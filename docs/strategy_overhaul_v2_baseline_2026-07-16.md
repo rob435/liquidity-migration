@@ -1,11 +1,15 @@
 # Strategy Overhaul V2 — Historical Baseline, 2026-07-16
 
-Status: hash-pinned exploratory reference control. It is descriptive historical
-evidence, not a confirmatory result, runtime-parity claim, promotion decision,
-or trading authorization.
+Status: superseded historical receipt. Its CONTINUOUS net returns used the
+invalid modal-cadence funding calculation. The current comparison control is
+`docs/strategy_overhaul_v2_baseline_2026-07-17.md`. This file is retained so the
+old claim and artifact identities remain auditable; it is not a current
+performance baseline, confirmatory result, runtime-parity claim, promotion
+decision, or trading authorization.
 
-This baseline fixes the current-profile outputs against which the first V2
-diagnostic and barebones comparisons must reconcile. The evaluation window is
+This baseline formerly fixed the current-profile outputs against which the
+first V2 diagnostic and barebones comparisons were intended to reconcile. The
+evaluation window is
 `[2023-07-16, 2026-07-16)` UTC, so the last eligible market day is 2026-07-15.
 Both venue roots are full-PIT. CONTINUOUS used modeled and chart leverage `1.0`.
 LONG used its native active configuration (`execution_leverage=10.0`,
@@ -104,15 +108,15 @@ CONTINUOUS implementation, configuration, or equity generation. The artifact is
 accepted as the hash-pinned historical reference on that narrow basis. It is
 not represented as a single-commit four-cell rerun.
 
-Any future claim-bearing active-versus-barebones run must execute both arms at
-the same code commit and from the same frozen venue root. Its active arm must
-reconcile to this reference at decision/ledger keys and at continuous numeric
-outputs under declared tolerances. If it does not, diagnose the difference and
-create a newly labelled baseline; do not overwrite this one.
+This was the comparison rule before the funding defect was found. New
+claim-bearing work must use the corrected 2026-07-17 baseline instead. This
+receipt remains immutable historical context and must not be silently
+overwritten or treated as a valid net-accounting control.
 
-## Comparison contract
+## Superseded comparison contract
 
-Every V2 evidence card that compares a change with the current profile must:
+The following contract governed this historical receipt. The active contract
+is in `docs/strategy_overhaul_v2_baseline_2026-07-17.md`.
 
 1. name the applicable reference cell and artifact hashes;
 2. match PIT universe, venue, `[start, end)`, timing, execution, cost, funding,

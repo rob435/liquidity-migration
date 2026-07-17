@@ -453,3 +453,52 @@ outcome-exposed deterministic lifecycle repair, not an evidentiary reset. The
 same-window funding-attribution run remains the isolated funding comparison;
 the new rolling run remains exploratory and authorizes no profile, deployment,
 capital, mainnet, or real-money change.
+
+### Final corrected descriptive outcome — completed 2026-07-17 15:35:23 UTC
+
+Run `benchmark-replacement-2026-07-17-rmom-lifecycle-fixed` completed every
+registered data, validation, full RMOM rewrite, LONG, CONTINUOUS, summary, and
+reconciliation step at code commit
+`b095d5ce0274d094147d1f63262bb6f6606f3e7d`. Its frozen window is
+`[2023-07-17, 2026-07-17)`, with 1x modeled and chart leverage. Summary snapshot
+ID is `1a50d9fcaaa8064ca82b897d33cab0f44026c001b7d4d93195c57bbc6b540537`;
+the summary file SHA-256 is
+`9ca2cb8be2f5e4c470b382d06ccff82158d28e76e00c005fa6a21eff11203409`.
+
+Registered cell results:
+
+| Cell | Rows/trades | Return | Max drawdown | Sharpe | Funding |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Bybit LONG | 183 | +35.0733% | -3.2739% | 2.2047 | modeled, 100%; 1,521 events |
+| Binance LONG | 183 | +29.3684% | -3.0682% | 1.6649 | modeled, 100%; 1,536 events |
+| Bybit CONTINUOUS | 786 / 739 / 659 | +20.6472% | -1.2951% | 2.66 daily annualized | partial: two 1% trades per component |
+| Binance CONTINUOUS | 766 / 703 / 611 | +16.5479% | -1.5589% | 2.36 daily annualized | partial: one 1% trade per component |
+
+Both LONG reports are untainted, warning-free, and full-PIT, with zero missing
+required manifest date-symbols. Every generated ledger has unique trade IDs
+within its file, and independent equity-CSV recomputation matched final return
+and minimum drawdown exactly. Full artifact paths and hashes are pinned in
+`docs/strategy_overhaul_v2_baseline_2026-07-17.md`.
+
+The CONTINUOUS funding limitations were narrowed rather than waived. Bybit's
+partial rows are `PENGUSDT` on 2025-01-30 and `1000MUMUUSDT` on 2025-06-11;
+Binance's are `HOOKUSDT` on 2026-03-23. Fresh scratch-root venue queries over
+the affected dates returned exactly the same funding rows as the canonical
+roots and no recoverable event. No cadence-derived settlement was fabricated.
+The Binance ancillary log also retains invalid-pair index-price warnings for
+`ANTHROPICUSDT` and `OPENAIUSDT`; neither appears in an emitted benchmark
+ledger.
+
+The separate same-window attribution snapshot
+`a4dd216d917fd5473b90392a807ef7e90a5132dbb2a523b392378665be32259f`
+kept trade identities and all non-funding fields fixed. It corrected the old
+CONTINUOUS returns from 21.06% to 20.25% Bybit and 17.35% to 16.58% Binance.
+The final rolling run additionally incorporates the registered window roll,
+stable-RMOM-key correction, and chronological terminal-tape correction, so its
+delta is not represented as funding attribution.
+
+The reconciliation step recorded `skipped_no_account_snapshots`. The supplied
+Bybit paste is mixed-cadence settlement evidence only, not a complete account
+journal. Therefore this outcome supports a corrected descriptive historical
+baseline only. It does not establish demo/paper parity, forward alpha,
+promotion, sizing, deployment, mainnet readiness, or real-money authority.

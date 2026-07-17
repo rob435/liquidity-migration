@@ -8,57 +8,78 @@ claim. Current host state belongs in `STATE.md`.
 
 | Object | Evidence read | Operating boundary |
 | --- | --- | --- |
-| `continuous_ensemble_v2` | Positive current-profile descriptive curves on both canonical roots; Binance has one partially funded trade per component and the curve still does not prove live-runtime parity | Demo components plus hedge; paper components only; no mainnet authority |
+| `continuous_ensemble_v2` | Positive corrected current-profile descriptive curves on both canonical roots; two Bybit trades and one Binance trade have incomplete venue funding coverage and the curve does not prove live-runtime parity | Demo components plus hedge; paper components only; no mainnet authority |
 | `LongV11aDivWeekendVol` | Positive current full-PIT result on both venues, but still strongly dependent on take-profit winners and not validated by its tiny skewed forward sample | Demo/paper profile only; no size or mainnet authority |
 
 Binance is a research/replay venue, not a live execution venue.
 
-## Canonical benchmark refresh registered 2026-07-16
+## Corrected canonical benchmark completed 2026-07-17
 
-The current descriptive benchmark uses `[2023-07-16, 2026-07-16)` at 1x
-modeled and chart leverage. Data therefore ends on the completed UTC day
-2026-07-15. It is exploratory, historically exposed evidence: there was no
-pass threshold, and it authorizes no strategy, parameter, deployment, sizing,
-or capital change.
+The current descriptive benchmark uses `[2023-07-17, 2026-07-17)` at 1x
+modeled exposure and 1x chart presentation, ending on completed UTC day
+2026-07-16. It ran at code commit `b095d5c` after exact-settlement funding,
+stable aged-out RMOM keys, and chronological terminal-tape closure. It is
+exploratory, historically exposed evidence with no pass threshold and
+authorizes no strategy, parameter, deployment, sizing, or capital change.
 
 | Profile | Venue | Trades | Return | Max drawdown | Sharpe-like | MAR | Funding |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| LONG | Bybit | 183 | +35.38% | -3.27% | 2.22 | n/a | modeled, 100% |
-| LONG | Binance | 183 | +29.37% | -3.07% | 1.66 | n/a | modeled, 100% |
-| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Bybit | 786 / 737 / 656 | +21.06% | -1.30% | 2.73 | 5.41 | modeled |
-| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Binance | 768 / 703 / 611 | +17.35% | -1.41% | 2.46 | 4.10 | partial |
+| LONG | Bybit | 183 | +35.07% | -3.27% | 2.20 | n/a | modeled, 100%; 1,521 events |
+| LONG | Binance | 183 | +29.37% | -3.07% | 1.66 | n/a | modeled, 100%; 1,536 events |
+| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Bybit | 786 / 739 / 659 | +20.65% | -1.30% | 2.66 | 5.31 | partial: two trades per component |
+| CONTINUOUS (`turn3p3/turn4p3/turn4p5`) | Binance | 766 / 703 / 611 | +16.55% | -1.56% | 2.36 | 3.54 | partial: one trade per component |
 
-CONTINUOUS annualized returns were 6.58% on Bybit and 5.48% on Binance;
-worst days were -0.93% and -0.58%, respectively. Binance's coarse `partial`
-label is localized to the same `HOOKUSDT` trade opened 2026-03-23 in each
-component: all other trades are labeled modeled (767/768, 702/703, and
-610/611). The report does not expose a funding-event or notional modeled
-fraction, so Binance's CONTINUOUS net-return comparison remains limited.
+Bybit CONTINUOUS has 807 union trade IDs across 2,184 component rows; Binance
+has 787 across 2,080. The partial Bybit rows are `PENGUSDT` on 2025-01-30 and
+`1000MUMUUSDT` on 2025-06-11, repeated across components. The partial Binance
+rows are `HOOKUSDT` on 2026-03-23, also repeated. Each affected trade has 1%
+component notional. Fresh narrow venue queries returned exactly the same rows
+already in the canonical roots, so no missing settlement can be safely appended
+or inferred. All other component rows are modeled.
 
-Both venue directions agree, but they are correlated implementations over
-different listings, prices, funding histories, and fill proxies. Bybit's LONG
-return exceeded Binance by 6.01 percentage points and CONTINUOUS by 3.71
-points; that is robustness context, not venue independence or a causal venue
-effect. Binance had the shallower LONG drawdown and better CONTINUOUS worst
-day, while Bybit had the higher reported returns, Sharpes, and CONTINUOUS MAR.
+Both LONG reports are `full_pit_universe`, untainted, warning-free, and have
+zero missing required manifest date-symbols. CONTINUOUS remains an
+`exploratory_historical_equity` reconstruction and does not replay the complete
+demo account lifecycle or accepted-decision BTC-risk state. No frozen demo and
+paper account snapshots were available, so the automated three-way step
+correctly recorded `skipped_no_account_snapshots`; no parity claim exists.
 
-The Bybit canonical validator covered 916 symbols and 591,596 required
-symbol-days with zero missing requirements. Binance's atomic monthly plus
-current-month build published 14,385,584 hourly rows for 812 symbols and a
-599,001-symbol-day manifest with zero failed archive files. Both LONG reports
-are `full_pit_universe`, untainted, and warning-free. CONTINUOUS remains an
-`exploratory_historical_equity` reconstruction and does not replay the full
-demo account lifecycle or accepted-decision BTC-risk state.
+The hash-pinned curves, equity CSVs, reports, and complete ledgers are indexed
+in `docs/strategy_overhaul_v2_baseline_2026-07-17.md`. The run summary snapshot
+is `1a50d9fcaaa8064ca82b897d33cab0f44026c001b7d4d93195c57bbc6b540537`.
+The superseded 2026-07-16 baseline remains a historical receipt only.
 
-Primary receipts are under
-`reports/research-refresh/benchmark-refresh-2026-07-16-isolated/`,
-`reports/research-refresh/benchmark-refresh-2026-07-16-binance-atomic/`, and
-`reports/research-refresh/benchmark-refresh-2026-07-16-bybit-long-diagnostics/`.
-The corrected Bybit LONG event tape and all core CSVs are byte-identical to the
-pre-diagnostic run; only warning/path metadata and a ~1e-17 reduction-order
-difference changed. No frozen demo and paper account snapshots were available,
-so the three-way reconciliation correctly recorded
-`skipped_no_account_snapshots`; no demo/paper/backtest parity claim exists.
+### Funding correction attribution
+
+The same-window run `funding-correction-same-window-2026-07-17` held
+`[2023-07-16, 2026-07-16)`, strategy decisions, exits, weights, costs, and
+presentation fixed. All six LONG/component trade-ID sets and all non-funding
+fields were unchanged. Exact settlements reduced CONTINUOUS return from the
+invalid 21.06% to 20.25% on Bybit and from 17.35% to 16.58% on Binance. The
+rolling benchmark cannot be subtracted from the old baseline as a pure funding
+effect because its window, RMOM keys, and terminal lifecycle also changed.
+
+The owner-supplied Bybit paste supplied settlement evidence, not a full account
+ledger: all 27 funding rows matched the public canonical timestamps and rates
+after BST/sign normalization, but shortened identifiers and the absence of
+wallet, position, order, and closed-PnL series prevent account reconciliation.
+
+### Big-PC branch discrepancy
+
+The obsolete `codex/account-kernel-binance-combined` branch compared TP10 pre
+outputs with TP12 post outputs. Across 816, 743, and 614 rows whose interval and
+weight stayed fixed, funding event count and funding return matched exactly;
+there were zero mismatches. Aggregate funding changed because TP12 changed
+exits and holding time. Both old checkouts shared the same flawed modal-cadence
+funding blob, so neither old funding result was authoritative.
+
+That branch did correctly diagnose missing/competing active marks in historical
+account-kernel replay. Main commit `be6367f` independently contains equivalent
+pending-exit mark retention and current-decision price precedence. Current
+`main` additionally has the exact-funding, RMOM, and terminal-tape fixes. The
+full preserved diagnosis is
+`docs/account_kernel_binance_combined_audit_2026-07-17.md`; the branch's 1.4 GB
+artifact bundle and Windows adapters are not merge material.
 
 ## Continuous v2
 
@@ -116,11 +137,11 @@ Durable mechanism reads:
 
 ## Long v11a
 
-Current descriptive refresh through the 2026-07-15 signal day:
+Current descriptive refresh through the 2026-07-16 signal day:
 
 | Venue | Trades | Return | Max drawdown | Sharpe-like |
 | --- | ---: | ---: | ---: | ---: |
-| Bybit | 183 | +35.38% | -3.27% | 2.22 |
+| Bybit | 183 | +35.07% | -3.27% | 2.20 |
 | Binance | 183 | +29.37% | -3.07% | 1.66 |
 
 The July refresh did not rerun the mechanism ablations. Earlier work remained

@@ -138,18 +138,22 @@ venue delivery, production load, or deployment safety.
 ## Hash-pinned historical comparison baseline
 
 The current-profile reference is
-`docs/strategy_overhaul_v2_baseline_2026-07-16.md`. It fixes the four Bybit and
+`docs/strategy_overhaul_v2_baseline_2026-07-17.md`. It fixes the four Bybit and
 Binance LONG/CONTINUOUS curves, reports, and complete trade ledgers for
-`[2023-07-16, 2026-07-16)` by exact artifact hash. This is the historical
+`[2023-07-17, 2026-07-17)` by exact artifact hash after the exact-settlement
+funding, stable-RMOM-key, and chronological terminal-tape corrections. The
+2026-07-16 baseline is a superseded historical receipt because its CONTINUOUS
+net returns used invalid modal-cadence funding. This is the historical
 comparison target for V2, not a promotion gate or a claim that the exposed
 window is confirmatory.
 
 Any claim-bearing active-versus-change run must execute a same-commit active
 control and first reconcile its decisions, ledger keys, equity, and drawdown to
 the applicable pinned reference. The arms must share PIT universe, venue,
-window, timing, fill, costs, funding, capacity, accounting, modeled exposure,
-and presentation. A mismatch is investigated or labelled as a different
-baseline; it is never hidden by comparing headline metrics alone.
+window, profile ID and revision, component config hashes, actual take-profit
+percentage, timing, fill, costs, funding, capacity, accounting, modeled
+exposure, and presentation. A mismatch is investigated or labelled as a
+different baseline; it is never hidden by comparing headline metrics alone.
 
 ## Phase 3 — Exploratory diagnostic read
 
@@ -276,6 +280,39 @@ Use offline/shadow first, then a separately authorized demo/paper epoch for
 execution agreement. Promotion, sizing, and mainnet require their own evidence
 and owner authority.
 
+## Measured research-run optimization backlog
+
+The corrected four-cell refresh took 9,163 seconds of measured stage time, or
+about 2.55 hours. CONTINUOUS reconstruction dominated at 2,392 seconds on
+Bybit and 2,448 seconds on Binance. Full RMOM rewrites took 627 and 608 seconds;
+ancillary tails took 308 and 981 seconds. These are measurements of this local
+run, not universal budgets.
+
+Optimize in this order, with exact decision keys and ledger fields compared
+before accepting any change:
+
+1. add per-stage elapsed time and peak-RSS fields to the existing run event
+   ledger so future optimization claims are reproducible;
+2. reuse immutable daily/feature panels across CONTINUOUS components and
+   sleeves where ownership is currently duplicated, while retaining separate
+   account sessions and outputs;
+3. restore normal partitioned/append RMOM operation now that the one-time full
+   rewrite migration is complete, and benchmark a partition rewrite against a
+   full rewrite on stable keys and matching NaN positions;
+4. make ancillary negative caching listing/incarnation-aware so invalid alias
+   endpoints such as `ANTHROPICUSDT` and `OPENAIUSDT` do not consume repeated
+   tail retries without hiding a later valid incarnation;
+5. profile journal materialization and component aggregation before changing
+   concurrency. Parallelism is accepted only when it stays within measured
+   memory bounds and reproduces the serial ledgers/equity under the declared
+   tolerances.
+
+Generated research payloads stay under ignored run-scoped `reports/`; their
+small manifests and hashes are the durable control. The obsolete Big-PC branch
+is not a performance cache: its 1.4 GB audit bundle and Windows adapters are
+documented in `docs/account_kernel_binance_combined_audit_2026-07-17.md` and
+must not be merged into `main`.
+
 ## Immediate work queue
 
 1. Freeze the first exploratory diagnostic-epoch contract, including the exact
@@ -287,7 +324,7 @@ and owner authority.
    that frozen contract and emit the unrestricted candidate tapes.
 3. Run same-commit active and barebones historical arms from the same frozen
    roots. Reconcile active decisions and continuous outputs to the hash-pinned
-   2026-07-16 baseline before interpreting the barebones curves, ledgers, or
+   2026-07-17 baseline before interpreting the barebones curves, ledgers, or
    characteristics.
 4. Keep the command/markout projector on deterministic fixtures until a demo
    epoch is separately authorized. Then bind its canonical VPS roots and
