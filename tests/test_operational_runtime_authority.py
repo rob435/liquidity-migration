@@ -864,6 +864,13 @@ def test_clean_checkout_never_executes_repo_local_clean_filter(tmp_path: Path) -
         ],
         check=True,
     )
+    # `git add -A` may reuse the unchanged tracked file's stat-cache entry even
+    # though .gitattributes now assigns a filter. Force the setup-time filter
+    # execution so this test does not depend on filesystem timestamp granularity.
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "--renormalize", "tracked.txt"],
+        check=True,
+    )
     commit = _commit_all(repository, "audited filter")
     assert sentinel.exists()
     sentinel.unlink()
