@@ -85,9 +85,10 @@ Exit criteria:
 - the output is a single deterministic command table plus one manifest;
 - focused tests, Ruff, and mypy pass.
 
-Status: complete on the research branch. The command table remains diagnostic
-only and has not been built from a registered real epoch. From the rebaseline
-base through the Phase-1 commit, package and developer-script changes were
+Status: complete in the current `main` implementation. The command table
+remains diagnostic only and has not been built from a registered real epoch.
+From the rebaseline base through the Phase-1 commit, package and developer-script
+changes were
 1,218 additions and 32 deletions, or 1,186 net, inside the 1,500-line pre-table
 stop-loss.
 
@@ -115,9 +116,10 @@ Exit criteria:
   on a future label;
 - a deployment is not implied; operational authorization remains separate.
 
-Status: the bounded demo markout path and command-table join are implemented on
-the research branch. They preserve actual lag and explicit missingness, keep
-capture I/O off the private fill-accounting path, and retain symbols only while
+Status: the bounded demo markout path and command-table join are implemented in
+the current `main` implementation. They preserve actual lag and explicit
+missingness, keep capture I/O off the private fill-accounting path, and retain
+symbols only while
 bounded tasks are pending. Per-owner-loop registration work and per-book-update
 mark writes are each capped at 128. The pre-gate decision funnel and
 claim-specific path labels are not implemented. Nothing in this phase is
@@ -132,6 +134,22 @@ time was 98.8 ms, median bytes written was 363.1 KiB, and maximum traced Python
 allocation was 0.60 MB. Every run emitted all 400 marks and left no symbol
 pending. This measures local code/storage overhead only; it says nothing about
 venue delivery, production load, or deployment safety.
+
+## Hash-pinned historical comparison baseline
+
+The current-profile reference is
+`docs/strategy_overhaul_v2_baseline_2026-07-16.md`. It fixes the four Bybit and
+Binance LONG/CONTINUOUS curves, reports, and complete trade ledgers for
+`[2023-07-16, 2026-07-16)` by exact artifact hash. This is the historical
+comparison target for V2, not a promotion gate or a claim that the exposed
+window is confirmatory.
+
+Any claim-bearing active-versus-change run must execute a same-commit active
+control and first reconcile its decisions, ledger keys, equity, and drawdown to
+the applicable pinned reference. The arms must share PIT universe, venue,
+window, timing, fill, costs, funding, capacity, accounting, modeled exposure,
+and presentation. A mismatch is investigated or labelled as a different
+baseline; it is never hidden by comparing headline metrics alone.
 
 ## Phase 3 — Exploratory diagnostic read
 
@@ -153,13 +171,63 @@ Read in this order:
 5. **Portfolio:** synchronized losses, symbol/day concentration, component
    overlap, hedge interaction, funding, and tail contribution.
 
+The first diagnostic read has exactly two strategy representations per sleeve:
+
+1. **Active control:** the current profile, reconciled to the hash-pinned
+   historical baseline above.
+2. **Barebones source-population comparator:** one fixed, minimally filtered
+   causal candidate family designed to expose enough observations to measure
+   gate attrition and trade characteristics. It is a diagnostic population, not
+   a candidate strategy or deployment proposal.
+
+The barebones representation produces two distinct artifacts. An unweighted
+candidate tape retains every causal source event and its gate pass/fail states,
+first rejection, missingness, fixed-horizon outcomes, MAE, and MFE. A separate
+portfolio curve applies a deterministic collision/capacity rule, fixed sizing,
+and the same lifecycle, cost, funding, fill, and accounting model as the active
+control. Candidate-level inference must use the tape; capacity-selected
+portfolio trades are not a substitute for the larger source population.
+
+Before outcomes are read, the diagnostic-epoch contract must freeze the exact
+barebones rules. The intended starting definitions are:
+
+- **CONTINUOUS:** retain PIT tradability, the closed-bar decile-9 short source
+  event, one-hour causal confirmation, and a predeclared executable-liquidity
+  floor. Record but do not gate on the BTC trend, residual-momentum quartile,
+  240-day/event subtype, or component-specialization filters.
+- **LONG:** retain PIT tradability, the active pump trigger, causal
+  retrace/deadline entry anchor, signal freshness, and a predeclared
+  executable-liquidity/history floor. Record but do not gate on BTC/ETH regime,
+  top-volume rank, close location, ATR cap, weekend multiplier, or adaptive
+  volatility/BTC sizing filters.
+
+Safety and feasibility constraints are not relabelled as alpha filters. If a
+constraint is required for an executable portfolio, it remains in the
+portfolio curve and is still recorded on the unrestricted candidate tape. The
+liquidity/history floors, collision rule, fixed size, path horizons, and exact
+gate list must be selected from causal/execution requirements and written into
+the epoch contract before any barebones outcome is inspected.
+
+There is one barebones arm per sleeve: no filter ladder, threshold sweep, or
+post-result redefinition. Predeclared characteristic families are signal
+strength, close location, volatility/ATR, turnover/liquidity, listing age,
+BTC/ETH regime, residual momentum, event subtype, and available execution-cost
+features. Analysis reports unique-decision, simultaneous-wave, and calendar
+block support with block-aware uncertainty. Naive row counts, overlapping
+components, or two venues are not treated as independent samples. Any ranking
+of “best” characteristics on this already exposed window is exploratory and
+must be tested on a prospectively untouched temporal surface before a strategy
+claim.
+
 The old untested `C-H1`, `C-H2`, `L-H1`, and `L-H2` estimands are priors only.
 They receive no privileged slot. Diagnostics may support revisiting one, refute
 its premise, or motivate a different mechanism.
 
-Exit criteria: a compact evidence card lists observed failure modes, effect
-sizes, block-level uncertainty, concentration, all inspected variants, and
-explicit non-conclusions. No rule changes occur in this phase.
+Exit criteria: a compact evidence card lists baseline reconciliation, active and
+barebones counts, the full gate funnel, observed failure modes, effect sizes,
+block-level uncertainty, concentration, all inspected variants, and explicit
+non-conclusions. It publishes the curves and complete active/barebones ledgers.
+No rule changes occur in this phase.
 
 ## Phase 4 — Thesis selection
 
@@ -210,13 +278,19 @@ and owner authority.
 
 ## Immediate work queue
 
-1. Freeze the first exploratory diagnostic-epoch contract, including the LONG
-   and CONTINUOUS source-population and gate-transition semantics, before adding
-   a funnel writer or inspecting outcomes.
+1. Freeze the first exploratory diagnostic-epoch contract, including the exact
+   LONG and CONTINUOUS barebones source populations, executable floors, fixed
+   sizing/collision rule, characteristic families, path labels, and
+   gate-transition semantics, before adding a funnel writer or inspecting
+   outcomes.
 2. Implement the minimal row-level funnel at the existing candidate owners to
-   that frozen contract; keep the command/markout projector on deterministic
-   fixtures until separately authorized demo evidence exists.
-3. Separately authorize the demo epoch, bind its canonical VPS roots and
+   that frozen contract and emit the unrestricted candidate tapes.
+3. Run same-commit active and barebones historical arms from the same frozen
+   roots. Reconcile active decisions and continuous outputs to the hash-pinned
+   2026-07-16 baseline before interpreting the barebones curves, ledgers, or
+   characteristics.
+4. Keep the command/markout projector on deterministic fixtures until a demo
+   epoch is separately authorized. Then bind its canonical VPS roots and
    exposure boundary, export a frozen read-only snapshot, and produce the
    diagnostic evidence card.
-4. Only then write the first alpha thesis preregistration.
+5. Only then write the first alpha thesis preregistration.
