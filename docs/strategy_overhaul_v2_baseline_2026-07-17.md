@@ -156,6 +156,20 @@ The rolling baseline above also includes a one-day window roll, the stable RMOM
 aged-out-key repair, and chronological terminal-tape closure. Its delta from
 the superseded baseline must therefore not be attributed to funding alone.
 
+## Reuse without recomputation
+
+This baseline is an immutable input to Strategy Overhaul V2 Phase 3. Verify the
+pinned paths, hashes, commit, profile revision, and component config identities,
+then read the existing ledgers and curves. Do not run a research refresh, data
+tail, RMOM rebuild, active LONG/CONTINUOUS backtest, or equity regeneration to
+reproduce it.
+
+Phase 3 adds observer-only funnel and barebones artifacts. Writer-on/writer-off
+tests must prove active decision and numerical equivalence on deterministic
+fixtures. If a later change alters shared strategy semantics or a pinned
+identity, stop and amend the plan. Missing artifacts or an unresolved mismatch
+do not authorize an automatic four-cell replacement run.
+
 ## Comparison contract
 
 Every V2 evidence card that compares a change with the current profile must:

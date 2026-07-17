@@ -3,6 +3,11 @@
 Status: active engineering/research plan; no alpha thesis or confirmatory
 experiment is active yet.
 
+Execution entry point as of 2026-07-17: start at Phase 3. Phases 0--2 and the
+corrected strategy benchmark are closed inputs, not jobs to rerun. Do not begin
+this overhaul with another data refresh, RMOM rebuild, active LONG/CONTINUOUS
+backtest, or equity-curve regeneration.
+
 The objective is to generate a small number of mechanism-based strategy theses
 from causal trade diagnostics, then test them prospectively. The objective is
 not to rebuild the retired overhaul, produce a large parameter atlas, or make
@@ -20,6 +25,11 @@ the existing curves look better.
   separately keyed until the analytical join.
 - A strategy change may alter one declared mechanism at a time. Safety controls
   are evaluated as safety controls, not forced to improve an alpha metric.
+- Treat the corrected 2026-07-17 benchmark as immutable, consumption-only
+  evidence. Verify its files and hashes; do not reproduce it as housekeeping.
+- Diagnostic writers are observers. With the writer enabled or disabled, active
+  decision keys, ordering, targets, lifecycle, accounting, and numerical outputs
+  must remain unchanged.
 
 ## Engineering and artifact stop-losses
 
@@ -31,6 +41,9 @@ These are budgets for this overhaul, not universal repository policy:
   `docs/trade_diagnostics.md` unless a preregistration names the extra consumer.
 - Smoke work uses a bounded synthetic fixture or at most 100 commands/decisions.
   The next step is one resumable venue/time partition, not the full history.
+- Baseline preflight is limited to identity/hash verification. A missing or
+  mismatched pinned artifact stops the comparison; it does not authorize a
+  replacement benchmark run.
 - If a stage produces no decision-useful row within two measured compute hours,
   stop, preserve the failure, and reduce the claim or repair the blocker. Do not
   add orchestration around an unidentified result.
@@ -40,7 +53,7 @@ These are budgets for this overhaul, not universal repository policy:
 Crossing a stop-loss requires an explicit plan amendment before more code or
 compute, including why the additional surface is necessary.
 
-## Phase 0 — Rebaseline
+## Phase 0 — Rebaseline (closed)
 
 Deliverable: `docs/research_rebaseline_2026-07-16.md`.
 
@@ -54,7 +67,7 @@ Exit criteria:
   architecture.
 
 Status: complete for repository planning. Deployment parity remains a separate
-operational task.
+operational task. Do not rerun Phase 0 from this plan.
 
 ## Phase 1 — Execution diagnostic MVP
 
@@ -147,13 +160,25 @@ net returns used invalid modal-cadence funding. This is the historical
 comparison target for V2, not a promotion gate or a claim that the exposed
 window is confirmatory.
 
-Any claim-bearing active-versus-change run must execute a same-commit active
-control and first reconcile its decisions, ledger keys, equity, and drawdown to
-the applicable pinned reference. The arms must share PIT universe, venue,
-window, profile ID and revision, component config hashes, actual take-profit
-percentage, timing, fill, costs, funding, capacity, accounting, modeled
-exposure, and presentation. A mismatch is investigated or labelled as a
-different baseline; it is never hidden by comparing headline metrics alone.
+Phase 3 consumes this baseline in place. Its preflight verifies the pinned
+commit, config identities, file presence, and hashes; it does not invoke
+`research-refresh`, `equity_curves.sh`, or either active strategy backtest. The
+existing active ledgers and curves are the reference side of the exploratory
+comparison.
+
+The new funnel/barebones implementation may be compared with that reference
+only while it is observer-only. Focused tests must prove that enabling the
+diagnostic writer leaves active decision keys, ordering, targets, lifecycle,
+accounting, and continuous numerical outputs unchanged on deterministic
+fixtures. The implementation diff must not change the PIT universe, profile,
+component configs, take-profit, timing, fills, costs, funding, capacity,
+accounting, modeled exposure, or presentation.
+
+If shared strategy semantics or any baseline identity changes, stop and amend
+the plan before viewing affected outcomes. First attempt focused equivalence;
+only an unresolved affected cell may justify a targeted control replay. A
+routine four-cell benchmark refresh is not a Phase-3 prerequisite and must not
+be used as a comfort check.
 
 ## Phase 3 — Exploratory diagnostic read
 
@@ -177,8 +202,8 @@ Read in this order:
 
 The first diagnostic read has exactly two strategy representations per sleeve:
 
-1. **Active control:** the current profile, reconciled to the hash-pinned
-   historical baseline above.
+1. **Active reference:** the already generated, hash-pinned current-profile
+   ledgers and curves above. Read and link them; do not regenerate or copy them.
 2. **Barebones source-population comparator:** one fixed, minimally filtered
    causal candidate family designed to expose enough observations to measure
    gate attrition and trade characteristics. It is a diagnostic population, not
@@ -189,7 +214,7 @@ candidate tape retains every causal source event and its gate pass/fail states,
 first rejection, missingness, fixed-horizon outcomes, MAE, and MFE. A separate
 portfolio curve applies a deterministic collision/capacity rule, fixed sizing,
 and the same lifecycle, cost, funding, fill, and accounting model as the active
-control. Candidate-level inference must use the tape; capacity-selected
+reference. Candidate-level inference must use the tape; capacity-selected
 portfolio trades are not a substitute for the larger source population.
 
 Before outcomes are read, the diagnostic-epoch contract must freeze the exact
@@ -227,11 +252,13 @@ The old untested `C-H1`, `C-H2`, `L-H1`, and `L-H2` estimands are priors only.
 They receive no privileged slot. Diagnostics may support revisiting one, refute
 its premise, or motivate a different mechanism.
 
-Exit criteria: a compact evidence card lists baseline reconciliation, active and
-barebones counts, the full gate funnel, observed failure modes, effect sizes,
-block-level uncertainty, concentration, all inspected variants, and explicit
-non-conclusions. It publishes the curves and complete active/barebones ledgers.
-No rule changes occur in this phase.
+Exit criteria: a compact evidence card lists baseline hash verification,
+referenced active counts, new barebones counts, the full gate funnel, observed
+failure modes, effect sizes, block-level uncertainty, concentration, all
+inspected variants, and explicit non-conclusions. It publishes the new
+candidate tape, barebones ledger, and barebones curve, and links the existing
+active curves/ledgers without regenerating them. No rule changes occur in this
+phase.
 
 ## Phase 4 — Thesis selection
 
@@ -280,7 +307,7 @@ Use offline/shadow first, then a separately authorized demo/paper epoch for
 execution agreement. Promotion, sizing, and mainnet require their own evidence
 and owner authority.
 
-## Measured research-run optimization backlog
+## Deferred infrastructure work — not a Phase-3 prerequisite
 
 The corrected four-cell refresh took 9,163 seconds of measured stage time, or
 about 2.55 hours. CONTINUOUS reconstruction dominated at 2,392 seconds on
@@ -288,24 +315,11 @@ Bybit and 2,448 seconds on Binance. Full RMOM rewrites took 627 and 608 seconds;
 ancillary tails took 308 and 981 seconds. These are measurements of this local
 run, not universal budgets.
 
-Optimize in this order, with exact decision keys and ledger fields compared
-before accepting any change:
-
-1. add per-stage elapsed time and peak-RSS fields to the existing run event
-   ledger so future optimization claims are reproducible;
-2. reuse immutable daily/feature panels across CONTINUOUS components and
-   sleeves where ownership is currently duplicated, while retaining separate
-   account sessions and outputs;
-3. restore normal partitioned/append RMOM operation now that the one-time full
-   rewrite migration is complete, and benchmark a partition rewrite against a
-   full rewrite on stable keys and matching NaN positions;
-4. make ancillary negative caching listing/incarnation-aware so invalid alias
-   endpoints such as `ANTHROPICUSDT` and `OPENAIUSDT` do not consume repeated
-   tail retries without hiding a later valid incarnation;
-5. profile journal materialization and component aggregation before changing
-   concurrency. Parallelism is accepted only when it stays within measured
-   memory bounds and reproduces the serial ledgers/equity under the declared
-   tolerances.
+General runner telemetry, shared-panel optimization, RMOM partition benchmarks,
+ancillary negative-cache work, and concurrency changes are deferred. Do not
+implement them while the first diagnostic table is still missing. Reopen only
+the specific bottleneck if the new candidate/funnel path reaches the two-hour
+stop-loss, and preserve exact decision keys and declared numerical tolerances.
 
 Generated research payloads stay under ignored run-scoped `reports/`; their
 small manifests and hashes are the durable control. The obsolete Big-PC branch
@@ -315,19 +329,34 @@ must not be merged into `main`.
 
 ## Immediate work queue
 
-1. Freeze the first exploratory diagnostic-epoch contract, including the exact
+Do not run `scripts/ops.sh research-refresh`, `scripts/equity_curves.sh`, an
+active LONG/CONTINUOUS historical backtest, a market-data refresh, or an RMOM
+rebuild for this queue.
+
+1. Verify the existing 2026-07-17 baseline paths, hashes, commit, and component
+   config identities with a one-shot check, not a new verification subsystem.
+   In the same change, freeze the first exploratory diagnostic-epoch contract,
+   including its exact four-payload budget and the exact
    LONG and CONTINUOUS barebones source populations, executable floors, fixed
    sizing/collision rule, characteristic families, path labels, and
    gate-transition semantics, before adding a funnel writer or inspecting
    outcomes.
-2. Implement the minimal row-level funnel at the existing candidate owners to
-   that frozen contract and emit the unrestricted candidate tapes.
-3. Run same-commit active and barebones historical arms from the same frozen
-   roots. Reconcile active decisions and continuous outputs to the hash-pinned
-   2026-07-17 baseline before interpreting the barebones curves, ledgers, or
-   characteristics.
-4. Keep the command/markout projector on deterministic fixtures until a demo
-   epoch is separately authorized. Then bind its canonical VPS roots and
-   exposure boundary, export a frozen read-only snapshot, and produce the
-   diagnostic evidence card.
-5. Only then write the first alpha thesis preregistration.
+2. Implement the minimal observer-only row-level funnel at the existing LONG
+   and CONTINUOUS candidate owners. Add writer-on/writer-off equivalence tests
+   before emitting any outcome-bearing row.
+3. Generate one bounded, resumable partition of the new candidate tapes and
+   validate source-key completeness, gate transitions, causal availability,
+   missingness, and duplicate suppression. Then append only the remaining new
+   diagnostic partitions; do not regenerate the active benchmark artifacts.
+4. Build the one preregistered barebones portfolio ledger/curve per sleeve from
+   those tapes using the frozen collision, sizing, lifecycle, cost, funding,
+   fill, and accounting rules. Compare them with the existing active artifacts
+   by reference and issue the exploratory evidence card.
+5. Select at most one thesis per sleeve and write the first alpha
+   thesis preregistration.
+
+The command/markout projector remains on deterministic fixtures. A real demo
+epoch is a separate, explicitly authorized track and is not a prerequisite for
+the historical selection diagnostic. Require it before thesis selection only
+when the proposed mechanism itself depends on execution behavior that the
+historical sources cannot identify.
