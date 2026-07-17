@@ -170,6 +170,13 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _valid_ohlc() -> pl.Expr:
+    return pl.all_horizontal(
+        [pl.col(column).is_not_null() & pl.col(column).is_finite() & (pl.col(column) > 0.0)
+         for column in ("open", "high", "low", "close")]
+    )
+
+
 def _bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, list[Any]]]:
     output: dict[str, dict[str, list[Any]]] = {}
     prepared = klines.with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
@@ -491,8 +498,9 @@ def _build_continuous_funnel(
                 ),
                 "gate_source_decile_9": "pass",
                 "gate_liquidity_floor": gate_state(
-                    _finite(source.get("turnover_quote")) is not None
-                    and float(source["turnover_quote"]) >= 500_000.0
+                    None
+                    if _finite(source.get("turnover_quote")) is None
+                    else float(source["turnover_quote"]) >= 500_000.0
                 ),
                 "gate_one_hour_confirmation": gate_state(entry_price is not None),
                 "gate_active_rmom_quartile": "missing",
@@ -816,6 +824,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest, read_manifest_files = _read_manifest(root, membership_dates)
     if set(read_kline_files) != set(kline_files) or set(read_manifest_files) != set(manifest_files):
         raise RuntimeError("input partition discovery changed between identity and read")
+    raw_kline_rows = klines.height
+    invalid_ohlc_rows = klines.filter(~_valid_ohlc()).height
+    klines = klines.filter(_valid_ohlc())
     bars_by_symbol = _bars_by_symbol(klines)
     start_ms = _date_ms(args.start)
     end_ms = _date_ms(args.end)
@@ -897,6 +908,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "gate_transitions": "single_evaluation_partition_valid",
                 "causal_availability": True,
                 "duplicate_suppression": True,
+            },
+            "input_quality": {
+                "raw_kline_rows": raw_kline_rows,
+                "invalid_ohlc_rows_rejected": invalid_ohlc_rows,
+                "usable_kline_rows": klines.height,
             },
             "counts": {
                 "long_source_rows": long_funnel.height,

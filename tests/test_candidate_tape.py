@@ -14,7 +14,21 @@ from scripts.build_candidate_tape import (
     _bars_by_symbol,
     _build_continuous_funnel,
     _build_path_labels,
+    _valid_ohlc,
 )
+
+
+def test_invalid_ohlc_is_explicitly_rejected() -> None:
+    frame = pl.DataFrame(
+        {
+            "open": [1.0, None],
+            "high": [1.1, 1.1],
+            "low": [0.9, 0.9],
+            "close": [1.0, 1.0],
+        }
+    )
+
+    assert frame.filter(_valid_ohlc()).height == 1
 
 
 def test_continuous_candidate_partition_is_structurally_complete() -> None:
@@ -83,4 +97,3 @@ def test_continuous_candidate_partition_is_structurally_complete() -> None:
     labels = _build_path_labels(funnel, bars)
     label_structure = validate_path_labels(labels, funnel)
     assert label_structure["rows"] == funnel.height
-
