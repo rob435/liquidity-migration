@@ -861,6 +861,139 @@ def test_build_binance_oos_refuses_universe_shrink_without_override(tmp_path, mo
     assert (root / "klines_1h" / "date=2024-01-01" / "symbol=BBBUSDT").exists()
 
 
+def test_build_stages_daily_only_symbols_atomically_with_monthly_history(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    dec01 = 1701388800000
+    jan01 = 1704067200000
+    jan02 = jan01 + 24 * MS_PER_HOUR
+    _write_klines(root, "BBBUSDT", jan02, 24)
+
+    monkeypatch.setattr(bv, "discover", lambda **_kwargs: {"AAAUSDT": ["2023-12"]})
+    monkeypatch.setattr(
+        bv,
+        "list_usdm_usdt_daily_symbols",
+        lambda: ["AAAUSDT", "BBBUSDT"],
+    )
+
+    def _rows(symbol: str, start_ms: int, source: str) -> list[dict[str, object]]:
+        return [
+            {
+                "ts_ms": start_ms + i * MS_PER_HOUR,
+                "symbol": symbol,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": source,
+            }
+            for i in range(24)
+        ]
+
+    monkeypatch.setattr(
+        bv,
+        "fetch_month_klines",
+        lambda symbol, month: _rows(symbol, dec01, f"monthly:{month}"),
+    )
+
+    def _daily(symbol: str, day: str):
+        if symbol == "BBBUSDT" and day == "2024-01-01":
+            return []
+        return _rows(
+            symbol,
+            jan01 if day == "2024-01-01" else jan02,
+            f"daily:{day}",
+        )
+
+    monkeypatch.setattr(bv, "fetch_daily_klines", _daily)
+
+    summary = bv.build_binance_oos(
+        root,
+        end_date="2024-01-03",
+        daily_start="2024-01-01",
+        workers=2,
+        job_batch_size=2,
+        max_failure_ratio=0.0,
+    )
+
+    klines = read_dataset(root, "klines_1h")
+    assert set(klines["symbol"].unique().to_list()) == {"AAAUSDT", "BBBUSDT"}
+    assert summary["daily_jobs"] == 4
+    assert summary["daily_rows"] == 72
+    assert summary["daily_missing_files"] == 1
+    assert summary["daily_failed_files"] == 0
+    assert (root / "archive_trade_manifest" / "date=2024-01-02").is_dir()
+
+
+def test_daily_tail_failure_does_not_publish_partial_canonical_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    dec01 = 1701388800000
+    jan02 = 1704067200000 + 24 * MS_PER_HOUR
+    _write_klines(root, "BBBUSDT", jan02, 24)
+    monkeypatch.setattr(bv, "discover", lambda **_kwargs: {"AAAUSDT": ["2023-12"]})
+    monkeypatch.setattr(bv, "list_usdm_usdt_daily_symbols", lambda: ["BBBUSDT"])
+    monkeypatch.setattr(
+        bv,
+        "fetch_month_klines",
+        lambda symbol, _month: [
+            {
+                "ts_ms": dec01 + i * MS_PER_HOUR,
+                "symbol": symbol,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": "monthly",
+            }
+            for i in range(24)
+        ],
+    )
+    monkeypatch.setattr(bv, "fetch_daily_klines", lambda _symbol, _day: None)
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        bv.build_binance_oos(
+            root,
+            end_date="2024-01-03",
+            daily_start="2024-01-01",
+            workers=1,
+            job_batch_size=2,
+            max_failure_ratio=0.0,
+        )
+
+    assert bv._persisted_kline_symbols(root) == {"BBBUSDT"}
+    assert not any(root.parent.glob(f".{root.name}.binance-oos-staging-*"))
+
+
+def test_daily_inventory_cannot_mask_missing_older_monthly_history(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    dec01 = 1701388800000
+    _write_klines(root, "BBBUSDT", dec01, 24)
+    monkeypatch.setattr(bv, "discover", lambda **_kwargs: {"AAAUSDT": ["2023-12"]})
+    monkeypatch.setattr(bv, "list_usdm_usdt_daily_symbols", lambda: ["BBBUSDT"])
+
+    with pytest.raises(RuntimeError, match="daily inventory cannot replace missing monthly history"):
+        bv.build_binance_oos(
+            root,
+            end_date="2024-01-03",
+            daily_start="2024-01-01",
+            workers=1,
+        )
+
+    assert bv._persisted_kline_symbols(root) == {"BBBUSDT"}
+
+
 def test_build_binance_oos_clean_rewrite_drops_stale_partitions(tmp_path, monkeypatch) -> None:
     """ingestion-4: with allow_degraded, the narrower rerun OVERWRITES klines_1h
     cleanly — the dropped symbol's stale partition must NOT survive. The original

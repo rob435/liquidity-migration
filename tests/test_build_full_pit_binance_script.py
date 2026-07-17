@@ -10,7 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "build_full_pit_binance.sh"
 
 
-def test_script_is_valid_bash_and_daily_tail_follows_clean_monthly_rebuild() -> None:
+def test_script_is_valid_bash_and_stages_daily_tail_with_monthly_rebuild() -> None:
     subprocess.run(
         ["bash", "-n", str(SCRIPT)],
         cwd=REPO,
@@ -20,11 +20,11 @@ def test_script_is_valid_bash_and_daily_tail_follows_clean_monthly_rebuild() -> 
     )
     text = SCRIPT.read_text(encoding="utf-8")
     monthly = text.index("build-binance-oos --data-root")
-    daily = text.index("topup-daily-klines --data-root")
     manifest_read = text.index("pl.read_parquet")
 
-    assert monthly < daily < manifest_read
-    assert '--start "$DAILY_START" --end "$END"' in text
+    assert monthly < manifest_read
+    assert '--daily-start "$DAILY_START"' in text
+    assert "topup-daily-klines --data-root" not in text
     assert "BINANCE_DAILY_START" in text
 
 

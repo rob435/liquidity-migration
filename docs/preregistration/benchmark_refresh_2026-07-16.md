@@ -159,3 +159,44 @@ market data remains append-first where supported, and canonical residual
 momentum remains an atomic full rewrite as already registered. This changes no
 strategy, feature formula, data, cost, leverage, window, cell, or
 interpretation rule.
+
+### Pre-outcome Binance current-month amendment — 2026-07-17 00:10:25 UTC
+
+The isolated run completed both Bybit cells, then failed closed before any
+Binance feature or performance result because monthly archive discovery found
+790 symbols versus 804 persisted kline symbols. All 17 names classified as
+dropped are present in Binance's public USD-M daily archive inventory, and all
+of their persisted bars are confined to July 2026. They are current-month
+daily-only contracts whose monthly ZIPs do not yet exist. The canonical script
+intends to rebuild the monthly pair and append the current daily month, but the
+monthly universe-shrink guard aborts before that second stage.
+
+Before any Binance result is inspected, the deterministic repair is registered
+as follows: build monthly history and the explicitly bounded current-month
+daily tail inside one staging generation; derive membership from the combined
+persisted kline coverage; verify uniqueness, provenance, row counts, and the
+prior-universe non-shrink condition against the combined monthly-plus-daily
+inventory; and publish the kline/manifest pair atomically. Monthly and daily
+download failures retain the existing strict zero-tolerance setting for this
+run. No `allow_degraded` override is permitted. This changes acquisition and
+publication ordering only, not data values, strategy logic, features, costs,
+leverage, window, cells, or interpretation.
+
+### Outcome-exposed LONG diagnostics amendment — 2026-07-17 00:17:19 UTC
+
+After Bybit LONG completed, its headline metrics were observed together with a
+`WINDOW_CLIPPED_END` warning. Source inspection established that the warning is
+a reporting off-by-one: LONG passes the end-exclusive boundary `2026-07-16` to
+a generic diagnostic that compares it with the latest inclusive kline date
+`2026-07-15`. The canonical root and run both contain exactly the registered
+completed-day tail; the warning does not arise from a missing partition.
+
+The repair will convert LONG's non-empty exclusive end to its preceding
+inclusive data date only at the diagnostic call boundary. The generic
+diagnostic's inclusive-date contract and the strategy's end-exclusive filter
+remain unchanged. Tests must prove that `[start, 2026-07-16)` does not warn when
+data reaches 2026-07-15 and still warns when data ends earlier. Because Bybit
+LONG performance is already exposed, this is not a prospective evidentiary
+reset and the observed metrics remain descriptive. Both LONG cells will be
+rerun solely to produce truthful warning metadata and fresh artifact hashes;
+strategy decisions and numerical outputs must match the pre-fix cells.

@@ -19,12 +19,14 @@ from liquidity_migration.historical_account_replay import (
 from liquidity_migration.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
 from liquidity_migration.long_native import (
     LongNativeConfig,
+    _diagnostic_data_end,
     _finalize_trade,
     _methodology_run_label,
     _run_long_pipeline,
     format_long_native_report,
     long_v11a_profile,
 )
+from liquidity_migration.run_diagnostics import diagnose
 
 
 def _feature(symbol: str, ts_ms: int, *, day_return: float = 0.20) -> dict[str, object]:
@@ -162,6 +164,23 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
     }
     with pytest.raises(TypeError):
         LongNativeConfig(enable_fomo_chase=False)  # type: ignore[call-arg]
+
+
+def test_diagnostic_end_translates_exclusive_boundary_to_last_data_day() -> None:
+    assert _diagnostic_data_end("2026-07-16") == "2026-07-15"
+    assert _diagnostic_data_end("") is None
+    common = {
+        "full_pit_universe_pass": True,
+        "funding_mode": "modeled",
+        "archive_manifest_empty": False,
+        "requested_end": _diagnostic_data_end("2026-07-16"),
+        "n_features": 1,
+        "n_trades": 1,
+    }
+    complete = diagnose(**common, data_end="2026-07-15")
+    stale = diagnose(**common, data_end="2026-07-14")
+    assert all(warning.code != "WINDOW_CLIPPED_END" for warning in complete)
+    assert any(warning.code == "WINDOW_CLIPPED_END" for warning in stale)
 
 
 def test_finalize_trade_notional_multiplier_scales_gross() -> None:

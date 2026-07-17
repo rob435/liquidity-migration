@@ -525,7 +525,7 @@ def topup_binance_daily_klines(
                     file=sys.stderr,
                 )
 
-    missing_jobs_artifact = root / "binance_vision_daily_missing_jobs.json"
+    missing_jobs_artifact = root / DAILY_MISSING_JOBS_ARTIFACT
     missing_jobs_artifact.parent.mkdir(parents=True, exist_ok=True)
     missing_jobs_artifact.write_text(
         json.dumps(
@@ -540,7 +540,7 @@ def topup_binance_daily_klines(
         failed_jobs,
         len(jobs),
         max_failure_ratio=max_failure_ratio,
-        artifact_path=root / "binance_vision_daily_failed_jobs.json",
+        artifact_path=root / DAILY_FAILED_JOBS_ARTIFACT,
     )
 
     written_rows = 0
@@ -788,6 +788,8 @@ def rewrite_manifest_to_coverage(
 # --------------------------------------------------------------------------
 
 FAILED_JOBS_ARTIFACT = "binance_vision_failed_jobs.json"
+DAILY_FAILED_JOBS_ARTIFACT = "binance_vision_daily_failed_jobs.json"
+DAILY_MISSING_JOBS_ARTIFACT = "binance_vision_daily_missing_jobs.json"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -885,6 +887,41 @@ def _normalize_monthly_job_frame(
     )
 
 
+def _normalize_daily_job_frame(
+    rows: Sequence[dict[str, object]],
+    *,
+    symbol: str,
+    day: str,
+    end_ms: int,
+) -> pl.DataFrame:
+    """Validate one daily archive object's symbol and exact UTC day."""
+
+    frame = _normalize_monthly_job_frame(
+        rows,
+        symbol=symbol,
+        month=day[:7],
+        end_ms=end_ms,
+    )
+    if frame.is_empty():
+        return frame
+    observed_days = (
+        frame.select(
+            pl.from_epoch("ts_ms", time_unit="ms")
+            .dt.strftime("%Y-%m-%d")
+            .alias("date")
+        )
+        .get_column("date")
+        .unique()
+        .to_list()
+    )
+    if observed_days != [day]:
+        raise RuntimeError(
+            f"Binance daily job {symbol}:{day} contains out-of-day timestamps: "
+            f"{observed_days}"
+        )
+    return frame
+
+
 def _flush_monthly_frames(staging_root: Path, frames: list[pl.DataFrame]) -> int:
     if not frames:
         return 0
@@ -901,6 +938,80 @@ def _flush_monthly_frames(staging_root: Path, frames: list[pl.DataFrame]) -> int
     )
     frames.clear()
     return batch.height
+
+
+def _download_daily_tail_to_staging(
+    staging_root: Path,
+    *,
+    evidence_root: Path,
+    symbols: Sequence[str],
+    days: Sequence[str],
+    end_ms: int,
+    workers: int,
+    job_batch_size: int,
+    max_failure_ratio: float,
+) -> dict[str, int]:
+    """Download a bounded daily tail into the unpublished canonical generation."""
+
+    jobs = [(symbol, day) for symbol in symbols for day in days]
+    failed_jobs: list[tuple[str, str]] = []
+    missing_jobs: list[tuple[str, str]] = []
+    pending_frames: list[pl.DataFrame] = []
+    staged_rows = 0
+    done = 0
+    for offset in range(0, len(jobs), job_batch_size):
+        scheduled = jobs[offset : offset + job_batch_size]
+        with ThreadPoolExecutor(max_workers=min(workers, len(scheduled))) as executor:
+            futures = {
+                executor.submit(fetch_daily_klines, symbol, day): (symbol, day)
+                for symbol, day in scheduled
+            }
+            for future in as_completed(futures):
+                symbol, day = futures[future]
+                rows = future.result()
+                if rows is None:
+                    failed_jobs.append((symbol, day))
+                elif rows:
+                    frame = _normalize_daily_job_frame(
+                        rows,
+                        symbol=symbol,
+                        day=day,
+                        end_ms=end_ms,
+                    )
+                    if not frame.is_empty():
+                        pending_frames.append(frame)
+                else:
+                    missing_jobs.append((symbol, day))
+                done += 1
+        staged_rows += _flush_monthly_frames(staging_root, pending_frames)
+        if done % 500 < len(scheduled) or done == len(jobs):
+            print(
+                f"[binance_vision]  {done}/{len(jobs)} daily files, "
+                f"{staged_rows:,} staged rows, {len(missing_jobs)} 404, "
+                f"{len(failed_jobs)} failed",
+                file=sys.stderr,
+            )
+
+    (evidence_root / DAILY_MISSING_JOBS_ARTIFACT).write_text(
+        json.dumps(
+            [{"symbol": symbol, "date": day} for symbol, day in sorted(missing_jobs)],
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_download_completeness(
+        failed_jobs,
+        len(jobs),
+        max_failure_ratio=max_failure_ratio,
+        artifact_path=evidence_root / DAILY_FAILED_JOBS_ARTIFACT,
+    )
+    return {
+        "jobs": len(jobs),
+        "rows": staged_rows,
+        "missing": len(missing_jobs),
+        "failed": len(failed_jobs),
+    }
 
 
 def _write_staged_binance_manifest(staging_root: Path) -> int:
@@ -1167,27 +1278,44 @@ def _assert_download_completeness(
         )
 
 
-def _persisted_kline_symbols(root: Path) -> set[str]:
-    """Symbols already present on disk under ``klines_1h`` (via partition dirs).
+def _persisted_kline_symbol_sets(
+    root: Path,
+    *,
+    before: str | None = None,
+) -> tuple[set[str], set[str]]:
+    """Read all persisted symbols and the subset before an optional boundary."""
 
-    Reads the ``symbol=...`` partition directory names rather than loading the
-    dataset, so it is cheap on a large prior build. Empty set when no prior
-    klines_1h exists."""
     kroot = root / "klines_1h"
     if not kroot.exists():
-        return set()
+        return set(), set()
+    boundary = date.fromisoformat(before) if before is not None else None
     symbols: set[str] = set()
+    earlier: set[str] = set()
     for date_dir in kroot.iterdir():
         if not date_dir.name.startswith("date="):
             continue
+        try:
+            partition_date = date.fromisoformat(date_dir.name.removeprefix("date="))
+        except ValueError:
+            partition_date = None
         for sym_dir in date_dir.iterdir():
             if sym_dir.name.startswith("symbol="):
                 try:
-                    symbols.add(decode_symbol_partition(sym_dir.name.split("=", 1)[1]))
+                    symbol = decode_symbol_partition(sym_dir.name.split("=", 1)[1])
                 except SymbolIdentityError as exc:
                     raise RuntimeError(
                         f"unsafe/non-canonical Binance symbol partition: {sym_dir}"
                     ) from exc
+                symbols.add(symbol)
+                if boundary is not None and partition_date is not None and partition_date < boundary:
+                    earlier.add(symbol)
+    return symbols, earlier
+
+
+def _persisted_kline_symbols(root: Path) -> set[str]:
+    """Symbols already present under date/symbol-partitioned ``klines_1h``."""
+
+    symbols, _ = _persisted_kline_symbol_sets(root)
     return symbols
 
 
@@ -1199,14 +1327,17 @@ def build_binance_oos(
     job_batch_size: int = 48,
     max_failure_ratio: float = 0.005,
     allow_degraded: bool = False,
+    daily_start: str | None = None,
 ) -> dict:
     """Build a Bybit-shaped PIT data root from the Binance Vision archive.
 
     end_date is the exclusive upper bound on signal days (klines kept strictly
     before it). Writes klines_1h and a coverage-filtered archive_trade_manifest.
 
-    Refuses to write when monthly download failures exceed
-    ``max_failure_ratio``.
+    Refuses to write when monthly or included daily-tail download failures
+    exceed ``max_failure_ratio``. When ``daily_start`` is supplied, it must be
+    the first day of the month containing ``end_date - 1``; monthly history and
+    that bounded daily tail are staged and published as one verified pair.
 
     The klines_1h dataset is REWRITTEN clean (not appended) so a rerun that
     discovers a narrower universe — e.g. after a transient S3 listing shortfall —
@@ -1232,11 +1363,37 @@ def build_binance_oos(
         raise ValueError("workers and job_batch_size must be positive")
     if not 0.0 <= max_failure_ratio <= 1.0:
         raise ValueError("max_failure_ratio must be between 0 and 1")
+    end_day = date.fromisoformat(end_date)
     end_ms = int(pl.Series([end_date]).str.to_datetime().dt.timestamp("ms")[0])
     max_month = end_date[:7]
+    daily_days: list[str] = []
+    daily_symbols: tuple[str, ...] = ()
+    if daily_start is not None:
+        daily_start_day = date.fromisoformat(daily_start)
+        expected_daily_start = (end_day - timedelta(days=1)).replace(day=1)
+        if daily_start_day != expected_daily_start:
+            raise ValueError(
+                "Binance canonical daily_start must be the first day of the month "
+                f"containing end_date - 1: expected {expected_daily_start}, "
+                f"got {daily_start_day}"
+            )
+        daily_days = _days_between(daily_start, end_date)
+        if not daily_days:
+            raise ValueError("Binance canonical daily tail cannot be empty")
+        daily_symbols = tuple(
+            validate_usdm_usdt_symbols(
+                list_usdm_usdt_daily_symbols(),
+                source="Binance Vision canonical daily-tail inventory",
+                ignore_non_usdt_entries=False,
+            )
+        )
 
     print(f"[binance_vision] discovering symbols/months <= {max_month} ...", file=sys.stderr)
-    discovered = discover(max_month=max_month, workers=min(workers, 16))
+    discovered = discover(
+        max_month=max_month,
+        workers=min(workers, 16),
+        max_listing_failure_ratio=max_failure_ratio,
+    )
     validated_symbols = validate_usdm_usdt_symbols(
         tuple(discovered),
         source="Binance Vision monthly build inventory",
@@ -1244,21 +1401,52 @@ def build_binance_oos(
     )
     if set(validated_symbols) != set(discovered):
         raise RuntimeError("Binance Vision build inventory changed during symbol normalization")
-    inventory = {symbol: discovered[symbol] for symbol in validated_symbols}
+    inventory = {
+        symbol: [
+            month
+            for month in discovered[symbol]
+            if daily_start is None or month < daily_start[:7]
+        ]
+        for symbol in validated_symbols
+    }
+    inventory = {symbol: months for symbol, months in inventory.items() if months}
     jobs = [(sym, ym) for sym, months in inventory.items() for ym in months]
     if len(jobs) != len(set(jobs)):
         raise RuntimeError("Binance Vision discovery returned duplicate symbol/month jobs")
     print(f"[binance_vision] {len(inventory)} symbols, {len(jobs)} monthly files to fetch", file=sys.stderr)
+    if daily_start is not None:
+        print(
+            f"[binance_vision] {len(daily_symbols)} daily symbols x "
+            f"{len(daily_days)} days to stage atomically",
+            file=sys.stderr,
+        )
 
     # Universe-shrink gate: a rerun that discovers symbols NOT covering a prior
     # wider build would leave that build's now-absent symbols stranded on disk.
     # Refuse rather than silently retain stale symbol-days (survivorship corruption).
-    persisted = _persisted_kline_symbols(root)
-    dropped_symbols = persisted - set(inventory)
+    persisted, persisted_before_daily = _persisted_kline_symbol_sets(
+        root,
+        before=daily_start,
+    )
+    combined_inventory = set(inventory) | set(daily_symbols)
+    dropped_symbols = persisted - combined_inventory
+    historical_dropped_symbols = (
+        persisted_before_daily - set(inventory)
+        if daily_start is not None
+        else set()
+    )
+    if historical_dropped_symbols and not allow_degraded:
+        sample = ", ".join(sorted(historical_dropped_symbols)[:10])
+        raise RuntimeError(
+            "binance OOS build REFUSED: current daily inventory cannot replace missing "
+            f"monthly history for {len(historical_dropped_symbols)} persisted symbols: "
+            f"{sample}. Pass allow_degraded=True to overwrite with the narrower universe."
+        )
     if dropped_symbols and not allow_degraded:
         sample = ", ".join(sorted(dropped_symbols)[:10])
         raise RuntimeError(
-            f"binance OOS build REFUSED: discovered universe ({len(inventory)} symbols) "
+            f"binance OOS build REFUSED: combined archive universe "
+            f"({len(combined_inventory)} symbols) "
             f"shrank vs the persisted klines_1h ({len(persisted)} symbols) — "
             f"{len(dropped_symbols)} symbols would be stranded: {sample}. "
             f"Pass allow_degraded=True to overwrite with the narrower universe."
@@ -1317,8 +1505,30 @@ def build_binance_oos(
             max_failure_ratio=max_failure_ratio,
             artifact_path=root / FAILED_JOBS_ARTIFACT,
         )
+        daily_stats = {"jobs": 0, "rows": 0, "missing": 0, "failed": 0}
+        if daily_start is not None:
+            daily_stats = _download_daily_tail_to_staging(
+                staging_root,
+                evidence_root=root,
+                symbols=daily_symbols,
+                days=daily_days,
+                end_ms=end_ms,
+                workers=workers,
+                job_batch_size=job_batch_size,
+                max_failure_ratio=max_failure_ratio,
+            )
+            staged_rows += daily_stats["rows"]
         if staged_rows <= 0:
             raise RuntimeError("no klines downloaded from data.binance.vision")
+
+        staged_symbols = _persisted_kline_symbols(staging_root)
+        missing_persisted = persisted - staged_symbols
+        if missing_persisted and not allow_degraded:
+            sample = ", ".join(sorted(missing_persisted)[:10])
+            raise RuntimeError(
+                "binance OOS build REFUSED: verified monthly-plus-daily staging lost "
+                f"{len(missing_persisted)} persisted symbols: {sample}"
+            )
 
         manifest_rows = _write_staged_binance_manifest(staging_root)
         staged_stats = _verify_staged_binance_datasets(
@@ -1354,6 +1564,11 @@ def build_binance_oos(
             "kline_rows": int(published["kline_rows"]),
             "manifest_rows": int(published["manifest_rows"]),
             "failed_files": failed,
+            "daily_start": daily_start,
+            "daily_jobs": daily_stats["jobs"],
+            "daily_rows": daily_stats["rows"],
+            "daily_missing_files": daily_stats["missing"],
+            "daily_failed_files": daily_stats["failed"],
         }
     finally:
         # Preserve both generations only when a process-level publication marker
@@ -1378,6 +1593,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--workers", type=int, default=24)
     b.add_argument("--job-batch-size", type=int, default=48)
     b.add_argument("--max-failure-ratio", type=float, default=0.005)
+    b.add_argument(
+        "--daily-start",
+        default=None,
+        help=(
+            "Optional first day of the end month; stage this daily tail with monthly "
+            "history before atomic publication."
+        ),
+    )
     b.add_argument(
         "--allow-degraded",
         action="store_true",
@@ -1421,6 +1644,7 @@ def main(argv: list[str] | None = None) -> int:
             job_batch_size=args.job_batch_size,
             max_failure_ratio=args.max_failure_ratio,
             allow_degraded=args.allow_degraded,
+            daily_start=args.daily_start,
         )
         print(summary)
     elif args.mode == "filter-manifest":

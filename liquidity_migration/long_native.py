@@ -112,6 +112,16 @@ def long_v11a_profile() -> LongNativeConfig:
     return LongNativeConfig()
 
 
+def _diagnostic_data_end(exclusive_end: str) -> str | None:
+    """Translate the strategy's exclusive end into an inclusive data date."""
+
+    if not exclusive_end:
+        return None
+    return (
+        dt.date.fromisoformat(exclusive_end) - dt.timedelta(days=1)
+    ).isoformat()
+
+
 def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float:
     """Active v11a BTC-vol book scalar, shared by equity and runtime."""
 
@@ -527,7 +537,7 @@ def run_long_native_research(
         funding_mode=funding_mode,
         archive_manifest_empty=archive_manifest.is_empty(),
         requested_start=cfg.start_date or None,
-        requested_end=cfg.end_date or None,
+        requested_end=_diagnostic_data_end(cfg.end_date),
         data_start=str(data_start) if data_start is not None else None,
         data_end=str(data_end) if data_end is not None else None,
         n_features=features.height,

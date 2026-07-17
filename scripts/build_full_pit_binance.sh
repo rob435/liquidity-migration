@@ -3,12 +3,11 @@
 # Window: BINANCE_START (default 2019-09-01) to end-exclusive BINANCE_END.
 #
 # Stages:
-#   [1/3] binance_vision build-binance-oos  — monthly klines + PIT manifest
-#   [2/3] binance_vision topup-daily-klines — current-month daily kline tail
-#   [3/3] download-binance-proxy            — funding, OI, mark/index/premium, taker_flow
+#   [1/2] binance_vision build-binance-oos  — atomic monthly + daily-tail klines/PIT pair
+#   [2/2] download-binance-proxy            — funding, OI, mark/index/premium, taker_flow
 #
 # Perps-only by construction:
-#   * both `binance_vision` stages read only `data/futures/um/...` from
+#   * the `binance_vision` stage reads only `data/futures/um/...` from
 #     data.binance.vision (USD-Margined futures = USDT-quoted perpetuals).
 #   * `download-binance-proxy` resolves to `binance_usdm_*` dataset names,
 #     which target Binance's USD-M REST endpoints exclusively.
@@ -55,9 +54,9 @@ export PYTHONIOENCODING=utf-8
 cd "$(dirname "$0")/.."
 mkdir -p "$ROOT"
 
-# Monthly ZIPs do not cover an in-progress month. Re-fetch the month containing
-# END-1 day from daily archives after the clean monthly rewrite. The top-up is
-# append/idempotent and rewrites membership from actual >=20-bar coverage.
+# Monthly ZIPs do not cover an in-progress month. Stage the month containing
+# END-1 day from daily archives in the same unpublished generation as monthly
+# history, then derive membership from their combined >=20-bar coverage.
 DAILY_START="${BINANCE_DAILY_START:-$("$PYTHON_BIN" - "$END" <<'PY'
 import datetime as dt
 import sys
@@ -77,16 +76,11 @@ echo "  max monthly failure ratio: $MAX_FAILURE_RATIO"
 echo "=============================================================="
 
 echo
-echo "[1/3] Binance — full PIT root from data.binance.vision USD-M monthly archives"
+echo "[1/2] Binance — atomic full PIT root from USD-M monthly + current daily archives"
 "$PYTHON_BIN" -m liquidity_migration.binance_vision \
   build-binance-oos --data-root "$ROOT" --end "$END" --workers "$VISION_WORKERS" \
-  --job-batch-size "$JOB_BATCH_SIZE" --max-failure-ratio "$MAX_FAILURE_RATIO"
-
-echo
-echo "[2/3] Binance — daily archive tail for the month not guaranteed by monthly ZIPs"
-"$PYTHON_BIN" -m liquidity_migration.binance_vision \
-  topup-daily-klines --data-root "$ROOT" \
-  --start "$DAILY_START" --end "$END" --workers "$VISION_WORKERS"
+  --job-batch-size "$JOB_BATCH_SIZE" --max-failure-ratio "$MAX_FAILURE_RATIO" \
+  --daily-start "$DAILY_START"
 
 # Derive symbol list from the manifest.
 # Perps-only guard: any symbol not USDT-quoted fails the build loudly.
@@ -116,7 +110,7 @@ fi
 N_SYMBOLS=$(echo "$SYMBOLS" | tr ',' '\n' | wc -l)
 
 echo
-echo "[3/3] Binance — ancillary datasets for $N_SYMBOLS symbols"
+echo "[2/2] Binance — ancillary datasets for $N_SYMBOLS symbols"
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   download-binance-proxy \
     --symbols "$SYMBOLS" \

@@ -30,20 +30,23 @@ BINANCE_START=YYYY-MM-DD BINANCE_END=YYYY-MM-DD \
 All `END` values are exclusive. The Bybit builder combines archive-observed
 membership with explicitly labelled current-listing inference, downloads
 manifest-gated 1h klines, validates coverage without deleting missing expected
-membership, and adds funding/OI/mark/index/premium data. The
-Binance builder uses USD-M archive klines plus the current-month daily tail and
-adds funding/OI/mark/index/premium/taker flow. Its monthly rebuild keeps at most
+membership, and adds funding/OI/mark/index/premium data. The Binance builder
+uses USD-M monthly archive klines plus the explicitly bounded current-month
+daily tail and adds funding/OI/mark/index/premium/taker flow. Monthly history
+and the daily tail are assembled in one staging generation so daily-only new
+contracts cannot be dropped before a later top-up. It keeps at most
 `BINANCE_JOB_BATCH_SIZE` completed jobs in a scheduling batch (default 48),
-stages `klines_1h` and `archive_trade_manifest` as a pair, verifies the persisted
-pair, and publishes both under their dataset locks. A normal mid-publication
+stages `klines_1h` and `archive_trade_manifest` as a pair, verifies the combined
+persisted pair and prior-universe coverage, and publishes both under their
+dataset locks. A normal mid-publication
 failure restores the prior pair. A process interruption can leave
 `.binance_vision_publish_incomplete.json`; a later rebuild refuses before
 network access or mutation. Inspect the marker's staging and backup paths and
 recover deliberately rather than deleting it as "stale."
 
 The shell builder defaults `BINANCE_MAX_FAILURE_RATIO=0`, so a single failed
-monthly download aborts the build. Both values are environment overrides and
-are recorded in the shell invocation. Both full-PIT scripts reject positional
+monthly or daily-tail download aborts the build. Both values are environment
+overrides and are recorded in the shell invocation. Both full-PIT scripts reject positional
 arguments rather than silently ignoring a mistyped boundary. Read each script
 before a large run; defaults and upstream availability can change.
 
