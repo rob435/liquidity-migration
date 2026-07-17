@@ -269,6 +269,7 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
         retirement_registry_path=registry,
     )
     assert long.active_symbols == ("AAAUSDT",)
+    assert long.temporarily_ineligible == ()
     assert long.scheduled_retirements == ()
     assert not registry.exists()
 
@@ -297,6 +298,65 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
         retirement_registry_path=registry,
     )
     assert [row.symbol for row in after_removal.scheduled_retirements] == ["BBBUSDT"]
+
+
+def test_profile_reconciliation_treats_live_liquidity_drift_as_temporary(
+    tmp_path: Path,
+) -> None:
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    reconciliation = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [_instrument("AAAUSDT"), _instrument("BBBUSDT")]
+        ),
+        _normalize_tickers(
+            [
+                _ticker("AAAUSDT", "1500000"),
+                _ticker("BBBUSDT", "1000000"),
+                _ticker("WC_ESP_ARG_USDT-19JUL26", "9000000"),
+            ]
+        ),
+        frozen,
+        profile="long",
+        snapshot_ts_ms=now_ms,
+        context="test LONG",
+        retirement_registry_path=tmp_path / "retirements.json",
+    )
+
+    assert reconciliation.active_symbols == ()
+    assert reconciliation.temporarily_ineligible_rows() == [
+        {"symbol": "AAAUSDT", "reasons": ["turnover_below_floor"]}
+    ]
+    assert reconciliation.scheduled_retirements == ()
+    assert not (tmp_path / "retirements.json").exists()
+
+
+def test_profile_reconciliation_does_not_mask_structural_contract_change(
+    tmp_path: Path,
+) -> None:
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    with pytest.raises(RuntimeError, match="lost 1 unexplained symbol.*AAAUSDT"):
+        enforce_frozen_candidate_frames(
+            _normalize_instruments(
+                [
+                    _instrument("AAAUSDT", status="Settling"),
+                    _instrument("BBBUSDT"),
+                ]
+            ),
+            _normalize_tickers(
+                [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+            ),
+            frozen,
+            profile="long",
+            snapshot_ts_ms=now_ms,
+            context="test LONG",
+            retirement_registry_path=tmp_path / "retirements.json",
+        )
 
 
 def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path) -> None:

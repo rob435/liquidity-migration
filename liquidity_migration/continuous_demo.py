@@ -1682,6 +1682,13 @@ def run_continuous_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
+            "temporarily_ineligible_candidates_json": json.dumps(
+                candidate_reconciliation.temporarily_ineligible_rows()
+                if candidate_reconciliation is not None
+                else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             "scheduled_candidate_retirements_json": json.dumps(
                 candidate_reconciliation.retirement_rows()
                 if candidate_reconciliation is not None

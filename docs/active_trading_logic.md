@@ -141,14 +141,20 @@ risk or venue-rule rejection remains possible when actual account state differs
 from the validation reference; that is a safety decision, not configuration
 drift.
 
-The frozen candidate artifact retains profile-specific populations. A symbol
-with a newly observed venue `deliveryTime` is recorded prospectively in a
-private retirement registry and removed from new-entry membership. The cycle
-continues only when the canonical position, component desires/targets, working
-orders, aggregate target, and unresolved inbox are all flat for that symbol.
-The registry preserves the observation after the venue removes the instrument
-row. An unexplained disappearance or any remaining exposure still fails
-closed.
+The frozen candidate artifact retains profile-specific admission populations;
+post-freeze listings cannot enter. Live turnover, age, and configured liquidity
+rank are re-evaluated each cycle, so a frozen symbol that temporarily fails one
+of those dynamic filters is skipped and the exact reason is written to the
+cycle receipt. That normal ranking movement is distinct from disappearance.
+
+A symbol with a newly observed future venue `deliveryTime` is recorded
+prospectively in a private retirement registry and removed from new-entry
+membership. The cycle continues only when the canonical position, component
+desires/targets, working orders, aggregate target, and unresolved inbox are all
+flat for that symbol. The registry preserves the observation after the venue
+removes the instrument row. A missing ticker/instrument without prior evidence,
+a structural contract change, malformed eligibility input, or any remaining
+exposure still fails closed.
 
 ### Reconstruction limits
 

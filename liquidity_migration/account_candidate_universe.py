@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -63,10 +64,26 @@ class ScheduledCandidateRetirement:
 
 
 @dataclass(frozen=True, slots=True)
+class TemporarilyIneligibleCandidate:
+    symbol: str
+    reasons: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CandidatePopulationReconciliation:
     profile: str
     active_symbols: tuple[str, ...]
+    temporarily_ineligible: tuple[TemporarilyIneligibleCandidate, ...]
     scheduled_retirements: tuple[ScheduledCandidateRetirement, ...]
+
+    def temporarily_ineligible_rows(self) -> list[dict[str, Any]]:
+        return [row.to_dict() for row in self.temporarily_ineligible]
 
     def retirement_rows(self) -> list[dict[str, Any]]:
         return [row.to_dict() for row in self.scheduled_retirements]
@@ -832,6 +849,7 @@ def _load_retirement_registry(
             or delivery_time_ms <= 0
             or first_observed_ts_ms <= 0
             or delivery_time_ms <= frozen.snapshot_ts_ns // 1_000_000
+            or delivery_time_ms <= first_observed_ts_ms
             or source != "live_instrument_delivery_time"
         ):
             raise ValueError("candidate-retirement registry record is invalid")
@@ -894,16 +912,102 @@ def _write_retirement_registry(
         temporary.unlink(missing_ok=True)
 
 
-def _instrument_rows_by_symbol(instruments: pl.DataFrame) -> dict[str, Mapping[str, Any]]:
+def _instrument_rows_by_symbol(
+    instruments: pl.DataFrame,
+    *,
+    candidate_symbols: set[str],
+) -> dict[str, Mapping[str, Any]]:
     if "symbol" not in instruments.columns:
         raise RuntimeError("current instrument frame lacks symbol")
     output: dict[str, Mapping[str, Any]] = {}
     for row in instruments.to_dicts():
+        raw_symbol = str(row.get("symbol") or "").strip().upper()
+        if raw_symbol not in candidate_symbols:
+            continue
         symbol = _symbol(row.get("symbol"))
         if symbol in output:
             raise RuntimeError(f"current instrument frame repeats {symbol}")
         output[symbol] = row
     return output
+
+
+def _ticker_rows_by_symbol(
+    tickers: pl.DataFrame,
+    *,
+    candidate_symbols: set[str],
+) -> dict[str, Mapping[str, Any]]:
+    if "symbol" not in tickers.columns:
+        raise RuntimeError("current ticker frame lacks symbol")
+    output: dict[str, Mapping[str, Any]] = {}
+    for row in tickers.to_dicts():
+        raw_symbol = str(row.get("symbol") or "").strip().upper()
+        if raw_symbol not in candidate_symbols:
+            continue
+        symbol = _symbol(row.get("symbol"))
+        if symbol in output:
+            raise RuntimeError(f"current ticker frame repeats {symbol}")
+        output[symbol] = row
+    return output
+
+
+def _temporary_ineligibility_reasons(
+    *,
+    symbol: str,
+    instrument: Mapping[str, Any] | None,
+    ticker: Mapping[str, Any] | None,
+    config: UniverseConfig,
+    snapshot_ts_ms: int,
+) -> tuple[str, ...] | None:
+    """Explain reversible live-filter drift without masking input corruption.
+
+    A frozen candidate is an admission boundary, not a promise that its current
+    turnover or liquidity rank can never change. Missing venue rows, malformed
+    market data, and structural contract changes remain hard failures.
+    """
+
+    if instrument is None or ticker is None:
+        return None
+    symbol_type = str(instrument.get("symbol_type") or "").strip().lower()
+    contract_type = str(instrument.get("contract_type") or "")
+    raw_turnover_24h = ticker.get("turnover_24h")
+    if raw_turnover_24h is None:
+        return None
+    try:
+        delivery_time_ms = int(instrument.get("delivery_time_ms") or 0)
+        turnover_24h = float(raw_turnover_24h)
+    except (TypeError, ValueError):
+        return None
+    if (
+        str(instrument.get("status") or "") != "Trading"
+        or str(instrument.get("settle_coin") or "") != "USDT"
+        or symbol_type not in set(CRYPTO_LINEAR_SYMBOL_TYPES)
+        or bool(instrument.get("is_prelisting"))
+        or contract_type not in {"LinearPerpetual", "linear", "Linear"}
+        or delivery_time_ms != 0
+        or symbol in set(config.exclude_symbols)
+        or not math.isfinite(turnover_24h)
+        or turnover_24h < 0.0
+    ):
+        return None
+
+    reasons: list[str] = []
+    if turnover_24h < config.min_turnover_24h:
+        reasons.append("turnover_below_floor")
+    if config.min_age_days > 0 or config.max_age_days > 0:
+        try:
+            launch_time_ms = int(instrument.get("launch_time_ms") or 0)
+        except (TypeError, ValueError):
+            return None
+        if launch_time_ms <= 0 or launch_time_ms > snapshot_ts_ms:
+            return None
+        age_days = (snapshot_ts_ms - launch_time_ms) / 86_400_000.0
+        if config.min_age_days > 0 and age_days < config.min_age_days:
+            reasons.append("listing_age_below_floor")
+        if config.max_age_days > 0 and age_days > config.max_age_days:
+            reasons.append("listing_age_above_ceiling")
+    if not reasons:
+        reasons.append("outside_configured_liquidity_rank")
+    return tuple(reasons)
 
 
 def enforce_frozen_candidate_frames(
@@ -933,14 +1037,43 @@ def enforce_frozen_candidate_frames(
     missing = sorted(required - current)
     registry_path = Path(retirement_registry_path).expanduser()
     registry = _load_retirement_registry(registry_path, frozen=frozen)
-    instrument_rows = _instrument_rows_by_symbol(instruments)
+    instrument_rows = _instrument_rows_by_symbol(
+        instruments,
+        candidate_symbols=required,
+    )
+    ticker_rows = _ticker_rows_by_symbol(
+        tickers,
+        candidate_symbols=required,
+    )
     retirements: dict[str, ScheduledCandidateRetirement] = {}
+    temporarily_ineligible: dict[str, TemporarilyIneligibleCandidate] = {}
     unexplained: list[str] = []
     changed = False
+    reactivated = sorted(set(registry) & current)
+    if reactivated:
+        raise RuntimeError(
+            f"{context}: scheduled retirement re-entered current eligibility: "
+            f"{','.join(reactivated)}"
+        )
+    profile_config = _universe_config(frozen.profile_inputs[profile])
     for symbol in missing:
         row = instrument_rows.get(symbol)
-        delivery_time_ms = int((row or {}).get("delivery_time_ms") or 0)
-        if delivery_time_ms > frozen.snapshot_ts_ns // 1_000_000:
+        try:
+            delivery_time_ms = int((row or {}).get("delivery_time_ms") or 0)
+        except (TypeError, ValueError):
+            delivery_time_ms = -1
+        prior = registry.get(symbol)
+        if prior is not None and delivery_time_ms > 0:
+            if prior.delivery_time_ms != delivery_time_ms:
+                raise RuntimeError(
+                    f"{context}: {symbol} delivery time changed from "
+                    f"{prior.delivery_time_ms} to {delivery_time_ms}"
+                )
+            retirements[symbol] = prior
+        elif (
+            delivery_time_ms > frozen.snapshot_ts_ns // 1_000_000
+            and delivery_time_ms > snapshot_ts_ms
+        ):
             observed = ScheduledCandidateRetirement(
                 symbol=symbol,
                 delivery_time_ms=delivery_time_ms,
@@ -948,23 +1081,28 @@ def enforce_frozen_candidate_frames(
                 observed_status=str((row or {}).get("status") or ""),
                 evidence_source="live_instrument_delivery_time",
             )
-            prior = registry.get(symbol)
-            if prior is not None and prior.delivery_time_ms != delivery_time_ms:
-                raise RuntimeError(
-                    f"{context}: {symbol} delivery time changed from "
-                    f"{prior.delivery_time_ms} to {delivery_time_ms}"
-                )
-            if prior is None:
-                registry[symbol] = observed
-                prior = observed
-                changed = True
-            retirements[symbol] = prior
-        elif row is None and symbol in registry:
+            registry[symbol] = observed
+            retirements[symbol] = observed
+            changed = True
+        elif row is None and prior is not None:
             # Once the venue removes the instrument row, the prospectively
             # captured delivery-time observation remains the causal evidence.
-            retirements[symbol] = registry[symbol]
+            retirements[symbol] = prior
         else:
-            unexplained.append(symbol)
+            temporary_reasons = _temporary_ineligibility_reasons(
+                symbol=symbol,
+                instrument=row,
+                ticker=ticker_rows.get(symbol),
+                config=profile_config,
+                snapshot_ts_ms=snapshot_ts_ms,
+            )
+            if temporary_reasons is None:
+                unexplained.append(symbol)
+            else:
+                temporarily_ineligible[symbol] = TemporarilyIneligibleCandidate(
+                    symbol=symbol,
+                    reasons=temporary_reasons,
+                )
     if unexplained:
         preview = ",".join(unexplained[:20])
         suffix = "..." if len(unexplained) > 20 else ""
@@ -980,6 +1118,10 @@ def enforce_frozen_candidate_frames(
     return CandidatePopulationReconciliation(
         profile=profile,
         active_symbols=active,
+        temporarily_ineligible=tuple(
+            temporarily_ineligible[symbol]
+            for symbol in sorted(temporarily_ineligible)
+        ),
         scheduled_retirements=tuple(retirements[symbol] for symbol in sorted(retirements)),
     )
 
