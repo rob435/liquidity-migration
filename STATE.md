@@ -2,19 +2,23 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-16 18:40 UTC. These facts describe the deployed implementation
-commit below; a later documentation-only receipt may leave the branch ahead.
+at 2026-07-17 22:55 UTC. These facts describe the deployed implementation
+commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `c8251fffd4777a53c153a7798c4c722563b1d93e`, profile `operational`, receipt
-  SHA-256 `59fbb9d7e28b5fb9b31386ff3d7a5e60c0d0164566ff24355c5c64c918fe1a02`.
+  `3e1860d9c6e637300e540ca99fad22bc9b98fe3f`, profile `operational`, receipt
+  SHA-256 `37cc00133773843028f2cd3fc24fddccbbaaccc96f98c9d028e2e6be92f4d248`.
+- The installed demo and paper operational-profile bytes are identical, with
+  SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
+  The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. An on-demand watchdog run under the new exact authority exited zero
-  at 18:39 UTC with no active alert across all ten monitored units.
+  liveness. The first 2x hedge run exited zero at 22:51 UTC. An on-demand
+  watchdog run under the exact authority exited zero at 22:55 UTC and resolved
+  all four strategy-liveness alerts from the quiesced deployment interval.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -24,22 +28,28 @@ commit below; a later documentation-only receipt may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reads after producer quiescence and again after
-  activation showed zero non-flat positions and zero regular or conditional
-  orders. Demo and paper owners report healthy current-generation state; demo
-  reconciliation reports zero mismatches.
-- Demo and paper owners publish healthy generation-bound status. Demo
-  reconciliation is healthy with zero mismatches; both reported exact
-  queue-head readiness, zero restarts, and fresh owner health after activation.
-  The demo inbox had zero pending, processing, or failed requests. Live-L2 and
-  owner-health ages are measured in seconds. With no active work, each owner
-  subscribes only to the idle BTC book.
+- Authenticated Bybit demo reads after activation showed zero non-flat
+  positions and zero regular or conditional orders. The canonical journal
+  verified and applied all 8,193 events at head
+  `b42c1863716bb26cd696734f5a84f820b87204aaa02a792f899abb74a8c20000`,
+  with zero nonzero positions, working orders, component targets, or aggregate
+  targets. The inbox had zero unresolved requests.
+- Demo and paper owners publish healthy current-generation state with zero
+  restarts. The account-health reader now accepts harmless heartbeat
+  replacement only when the replacement binds the same journal head; a changed
+  head still fails closed.
 - All four target producers have current-generation completed-cycle receipts
-  bound to their exact durable cycle. LONG demo/paper reported 231,839 current
-  kline rows; CONTINUOUS demo/paper reported 371,833. Completion-age liveness
-  was clean after publication. Paper is explicitly
+  bound to the operational-profile SHA. LONG demo/paper completed with 100
+  active symbols, 2x entry leverage, and a 0.5 notional multiplier. CONTINUOUS
+  demo/paper completed with 513 active symbols, 2x entry leverage, a 1.0
+  notional multiplier, no entry candidates, and no publication error.
+  Completion-age liveness was clean after publication. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
   not performance or fill-quality evidence.
+- The account owner caps leverage at 2x, symbol notional at 5,000 USDT,
+  component/account gross at 20,000 USDT, and initial margin at 10,000 USDT.
+  Startup/authorization reject unknown profile fields, producer leverage above
+  the owner cap, or registered exposure envelopes outside the same profile.
 - The prior demo owner retained raw depth for the full universe, reached about
   2.75 GiB resident memory, and stalled reconciliation through swap pressure.
   The bounded owner remains near 93 MiB after cutover.
@@ -56,6 +66,30 @@ commit below; a later documentation-only receipt may leave the branch ahead.
   `be80dc76002dc8a0c943798e23b58c29f3894e83f9d6d7a72414008df1d9f146`.
 
 ## Incident interpretation
+
+- No trade was entered from the observed ONDO signal under the old deployment.
+  LONG requested 10x leverage while the account owner allowed at most 2x, so
+  every proposed entry was rejected before a venue order existed. Authenticated
+  venue and journal evidence confirmed no hidden order or fill.
+- LONG, CONTINUOUS, and hedge leverage plus exposure/risk knobs now come from
+  one strict operational profile. Independent systemd sizing variables were
+  removed. The current ONDO signal remains unqueued because its exact earlier
+  risk-rejected attempt is terminally suppressed; CONTINUOUS has zero current
+  entry candidates. A new strategy-qualified attempt is eligible at 2x, subject
+  to the still-active account and venue safety checks.
+- Three CONTINUOUS candidates (`HIGHUSDT`, `PUMPBTCUSDT`, and
+  `WHITEWHALEUSDT`) have venue `deliveryTime=1784538000000`. They are recorded
+  prospectively in private mode-0600 retirement registries and may retire only
+  while account positions, targets, orders, and inbox exposure are all flat.
+- Normal live LONG turnover/rank movement is no longer mistaken for a
+  disappearance: the latest cycles recorded 20 temporarily ineligible symbols
+  with exact reasons and continued. Missing ticker/instrument rows, structural
+  contract changes, malformed inputs, retirement evidence changes, or retained
+  exposure still fail closed.
+- Unresolved Telegram risk blocks now carry signal expiry and are removed after
+  the immutable signal window ends. Timer-driven oneshot failures no longer say
+  that systemd has permanently stopped retrying; the alert identifies the
+  failed unit and tells the operator to inspect its journal.
 
 - The 17:20 `latest cycle is 0.1 min future-dated` page was another local
   watchdog read race, not future scheduler data or a stopped producer. The
