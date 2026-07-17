@@ -12,6 +12,7 @@ artifacts before inspecting affected outcomes.
 | Area | Record | Status |
 | --- | --- | --- |
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
+| Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
 
 ## Archived outcomes
 

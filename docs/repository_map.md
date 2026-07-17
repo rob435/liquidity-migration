@@ -46,6 +46,7 @@ deploy references, and tests.
 | Operations and deployment | `scripts/ops.sh`, guarded runtime/deploy scripts, `deploy/systemd/`, `.github/workflows/vps-deploy.yml` | Runtime-script and ops tests; `docs/operations.md`, `deploy/systemd/README.md`, `STATE.md` |
 | Research integrity and reporting | Research modules, `scripts/equity_curves.*`, `scripts/research_refresh.*`, `three_way_reconciliation.py`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_refresh.md`, `docs/research_summary.md`, `docs/strategy_overhaul_lessons.md`, `docs/strategy_overhaul_migration_audit.md`, applicable research skills and report tests |
 | Trade diagnostics | Verified account journal, exact decision/markout books, and the read-only command projection | `trade_diagnostics.py`, `post_fill_markouts.py`, bounded capture hooks, `scripts/build_trade_diagnostics.py`, `docs/trade_diagnostics.md`, and focused diagnostic tests |
+| Strategy-source diagnostics | Observer-only LONG/CONTINUOUS source gates and separated future-path labels | `strategy_funnel.py`, hooks at the existing strategy owners, `scripts/build_candidate_tape.py`, the active diagnostic-epoch preregistration, and funnel/candidate-tape tests |
 
 Prefixes are a discovery aid, not proof of ownership. Open the definition,
 callers, persistence format, runtime configuration, and focused tests before a
@@ -63,6 +64,9 @@ cross-domain edit.
   constructing a command or interpreting output. Use
   `scripts/ops.sh research-refresh plan` for the combined append/benchmark
   workflow and inspect its frozen boundary before `run`.
+- Registered candidate-tape partitions: `scripts/build_candidate_tape.py --help`;
+  this entry point reads only the preregistered PIT root and writes one run-scoped
+  diagnostic partition.
 
 ## Validation ladder
 

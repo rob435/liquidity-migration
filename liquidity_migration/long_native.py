@@ -723,44 +723,71 @@ def detect_pattern_fomo_chase(row: dict[str, Any], cfg: LongNativeConfig) -> boo
     today_rank = _safe_float(row.get("today_volume_rank"))
     if today_rank is None or today_rank > cfg.fc_top_volume_rank_max:
         return False
-    today_ret = _safe_float(row.get("log_return"))
-    if today_ret is None:
+    if _safe_float(row.get("log_return")) is None:
         return False
-    sigma_d = _safe_float(row.get("sigma_daily_30d"))
-    threshold_1d = (
-        cfg.fc_sigma_mult * sigma_d if sigma_d is not None and sigma_d > 0.0 else math.log1p(cfg.fc_min_day_return)
-    )
+    pump = long_pump_family(row, cfg)
     close_location = _safe_float(row.get("close_location"))
-    trigger_1d = (
-        today_ret >= threshold_1d and close_location is not None and close_location >= cfg.fc_min_close_location
-    )
-
-    trigger_3d = False
-    pump_3d = _safe_float(row.get("pump_3d_log"))
     close_loc_3d = _safe_float(row.get("close_loc_3d"))
-    if pump_3d is not None and close_loc_3d is not None and close_loc_3d >= cfg.fc_close_loc_multi_day:
-        threshold_3d = (
-            cfg.fc_sigma_mult * sigma_d * math.sqrt(3)
-            if sigma_d is not None and sigma_d > 0.0
-            else math.log1p(cfg.fc_min_day_return) * math.sqrt(3)
-        )
-        trigger_3d = pump_3d >= threshold_3d
-
-    trigger_7d = False
-    pump_7d = _safe_float(row.get("pump_7d_log"))
     close_loc_7d = _safe_float(row.get("close_loc_7d"))
-    if pump_7d is not None and close_loc_7d is not None and close_loc_7d >= cfg.fc_close_loc_multi_day:
-        threshold_7d = (
-            cfg.fc_sigma_mult * sigma_d * math.sqrt(7)
-            if sigma_d is not None and sigma_d > 0.0
-            else math.log1p(cfg.fc_min_day_return) * math.sqrt(7)
-        )
-        trigger_7d = pump_7d >= threshold_7d
-
+    trigger_1d = bool(pump["trigger_1d"]) and (
+        close_location is not None and close_location >= cfg.fc_min_close_location
+    )
+    trigger_3d = bool(pump["trigger_3d"]) and (
+        close_loc_3d is not None and close_loc_3d >= cfg.fc_close_loc_multi_day
+    )
+    trigger_7d = bool(pump["trigger_7d"]) and (
+        close_loc_7d is not None and close_loc_7d >= cfg.fc_close_loc_multi_day
+    )
     if not (trigger_1d or trigger_3d or trigger_7d):
         return False
     atr_pct = _safe_float(row.get("atr_14d_pct"))
     return atr_pct is not None and 0.0 < atr_pct <= cfg.fc_max_atr_pct
+
+
+def long_pump_family(row: dict[str, Any], cfg: LongNativeConfig) -> dict[str, Any]:
+    """Return the causal FC pump family before active alpha filters.
+
+    The diagnostic source population uses these exact magnitude thresholds but
+    records regime, universe/rank, close-location, and ATR constraints later.
+    ``detect_pattern_fomo_chase`` consumes the same flags, preventing a second
+    implementation of the active pump arithmetic.
+    """
+
+    sigma_d = _safe_float(row.get("sigma_daily_30d"))
+    threshold_1d = (
+        cfg.fc_sigma_mult * sigma_d
+        if sigma_d is not None and sigma_d > 0.0
+        else math.log1p(cfg.fc_min_day_return)
+    )
+    thresholds = {
+        "1d": threshold_1d,
+        "3d": threshold_1d * math.sqrt(3),
+        "7d": threshold_1d * math.sqrt(7),
+    }
+    values = {
+        "1d": _safe_float(row.get("log_return")),
+        "3d": _safe_float(row.get("pump_3d_log")),
+        "7d": _safe_float(row.get("pump_7d_log")),
+    }
+    triggers = {
+        horizon: value is not None and value >= thresholds[horizon]
+        for horizon, value in values.items()
+    }
+    ratios = [
+        value / thresholds[horizon]
+        for horizon, value in values.items()
+        if value is not None and thresholds[horizon] > 0.0
+    ]
+    return {
+        "threshold_1d": thresholds["1d"],
+        "threshold_3d": thresholds["3d"],
+        "threshold_7d": thresholds["7d"],
+        "trigger_1d": triggers["1d"],
+        "trigger_3d": triggers["3d"],
+        "trigger_7d": triggers["7d"],
+        "trigger_any": any(triggers.values()),
+        "source_strength": max(ratios) if ratios else None,
+    }
 
 
 def _fc_exit_params(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[float, float]:

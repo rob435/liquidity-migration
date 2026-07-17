@@ -90,6 +90,7 @@ from .execution_environment import (
 )
 from .storage import exclusive_file_lock, write_dataset
 from .strategy_targets import component_target_intent
+from .strategy_funnel import DecisionFunnelObserver
 from .strategy_target_replay import PublishedTargetCyclePayload
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
@@ -258,6 +259,7 @@ def build_confirmed_entry_state(
     *,
     now_ts_ms: int,
     config: ContinuousDemoCycleConfig,
+    funnel_observer: DecisionFunnelObserver | None = None,
 ) -> pl.DataFrame:
     """Return the entry decile from the configured confirmed deciding bar.
 
@@ -282,6 +284,9 @@ def build_confirmed_entry_state(
         rmom_quantile=config.rmom_quantile,
         start_ms=0,
         feature_set=config.feature_set,
+        funnel_observer=funnel_observer,
+        funnel_venue="bybit",
+        funnel_signal_ts_ms=deciding_ts,
     )
     return _select_live_state_columns(panel.filter(pl.col("ts_ms") == deciding_ts))
 
@@ -1326,6 +1331,7 @@ def run_continuous_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
     panel_cache: "LivePanelCache | None" = None,
+    funnel_observer: DecisionFunnelObserver | None = None,
 ) -> PublishedTargetCyclePayload:
     """Plan one CONT cycle and publish immutable account targets.
 
@@ -1449,6 +1455,7 @@ def run_continuous_demo_cycle(
                 rmom,
                 now_ts_ms=cycle_now_ms,
                 config=demo,
+                funnel_observer=funnel_observer,
             )
 
         target_publisher = AccountTargetPublisher(account_route)

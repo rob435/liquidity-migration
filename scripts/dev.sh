@@ -58,6 +58,7 @@ case "$command" in
       liquidity_migration \
       scripts/repo_doctor.py \
       scripts/build_trade_diagnostics.py \
+      scripts/build_candidate_tape.py \
       "$@"
     ;;
   test)
@@ -72,7 +73,8 @@ case "$command" in
     "$PYTHON_BIN" -m mypy \
       liquidity_migration \
       scripts/repo_doctor.py \
-      scripts/build_trade_diagnostics.py
+      scripts/build_trade_diagnostics.py \
+      scripts/build_candidate_tape.py
     echo "[dev] pytest"
     "$PYTHON_BIN" -m pytest -q "$@"
     ;;

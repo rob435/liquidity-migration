@@ -53,6 +53,25 @@ These are budgets for this overhaul, not universal repository policy:
 Crossing a stop-loss requires an explicit plan amendment before more code or
 compute, including why the additional surface is necessary.
 
+### Engineering-budget amendment — 2026-07-17
+
+Phase-3 accounting found that the literal cumulative pre-table budget had
+already been crossed by the closed Phase-2 implementation without a recorded
+amendment. Phase 1 contributed 1,186 net package/developer-script lines and
+Phase 2 contributed another 929, for 2,115 before Phase 3. That inherited breach
+cannot be made prospective after the fact and must not be described as within
+the original 1,500-line limit.
+
+The Phase-3 user instruction requires the still-missing shared funnel contract
+and one bounded, resumable candidate-tape export. Reusing the execution-TCA
+module for strategy-source causality would merge distinct ownership and does
+not remove the exporter. The prospective ceiling through the first candidate
+table is therefore amended to three production modules, two read-only entry
+points, and 3,850 cumulative net production lines across Phases 1--3. No fourth
+module, third entry point, runner telemetry, cache framework, or generalized
+research orchestration is authorized. The two-hour compute limit, one-partition
+limit, payload limit, and failed-baseline comparison boundary are unchanged.
+
 ## Phase 0 — Rebaseline (closed)
 
 Deliverable: `docs/research_rebaseline_2026-07-16.md`.

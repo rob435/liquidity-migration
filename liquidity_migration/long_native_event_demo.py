@@ -31,6 +31,7 @@ Operating model
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -84,9 +85,23 @@ from .execution_environment import (
     account_id_for_environment,
     execution_environment,
 )
-from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features, long_v11a_profile
+from .long_native import (
+    LongNativeConfig,
+    _classify_entry,
+    _safe_float,
+    _vol_target_scale,
+    build_long_features,
+    long_pump_family,
+    long_v11a_profile,
+)
 from .storage import exclusive_file_lock, write_dataset
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME, long_trade_id
+from .strategy_funnel import (
+    DecisionFunnelObserver,
+    finalize_funnel_row,
+    gate_state,
+    observe_funnel_rows_safely,
+)
 from .strategy_targets import component_target_intent
 from .strategy_target_replay import PublishedTargetCyclePayload
 from .universe import build_current_universe_table
@@ -95,6 +110,7 @@ from .universe import build_current_universe_table
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +293,7 @@ def run_long_native_demo_cycle(
     kline_store: Any | None = None,
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
+    funnel_observer: DecisionFunnelObserver | None = None,
 ) -> PublishedTargetCyclePayload:
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or long_v11a_profile()
@@ -449,6 +466,7 @@ def run_long_native_demo_cycle(
             strategy=strategy,
             price_by_symbol=price_by_symbol,
             max_new_entries=demo.max_new_entries_per_cycle,
+            funnel_observer=funnel_observer,
         )
         free_slots = max(
             strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
@@ -757,6 +775,8 @@ def _select_long_entry_candidates(
     strategy: LongNativeConfig,
     price_by_symbol: dict[str, float],
     max_new_entries: int,
+    funnel_observer: DecisionFunnelObserver | None = None,
+    funnel_venue: str = "bybit",
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Detect FC v11a candidates from the latest closed daily bar.
 
@@ -793,6 +813,22 @@ def _select_long_entry_candidates(
     closed_ts = sorted(int(ts) for ts in features["ts_ms"].unique().to_list() if ts is not None and int(ts) <= now_ms)
     recent_closed_ts = closed_ts[-2:]
     rows_by_ts = {ts: features.filter(pl.col("ts_ms") == ts).to_dicts() for ts in recent_closed_ts}
+    if funnel_observer is not None:
+        try:
+            observe_funnel_rows_safely(
+                funnel_observer,
+                _long_pre_gate_funnel_rows(
+                    rows_by_ts=rows_by_ts,
+                    open_symbols=open_symbols,
+                    cooldown_until=cooldown_until,
+                    now_ms=now_ms,
+                    strategy=strategy,
+                    price_by_symbol=price_by_symbol,
+                    venue=funnel_venue,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - diagnostic projection cannot change active decisions
+            _LOGGER.exception("LONG pre-gate funnel projection failed")
     eligible_ts = []
     for ts in recent_closed_ts:
         fc_signal_count = 0
@@ -916,6 +952,116 @@ def _select_long_entry_candidates(
         )
     )
     return deduped[:max_new_entries], skips
+
+
+def _long_pre_gate_funnel_rows(
+    *,
+    rows_by_ts: dict[int, list[dict[str, Any]]],
+    open_symbols: set[Any],
+    cooldown_until: dict[str, int],
+    now_ms: int,
+    strategy: LongNativeConfig,
+    price_by_symbol: dict[str, float],
+    venue: str,
+) -> list[dict[str, Any]]:
+    """Project causal pump sources without participating in selection."""
+
+    output: list[dict[str, Any]] = []
+    required_order = (
+        "pit_tradable",
+        "history_floor",
+        "liquidity_floor",
+        "pump_trigger",
+        "entry_anchor",
+        "signal_freshness",
+    )
+    for signal_ts_ms in sorted(rows_by_ts):
+        for row in rows_by_ts[signal_ts_ms]:
+            pump = long_pump_family(row, strategy)
+            if not bool(pump["trigger_any"]):
+                continue
+            symbol = str(row["symbol"]).upper()
+            signal_close = _safe_float(row.get("close"))
+            live_price = _safe_float(price_by_symbol.get(symbol))
+            first_check_ts_ms = signal_ts_ms + exact_duration_ms(
+                hours=max(1, strategy.entry_delay_hours)
+            )
+            deadline_ts_ms = signal_ts_ms + exact_duration_ms(
+                hours=strategy.fc_sniper_deadline_hours
+            )
+            anchor_ready: bool | None
+            entry_ts_ms: int | None = None
+            if live_price is None or live_price <= 0.0 or signal_close is None or signal_close <= 0.0:
+                anchor_ready = None
+            elif now_ms < first_check_ts_ms:
+                anchor_ready = False
+            elif live_price <= signal_close * (1.0 - strategy.fc_sniper_retrace_pct) or now_ms >= deadline_ts_ms:
+                anchor_ready = True
+                entry_ts_ms = now_ms
+            else:
+                anchor_ready = False
+            close_location = _safe_float(row.get("close_location"))
+            close_loc_3d = _safe_float(row.get("close_loc_3d"))
+            close_loc_7d = _safe_float(row.get("close_loc_7d"))
+            active_close_location = (
+                (bool(pump["trigger_1d"]) and close_location is not None and close_location >= strategy.fc_min_close_location)
+                or (bool(pump["trigger_3d"]) and close_loc_3d is not None and close_loc_3d >= strategy.fc_close_loc_multi_day)
+                or (bool(pump["trigger_7d"]) and close_loc_7d is not None and close_loc_7d >= strategy.fc_close_loc_multi_day)
+            )
+            atr_pct = _safe_float(row.get("atr_14d_pct"))
+            active_pattern, _stop, _target, _hold = _classify_entry(row, strategy)
+            history_days = int(row.get("symbol_age_days") or 0)
+            turnover_median = row.get("turnover_median_90d")
+            turnover_value = _safe_float(turnover_median)
+            source = {
+                "sleeve": "long",
+                "venue": venue,
+                "symbol": symbol,
+                "signal_ts_ms": signal_ts_ms,
+                "feature_ts_ms": signal_ts_ms,
+                "data_available_ts_ms": signal_ts_ms,
+                "decision_ts_ms": now_ms,
+                "entry_ts_ms": entry_ts_ms,
+                "evaluation_ts_ms": now_ms,
+                "component_scope": "long_active_profile",
+                "source_strength": pump["source_strength"],
+                "pump_trigger_1d": bool(pump["trigger_1d"]),
+                "pump_trigger_3d": bool(pump["trigger_3d"]),
+                "pump_trigger_7d": bool(pump["trigger_7d"]),
+                "symbol_age_days": history_days,
+                "turnover_median_90d": turnover_value,
+                "active_reference_accepted": active_pattern == "fomo_chase",
+                "gate_pit_tradable": "not_applicable",
+                "gate_history_floor": gate_state(history_days >= 90 and turnover_value is not None),
+                "gate_liquidity_floor": gate_state(
+                    None if turnover_value is None else turnover_value >= 500_000.0
+                ),
+                "gate_pump_trigger": "pass",
+                "gate_entry_anchor": gate_state(anchor_ready),
+                "gate_signal_freshness": gate_state((now_ms - signal_ts_ms) <= SIGNAL_FRESHNESS_MS),
+                "gate_active_btc_regime": gate_state(bool(row.get("regime_on"))),
+                "gate_active_eth_regime": gate_state(bool(row.get("eth_regime_on"))),
+                "gate_active_universe": gate_state(bool(row.get("in_universe"))),
+                "gate_active_top_volume": gate_state(
+                    None
+                    if _safe_float(row.get("today_volume_rank")) is None
+                    else 0.0 < float(row["today_volume_rank"]) <= strategy.fc_top_volume_rank_max
+                ),
+                "gate_active_close_location": gate_state(active_close_location),
+                "gate_active_atr": gate_state(
+                    None if atr_pct is None else 0.0 < atr_pct <= strategy.fc_max_atr_pct
+                ),
+                "gate_existing_exposure": gate_state(symbol not in open_symbols),
+                "gate_cooldown": gate_state(cooldown_until.get(symbol, 0) <= now_ms),
+                "gate_capacity": "not_applicable",
+                "gate_owner_health": "not_applicable",
+                "gate_unresolved_target": "not_applicable",
+                "gate_terminal_attempt": "not_applicable",
+                "gate_account_risk": "not_applicable",
+                "gate_publication": "not_applicable",
+            }
+            output.append(finalize_funnel_row(source, required_gate_order=required_order))
+    return output
 
 
 def _vol_parity_weight(

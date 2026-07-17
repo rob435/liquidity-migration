@@ -4,6 +4,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,8 +41,15 @@ from .historical_account_replay import (
     synthetic_historical_rules_for_symbols,
 )
 from .strategy_targets import component_target_intent
+from .strategy_funnel import (
+    DecisionFunnelObserver,
+    finalize_funnel_row,
+    gate_state,
+    observe_funnel_rows_safely,
+)
 
 FEATURES = ("rv_168h", "vov", "dist_low", "xsret7", "xsret3")
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +345,9 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
 def cross_sectional_decile(
     k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5,
     feature_set: tuple[str, ...] = FEATURES,
+    funnel_observer: DecisionFunnelObserver | None = None,
+    funnel_venue: str = "unknown",
+    funnel_signal_ts_ms: int | None = None,
 ) -> pl.DataFrame:
     """Cross-sectional composite -> decile from per-symbol features. `k` must already carry
     [symbol, ts_ms, turnover_quote, rv_168h, vov, dist_low, ret72, ret168]; the backtest passes the
@@ -352,6 +363,51 @@ def cross_sectional_decile(
         pl.col("ret168").rank().over("ts_ms").alias("xsret7"),
         pl.col("ret72").rank().over("ts_ms").alias("xsret3"),
     )
+    if funnel_observer is not None:
+        try:
+            source_panel = continuous_source_decile_panel(
+                k,
+                rmom,
+                feature_set=("max_ret168",),
+            )
+            if funnel_signal_ts_ms is not None:
+                source_panel = source_panel.filter(pl.col("ts_ms") == funnel_signal_ts_ms)
+            source_rows: list[dict[str, Any]] = []
+            for row in source_panel.filter(pl.col("source_decile") == 9).to_dicts():
+                signal_ts_ms = int(row["ts_ms"])
+                source_rows.append(
+                    finalize_funnel_row(
+                        {
+                            **row,
+                            "sleeve": "continuous",
+                            "venue": funnel_venue,
+                            "signal_ts_ms": signal_ts_ms,
+                            "feature_ts_ms": int(row["feature_ts_ms"]),
+                            "data_available_ts_ms": int(row["data_available_ts_ms"]),
+                            "decision_ts_ms": int(row["decision_ts_ms"]),
+                            "entry_ts_ms": None,
+                            "evaluation_ts_ms": int(row["decision_ts_ms"]),
+                            "component_scope": "shared_pre_component",
+                            "gate_pit_tradable": "not_applicable",
+                            "gate_history_floor": "missing",
+                            "gate_source_decile_9": gate_state(row["source_decile"] == 9),
+                            "gate_liquidity_floor": gate_state(
+                                float(row["turnover_quote"]) >= 500_000.0
+                            ),
+                            "gate_one_hour_confirmation": "not_applicable",
+                        },
+                        required_gate_order=(
+                            "pit_tradable",
+                            "history_floor",
+                            "source_decile_9",
+                            "liquidity_floor",
+                            "one_hour_confirmation",
+                        ),
+                    )
+                )
+            observe_funnel_rows_safely(funnel_observer, source_rows)
+        except Exception:  # noqa: BLE001 - observer projection cannot change active ranks
+            _LOGGER.exception("continuous pre-gate funnel projection failed")
     k = k.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day_ts"))
     k = k.join(rmom, on=["symbol", "day_ts"], how="left").filter(pl.col("residual_momentum").is_not_null())
     k = k.with_columns(
@@ -414,6 +470,98 @@ def cross_sectional_decile(
     return k.select(cols + [c for c in event_cols if c in k.columns]).sort(["symbol", "ts_ms"])
 
 
+def continuous_source_decile_panel(
+    k: pl.DataFrame,
+    rmom: pl.DataFrame,
+    *,
+    feature_set: tuple[str, ...] = ("max_ret168",),
+) -> pl.DataFrame:
+    """Rank the barebones source before active RMOM/component filters.
+
+    ``k`` already carries causal per-symbol features. Residual momentum is a
+    left-joined characteristic and never removes a source row here.
+    """
+
+    present = [feature for feature in feature_set if feature in k.columns]
+    if not present:
+        raise ValueError("continuous source panel requires at least one selected feature")
+    source = k.filter(
+        pl.all_horizontal(
+            [pl.col(feature).is_not_null() & pl.col(feature).is_finite() for feature in present]
+        )
+    )
+    source = source.with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day_ts"))
+    rmom_columns = [
+        column
+        for column in ("symbol", "day_ts", "residual_momentum")
+        if column in rmom.columns
+    ]
+    if set(rmom_columns) == {"symbol", "day_ts", "residual_momentum"}:
+        source = source.join(
+            rmom.select(rmom_columns).unique(["symbol", "day_ts"]),
+            on=["symbol", "day_ts"],
+            how="left",
+        )
+    else:
+        source = source.with_columns(pl.lit(None, dtype=pl.Float64).alias("residual_momentum"))
+    rank_denom = pl.max_horizontal(pl.len().over("ts_ms") - 1, pl.lit(1))
+    source = source.with_columns(
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("signal_bar_close_ts_ms"),
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("decision_ts_ms"),
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("feature_ts_ms"),
+        (pl.col("ts_ms") + MS_PER_HOUR).alias("data_available_ts_ms"),
+        ((pl.col("turnover_quote").rank().over("ts_ms") - 1) / rank_denom).alias("liquidity_rank"),
+        ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / rank_denom).alias(
+            "residual_momentum_rank"
+        ),
+        *[
+            ((pl.col(feature).rank().over("ts_ms") - 1) / rank_denom).alias(f"_source_n_{feature}")
+            for feature in present
+        ],
+    )
+    source = source.with_columns(
+        pl.mean_horizontal([pl.col(f"_source_n_{feature}") for feature in present]).alias(
+            "source_composite"
+        )
+    )
+    source = source.with_columns(
+        (
+            ((pl.col("source_composite").rank().over("ts_ms") - 1) * 10)
+            // pl.len().over("ts_ms")
+        )
+        .clip(0, 9)
+        .alias("source_decile")
+    )
+    keep = [
+        "symbol",
+        "ts_ms",
+        "source_decile",
+        "source_composite",
+        "turnover_quote",
+        "signal_bar_close_ts_ms",
+        "decision_ts_ms",
+        "feature_ts_ms",
+        "data_available_ts_ms",
+        "residual_momentum",
+        "residual_momentum_rank",
+        "liquidity_rank",
+        *present,
+        "rv_168h",
+        "vov",
+        "dist_low",
+        "ret1",
+        "prior6_ret1_max",
+        "giveback_from_prior6_high",
+        "turnover_spike_168h",
+        "turnover_24h",
+        "turnover_zscore_168h",
+    ]
+    selected = list(dict.fromkeys(column for column in keep if column in source.columns))
+    return source.select(selected).sort(
+        ["ts_ms", "symbol"]
+    )
+
+
 def _entry_event_expr(trigger: str) -> pl.Expr:
     if trigger == "none":
         return pl.lit(True)
@@ -449,6 +597,9 @@ def _entry_event_expr(trigger: str) -> pl.Expr:
 def compute_continuous_decile_panel(
     k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5, start_ms: int = 0,
     feature_set: tuple[str, ...] = FEATURES,
+    funnel_observer: DecisionFunnelObserver | None = None,
+    funnel_venue: str = "unknown",
+    funnel_signal_ts_ms: int | None = None,
 ) -> pl.DataFrame:
     """Shared feature -> composite -> decile pipeline (used by BOTH the backtest panel and the
     live demo state, so the live signal is provably identical to the verified backtest).
@@ -461,7 +612,15 @@ def compute_continuous_decile_panel(
     k = per_symbol_timeseries_features(k)
     if start_ms:
         k = k.filter(pl.col("ts_ms") >= start_ms)
-    return cross_sectional_decile(k, rmom, rmom_quantile=rmom_quantile, feature_set=feature_set)
+    return cross_sectional_decile(
+        k,
+        rmom,
+        rmom_quantile=rmom_quantile,
+        feature_set=feature_set,
+        funnel_observer=funnel_observer,
+        funnel_venue=funnel_venue,
+        funnel_signal_ts_ms=funnel_signal_ts_ms,
+    )
 
 
 def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.DataFrame:
