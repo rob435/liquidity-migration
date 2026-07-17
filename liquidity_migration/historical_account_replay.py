@@ -263,9 +263,17 @@ class HistoricalAccountSession:
 
     def process_cycle(self, cycle: HistoricalReplayCycle) -> AccountCycleResult:
         if cycle.wall_ts_ns < self._last_wall_ts_ns:
-            raise ValueError("historical account session cannot move backward in wall time")
+            raise ValueError(
+                "historical account session cannot move backward in wall time: "
+                f"batch={cycle.batch_id!r} cycle={cycle.wall_ts_ns} "
+                f"last={self._last_wall_ts_ns}"
+            )
         if cycle.monotonic_ns is not None and cycle.monotonic_ns < self._last_monotonic_ns:
-            raise ValueError("historical account session cannot move backward in monotonic time")
+            raise ValueError(
+                "historical account session cannot move backward in monotonic time: "
+                f"batch={cycle.batch_id!r} cycle={cycle.monotonic_ns} "
+                f"last={self._last_monotonic_ns}"
+            )
         self._ensure_started(cycle.wall_ts_ns, cycle.monotonic_ns)
         assert self.clock is not None and self.runtime is not None and self.event_clock is not None
         exact_market_by_symbol = (

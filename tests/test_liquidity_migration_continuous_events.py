@@ -146,6 +146,52 @@ def test_run_trades_uses_fixed_market_entry_and_hold() -> None:
     assert trades["side"][0] == "short"
 
 
+def test_data_end_exit_is_finalized_before_later_account_decisions(tmp_path: Path) -> None:
+    klines = pl.concat(
+        [
+            _grid_klines(["A"], 3),
+            _grid_klines(["B"], 12),
+        ]
+    )
+    bars = _indexed_price_bars_by_symbol(klines)
+    entries = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "ts_ms": [0, 4 * MS_PER_HOUR],
+            "composite": [0.9, 0.8],
+            "turnover_quote": [1_000_000.0, 1_000_000.0],
+        }
+    )
+    config = _active_test_config(
+        execution_strategy_id="continuous-data-end-order-test",
+        hold_hours=4,
+        max_active=10,
+    )
+    session = HistoricalAccountSession(
+        tmp_path / "account",
+        account_id="continuous-data-end-order-test",
+        risk_policy=AccountRiskPolicy(1e12, 1e12, 1e12, 1e12, 1.0),
+        instrument_rules=synthetic_historical_rules_for_symbols(
+            ["A", "B"], max_leverage=1.0, observed_ts_ns=1
+        ),
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="continuous-data-end-order-test",
+    )
+
+    trades, skips = _run_trades(entries, bars, None, config, kernel_session=session)
+
+    a_trade = trades.filter(pl.col("symbol") == "A").row(0, named=True)
+    assert skips["skipped_account_kernel"] == 0
+    assert trades.height == 2
+    assert a_trade["exit_reason"] == "data_end"
+    assert a_trade["exit_ts_ms"] == 3 * MS_PER_HOUR
+    assert session._last_wall_ts_ns == int(trades["exit_ts_ms"].max()) * 1_000_000
+
+
 def test_run_trades_applies_daily_btc_gate_and_crowding() -> None:
     bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B"], 12))
     entries = pl.DataFrame(

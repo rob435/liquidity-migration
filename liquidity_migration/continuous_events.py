@@ -756,7 +756,7 @@ def _run_trades(
     ) -> None:
         rows.append(trade)
 
-    def _advance_positions(through_ts_ms: int, *, final: bool = False) -> None:
+    def _advance_positions(through_ts_ms: int) -> None:
         closed_keys: list[str] = []
         closed: list[tuple[str, _ContinuousHistoricalOpen, dict[str, Any]]] = []
         for key, position in sorted(
@@ -785,11 +785,17 @@ def _run_trades(
             ):
                 last_index = position.end_bar_index - 1
                 boundary_ts_ms = int(bars["bar_end_ts_ms"][last_index])
-                if final or boundary_ts_ms >= state.planned_exit_ts_ms:
-                    state.close_at_boundary(
-                        close=float(bars["close"][last_index]),
-                        bar_end_ts_ms=boundary_ts_ms,
-                    )
+                # All bars eligible for this trade have now been consumed. If
+                # the symbol tape ends (or has no bar at the planned boundary),
+                # retain the existing ``data_end`` exit at the final observable
+                # bar, but finalize it now while account decisions are still
+                # chronological. Deferring it until the whole replay ends can
+                # leave a delisted symbol open for months and then submit an old
+                # exit after newer account cycles.
+                state.close_at_boundary(
+                    close=float(bars["close"][last_index]),
+                    bar_end_ts_ms=boundary_ts_ms,
+                )
             if state.closed:
                 closed_keys.append(key)
                 closed.append((key, position, _materialize_open(position)))
@@ -950,7 +956,7 @@ def _run_trades(
                 _submit_kernel_decisions([entry_decision])
         last_entry[sym] = order_submit_ts
     _flush_pending_entries()
-    _advance_positions(2**63 - 1, final=True)
+    _advance_positions(2**63 - 1)
     skips = {
         "skipped_capacity": skipped_capacity,
         "skipped_cooldown": skipped_cooldown,

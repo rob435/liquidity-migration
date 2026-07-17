@@ -402,3 +402,54 @@ attribution surface; it is not rerun on the feature-rebuild commit because its
 purpose was exact comparison on the pre-append data identity. The new rolling
 run is exposed exploratory evidence with no pass threshold and no deployment
 or trading authority.
+
+### Outcome-exposed terminal-data lifecycle correction — 2026-07-17 13:00:10 UTC
+
+The relabelled rolling run under ID
+`benchmark-replacement-2026-07-17-rmom-fixed` completed its Bybit data and
+feature steps and its Bybit LONG cell, then failed closed in the first
+CONTINUOUS component before writing a component ledger, report, aggregate
+equity curve, or summary. The historical account guard reported
+`historical account session cannot move backward in wall time`. The failed
+run, its observed LONG result, partial CONTINUOUS account journal, commands,
+logs, data identities, and feature receipt remain preserved and are not a
+replacement baseline.
+
+Inspection of the partial account journal exposed the exact lifecycle defect.
+`PENGUSDT` entered on 2025-01-30 and its available price tape ended before the
+planned hold boundary. The trade lifecycle already defines the final
+observable-bar close as `data_end`, with that bar's timestamp and price, but
+the chronological runner deferred the close until whole-run finalization.
+The local position and account target therefore remained open through later
+2025/2026 decisions; finalization then attempted to submit the old terminal
+exit after a 2026-07-14 account cycle. This is not a funding effect. Because
+the stale position also consumed capacity/account exposure, repairing it can
+change later CONTINUOUS decisions and performance; no numerical-equivalence
+claim is permitted.
+
+Before another replacement outcome is inspected, the correction is frozen as
+follows:
+
+- once every bar eligible for an open trade has been consumed, finalize the
+  existing boundary close immediately at the same final observable timestamp
+  and price; `close_at_boundary` continues to label an early terminal close
+  `data_end` and a completed hold `max_hold`;
+- submit that exit through the same historical account kernel before any later
+  entry/exit cycle, thereby releasing both the local capacity slot and the
+  account target chronologically; do not fabricate a later price or timestamp;
+- retain the strict backward-clock guard and include the offending batch,
+  attempted timestamp, and prior timestamp in future failures;
+- regression-test a symbol whose tape ends before its hold boundary followed
+  by a later symbol entry, proving the terminal exit is recorded first and the
+  complete session remains monotonic; run the full repository gate before the
+  replacement replay.
+
+The replacement tested set is again all four cells at the same 1x profiles,
+costs, roots, and window `[2023-07-17, 2026-07-17)`, now under run ID
+`benchmark-replacement-2026-07-17-rmom-lifecycle-fixed`. It must repeat the
+registered append-first data refresh and atomic full residual-momentum rebuild
+on both venues so the final run has one self-contained receipt. This is an
+outcome-exposed deterministic lifecycle repair, not an evidentiary reset. The
+same-window funding-attribution run remains the isolated funding comparison;
+the new rolling run remains exploratory and authorizes no profile, deployment,
+capital, mainnet, or real-money change.
