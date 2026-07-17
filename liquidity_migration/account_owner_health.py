@@ -306,12 +306,7 @@ def require_recent_account_owner_health(
             label="expected account-owner invocation id",
         )
     )
-    # The health file is an independently replaced operational projection. Read
-    # it on both sides of the journal snapshot so a concurrent owner update
-    # cannot bind one heartbeat to a different journal head. A normal heartbeat
-    # replacement is retried; sustained churn still fails closed.
-    for _attempt in range(ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS):
-        health = read_account_owner_health(root)
+    def validate_health(health: AccountOwnerHealth) -> None:
         if health.environment != environment:
             raise RuntimeError(f"account-owner health environment is {health.environment}, expected {environment}")
         if expected_generation is not None and health.invocation_id != expected_generation:
@@ -332,11 +327,33 @@ def require_recent_account_owner_health(
                 f"account-owner health account_id is {health.account_id!r}, "
                 f"expected {expected_account_id!r}"
             )
+
+    # The projection is replaced every few seconds. A replacement that retains
+    # the same journal binding is harmless heartbeat churn and must not take a
+    # producer down merely because journal verification spans that heartbeat.
+    # A projection pointing at a different head is retried and still fails
+    # closed if the journal never converges to it.
+    saw_churn = False
+    health: AccountOwnerHealth | None = None
+    events: list[Any] = []
+    for _attempt in range(ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS):
+        before = read_account_owner_health(root)
+        validate_health(before)
         events = read_account_journal(root, verify=True)
-        if read_account_owner_health(root) == health:
-            break
-    else:
+        health = read_account_owner_health(root)
+        validate_health(health)
+        saw_churn = saw_churn or health != before
+        journal_sequence = events[-1].sequence if events else 0
+        journal_state_hash = events[-1].state_hash if events else GENESIS_HASH
+        if (
+            health.journal_sequence == journal_sequence
+            and health.journal_state_hash == journal_state_hash
+            and (not events or health.account_id == events[-1].account_id)
+        ):
+            return health
+    if saw_churn:
         raise RuntimeError("account-owner health changed while binding the journal head")
+    assert health is not None
     journal_sequence = events[-1].sequence if events else 0
     journal_state_hash = events[-1].state_hash if events else GENESIS_HASH
     if health.journal_sequence != journal_sequence:
@@ -346,9 +363,7 @@ def require_recent_account_owner_health(
         )
     if health.journal_state_hash != journal_state_hash:
         raise RuntimeError("account-owner health journal state hash mismatch")
-    if events and health.account_id != events[-1].account_id:
-        raise RuntimeError(
-            f"account-owner health account_id {health.account_id!r} does not match "
-            f"journal account_id {events[-1].account_id!r}"
-        )
-    return health
+    raise RuntimeError(
+        f"account-owner health account_id {health.account_id!r} does not match "
+        f"journal account_id {events[-1].account_id!r}"
+    )

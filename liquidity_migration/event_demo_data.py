@@ -21,6 +21,7 @@ from typing import Any, Protocol
 import polars as pl
 
 from .account_candidate_universe import (
+    CandidatePopulationReconciliation,
     FrozenCandidateUniverse,
     continuous_profile_universe_inputs,
     enforce_frozen_candidate_frames,
@@ -326,7 +327,13 @@ def _resolve_cycle_universe(
     ticker_cache: Any | None,
     state_cache_stale_seconds: float,
     frozen_candidate_universe: FrozenCandidateUniverse | None = None,
-) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+) -> tuple[
+    pl.DataFrame,
+    list[str],
+    pl.DataFrame,
+    str,
+    CandidatePopulationReconciliation | None,
+]:
     """Resolve one fresh, public-only strategy universe."""
 
     _ = config  # venue normalization is owned by the supplied public adapter
@@ -370,6 +377,7 @@ def _resolve_cycle_universe(
                 tickers.height,
             )
     candidate_path = str(getattr(demo, "candidate_universe_file", "") or "").strip()
+    candidate_reconciliation = None
     if candidate_path:
         frozen = frozen_candidate_universe or load_candidate_universe(candidate_path)
         if frozen.path != Path(candidate_path).expanduser().absolute():
@@ -379,22 +387,28 @@ def _resolve_cycle_universe(
             profile="continuous",
             current_inputs=continuous_profile_universe_inputs(demo),
         )
-        enforce_frozen_candidate_frames(
+        candidate_reconciliation = enforce_frozen_candidate_frames(
             instruments,
             tickers,
             frozen,
+            profile="continuous",
             snapshot_ts_ms=cycle_now_ms,
             context="CONT cycle",
+            retirement_registry_path=(
+                root / "candidate_retirements" / f"{frozen.artifact_sha256}.json"
+            ),
         )
         # Newly listed symbols may appear in the current public snapshot but
         # cannot enter this bounded evidence epoch.
-        universe = universe.filter(pl.col("symbol").is_in(list(frozen.symbols)))
+        universe = universe.filter(
+            pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))
+        )
     elif frozen_candidate_universe is not None:
         raise ValueError("CONT received a frozen candidate universe without a configured path")
     symbols = universe["symbol"].to_list() if not universe.is_empty() else []
     if not symbols:
         raise RuntimeError("public market-data cycle found no tradable symbols")
-    return universe, symbols, tickers, ticker_source
+    return universe, symbols, tickers, ticker_source, candidate_reconciliation
 
 def _download_recent_1h_klines(
     symbols: list[str],

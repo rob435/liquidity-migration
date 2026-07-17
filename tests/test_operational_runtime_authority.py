@@ -256,7 +256,12 @@ def _fixture(
     else:
         symbols = _private(config / "symbols.txt", "BTCUSDT\n")
         rules = _private(config / "rules.json", '{"schema_version":1}\n')
-    risk = _private(config / "risk.json", '{"max_leverage":2}\n')
+    risk = _private(
+        config / "risk.json",
+        (Path(__file__).resolve().parents[1] / "configs" / "operational.demo.json").read_text(
+            encoding="utf-8"
+        ),
+    )
     paper_symbols = _private(config / "paper" / "symbols.txt", symbols.read_text())
     paper_rules = _private(config / "paper" / "rules.json", rules.read_text())
     paper_risk = _private(config / "paper" / "risk.json", risk.read_text())

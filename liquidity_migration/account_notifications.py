@@ -125,6 +125,11 @@ class AccountNotificationEngine:
                         kernel_state=kernel_state,
                     )
             _clear_recent_entry_rejection_counters(next_state)
+        _prune_expired_entry_rejections(
+            next_state,
+            kernel_state=kernel_state,
+            now_ns=now,
+        )
         event_messages = self._event_messages(
             new_events,
             next_state,
@@ -519,6 +524,7 @@ def _entry_risk_decision_messages(
             "first_rejected_ts_ns": first_rejected_ts_ns,
             "last_rejected_ts_ns": now_ns,
             "last_batch_id": batch_id,
+            "signal_valid_until_ns": _proposal_signal_valid_until_ns(proposal),
         }
         notification_state.recent_entry_rejection_attempts[attempt_key] = (
             notification_state.recent_entry_rejection_attempts.get(attempt_key, 0) + 1
@@ -665,6 +671,43 @@ def _clear_recent_entry_rejection_counters(state: AccountNotificationState) -> N
     state.recent_entry_rejection_reasons.clear()
 
 
+def _proposal_signal_valid_until_ns(proposal: Mapping[str, Any]) -> int:
+    metadata = proposal.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        return 0
+    valid_until_ms = _safe_int(metadata.get("signal_valid_until_ms"), default=0)
+    return valid_until_ms * 1_000_000 if valid_until_ms > 0 else 0
+
+
+def _prune_expired_entry_rejections(
+    state: AccountNotificationState,
+    *,
+    kernel_state: AccountState,
+    now_ns: int,
+) -> None:
+    """Remove unresolved projections once their immutable signal window ends."""
+
+    proposals = tuple(kernel_state.target_proposals.values())
+    for attempt_key, row in list(state.entry_rejections.items()):
+        expiry_ns = max(_safe_int(row.get("signal_valid_until_ns"), default=0), 0)
+        if expiry_ns <= 0:
+            target_key = str(row.get("target_key") or "")
+            matching_expiries = [
+                _proposal_signal_valid_until_ns(proposal)
+                for proposal in proposals
+                if _entry_attempt_key(proposal) == attempt_key
+                or (
+                    target_key
+                    and str(proposal.get("target_key") or "") == target_key
+                )
+            ]
+            expiry_ns = max(matching_expiries, default=0)
+            if expiry_ns > 0:
+                row["signal_valid_until_ns"] = expiry_ns
+        if expiry_ns > 0 and expiry_ns <= now_ns:
+            state.entry_rejections.pop(attempt_key, None)
+
+
 def _loaded_entry_rejection(row: Mapping[str, Any]) -> dict[str, Any]:
     raw_reasons = row.get("reasons") or ()
     if isinstance(raw_reasons, str):
@@ -687,6 +730,10 @@ def _loaded_entry_rejection(row: Mapping[str, Any]) -> dict[str, Any]:
             0,
         ),
         "last_batch_id": str(row.get("last_batch_id") or ""),
+        "signal_valid_until_ns": max(
+            _safe_int(row.get("signal_valid_until_ns"), default=0),
+            0,
+        ),
     }
 
 

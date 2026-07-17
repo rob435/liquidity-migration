@@ -11,7 +11,8 @@ Primary sources:
   `continuous_events.ContinuousEventConfig`, and
   `continuous_profile.ACTIVE_CONTINUOUS_CONFIG`;
 - LONG: `long_native.long_v11a_profile` and the long event producer;
-- execution scale: `deploy/systemd/` and the bound environment;
+- execution scale and account caps: `configs/operational.demo.json` after
+  strict runtime-profile validation;
 - fills, lifecycle, and protection: the account journal and account owner.
 
 Both strategy processes publish absolute component targets. They do not place
@@ -60,9 +61,11 @@ decisions. A causal BTC-risk score in `[0.70, 0.90)` multiplies every component
 for the same `(symbol, signal_ts)` by `0.35`; otherwise the multiplier is `1.0`.
 The state is reconstructed from accepted account targets.
 
-The current demo and paper component units set `NOTIONAL_MULTIPLIER=10` and
-`ENTRY_LEVERAGE=10`. The multiplier changes target quantity; leverage changes
-margin. Results from that scale are not evidence for a 1x performance claim.
+The current shared operational profile sets notional multiplier `1` and entry
+leverage `2` for both demo and paper. The multiplier changes target quantity;
+leverage changes margin. Producers do not read independent systemd sizing
+variables: the same profile bytes also define the account owner's maximum
+leverage and absolute exposure caps.
 
 ### Exit and hedge
 
@@ -115,14 +118,37 @@ scales. The profile uses a 30-day volatility estimate with a 30% annual floor,
 a 30% position-weight cap, a 60% BTC-vol target with scale `[0.30, 1.25]`, and a
 1.5 weekend multiplier. Exit cooldown is seven days.
 
-Current demo/paper units use notional multiplier 1, entry leverage 10, no
-separate per-order notional cap, at most five new entries per cycle, and a 50%
-projected initial-margin ceiling. Effective bound environment values override
+The current shared operational profile uses notional multiplier `0.5`, entry
+leverage `2`, no separate per-order notional cap, at most five new entries per
+cycle, and a 50% projected initial-margin ceiling. At the profile's 10,000 USDT
+validation reference, the worst-case registered LONG envelope is 9,375 USDT
+gross and 4,687.50 USDT initial margin. Runtime profile bytes override this
 documentation.
 
 Each target carries a 1.5 ATR stop, 4.0 ATR take-profit, and three-day maximum
 hold. The account owner derives executable prices and the hold clock from the
 first attributable fill and owns the aggregate venue order.
+
+## Operational risk and candidate retirement
+
+`configs/operational.demo.json` is the single editable source for LONG,
+CONTINUOUS, hedge leverage, and account caps. The current account policy caps
+projected component gross at 20,000 USDT, account gross at 20,000 USDT, one-symbol
+notional at 5,000 USDT, initial margin at 10,000 USDT, and leverage at `2`.
+Authorization refuses unknown fields, producer leverage above the owner cap,
+or registered LONG/CONTINUOUS exposure envelopes outside those limits. Normal
+risk or venue-rule rejection remains possible when actual account state differs
+from the validation reference; that is a safety decision, not configuration
+drift.
+
+The frozen candidate artifact retains profile-specific populations. A symbol
+with a newly observed venue `deliveryTime` is recorded prospectively in a
+private retirement registry and removed from new-entry membership. The cycle
+continues only when the canonical position, component desires/targets, working
+orders, aggregate target, and unresolved inbox are all flat for that symbol.
+The registry preserves the observation after the venue removes the instrument
+row. An unexplained disappearance or any remaining exposure still fails
+closed.
 
 ### Reconstruction limits
 

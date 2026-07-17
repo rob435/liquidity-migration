@@ -770,9 +770,11 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
 
     monkeypatch.setattr(module, "load_candidate_universe", load_candidate)
 
-    def resolve_universe(**kwargs: Any) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+    def resolve_universe(
+        **kwargs: Any,
+    ) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str, None]:
         assert kwargs["frozen_candidate_universe"] is frozen_candidate
-        return universe, ["NEWUSDT"], tickers, "fixture"
+        return universe, ["NEWUSDT"], tickers, "fixture", None
 
     monkeypatch.setattr(
         module,

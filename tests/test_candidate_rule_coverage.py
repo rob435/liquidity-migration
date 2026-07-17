@@ -201,7 +201,14 @@ def test_operational_authority_accepts_byte_exact_private_paper_mirrors(
     candidate = _candidate(tmp_path)
     rules = _rules(tmp_path, candidate)
     risk = tmp_path / "risk.json"
-    risk.write_text('{"max_leverage":2}\n', encoding="utf-8")
+    risk.write_text(
+        (
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "operational.demo.json"
+        ).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     risk.chmod(0o600)
     paper_config = tmp_path / "paper-config"
     paper_config.mkdir()

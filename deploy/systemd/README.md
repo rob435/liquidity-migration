@@ -165,6 +165,13 @@ disjoint, and non-nested. The issuer proves candidate/rule coverage against the
 demo sources once, then requires isolated paper candidate, rule, and risk
 mirrors to be byte-exact copies.
 
+`configs/operational.demo.json` is installed at the demo
+`ACCOUNT_RISK_POLICY_FILE` during the stopped install, then mirrored into the
+paper boundary. LONG, CONTINUOUS, the demo hedge, and the account owners parse
+those same bytes. Sizing/leverage is deliberately absent from the strategy
+unit `Environment=` lines, and authorization refuses a producer/owner leverage
+or registered exposure-envelope mismatch before a receipt can be issued.
+
 Repository sleeve defaults live in `deploy/sleeves.env`. The optional host file
 may narrow an enabled sleeve to off. The resolved file is generated during
 install and later bound into authority. Off stops new targets but does not

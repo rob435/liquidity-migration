@@ -10,12 +10,21 @@ import pytest
 
 from liquidity_migration.account_candidate_universe import (
     build_candidate_universe_artifact,
+    enforce_frozen_candidate_frames,
     enforce_frozen_candidate_population,
     load_candidate_universe,
+    require_scheduled_retirements_flat,
     write_candidate_universe,
 )
+from liquidity_migration.account_intent_client import (
+    AccountTargetPublisher,
+    requested_target,
+)
+from liquidity_migration.account_route import ensure_account_route
+from liquidity_migration.account_service import SleeveAdapterKind
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
 from liquidity_migration.deterministic_serialization import canonical_json
+from liquidity_migration.downloaders import _normalize_instruments, _normalize_tickers
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 
 
@@ -29,6 +38,7 @@ def _instrument(
     launch_time: str = "1700000000000",
     prelisting: bool = False,
     symbol_type: object = "",
+    delivery_time: str = "0",
 ) -> dict[str, object]:
     return {
         "symbol": symbol,
@@ -39,7 +49,7 @@ def _instrument(
         "quoteCoin": "USDT",
         "settleCoin": "USDT",
         "launchTime": launch_time,
-        "deliveryTime": "0",
+        "deliveryTime": delivery_time,
         "priceFilter": {"tickSize": "0.1"},
         "lotSizeFilter": {
             "qtyStep": "0.01",
@@ -224,6 +234,129 @@ def test_write_load_and_enforce_population(tmp_path: Path) -> None:
         )
     with pytest.raises(FileExistsError):
         write_candidate_universe(path, _payload())
+
+
+def test_profile_specific_population_records_and_reuses_scheduled_retirement(
+    tmp_path: Path,
+) -> None:
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    assert frozen.profile_symbols == {
+        "long": ("AAAUSDT",),
+        "continuous": ("AAAUSDT", "BBBUSDT"),
+    }
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    delivery_ms = now_ms + 3 * 24 * 60 * 60 * 1_000
+    instruments = _normalize_instruments(
+        [
+            _instrument("AAAUSDT"),
+            _instrument("BBBUSDT", delivery_time=str(delivery_ms)),
+        ]
+    )
+    tickers = _normalize_tickers(
+        [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+    )
+    registry = tmp_path / "retirements.json"
+
+    long = enforce_frozen_candidate_frames(
+        instruments,
+        tickers,
+        frozen,
+        profile="long",
+        snapshot_ts_ms=now_ms,
+        context="test LONG",
+        retirement_registry_path=registry,
+    )
+    assert long.active_symbols == ("AAAUSDT",)
+    assert long.scheduled_retirements == ()
+    assert not registry.exists()
+
+    continuous = enforce_frozen_candidate_frames(
+        instruments,
+        tickers,
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+    assert continuous.active_symbols == ("AAAUSDT",)
+    assert [row.symbol for row in continuous.scheduled_retirements] == ["BBBUSDT"]
+    assert registry.stat().st_mode & 0o777 == 0o600
+
+    # After venue removal, the prospectively captured observation continues to
+    # explain the disappearance instead of turning every cycle into an outage.
+    after_removal = enforce_frozen_candidate_frames(
+        _normalize_instruments([_instrument("AAAUSDT")]),
+        _normalize_tickers([_ticker("AAAUSDT", "3000000")]),
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=delivery_ms + 1,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+    assert [row.symbol for row in after_removal.scheduled_retirements] == ["BBBUSDT"]
+
+
+def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path) -> None:
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    delivery_ms = now_ms + 1_000
+    reconciliation = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(delivery_ms)),
+            ]
+        ),
+        _normalize_tickers(
+            [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+        ),
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms,
+        context="test CONT",
+        retirement_registry_path=tmp_path / "retirements.json",
+    )
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    require_scheduled_retirements_flat(
+        reconciliation,
+        route=route,
+        context="test CONT",
+    )
+
+    publisher = AccountTargetPublisher(route)
+    publisher.publish(
+        batch_id="retired-symbol-risk",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="retired-symbol-risk/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=100.0,
+                leverage=2.0,
+                reason="test",
+            ),
+        ),
+        created_ts_ns=now_ms * 1_000_000,
+    )
+    with pytest.raises(RuntimeError, match="unresolved_nonzero_request"):
+        require_scheduled_retirements_flat(
+            reconciliation,
+            route=route,
+            context="test CONT",
+        )
 
 
 def test_loader_rejects_tamper_symlink_and_open_permissions(tmp_path: Path) -> None:

@@ -22,14 +22,6 @@ Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
-Environment=MAX_ACTIVE=25
-Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=BTC_TREND_GATE=uptrend
-# Demo execution stress: leverage changes margin; the notional multiplier
-# changes target quantity. This is execution evidence at 10x exposure scale.
-Environment=ENTRY_LEVERAGE=10
-Environment=NOTIONAL_MULTIPLIER=10
-Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1

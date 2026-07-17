@@ -147,6 +147,7 @@ def _submit_entry_risk_decision(
     components: tuple[str, ...] = ("trade-a",),
     rejection: str | None = "below_min_notional",
     explicit_attempt_keys: bool = True,
+    signal_valid_until_ms: int | None = None,
 ):
     policy = loose_policy
     min_notional = 0.1
@@ -165,6 +166,13 @@ def _submit_entry_risk_decision(
     targets = []
     for component in components:
         metadata = {"entry_attempt_key": f"attempt:{component}"} if explicit_attempt_keys else {}
+        if signal_valid_until_ms is not None:
+            metadata.update(
+                {
+                    "signal_ts_ms": signal_valid_until_ms - 3_600_000,
+                    "signal_valid_until_ms": signal_valid_until_ms,
+                }
+            )
         targets.append(
             DesiredTarget(
                 decision_key=(f"continuous-target/notify/{batch_id}/entry/{component}"),
@@ -687,6 +695,33 @@ def test_identical_entry_risk_rejections_increment_durably_without_spam(
     notifier.commit(repeated)
     persisted = json.loads(notifier.state_path.read_text())
     assert persisted["entry_rejections"]["attempt:trade-a"]["count"] == 2
+
+
+def test_expired_entry_signal_does_not_remain_an_unresolved_risk_block(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, notifier, snapshot, policy = _setup_risk_notifications(
+        tmp_path / "account"
+    )
+    valid_until_ms = clock.wall_time_ns() // 1_000_000 + 1_000
+    _submit_entry_risk_decision(
+        kernel,
+        snapshot=snapshot,
+        loose_policy=policy,
+        batch_id="risk-expiring",
+        signal_valid_until_ms=valid_until_ms,
+    )
+    first = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+    assert first.next_state.entry_rejections["attempt:trade-a"][
+        "signal_valid_until_ns"
+    ] == valid_until_ms * 1_000_000
+    notifier.commit(first)
+
+    clock.advance_ns(2_000_000_000)
+    expired = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+
+    assert expired.next_state.entry_rejections == {}
+    assert "unresolved attempt" not in expired.message
 
 
 def test_entry_risk_reason_change_sends_one_changed_alert(tmp_path: Path) -> None:

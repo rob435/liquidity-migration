@@ -178,33 +178,36 @@ def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> 
     assert "After=network-online.target" in fragment
 
 
-def test_demo_and_paper_strategy_units_share_decision_knobs() -> None:
+def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -> None:
     long_demo = _environment("liquidity-migration-bybit-long-demo.service")
     long_paper = _environment("liquidity-migration-bybit-long-paper.service")
-    for key in (
+    sizing_keys = (
         "NOTIONAL_MULTIPLIER",
         "ENTRY_LEVERAGE",
         "MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY",
+        "MAX_ORDER_NOTIONAL_PCT_EQUITY",
         "MAX_NEW_ENTRIES_PER_CYCLE",
-        "LOOKBACK_DAYS",
-        "WORKERS",
-        "WS_KLINES_ENABLED",
-        "WS_KLINES_BOOTSTRAP_WORKERS",
-    ):
-        assert long_demo[key] == long_paper[key]
+        "MAX_ACTIVE",
+        "BTC_TREND_GATE",
+        "PER_POSITION_NOTIONAL_PCT_EQUITY",
+    )
     continuous_demo = _environment("liquidity-migration-bybit-continuous-demo.service")
     continuous_paper = _environment("liquidity-migration-bybit-continuous-paper.service")
+    for environment in (long_demo, long_paper, continuous_demo, continuous_paper):
+        assert set(environment).isdisjoint(sizing_keys)
     for key in (
         "LOOKBACK_DAYS",
         "WORKERS",
-        "MAX_ACTIVE",
-        "MAX_NEW_ENTRIES_PER_CYCLE",
-        "BTC_TREND_GATE",
-        "ENTRY_LEVERAGE",
-        "NOTIONAL_MULTIPLIER",
-        "PER_POSITION_NOTIONAL_PCT_EQUITY",
     ):
         assert continuous_demo[key] == continuous_paper[key]
+    for key in ("LOOKBACK_DAYS", "WORKERS", "WS_KLINES_ENABLED", "WS_KLINES_BOOTSTRAP_WORKERS"):
+        assert long_demo[key] == long_paper[key]
+    long_runner = _read("scripts/run_bybit_long_demo_event_engine.sh")
+    continuous_runner = _read("scripts/run_bybit_continuous_demo_event_engine.sh")
+    hedge_runner = _read("scripts/run_continuous_hedge.sh")
+    for runner in (long_runner, continuous_runner, hedge_runner):
+        assert 'ACCOUNT_RISK_POLICY_FILE' in runner
+        assert '--operational-profile-file' in runner
     assert long_demo["EXECUTION_ENVIRONMENT"] == "demo"
     assert long_paper["EXECUTION_ENVIRONMENT"] == "paper"
     assert continuous_demo["EXECUTION_ENVIRONMENT"] == "demo"

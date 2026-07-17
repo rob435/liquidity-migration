@@ -78,20 +78,17 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
 fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
 WORKERS="${WORKERS:-4}"
-MAX_ACTIVE="${MAX_ACTIVE:-25}"
-MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
-# Default to the DEPLOYED gate (uptrend) so a dropped env line cannot silently
-# disable the 30d-BTC trend gate. The systemd units pin BTC_TREND_GATE explicitly;
-# set it to "off" there (demo + paper together) for a plumbing test.
-BTC_TREND_GATE="${BTC_TREND_GATE:-uptrend}"
-ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
-NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
-PER_POSITION_NOTIONAL_PCT_EQUITY="${PER_POSITION_NOTIONAL_PCT_EQUITY:-2}"
+OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
+if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
+    echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
+    exit 2
+fi
 
 target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
+    --operational-profile-file "$OPERATIONAL_PROFILE_FILE"
 )
 if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
     target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
@@ -111,18 +108,12 @@ if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
     fi
     target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
-echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS notional_x=$NOTIONAL_MULTIPLIER entry_leverage=$ENTRY_LEVERAGE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
+echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
     continuous-event-demo-cycle \
     --lookback-days "$LOOKBACK_DAYS" \
     --workers "$WORKERS" \
-    --max-active "$MAX_ACTIVE" \
-    --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
-    --btc-trend-gate "$BTC_TREND_GATE" \
-    --entry-leverage "$ENTRY_LEVERAGE" \
-    --notional-multiplier "$NOTIONAL_MULTIPLIER" \
-    --per-position-notional-pct-equity "$PER_POSITION_NOTIONAL_PCT_EQUITY" \
     --daemon --interval-seconds "$INTERVAL_SECONDS" \
     ${target_route_args[@]+"${target_route_args[@]}"}

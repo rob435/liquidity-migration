@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
@@ -12,6 +13,9 @@ import scripts.run_continuous_hedge as hedge_runner
 from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.continuous_hedge_manager import HedgeDecision2F, HedgeModelPrior
 from liquidity_migration.continuous_rebalance import ContinuousRebalanceResizePlan
+
+
+OPERATIONAL_PROFILE = Path(__file__).resolve().parents[1] / "configs" / "operational.demo.json"
 
 
 def _resize_plan(
@@ -113,6 +117,8 @@ def _setup_runner(
     args = list(argv or [])
     if "--execution-environment" not in args:
         args[:0] = ["--execution-environment", execution_environment]
+    if "--operational-profile-file" not in args:
+        args.extend(("--operational-profile-file", str(OPERATIONAL_PROFILE)))
     if account_root:
         args.extend(("--account-root", str(tmp_path / "account")))
     if account_inbox and "--account-inbox-root" not in args:
@@ -318,7 +324,7 @@ def test_btc_fallback_publishes_btc_target_and_explicit_eth_flatten(monkeypatch,
     }
     assert notionals == {"BTCUSDT": 500.0, "ETHUSDT": 0.0}
     assert all(
-        item["intent"]["leverage"] == 10.0
+        item["intent"]["leverage"] == 2.0
         for request in requests
         for item in request["intents"]
     )

@@ -71,11 +71,11 @@ fi
 # The engine requires at least 95 days for its factor windows.
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-100}"
 WORKERS="${WORKERS:-4}"
-NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
-ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-10}"
-MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY="${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY:-0.5}"
-MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
-MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
+OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
+if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
+    echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
+    exit 2
+fi
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
 KLINES_FOLLOW_ROOT="${KLINES_FOLLOW_ROOT:-}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
@@ -107,6 +107,7 @@ target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
+    --operational-profile-file "$OPERATIONAL_PROFILE_FILE"
 )
 if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
     target_route_args+=(--strategy-target-capture-path "$STRATEGY_TARGET_CAPTURE_PATH")
@@ -124,7 +125,7 @@ fi
 echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
 echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1} klines_follow_root=$KLINES_FOLLOW_ROOT"
-echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x max_projected_im=${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY}"
+echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 
 mkdir -p "$DATA_ROOT/.locks"
 
@@ -139,11 +140,6 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         long-native-event-demo-cycle \
         --lookback-days "$LOOKBACK_DAYS" \
         --workers "$WORKERS" \
-        --notional-multiplier "$NOTIONAL_MULTIPLIER" \
-        --entry-leverage "$ENTRY_LEVERAGE" \
-        --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
-        --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
-        --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
         "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
@@ -159,11 +155,6 @@ while true; do
         long-native-event-demo-cycle \
         --lookback-days "$LOOKBACK_DAYS" \
         --workers "$WORKERS" \
-        --notional-multiplier "$NOTIONAL_MULTIPLIER" \
-        --entry-leverage "$ENTRY_LEVERAGE" \
-        --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
-        --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
-        --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         "${target_route_args[@]}" \
         "${ws_klines_args[@]}"
     status=$?

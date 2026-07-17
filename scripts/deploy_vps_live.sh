@@ -211,6 +211,25 @@ prepare_paper_runtime_boundary() {
         chown root:root "$path"
         chmod 0600 "$path"
     done
+    operational_profile_source="$REPO_DIR/configs/operational.demo.json"
+    [ -f "$operational_profile_source" ] && [ ! -L "$operational_profile_source" ] \
+        || fail "missing tracked operational profile: $operational_profile_source"
+    "$PYTHON" - "$operational_profile_source" <<'PY'
+import sys
+from liquidity_migration.operational_profile import load_operational_profile
+
+load_operational_profile(sys.argv[1])
+PY
+    # Install only while every managed unit is quiescent (install_mode enforces
+    # that before this boundary). The account owner and all target producers
+    # subsequently consume these exact bytes through ACCOUNT_RISK_POLICY_FILE.
+    install -o root -g root -m 0600 "$operational_profile_source" "$demo_risk"
+    "$PYTHON" - "$demo_risk" <<'PY'
+import sys
+from liquidity_migration.operational_profile import load_operational_profile
+
+load_operational_profile(sys.argv[1])
+PY
     if [ -z "$demo_candidate" ]; then
         "$PYTHON" - /etc/liquidity-migration/account-execution.env "$demo_symbols" <<'PY'
 import os
@@ -550,6 +569,7 @@ install_mode() {
     "$PYTHON" -m ruff check liquidity_migration scripts tests
     "$PYTHON" -m mypy liquidity_migration
     "$PYTHON" -m pytest -q \
+        tests/test_operational_profile.py \
         tests/test_operational_runtime_authority.py \
         tests/test_runtime_scripts.py
 

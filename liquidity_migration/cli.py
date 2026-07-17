@@ -293,6 +293,12 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
 
     candidate_universe_file = getattr(args, "candidate_universe_file", "")
     strategy_target_capture_path = getattr(args, "strategy_target_capture_path", None)
+    operational_profile = None
+    if args.operational_profile_file:
+        from liquidity_migration.operational_profile import load_operational_profile
+
+        operational_profile = load_operational_profile(args.operational_profile_file)
+    long_settings = operational_profile.long if operational_profile else None
 
     # ws_klines_* defaults read off a throwaway default instance (see the
     # event-demo block above for why the slots class can't be read directly).
@@ -301,12 +307,29 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         universe_superset_size=args.universe_superset_size,
         lookback_days=args.lookback_days,
         workers=args.workers,
-        notional_multiplier=args.notional_multiplier,
-        entry_leverage=args.entry_leverage,
-        max_projected_initial_margin_pct_equity=args.max_projected_initial_margin_pct_equity,
-        max_order_notional_pct_equity=args.max_order_notional_pct_equity,
+        notional_multiplier=(
+            long_settings.notional_multiplier if long_settings else args.notional_multiplier
+        ),
+        entry_leverage=(long_settings.entry_leverage if long_settings else args.entry_leverage),
+        max_projected_initial_margin_pct_equity=(
+            long_settings.max_projected_initial_margin_pct_equity
+            if long_settings
+            else args.max_projected_initial_margin_pct_equity
+        ),
+        max_order_notional_pct_equity=(
+            long_settings.max_order_notional_pct_equity
+            if long_settings
+            else args.max_order_notional_pct_equity
+        ),
         wallet_balance_fraction=args.wallet_balance_fraction,
-        max_new_entries_per_cycle=args.max_new_entries_per_cycle,
+        max_new_entries_per_cycle=(
+            long_settings.max_new_entries_per_cycle
+            if long_settings
+            else args.max_new_entries_per_cycle
+        ),
+        operational_profile_sha256=(
+            operational_profile.source_sha256 if operational_profile else ""
+        ),
         execution_environment=args.execution_environment,
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),
@@ -361,17 +384,46 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
 
     candidate_universe_file = getattr(args, "candidate_universe_file", "")
     strategy_target_capture_path = getattr(args, "strategy_target_capture_path", None)
+    operational_profile = None
+    if args.operational_profile_file:
+        from liquidity_migration.operational_profile import load_operational_profile
+
+        operational_profile = load_operational_profile(args.operational_profile_file)
+    continuous_settings = operational_profile.continuous if operational_profile else None
 
     cont_demo_config = ContinuousDemoCycleConfig(
         lookback_days=args.lookback_days,
         workers=args.workers,
-        max_active=args.max_active,
+        max_active=(continuous_settings.max_active if continuous_settings else args.max_active),
         klines_follow_root=args.klines_follow_root,
-        max_new_entries_per_cycle=args.max_new_entries_per_cycle,
-        btc_trend_gate=args.btc_trend_gate,
-        entry_leverage=args.entry_leverage,
-        notional_multiplier=args.notional_multiplier,
-        per_position_notional_pct_equity=args.per_position_notional_pct_equity,
+        max_new_entries_per_cycle=(
+            continuous_settings.max_new_entries_per_cycle
+            if continuous_settings
+            else args.max_new_entries_per_cycle
+        ),
+        btc_trend_gate=(
+            continuous_settings.btc_trend_gate
+            if continuous_settings
+            else args.btc_trend_gate
+        ),
+        entry_leverage=(
+            continuous_settings.entry_leverage
+            if continuous_settings
+            else args.entry_leverage
+        ),
+        notional_multiplier=(
+            continuous_settings.notional_multiplier
+            if continuous_settings
+            else args.notional_multiplier
+        ),
+        per_position_notional_pct_equity=(
+            continuous_settings.per_position_notional_pct_equity
+            if continuous_settings
+            else args.per_position_notional_pct_equity
+        ),
+        operational_profile_sha256=(
+            operational_profile.source_sha256 if operational_profile else ""
+        ),
         execution_environment=args.execution_environment,
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),

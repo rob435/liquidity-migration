@@ -37,7 +37,10 @@ from .account_intent_client import (
     publish_exit_first_target_requests,
     unresolved_target_snapshot,
 )
-from .account_candidate_universe import load_candidate_universe
+from .account_candidate_universe import (
+    load_candidate_universe,
+    require_scheduled_retirements_flat,
+)
 from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
@@ -145,6 +148,9 @@ class ContinuousDemoCycleConfig:
     entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
     # Explicit demo/paper scale multiplier, recorded in configs and ledgers.
     notional_multiplier: float = 1.0
+    # SHA-256 of the shared operational profile when runtime sizing came from
+    # that profile. Empty is retained for isolated diagnostics/tests.
+    operational_profile_sha256: str = ""
     workers: int = 8
     # 0/0 keeps the full resolved universe; the signal's liquidity gate filters it.
     universe_rank_end: int = 0
@@ -1362,7 +1368,13 @@ def run_continuous_demo_cycle(
         candidate_universe = (
             load_candidate_universe(demo.candidate_universe_file) if demo.candidate_universe_file else None
         )
-        universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
+        (
+            universe,
+            symbols,
+            tickers,
+            ticker_source,
+            candidate_reconciliation,
+        ) = _resolve_cycle_universe(
             public=public,
             demo=demo,
             config=config,
@@ -1372,6 +1384,12 @@ def run_continuous_demo_cycle(
             state_cache_stale_seconds=state_cache_stale_seconds,
             frozen_candidate_universe=candidate_universe,
         )
+        if candidate_reconciliation is not None:
+            require_scheduled_retirements_flat(
+                candidate_reconciliation,
+                route=account_route,
+                context="CONT cycle",
+            )
 
         account_owner_health_error = ""
         try:
@@ -1664,6 +1682,14 @@ def run_continuous_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
+            "scheduled_candidate_retirements_json": json.dumps(
+                candidate_reconciliation.retirement_rows()
+                if candidate_reconciliation is not None
+                else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "operational_profile_sha256": demo.operational_profile_sha256,
             "feature_set": ",".join(demo.feature_set),
             "entry_leverage": demo.entry_leverage,
             "per_position_notional_pct_equity": demo.per_position_notional_pct_equity,

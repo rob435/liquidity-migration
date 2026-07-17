@@ -396,11 +396,41 @@ def test_recent_health_retries_one_concurrent_projection_replacement(
     ) == second
 
 
-def test_recent_health_rejects_sustained_projection_churn(
+def test_recent_health_accepts_sustained_same_journal_heartbeat_churn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sequence = iter(_health(loop_sequence=index) for index in range(1, 20))
+    monkeypatch.setattr(
+        owner_health_module,
+        "read_account_owner_health",
+        lambda _root: next(sequence),
+    )
+
+    result = require_recent_account_owner_health(
+        tmp_path,
+        environment="paper",
+        max_age_ns=2_000,
+        now_ns=11_000,
+    )
+
+    assert result.loop_sequence == 2
+
+
+def test_recent_health_rejects_sustained_different_journal_head_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sequence = iter(
+        AccountOwnerHealth(
+            **{
+                **_health(loop_sequence=index).to_dict(),
+                "journal_sequence": index,
+                "journal_state_hash": f"{index:064x}",
+            }
+        )
+        for index in range(1, 20)
+    )
     monkeypatch.setattr(
         owner_health_module,
         "read_account_owner_health",

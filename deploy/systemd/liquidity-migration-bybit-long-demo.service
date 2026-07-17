@@ -22,11 +22,6 @@ Environment=TELEGRAM_ENABLED=0
 Environment=INTERVAL_SECONDS=60
 Environment=USE_DAEMON=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=NOTIONAL_MULTIPLIER=1
-Environment=ENTRY_LEVERAGE=10
-Environment=MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY=0.5
-Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
-Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 # The 90-day turnover rank requires at least 95 days after bar trimming.
 Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2

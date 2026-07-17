@@ -2,8 +2,9 @@
 
 The artifact is deliberately a forward, point-in-time population contract.  It
 does not claim historical PIT membership.  LONG and CONT keep their own ranking
-and signal logic; this module only prevents a post-freeze listing from entering
-the evidence window and fails closed when a frozen tradable symbol disappears.
+and signal logic; this module prevents a post-freeze listing from entering the
+evidence window. Venue-announced retirements are recorded prospectively and may
+leave the entry population only while the bound account is provably flat.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -27,6 +29,8 @@ from .universe import CRYPTO_LINEAR_SYMBOL_TYPES, build_current_universe_table
 CANDIDATE_UNIVERSE_SCHEMA_VERSION = 3
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
 _PROFILE_NAMES = ("long", "continuous")
+_RETIREMENT_REGISTRY_SCHEMA_VERSION = 1
+_RETIREMENT_REGISTRY_KIND = "candidate_retirement_registry"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +41,35 @@ class FrozenCandidateUniverse:
     file_sha256: str
     snapshot_ts_ns: int
     profile_inputs: Mapping[str, Mapping[str, Any]]
+    profile_symbols: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledCandidateRetirement:
+    symbol: str
+    delivery_time_ms: int
+    first_observed_ts_ms: int
+    observed_status: str
+    evidence_source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "delivery_time_ms": self.delivery_time_ms,
+            "first_observed_ts_ms": self.first_observed_ts_ms,
+            "observed_status": self.observed_status,
+            "evidence_source": self.evidence_source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePopulationReconciliation:
+    profile: str
+    active_symbols: tuple[str, ...]
+    scheduled_retirements: tuple[ScheduledCandidateRetirement, ...]
+
+    def retirement_rows(self) -> list[dict[str, Any]]:
+        return [row.to_dict() for row in self.scheduled_retirements]
 
 
 def _self_hash(payload: Mapping[str, Any]) -> str:
@@ -659,6 +692,7 @@ def load_candidate_universe(
     declared_eligible = payload.get("profile_eligible_symbols")
     if not isinstance(declared_eligible, Mapping):
         raise ValueError("candidate-universe profile populations are invalid")
+    profile_symbols: dict[str, tuple[str, ...]] = {}
     for profile in _PROFILE_NAMES:
         values = declared_eligible.get(profile)
         if (
@@ -667,6 +701,7 @@ def load_candidate_universe(
             or values != sorted(rebuilt_eligible[profile])
         ):
             raise ValueError(f"candidate-universe {profile} population is inconsistent")
+        profile_symbols[profile] = tuple(_symbol(value) for value in values)
     decisions = payload.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("candidate-universe decisions must be a list")
@@ -699,6 +734,7 @@ def load_candidate_universe(
         profile_inputs={
             profile: dict(profile_inputs[profile]) for profile in _PROFILE_NAMES
         },
+        profile_symbols=profile_symbols,
     )
 
 
@@ -739,26 +775,273 @@ def require_profile_binding(
         )
 
 
+def _load_retirement_registry(
+    path: Path,
+    *,
+    frozen: FrozenCandidateUniverse,
+) -> dict[str, ScheduledCandidateRetirement]:
+    if path.is_symlink():
+        raise ValueError("candidate-retirement registry must not be a symbolic link")
+    if not path.exists():
+        return {}
+    snapshot = read_stable_file(
+        path,
+        label="candidate-retirement registry",
+        reject_empty=True,
+        require_mode=0o600,
+        require_single_link=True,
+    )
+    try:
+        payload = json.loads(snapshot.data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("candidate-retirement registry is invalid JSON") from exc
+    expected = {
+        "schema_version",
+        "kind",
+        "candidate_universe_artifact_sha256",
+        "records",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise ValueError("candidate-retirement registry fields are invalid")
+    if (
+        payload["schema_version"] != _RETIREMENT_REGISTRY_SCHEMA_VERSION
+        or payload["kind"] != _RETIREMENT_REGISTRY_KIND
+        or payload["candidate_universe_artifact_sha256"] != frozen.artifact_sha256
+    ):
+        raise ValueError("candidate-retirement registry identity is invalid")
+    raw_records = payload["records"]
+    if not isinstance(raw_records, list):
+        raise ValueError("candidate-retirement registry records must be a list")
+    output: dict[str, ScheduledCandidateRetirement] = {}
+    record_fields = {
+        "symbol",
+        "delivery_time_ms",
+        "first_observed_ts_ms",
+        "observed_status",
+        "evidence_source",
+    }
+    for raw in raw_records:
+        if not isinstance(raw, Mapping) or set(raw) != record_fields:
+            raise ValueError("candidate-retirement registry record fields are invalid")
+        symbol = _symbol(raw["symbol"])
+        delivery_time_ms = int(raw["delivery_time_ms"])
+        first_observed_ts_ms = int(raw["first_observed_ts_ms"])
+        source = str(raw["evidence_source"])
+        if (
+            symbol in output
+            or delivery_time_ms <= 0
+            or first_observed_ts_ms <= 0
+            or delivery_time_ms <= frozen.snapshot_ts_ns // 1_000_000
+            or source != "live_instrument_delivery_time"
+        ):
+            raise ValueError("candidate-retirement registry record is invalid")
+        output[symbol] = ScheduledCandidateRetirement(
+            symbol=symbol,
+            delivery_time_ms=delivery_time_ms,
+            first_observed_ts_ms=first_observed_ts_ms,
+            observed_status=str(raw["observed_status"]),
+            evidence_source=source,
+        )
+    if list(output) != sorted(output):
+        raise ValueError("candidate-retirement registry records must be sorted")
+    return output
+
+
+def _write_retirement_registry(
+    path: Path,
+    *,
+    frozen: FrozenCandidateUniverse,
+    records: Mapping[str, ScheduledCandidateRetirement],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ValueError("candidate-retirement registry must not be a symbolic link")
+    payload = {
+        "schema_version": _RETIREMENT_REGISTRY_SCHEMA_VERSION,
+        "kind": _RETIREMENT_REGISTRY_KIND,
+        "candidate_universe_artifact_sha256": frozen.artifact_sha256,
+        "records": [records[symbol].to_dict() for symbol in sorted(records)],
+    }
+    data = canonical_json(payload) + b"\n"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            str(temporary),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(data)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                raise OSError("candidate-retirement registry write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _instrument_rows_by_symbol(instruments: pl.DataFrame) -> dict[str, Mapping[str, Any]]:
+    if "symbol" not in instruments.columns:
+        raise RuntimeError("current instrument frame lacks symbol")
+    output: dict[str, Mapping[str, Any]] = {}
+    for row in instruments.to_dicts():
+        symbol = _symbol(row.get("symbol"))
+        if symbol in output:
+            raise RuntimeError(f"current instrument frame repeats {symbol}")
+        output[symbol] = row
+    return output
+
+
 def enforce_frozen_candidate_frames(
     instruments: pl.DataFrame,
     tickers: pl.DataFrame,
     frozen: FrozenCandidateUniverse,
     *,
+    profile: str,
     snapshot_ts_ms: int,
     context: str,
-) -> tuple[str, ...]:
+    retirement_registry_path: str | Path,
+) -> CandidatePopulationReconciliation:
+    if profile not in _PROFILE_NAMES:
+        raise ValueError(f"unknown candidate-universe profile {profile!r}")
     tables = build_profile_universe_tables_from_frames(
         instruments,
         tickers,
         snapshot_ts_ms=snapshot_ts_ms,
         profile_inputs=frozen.profile_inputs,
     )
-    current_union: set[str] = set()
-    for table in tables.values():
-        if not table.is_empty():
-            current_union.update(str(value) for value in table["symbol"].to_list())
-    return enforce_frozen_candidate_population(
-        sorted(current_union),
-        frozen,
-        context=context,
+    current = (
+        {_symbol(value) for value in tables[profile]["symbol"].to_list()}
+        if not tables[profile].is_empty()
+        else set()
     )
+    required = set(frozen.profile_symbols[profile])
+    missing = sorted(required - current)
+    registry_path = Path(retirement_registry_path).expanduser()
+    registry = _load_retirement_registry(registry_path, frozen=frozen)
+    instrument_rows = _instrument_rows_by_symbol(instruments)
+    retirements: dict[str, ScheduledCandidateRetirement] = {}
+    unexplained: list[str] = []
+    changed = False
+    for symbol in missing:
+        row = instrument_rows.get(symbol)
+        delivery_time_ms = int((row or {}).get("delivery_time_ms") or 0)
+        if delivery_time_ms > frozen.snapshot_ts_ns // 1_000_000:
+            observed = ScheduledCandidateRetirement(
+                symbol=symbol,
+                delivery_time_ms=delivery_time_ms,
+                first_observed_ts_ms=snapshot_ts_ms,
+                observed_status=str((row or {}).get("status") or ""),
+                evidence_source="live_instrument_delivery_time",
+            )
+            prior = registry.get(symbol)
+            if prior is not None and prior.delivery_time_ms != delivery_time_ms:
+                raise RuntimeError(
+                    f"{context}: {symbol} delivery time changed from "
+                    f"{prior.delivery_time_ms} to {delivery_time_ms}"
+                )
+            if prior is None:
+                registry[symbol] = observed
+                prior = observed
+                changed = True
+            retirements[symbol] = prior
+        elif row is None and symbol in registry:
+            # Once the venue removes the instrument row, the prospectively
+            # captured delivery-time observation remains the causal evidence.
+            retirements[symbol] = registry[symbol]
+        else:
+            unexplained.append(symbol)
+    if unexplained:
+        preview = ",".join(unexplained[:20])
+        suffix = "..." if len(unexplained) > 20 else ""
+        raise RuntimeError(
+            f"{context}: frozen {profile} candidate population lost "
+            f"{len(unexplained)} unexplained symbol(s): {preview}{suffix}"
+        )
+    if changed:
+        _write_retirement_registry(registry_path, frozen=frozen, records=registry)
+    active = tuple(
+        symbol for symbol in frozen.profile_symbols[profile] if symbol in current
+    )
+    return CandidatePopulationReconciliation(
+        profile=profile,
+        active_symbols=active,
+        scheduled_retirements=tuple(retirements[symbol] for symbol in sorted(retirements)),
+    )
+
+
+def require_scheduled_retirements_flat(
+    reconciliation: CandidatePopulationReconciliation,
+    *,
+    route: object,
+    context: str,
+    tolerance: float = 1e-12,
+) -> None:
+    """Fail closed if a retired entry symbol has any account or queue exposure."""
+
+    if not reconciliation.scheduled_retirements:
+        return
+    from .account_kernel import read_account_journal, reduce_account_events  # noqa: PLC0415
+    from .account_service import AccountIntentInbox  # noqa: PLC0415
+
+    account_path = getattr(route, "account_path", None)
+    if not isinstance(account_path, Path):
+        raise TypeError("scheduled-retirement flatness requires a verified AccountRoute")
+    retired = {row.symbol for row in reconciliation.scheduled_retirements}
+    inbox = AccountIntentInbox(route)  # type: ignore[arg-type]
+    unresolved = inbox.unresolved_requests()
+    pending = sorted(
+        {
+            item.intent.symbol.upper()
+            for request in unresolved
+            for item in request.intents
+            if item.intent.symbol.upper() in retired
+            and abs(float(item.intent.signed_notional_usdt)) > tolerance
+        }
+    )
+    state = reduce_account_events(read_account_journal(account_path, verify=True))
+    problems: dict[str, list[str]] = {symbol: [] for symbol in retired}
+    for symbol in sorted(retired):
+        position = state.positions.get(symbol)
+        if position is not None and abs(position.signed_qty) > tolerance:
+            problems[symbol].append("position")
+        if abs(float(state.aggregate_targets.get(symbol, 0.0))) > tolerance:
+            problems[symbol].append("aggregate_target")
+        if abs(state.working_signed_qty(symbol)) > tolerance:
+            problems[symbol].append("working_order")
+        for label, targets in (
+            ("component_target", state.component_targets),
+            ("component_desire", state.component_target_desires),
+        ):
+            if any(
+                str(target.get("symbol") or "").upper() == symbol
+                and abs(float(target.get("signed_qty") or 0.0)) > tolerance
+                for target in targets.values()
+            ):
+                problems[symbol].append(label)
+        if symbol in pending:
+            problems[symbol].append("unresolved_nonzero_request")
+    active = {
+        symbol: tuple(labels) for symbol, labels in problems.items() if labels
+    }
+    if active:
+        detail = "; ".join(
+            f"{symbol}={','.join(labels)}" for symbol, labels in sorted(active.items())
+        )
+        raise RuntimeError(
+            f"{context}: scheduled-retirement symbols are not account-flat: {detail}"
+        )

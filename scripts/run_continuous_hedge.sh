@@ -60,5 +60,6 @@ esac
 args+=(
     --account-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-root "$ACCOUNT_EXECUTION_ROOT"
+    --operational-profile-file "${ACCOUNT_RISK_POLICY_FILE:-}"
 )
 exec "$PYTHON_BIN" scripts/run_continuous_hedge.py "${args[@]}"

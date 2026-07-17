@@ -32,6 +32,7 @@ from .candidate_rule_coverage import build_candidate_rule_coverage
 from .deterministic_serialization import canonical_json
 from .execution_adapters import INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 from .maintenance_lock import acquire_inherited_locks
+from .operational_profile import load_operational_profile
 from .private_receipt_publication import publish_private_receipt
 from .systemd_environment import parse_systemd_environment_bytes
 
@@ -1076,6 +1077,8 @@ def _validate_environments(
         f"account-execution.env:{_CANDIDATE_UNIVERSE_KEY}"
     ]
     rules_snapshot = inputs["account-execution.env:ACCOUNT_DEMO_RULES_FILE"]
+    risk_snapshot = inputs["account-execution.env:ACCOUNT_RISK_POLICY_FILE"]
+    load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
     build_candidate_rule_coverage(
         demo_candidate_path,
         rules_snapshot.path,
@@ -1168,6 +1171,8 @@ def _validate_paper_runtime_environments(
         raise ValueError(
             "paper operational candidate universe must also be the owner symbols file"
         )
+    risk_snapshot = inputs["account-paper-execution.env:ACCOUNT_RISK_POLICY_FILE"]
+    load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
     return root_identities, inputs
 
 
