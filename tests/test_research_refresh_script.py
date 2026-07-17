@@ -92,6 +92,15 @@ def test_rmom_step_full_rewrites_after_canonical_data_refresh(tmp_path: Path) ->
     assert step.fingerprint_extra["rewrite_reason"] == "canonical_data_mode"
 
 
+def test_force_rmom_full_rewrite_is_manifested_and_distinct_from_canonical_mode() -> None:
+    args = refresh.build_parser().parse_args(
+        ["plan", "--data-mode", "tail", "--force-rmom-full-rewrite"]
+    )
+
+    assert refresh._manifest_configuration(args)["force_rmom_full_rewrite"] is True
+    assert refresh._rmom_rewrite_reason(args) == "operator_forced"
+
+
 def test_run_ledger_resumes_exact_success_without_reexecuting(tmp_path: Path) -> None:
     output = tmp_path / "result.txt"
     step = refresh.CommandStep(

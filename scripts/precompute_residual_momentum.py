@@ -51,6 +51,7 @@ DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
 
 # Shift three days so every residual in the day-D signal is computable by D 00:00 UTC.
 RMOM_WINDOW = 7
+RMOM_MIN_SAMPLES = 4
 RMOM_CAUSAL_SHIFT = 3
 DEFAULT_APPEND_OVERLAP_DAYS = 14
 
@@ -60,7 +61,7 @@ def residual_momentum_expr() -> "pl.Expr":
     single source of truth and is unit-testable without running the full factor-panel build."""
     return (
         pl.col("residual_return")
-        .rolling_sum(window_size=RMOM_WINDOW, min_samples=4)
+        .rolling_sum(window_size=RMOM_WINDOW, min_samples=RMOM_MIN_SAMPLES)
         .shift(RMOM_CAUSAL_SHIFT)
         .over("symbol")
         .alias("residual_momentum")
@@ -92,12 +93,31 @@ def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
     if resid.is_empty():
         return resid
     end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
-    active_cutoff = end_day - 8 * MS_PER_DAY  # only pad symbols with data within a rolling window of `end`
+    # A shifted rolling window can still emit causal values after a symbol's
+    # final real residual.  Pad every symbol far enough to materialize those
+    # final values, then stop once fewer than ``RMOM_MIN_SAMPLES`` real
+    # residuals can remain in the window.  Tying padding to the global end date
+    # made a full rebuild erase previously emitted keys when a symbol aged out:
+    # the same source history then produced a different table depending on the
+    # day it was built.
+    trailing_days = RMOM_CAUSAL_SHIFT + RMOM_WINDOW - RMOM_MIN_SAMPLES
     pad = (
         resid.group_by("symbol")
         .agg(pl.col("ts_ms").max().alias("_last"))
-        .filter(pl.col("_last") >= active_cutoff)
-        .with_columns(pl.int_ranges(pl.col("_last") + MS_PER_DAY, end_day + MS_PER_DAY, MS_PER_DAY).alias("ts_ms"))
+        .filter(pl.col("_last") < end_day)
+        .with_columns(
+            pl.min_horizontal(
+                pl.col("_last") + trailing_days * MS_PER_DAY,
+                pl.lit(end_day, dtype=pl.Int64),
+            ).alias("_pad_end")
+        )
+        .with_columns(
+            pl.int_ranges(
+                pl.col("_last") + MS_PER_DAY,
+                pl.col("_pad_end") + MS_PER_DAY,
+                MS_PER_DAY,
+            ).alias("ts_ms")
+        )
         .explode("ts_ms")
         .filter(pl.col("ts_ms").is_not_null())
         .with_columns(pl.lit(None, dtype=pl.Float64).alias("residual_return"))

@@ -45,7 +45,7 @@ through 2026-07-15 UTC.
 | Bybit klines | Recheck a trailing overlap and fetch missing or sub-20-bar partitions. | The complete root is then validated against independent membership. A failure triggers a full missing-only scan. |
 | Binance klines/membership | Append strict current-month daily archives and rebuild membership from observed archive coverage. | Crossing a month that is not already materialized falls back to the atomic canonical monthly builder. |
 | Ancillary market data | Re-fetch from the stalest dataset boundary minus the overlap. | Writers reuse valid partitions. Tail mode is operational refresh evidence, not a substitute for a registered full-history rebuild. |
-| Residual momentum | Recompute a checked overlap, prove stable rows unchanged, then atomically append/refresh the provisional tail. | A legacy schema without `is_provisional` receives one explicit atomic full rewrite. |
+| Residual momentum | Recompute a checked overlap, prove stable rows unchanged, then atomically append/refresh the provisional tail. | Final causal rows are retained for aged-out symbols. A legacy schema without `is_provisional` receives one explicit atomic full rewrite; any other stable-overlap mismatch fails closed for inspection. |
 | Backtests | Reuse an identical completed run-scoped report; otherwise recompute the fixed window from a clean sleeve directory. | Incremental PnL would require a separately verified engine-state checkpoint. The tool does not invent one or append a new replay to an old account journal. |
 
 `--data-mode canonical` invokes `build_full_pit_bybit.sh` and
@@ -57,6 +57,12 @@ the prior table; a full data reconstruction can legitimately change historical
 cross-sectional inputs, so retaining a previously “stable” feature overlap
 would mix evidence identities. Routine `tail` mode continues to require exact
 checked-overlap agreement before appending.
+
+When inspection establishes that only the feature table must be reconstructed,
+`--force-rmom-full-rewrite` atomically rebuilds residual momentum from its fixed
+causal start without changing `tail` market-data behavior. The choice is frozen
+in the run manifest and command fingerprint. It is an explicit recovery or
+migration control, not an automatic waiver for an unexplained overlap failure.
 
 All selected datasets must expose a partition for `end - 1 day`; the all-root
 manifest check must pass; and every requested backtest report must match the

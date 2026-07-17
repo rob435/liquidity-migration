@@ -90,6 +90,34 @@ def test_residual_owner_exposes_stable_and_provisional_tail_explicitly() -> None
     assert provisional["is_provisional"].to_list() == [True] * provisional.height
 
 
+def test_residual_owner_keeps_final_causal_keys_after_symbol_ages_out() -> None:
+    """A later global end must not erase a delisted symbol's final signals.
+
+    With a seven-row window, four required samples, and shift three, six null
+    calendar rows are enough to emit every final causal value.  A prior
+    end-relative cutoff dropped these rows once the symbol was more than eight
+    days behind the global end, making full and incremental builds disagree.
+    """
+    start_ms = MOD._date_str_to_ms("2025-01-01")
+    last_real = start_ms + 9 * DAY_MS
+    resid = pl.DataFrame(
+        {
+            "symbol": ["DELISTED"] * 10,
+            "ts_ms": [start_ms + day * DAY_MS for day in range(10)],
+            "residual_return": [float(day) for day in range(10)],
+        }
+    )
+
+    while_recent = MOD.residual_momentum_from_residuals(resid, end="2025-01-15")
+    after_aging_out = MOD.residual_momentum_from_residuals(resid, end="2025-03-01")
+
+    _assert_existing_keys_allclose(while_recent, after_aging_out)
+    assert int(after_aging_out["ts_ms"].max()) == last_real + 6 * DAY_MS
+    final = after_aging_out.filter(pl.col("ts_ms") > last_real)
+    assert final.height == 6
+    assert final["is_provisional"].to_list() == [False, False, False, True, True, True]
+
+
 def test_residual_owner_rejects_incomplete_input_contract() -> None:
     with pytest.raises(ValueError, match="missing columns"):
         MOD.residual_momentum_from_residuals(

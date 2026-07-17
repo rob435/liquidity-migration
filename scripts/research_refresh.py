@@ -713,21 +713,22 @@ def _rmom_step(
     venue: str,
     end: dt.date,
     force_full_rewrite: bool = False,
+    rewrite_reason: str | None = None,
 ) -> CommandStep:
     path = root / "residual_momentum.parquet"
     full_rewrite = force_full_rewrite
-    rewrite_reason = "canonical_data_mode" if force_full_rewrite else ""
+    resolved_rewrite_reason = rewrite_reason or ("canonical_data_mode" if force_full_rewrite else "")
     schema: list[str] = []
     if path.is_file():
         try:
             schema = pl.read_parquet(path, n_rows=0).columns
         except Exception:  # noqa: BLE001 - the owner will perform an atomic replacement
             full_rewrite = True
-            rewrite_reason = rewrite_reason or "unreadable_existing_table"
+            resolved_rewrite_reason = resolved_rewrite_reason or "unreadable_existing_table"
         else:
             if "is_provisional" not in schema:
                 full_rewrite = True
-                rewrite_reason = rewrite_reason or "legacy_schema"
+                resolved_rewrite_reason = resolved_rewrite_reason or "legacy_schema"
     command = [
         str(PYTHON),
         "-u",
@@ -749,9 +750,17 @@ def _rmom_step(
         fingerprint_extra={
             "schema_before": schema,
             "full_rewrite": full_rewrite,
-            "rewrite_reason": rewrite_reason,
+            "rewrite_reason": resolved_rewrite_reason,
         },
     )
+
+
+def _rmom_rewrite_reason(args: argparse.Namespace) -> str | None:
+    if args.force_rmom_full_rewrite:
+        return "operator_forced"
+    if args.data_mode == "canonical":
+        return "canonical_data_mode"
+    return None
 
 
 def _validate_rmom(root: Path, *, venue: str, end: dt.date) -> None:
@@ -965,6 +974,7 @@ def _manifest_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "overlap_days": args.overlap_days,
         "skip_data": args.skip_data,
         "skip_features": args.skip_features,
+        "force_rmom_full_rewrite": args.force_rmom_full_rewrite,
         "skip_backtests": args.skip_backtests,
         "preregistration": preregistration,
         "modeled_leverage": 1.0,
@@ -1039,12 +1049,14 @@ def _plan(args: argparse.Namespace) -> int:
         if not args.skip_data:
             _refresh_data(venue=str(venue), root=root, end=end, args=args, ledger=None)
         if not args.skip_features and "continuous" in configuration["sleeves"]:
+            rewrite_reason = _rmom_rewrite_reason(args)
             _print_step(
                 _rmom_step(
                     root,
                     venue=str(venue),
                     end=end,
-                    force_full_rewrite=args.data_mode == "canonical",
+                    force_full_rewrite=rewrite_reason is not None,
+                    rewrite_reason=rewrite_reason,
                 )
             )
         if not args.skip_backtests:
@@ -1151,12 +1163,14 @@ def _execute(args: argparse.Namespace) -> int:
         if not args.skip_data:
             _refresh_data(venue=venue, root=root, end=end, args=args, ledger=ledger)
         if not args.skip_features and "continuous" in sleeves:
+            rewrite_reason = _rmom_rewrite_reason(args)
             ledger.run(
                 _rmom_step(
                     root,
                     venue=venue,
                     end=end,
-                    force_full_rewrite=args.data_mode == "canonical",
+                    force_full_rewrite=rewrite_reason is not None,
+                    rewrite_reason=rewrite_reason,
                 )
             )
             _validate_rmom(root, venue=venue, end=end)
@@ -1256,6 +1270,11 @@ def _add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--preregistration", default=None, help="optional frozen contract path to hash")
     parser.add_argument("--skip-data", action="store_true")
     parser.add_argument("--skip-features", action="store_true")
+    parser.add_argument(
+        "--force-rmom-full-rewrite",
+        action="store_true",
+        help="atomically rebuild residual momentum from its full causal start instead of checked tail append",
+    )
     parser.add_argument("--skip-backtests", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true", help="label and allow exploratory dirty-source run")
     parser.add_argument("--manifest-workers", type=int, default=16)

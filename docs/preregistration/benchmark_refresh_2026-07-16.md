@@ -353,3 +353,52 @@ PIT failure, clipped tail, or incomplete cell limits or invalidates only the
 affected claim and cannot be waived. Neither run establishes daemon parity,
 forward alpha, promotion, sizing, deployment, mainnet readiness, or real-money
 authority.
+
+### Pre-outcome residual-momentum rebuild correction — 2026-07-17 12:06:59 UTC
+
+The first rolling replacement attempt under run ID
+`benchmark-replacement-2026-07-17` stopped before any replacement backtest
+cell began. Its checked Bybit residual-momentum append found 8,453 stable keys
+in the existing overlap but only 8,444 in the rebuild. The failed command,
+source identity, data refresh, and log remain part of that run receipt; the run
+is not a replacement benchmark and will not be deleted or reused under a
+different commit.
+
+Inspection was limited to feature/data identities, not trade or equity
+outcomes. The nine missing stable keys, plus nine provisional keys outside the
+stable comparison, were the final six padded dates for `ESUSDT`, `SCRUSDT`,
+and `SWARMSUSDT` after their last real residual on 2026-07-08. The builder had
+conditioned padding on proximity to the current global end. Advancing the end
+date therefore erased a symbol's final causally computable keys from a full
+rebuild even though an earlier incremental build had retained them. This made
+the feature table depend on build date. A diagnostic old-code full rewrite was
+preserved before replacement; it also showed that refreshed July 9 inputs
+changed 2,850 common feature values only on July 12--16, as permitted by the
+registered three-day causal delay.
+
+Before any rolling replacement outcome is inspected, the feature correction is
+frozen as follows:
+
+- for every symbol, append at most
+  `causal_shift + window - min_samples = 3 + 7 - 4 = 6` null calendar rows
+  after its final real residual, capped at the requested end;
+- never condition those final per-symbol rows on distance from the global end;
+- retain the existing stable/provisional definition and checked-overlap
+  tolerances; an unexplained stable mismatch still fails closed;
+- regression-test that advancing the global end cannot remove or numerically
+  change an aged-out symbol's final causal keys, and that padding stops after
+  six days;
+- atomically full-rewrite both venue residual-momentum tables from the fixed
+  2023-03-01 causal start before the rolling replacement, because a tail append
+  cannot restore missing final rows outside its overlap.
+
+The replacement tested set is prospectively relabelled to the same four cells,
+same window `[2023-07-17, 2026-07-17)`, same roots, profiles, costs, leverage,
+and interpretation under run ID
+`benchmark-replacement-2026-07-17-rmom-fixed`. It must use tail market-data
+refresh plus the manifested `--force-rmom-full-rewrite` feature migration.
+The completed same-window funding-attribution run remains the accounting
+attribution surface; it is not rerun on the feature-rebuild commit because its
+purpose was exact comparison on the pre-append data identity. The new rolling
+run is exposed exploratory evidence with no pass threshold and no deployment
+or trading authority.
