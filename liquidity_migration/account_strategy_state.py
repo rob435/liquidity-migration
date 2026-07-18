@@ -269,6 +269,23 @@ class CanonicalReductionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class CanonicalAccountProjection:
+    """One verified event/state snapshot shared by canonical read models.
+
+    The trusted state optimization is valid only while consumers run before
+    the account owner mutates again.  All durable evidence remains the event
+    tuple; count and terminal state hash bind the materialized state to it.
+    """
+
+    events: tuple[AccountEvent, ...]
+    state: AccountState
+    accepted_batches: frozenset[str]
+    quantity_tolerance: float
+    component_revisions: Mapping[str, _ComponentRevisionConvergence]
+    execution_anchors: Mapping[str, CanonicalComponentExecutionAnchor]
+
+
+@dataclass(frozen=True, slots=True)
 class _BatchFillSummary:
     batch_id: str
     symbol: str
@@ -289,6 +306,7 @@ def canonical_component_execution_anchors(
     sleeve: str | None = None,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
     account_events: Sequence[AccountEvent] | None = None,
+    account_projection: CanonicalAccountProjection | None = None,
 ) -> tuple[CanonicalComponentExecutionAnchor, ...]:
     """Project component lifecycle clocks only from verified execution facts.
 
@@ -298,21 +316,28 @@ def canonical_component_execution_anchors(
     cannot reset it.
     """
 
-    events = (
-        list(account_events)
-        if account_events is not None
-        else read_account_journal(account_root, verify=True)
-    )
-    if not events:
-        return ()
-    state = reduce_account_events(events)
-    accepted_batches = _accepted_batches(events)
-    anchors = _component_execution_anchors_from_events(
-        events,
-        state=state,
-        accepted_batches=accepted_batches,
-        tolerance=_latest_account_quantity_tolerance(events),
-    )
+    if account_projection is not None:
+        if account_events is not None:
+            raise ValueError(
+                "canonical anchors accept either account_events or account_projection"
+            )
+        anchors = account_projection.execution_anchors
+    else:
+        events = (
+            list(account_events)
+            if account_events is not None
+            else read_account_journal(account_root, verify=True)
+        )
+        if not events:
+            return ()
+        state = reduce_account_events(events)
+        accepted_batches = _accepted_batches(events)
+        anchors = _component_execution_anchors_from_events(
+            events,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=_latest_account_quantity_tolerance(events),
+        )
     wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     return tuple(
@@ -452,6 +477,65 @@ def _build_batch_fill_index(
     )
 
 
+def canonical_account_projection(
+    account_root: str | Path,
+    *,
+    account_events: Sequence[AccountEvent] | None = None,
+    trusted_account_state: AccountState | None = None,
+) -> CanonicalAccountProjection:
+    """Build shared canonical inputs from one verified account snapshot.
+
+    ``trusted_account_state`` is an in-process optimization for the sole
+    account owner.  It is accepted only when its applied-event count and
+    rolling state hash exactly bind it to ``account_events``.
+    """
+
+    events = tuple(
+        account_events
+        if account_events is not None
+        else read_account_journal(account_root, verify=True)
+    )
+    if trusted_account_state is None:
+        state = reduce_account_events(events)
+    else:
+        expected_state_hash = (
+            events[-1].state_hash if events else AccountState().rolling_state_hash
+        )
+        if (
+            trusted_account_state.events_applied != len(events)
+            or trusted_account_state.rolling_state_hash != expected_state_hash
+        ):
+            raise RuntimeError(
+                "trusted account state does not match its canonical event snapshot"
+            )
+        state = trusted_account_state
+    accepted_batches = _accepted_batches(events)
+    quantity_tolerance = _latest_account_quantity_tolerance(events)
+    batch_fill_index = _build_batch_fill_index(events, state=state)
+    component_revisions = _latest_component_revision_convergence(
+        events,
+        state=state,
+        accepted_batches=accepted_batches,
+        tolerance=quantity_tolerance,
+        batch_fill_index=batch_fill_index,
+    )
+    execution_anchors = _component_execution_anchors_from_events(
+        events,
+        state=state,
+        accepted_batches=accepted_batches,
+        tolerance=quantity_tolerance,
+        batch_fill_index=batch_fill_index,
+    )
+    return CanonicalAccountProjection(
+        events=events,
+        state=state,
+        accepted_batches=frozenset(accepted_batches),
+        quantity_tolerance=quantity_tolerance,
+        component_revisions=component_revisions,
+        execution_anchors=execution_anchors,
+    )
+
+
 def _batch_fill_summary(
     events: Sequence[AccountEvent],
     *,
@@ -565,8 +649,10 @@ def _component_execution_anchors_from_events(
     state: AccountState,
     accepted_batches: set[str],
     tolerance: float,
+    batch_fill_index: _BatchFillIndex | None = None,
 ) -> dict[str, CanonicalComponentExecutionAnchor]:
-    batch_fill_index = _build_batch_fill_index(events, state=state)
+    if batch_fill_index is None:
+        batch_fill_index = _build_batch_fill_index(events, state=state)
     targets_by_batch = _ordinary_targets_by_batch(
         events,
         accepted_batches=accepted_batches,
@@ -1315,6 +1401,7 @@ def canonical_strategy_trade_rows(
     sleeve: str,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
     account_events: Sequence[AccountEvent] | None = None,
+    account_projection: CanonicalAccountProjection | None = None,
 ) -> pl.DataFrame:
     """Project accepted desires plus fill-backed component lifecycle rows.
 
@@ -1325,28 +1412,45 @@ def canonical_strategy_trade_rows(
     cooldown clock.
     """
 
-    events = (
-        list(account_events)
-        if account_events is not None
-        else read_account_journal(account_root, verify=True)
-    )
-    if not events:
-        return pl.DataFrame()
-    accepted_batches = _accepted_batches(events)
-    state = reduce_account_events(events)
-    quantity_tolerance = _latest_account_quantity_tolerance(events)
-    component_revisions = _latest_component_revision_convergence(
-        events,
-        state=state,
-        accepted_batches=accepted_batches,
-        tolerance=quantity_tolerance,
-    )
-    execution_anchors = _component_execution_anchors_from_events(
-        events,
-        state=state,
-        accepted_batches=accepted_batches,
-        tolerance=quantity_tolerance,
-    )
+    if account_projection is not None:
+        if account_events is not None:
+            raise ValueError(
+                "canonical trades accept either account_events or account_projection"
+            )
+        events = account_projection.events
+        if not events:
+            return pl.DataFrame()
+        state = account_projection.state
+        accepted_batches = set(account_projection.accepted_batches)
+        quantity_tolerance = account_projection.quantity_tolerance
+        component_revisions = account_projection.component_revisions
+        execution_anchors = account_projection.execution_anchors
+    else:
+        events = tuple(
+            account_events
+            if account_events is not None
+            else read_account_journal(account_root, verify=True)
+        )
+        if not events:
+            return pl.DataFrame()
+        state = reduce_account_events(events)
+        accepted_batches = _accepted_batches(events)
+        quantity_tolerance = _latest_account_quantity_tolerance(events)
+        batch_fill_index = _build_batch_fill_index(events, state=state)
+        component_revisions = _latest_component_revision_convergence(
+            events,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=quantity_tolerance,
+            batch_fill_index=batch_fill_index,
+        )
+        execution_anchors = _component_execution_anchors_from_events(
+            events,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=quantity_tolerance,
+            batch_fill_index=batch_fill_index,
+        )
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     lifecycles: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -1776,11 +1880,12 @@ def _planning_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _latest_component_revision_convergence(
-    events: list[AccountEvent],
+    events: Sequence[AccountEvent],
     *,
     state: AccountState,
     accepted_batches: set[str],
     tolerance: float,
+    batch_fill_index: _BatchFillIndex | None = None,
 ) -> dict[str, _ComponentRevisionConvergence]:
     """Recover component-local execution evidence from accepted target batches.
 
@@ -1835,11 +1940,19 @@ def _latest_component_revision_convergence(
                 ):
                     changed.append(event)
 
-            batch_orders = [
-                order
-                for order in state.orders.values()
-                if order.batch_id == batch_id and order.symbol == symbol
-            ]
+            if batch_fill_index is None:
+                batch_orders = [
+                    order
+                    for order in state.orders.values()
+                    if order.batch_id == batch_id and order.symbol == symbol
+                ]
+            else:
+                batch_orders = list(
+                    batch_fill_index.orders_by_batch_symbol.get(
+                        (str(batch_id), str(symbol)),
+                        (),
+                    )
+                )
             commands_filled = bool(batch_orders) and all(
                 order.status == "filled"
                 and _quantities_match(
@@ -1902,7 +2015,7 @@ def _latest_component_revision_convergence(
     return revisions
 
 
-def _latest_account_quantity_tolerance(events: list[AccountEvent]) -> float:
+def _latest_account_quantity_tolerance(events: Sequence[AccountEvent]) -> float:
     """Recover the tolerance governing the latest accepted account target."""
 
     for event in reversed(events):

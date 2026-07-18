@@ -41,8 +41,8 @@ from .account_service import (
 from .account_strategy_state import (
     CanonicalComponentExecutionAnchor,
     CanonicalReductionEvent,
+    canonical_account_projection,
     canonical_adverse_reduction_events,
-    canonical_component_execution_anchors,
     canonical_strategy_trade_rows,
     terminal_entry_attempt_keys,
 )
@@ -385,6 +385,8 @@ class ActiveRuntimeComparator:
         self._continuous_trades = pl.DataFrame()
         self._anchors: dict[str, CanonicalComponentExecutionAnchor] = {}
         self._continuous_adverse: tuple[CanonicalReductionEvent, ...] = ()
+        self._long_terminal_attempts: frozenset[str] = frozenset()
+        self._continuous_terminal_attempts: frozenset[str] = frozenset()
         self._projection_dirty = False
         self._last_hour_ms = 0
         self._request_ordinal = 0
@@ -407,28 +409,43 @@ class ActiveRuntimeComparator:
             self._continuous_trades = pl.DataFrame()
             self._anchors = {}
             self._continuous_adverse = ()
+            self._long_terminal_attempts = frozenset()
+            self._continuous_terminal_attempts = frozenset()
         else:
             root = self.session.root
+            if self.session.kernel is None:
+                raise RuntimeError("account events exist before comparator kernel startup")
+            projection = canonical_account_projection(
+                root,
+                account_events=self._events,
+                trusted_account_state=self.session.kernel._state_ref(),
+            )
             self._long_trades = canonical_strategy_trade_rows(
                 root,
                 sleeve=SleeveAdapterKind.LONG.value,
                 strategy_ids=(self.long_strategy_id,),
-                account_events=self._events,
+                account_projection=projection,
             )
             self._continuous_trades = canonical_strategy_trade_rows(
                 root,
                 sleeve=SleeveAdapterKind.CONTINUOUS.value,
                 strategy_ids=self.continuous_managed_strategy_ids,
+                account_projection=projection,
+            )
+            self._anchors = dict(projection.execution_anchors)
+            self._continuous_adverse = canonical_adverse_reduction_events(
+                root,
+                sleeve=SleeveAdapterKind.CONTINUOUS.value,
+                strategy_ids=self.continuous_managed_strategy_ids,
                 account_events=self._events,
             )
-            self._anchors = {
-                anchor.target_key: anchor
-                for anchor in canonical_component_execution_anchors(
-                    root,
-                    account_events=self._events,
-                )
-            }
-            self._continuous_adverse = canonical_adverse_reduction_events(
+            self._long_terminal_attempts = terminal_entry_attempt_keys(
+                root,
+                sleeve=SleeveAdapterKind.LONG.value,
+                strategy_ids=(self.long_strategy_id,),
+                account_events=self._events,
+            )
+            self._continuous_terminal_attempts = terminal_entry_attempt_keys(
                 root,
                 sleeve=SleeveAdapterKind.CONTINUOUS.value,
                 strategy_ids=self.continuous_managed_strategy_ids,
@@ -764,19 +781,13 @@ class ActiveRuntimeComparator:
                 now_ms=boundary_ts_ms,
                 strategy_id=self.long_strategy_id,
             )
-            terminal_attempts = terminal_entry_attempt_keys(
-                self.session.root,
-                sleeve=SleeveAdapterKind.LONG.value,
-                strategy_ids=(self.long_strategy_id,),
-                account_events=self._events,
-            )
             entry_intents = [
                 intent
                 for intent in entry_intents
                 if str(
                     intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or ""
                 )
-                not in terminal_attempts
+                not in self._long_terminal_attempts
             ]
         else:
             entry_intents = []
@@ -1020,7 +1031,6 @@ class ActiveRuntimeComparator:
             default_leverage=self.continuous_demo.entry_leverage,
         )
 
-        current_events = self._account_events()
         entry_paused, _recent_adverse = entry_circuit_breaker_tripped(
             self._continuous_adverse,
             now_ms=boundary_ts_ms,
@@ -1147,17 +1157,11 @@ class ActiveRuntimeComparator:
             now_ms=boundary_ts_ms,
             strategy_id=self.continuous_strategy_id,
         )
-        terminal_attempts = terminal_entry_attempt_keys(
-            self.session.root,
-            sleeve=SleeveAdapterKind.CONTINUOUS.value,
-            strategy_ids=self.continuous_managed_strategy_ids,
-            account_events=current_events,
-        )
         entry_intents = [
             intent
             for intent in entry_intents
             if str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
-            not in terminal_attempts
+            not in self._continuous_terminal_attempts
         ]
         targeted_component_ids = {
             intent.intent.component_id for intent in entry_intents

@@ -196,3 +196,41 @@ and LONG-funnel part 00000 SHA-256
 Failure of either identity invalidates the replacement. These comparisons are
 refactor equivalence checks only; the partial rows remain spent structural
 diagnostics and carry no thesis or economic evidentiary weight.
+
+## Amendment 9: one canonical projection per dirty account snapshot
+
+Registered 2026-07-18 after terminating the first indexed replacement at code
+commit `e45d90c55aa543ceeb7cbbcd9dfff688978218fe`, but before another
+replacement run or any monetary inspection. Its create-only termination receipt
+is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-e45d90c55aa5/termination.json`
+with SHA-256
+`701386b22989a35c39bb5cd544dc9377a02caa66d10dbd6b2c6fefa688cbc8ed`.
+That attempt passed both Amendment 8 byte-identical prefix checks, proving the
+fill index and cached protection anchors preserved the observed prefix, but it
+remains incomplete and invalid for a parity or strategy conclusion.
+
+Two later read-only stack samples showed a second performance defect: one
+dirty-account refresh replayed the identical event tuple through
+`reduce_account_events` independently for the LONG trade projection, the
+CONTINUOUS trade projection, and then the component-anchor projection. The
+second call alone remained active more than ten minutes at the partial
+boundary. No outcome was opened; inspection again covered only call stacks,
+prefix identities, chronology, and process performance.
+
+The next replacement may derive one `CanonicalAccountProjection` per dirty
+event snapshot and share its accepted batches, quantity tolerance, component
+revision evidence, and execution anchors across both sleeve projections and
+protection. It may reuse the account owner's in-process materialized state only
+when both `events_applied == len(account_events)` and its rolling state hash
+equals the final event's state hash; any mismatch fails the run. The context is
+consumed synchronously before another account mutation. Exact terminal entry
+attempt sets may also be cached from that same snapshot instead of rescanning
+unchanged events each hour.
+
+Direct replay, trusted-state context, and shared-context trade/anchor outputs
+must compare exactly in tests and on a verified account-journal sample. The
+replacement remains bound to Amendment 8's two byte-identical trace prefixes.
+This is a read-model performance repair only: it cannot alter source data,
+gates, source decisions, targets, request order, execution, lifecycle rules,
+BTC-risk state, or the ban on inspecting monetary outcomes.

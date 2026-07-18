@@ -9,6 +9,7 @@ from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
+    AccountState,
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
@@ -16,6 +17,7 @@ from liquidity_migration.account_kernel import (
     read_account_journal,
 )
 from liquidity_migration.account_strategy_state import (
+    canonical_account_projection,
     canonical_adverse_reduction_events,
     canonical_component_execution_anchors,
     canonical_entry_attempts,
@@ -1085,10 +1087,34 @@ def test_terminal_group_reduction_projects_one_account_pnl_event(
     adverse = canonical_adverse_reduction_events(root, sleeve="long")
     assert [event.pnl_key for event in adverse] == [reduction.pnl_key]
     event_snapshot = read_account_journal(root, verify=True)
+    shared_projection = canonical_account_projection(
+        root,
+        account_events=event_snapshot,
+        trusted_account_state=kernel._state_ref(),
+    )
+    replayed_projection = canonical_account_projection(
+        root,
+        account_events=event_snapshot,
+    )
+    assert shared_projection.accepted_batches == replayed_projection.accepted_batches
+    assert shared_projection.quantity_tolerance == replayed_projection.quantity_tolerance
+    assert shared_projection.component_revisions == replayed_projection.component_revisions
+    assert shared_projection.execution_anchors == replayed_projection.execution_anchors
+    with pytest.raises(RuntimeError, match="does not match"):
+        canonical_account_projection(
+            root,
+            account_events=event_snapshot,
+            trusted_account_state=AccountState(),
+        )
     indexed_anchors = canonical_component_execution_anchors(
         root,
         sleeve="long",
         account_events=event_snapshot,
+    )
+    assert indexed_anchors == canonical_component_execution_anchors(
+        root,
+        sleeve="long",
+        account_projection=shared_projection,
     )
     assert indexed_anchors == canonical_component_execution_anchors(
         root,
@@ -1123,6 +1149,12 @@ def test_terminal_group_reduction_projects_one_account_pnl_event(
     )
 
     rows = canonical_strategy_trade_rows(root, sleeve="long").sort("trade_id")
+    shared_rows = canonical_strategy_trade_rows(
+        root,
+        sleeve="long",
+        account_projection=shared_projection,
+    ).sort("trade_id")
+    assert shared_rows.equals(rows)
     assert rows["status"].to_list() == ["closed", "closed"]
     assert rows["exit_target_ts_ms"].to_list() == [4_000, 4_000]
     assert rows["exit_ts_ms"].to_list() == [5_000, 5_000]
