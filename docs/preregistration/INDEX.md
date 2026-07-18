@@ -1,9 +1,9 @@
 # Preregistration Index
 
 No confirmatory outcome is active as of 2026-07-18. The first V2 cycle closed
-with no qualifying thesis and left its later holdout untouched. A new
-thesis-specific contract must be frozen before that surface is generated or
-read.
+with no qualifying thesis and left its later holdout untouched. An exploratory
+comparator/accounting repair is active; a new thesis-specific contract must be
+frozen before the holdout surface is generated or read.
 
 New decision-influencing work must follow
 `docs/parameter_pre_registration.md` and `docs/governance.md`: freeze the claim,
@@ -20,6 +20,7 @@ artifacts before inspecting affected outcomes.
 | Strategy Overhaul V2 completion cycle | `strategy_overhaul_v2_completion_cycle_2026-07-17.md` | Closed with no qualifying thesis; the registered holdout remains untouched |
 | Strategy Overhaul V2 Phase-3 replay recovery | `strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md` | Completed historical control record for the preserved flush-bound failure |
 | Strategy Overhaul V2 Phase-3 bounded account recovery | `strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md` | Completed: exact 100-key samples verify; full portfolio values remain explicitly not account-reconciled |
+| Strategy Overhaul V2 comparator/accounting repair | `strategy_overhaul_v2_comparator_accounting_repair_2026-07-18.md` | Active exploratory repair; holdout access forbidden until every matched-control and thesis-selection gate passes |
 
 ## Archived outcomes
 
