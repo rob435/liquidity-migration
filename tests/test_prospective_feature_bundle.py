@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 from polars.testing import assert_frame_equal
+import pytest
 
 from liquidity_migration.continuous_events import (
     continuous_source_decile_panel,
@@ -13,10 +14,34 @@ from scripts.build_prospective_feature_bundle import (
     FEATURE_SET,
     RMOM_QUANTILE,
     _continuous_chunk_features,
+    _validate_raw_klines,
 )
 
 HOUR_MS = 3_600_000
 DAY_MS = 86_400_000
+
+
+def test_raw_validation_allows_only_canonical_zero_volume_null_ohlc_padding() -> None:
+    padding = pl.DataFrame(
+        {
+            "ts_ms": [0],
+            "symbol": ["NEW"],
+            "date": ["1970-01-01"],
+            "open": [None],
+            "high": [None],
+            "low": [None],
+            "close": [None],
+            "turnover_quote": [0.0],
+            "volume_base": [0.0],
+        },
+        schema_overrides={column: pl.Float64 for column in ("open", "high", "low", "close")},
+    )
+    receipt = _validate_raw_klines(padding, tag="fixture")
+    assert receipt["canonical_leading_padding_rows"] == 1
+
+    partial = padding.with_columns(pl.lit(1.0).alias("close"))
+    with pytest.raises(RuntimeError, match="invalid structural"):
+        _validate_raw_klines(partial, tag="fixture")
 
 
 def test_continuous_chunk_carry_matches_monolithic_feature_owner() -> None:

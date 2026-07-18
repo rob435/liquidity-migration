@@ -303,24 +303,30 @@ def _verified_read(
     }
 
 
-def _validate_raw_klines(frame: pl.DataFrame, *, tag: str) -> None:
+def _validate_raw_klines(frame: pl.DataFrame, *, tag: str) -> dict[str, int]:
     missing = sorted(set(RAW_COLUMNS) - set(frame.columns))
     if missing:
         raise RuntimeError(f"{tag} klines missing required columns: {missing}")
     duplicate_count = frame.height - frame.select("symbol", "ts_ms").unique().height
     if duplicate_count:
         raise RuntimeError(f"{tag} klines have duplicate (symbol,ts_ms) keys: {duplicate_count}")
+    canonical_padding = pl.all_horizontal(
+        [pl.col(column).is_null() for column in ("open", "high", "low", "close")]
+    ) & (pl.col("turnover_quote") == 0.0) & (pl.col("volume_base") == 0.0)
     invalid = frame.filter(
         pl.col("symbol").is_null()
         | (pl.col("symbol").str.strip_chars() == "")
         | pl.col("ts_ms").is_null()
-        | pl.any_horizontal(
-            [
-                pl.col(column).is_null()
-                | ~pl.col(column).is_finite()
-                | (pl.col(column) <= 0.0)
-                for column in ("open", "high", "low", "close")
-            ]
+        | (
+            ~canonical_padding
+            & pl.any_horizontal(
+                [
+                    pl.col(column).is_null()
+                    | ~pl.col(column).is_finite()
+                    | (pl.col(column) <= 0.0)
+                    for column in ("open", "high", "low", "close")
+                ]
+            )
         )
         | pl.col("turnover_quote").is_null()
         | ~pl.col("turnover_quote").is_finite()
@@ -331,6 +337,12 @@ def _validate_raw_klines(frame: pl.DataFrame, *, tag: str) -> None:
     )
     if not invalid.is_empty():
         raise RuntimeError(f"{tag} klines contain invalid structural/numeric rows: {invalid.height}")
+    return {
+        "rows": frame.height,
+        "duplicate_keys": duplicate_count,
+        "canonical_leading_padding_rows": frame.filter(canonical_padding).height,
+        "invalid_rows": 0,
+    }
 
 
 def _frame_summary(frame: pl.DataFrame, *, keys: Sequence[str]) -> dict[str, Any]:
@@ -411,6 +423,7 @@ def _validate_identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
     contract_sha = _sha256(contract)
     snapshot_receipt_sha = _sha256(snapshot_receipt_path)
     reconstruction_receipt_sha = _sha256(reconstruction_receipt_path)
+    amendments = [path.expanduser().resolve(strict=True) for path in args.amendment]
     container_sha = _sha256(container)
     if contract_sha != snapshot.get("contract_sha256"):
         raise RuntimeError("contract bytes do not match the snapshot receipt")
@@ -438,6 +451,9 @@ def _validate_identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "container_sha256": container_sha,
         "snapshot": snapshot,
         "reconstruction": reconstruction,
+        "amendments": [
+            {"path": str(path), "sha256": _sha256(path)} for path in amendments
+        ],
     }
 
 
@@ -447,6 +463,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-receipt", type=Path, required=True)
     parser.add_argument("--reconstruction-receipt", type=Path, required=True)
     parser.add_argument("--contract", type=Path, required=True)
+    parser.add_argument(
+        "--amendment",
+        type=Path,
+        action="append",
+        default=[],
+        help="Append-only preregistration amendment; repeat in registration order.",
+    )
     parser.add_argument("--start", type=dt.date.fromisoformat, required=True)
     parser.add_argument("--end", type=dt.date.fromisoformat, required=True)
     parser.add_argument("--out", type=Path, required=True)
@@ -485,6 +508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "snapshot_receipt_sha256": identities["snapshot_receipt_sha256"],
         "reconstruction_receipt_sha256": identities["reconstruction_receipt_sha256"],
         "container_sha256": identities["container_sha256"],
+        "amendments": identities["amendments"],
         "raw_window": {"start": raw_start.isoformat(), "end_exclusive": args.end.isoformat()},
         "feature_window": {"start": args.start.isoformat(), "end_exclusive": args.end.isoformat()},
         "chunk_days": args.chunk_days,
@@ -505,7 +529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(preflight, sort_keys=True))
         return 0
 
-    work = output.with_name(f".{output.name}.working")
+    work = output.with_name(f".{output.name}.working-{run_identity_sha[:12]}")
     work.mkdir(parents=True, exist_ok=True)
     checkpoint_path = work / "build_checkpoint.json"
     if checkpoint_path.exists():
@@ -547,7 +571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 start=chunk_start,
                 end=chunk_end,
             )
-            _validate_raw_klines(raw, tag=tag)
+            raw_validation = _validate_raw_klines(raw, tag=tag)
             coverage = raw.group_by(["date", "symbol"]).agg(pl.len().alias("hourly_bars"))
             filtered, pit_receipt = filter_klines_to_pit_membership(raw, manifest)
             pit_pairs = filtered.select("date", "symbol").unique().sort(["date", "symbol"])
@@ -570,6 +594,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             checkpoint["daily_chunks"][tag] = {
                 "input_identity": input_identity,
+                "raw_validation": raw_validation,
                 "pit_filter": pit_receipt,
                 "files": {
                     name: {
@@ -799,7 +824,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             first_identity = checkpoint["daily_chunks"][tag]["input_identity"]
             if second_identity != first_identity:
                 raise RuntimeError(f"second verified input read changed for {tag}")
-            _validate_raw_klines(raw, tag=tag)
+            second_raw_validation = _validate_raw_klines(raw, tag=tag)
+            if second_raw_validation != checkpoint["daily_chunks"][tag]["raw_validation"]:
+                raise RuntimeError(f"second raw-validation receipt changed for {tag}")
             filtered, second_pit = filter_klines_to_pit_membership(raw, manifest)
             first_pit = checkpoint["daily_chunks"][tag]["pit_filter"]
             if second_pit != first_pit:
