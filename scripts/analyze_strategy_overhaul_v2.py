@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze the registered V2 discovery tape and build its barebones portfolio.
-
-The command consumes only the prospectively frozen discovery partitions.  Its
-preflight is outcome-blind.  Build mode opens the registered label columns only
-after structural and raw-input identities pass, then writes the four declared
-Phase-3 payloads atomically.
-"""
+"""Analyze the registered V2 discovery tape and build its barebones portfolio."""
 
 # ruff: noqa: E402
 
@@ -82,9 +76,13 @@ NOTIONAL_WEIGHT = NOTIONAL_USD / CAPITAL_USD
 COMPLETION_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_completion_cycle_2026-07-17.md"
 BASE_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md"
 RECOVERY_CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md"
+BUFFERED_RECOVERY_CONTRACT = (
+    REPO / "docs/preregistration/strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md"
+)
 EXPECTED_COMPLETION_CONTRACT_SHA256 = "702ab2e84e0c6acdc5c14acd251a60a63f8fdca68928b0109b2d440999876cc8"
 EXPECTED_BASE_CONTRACT_SHA256 = "9b522bb09bc08e36eb8cdddcbc47d915fc580499895879c2d10070b4fe090879"
 EXPECTED_RECOVERY_CONTRACT_SHA256 = "d572818f7098a4ffda52c325881a98e49ed952b01b626c4e478c5288cb580095"
+EXPECTED_BUFFERED_RECOVERY_CONTRACT_SHA256 = "b9e3892d96daaa60617e0ea9b5dbde68a78bae9b55c619eae5d1cd52d3f282e6"
 EXPECTED_CANDIDATE_COMMIT = "fefb7b5c4fdd225c45540760488e38c94ec111a7"
 HORIZONS = (1, 6, 24, 72)
 
@@ -1014,6 +1012,8 @@ def _apply_funding(
 
 
 _PORTABLE_ACCOUNT_MUTEX = threading.RLock()
+_ORIGINAL_ACCOUNT_WRITE_TRANSACTION = account_kernel_module._write_transaction
+_PORTABLE_TRANSACTION_BUFFER: list[tuple[Path, tuple[Any, ...]]] = []
 
 
 @contextlib.contextmanager
@@ -1024,57 +1024,38 @@ def _portable_account_lock(*_args: object, **_kwargs: object) -> Iterator[None]:
 
 def _portable_atomic_replace(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(str(temporary), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
-    try:
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
-                raise OSError("portable account write made no progress")
-            offset += written
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+    if path.write_bytes(data) != len(data):
+        raise OSError("portable account write made no progress")
 
 
-def _portable_append_projection(
-    root: str | Path,
-    *,
-    existing: Sequence[Any],
-    appended: Sequence[Any],
-) -> None:
-    if not appended:
-        return
-    path = account_kernel_module.account_journal_path(root)
-    expected = existing[-1].event_hash if existing else ""
-    actual = account_kernel_module._projection_last_event_hash(path) if path.exists() else ""
-    if actual != expected:
-        _portable_atomic_replace(
-            path,
-            b"".join(canonical_json(event.to_dict()) + b"\n" for event in [*existing, *appended]),
-        )
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    try:
-        for event in appended:
-            data = canonical_json(event.to_dict()) + b"\n"
-            offset = 0
-            while offset < len(data):
-                written = os.write(descriptor, data[offset:])
-                if written <= 0:
-                    raise OSError("portable account append made no progress")
-                offset += written
-    finally:
-        os.close(descriptor)
+def _portable_buffer_transaction(root: str | Path, events: Sequence[Any]) -> Path:
+    if not events:
+        raise ValueError("cannot buffer an empty account transaction")
+    directory = account_kernel_module.account_transactions_path(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    batch = tuple(events)
+    _PORTABLE_TRANSACTION_BUFFER.append((Path(root), batch))
+    return directory / f"{batch[0].sequence:020d}-{batch[-1].sequence:020d}.buffered"
 
 
 def _enable_portable_account_io() -> None:
     setattr(account_kernel_module, "exclusive_file_lock", _portable_account_lock)
     setattr(account_kernel_module, "_atomic_replace", _portable_atomic_replace)
-    setattr(account_kernel_module, "_append_jsonl_projection", _portable_append_projection)
+    setattr(account_kernel_module, "_write_transaction", _portable_buffer_transaction)
+    setattr(account_kernel_module, "_append_jsonl_projection", lambda *_args, **_kwargs: None)
     setattr(replay_module, "JsonlStrategyEventTape", lambda _path: MemoryStrategyEventTape())
+
+
+def _account_sample(ledger: pl.DataFrame) -> pl.DataFrame:
+    selected: list[pl.DataFrame] = []
+    for sleeve in ("long", "continuous"):
+        part = ledger.filter(pl.col("sleeve") == sleeve)
+        keys = sorted(
+            (str(value) for value in part["source_key"]),
+            key=lambda key: (hashlib.sha256(key.encode("utf-8")).hexdigest(), key),
+        )[:100]
+        selected.append(part.filter(pl.col("source_key").is_in(keys)))
+    return pl.concat(selected, how="vertical", rechunk=True)
 
 
 def _replay_account(
@@ -1084,6 +1065,8 @@ def _replay_account(
     long_costs: CostConfig,
 ) -> dict[str, Any]:
     _enable_portable_account_io()
+    if _PORTABLE_TRANSACTION_BUFFER:
+        raise RuntimeError("portable transaction buffer was not empty at replay start")
     output: dict[str, Any] = {}
     for sleeve in ("long", "continuous"):
         part = ledger.filter(pl.col("sleeve") == sleeve).sort(["entry_ts_ms", "symbol"])
@@ -1178,7 +1161,16 @@ def _replay_account(
         }
         if nonflat:
             raise RuntimeError(f"{sleeve} account replay ended non-flat: {nonflat}")
+        for transaction_root, buffered_events in _PORTABLE_TRANSACTION_BUFFER:
+            if transaction_root != account_root:
+                raise RuntimeError("portable transaction buffer crossed account roots")
+            _ORIGINAL_ACCOUNT_WRITE_TRANSACTION(account_root, buffered_events)
+        _PORTABLE_TRANSACTION_BUFFER.clear()
         events = read_account_journal(account_root, verify=True)
+        _portable_atomic_replace(
+            account_kernel_module.account_journal_path(account_root),
+            b"".join(canonical_json(event.to_dict()) + b"\n" for event in events),
+        )
         event_counts: dict[str, int] = {}
         for event in events:
             event_counts[event.event_type] = event_counts.get(event.event_type, 0) + 1
@@ -1194,7 +1186,7 @@ def _replay_account(
             "expected_fills": expected_fills,
             "event_counts": event_counts,
             "strategy_event_tape_hash": None if recorder is None else recorder.tape_hash,
-            "portable_boundary": "single_process_mutex_atomic_replace_append_no_fsync",
+            "portable_boundary": "single_process_buffered_direct_materialization_no_durability",
             "final_flat": True,
         }
     return output
@@ -1431,12 +1423,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     contract = args.contract.expanduser().resolve(strict=True)
     base_contract = args.base_contract.expanduser().resolve(strict=True)
     recovery_contract = RECOVERY_CONTRACT.resolve(strict=True)
+    buffered_recovery_contract = BUFFERED_RECOVERY_CONTRACT.resolve(strict=True)
     if _sha256(contract) != EXPECTED_COMPLETION_CONTRACT_SHA256:
         raise RuntimeError("completion contract identity differs from the registered bytes")
     if _sha256(base_contract) != EXPECTED_BASE_CONTRACT_SHA256:
         raise RuntimeError("base diagnostic contract identity differs from the registered bytes")
     if _sha256(recovery_contract) != EXPECTED_RECOVERY_CONTRACT_SHA256:
         raise RuntimeError("recovery contract identity differs from the registered bytes")
+    if _sha256(buffered_recovery_contract) != EXPECTED_BUFFERED_RECOVERY_CONTRACT_SHA256:
+        raise RuntimeError("buffered recovery contract identity differs from the registered bytes")
     started = time.perf_counter()
     manifests = _load_candidate_manifests(candidate_root)
     funnel, _label_structure, structural = _structural_frames(candidate_root)
@@ -1452,6 +1447,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "base_contract_sha256": _sha256(base_contract),
         "recovery_contract": str(recovery_contract),
         "recovery_contract_sha256": _sha256(recovery_contract),
+        "buffered_recovery_contract": str(buffered_recovery_contract),
+        "buffered_recovery_contract_sha256": _sha256(buffered_recovery_contract),
         "candidate_manifests": len(manifests),
         "candidate_manifest_file_sha256": [
             _sha256(_manifest_path(candidate_root, month)) for month, _start, _end in _month_specs()
@@ -1534,11 +1531,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if work.exists():
         raise FileExistsError(f"analysis working directory already exists: {work}")
     work.mkdir(parents=True)
+    account_sample = _account_sample(ledger)
     account = _replay_account(
-        ledger,
+        account_sample,
         work_root=work,
         long_costs=long_costs,
     )
+    for sleeve in ("long", "continuous"):
+        full_part = ledger.filter(pl.col("sleeve") == sleeve)
+        sample_part = account_sample.filter(pl.col("sleeve") == sleeve)
+        sample_identity = hashlib.sha256(
+            canonical_json({"source_keys": sorted(str(value) for value in sample_part["source_key"])})
+        ).hexdigest()
+        account[sleeve].update(
+            scope="bounded_key_sample_100_per_sleeve",
+            full_ledger_trades=full_part.height,
+            sampled_trades=sample_part.height,
+            sample_source_keys_sha256=sample_identity,
+        )
     portfolio = _portfolio_summary(ledger, curve, portfolio_stats, account)
     median_continuous_cost = float(
         characteristics["decorated_frame"].filter(pl.col("sleeve") == "continuous")["modeled_cost_bps"].median()
@@ -1588,6 +1598,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CONTINUOUS current-profile thesis selection is disabled by invalid RMOM provenance",
                 "historical costs are modeled, not calibrated execution TCA",
                 "portable account I/O proves neither crash/POSIX durability nor deployment parity",
+                "full ledger/curve values are not exhaustively account-replayed; account proof is a key-only sample",
                 "no demo, mainnet, size, capital, or real-money authority",
             ],
         }
@@ -1624,7 +1635,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "portfolio_kline_files_read": len(kline_files),
             "portfolio_kline_identity_covered_by_candidate_manifests": True,
             "account_transaction_identity": account_identity,
-            "portable_account_boundary": "single_process_mutex_atomic_replace_append_no_fsync",
+            "account_scope": "bounded_key_sample_100_per_sleeve",
+            "account_sample_source_keys_sha256": {
+                sleeve: account[sleeve]["sample_source_keys_sha256"] for sleeve in ("long", "continuous")
+            },
+            "portable_account_boundary": "single_process_buffered_direct_materialization_no_durability",
             "crash_durability_claim": False,
         }
         manifest_payload: dict[str, Any] = {

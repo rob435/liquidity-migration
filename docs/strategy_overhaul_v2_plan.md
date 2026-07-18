@@ -102,6 +102,17 @@ one exact retry may remove only those crash-durability flushes, must retain and
 verify the complete account event/hash chain, and has a 45-minute stop so total
 Phase-3 analysis compute remains below two hours.
 
+The no-`fsync` retry remained too slow in dense periods and was stopped before
+its cap without inspecting performance. A synthetic stress check then exposed
+superlinear production state/hash cost that cannot fit the remaining stop. The
+final prospective recovery is
+`docs/preregistration/strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md`:
+it freezes a key-only 100-trade sample per sleeve, buffers those exact kernel
+transactions, and materializes their canonical files/projection once before
+full verification. Full portfolio values remain model-based rather than
+account-reconciled. Its 24-minute stop keeps all Phase-3 analysis attempts
+cumulatively below two hours; no fourth attempt is authorized.
+
 ## Phase 0 — Rebaseline (closed)
 
 Deliverable: `docs/research_rebaseline_2026-07-16.md`.

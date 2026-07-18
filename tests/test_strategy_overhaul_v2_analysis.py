@@ -11,6 +11,7 @@ from liquidity_migration.config import CostConfig
 from scripts.analyze_strategy_overhaul_v2 import (
     CAPITAL_USD,
     ContinuousEventConfig,
+    _account_sample,
     _path_estimate,
     _quartile_contrast,
     _replay_account,
@@ -58,6 +59,23 @@ def test_quartile_contrast_uses_frozen_high_minus_low_direction() -> None:
     assert result["status"] == "estimated"
     assert result["return_24h"]["effect_high_minus_low"] > 0.0
     assert result["q75"] > result["q25"]
+
+
+def test_account_sample_is_bounded_and_key_only() -> None:
+    frame = pl.from_dicts(
+        [
+            {"source_key": f"source-{index}", "sleeve": sleeve, "return_24h": float(index)}
+            for sleeve in ("long", "continuous")
+            for index in range(120)
+        ]
+    )
+    changed = frame.with_columns((pl.col("return_24h") * -1000.0).alias("return_24h"))
+
+    selected = _account_sample(frame)
+    changed_selected = _account_sample(changed)
+
+    assert selected.group_by("sleeve").len()["len"].to_list() == [100, 100]
+    assert set(selected["source_key"]) == set(changed_selected["source_key"])
 
 
 def _write_hourly_fixture(root: Path, start: dt.datetime, hours: int) -> None:
@@ -175,4 +193,6 @@ def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path, mo
     assert receipt["long"]["expected_fills"] == 2
     assert receipt["continuous"]["expected_fills"] == 2
     assert receipt["long"]["events"] > 0
+    assert receipt["long"]["transactions"] > 0
+    assert (tmp_path / "account-work" / "account-long" / "account_journal" / "events.jsonl").is_file()
     assert CAPITAL_USD == 1_000_000.0
