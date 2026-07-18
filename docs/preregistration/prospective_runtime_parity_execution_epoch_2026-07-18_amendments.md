@@ -84,3 +84,56 @@ account journal/state identities. They may compare the runtime transcript with
 the legacy historical engine only as a labelled diagnostic; a mismatch cannot
 be silently repaired, pooled away, or interpreted as alpha. No return, thesis,
 profile, deployment, mainnet, or real-money conclusion is authorized.
+
+## Amendment 6: chronological account port and terminal boundary
+
+Registered 2026-07-18 after the production-function ownership trace and the
+request-identity replay repair, but before the comparator generated or
+inspected any active historical source decision, target, lifecycle, return, or
+P&L transcript.
+
+The historical port has no evidence for sub-hour daemon interleaving or a live
+ticker between frozen bars. It therefore uses one declared chronological
+schedule rather than inventing timing from thread or filesystem order. At each
+whole-hour boundary it (1) presents that hour's frozen close to the production
+account-protection owner and immediately processes any resulting risk-owned
+zero targets, (2) runs the production LONG planner and immediately processes
+its exit-first publication, then (3) runs the production CONTINUOUS planner and
+immediately processes its exit-first, independently published component
+requests. Nanosecond request ordinals remain those produced by the publication
+owner. This is a deterministic comparator tie-break, not a claim that the two
+live producer daemons always arrive in that order; the forward capture owns
+actual interleaving.
+
+Other historical ports are frozen as follows:
+
+- the price available at boundary `T` is the close of the complete hourly bar
+  starting at `T-1h`; missing required prices fail the affected run rather than
+  carrying a stale mark;
+- the CONTINUOUS 240-day age gate uses the first directly observed public
+  archive membership date from the run-scoped PIT manifest, evaluated at the
+  deciding bar date. Current launch-time metadata is not projected backward;
+- LONG and CONTINUOUS share one deterministic USD 1,000,000 account, matching
+  the deployed ownership topology. The account risk policy is deliberately
+  non-binding (`10x` component/symbol, `100x` account/initial-margin, maximum
+  leverage `10`) so this run tests the production sequencer rather than
+  reverse-engineering an unavailable historical operator policy;
+- the historical instrument port uses `1e-12` price and quantity grids,
+  effectively unlimited displayed size, zero latency, zero modeled fee, zero
+  funding, and exact close-price fills. Those fields and their hashes remain in
+  the account evidence, but they support no venue-rule, cost, capacity,
+  slippage, or economic conclusion; and
+- after the last eligible source decision, hourly protection and strategy
+  deadlines continue only through the frozen raw-data boundary. Any component
+  still nonzero is then replaced by an explicit risk-owned
+  `comparator_boundary_flat` target at its last available frozen close. These
+  terminal targets are retained and counted, are excluded from strategy source
+  decisions and forward-parity support, and exist only to make journal,
+  lifecycle, attribution, and final-flatness checks total.
+
+The comparator retains the frozen source-population identities, row-level
+static/dynamic gate trace, source decisions, publication order and content
+hashes, BTC-risk chain, canonical lifecycle projection, and verified account
+hash chain. Validation may inspect discrete structure, coverage, identities,
+and flatness only. Monetary P&L, returns, equity curves, and trade-outcome
+ranking remain unopened under this engineering contract.
