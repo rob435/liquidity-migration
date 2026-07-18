@@ -78,13 +78,16 @@ legacy features, reports, locks, caches, or prior backtest outputs:
 ```text
 archive_trade_manifest
 klines_1h
-klines_5m                 when present in the declared window
-funding
-open_interest
-mark_price_1h
-index_price_1h
-premium_index_1h
 ```
+
+The manifest owns PIT membership before ranks and `klines_1h` owns every
+historical feature/source decision in this contract. Historical `klines_5m`
+cannot establish exact runtime intrabar state because its coverage is
+incomplete; forward target captures own that parity surface. Funding, OI,
+mark/index/premium, legacy features, and historical report bytes are excluded
+because no registered input-reconstruction, target-parity, full-ledger, or TCA
+decision here consumes them. A later net-economic claim must freeze its own
+raw funding/cost/capacity inputs before analysis.
 
 The implementation stores file bytes and a sorted logical manifest in a
 create-only content container. Every row records normalized relative path,
@@ -263,3 +266,19 @@ deltas after public refresh. Incomplete five-minute coverage remains explicit
 and cannot support exact historical intrabar-entry parity; that aspect is
 tested on forward target captures. No decision rule, tolerance, model, or
 forward horizon changed.
+
+## Pre-exposure amendment 3: claim-owned dataset set
+
+Registered 2026-07-18 14:01 UTC after a path/size-only plan and before any raw
+file content, feature, target, return, or P&L was read. The initial broad plan
+contained 3,516,105 files and 16,482,772,249 bytes. Consumer tracing established
+that only `archive_trade_manifest` (2,016 files, 17,652,046 bytes) and
+`klines_1h` (526,544 files, 2,478,783,708 bytes) feed a registered baseline
+claim. The 477,942 incomplete five-minute files do not reconstruct exact
+intrabar runtime state; the five ancillary datasets feed no feature, parity,
+ledger, or TCA decision in this epoch. They are therefore removed before
+content capture under the contract's existing claim-consumed-input rule.
+Forward target captures own intrabar parity, canonical journals/books/markouts
+own TCA, and any later economic study must register and freeze ancillary bytes
+separately. This amendment changes no outcome, tolerance, model, or forward
+clock.
