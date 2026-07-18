@@ -201,6 +201,7 @@ def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | N
 
 def _write_signal_atomic(path: Path, sig: pl.DataFrame) -> None:
     # Atomic write: a killed/failed refresh must not leave a torn parquet that the live join reads.
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         sig.write_parquet(tmp_path)
@@ -279,12 +280,12 @@ def _assert_append_overlap_matches(
 def _append_signal(
     root: Path,
     *,
+    out_path: Path,
     existing: pl.DataFrame,
     end: str,
     klines_dataset: str | None,
     append_overlap_days: int,
 ) -> int:
-    out_path = root / "residual_momentum.parquet"
     if append_overlap_days < 1:
         raise ValueError("append_overlap_days must be positive")
     _validate_rmom_schema(existing, path=out_path)
@@ -346,11 +347,13 @@ def precompute(
     klines_dataset: str | None = None,
     append: bool = True,
     append_overlap_days: int = DEFAULT_APPEND_OVERLAP_DAYS,
+    output_path: Path | None = None,
 ) -> int:
-    out_path = root / "residual_momentum.parquet"
+    out_path = output_path or (root / "residual_momentum.parquet")
     if append and out_path.exists():
         return _append_signal(
             root,
+            out_path=out_path,
             existing=pl.read_parquet(out_path),
             end=end,
             klines_dataset=klines_dataset,
@@ -389,9 +392,18 @@ def main() -> int:
         default=DEFAULT_APPEND_OVERLAP_DAYS,
         help="Existing trailing days to recompute and compare before appending new residual_momentum rows.",
     )
+    ap.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Explicit output parquet for a single root; useful for immutable run-scoped research artifacts.",
+    )
     args = ap.parse_args()
     end = args.end or _default_end()
     roots = [Path(r).expanduser() for r in args.root] if args.root else DEFAULT_ROOTS
+    if args.output is not None and len(roots) != 1:
+        ap.error("--output requires exactly one --root")
+    output_path = args.output.expanduser().resolve() if args.output is not None else None
     for root in roots:
         if not root.exists():
             print(f"[skip] {root} not found")
@@ -403,6 +415,7 @@ def main() -> int:
             klines_dataset=args.klines_dataset,
             append=not args.full_rewrite,
             append_overlap_days=args.append_overlap_days,
+            output_path=output_path,
         )
     print("DONE precompute_residual_momentum", flush=True)
     return 0

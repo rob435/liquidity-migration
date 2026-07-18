@@ -376,6 +376,30 @@ def test_precompute_append_refuses_table_without_provenance(
     assert path.read_bytes() == before
 
 
+def test_precompute_explicit_output_does_not_replace_shared_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_residual_inputs(monkeypatch)
+    shared_path = tmp_path / "residual_momentum.parquet"
+    shared_bytes = b"legacy-shared-rmom"
+    shared_path.write_bytes(shared_bytes)
+    run_path = tmp_path / "research-run" / "residual_momentum.parquet"
+
+    rows = MOD.precompute(
+        tmp_path,
+        start="2025-01-01",
+        end="2025-02-01",
+        klines_dataset="klines_1h",
+        append=False,
+        output_path=run_path,
+    )
+
+    assert rows > 0
+    assert run_path.exists()
+    assert "is_provisional" in pl.read_parquet(run_path).columns
+    assert shared_path.read_bytes() == shared_bytes
+
+
 def test_precompute_append_refuses_overlap_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_residual_inputs(monkeypatch)
     MOD.precompute(

@@ -1013,6 +1013,7 @@ def _apply_funding(
 _PORTABLE_ACCOUNT_MUTEX = threading.RLock()
 _ORIGINAL_ACCOUNT_WRITE_TRANSACTION = account_kernel_module._write_transaction
 _PORTABLE_TRANSACTION_BUFFER: list[tuple[Path, tuple[Any, ...]]] = []
+PORTABLE_SEGMENT_MAX_EVENTS = 4096
 
 
 @contextlib.contextmanager
@@ -1035,6 +1036,52 @@ def _portable_buffer_transaction(root: str | Path, events: Sequence[Any]) -> Pat
     batch = tuple(events)
     _PORTABLE_TRANSACTION_BUFFER.append((Path(root), batch))
     return directory / f"{batch[0].sequence:020d}-{batch[-1].sequence:020d}.buffered"
+
+
+def _materialize_portable_transactions(account_root: Path) -> dict[str, Any]:
+    """Persist buffered whole kernel batches in bounded compact segments.
+
+    Event order and hashes are unchanged.  Grouping consecutive whole batches
+    avoids tens of thousands of tiny Windows files while the boundary hash
+    keeps the original kernel transaction partition reconstructable.
+    """
+
+    batches: list[tuple[Any, ...]] = []
+    for transaction_root, buffered_events in _PORTABLE_TRANSACTION_BUFFER:
+        if transaction_root != account_root:
+            raise RuntimeError("portable transaction buffer crossed account roots")
+        batches.append(buffered_events)
+    if not batches:
+        raise RuntimeError("portable transaction buffer is empty at materialization")
+    boundaries = [
+        {
+            "first_sequence": int(batch[0].sequence),
+            "last_sequence": int(batch[-1].sequence),
+            "events": len(batch),
+            "first_event_hash": str(batch[0].event_hash),
+            "last_event_hash": str(batch[-1].event_hash),
+        }
+        for batch in batches
+    ]
+    boundary_sha256 = hashlib.sha256(canonical_json({"boundaries": boundaries})).hexdigest()
+    compact_segments = 0
+    current: list[Any] = []
+    for batch in batches:
+        if current and len(current) + len(batch) > PORTABLE_SEGMENT_MAX_EVENTS:
+            _ORIGINAL_ACCOUNT_WRITE_TRANSACTION(account_root, current)
+            compact_segments += 1
+            current = []
+        current.extend(batch)
+    if current:
+        _ORIGINAL_ACCOUNT_WRITE_TRANSACTION(account_root, current)
+        compact_segments += 1
+    _PORTABLE_TRANSACTION_BUFFER.clear()
+    return {
+        "original_kernel_transactions": len(batches),
+        "compact_authoritative_segments": compact_segments,
+        "original_transaction_boundaries_sha256": boundary_sha256,
+        "max_events_per_compact_segment": PORTABLE_SEGMENT_MAX_EVENTS,
+    }
 
 
 def _enable_portable_account_io() -> None:
@@ -1160,11 +1207,7 @@ def _replay_account(
         }
         if nonflat:
             raise RuntimeError(f"{sleeve} account replay ended non-flat: {nonflat}")
-        for transaction_root, buffered_events in _PORTABLE_TRANSACTION_BUFFER:
-            if transaction_root != account_root:
-                raise RuntimeError("portable transaction buffer crossed account roots")
-            _ORIGINAL_ACCOUNT_WRITE_TRANSACTION(account_root, buffered_events)
-        _PORTABLE_TRANSACTION_BUFFER.clear()
+        persistence = _materialize_portable_transactions(account_root)
         events = read_account_journal(account_root, verify=True)
         _portable_atomic_replace(
             account_kernel_module.account_journal_path(account_root),
@@ -1181,6 +1224,7 @@ def _replay_account(
         recorder = session.event_clock.recorder if session.event_clock is not None else None
         output[sleeve] = {
             **receipt,
+            **persistence,
             "decisions": accepted_decisions,
             "expected_fills": expected_fills,
             "event_counts": event_counts,

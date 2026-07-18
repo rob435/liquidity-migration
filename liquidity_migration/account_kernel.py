@@ -885,7 +885,7 @@ def _projection_last_event_hash(path: Path) -> str:
 def _append_jsonl_projection(
     root: str | Path,
     *,
-    existing: Sequence[AccountEvent],
+    expected_previous_hash: str,
     appended: Sequence[AccountEvent],
 ) -> None:
     """Append the rebuildable projection, repairing it after an interrupted write.
@@ -898,10 +898,12 @@ def _append_jsonl_projection(
     if not appended:
         return
     path = account_journal_path(root)
-    expected_previous = existing[-1].event_hash if existing else ""
     actual_previous = _projection_last_event_hash(path) if path.exists() else ""
-    if actual_previous != expected_previous:
-        _write_jsonl_projection(root, [*existing, *appended])
+    if actual_previous != expected_previous_hash:
+        # Transaction segments are already authoritative at this point. Read
+        # them only on the exceptional repair path instead of carrying and
+        # copying the complete prior event list through every ordinary append.
+        _write_jsonl_projection(root, read_account_journal(root, verify=True))
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     created = not path.exists()
@@ -1019,13 +1021,19 @@ class AccountJournal:
             # lets concurrent readers continue to see the prior committed
             # snapshot; they can never observe the prospective reducer state.
             with self._cache_lock:
-                existing = list(self._events_ref())
+                existing = self._events_ref()
                 committed_state = self._state_ref()
-                existing_by_id = dict(self._cached_events_by_id or {event.event_id: event for event in existing})
+                existing_by_id = self._cached_events_by_id
+                if existing_by_id is None:
+                    existing_by_id = {event.event_id: event for event in existing}
+                    self._cached_events_by_id = existing_by_id
                 storage_signature = self._cached_signature
-            if existing and existing[0].account_id != self.account_id:
+                existing_count = len(existing)
+                existing_first_account_id = existing[0].account_id if existing else ""
+                existing_last_event_hash = existing[-1].event_hash if existing else GENESIS_HASH
+            if existing_first_account_id and existing_first_account_id != self.account_id:
                 raise AccountJournalIntegrityError(
-                    f"journal belongs to {existing[0].account_id!r}, not {self.account_id!r}"
+                    f"journal belongs to {existing_first_account_id!r}, not {self.account_id!r}"
                 )
             transaction_count = 0
             if storage_signature is not None and storage_signature[0] == "transactions":
@@ -1047,8 +1055,8 @@ class AccountJournal:
             normalized = [_normalized_spec(spec) for spec in specs]
             pending_by_id: dict[str, AccountEvent] = {}
             appended: list[AccountEvent] = []
-            next_sequence = len(existing) + 1
-            prev_hash = existing[-1].event_hash if existing else GENESIS_HASH
+            next_sequence = existing_count + 1
+            prev_hash = existing_last_event_hash
             for row in normalized:
                 duplicate = existing_by_id.get(str(row["event_id"])) or pending_by_id.get(str(row["event_id"]))
                 if duplicate is not None:
@@ -1087,11 +1095,7 @@ class AccountJournal:
                 prev_hash = event.event_hash
             if appended:
                 transaction_path = _write_transaction(self.root, appended)
-                prospective_events = [*existing, *appended]
-                prospective_events_by_id = {
-                    **existing_by_id,
-                    **{event.event_id: event for event in appended},
-                }
+                appended_by_id = {event.event_id: event for event in appended}
                 try:
                     transaction_mtime = transaction_path.parent.stat().st_mtime_ns
                 except OSError:
@@ -1106,15 +1110,47 @@ class AccountJournal:
                 # fields together only after it succeeds; failed writes leave
                 # the prior cache untouched.
                 with self._cache_lock:
-                    self._cached_events = prospective_events
-                    self._cached_events_by_id = prospective_events_by_id
+                    if self._cached_events is existing:
+                        # The usual single-writer path extends the committed
+                        # cache in place. Rebuilding two history-sized lists
+                        # and a history-sized ID map for every target made long
+                        # historical sessions quadratic in prior events.
+                        existing.extend(appended)
+                        self._cached_events = existing
+                    else:
+                        # A reader may have refreshed from the newly committed
+                        # segment between the durable write and this cache
+                        # publication. Keep that authoritative snapshot when
+                        # it already contains this exact transaction; the
+                        # fallback copy is concurrency-only, never the replay
+                        # hot path.
+                        refreshed = self._cached_events or []
+                        expected_count = existing_count + len(appended)
+                        if (
+                            len(refreshed) != expected_count
+                            or not refreshed
+                            or refreshed[-1].event_hash != appended[-1].event_hash
+                        ):
+                            refreshed = [*existing, *appended]
+                        self._cached_events = refreshed
+                    if self._cached_events_by_id is existing_by_id:
+                        existing_by_id.update(appended_by_id)
+                        self._cached_events_by_id = existing_by_id
+                    else:
+                        refreshed_by_id = self._cached_events_by_id or {
+                            event.event_id: event for event in self._cached_events
+                        }
+                        refreshed_by_id.update(appended_by_id)
+                        self._cached_events_by_id = refreshed_by_id
                     self._cached_signature = committed_signature
                     self._cached_state = prospective_state
                 # Rebuildable operator/tooling projection. If this fails, the
                 # transaction and published cache still agree on committed truth.
                 _append_jsonl_projection(
                     self.root,
-                    existing=existing,
+                    expected_previous_hash=(
+                        existing_last_event_hash if existing_count else ""
+                    ),
                     appended=appended,
                 )
             return appended

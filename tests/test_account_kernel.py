@@ -1011,6 +1011,41 @@ def test_account_journal_failed_write_does_not_publish_prospective_state(
     assert "prospective" not in observed_state.venue_snapshots
 
 
+def test_account_journal_extends_committed_cache_without_history_sized_recopy(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="snapshot-1",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=1,
+    )
+    cached_events = kernel.journal._cached_events
+    cached_ids = kernel.journal._cached_events_by_id
+    assert cached_events is not None
+    assert cached_ids is not None
+
+    kernel.record_venue_snapshot(
+        snapshot_key="snapshot-2",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=2,
+        local_receive_ts_ns=2,
+    )
+
+    assert kernel.journal._cached_events is cached_events
+    assert kernel.journal._cached_events_by_id is cached_ids
+    assert [
+        event.payload["snapshot_key"]
+        for event in read_account_journal(tmp_path)
+        if event.event_type == AccountEventType.VENUE_SNAPSHOT.value
+    ] == ["snapshot-1", "snapshot-2"]
+
+
 def test_account_risk_revalues_existing_components_at_current_market_input(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     tight = AccountRiskPolicy(

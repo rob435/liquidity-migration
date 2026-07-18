@@ -223,5 +223,8 @@ def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path, mo
     assert receipt["continuous"]["expected_fills"] == 2
     assert receipt["long"]["events"] > 0
     assert receipt["long"]["transactions"] > 0
+    assert receipt["long"]["original_kernel_transactions"] >= 2
+    assert receipt["long"]["compact_authoritative_segments"] == 1
+    assert len(receipt["long"]["original_transaction_boundaries_sha256"]) == 64
     assert (tmp_path / "account-work" / "account-long" / "account_journal" / "events.jsonl").is_file()
     assert CAPITAL_USD == 1_000_000.0
