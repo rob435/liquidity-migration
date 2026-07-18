@@ -12,6 +12,7 @@ from scripts.analyze_strategy_overhaul_v2 import (
     CAPITAL_USD,
     ContinuousEventConfig,
     _account_sample,
+    _candidate_scores,
     _path_estimate,
     _quartile_contrast,
     _replay_account,
@@ -76,6 +77,34 @@ def test_account_sample_is_bounded_and_key_only() -> None:
 
     assert selected.group_by("sleeve").len()["len"].to_list() == [100, 100]
     assert set(selected["source_key"]) == set(changed_selected["source_key"])
+
+
+def test_candidate_below_cost_cannot_qualify_on_other_scores() -> None:
+    support = {"sources": 500, "waves": 200, "dates": 150}
+    contrast = {
+        "status": "estimated",
+        "family": "signal_strength",
+        "field": "source_strength",
+        "return_24h": {
+            "effect_high_minus_low": -0.0035,
+            "block_ci_95": [-0.01, 0.002],
+            "low_support": support,
+            "high_support": support,
+        },
+        "early_return_24h": {"effect_high_minus_low": -0.0035},
+        "late_return_24h": {"effect_high_minus_low": -0.0035},
+    }
+    scores = _candidate_scores(
+        {"long": {"contrasts": [contrast]}, "continuous": {"contrasts": []}},
+        long_cost_return=0.0045,
+        continuous_cost_return=0.002,
+    )
+
+    candidate = scores["long"]["considered"][0]
+    assert candidate["total_score"] >= 6
+    assert candidate["economic_score"] == 0
+    assert candidate["eligible"] is False
+    assert scores["long"]["selected_mechanical_candidate"] is None
 
 
 def _write_hourly_fixture(root: Path, start: dt.datetime, hours: int) -> None:

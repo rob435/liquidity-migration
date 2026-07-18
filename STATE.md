@@ -102,3 +102,10 @@ The tracked hedge history is an immutable sizing-only model prior through
 2026-07-09. It is not live-extended calibration or performance evidence. No
 confirmatory research experiment is active, and no runtime status or paper
 result authorizes research promotion or real-money deployment.
+
+Research-only addendum, 2026-07-18: Strategy Overhaul V2 closed with no
+qualifying thesis and did not touch its reserved holdout. Its full diagnostic
+portfolios are model-based and negative after costs/funding; production account
+verification is a bounded 100-key sample per sleeve, not exhaustive parity.
+This changes no live/demo/paper authority or topology above. See
+`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`.

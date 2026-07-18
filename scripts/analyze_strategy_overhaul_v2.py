@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Analyze the registered V2 discovery tape and build its barebones portfolio."""
-
 # ruff: noqa: E402
 
 from __future__ import annotations
@@ -1324,7 +1323,8 @@ def _candidate_scores(
             prior_penalty = -2 if sleeve == "continuous" and item["family"] == "regime" else 0
             regime_no_change = sleeve == "long" and item["family"] == "regime" and effect >= 0.0
             total = 2 + support_score + economic_score + temporal_score + 1 + prior_penalty
-            eligible = total >= 6 and support_score >= 1 and not regime_no_change and sleeve != "continuous"
+            selection_blocked = economic_score == 0 or regime_no_change or sleeve == "continuous"
+            eligible = total >= 6 and support_score >= 1 and not selection_blocked
             rows.append(
                 {
                     "family": item["family"],
@@ -1342,6 +1342,8 @@ def _candidate_scores(
                     "ineligible_reason": (
                         "current profile comparator unavailable: invalid RMOM provenance"
                         if sleeve == "continuous"
+                        else "effect does not exceed modeled cost"
+                        if economic_score == 0
                         else "no profile change when the active regime side is favored"
                         if regime_no_change
                         else None

@@ -44,9 +44,9 @@ deploy references, and tests.
 | Venue execution boundary | `account_service_bybit.py`, `account_execution_stream.py`, `bybit_execution_adapter.py`, `bybit_market_data.py`, `execution_adapters.py` | Account-service Bybit, execution-stream, market-data-boundary, and adapter-facing tests |
 | Market capture and liveness | `market_capture.py`, `ws_state_cache.py`, `account_owner_health.py`, `account_owner_readiness.py`, `strategy_cycle_health.py`, `run_diagnostics.py` | Capture, cache, owner health/readiness, strategy-completion, diagnostics, and liveness-script tests |
 | Operations and deployment | `scripts/ops.sh`, guarded runtime/deploy scripts, `deploy/systemd/`, `.github/workflows/vps-deploy.yml` | Runtime-script and ops tests; `docs/operations.md`, `deploy/systemd/README.md`, `STATE.md` |
-| Research integrity and reporting | Research modules, `scripts/equity_curves.*`, `scripts/research_refresh.*`, `three_way_reconciliation.py`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_refresh.md`, `docs/research_summary.md`, `docs/strategy_overhaul_lessons.md`, `docs/strategy_overhaul_migration_audit.md`, applicable research skills and report tests |
+| Research integrity and reporting | Research modules, `scripts/equity_curves.*`, `scripts/research_refresh.*`, `three_way_reconciliation.py`, preregistrations, raw run artifacts | `docs/governance.md`, `docs/research_refresh.md`, `docs/research_summary.md`, `docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`, applicable research skills and report tests |
 | Trade diagnostics | Verified account journal, exact decision/markout books, and the read-only command projection | `trade_diagnostics.py`, `post_fill_markouts.py`, bounded capture hooks, `scripts/build_trade_diagnostics.py`, `docs/trade_diagnostics.md`, and focused diagnostic tests |
-| Strategy-source diagnostics | Observer-only LONG/CONTINUOUS source gates and separated future-path labels | `strategy_funnel.py`, hooks at the existing strategy owners, `scripts/build_candidate_tape.py`, the active diagnostic-epoch preregistration, and funnel/candidate-tape tests |
+| Strategy-source diagnostics | Observer-only LONG/CONTINUOUS source gates, separated future-path labels, and registered exploratory analysis | `strategy_funnel.py`, hooks at the existing strategy owners, `scripts/build_candidate_tape.py`, `scripts/analyze_strategy_overhaul_v2.py`, the V2 contracts/receipt, and focused tests |
 
 Prefixes are a discovery aid, not proof of ownership. Open the definition,
 callers, persistence format, runtime configuration, and focused tests before a
@@ -67,6 +67,9 @@ cross-domain edit.
 - Registered candidate-tape partitions: `scripts/build_candidate_tape.py --help`;
   this entry point reads only the preregistered PIT root and writes one run-scoped
   diagnostic partition.
+- Registered V2 aggregate analysis: `scripts/analyze_strategy_overhaul_v2.py --help`;
+  its preflight is outcome-blind, while build mode is contract-bound
+  exploratory research and carries no operational authority.
 
 ## Validation ladder
 

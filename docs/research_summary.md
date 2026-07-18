@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated 2026-07-17 UTC. This is a decision log, not policy or deployment authority.
+Updated 2026-07-18 UTC. This is a decision log, not policy or deployment authority.
 Apply `docs/governance.md` and inspect the named artifacts before relying on a
 claim. Current host state belongs in `STATE.md`.
 
@@ -12,6 +12,37 @@ claim. Current host state belongs in `STATE.md`.
 | `LongV11aDivWeekendVol` | Positive current full-PIT result on both venues, but still strongly dependent on take-profit winners and not validated by its tiny skewed forward sample | Demo/paper profile only; no size or mainnet authority |
 
 Binance is a research/replay venue, not a live execution venue.
+
+## Strategy Overhaul V2 cycle closed 2026-07-18
+
+The registered Bybit discovery cycle completed across 43 months
+`[2021-05-01, 2024-12-01)` and closed with **no qualifying thesis**. The
+`[2025-01-01, 2026-07-06)` holdout remains untouched; no profile,
+implementation, runtime, deployment, size, or capital change follows.
+
+The candidate tape contains 5,850 admitted LONG and 219,846 admitted
+CONTINUOUS labels. Equal-date 24h path means are +0.2208% for LONG (95% date
+block interval [-0.3170%, +0.7686%]) and +0.3221% for CONTINUOUS ([+0.0385%,
++0.6150%]). The fixed-USD 10,000 barebones portfolios are negative after
+modeled economics: LONG gross +3.28%, costs -8.55%, funding +2.04%, net -3.23%;
+CONTINUOUS gross +36.60%, costs -40.89%, funding -15.94%, net -20.23%.
+
+Every LONG 24h characteristic contrast is smaller than the frozen 45 bp
+round-trip hurdle; the largest is listing age at +38.68 bps. The raw diagnostic
+selector incorrectly omitted the economic-score gate and its close-location
+selection is invalid; independent recomputation applies the preregistered rule
+and yields no LONG thesis. CONTINUOUS `source_composite` is an exploratory lead
+(+65.74 bps, interval [+24.15, +108.01]) but cannot qualify because the root
+cannot construct the exact current comparator without proven residual-momentum
+provenance.
+
+The full ledger/curve is model-based. Exact production account/event/hash
+verification is bounded to a prospectively frozen 100-key sample per sleeve
+after full replay exceeded the compute stop; both samples verify and end flat,
+but the full portfolios are not account-reconciled. The complete identities,
+funnels, paths, effects, portfolio diagnostics, deviations, independent checks,
+and non-conclusions are in
+`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`.
 
 ## Strategy Overhaul V2 Phase-3 structural checkpoint
 

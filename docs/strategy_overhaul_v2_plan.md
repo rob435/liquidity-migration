@@ -1,12 +1,13 @@
 # Strategy Overhaul V2 — Diagnostic-First Plan
 
-Status: active engineering/research plan; no alpha thesis or confirmatory
-experiment is active yet.
+Status: closed on 2026-07-18 with no qualifying thesis. The completion receipt
+is `docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`; the reserved
+holdout remains untouched and no confirmatory experiment or implementation is
+active.
 
-Execution entry point as of 2026-07-17: start at Phase 3. Phases 0--2 and the
-corrected strategy benchmark are closed inputs, not jobs to rerun. Do not begin
-this overhaul with another data refresh, RMOM rebuild, active LONG/CONTINUOUS
-backtest, or equity-curve regeneration.
+Phases 0--4 are closed. Phases 5--6 were not activated because no thesis passed
+the frozen economic/comparator gates. The corrected benchmark and diagnostic
+cycle are historical inputs, not jobs to rerun.
 
 The objective is to generate a small number of mechanism-based strategy theses
 from causal trade diagnostics, then test them prospectively. The objective is
@@ -320,14 +321,13 @@ candidate tape, barebones ledger, and barebones curve, and links the existing
 active curves/ledgers without regenerating them. No rule changes occur in this
 phase.
 
-Status: in progress. The frozen first Bybit partition completed structurally at
-code `e126ecc`; its post-run receipt is
-`docs/strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md`. The pinned active
-artifacts were absent locally, so comparison is disabled. No label value,
-funnel outcome distribution, portfolio curve, evidence card, or thesis has been
-inspected or produced. The completion-cycle contract now prospectively expands the uninspected
-discovery surface and reserves the later holdout. The absent active payloads
-remain a comparison limitation, not a regeneration job.
+Status: complete. The 43-month Bybit discovery, four-payload analysis, and
+independent checks are recorded in
+`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`. Active comparison
+remained disabled because all 23 pinned payloads were absent. Full portfolio
+values are model-based; exact account/event verification is the prospectively
+bounded 100-key sample per sleeve after exhaustive replay crossed the compute
+stop. The reserved holdout remains untouched.
 
 ## Phase 4 — Thesis selection
 
@@ -344,6 +344,12 @@ A thesis qualifies only if it:
 Rank candidates by expected decision value, identification quality, and cost of
 testing—not by the best exploratory return or t-statistic. Record every
 candidate considered so the tested set cannot disappear later.
+
+Status: complete with no selection. Every LONG 24h effect is below the frozen
+45 bp cost hurdle. CONTINUOUS has exploratory leads but lacks the exact active
+comparator because residual-momentum provenance is invalid. The artifact's raw
+LONG eligibility flag omitted the economic gate; the completion receipt applies
+the registered rule and records the implementation correction.
 
 ## Phase 5 — Prospective test
 
@@ -368,6 +374,9 @@ diagnostic cannot silently become forward confirmation.
 Exit criteria: apply the frozen rule once, append every completed/failed/aborted
 cell, and issue the evidence card. An inconclusive result stays inconclusive.
 
+Status: not activated. No thesis-specific contract was created and no holdout
+label was generated or read.
+
 ## Phase 6 — Runtime parity, only after support
 
 For a supported thesis, implement the smallest profile change and compare
@@ -377,6 +386,9 @@ is a forward demo/paper execution epoch and remains a separately authorized
 operational contract naming deployment and risk boundaries. A negative,
 inconclusive, or no-qualifying-thesis cycle has no implementation to parity-test.
 Promotion, sizing, and mainnet require their own evidence and owner authority.
+
+Status: not applicable. There is no supported thesis to implement or
+parity-test; Phase 6B remains separately unauthorized.
 
 ## Deferred infrastructure work — not a Phase-3 prerequisite
 
@@ -398,36 +410,15 @@ is not a performance cache: its 1.4 GB audit bundle and Windows adapters are
 documented in `docs/account_kernel_binance_combined_audit_2026-07-17.md` and
 must not be merged into `main`.
 
-## Immediate work queue
+## Completion record
 
-Do not run `scripts/ops.sh research-refresh`, `scripts/equity_curves.sh`, an
-active LONG/CONTINUOUS historical backtest, a market-data refresh, or an RMOM
-rebuild for this queue.
+The former immediate queue is complete. No baseline, market data, RMOM, active
+backtest, or equity artifact was regenerated. The cycle produced the registered
+candidate tapes and four-payload analysis, applied the selection rule once,
+found no qualifying thesis, and left the holdout untouched.
 
-1. Verify the existing 2026-07-17 baseline paths, hashes, commit, and component
-   config identities with a one-shot check, not a new verification subsystem.
-   In the same change, freeze the first exploratory diagnostic-epoch contract,
-   including its exact four-payload budget and the exact
-   LONG and CONTINUOUS barebones source populations, executable floors, fixed
-   sizing/collision rule, characteristic families, path labels, and
-   gate-transition semantics, before adding a funnel writer or inspecting
-   outcomes.
-2. Implement the minimal observer-only row-level funnel at the existing LONG
-   and CONTINUOUS candidate owners. Add writer-on/writer-off equivalence tests
-   before emitting any outcome-bearing row.
-3. The first bounded partition is complete. Generate only the 43 discovery
-   months frozen by the completion-cycle contract, validate the joint source
-   population before reading outcomes, and leave the reserved holdout untouched.
-   Do not regenerate the active benchmark artifacts.
-4. Build the one preregistered barebones portfolio ledger/curve per sleeve from
-   those tapes using the frozen collision, sizing, lifecycle, cost, funding,
-   fill, and accounting rules. Compare them with the existing active artifacts
-   by reference and issue the exploratory evidence card.
-5. Select at most one thesis per sleeve and write the first alpha
-   thesis preregistration.
-
-The command/markout projector remains on deterministic fixtures. A real demo
-epoch is a separate, explicitly authorized track and is not a prerequisite for
-the historical selection diagnostic. Require it before thesis selection only
-when the proposed mechanism itself depends on execution behavior that the
-historical sources cannot identify.
+Future work is a new cycle, not a continuation of this queue. The most useful
+lead is a prospective repair of CONTINUOUS residual-momentum provenance before
+constructing an exact current-profile comparator. Cost/funding mechanisms may
+also be investigated on genuinely untouched data. A real demo/paper epoch
+still requires separate owner authorization; mainnet remains unauthorized.
