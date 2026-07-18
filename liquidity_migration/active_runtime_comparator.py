@@ -74,7 +74,7 @@ from .historical_account_replay import (
     HistoricalAccountSession,
     historical_submission_feedback,
 )
-from .long_native import LongNativeConfig
+from .long_native import LongNativeConfig, long_pump_family
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _compute_long_order_sizing,
@@ -159,6 +159,21 @@ def _long_price_required_symbols(
         funnel_observer=None,
     )
     return probe.symbols
+
+
+def _long_observer_price_symbols(
+    *,
+    features: pl.DataFrame,
+    strategy: LongNativeConfig,
+) -> set[str]:
+    """Return the legacy raw-pump price population used only by the funnel."""
+
+    symbols: set[str] = set()
+    for row in features.iter_rows(named=True):
+        pump = long_pump_family(row, strategy)
+        if bool(pump["trigger_any"]):
+            symbols.add(str(row["symbol"]).upper())
+    return symbols
 
 
 class NullComparatorTraceSink:
@@ -754,13 +769,26 @@ class ActiveRuntimeComparator:
         *,
         boundary_ts_ms: int,
     ) -> dict[str, float]:
-        symbols = _long_price_required_symbols(
+        required = _long_price_required_symbols(
             features=features,
             all_trades=self._long_trades,
             now_ms=boundary_ts_ms,
             strategy=self.long_strategy,
         )
-        return self.price_port.prices(symbols, boundary_ts_ms)
+        prices = self.price_port.prices(required, boundary_ts_ms)
+        optional = _long_observer_price_symbols(
+            features=features,
+            strategy=self.long_strategy,
+        ) - required
+        for symbol in sorted(optional):
+            try:
+                prices[symbol] = self.price_port.price(symbol, boundary_ts_ms)
+            except RuntimeError:
+                # The production selector never reads this symbol. Preserve
+                # observer continuity when a frozen price exists, but do not
+                # turn an optional diagnostic field into an active dependency.
+                continue
+        return prices
 
     def _run_long(
         self,

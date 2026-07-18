@@ -32,7 +32,9 @@ from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 
 class _FixedPrices:
     def price(self, symbol: str, boundary_ts_ms: int) -> float:
-        assert symbol in {"AUSDT", "BUSDT"}
+        if symbol == "CANTOUSDT":
+            raise RuntimeError("optional frozen price is absent")
+        assert symbol in {"AUSDT", "BUSDT", "DUSDT"}
         assert boundary_ts_ms > 0
         return 10.0
 
@@ -262,15 +264,28 @@ def test_shared_comparator_preserves_requests_btc_chain_and_boundary_flat(
         "symbol_age_days": 82,
         "turnover_median_90d": None,
     }
+    optional_priced_pump = {
+        **ineligible_pump,
+        "symbol": "DUSDT",
+    }
+    mixed_long_features = pl.from_dicts(
+        [
+            *long_features.to_dicts(),
+            ineligible_pump,
+            optional_priced_pump,
+        ],
+        infer_schema_length=None,
+    )
     assert _long_price_required_symbols(
-        features=pl.from_dicts(
-            [*long_features.to_dicts(), ineligible_pump],
-            infer_schema_length=None,
-        ),
+        features=mixed_long_features,
         all_trades=pl.DataFrame(),
         now_ms=boundary,
         strategy=long_v11a_profile(),
     ) == {long_symbol}
+    assert comparator._long_candidate_prices(
+        mixed_long_features,
+        boundary_ts_ms=boundary,
+    ) == {long_symbol: 10.0, "DUSDT": 10.0}
 
     cycle = comparator.process_hour(
         boundary,

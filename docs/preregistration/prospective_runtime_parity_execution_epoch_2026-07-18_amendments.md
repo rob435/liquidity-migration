@@ -296,3 +296,42 @@ attempt byte-for-byte: continuous-gate parts 00000 through 00007 and
 LONG-funnel parts 00000 through 00010. Those hashes are pinned in the runner.
 The partial attempt remains incomplete and has no strategy or economic
 evidentiary weight.
+
+## Amendment 12: separate strict selector prices from optional funnel prices
+
+Registered 2026-07-18 after terminating the first replacement at code commit
+`3d1c407dcdf1794104e00e80e04e2d22ab607d69`, before executing another
+replacement and without monetary inspection. Its create-only termination
+receipt is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-3d1c407dcdf1/termination.json`
+with SHA-256
+`75382d0ed1c6e75f9fbdb2bd0f018c955a488850ca39539b9d9f427d211d6dae`.
+The replacement implementation was prepared after the structural failure but
+must not execute until this amendment and that receipt are hash-pinned by the
+runner at a clean commit.
+
+The first closed CONTINUOUS gate partition remained byte-identical, but the
+first 20,000-row LONG funnel partition changed from registered SHA-256
+`31f4d87816b8972b18626eb8297e726ab6aa15efb48ea8286f977fed7090d83e`
+to `9f872686dd0b1a1c1aaed9951c9fcc3985048586d54fe7ff7ecbcdda6fae15ae`.
+Shape and schema were identical. Differences were confined to
+`entry_ts_ms`, `gate_entry_anchor`, `rejection_keys`, `first_rejection`, and
+their `gate_state_sha256`. The attempt was stopped immediately under the
+registered prefix-identity rule; no active-decision equivalence is inferred
+from this partial comparison.
+
+The cause was a dependency conflation inside the production selector. Its
+active candidate path reads live prices only after classification, exposure,
+cooldown, and entry-delay gates. Its non-participating funnel observer, called
+inside the same selector, reads prices for the wider raw-pump population. The
+first Amendment 11 implementation supplied only strict active-path prices to
+both consumers, so previously populated optional observer fields became null.
+
+The next replacement must first load every active-path price discovered by the
+observer-free production-selector probe, with any missing or invalid required
+price failing closed. It may then augment that same price map with frozen
+prices for the raw-pump observer population when those exact prices exist.
+Absence of an observer-only price leaves that optional diagnostic unset and
+must not fail or alter active selection. The authoritative selector still runs
+once with real frozen prices and the registered funnel observer. All 19 closed
+trace partitions from the CANTO failure remain pinned byte-for-byte.
