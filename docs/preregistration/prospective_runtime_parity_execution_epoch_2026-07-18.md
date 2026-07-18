@@ -54,8 +54,10 @@ scope. Historical and forward returns must not be opened under this contract.
   new strategy-price outcome; only event, coverage, flatness, and accounting
   identities may be inspected.
 - The raw baseline snapshot uses the local Bybit PIT root and the half-open
-  completed-data boundary `[2023-03-01, 2026-07-18)`. Earlier manifest rows may
-  be retained solely to establish launch/listing history. No feature, target,
+  completed-data boundary `[2022-12-01, 2026-07-18)`. Feature outputs remain
+  bounded to `[2023-03-01, 2026-07-18)`; the earlier 90 days are the fixed
+  causal factor warm-up. Earlier manifest rows may be retained solely to
+  establish launch/listing history. No feature, target,
   path, return, or P&L outcome is inspected while the snapshot is built.
 - The forward epoch begins only after a create-only start receipt proves the
   exact installed commit, profile/config identities, healthy demo/paper owners,
@@ -237,3 +239,13 @@ amendment and a new forward surface. Unknown safety-critical operational state
 fails closed. This contract authorizes offline work and observation of the
 already authorized demo/paper fleet; it does not authorize mainnet,
 `REAL_MONEY`, new capital, or a strategy/profile change.
+
+## Pre-exposure amendment 1: factor warm-up boundary
+
+Registered 2026-07-18 13:43 UTC before any snapshot bytes, feature values,
+targets, returns, or P&L were read. Source inspection established that
+`build_factor_panel` reads 90 calendar days before the requested RMOM feature
+start. The raw snapshot start is therefore corrected from `2023-03-01` to
+`2022-12-01`, while the feature/result start remains `2023-03-01`. This is an
+outcome-blind causal-availability correction; the end boundary, tested set,
+rules, tolerances, and forward clock are unchanged.
