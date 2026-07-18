@@ -93,6 +93,7 @@ from .protection_engine import (
 )
 from .strategy_funnel import DecisionFunnelObserver
 from .strategy_runtime import SleeveTargetIntent
+from .venue_lifecycle import VenueDelistingSettlement
 
 
 class HistoricalPricePort(Protocol):
@@ -121,6 +122,8 @@ class ComparatorTraceSink(Protocol):
     def request(self, row: Mapping[str, Any]) -> None: ...
 
     def request_intent(self, row: Mapping[str, Any]) -> None: ...
+
+    def venue_lifecycle(self, row: Mapping[str, Any]) -> None: ...
 
 
 class _LongPriceRequirementProbe:
@@ -193,6 +196,9 @@ class NullComparatorTraceSink:
         del row
 
     def request_intent(self, row: Mapping[str, Any]) -> None:
+        del row
+
+    def venue_lifecycle(self, row: Mapping[str, Any]) -> None:
         del row
 
 
@@ -370,6 +376,7 @@ class ActiveRuntimeComparator:
         first_archive_day_by_symbol: Mapping[str, int],
         btc_state_root: str | Path,
         run_config: ComparatorRunConfig,
+        venue_lifecycle_events: Sequence[VenueDelistingSettlement] = (),
         trace_sink: ComparatorTraceSink | None = None,
     ) -> None:
         if route.account_id != session.account_id:
@@ -412,6 +419,56 @@ class ActiveRuntimeComparator:
         self.run_config = run_config
         self.trace_sink = trace_sink or NullComparatorTraceSink()
         self.long_funnel = _LongFunnelPort(self.trace_sink)
+        lifecycle_events = tuple(
+            sorted(
+                venue_lifecycle_events,
+                key=lambda event: (
+                    event.dispatch_ts_ms,
+                    event.effective_ts_ms,
+                    event.symbol,
+                ),
+            )
+        )
+        lifecycle_identities = {
+            (event.symbol, event.effective_ts_ms) for event in lifecycle_events
+        }
+        if len(lifecycle_identities) != len(lifecycle_events):
+            raise ValueError("comparator venue lifecycle contains duplicate events")
+        lifecycle_symbols = {event.symbol for event in lifecycle_events}
+        if len(lifecycle_symbols) != len(lifecycle_events):
+            raise ValueError("comparator venue lifecycle contains repeated symbols")
+        lifecycle_start_ms = min(
+            run_config.long_source_start_ms,
+            run_config.continuous_source_start_ms,
+        )
+        outside_clock = [
+            event.symbol
+            for event in lifecycle_events
+            if not lifecycle_start_ms
+            <= event.dispatch_ts_ms
+            <= run_config.source_end_ms
+        ]
+        if outside_clock:
+            raise ValueError(
+                "comparator venue lifecycle escaped the registered clock: "
+                f"{outside_clock}"
+            )
+        self._venue_lifecycle_events = lifecycle_events
+        self._venue_lifecycle_by_dispatch: dict[
+            int, tuple[VenueDelistingSettlement, ...]
+        ] = {}
+        for dispatch_ts_ms in sorted(
+            {event.dispatch_ts_ms for event in lifecycle_events}
+        ):
+            self._venue_lifecycle_by_dispatch[dispatch_ts_ms] = tuple(
+                event
+                for event in lifecycle_events
+                if event.dispatch_ts_ms == dispatch_ts_ms
+            )
+        self._venue_lifecycle_by_symbol = {
+            event.symbol: event for event in lifecycle_events
+        }
+        self._inactive_venue_symbols: set[str] = set()
         self.btc_klines = btc_klines
         self.btc_context = btc_context_by_day(btc_klines)
         self.btc_trend_lookup = _btc_trend_returns(
@@ -447,6 +504,9 @@ class ActiveRuntimeComparator:
         self._source_decision_counts: Counter[str] = Counter()
         self._cycle_count = 0
         self._protection_trigger_count = 0
+        self._venue_lifecycle_observed_count = 0
+        self._venue_lifecycle_fill_count = 0
+        self._venue_lifecycle_blocked_entry_count = 0
 
     def _account_events(self) -> tuple[AccountEvent, ...]:
         if self.session.kernel is None:
@@ -522,6 +582,183 @@ class ActiveRuntimeComparator:
         )
         symbols.update(state.working_symbols())
         return {symbol for symbol in symbols if symbol}
+
+    @staticmethod
+    def _venue_lifecycle_identity(
+        event: VenueDelistingSettlement,
+    ) -> dict[str, Any]:
+        return {
+            "venue": "bybit",
+            "event_type": "perpetual_delisting_settlement",
+            "symbol": event.symbol,
+            "effective_ts_ms": event.effective_ts_ms,
+            "dispatch_ts_ms": event.dispatch_ts_ms,
+            "announcement_published_ts_ms": event.announcement_published_ts_ms,
+            "announcement_url": event.announcement_url,
+            "announcement_uid": event.announcement_uid,
+            "announcement_sha256": event.announcement_sha256,
+            "index_api_sha256": event.index_api_sha256,
+            "index_api_canonical_sha256": event.index_api_canonical_sha256,
+            "proxy_method": event.proxy_method,
+            "proxy_exactness": event.proxy_exactness,
+            "source_scope": event.source_scope,
+        }
+
+    def _run_venue_lifecycle(self, boundary_ts_ms: int) -> dict[str, int]:
+        events = self._venue_lifecycle_by_dispatch.get(boundary_ts_ms, ())
+        fills = 0
+        for event in events:
+            self._inactive_venue_symbols.add(event.symbol)
+            action = "flat_observed"
+            position_before = 0.0
+            if self.session.kernel is not None:
+                state = self.session.kernel._state_ref()
+                position = state.positions.get(event.symbol)
+                position_before = (
+                    float(position.signed_qty) if position is not None else 0.0
+                )
+                tolerance = max(abs(position_before) * 1e-12, 1e-12)
+                nonzero_targets = sorted(
+                    key
+                    for key, target in state.component_targets.items()
+                    if str(target.get("symbol") or "").upper() == event.symbol
+                    and abs(float(target.get("signed_qty") or 0.0)) > tolerance
+                )
+                aggregate_target = float(
+                    state.aggregate_targets.get(event.symbol, 0.0)
+                )
+                working_qty = float(state.working_signed_qty(event.symbol))
+                working_orders = state.working_order_count(
+                    event.symbol,
+                    tolerance=tolerance,
+                )
+                if abs(position_before) <= tolerance:
+                    if (
+                        nonzero_targets
+                        or abs(aggregate_target) > tolerance
+                        or abs(working_qty) > tolerance
+                        or working_orders
+                    ):
+                        raise RuntimeError(
+                            "flat venue lifecycle event found latent account state: "
+                            f"symbol={event.symbol}, targets={nonzero_targets}, "
+                            f"aggregate={aggregate_target}, working_qty={working_qty}, "
+                            f"working_orders={working_orders}"
+                        )
+                else:
+                    execution_id = (
+                        f"bybit-delisting:{event.symbol}:{event.effective_ts_ms}"
+                    )
+                    adopted = self.session.kernel.adopt_external_protection_fill(
+                        protection_key=(
+                            f"venue-delisting:{event.symbol}:"
+                            f"{event.effective_ts_ms}"
+                        ),
+                        venue_order_id=execution_id,
+                        execution_id=execution_id,
+                        symbol=event.symbol,
+                        signed_qty=-position_before,
+                        price=event.proxy_price,
+                        fee_usdt=event.settlement_fee_usdt,
+                        exchange_ts_ns=event.effective_ts_ms * 1_000_000,
+                        local_receive_ts_ns=event.dispatch_ts_ms * 1_000_000,
+                        reason="venue_delisting_settlement",
+                        execution_origin="venue_delisting_settlement",
+                        metadata={
+                            **self._venue_lifecycle_identity(event),
+                            "proxy_price_decimal": event.proxy_price_decimal,
+                            "structural_comparator": True,
+                            "monetary_outcomes_inspected": False,
+                        },
+                    )
+                    if not adopted:
+                        raise RuntimeError(
+                            "venue lifecycle settlement unexpectedly replayed an "
+                            f"existing execution: {execution_id}"
+                        )
+                    self._projection_dirty = True
+                    self._refresh_projection(force=True)
+                    final_state = self.session.kernel._state_ref()
+                    final_position = final_state.positions.get(event.symbol)
+                    final_position_qty = (
+                        float(final_position.signed_qty)
+                        if final_position is not None
+                        else 0.0
+                    )
+                    final_targets = {
+                        key: float(target.get("signed_qty") or 0.0)
+                        for key, target in final_state.component_targets.items()
+                        if str(target.get("symbol") or "").upper()
+                        == event.symbol
+                        and abs(float(target.get("signed_qty") or 0.0))
+                        > tolerance
+                    }
+                    final_working = final_state.working_symbols(
+                        tolerance=tolerance
+                    )
+                    if (
+                        abs(final_position_qty) > tolerance
+                        or final_targets
+                        or event.symbol in final_working
+                    ):
+                        raise RuntimeError(
+                            "venue lifecycle settlement did not converge flat: "
+                            f"symbol={event.symbol}, position={final_position_qty}, "
+                            f"targets={final_targets}, working="
+                            f"{event.symbol in final_working}"
+                        )
+                    fills += 1
+                    self._venue_lifecycle_fill_count += 1
+                    action = "settlement_fill"
+            self._venue_lifecycle_observed_count += 1
+            self.trace_sink.venue_lifecycle(
+                {
+                    **self._venue_lifecycle_identity(event),
+                    "action": action,
+                    "cycle_ts_ms": boundary_ts_ms,
+                    "position_before_signed_qty": position_before,
+                    "monetary_outcomes_inspected": False,
+                }
+            )
+        return {"events": len(events), "settlement_fills": fills}
+
+    def _block_delisted_entries(
+        self,
+        intents: Sequence[RequestedIntent],
+        *,
+        boundary_ts_ms: int,
+        sleeve: str,
+    ) -> tuple[list[RequestedIntent], int]:
+        allowed: list[RequestedIntent] = []
+        blocked = 0
+        for requested in intents:
+            symbol = requested.intent.symbol.upper()
+            event = self._venue_lifecycle_by_symbol.get(symbol)
+            if symbol not in self._inactive_venue_symbols:
+                allowed.append(requested)
+                continue
+            if event is None or boundary_ts_ms < event.dispatch_ts_ms:
+                raise RuntimeError(
+                    f"inactive venue symbol {symbol} lacks an effective lifecycle event"
+                )
+            blocked += 1
+            self._venue_lifecycle_blocked_entry_count += 1
+            self.trace_sink.venue_lifecycle(
+                {
+                    **self._venue_lifecycle_identity(event),
+                    "action": "entry_blocked",
+                    "trace_type": "venue_lifecycle_block",
+                    "cycle_ts_ms": boundary_ts_ms,
+                    "sleeve": sleeve,
+                    "decision_key": requested.intent.decision_key,
+                    "target_key": requested.intent.target_key,
+                    "strategy_id": requested.intent.strategy_id,
+                    "component_id": requested.intent.component_id,
+                    "reason": "venue_delisted_before_target_publication",
+                    "monetary_outcomes_inspected": False,
+                }
+            )
+        return allowed, blocked
 
     @staticmethod
     def _request_owner(request: AccountTargetRequest) -> str:
@@ -809,6 +1046,7 @@ class ActiveRuntimeComparator:
         )
 
         candidates: list[dict[str, Any]] = []
+        venue_blocked_entries = 0
         if (
             not recent_features.is_empty()
             and self.run_config.long_source_start_ms <= boundary_ts_ms
@@ -857,6 +1095,11 @@ class ActiveRuntimeComparator:
                 )
                 not in self._long_terminal_attempts
             ]
+            entry_intents, venue_blocked_entries = self._block_delisted_entries(
+                entry_intents,
+                boundary_ts_ms=boundary_ts_ms,
+                sleeve=SleeveAdapterKind.LONG.value,
+            )
         else:
             entry_intents = []
         long_targeted_component_ids = {
@@ -927,6 +1170,7 @@ class ActiveRuntimeComparator:
             "entry_candidates": len(candidates),
             "exit_requests": exits_processed,
             "entry_requests": entries_processed,
+            "venue_blocked_entries": venue_blocked_entries,
         }
 
     def _continuous_age_universe(
@@ -1146,6 +1390,7 @@ class ActiveRuntimeComparator:
 
         prices: dict[str, float] = {}
         candidates: list[dict[str, Any]] = []
+        venue_blocked_entries = 0
         component_capacity: dict[str, int] = {}
         component_reached: dict[str, bool] = {}
         if (
@@ -1231,13 +1476,14 @@ class ActiveRuntimeComparator:
             if str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
             not in self._continuous_terminal_attempts
         ]
-        targeted_component_ids = {
+        production_targeted_component_ids = {
             intent.intent.component_id for intent in entry_intents
         }
         targeted_candidates = [
             row
             for row in final_candidates
-            if str(row.get("trade_id") or "") in targeted_component_ids
+            if str(row.get("trade_id") or "")
+            in production_targeted_component_ids
         ]
 
         prior_symbols = self._prior_signal_symbols(
@@ -1261,6 +1507,14 @@ class ActiveRuntimeComparator:
             entry_capacity=entry_capacity,
             btc_risk_blocked=bool(btc_stats["entry_blocked"]),
         )
+        entry_intents, venue_blocked_entries = self._block_delisted_entries(
+            entry_intents,
+            boundary_ts_ms=boundary_ts_ms,
+            sleeve=SleeveAdapterKind.CONTINUOUS.value,
+        )
+        targeted_component_ids = {
+            intent.intent.component_id for intent in entry_intents
+        }
 
         for row in exits:
             self._source_decision_counts["continuous:exit"] += 1
@@ -1334,6 +1588,7 @@ class ActiveRuntimeComparator:
             "entry_candidates": len(final_candidates),
             "exit_requests": exits_processed,
             "entry_requests": entries_processed,
+            "venue_blocked_entries": venue_blocked_entries,
         }
 
     def process_hour(
@@ -1343,7 +1598,7 @@ class ActiveRuntimeComparator:
         long_recent_features: pl.DataFrame | None = None,
         continuous_entry_state: pl.DataFrame | None = None,
     ) -> dict[str, Any]:
-        """Process one frozen close in registered protection/LONG/CONT order."""
+        """Process one frozen close in lifecycle/protection/LONG/CONT order."""
 
         boundary = int(boundary_ts_ms)
         if boundary <= self._last_hour_ms or boundary % MS_PER_HOUR:
@@ -1353,6 +1608,7 @@ class ActiveRuntimeComparator:
         self._last_hour_ms = boundary
         self._cycle_count += 1
         self._refresh_projection()
+        venue_lifecycle_stats = self._run_venue_lifecycle(boundary)
         protection_requests = self._run_protection(boundary)
         long_stats = self._run_long(
             boundary_ts_ms=boundary,
@@ -1373,6 +1629,10 @@ class ActiveRuntimeComparator:
         row: dict[str, Any] = {
             "cycle_ordinal": self._cycle_count,
             "cycle_ts_ms": boundary,
+            **{
+                f"venue_lifecycle_{key}": value
+                for key, value in venue_lifecycle_stats.items()
+            },
             "protection_requests": protection_requests,
             **{f"long_{key}": value for key, value in long_stats.items()},
             **{
@@ -1529,6 +1789,14 @@ class ActiveRuntimeComparator:
                 "final accepted-decision BTC-risk reconciliation failed: "
                 f"{btc_reconciliation['blocking_reason']}"
             )
+        if self._venue_lifecycle_observed_count != len(
+            self._venue_lifecycle_events
+        ):
+            raise RuntimeError(
+                "registered venue lifecycle was not fully observed: "
+                f"{self._venue_lifecycle_observed_count} != "
+                f"{len(self._venue_lifecycle_events)}"
+            )
         return {
             "cycles": self._cycle_count,
             "requests": self._request_ordinal,
@@ -1537,6 +1805,19 @@ class ActiveRuntimeComparator:
                 sorted(self._source_decision_counts.items())
             ),
             "protection_requests": self._protection_trigger_count,
+            "venue_lifecycle_registered_events": len(
+                self._venue_lifecycle_events
+            ),
+            "venue_lifecycle_observed_events": (
+                self._venue_lifecycle_observed_count
+            ),
+            "venue_lifecycle_settlement_fills": self._venue_lifecycle_fill_count,
+            "venue_lifecycle_blocked_entries": (
+                self._venue_lifecycle_blocked_entry_count
+            ),
+            "venue_lifecycle_inactive_symbols": len(
+                self._inactive_venue_symbols
+            ),
             "account_events": len(events),
             "account_event_counts": dict(sorted(grouped.items())),
             "last_sequence": events[-1].sequence if events else 0,

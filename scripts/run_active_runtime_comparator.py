@@ -77,6 +77,9 @@ from liquidity_migration.long_native import long_pump_family, long_v11a_profile 
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig  # noqa: E402
 from liquidity_migration.strategy_event_clock import MemoryStrategyEventTape  # noqa: E402
 from liquidity_migration.strategy_funnel import payload_sha256  # noqa: E402
+from liquidity_migration.venue_lifecycle import (  # noqa: E402
+    load_venue_delisting_settlements,
+)
 
 EPOCH_ROOT = REPO / "reports/prospective-runtime-parity-execution-epoch-2026-07-18"
 FEATURE_ROOT = EPOCH_ROOT / "features/bybit-baseline"
@@ -87,6 +90,10 @@ BASE_CONTRACT = REPO / "docs/preregistration/prospective_runtime_parity_executio
 AMENDMENTS = REPO / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md"
 FEATURE_RECEIPT = FEATURE_ROOT / "feature_receipt.json"
 RECONSTRUCTION_RECEIPT = EPOCH_ROOT / "reconstruction/bybit-baseline.receipt.json"
+LIFECYCLE_ROOT = EPOCH_ROOT / "venue-lifecycle/bybit-census-search-v2"
+LIFECYCLE_RECEIPT = LIFECYCLE_ROOT / "receipt.json"
+LIFECYCLE_EVENTS = LIFECYCLE_ROOT / "events.parquet"
+LIFECYCLE_SEARCH_QUERIES = LIFECYCLE_ROOT / "search_queries.parquet"
 DEFAULT_OUT = EPOCH_ROOT / "runtime-parity/active-production-comparator"
 FIRST_FAILED_ATTEMPT_ROOT = (
     EPOCH_ROOT
@@ -121,18 +128,34 @@ OBSERVER_PRICE_FAILED_ATTEMPT_ROOT = (
 OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION = (
     OBSERVER_PRICE_FAILED_ATTEMPT_ROOT / "termination.json"
 )
+DELISTING_FAILED_ATTEMPT_ROOT = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-9b2ba6d9bc9f"
+)
+DELISTING_FAILED_ATTEMPT_TERMINATION = (
+    DELISTING_FAILED_ATTEMPT_ROOT / "termination.json"
+)
+SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION = (
+    EPOCH_ROOT
+    / "venue-lifecycle/.bybit-census-search-v2.working-query-highlight/termination.json"
+)
 
 EXPECTED_BASE_CONTRACT_SHA256 = "15edc498adf2bd068c33ff2f791fa3e46f161196db673a839adcf317aba35a31"
-EXPECTED_AMENDMENTS_SHA256 = "1e104b76c179809e71c4a51e3486f2df1e6531ac554d9314b7e9f6ec65b70819"
+EXPECTED_AMENDMENTS_SHA256 = "9f4105b1a6c267fb40546ff6769c8be143ba1f250e40ae6f7f559d9c6e70862b"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
 EXPECTED_FEATURE_PAYLOAD_SHA256 = "eff681990a9262a3b30781588ee80a7f7b2f67ca16c812b4edda8b86203061b0"
+EXPECTED_LIFECYCLE_RECEIPT_SHA256 = "19c8a3bc88681f9b36420d99eed6c9d31150e331ccf8bc0097d308bb2e3d4327"
+EXPECTED_LIFECYCLE_EVENTS_SHA256 = "7ca1de951837b5659aee8b9ceefe95b8c661960ba671a453d65fb457d7fdc4c1"
+EXPECTED_LIFECYCLE_SEARCH_QUERIES_SHA256 = "c16eb2d370d15afbbe3e79d882dbdb22f8da3633d83a252cf50d9232df03c09e"
 EXPECTED_FAILED_ATTEMPT_TERMINATION_SHA256 = "dd5df88b6d77fe181ba1fb1737b97fa3a62841065d16c425b1f26499954063d1"
 EXPECTED_INDEXED_FAILED_ATTEMPT_TERMINATION_SHA256 = "701386b22989a35c39bb5cd544dc9377a02caa66d10dbd6b2c6fefa688cbc8ed"
 EXPECTED_SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION_SHA256 = "28eac53954835d799e066642ecba4843037ab05f8fddb587ba4fa1b89360a738"
 EXPECTED_PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION_SHA256 = "ec37b1bb95d8e7aac4780716504f74d87aba6a93ec9082e824d796906167c80a"
 EXPECTED_OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION_SHA256 = "75382d0ed1c6e75f9fbdb2bd0f018c955a488850ca39539b9d9f427d211d6dae"
+EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256 = "aa4ed1e13dfb8c0828647d10dea4dd09fac5532764f907cfc52321f08e12288e"
+EXPECTED_SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION_SHA256 = "f9eb3ff6c9311da43db8a156ce883022ea963b35a9245b8fdfafc0f54d3d961f"
 EXPECTED_PREFIX_IDENTITIES = {
     "traces/continuous_gates/part-00000.parquet": (
         "ae7d56f33b6642a43227b8f4affd4c054f8be59f2fc90f27d9c777a4b5a41eb2"
@@ -157,6 +180,9 @@ EXPECTED_PREFIX_IDENTITIES = {
     ),
     "traces/continuous_gates/part-00007.parquet": (
         "cbe927f058e8060ce9f99aff886e62c9037c8482b444a99f4554fc631d36db1f"
+    ),
+    "traces/continuous_gates/part-00008.parquet": (
+        "4a45f75d5f5d04b553fda09333c84309ebb54de7d323dbf285f3dcb7c6d1f945"
     ),
     "traces/long_funnel/part-00000.parquet": (
         "31f4d87816b8972b18626eb8297e726ab6aa15efb48ea8286f977fed7090d83e"
@@ -190,6 +216,9 @@ EXPECTED_PREFIX_IDENTITIES = {
     ),
     "traces/long_funnel/part-00010.parquet": (
         "43a860c274df386607186adab4803229d06eb6a145623e734390626d6d182ecf"
+    ),
+    "traces/long_funnel/part-00011.parquet": (
+        "ef046c6c65a646da8ecb7d1dadcec64661d77d3bc82104aabdb35ef74ab41b7e"
     ),
 }
 
@@ -405,6 +434,7 @@ class _ComparatorTraceWriter:
         self.decisions = _PartitionWriter(root, "source_decisions")
         self.requests = _PartitionWriter(root, "requests")
         self.intents = _PartitionWriter(root, "request_intents")
+        self.lifecycle = _PartitionWriter(root, "venue_lifecycle")
         self.gate_root = root / "traces/continuous_gates"
         self.gate_frames: list[pl.DataFrame] = []
         self.gate_buffer_rows = 0
@@ -451,6 +481,9 @@ class _ComparatorTraceWriter:
     def request_intent(self, row: Mapping[str, Any]) -> None:
         self.intents.append(row)
 
+    def venue_lifecycle(self, row: Mapping[str, Any]) -> None:
+        self.lifecycle.append(row)
+
     def close(self) -> dict[str, int]:
         self._flush_gates()
         for writer in (
@@ -459,6 +492,7 @@ class _ComparatorTraceWriter:
             self.decisions,
             self.requests,
             self.intents,
+            self.lifecycle,
         ):
             writer.flush()
         return {
@@ -468,6 +502,7 @@ class _ComparatorTraceWriter:
             "source_decisions": self.decisions.row_count,
             "requests": self.requests.row_count,
             "request_intents": self.intents.row_count,
+            "venue_lifecycle": self.lifecycle.row_count,
             "accepted_requests": self.accepted_requests,
             "rejected_requests": self.rejected_requests,
         }
@@ -511,6 +546,18 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
             RECONSTRUCTION_RECEIPT,
             EXPECTED_RECONSTRUCTION_RECEIPT_SHA256,
         ),
+        "venue_lifecycle_receipt": (
+            LIFECYCLE_RECEIPT,
+            EXPECTED_LIFECYCLE_RECEIPT_SHA256,
+        ),
+        "venue_lifecycle_events": (
+            LIFECYCLE_EVENTS,
+            EXPECTED_LIFECYCLE_EVENTS_SHA256,
+        ),
+        "venue_lifecycle_search_queries": (
+            LIFECYCLE_SEARCH_QUERIES,
+            EXPECTED_LIFECYCLE_SEARCH_QUERIES_SHA256,
+        ),
         "failed_attempt_termination": (
             FIRST_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_FAILED_ATTEMPT_TERMINATION_SHA256,
@@ -530,6 +577,14 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "observer_price_failed_attempt_termination": (
             OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "delisting_failed_attempt_termination": (
+            DELISTING_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "search_highlight_failed_attempt_termination": (
+            SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION_SHA256,
         ),
     }
     output: dict[str, dict[str, Any]] = {}
@@ -557,6 +612,22 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         raise RuntimeError("feature receipt is not outcome-blind")
     if feature.get("pit", {}).get("full_pit_universe_pass") is not True:
         raise RuntimeError("feature receipt PIT gate did not pass")
+    lifecycle = json.loads(LIFECYCLE_RECEIPT.read_text(encoding="utf-8"))
+    lifecycle_pass = (
+        lifecycle.get("status") == "pass"
+        and lifecycle.get("coverage_valid") is True
+        and lifecycle.get("monetary_outcomes_inspected") is False
+        and int(lifecycle.get("search_queries_completed") or 0) == 286
+        and int(lifecycle.get("terminal_manifest_symbols") or 0) == 286
+        and int(lifecycle.get("admitted_events") or 0) == 235
+        and int(lifecycle.get("registered_klay_event_count") or 0) == 1
+        and int(lifecycle.get("duplicate_admissible_events") or 0) == 0
+        and int(lifecycle.get("admissible_event_index_failures") or 0) == 0
+        and not lifecycle.get("coverage_errors")
+        and not lifecycle.get("critical_article_failures")
+    )
+    if not lifecycle_pass:
+        raise RuntimeError("venue lifecycle census did not pass its registered gates")
     return output
 
 
@@ -839,6 +910,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output = args.out.expanduser().resolve()
     inputs = _registered_inputs()
+    venue_lifecycle_events = load_venue_delisting_settlements(LIFECYCLE_EVENTS)
     head = _git("rev-parse", "HEAD")
     dirty = bool(_git("status", "--porcelain=v1"))
     run_identity: dict[str, Any] = {
@@ -856,7 +928,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "end_exclusive_ms": END_MS,
         },
         "account_equity_usdt": CAPITAL_USDT,
-        "schedule_order": ["protection", "long", "continuous"],
+        "schedule_order": [
+            "venue_lifecycle",
+            "protection",
+            "long",
+            "continuous",
+        ],
+        "venue_lifecycle_registered_events": len(venue_lifecycle_events),
         "required_performance_refactor_prefix_identities": (
             EXPECTED_PREFIX_IDENTITIES
         ),
@@ -892,6 +970,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "output_absent": not output.exists(),
                     "continuous_feature_files": continuous_files,
                     "long_feature_present": "long_features.parquet" in feature["files"],
+                    "venue_lifecycle_events": len(venue_lifecycle_events),
                 },
                 sort_keys=True,
             ),
@@ -953,7 +1032,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     } | {
         str(value).upper()
         for value in continuous_features["symbol"].unique().to_list()
-    }
+    } | {event.symbol for event in venue_lifecycle_events}
     rules = _instrument_rules(symbols)
 
     account_root = work / "account"
@@ -1027,6 +1106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             continuous_source_start_ms=CONTINUOUS_START_MS,
             source_end_ms=END_MS,
         ),
+        venue_lifecycle_events=venue_lifecycle_events,
         trace_sink=trace,
     )
 
@@ -1081,6 +1161,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("cycle trace does not cover the registered clock")
     if trace_counts["requests"] != structural["requests"]:
         raise RuntimeError("request trace count disagrees with comparator summary")
+    expected_lifecycle_trace_rows = (
+        int(structural["venue_lifecycle_observed_events"])
+        + int(structural["venue_lifecycle_blocked_entries"])
+    )
+    if trace_counts["venue_lifecycle"] != expected_lifecycle_trace_rows:
+        raise RuntimeError(
+            "venue lifecycle trace count disagrees with comparator summary"
+        )
     prefix_equivalence = _prefix_equivalence(work)
 
     persistence = _materialize_transactions(account_root)
@@ -1121,6 +1209,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "risk_policy": asdict(session.risk_policy),
             "execution_config": asdict(execution),
             "instrument_rule_count": len(rules),
+            "venue_lifecycle": {
+                "event_count": len(venue_lifecycle_events),
+                "event_table_sha256": EXPECTED_LIFECYCLE_EVENTS_SHA256,
+                "receipt_sha256": EXPECTED_LIFECYCLE_RECEIPT_SHA256,
+            },
         },
     )
 
@@ -1132,6 +1225,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         and structural["btc_risk_reconciliation_error"] == 0
         and trace_counts["continuous_gate_rows"] == continuous_features.height
         and trace_counts["cycles"] == total_hours
+        and structural["venue_lifecycle_observed_events"]
+        == len(venue_lifecycle_events)
+        and trace_counts["venue_lifecycle"]
+        == expected_lifecycle_trace_rows
     ) else "fail"
     files = _artifact_identities(work)
     receipt: dict[str, Any] = {
@@ -1162,6 +1259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "explicit_non_conclusions": [
             "no alpha, return, thesis, or profile conclusion",
             "no calibrated venue execution, cost, fill, or capacity claim",
+            "no exact venue per-second delisting settlement-price claim",
             "no live daemon interleaving or intrabar parity claim",
             "no deployment, mainnet, capital, or real-money authority",
             "forward demo/paper structural validation remains required",

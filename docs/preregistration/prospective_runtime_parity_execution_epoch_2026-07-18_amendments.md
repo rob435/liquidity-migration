@@ -335,3 +335,181 @@ Absence of an observer-only price leaves that optional diagnostic unset and
 must not fail or alter active selection. The authoritative selector still runs
 once with real frozen prices and the registered funnel observer. All 19 closed
 trace partitions from the CANTO failure remain pinned byte-for-byte.
+
+## Amendment 13: venue delisting settlements and lifecycle census
+
+Registered 2026-07-18 after the clean-commit `9b2ba6d9bc9f41586b22af011aef4b2bd50855bc`
+attempt failed in protection, before another comparator execution and without
+monetary inspection. Its create-only termination receipt is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-9b2ba6d9bc9f/termination.json`
+with SHA-256
+`aa4ed1e13dfb8c0828647d10dea4dd09fac5532764f907cfc52321f08e12288e`.
+That attempt reproduced all 19 previously registered partitions and then
+closed two new partitions, CONTINUOUS gate part 00008 and LONG funnel part
+00011, with SHA-256 values
+`4a45f75d5f5d04b553fda09333c84309ebb54de7d323dbf285f3dcb7c6d1f945`
+and `ef046c6c65a646da8ecb7d1dadcec64661d77d3bc82104aabdb35ef74ab41b7e`.
+The next attempt must reproduce all 21 byte-for-byte.
+
+At `2024-10-29T01:00:00Z`, protection required a mark for an open
+`KLAYUSDT` position but the direct archive and frozen hourly reconstruction
+had no KLAY row for 2024-10-29. Official Bybit article
+`blt5ff8d91e5ecd3d34`, published 2024-10-23, states that the KLAYUSDT
+perpetual would be delisted at `2024-10-28T03:00:00Z`, all open positions
+would be closed automatically, and the closing price would be based on the
+average index price in the prior 30 minutes. The frozen reconstruction has
+three real KLAY hourly bars on 2024-10-28 and then 21 zero-volume padded bars
+at the last value. Those padding rows are continuity scaffolding, not an
+executable post-delist market. The comparator omitted the venue-owned forced
+settlement and therefore carried an impossible position past delisting.
+
+Before another full run, build a create-only Bybit lifecycle census over the
+903 symbols in the frozen direct archive manifest, including the 286 whose
+last direct membership precedes the registered end. Discovery must snapshot
+all 12 English Bybit announcement linkmap pages and the official article page
+for each candidate. A settlement is admissible only when the official article
+body identifies an in-scope symbol, gives an exact effective time, states that
+open positions are automatically closed, and identifies the prior 30-minute
+average index as the closing-price reference. Unmatched or ambiguous terminal
+symbols remain unresolved; they must not be inferred from a last file date.
+
+For each admitted event, snapshot the official Bybit one-minute index-price
+API result for the half-open interval `[T-30m, T)`. Require exactly 30 unique,
+positive, finite minute closes. The structural comparator will use the
+arithmetic mean of those 30 closes as a declared settlement-price proxy. This
+is not the exact venue per-second average and therefore carries no fill-price,
+P&L, cost, or TCA claim. KLAY's API rows were viewed during failure diagnosis
+before this rule was written; they are spent diagnostic evidence, and no
+economic conclusion may be drawn from that event. Fee remains zero under the
+already registered structural execution port.
+
+At each admitted effective hour, ingest the deterministic external settlement
+through the production account kernel before protection, using a closed
+`venue_delisting_settlement` origin, the exact open net quantity, and the
+frozen proxy price. The same atomic transaction must zero every component
+owner, record the external reduction, and finalize the flat symbol. A flat
+symbol produces no fill. Any missing lifecycle evidence, missing proxy input,
+quantity contradiction, or later missing required market price still fails
+closed. This addition models an exogenous venue/account event; it does not
+change strategy classification, selection, sizing, capacity, target
+publication, BTC-risk policy, or the protection/LONG/CONTINUOUS order after
+the lifecycle stage.
+
+## Amendment 14: complete historical announcement discovery
+
+Registered 2026-07-18 after the first Amendment 13 census completed but before
+querying the historical announcement-search interface or integrating any
+lifecycle event. The preserved create-only output is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/venue-lifecycle/bybit-census`.
+Its receipt SHA-256 is
+`3fcbb7dbf15d1d0d749220d0d70b5be68b4c825507021b0a63ba62c2d866aefc`
+and its `events.parquet` SHA-256 is
+`f038ec9a472c51ad972af6a8ace7b01c98e26befc732515d4c436c2a7c31b92d`.
+No monetary outcome was opened. Structural validation showed that the 91
+admitted events span only 2025-10-06 through 2026-04-03 and omit KLAYUSDT. The
+12-page linkmap is multilingual and rolling: it exposed 1,401 unique English
+URLs at retrieval time, not a complete historical English archive. Therefore
+the census's generic `pass` status is coverage-invalid and it must not be used
+by the comparator.
+
+The replacement is create-only at
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/venue-lifecycle/bybit-census-search-v2`.
+In addition to preserving the registered linkmap material, it must snapshot
+the live site's build manifest and article-filter JavaScript that define its
+official search client. The versions inspected before registration were build
+`Qy-gplcCtv3r30Ts8tjHv`, build-manifest SHA-256
+`ccec1c6aaf8d6be1a14a5c5ac709dce13f3f7fa9d37ef86e7a72c93590020a10`,
+and article-filter chunk SHA-256
+`2c5b9a62be8d4b4c173d4e4bc817595bbb3b0f49e6b10cd98938efa5fec9b3d7`.
+That client posts to
+`https://announcements.bybit.com/x-api/announcements/api/search/v1/index/announcement-posts_en`.
+
+For each of the 286 terminal manifest symbols, the replacement must query that
+endpoint using the exact normalized symbol, page zero, 50 hits per page, and no
+filter. If `nbHits` requires more pages, it must fetch consecutive pages until
+all reported hits are frozen; inconsistent counts, incomplete pagination, a
+duplicate object identity with contradictory content, or a request failure
+invalidates the census. Freeze each canonical request body and raw official
+response. Take the union of official result URLs and the rolling-linkmap URLs,
+then apply Amendment 13's article-body admission rule and index-price rule.
+Search hits are discovery evidence only: a terminal file date, title, snippet,
+or search rank cannot itself admit a lifecycle event.
+
+The replacement is coverage-valid only if all 286 registered symbol queries
+are complete, KLAYUSDT admits exactly one event at
+`2024-10-28T03:00:00Z` from article UID `blt5ff8d91e5ecd3d34`, every other
+admitted event satisfies Amendment 13, and every admitted event has a complete
+30-row official index-price input. Symbols with complete searches but no
+admissible official event remain explicitly unresolved; they are not inferred
+or fabricated. The comparator continues to fail closed if such a missing
+lifecycle event becomes execution-relevant. This correction changes discovery
+coverage only and still authorizes no P&L, cost, alpha, thesis, deployment, or
+real-money conclusion.
+
+## Amendment 15: query-dependent search highlighting
+
+Registered 2026-07-18 after the first Amendment 14 search attempt stopped,
+before its replacement and without monetary inspection. The incomplete attempt
+is preserved at
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/venue-lifecycle/.bybit-census-search-v2.working-query-highlight`.
+Its termination receipt SHA-256 is
+`f9eb3ff6c9311da43db8a156ce883022ea963b35a9245b8fdfafc0f54d3d961f`.
+
+The attempt saw article object `article.bltbf0fa753e30d9151` in the A8USDT and
+AGTUSDT query results and stopped because the raw hit objects were not
+byte-identical. The two frozen response SHA-256 values are respectively
+`e688daf1f935f0c059f2ed3da1ce046f9d668dd9eb5f84dd26a90542be3f9d08`
+and `c43f2e472bbe32f65d1552d360628b42bae31443068f3ba7e0ad26d5b1645d5b`.
+Structural comparison showed that the sole differing key was
+`_highlightResult`: Bybit embeds the current query term and highlighted title
+in that field. Every stable article field, including object ID, title,
+description, category, timestamps, URL, flags, thumbnail, and topics, was
+equal.
+
+The replacement must continue to freeze each raw query response exactly, but
+must exclude only `_highlightResult` when comparing repeated object IDs for a
+content contradiction. Any difference in any other hit field still fails the
+census. This is a parser correction for documented query-dependent response
+decoration; it does not relax article-body admission, lifecycle timing,
+settlement input, coverage, or any research conclusion.
+
+## Amendment 16: delisted instruments cannot accept new targets
+
+Registered 2026-07-18 after the coverage-valid lifecycle census completed,
+before lifecycle integration or another comparator run and without inspecting
+strategy or monetary outcomes. The create-only census receipt SHA-256 is
+`19c8a3bc88681f9b36420d99eed6c9d31150e331ccf8bc0097d308bb2e3d4327`,
+its `events.parquet` SHA-256 is
+`7ca1de951837b5659aee8b9ceefe95b8c661960ba671a453d65fb457d7fdc4c1`,
+and its `search_queries.parquet` SHA-256 is
+`c16eb2d370d15afbbe3e79d882dbdb22f8da3633d83a252cf50d9232df03c09e`.
+It completed all 286 searches, admitted 235 official events, admitted the
+registered KLAY event exactly once, and reported zero coverage, critical
+article, duplicate-event, or index-input errors. Four rolling-linkmap-only
+articles failed parsing, but all 984 exact-symbol search-result URLs fetched;
+the search-result admission path therefore remained complete.
+
+An admitted delisting event has two structural consequences at its dispatch
+boundary: the venue-owned settlement in Amendment 13 and the instrument's
+unavailability for new orders. Merely flattening an existing position would
+still allow a selector to reopen the symbol from same-day padded continuity
+bars or from a delayed pre-delist signal. Those bars are non-executable after
+the official effective time.
+
+The comparator must therefore retain an immutable set of dispatched delisted
+symbols. Lifecycle settlement runs first. LONG and CONTINUOUS production
+selection, sizing, funnel, and gate traces may then execute unchanged so their
+diagnostic and registered-prefix identities remain comparable, but every new
+entry intent for a dispatched symbol must be removed immediately before target
+publication. Exit intents are not blocked. Each removed entry must receive an
+outcome-blind `venue_lifecycle_block` trace containing the boundary, symbol,
+target and decision identities, official event identity and effective time,
+and the reason `venue_delisted_before_target_publication`. Cycle and final
+summaries must count observed lifecycle events, forced-settlement fills, and
+blocked entries.
+
+The existing 21 registered LONG-funnel and CONTINUOUS-gate partitions must
+remain byte-identical. A required frozen price that is missing before the
+post-selection gate still fails closed; the comparator may not invent a price
+to preserve a trace. This environment gate grants no alpha, fill-price, cost,
+deployment, or real-money conclusion.

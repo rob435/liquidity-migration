@@ -2481,8 +2481,9 @@ class AccountExecutionKernel:
         """Atomically adopt an out-of-band reduce fill and zero its owners.
 
         Bybit-created TP/SL executions do not carry a kernel command id.  This
-        also applies to manual, liquidation, and otherwise unattributed venue
-        reductions. This method synthesizes the missing canonical command/ack
+        also applies to manual, delisting, liquidation, and otherwise
+        unattributed venue reductions. This method synthesizes the missing
+        canonical command/ack
         while replacing all same-symbol component targets with zero in the
         *same journal transaction* as the fill. A restart or later target cycle
         therefore cannot reopen a position the venue already reduced.
@@ -2500,6 +2501,7 @@ class AccountExecutionKernel:
             "verified_native_stop",
             "bybit_stop_loss_unbound",
             "unattributed_external_reduction",
+            "venue_delisting_settlement",
             "venue_liquidation",
             "venue_adl",
         }

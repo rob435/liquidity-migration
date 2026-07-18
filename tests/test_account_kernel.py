@@ -633,6 +633,79 @@ def test_native_protection_fill_atomically_zeros_targets_and_records_pnl(tmp_pat
     assert len(read_account_journal(tmp_path)) == before + len(adopted)
 
 
+def test_venue_delisting_fill_is_an_allowed_external_reduction_origin(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    opened = kernel.submit_targets(
+        batch_id="open-before-delisting",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="open-before-delisting",
+                key="continuous/strategy/trade-delisting/BUSDT",
+                sleeve="continuous",
+                qty=-2.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = opened.commands[0]
+    KernelExecutionDriver(kernel).ingest(
+        [
+            {
+                "observation_type": "ack",
+                "command_id": command.command_id,
+                "exchange_ts_ns": 1_200_000_000,
+                "local_receive_ts_ns": 1_210_000_000,
+                "accepted": True,
+                "venue_order_id": "entry-before-delisting",
+            },
+            {
+                "observation_type": "fill",
+                "command_id": command.command_id,
+                "exchange_ts_ns": 1_220_000_000,
+                "local_receive_ts_ns": 1_225_000_000,
+                "venue_order_id": "entry-before-delisting",
+                "execution_id": "entry-exec-before-delisting",
+                "signed_qty": -2.0,
+                "price": 10.0,
+                "fee_usdt": 0.0,
+            },
+        ]
+    )
+
+    adopted = kernel.adopt_external_protection_fill(
+        protection_key="venue-delisting:BUSDT:1234",
+        venue_order_id="venue-delisting:BUSDT:1234",
+        execution_id="venue-delisting-execution:BUSDT:1234",
+        symbol="BUSDT",
+        signed_qty=2.0,
+        price=10.5,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_300_000_000,
+        local_receive_ts_ns=1_305_000_000,
+        reason="venue_delisting_settlement",
+        execution_origin="venue_delisting_settlement",
+        metadata={"proxy_exactness": "structural"},
+    )
+
+    state = kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    assert state.aggregate_targets["BUSDT"] == 0.0
+    fill = next(
+        event
+        for event in adopted
+        if event.event_type == AccountEventType.FILL.value
+    )
+    assert fill.payload["metadata"]["external_execution_origin"] == (
+        "venue_delisting_settlement"
+    )
+    assert fill.payload["metadata"]["proxy_exactness"] == "structural"
+
+
 def test_same_seed_and_input_tape_produce_identical_events_and_state_hashes(tmp_path: Path) -> None:
     roots = [tmp_path / "historical", tmp_path / "paper", tmp_path / "demo"]
     event_rows: list[list[dict[str, object]]] = []
