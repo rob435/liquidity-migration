@@ -107,9 +107,16 @@ SHARED_PROJECTION_FAILED_ATTEMPT_ROOT = (
 SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION = (
     SHARED_PROJECTION_FAILED_ATTEMPT_ROOT / "termination.json"
 )
+PRICE_OVERREQUEST_FAILED_ATTEMPT_ROOT = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-55be92283972"
+)
+PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION = (
+    PRICE_OVERREQUEST_FAILED_ATTEMPT_ROOT / "termination.json"
+)
 
 EXPECTED_BASE_CONTRACT_SHA256 = "15edc498adf2bd068c33ff2f791fa3e46f161196db673a839adcf317aba35a31"
-EXPECTED_AMENDMENTS_SHA256 = "24453ed752ad4f323ee716d90216c848c8ca372bc525722c5e748793b2ff7b36"
+EXPECTED_AMENDMENTS_SHA256 = "8c04e9e23eb19251be82438545a6d3929e000a2c112aa76e569ce456e92eee30"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
@@ -117,12 +124,64 @@ EXPECTED_FEATURE_PAYLOAD_SHA256 = "eff681990a9262a3b30781588ee80a7f7b2f67ca16c81
 EXPECTED_FAILED_ATTEMPT_TERMINATION_SHA256 = "dd5df88b6d77fe181ba1fb1737b97fa3a62841065d16c425b1f26499954063d1"
 EXPECTED_INDEXED_FAILED_ATTEMPT_TERMINATION_SHA256 = "701386b22989a35c39bb5cd544dc9377a02caa66d10dbd6b2c6fefa688cbc8ed"
 EXPECTED_SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION_SHA256 = "28eac53954835d799e066642ecba4843037ab05f8fddb587ba4fa1b89360a738"
+EXPECTED_PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION_SHA256 = "ec37b1bb95d8e7aac4780716504f74d87aba6a93ec9082e824d796906167c80a"
 EXPECTED_PREFIX_IDENTITIES = {
     "traces/continuous_gates/part-00000.parquet": (
         "ae7d56f33b6642a43227b8f4affd4c054f8be59f2fc90f27d9c777a4b5a41eb2"
     ),
+    "traces/continuous_gates/part-00001.parquet": (
+        "ce4086a7b5f01ee70b23a5e6f39bb07890680ba81383f50ab79ed7c98a8a6054"
+    ),
+    "traces/continuous_gates/part-00002.parquet": (
+        "9ce06fc85d0b600b86b4731cf2eca73ff72ff7eb93df85c2707ffea0a7399c0f"
+    ),
+    "traces/continuous_gates/part-00003.parquet": (
+        "d223d167e11d8d0a807a609e782503cf6d52fca07cb82190598d37ed31378c35"
+    ),
+    "traces/continuous_gates/part-00004.parquet": (
+        "d5edac73cfbac65471db89b5d47b143cd8cbcef3484c8fc24fc152a1e226be30"
+    ),
+    "traces/continuous_gates/part-00005.parquet": (
+        "3fd8b82c94c2d0960832c58c6ffaba766b1b11fd553d5524ecb6dc8029686e8f"
+    ),
+    "traces/continuous_gates/part-00006.parquet": (
+        "873e0ca1c26a7871bc83360adf604432b80f14d2c7ab59ebd73ea6082fdd7cdf"
+    ),
+    "traces/continuous_gates/part-00007.parquet": (
+        "cbe927f058e8060ce9f99aff886e62c9037c8482b444a99f4554fc631d36db1f"
+    ),
     "traces/long_funnel/part-00000.parquet": (
         "31f4d87816b8972b18626eb8297e726ab6aa15efb48ea8286f977fed7090d83e"
+    ),
+    "traces/long_funnel/part-00001.parquet": (
+        "03f7659d0ab210ff9f4d5d5d83bd21e98d204dce4af0c9ef88cc9003a00862c8"
+    ),
+    "traces/long_funnel/part-00002.parquet": (
+        "3eab1390e33bf5f41223fbf6304e3fa149b75f7166edfd7ff813968e7de6ec3e"
+    ),
+    "traces/long_funnel/part-00003.parquet": (
+        "00f75a19c9f7fc757b6ef1734f21b3711b818eac9edccfcf03b9cc49e2aa340b"
+    ),
+    "traces/long_funnel/part-00004.parquet": (
+        "047d26d9478f971118474cecccbcba641cb3a0387db22b52e85e7dd071d735c7"
+    ),
+    "traces/long_funnel/part-00005.parquet": (
+        "b116c2437d01247684c4a3fd04ddffe46c2de695836015b36508309631a34e4a"
+    ),
+    "traces/long_funnel/part-00006.parquet": (
+        "d078a04ec9f8ccc7ea02d083389524c755660fdfab5feb4bdb45bcf4ce980f86"
+    ),
+    "traces/long_funnel/part-00007.parquet": (
+        "22520e6269f2b72cbf9191653c6aa3d159cb63826fa525d4f93e3e25ece08573"
+    ),
+    "traces/long_funnel/part-00008.parquet": (
+        "27f3473e0c5057e186114c7e6eaa66a86b63f7d15a24873dde612f03f5fe1fd6"
+    ),
+    "traces/long_funnel/part-00009.parquet": (
+        "e0f6cd79eebd712bc9b6b26186e0356fccc44e6ebb166b75975614364aa8a06f"
+    ),
+    "traces/long_funnel/part-00010.parquet": (
+        "43a860c274df386607186adab4803229d06eb6a145623e734390626d6d182ecf"
     ),
 }
 
@@ -455,6 +514,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "shared_projection_failed_attempt_termination": (
             SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "price_overrequest_failed_attempt_termination": (
+            PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION_SHA256,
         ),
     }
     output: dict[str, dict[str, Any]] = {}

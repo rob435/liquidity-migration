@@ -15,6 +15,7 @@ from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.active_runtime_comparator import (
     ActiveRuntimeComparator,
     ComparatorRunConfig,
+    _long_price_required_symbols,
 )
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
@@ -251,6 +252,25 @@ def test_shared_comparator_preserves_requests_btc_chain_and_boundary_flat(
             "turnover_median_90d": [2_000_000.0],
         }
     )
+    ineligible_pump = {
+        **long_features.to_dicts()[0],
+        "symbol": "CANTOUSDT",
+        "in_universe": False,
+        "regime_on": False,
+        "eth_regime_on": False,
+        "today_volume_rank": 234,
+        "symbol_age_days": 82,
+        "turnover_median_90d": None,
+    }
+    assert _long_price_required_symbols(
+        features=pl.from_dicts(
+            [*long_features.to_dicts(), ineligible_pump],
+            infer_schema_length=None,
+        ),
+        all_trades=pl.DataFrame(),
+        now_ms=boundary,
+        strategy=long_v11a_profile(),
+    ) == {long_symbol}
 
     cycle = comparator.process_hour(
         boundary,

@@ -261,3 +261,38 @@ fails closed. Normal production callers retain the defensive replay copy. The
 trusted snapshot is read synchronously before another comparator mutation and
 does not change trigger logic, target construction, publication, accounting,
 or any registered trace identity requirement.
+
+## Amendment 11: production-ordered LONG price dependencies
+
+Registered 2026-07-18 after the first non-performance comparator failure at
+code commit `55be92283972217841ffc16b32a785632959250f`, before its
+replacement and without monetary inspection. The failure receipt is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-55be92283972/termination.json`
+with SHA-256
+`ec37b1bb95d8e7aac4780716504f74d87aba6a93ec9082e824d796906167c80a`.
+
+At `2024-08-13T01:00:00Z` the comparator requested a frozen hourly price for
+`CANTOUSDT` and correctly refused to carry a stale value when that day's file
+was absent. Subsequent structural diagnosis showed the request itself was not
+production-equivalent. The CANTO daily row had a raw pump trigger but only 82
+days of history, null PIT universe membership and 90-day turnover, both active
+regimes false, and production `_classify_entry == None`. The direct archive and
+hourly reconstruction end on 2024-08-12 and the PIT manifest has no CANTO row
+on 2024-08-13. The production LONG selector applies classification, exposure,
+cooldown, and delay gates before its live-price lookup; therefore CANTO's price
+was not decision-required. The historical port had instead requested prices
+for every raw pump source before calling that selector.
+
+The replacement may discover strict LONG price dependencies with one pure,
+observer-free call to the production selector using a positive read-recording
+price probe. Only symbols whose selector path actually reads a price are then
+loaded from the frozen reconstruction. The authoritative selector runs again
+with those real prices and the normal funnel observer. A missing price for any
+symbol that reaches the production price read still fails the run; no stale
+fill, row drop, inferred price, or relaxed gate is allowed.
+
+This repair must reproduce every closed trace partition from the failed
+attempt byte-for-byte: continuous-gate parts 00000 through 00007 and
+LONG-funnel parts 00000 through 00010. Those hashes are pinned in the runner.
+The partial attempt remains incomplete and has no strategy or economic
+evidentiary weight.

@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import polars as pl
 
@@ -74,7 +74,7 @@ from .historical_account_replay import (
     HistoricalAccountSession,
     historical_submission_feedback,
 )
-from .long_native import LongNativeConfig, long_pump_family
+from .long_native import LongNativeConfig
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _compute_long_order_sizing,
@@ -121,6 +121,44 @@ class ComparatorTraceSink(Protocol):
     def request(self, row: Mapping[str, Any]) -> None: ...
 
     def request_intent(self, row: Mapping[str, Any]) -> None: ...
+
+
+class _LongPriceRequirementProbe:
+    """Record only production-selector reads before supplying real prices."""
+
+    def __init__(self) -> None:
+        self.symbols: set[str] = set()
+
+    def get(self, key: object, _default: object = None) -> float:
+        self.symbols.add(str(key).upper())
+        return 1.0
+
+
+def _long_price_required_symbols(
+    *,
+    features: pl.DataFrame,
+    all_trades: pl.DataFrame,
+    now_ms: int,
+    strategy: LongNativeConfig,
+) -> set[str]:
+    """Discover strict price dependencies through the production selector.
+
+    The probe run has no observer or mutation.  Its positive placeholder lets
+    the selector reach every pre-price-eligible row; only calls to ``get`` are
+    retained.  The authoritative selector runs again with strict frozen prices.
+    """
+
+    probe = _LongPriceRequirementProbe()
+    _select_long_entry_candidates(
+        features=features,
+        all_trades=all_trades,
+        now_ms=now_ms,
+        strategy=strategy,
+        price_by_symbol=cast(dict[str, float], probe),
+        max_new_entries=max(features.height, 1),
+        funnel_observer=None,
+    )
+    return probe.symbols
 
 
 class NullComparatorTraceSink:
@@ -716,11 +754,12 @@ class ActiveRuntimeComparator:
         *,
         boundary_ts_ms: int,
     ) -> dict[str, float]:
-        symbols: set[str] = set()
-        for row in features.iter_rows(named=True):
-            pump = long_pump_family(row, self.long_strategy)
-            if bool(pump["trigger_any"]):
-                symbols.add(str(row["symbol"]).upper())
+        symbols = _long_price_required_symbols(
+            features=features,
+            all_trades=self._long_trades,
+            now_ms=boundary_ts_ms,
+            strategy=self.long_strategy,
+        )
         return self.price_port.prices(symbols, boundary_ts_ms)
 
     def _run_long(
