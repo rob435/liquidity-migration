@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.account_kernel import (
     AccountEventType,
+    AccountJournalIntegrityError,
     AccountRiskPolicy,
     AccountRiskSnapshot,
     InstrumentRules,
+    read_account_journal,
 )
-from liquidity_migration.account_service import RequestedIntent, SleeveAdapterKind
+from liquidity_migration.account_service import (
+    AccountTargetRequest,
+    RequestedIntent,
+    SleeveAdapterKind,
+)
 from liquidity_migration.execution_adapters import BookLevel, ExecutionTwinConfig, L2BookSnapshot, LatencyProfile
 from liquidity_migration.historical_account_replay import (
     HistoricalAccountSession,
@@ -147,3 +155,61 @@ def test_online_submit_decisions_builds_causal_cycle_and_feedback(tmp_path: Path
     assert outputs[0].target_result.commands[0].side == "Buy"
     assert session.kernel is not None
     assert session.kernel.state().positions["BUSDT"].signed_qty == 2.0
+
+
+def test_online_submit_request_preserves_published_batch_and_content_identity(
+    tmp_path: Path,
+) -> None:
+    rules = synthetic_historical_rules_for_symbols(
+        ["BUSDT"], max_leverage=10.0, observed_ts_ns=1_000
+    )
+    session = HistoricalAccountSession(
+        tmp_path,
+        account_id="published-account",
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        instrument_rules=rules,
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="published-account",
+    )
+    request = AccountTargetRequest(
+        request_id="target-request-one",
+        batch_id="published-batch-one",
+        created_ts_ns=2_000,
+        route_id="historical-route",
+        account_id="published-account",
+        environment="demo",
+        intents=(_intent(decision="published-entry", notional=20.0),),
+    )
+
+    outputs = session.submit_request(
+        request,
+        equity_usdt=100.0,
+        market_prices={"BUSDT": 10.0},
+    )
+
+    assert len(outputs) == 1
+    assert outputs[0].target_result.accepted
+    events = read_account_journal(tmp_path, verify=True)
+    risk = [event for event in events if event.event_type == AccountEventType.RISK_DECISION.value]
+    assert len(risk) == 1
+    assert risk[0].payload["batch_id"] == request.batch_id
+
+    conflicting_request = AccountTargetRequest(
+        request_id="target-request-two",
+        batch_id=request.batch_id,
+        created_ts_ns=request.created_ts_ns,
+        route_id=request.route_id,
+        account_id=request.account_id,
+        environment=request.environment,
+        intents=request.intents,
+    )
+    with pytest.raises(AccountJournalIntegrityError, match="request content changed"):
+        session.submit_request(
+            conflicting_request,
+            equity_usdt=100.0,
+            market_prices={"BUSDT": 10.0},
+        )

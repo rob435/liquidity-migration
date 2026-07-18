@@ -20,7 +20,7 @@ from .account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from .account_service import RequestedIntent, SleeveAdapterKind
+from .account_service import AccountTargetRequest, RequestedIntent, SleeveAdapterKind
 from .deterministic_runtime import VirtualClock
 from .execution_adapters import ExecutionTwinConfig, L2BookSnapshot, MarketOrderExecutionTwin
 from .execution_adapters import BookLevel
@@ -372,6 +372,8 @@ class HistoricalAccountSession:
         equity_usdt: float,
         batch_prefix: str = "strategy-kernel",
         market_prices: Mapping[str, float] | None = None,
+        exact_batch_id: str | None = None,
+        request_content_hash: str | None = None,
     ) -> tuple[AccountCycleResult, ...]:
         """Submit one causal timestamp's decisions and return immediate feedback."""
 
@@ -404,6 +406,14 @@ class HistoricalAccountSession:
             else:
                 layers.append([item])
                 layer_keys.append({target_key})
+
+        if exact_batch_id is not None:
+            if not str(exact_batch_id).strip():
+                raise ValueError("exact historical account batch id cannot be blank")
+            if len(layers) != 1:
+                raise ValueError(
+                    "one immutable target request cannot require multiple target-replacement layers"
+                )
 
         outputs: list[AccountCycleResult] = []
         for layer_index, layer in enumerate(layers, start=1):
@@ -460,7 +470,11 @@ class HistoricalAccountSession:
                     asks=(BookLevel(price, 1e15),),
                 )
             cycle = HistoricalReplayCycle(
-                batch_id=f"{batch_prefix}/{wall_ts_ns}/{sequence}/{layer_index}",
+                batch_id=(
+                    str(exact_batch_id)
+                    if exact_batch_id is not None
+                    else f"{batch_prefix}/{wall_ts_ns}/{sequence}/{layer_index}"
+                ),
                 wall_ts_ns=wall_ts_ns,
                 books=books,
                 intents=tuple(item.intent for item in layer),
@@ -470,9 +484,70 @@ class HistoricalAccountSession:
                     f"historical-fixed:{equity_usdt:g}:{wall_ts_ns}:{sequence}",
                     wall_ts_ns,
                 ),
+                request_content_hash=request_content_hash,
             )
             outputs.append(self.process_cycle(cycle))
         return tuple(outputs)
+
+    def submit_request(
+        self,
+        request: AccountTargetRequest,
+        *,
+        equity_usdt: float,
+        market_prices: Mapping[str, float],
+    ) -> tuple[AccountCycleResult, ...]:
+        """Replay one production-published request without losing its identity.
+
+        The request's immutable batch id, created clock, intent order, and
+        content hash flow into the production account kernel. Market prices are
+        an explicit deterministic port; no decision price is reconstructed
+        from a finished trade row.
+        """
+
+        if type(request) is not AccountTargetRequest:
+            raise TypeError("historical account request replay requires AccountTargetRequest")
+        if request.account_id != self.account_id:
+            raise ValueError(
+                "historical target request account does not match the replay session: "
+                f"{request.account_id!r} != {self.account_id!r}"
+            )
+        normalized_prices = {
+            str(symbol).upper(): float(price)
+            for symbol, price in market_prices.items()
+        }
+        decisions: list[HistoricalTargetDecision] = []
+        for item in request.intents:
+            symbol = item.intent.symbol.upper()
+            try:
+                reference_price = normalized_prices[symbol]
+            except KeyError as exc:
+                raise ValueError(
+                    f"historical target request lacks a market price for {symbol}"
+                ) from exc
+            metadata_price = item.intent.metadata.get("decision_reference_price")
+            if metadata_price is not None and float(metadata_price) != reference_price:
+                raise ValueError(
+                    f"published decision and historical market prices differ for {symbol}: "
+                    f"{float(metadata_price):g} vs {reference_price:g}"
+                )
+            decisions.append(
+                HistoricalTargetDecision(
+                    wall_ts_ns=request.created_ts_ns,
+                    intent=item,
+                    reference_price=reference_price,
+                    metadata={
+                        "request_id": request.request_id,
+                        "request_content_hash": request.content_hash(),
+                    },
+                )
+            )
+        return self.submit_decisions(
+            decisions,
+            equity_usdt=equity_usdt,
+            market_prices=normalized_prices,
+            exact_batch_id=request.batch_id,
+            request_content_hash=request.content_hash(),
+        )
 
     @property
     def final_state_hash(self) -> str:
