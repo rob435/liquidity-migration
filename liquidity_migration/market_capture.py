@@ -1312,13 +1312,38 @@ class BybitRawPublicMarketStream:
                 topics.append(f"publicTrade.{symbol}")
         return topics
 
-    def _send(self, operation: str, symbols: Iterable[str]) -> None:
+    def _send(self, operation: str, symbols: Iterable[str]) -> bool:
         topics = self._topics(symbols)
         socket = self._socket
         if not topics or socket is None:
-            return
-        for index in range(0, len(topics), 10):
-            socket.send(json.dumps({"op": operation, "args": topics[index : index + 10]}))
+            return False
+        try:
+            for index in range(0, len(topics), 10):
+                socket.send(
+                    json.dumps(
+                        {"op": operation, "args": topics[index : index + 10]}
+                    )
+                )
+        except Exception:  # noqa: BLE001 - a closed socket must enter reconnect
+            # ``run_forever`` can still be unwinding after its transport has
+            # closed.  A concurrent symbol refresh must retain the desired set
+            # for the next ``on_open`` instead of killing the account owner.
+            if self._socket is socket:
+                self._socket = None
+            close = getattr(socket, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - preserve the reconnect path
+                    _logger.debug("failed to close unusable Bybit public socket", exc_info=True)
+            if not self._stop.is_set():
+                _logger.warning(
+                    "Bybit public %s failed; reconnect will restore desired subscriptions",
+                    operation,
+                    exc_info=True,
+                )
+            return False
+        return True
 
     def update_symbols(self, symbols: Iterable[str]) -> None:
         desired = {symbol.upper() for symbol in symbols if symbol}

@@ -686,6 +686,44 @@ def test_operational_stream_subscribes_only_to_required_orderbooks() -> None:
     assert socket.sent == [{"op": "subscribe", "args": ["orderbook.50.BUSDT"]}]
 
 
+def test_raw_stream_closed_socket_defers_desired_symbols_to_reconnect() -> None:
+    class ClosedSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def send(self, _value: str) -> None:
+            raise RuntimeError("socket is already closed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class ReconnectedSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+    )
+    closed = ClosedSocket()
+    stream._socket = closed
+
+    stream.update_symbols({"BUSDT"})
+
+    assert closed.closed is True
+    assert stream._socket is None
+    reconnected = ReconnectedSocket()
+    stream._on_open(reconnected)
+    assert reconnected.sent == [
+        {"op": "subscribe", "args": ["orderbook.50.BUSDT"]}
+    ]
+
+
 def test_capture_rotates_segments_before_size_limit(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(
         tmp_path,
