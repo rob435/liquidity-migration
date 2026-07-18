@@ -54,8 +54,8 @@ scope. Historical and forward returns must not be opened under this contract.
   new strategy-price outcome; only event, coverage, flatness, and accounting
   identities may be inspected.
 - The raw baseline snapshot uses the local Bybit PIT root and the half-open
-  completed-data boundary `[2022-12-01, 2026-07-18)`. Feature outputs remain
-  bounded to `[2023-03-01, 2026-07-18)`; the earlier 90 days are the fixed
+  completed-data boundary `[2022-12-01, 2026-07-10)`. Feature outputs remain
+  bounded to `[2023-03-01, 2026-07-10)`; the earlier 90 days are the fixed
   causal factor warm-up. Earlier manifest rows may be retained solely to
   establish launch/listing history. No feature, target,
   path, return, or P&L outcome is inspected while the snapshot is built.
@@ -249,3 +249,17 @@ start. The raw snapshot start is therefore corrected from `2023-03-01` to
 `2022-12-01`, while the feature/result start remains `2023-03-01`. This is an
 outcome-blind causal-availability correction; the end boundary, tested set,
 rules, tolerances, and forward clock are unchanged.
+
+## Pre-exposure amendment 2: available baseline boundary
+
+Registered 2026-07-18 13:46 UTC before snapshot content, features, targets,
+returns, or P&L were read. An outcome-blind partition inventory found that both
+the independent Bybit manifest and hourly klines end on 2026-07-09, while the
+five-minute dataset ends on 2026-06-25 and the five ancillary datasets end on
+2026-07-10. The immutable baseline therefore ends at `2026-07-10` exclusive,
+the latest boundary supported jointly by manifest and hourly klines. Data from
+that boundary forward enters only as separately published, prior-hash-chained
+deltas after public refresh. Incomplete five-minute coverage remains explicit
+and cannot support exact historical intrabar-entry parity; that aspect is
+tested on forward target captures. No decision rule, tolerance, model, or
+forward horizon changed.
