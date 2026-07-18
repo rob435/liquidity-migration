@@ -795,6 +795,59 @@ def _autodetect_dataset_names(data_root: Path | str) -> dict[str, str]:
     }
 
 
+def build_feature_panel_from_daily(
+    daily_klines: pl.DataFrame,
+    *,
+    start: str,
+    end: str,
+    feature_specs: "Iterable[FeatureSpec] | str" = "all",
+    forward_horizons: tuple[int, ...] = (1, 3, 7),
+    universe_min_daily_turnover: float = 0.0,
+    funding_daily: pl.DataFrame | None = None,
+    open_interest_daily: pl.DataFrame | None = None,
+    premium_daily: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Build the canonical panel from pre-aggregated PIT-filtered daily inputs.
+
+    This pure owner is used by immutable research reconstruction.
+    ``daily_klines`` must already include the caller's causal warm-up and
+    forward-return tail. The ordinary data-root builder delegates here after
+    reading and aggregating its hourly datasets.
+    """
+
+    if daily_klines.is_empty():
+        return pl.DataFrame()
+    specs = resolve_feature_specs(feature_specs)
+    start_ms = _date_str_to_ms(start)
+    end_ms = _date_str_to_ms(end)
+    ctx = FeatureContext(
+        daily_klines=daily_klines,
+        daily_returns=_attach_daily_returns(daily_klines),
+        funding_daily=funding_daily if funding_daily is not None else pl.DataFrame(),
+        open_interest_daily=(
+            open_interest_daily if open_interest_daily is not None else pl.DataFrame()
+        ),
+        premium_daily=premium_daily if premium_daily is not None else pl.DataFrame(),
+        universe_min_daily_turnover=universe_min_daily_turnover,
+    )
+
+    panel = daily_klines.select(["symbol", "ts_ms", "date", "close", "turnover_quote"])
+    for spec in specs:
+        feat = spec.builder(ctx)
+        if feat.is_empty():
+            panel = panel.with_columns(pl.lit(None, dtype=pl.Float64).alias(spec.name))
+            continue
+        panel = panel.join(feat, on=["symbol", "ts_ms"], how="left")
+
+    fwd = _attach_forward_returns(daily_klines, forward_horizons)
+    if not fwd.is_empty():
+        panel = panel.join(fwd, on=["symbol", "ts_ms"], how="left")
+    if universe_min_daily_turnover > 0.0:
+        panel = panel.filter(pl.col("turnover_quote") >= universe_min_daily_turnover)
+    panel = panel.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+    return panel.sort(["ts_ms", "symbol"])
+
+
 def build_feature_panel(
     data_root: Path | str,
     *,
@@ -835,7 +888,6 @@ def build_feature_panel(
     cross-sectional rank. The default remains false for operational roots that
     contain a current live universe rather than a historical manifest.
     """
-    specs = resolve_feature_specs(feature_specs)
     start_ms = _date_str_to_ms(start)
     end_ms = _date_str_to_ms(end)
     # Pad 60 days backwards so rolling-30 has warm-up. Forward-return columns
@@ -878,44 +930,17 @@ def build_feature_panel(
             return pl.DataFrame()
 
     daily_klines = _aggregate_daily_klines(klines_1h)
-    daily_returns = _attach_daily_returns(daily_klines)
     funding_daily = _aggregate_daily_funding(funding)
     open_interest_daily = _aggregate_daily_open_interest(open_interest)
     premium_daily = _aggregate_daily_premium(premium)
-
-    ctx = FeatureContext(
-        daily_klines=daily_klines,
-        daily_returns=daily_returns,
+    return build_feature_panel_from_daily(
+        daily_klines,
+        start=start,
+        end=end,
+        feature_specs=feature_specs,
+        forward_horizons=forward_horizons,
+        universe_min_daily_turnover=universe_min_daily_turnover,
         funding_daily=funding_daily,
         open_interest_daily=open_interest_daily,
         premium_daily=premium_daily,
-        universe_min_daily_turnover=universe_min_daily_turnover,
     )
-
-    # Spine = (symbol, ts_ms) from the daily klines — every row in the panel
-    # corresponds to a date the symbol traded.
-    panel = daily_klines.select(["symbol", "ts_ms", "date", "close", "turnover_quote"])
-
-    for spec in specs:
-        feat = spec.builder(ctx)
-        if feat.is_empty():
-            # Feature could not be computed (e.g. missing dataset) — emit
-            # the column as nulls so the panel schema stays stable.
-            panel = panel.with_columns(pl.lit(None, dtype=pl.Float64).alias(spec.name))
-            continue
-        panel = panel.join(feat, on=["symbol", "ts_ms"], how="left")
-
-    fwd = _attach_forward_returns(daily_klines, forward_horizons)
-    if not fwd.is_empty():
-        panel = panel.join(fwd, on=["symbol", "ts_ms"], how="left")
-
-    # Apply optional universe-min-turnover filter LAST so feature computation
-    # still sees the full liquidity distribution (a higher floor would
-    # otherwise truncate the cross-sectional rank pool).
-    if universe_min_daily_turnover > 0.0:
-        panel = panel.filter(pl.col("turnover_quote") >= universe_min_daily_turnover)
-
-    # Restrict to the operator-requested window.
-    panel = panel.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
-
-    return panel.sort(["ts_ms", "symbol"])

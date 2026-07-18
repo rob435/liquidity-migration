@@ -603,6 +603,16 @@ def build_long_features(klines_1h: pl.DataFrame, *, config: LongNativeConfig) ->
     """Build only the features consumed by the registered FC-v11a profile."""
 
     daily = daily_bars(klines_1h)
+    return build_long_features_from_daily(daily, config=config)
+
+
+def build_long_features_from_daily(
+    daily: pl.DataFrame,
+    *,
+    config: LongNativeConfig,
+) -> pl.DataFrame:
+    """Build the canonical LONG feature set from PIT-filtered daily bars."""
+
     if daily.is_empty():
         return daily
     daily = add_returns_and_age(daily).sort(["symbol", "ts_ms"])

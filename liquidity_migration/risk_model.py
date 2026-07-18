@@ -15,6 +15,7 @@ from liquidity_migration.daily_feature_panel import (
     _read_window,
     _xs_rank,
     build_feature_panel,
+    build_feature_panel_from_daily,
 )
 from liquidity_migration.storage import read_dataset_columns
 from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership
@@ -102,6 +103,37 @@ def compute_btc_beta(
         # wrong-signed beta.
         pl.when(var_y > 1e-12).then(cov_xy / var_y).otherwise(None).alias("btc_beta")
     ).select("symbol", "ts_ms", "btc_beta")
+
+
+def build_factor_panel_from_daily(
+    daily_klines: pl.DataFrame,
+    *,
+    start: str,
+    end: str,
+    btc_symbol: str = "BTCUSDT",
+) -> pl.DataFrame:
+    """Build the canonical price-only factor panel from PIT-filtered daily bars."""
+
+    feat = build_feature_panel_from_daily(
+        daily_klines,
+        start=start,
+        end=end,
+        feature_specs=",".join(_REUSED_FACTOR_SPECS),
+        forward_horizons=(1,),
+    )
+    if feat.is_empty():
+        return pl.DataFrame()
+    feat = _xs_rank(feat, "realized_vol_7d", out_col="realized_vol_rank")
+    daily_returns = _attach_daily_returns(daily_klines)
+    feat = feat.join(
+        compute_btc_beta(daily_returns, btc_symbol=btc_symbol),
+        on=["symbol", "ts_ms"],
+        how="left",
+    )
+    keep = ["symbol", "ts_ms", "date"] + [c for c in _FACTOR_COLUMNS if c in feat.columns]
+    if "fwd_ret_1d" in feat.columns:
+        keep.append("fwd_ret_1d")
+    return feat.select(keep).sort(["ts_ms", "symbol"])
 
 
 def build_factor_panel(

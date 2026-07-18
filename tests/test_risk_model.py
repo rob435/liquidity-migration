@@ -5,10 +5,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
+from polars.testing import assert_frame_equal
 
+from liquidity_migration.daily_feature_panel import _aggregate_daily_klines
 from liquidity_migration.risk_model import (
     _FACTOR_COLUMNS,
     build_factor_panel,
+    build_factor_panel_from_daily,
     compute_btc_beta,
     fit_factor_returns,
 )
@@ -91,6 +94,21 @@ def test_build_factor_panel_attaches_all_factor_columns(tmp_path: Path) -> None:
     for col in ["symbol", "ts_ms", "date", *_FACTOR_COLUMNS]:
         assert col in panel.columns, f"missing {col}; got {panel.columns}"
     assert set(panel["symbol"].unique().to_list()) <= {"BTCUSDT", "AAA", "BBB"}
+
+
+def test_daily_factor_owner_matches_data_root_builder(tmp_path: Path) -> None:
+    _write_klines_root(tmp_path, symbols=["BTCUSDT", "AAA", "BBB"], days=40)
+    hourly = pl.read_parquet(sorted((tmp_path / "klines_1h").glob("**/*.parquet")))
+    daily = _aggregate_daily_klines(hourly)
+
+    from_root = build_factor_panel(tmp_path, start="2025-01-10", end="2025-02-08")
+    from_daily = build_factor_panel_from_daily(
+        daily,
+        start="2025-01-10",
+        end="2025-02-08",
+    )
+
+    assert_frame_equal(from_daily, from_root)
 
 
 def test_build_factor_panel_honours_klines_dataset_override(tmp_path: Path) -> None:
