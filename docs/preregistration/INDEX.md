@@ -21,6 +21,7 @@ artifacts before inspecting affected outcomes.
 | Strategy Overhaul V2 Phase-3 replay recovery | `strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md` | Completed historical control record for the preserved flush-bound failure |
 | Strategy Overhaul V2 Phase-3 bounded account recovery | `strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md` | Completed: exact 100-key samples verify; full portfolio values remain explicitly not account-reconciled |
 | Strategy Overhaul V2 comparator/accounting repair | `strategy_overhaul_v2_comparator_accounting_repair_2026-07-18.md` | Active exploratory repair; holdout access forbidden until every matched-control and thesis-selection gate passes |
+| Strategy Overhaul V2 account-state replay recovery | `strategy_overhaul_v2_account_state_replay_recovery_2026-07-18.md` | Active outcome-blind recovery after the preserved full-state-deepcopy scaling failure; one exact full retry permitted, no comparator or holdout authority |
 
 ## Archived outcomes
 
