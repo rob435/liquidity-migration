@@ -206,6 +206,7 @@ class HistoricalAccountSession:
         execution_config: ExecutionTwinConfig,
         id_seed: str,
         execution_id_seed: str | None = None,
+        unsafe_single_process_inplace_research: bool = False,
     ) -> None:
         self.root = Path(root)
         self.account_id = account_id
@@ -216,6 +217,9 @@ class HistoricalAccountSession:
         self.execution_config = execution_config
         self.id_seed = id_seed
         self.execution_id_seed = execution_id_seed or self.id_seed + ":execution"
+        self.unsafe_single_process_inplace_research = bool(
+            unsafe_single_process_inplace_research
+        )
         self.clock: VirtualClock | None = None
         self.event_clock: DeterministicEventClock[AccountCycleResult] | None = None
         self.kernel: AccountExecutionKernel | None = None
@@ -258,6 +262,9 @@ class HistoricalAccountSession:
             account_id=self.account_id,
             clock=self.clock,
             id_seed=self.id_seed,
+            unsafe_single_process_inplace_research=(
+                self.unsafe_single_process_inplace_research
+            ),
         )
         self.runtime = AccountKernelRuntime(self.kernel)
 

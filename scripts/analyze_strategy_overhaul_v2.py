@@ -1143,6 +1143,7 @@ def _replay_account(
                 max_decision_age_ns=0,
             ),
             id_seed=f"{strategy_id}:historical",
+            unsafe_single_process_inplace_research=True,
         )
         schedule: dict[int, dict[str, list[HistoricalTargetDecision]]] = {}
         for row in part.to_dicts():

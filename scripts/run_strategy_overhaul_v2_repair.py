@@ -52,6 +52,14 @@ from liquidity_migration.strategy_funnel import payload_sha256  # noqa: E402
 REPAIR_ID = "strategy-overhaul-v2-comparator-accounting-repair-2026-07-18"
 CONTRACT = REPO / "docs/preregistration/strategy_overhaul_v2_comparator_accounting_repair_2026-07-18.md"
 EXPECTED_CONTRACT_SHA256 = "9c6fb8383d09ad143c86784623f23000b932432b834eea024a85da71f89ec191"
+ACCOUNT_RECOVERY_CONTRACT = (
+    REPO
+    / "docs/preregistration/strategy_overhaul_v2_account_state_replay_recovery_2026-07-18.md"
+)
+EXPECTED_ACCOUNT_RECOVERY_CONTRACT_SHA256 = (
+    "88daceee840ba2ee36c1a5ef3903cd7b01c9502ccfa15199ccbe18c67dc3be21"
+)
+RMOM_ARTIFACT_BUILD_COMMIT = "8a6057c8560960f6c95981cb9a7473eb176bb933"
 PHASE3_ROOT = REPO / "reports/strategy-overhaul-v2/diagnostic-epoch-2026-07-17/phase3-analysis"
 PHASE3_MANIFEST = PHASE3_ROOT / "manifest.json"
 PHASE3_DIAGNOSTICS = PHASE3_ROOT / "diagnostics.json"
@@ -129,6 +137,10 @@ def _date_ms(value: dt.date) -> int:
 def _assert_registered_inputs(data_root: Path) -> dict[str, Any]:
     identities = {
         "contract": (CONTRACT, EXPECTED_CONTRACT_SHA256),
+        "account_recovery_contract": (
+            ACCOUNT_RECOVERY_CONTRACT,
+            EXPECTED_ACCOUNT_RECOVERY_CONTRACT_SHA256,
+        ),
         "phase3_manifest": (PHASE3_MANIFEST, EXPECTED_PHASE3_MANIFEST_SHA256),
         "phase3_diagnostics": (PHASE3_DIAGNOSTICS, EXPECTED_PHASE3_DIAGNOSTICS_SHA256),
         "barebones_ledger": (BAREBONES_LEDGER, EXPECTED_BAREBONES_LEDGER_SHA256),
@@ -190,7 +202,7 @@ def _install_windows_readonly_adapter() -> str:
     return "single_process_windows_readonly_no_flock_input_hash_guard"
 
 
-def _rmom_logical_input_identities(data_root: Path) -> dict[str, Any]:
+def _rmom_logical_input_identities(data_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Hash the date partitions that can influence the registered RMOM output."""
 
     names = _autodetect_dataset_names(data_root)
@@ -205,6 +217,8 @@ def _rmom_logical_input_identities(data_root: Path) -> dict[str, Any]:
         names["premium_dataset"]: feature_dates,
     }
     identities: dict[str, Any] = {}
+    legacy_mtime_ns = (data_root / "residual_momentum.parquet").stat().st_mtime_ns
+    modified_after_legacy: list[Path] = []
     for dataset, dates in requested.items():
         files = candidate._dataset_files(data_root, dataset, dates)
         identities[dataset] = {
@@ -212,7 +226,31 @@ def _rmom_logical_input_identities(data_root: Path) -> dict[str, Any]:
             "logical_start": dates[0].isoformat(),
             "logical_end_exclusive": (dates[-1] + dt.timedelta(days=1)).isoformat(),
         }
-    return identities
+        if dataset == names["klines_dataset"]:
+            modified_after_legacy.extend(
+                path for path in files if path.stat().st_mtime_ns > legacy_mtime_ns
+            )
+    affected_dates = sorted(
+        {
+            part.removeprefix("date=")
+            for path in modified_after_legacy
+            for part in path.parts
+            if part.startswith("date=")
+        }
+    )
+    mutation_evidence = {
+        "basis": "filesystem_mtime_after_legacy_feature_mtime_not_prior_content_hash",
+        "legacy_feature_mtime_ns": legacy_mtime_ns,
+        "kline_files_modified_after_legacy_feature": len(modified_after_legacy),
+        "affected_dates": len(affected_dates),
+        "first_affected_date": affected_dates[0] if affected_dates else None,
+        "last_affected_date": affected_dates[-1] if affected_dates else None,
+        "inference": (
+            "current raw inputs postdate the legacy feature; without the prior raw hashes this "
+            "supports but does not cryptographically prove raw-content drift"
+        ),
+    }
+    return identities, mutation_evidence
 
 
 def _compare_rmom_to_legacy(
@@ -282,6 +320,94 @@ def _compare_rmom_to_legacy(
     }
 
 
+def _rmom_failure_diagnostics(
+    rebuilt: pl.DataFrame,
+    legacy: pl.DataFrame,
+    *,
+    failure: str,
+) -> dict[str, Any]:
+    stable = require_stable_residual_momentum(rebuilt, source="rebuilt run-scoped RMOM")
+    start_ms = _date_ms(COMPARATOR_START)
+    end_ms = _date_ms(COMPARATOR_END)
+    new = (
+        stable.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+        .select("symbol", "ts_ms", pl.col("residual_momentum").alias("rebuilt_value"))
+    )
+    old = (
+        legacy.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+        .select("symbol", "ts_ms", pl.col("residual_momentum").alias("legacy_value"))
+    )
+    rebuilt_only = new.join(old, on=["symbol", "ts_ms"], how="anti")
+    legacy_only = old.join(new, on=["symbol", "ts_ms"], how="anti")
+    joined = new.join(old, on=["symbol", "ts_ms"], how="inner")
+    mismatched = joined.filter(
+        ~pl.col("rebuilt_value").is_close(
+            pl.col("legacy_value"),
+            rel_tol=1e-10,
+            abs_tol=1e-12,
+        )
+    ).with_columns(
+        (pl.col("rebuilt_value") - pl.col("legacy_value")).abs().alias("absolute_difference")
+    )
+    mismatch_dates = (
+        mismatched.select(pl.from_epoch("ts_ms", time_unit="ms").dt.date().alias("date"))
+        if not mismatched.is_empty()
+        else pl.DataFrame(schema={"date": pl.Date})
+    )
+    legacy_max = old.group_by("symbol").agg(pl.col("ts_ms").max().alias("legacy_symbol_max_ts_ms"))
+    extra_shape = (
+        rebuilt_only.group_by("symbol")
+        .agg(
+            pl.len().alias("extra_rows"),
+            pl.col("ts_ms").min().alias("extra_min_ts_ms"),
+            pl.col("ts_ms").max().alias("extra_max_ts_ms"),
+        )
+        .join(legacy_max, on="symbol", how="left")
+        .with_columns(
+            ((pl.col("extra_min_ts_ms") - pl.col("legacy_symbol_max_ts_ms")) / 86_400_000)
+            .alias("first_extra_gap_days"),
+            ((pl.col("extra_max_ts_ms") - pl.col("legacy_symbol_max_ts_ms")) / 86_400_000)
+            .alias("last_extra_gap_days"),
+        )
+    )
+    return {
+        "status": "invalid",
+        "failure": failure,
+        "stable_rows_total": stable.height,
+        "rebuilt_rows_in_comparator_window": new.height,
+        "legacy_rows_in_comparator_window": old.height,
+        "matching_keys": joined.height,
+        "rebuilt_only_keys": rebuilt_only.height,
+        "legacy_only_keys": legacy_only.height,
+        "rebuilt_only_symbols": rebuilt_only["symbol"].n_unique(),
+        "rebuilt_only_rows_per_symbol": sorted(
+            int(value) for value in extra_shape["extra_rows"].unique()
+        ),
+        "rebuilt_only_first_gap_days": sorted(
+            float(value) for value in extra_shape["first_extra_gap_days"].drop_nulls().unique()
+        ),
+        "rebuilt_only_last_gap_days": sorted(
+            float(value) for value in extra_shape["last_extra_gap_days"].drop_nulls().unique()
+        ),
+        "value_mismatches": mismatched.height,
+        "value_mismatch_symbols": mismatched["symbol"].n_unique(),
+        "value_mismatch_dates": mismatch_dates["date"].n_unique(),
+        "first_value_mismatch_date": (
+            None if mismatch_dates.is_empty() else str(mismatch_dates["date"].min())
+        ),
+        "last_value_mismatch_date": (
+            None if mismatch_dates.is_empty() else str(mismatch_dates["date"].max())
+        ),
+        "max_abs_difference": (
+            None
+            if mismatched.is_empty()
+            else float(cast(float, mismatched["absolute_difference"].max()))
+        ),
+        "rtol": 1e-10,
+        "atol": 1e-12,
+    }
+
+
 def _validate_existing_receipt(path: Path, *, artifact: Path) -> dict[str, Any]:
     payload = cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     recorded = payload.get("artifact") or {}
@@ -319,10 +445,16 @@ def run_rmom(data_root: Path, out: Path) -> dict[str, Any]:
 
     rebuilt = pl.read_parquet(artifact)
     legacy_path = data_root / "residual_momentum.parquet"
-    comparison = _compare_rmom_to_legacy(rebuilt, pl.read_parquet(legacy_path))
+    legacy = pl.read_parquet(legacy_path)
+    try:
+        comparison = _compare_rmom_to_legacy(rebuilt, legacy)
+        gate_status = "pass"
+    except RuntimeError as exc:
+        comparison = _rmom_failure_diagnostics(rebuilt, legacy, failure=str(exc))
+        gate_status = "invalid"
     if _sha256(legacy_path) != EXPECTED_LEGACY_RMOM_SHA256:
         raise RuntimeError("shared-root legacy RMOM changed during the run-scoped rebuild")
-    raw_inputs = _rmom_logical_input_identities(data_root)
+    raw_inputs, raw_mutation_evidence = _rmom_logical_input_identities(data_root)
     artifact_identity = {
         "path": str(artifact),
         "bytes": artifact.stat().st_size,
@@ -335,7 +467,11 @@ def run_rmom(data_root: Path, out: Path) -> dict[str, Any]:
         "kind": "strategy_overhaul_v2_rmom_repair",
         "study_mode": "outcome_blind_provenance_validation",
         "command_phase": "rmom",
+        "gate_status": gate_status,
         "built_now": built_now,
+        "artifact_build_code_commit": (
+            identity["code_commit"] if built_now else RMOM_ARTIFACT_BUILD_COMMIT
+        ),
         "formula": {
             "start": RMOM_START.isoformat(),
             "end_exclusive": RMOM_END.isoformat(),
@@ -346,13 +482,14 @@ def run_rmom(data_root: Path, out: Path) -> dict[str, Any]:
         },
         "read_adapter": adapter,
         "raw_logical_input_identities": raw_inputs,
+        "raw_input_mutation_evidence": raw_mutation_evidence,
         "comparison": comparison,
         "artifact": artifact_identity,
         "elapsed_seconds": time.perf_counter() - started,
         "outcomes_opened": False,
         "explicit_non_conclusions": [
             "legacy agreement validates spent-window values but cannot repair legacy provenance",
-            "this artifact alone does not establish an exact active comparator",
+            "a failed gate makes the registered exact active comparator invalid",
             "no alpha, deployment, execution-calibration, mainnet, or real-money claim",
         ],
     }
@@ -404,6 +541,20 @@ def _source_key_sha256(part: pl.DataFrame) -> str:
     return hashlib.sha256(
         phase3.canonical_json({"source_keys": sorted(str(value) for value in part["source_key"])})
     ).hexdigest()
+
+
+def _account_sample_n(ledger: pl.DataFrame, *, per_sleeve: int) -> pl.DataFrame:
+    if per_sleeve < 1:
+        raise ValueError("per_sleeve must be positive")
+    selected: list[pl.DataFrame] = []
+    for sleeve in ("long", "continuous"):
+        part = ledger.filter(pl.col("sleeve") == sleeve)
+        keys = sorted(
+            (str(value) for value in part["source_key"]),
+            key=lambda key: (hashlib.sha256(key.encode("utf-8")).hexdigest(), key),
+        )[:per_sleeve]
+        selected.append(part.filter(pl.col("source_key").is_in(keys)))
+    return pl.concat(selected, how="vertical", rechunk=True)
 
 
 def _validate_event_coverage(
@@ -494,49 +645,109 @@ def _account_archive_identity(root: Path) -> dict[str, Any]:
     return candidate._aggregate_file_identity(files, relative_to=root)
 
 
+def run_account_benchmark(data_root: Path, out: Path) -> dict[str, Any]:
+    identity = _base_identity(data_root, out)
+    if identity["git_dirty"]:
+        raise RuntimeError("account-state benchmark requires a clean code commit")
+    final = out / "account-state-inplace-benchmark"
+    receipt_path = final / "receipt.json"
+    if receipt_path.exists():
+        existing = cast(dict[str, Any], json.loads(receipt_path.read_text(encoding="utf-8")))
+        if (existing.get("performance_gate") or {}).get("status") != "pass":
+            raise RuntimeError("preserved account-state benchmark gate failed")
+        return existing
+    if final.exists():
+        raise FileExistsError(f"preserved incomplete benchmark root requires inspection: {final}")
+    work = out / ".account-state-inplace-benchmark.working"
+    if work.exists():
+        raise FileExistsError(f"preserved incomplete benchmark work requires inspection: {work}")
+    work.mkdir(parents=True)
+    ledger = _load_and_validate_ledger()
+    config = load_config(REPO / "configs/volume_alpha.default.yaml")
+    cells: dict[str, Any] = {}
+    for per_sleeve in (100, 200):
+        subset = _account_sample_n(ledger, per_sleeve=per_sleeve)
+        cell_root = work / f"n-{per_sleeve}-per-sleeve"
+        started = time.perf_counter()
+        receipts = phase3._replay_account(
+            subset,
+            work_root=cell_root,
+            long_costs=config.costs,
+        )
+        elapsed = time.perf_counter() - started
+        coverage = {
+            sleeve: _validate_event_coverage(
+                subset,
+                account_root=cell_root / f"account-{sleeve}",
+                sleeve=sleeve,
+            )
+            for sleeve in EXPECTED_TRADE_COUNTS
+        }
+        sample_regression = (
+            _compare_sample_receipts(subset, receipts) if per_sleeve == 100 else None
+        )
+        for receipt in receipts.values():
+            journal_path = Path(str(receipt.pop("journal_path")))
+            receipt["journal_path_relative_to_archive"] = journal_path.relative_to(work).as_posix()
+        cells[str(per_sleeve)] = {
+            "per_sleeve": per_sleeve,
+            "trades": subset.height,
+            "elapsed_seconds": elapsed,
+            "seconds_per_trade": elapsed / subset.height,
+            "receipts": receipts,
+            "coverage": coverage,
+            "frozen_sample_regression": sample_regression,
+        }
+    small = float(cells["100"]["elapsed_seconds"])
+    large = float(cells["200"]["elapsed_seconds"])
+    ratio = large / small if small > 0.0 else float("inf")
+    projected_seconds = (
+        float(cells["200"]["seconds_per_trade"])
+        * sum(EXPECTED_TRADE_COUNTS.values())
+    )
+    gate_status = "pass" if ratio <= 3.0 and projected_seconds <= 3_600.0 else "fail"
+    payload: dict[str, Any] = {
+        **identity,
+        "kind": "strategy_overhaul_v2_account_state_inplace_benchmark",
+        "study_mode": "outcome_blind_performance_and_parity_validation",
+        "command_phase": "account-benchmark",
+        "cells": cells,
+        "performance_gate": {
+            "status": gate_status,
+            "two_x_trade_runtime_ratio": ratio,
+            "maximum_ratio": 3.0,
+            "linear_full_replay_projection_seconds": projected_seconds,
+            "maximum_projected_seconds": 3_600.0,
+        },
+        "archive_identity_before_receipt": _account_archive_identity(work),
+        "outcomes_opened": False,
+        "holdout_touched": False,
+    }
+    payload["receipt_payload_sha256"] = payload_sha256(payload)
+    _write_json(work / "receipt.json", payload)
+    work.replace(final)
+    if gate_status != "pass":
+        raise RuntimeError(f"account-state benchmark gate failed: {payload['performance_gate']}")
+    return payload
+
+
 def run_account(data_root: Path, out: Path) -> dict[str, Any]:
     identity = _base_identity(data_root, out)
     if identity["git_dirty"]:
         raise RuntimeError("account repair requires a clean code commit")
     ledger = _load_and_validate_ledger()
     config = load_config(REPO / "configs/volume_alpha.default.yaml")
-
-    sample_final = out / "account-sample-regression"
-    sample_receipt_path = sample_final / "receipt.json"
-    if not sample_receipt_path.exists():
-        if sample_final.exists():
-            raise FileExistsError(f"preserved incomplete sample root requires inspection: {sample_final}")
-        sample_work = out / ".account-sample-regression.working"
-        if sample_work.exists():
-            raise FileExistsError(f"preserved incomplete sample work requires inspection: {sample_work}")
-        sample_work.mkdir(parents=True)
-        sample = phase3._account_sample(ledger)
-        sample_receipts = phase3._replay_account(
-            sample,
-            work_root=sample_work,
-            long_costs=config.costs,
-        )
-        sample_regression = _compare_sample_receipts(sample, sample_receipts)
-        sample_coverage = {
-            sleeve: _validate_event_coverage(
-                sample,
-                account_root=sample_work / f"account-{sleeve}",
-                sleeve=sleeve,
-            )
-            for sleeve in EXPECTED_TRADE_COUNTS
-        }
-        sample_payload: dict[str, Any] = {
-            "kind": "strategy_overhaul_v2_frozen_account_sample_regression",
-            "code_commit": identity["code_commit"],
-            "sample_regression": sample_regression,
-            "coverage": sample_coverage,
-            "archive_identity_before_receipt": _account_archive_identity(sample_work),
-            "holdout_touched": False,
-        }
-        sample_payload["receipt_payload_sha256"] = payload_sha256(sample_payload)
-        _write_json(sample_work / "receipt.json", sample_payload)
-        sample_work.replace(sample_final)
-    sample_payload = cast(dict[str, Any], json.loads(sample_receipt_path.read_text(encoding="utf-8")))
+    benchmark_receipt_path = out / "account-state-inplace-benchmark/receipt.json"
+    if not benchmark_receipt_path.is_file():
+        raise RuntimeError("full retry requires the registered account-state benchmark first")
+    benchmark_payload = cast(
+        dict[str, Any], json.loads(benchmark_receipt_path.read_text(encoding="utf-8"))
+    )
+    if (
+        benchmark_payload.get("code_commit") != identity["code_commit"]
+        or (benchmark_payload.get("performance_gate") or {}).get("status") != "pass"
+    ):
+        raise RuntimeError("account-state benchmark does not authorize this code commit")
 
     full_final = out / "full-account-replay"
     full_receipt_path = full_final / "receipt.json"
@@ -544,11 +755,14 @@ def run_account(data_root: Path, out: Path) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(full_receipt_path.read_text(encoding="utf-8")))
     if full_final.exists():
         raise FileExistsError(f"preserved incomplete full root requires inspection: {full_final}")
-    full_work = out / ".full-account-replay.working"
+    first_attempt = out / ".full-account-replay.working"
+    if not (first_attempt / "attempt.json").is_file():
+        raise RuntimeError("preserved first full replay attempt is absent")
+    full_work = out / ".full-account-replay-retry-1.working"
     if full_work.exists():
         raise FileExistsError(
-            "a full replay attempt already exists; the registered one-attempt boundary forbids retry "
-            f"without a new outcome-blind repair contract: {full_work}"
+            "the registered full replay retry already exists and cannot be repeated: "
+            f"{full_work}"
         )
     full_work.mkdir(parents=True)
     attempt_started_utc = dt.datetime.now(tz=dt.timezone.utc).isoformat()
@@ -559,7 +773,10 @@ def run_account(data_root: Path, out: Path) -> dict[str, Any]:
             "code_commit": identity["code_commit"],
             "started_at_utc": attempt_started_utc,
             "maximum_measured_seconds": 7_200,
-            "attempt_number": 1,
+            "attempt_number": 2,
+            "retry_number": 1,
+            "recovery_contract": str(ACCOUNT_RECOVERY_CONTRACT),
+            "recovery_contract_sha256": EXPECTED_ACCOUNT_RECOVERY_CONTRACT_SHA256,
             "holdout_touched": False,
         },
     )
@@ -602,7 +819,8 @@ def run_account(data_root: Path, out: Path) -> dict[str, Any]:
         "study_mode": "outcome_blind_account_integrity_validation",
         "command_phase": "account",
         "attempt_started_at_utc": attempt_started_utc,
-        "attempts": 1,
+        "attempts": 2,
+        "retry_number": 1,
         "elapsed_seconds": elapsed,
         "maximum_measured_seconds": 7_200,
         "ledger_pnl_identity": {
@@ -611,8 +829,10 @@ def run_account(data_root: Path, out: Path) -> dict[str, Any]:
             "rtol": 1e-12,
             "atol": 1e-12,
         },
-        "frozen_sample_receipt_sha256": _sha256(sample_receipt_path),
-        "frozen_sample_receipt_payload_sha256": sample_payload["receipt_payload_sha256"],
+        "account_state_benchmark_receipt_sha256": _sha256(benchmark_receipt_path),
+        "account_state_benchmark_receipt_payload_sha256": benchmark_payload[
+            "receipt_payload_sha256"
+        ],
         "account_receipts": receipts,
         "coverage": coverage,
         "archive_identity_before_receipt": _account_archive_identity(full_work),
@@ -632,7 +852,11 @@ def run_account(data_root: Path, out: Path) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("preflight", "rmom", "account"), required=True)
+    parser.add_argument(
+        "--phase",
+        choices=("preflight", "rmom", "account-benchmark", "account"),
+        required=True,
+    )
     parser.add_argument("--root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return parser
@@ -647,9 +871,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({**identity, "phase": "preflight"}, sort_keys=True))
         return 0
     out.mkdir(parents=True, exist_ok=True)
-    payload = run_rmom(data_root, out) if args.phase == "rmom" else run_account(data_root, out)
+    if args.phase == "rmom":
+        payload = run_rmom(data_root, out)
+    elif args.phase == "account-benchmark":
+        payload = run_account_benchmark(data_root, out)
+    else:
+        payload = run_account(data_root, out)
     print(json.dumps(payload, sort_keys=True, default=str))
-    return 0
+    return 2 if payload.get("gate_status") == "invalid" else 0
 
 
 if __name__ == "__main__":

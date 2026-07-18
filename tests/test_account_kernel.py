@@ -11,6 +11,7 @@ import liquidity_migration.account_kernel as account_kernel_module
 from liquidity_migration.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
+    AccountKernelError,
     AccountJournalIntegrityError,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -1044,6 +1045,72 @@ def test_account_journal_extends_committed_cache_without_history_sized_recopy(
         for event in read_account_journal(tmp_path)
         if event.event_type == AccountEventType.VENUE_SNAPSHOT.value
     ] == ["snapshot-1", "snapshot-2"]
+
+
+def test_single_process_inplace_research_avoids_state_deepcopy_and_rejects_untrusted_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kernel = AccountExecutionKernel(
+        tmp_path / "inplace",
+        account_id="acct",
+        unsafe_single_process_inplace_research=True,
+    )
+    kernel.record_venue_snapshot(
+        snapshot_key="snapshot-1",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=1,
+    )
+    committed_state = kernel._state_ref()
+
+    def forbidden_deepcopy(_value: object) -> object:
+        raise AssertionError("research transaction copied the accumulated account state")
+
+    monkeypatch.setattr(account_kernel_module.copy, "deepcopy", forbidden_deepcopy)
+    kernel.record_venue_snapshot(
+        snapshot_key="snapshot-2",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=2,
+        local_receive_ts_ns=2,
+    )
+
+    assert kernel._state_ref() is committed_state
+    with pytest.raises(AccountKernelError, match="trusted read-only builder"):
+        kernel.journal.transact(lambda _state: [])
+
+
+def test_single_process_inplace_research_preserves_event_hashes(tmp_path: Path) -> None:
+    baseline = AccountExecutionKernel(
+        tmp_path / "baseline",
+        account_id="acct",
+        clock=VirtualClock(current_wall_ns=1, current_monotonic_ns=0),
+    )
+    inplace = AccountExecutionKernel(
+        tmp_path / "inplace",
+        account_id="acct",
+        clock=VirtualClock(current_wall_ns=1, current_monotonic_ns=0),
+        unsafe_single_process_inplace_research=True,
+    )
+    for kernel in (baseline, inplace):
+        for index in (1, 2):
+            kernel.record_venue_snapshot(
+                snapshot_key=f"snapshot-{index}",
+                venue_positions={},
+                reconstructed_positions={},
+                mismatches=[],
+                exchange_ts_ns=index,
+                local_receive_ts_ns=index,
+            )
+
+    assert [event.to_dict() for event in inplace.journal.events()] == [
+        event.to_dict() for event in baseline.journal.events()
+    ]
+    assert inplace._state_ref().state_hash() == baseline._state_ref().state_hash()
 
 
 def test_account_risk_revalues_existing_components_at_current_market_input(tmp_path: Path) -> None:

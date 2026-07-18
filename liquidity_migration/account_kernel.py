@@ -933,7 +933,13 @@ def _append_jsonl_projection(
 class AccountJournal:
     """Serialized append-only account store with transactional event building."""
 
-    def __init__(self, root: str | Path, *, account_id: str) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        account_id: str,
+        unsafe_single_process_inplace_research: bool = False,
+    ) -> None:
         self.root = Path(root).expanduser()
         self.account_id = account_id
         # Transaction segments serialize writers across processes.  This lock
@@ -945,6 +951,13 @@ class AccountJournal:
         self._cached_events_by_id: dict[str, AccountEvent] | None = None
         self._cached_signature: tuple[object, ...] | None = None
         self._cached_state: AccountState | None = None
+        # Outcome-blind historical recovery only. The default production path
+        # retains isolated prospective state and prior-state reader visibility.
+        # The opt-in path is safe only with one process/thread and an infallible
+        # in-memory transaction buffer; it carries no rollback/durability claim.
+        self._unsafe_single_process_inplace_research = bool(
+            unsafe_single_process_inplace_research
+        )
         if not account_id:
             raise ValueError("account_id is required")
 
@@ -1049,8 +1062,20 @@ class AccountJournal:
                     "account events exist without authoritative transaction segments; "
                     "reset the account root explicitly"
                 )
-            prospective_state = copy.deepcopy(committed_state)
-            builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
+            if self._unsafe_single_process_inplace_research:
+                if not trusted_readonly_builder:
+                    raise AccountKernelError(
+                        "single-process in-place research transactions require a trusted read-only builder"
+                    )
+                prospective_state = committed_state
+                builder_state = prospective_state
+            else:
+                prospective_state = copy.deepcopy(committed_state)
+                builder_state = (
+                    prospective_state
+                    if trusted_readonly_builder
+                    else copy.deepcopy(committed_state)
+                )
             specs = list(builder(builder_state))
             normalized = [_normalized_spec(spec) for spec in specs]
             pending_by_id: dict[str, AccountEvent] = {}
@@ -1377,8 +1402,13 @@ class AccountExecutionKernel:
         account_id: str,
         clock: Clock | None = None,
         id_seed: str = "account-kernel-v1",
+        unsafe_single_process_inplace_research: bool = False,
     ) -> None:
-        self.journal = AccountJournal(root, account_id=account_id)
+        self.journal = AccountJournal(
+            root,
+            account_id=account_id,
+            unsafe_single_process_inplace_research=unsafe_single_process_inplace_research,
+        )
         self.account_id = account_id
         self.clock = clock or SystemClock()
         self.ids = DeterministicIds(f"{id_seed}:{account_id}")
