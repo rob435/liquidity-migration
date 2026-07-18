@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from .account_kernel import AccountExecutionKernel, InstrumentRules, MarketInputRef
+from .account_kernel import AccountEvent, AccountExecutionKernel, InstrumentRules, MarketInputRef
 from .account_service import (
     AccountIntentInbox,
     AccountTargetRequest,
@@ -43,13 +43,19 @@ class AccountProtectionEngine:
         self.inbox = inbox
         self.instrument_rules = rules
 
-    def evaluate(self, market_inputs: Mapping[str, MarketInputRef]) -> tuple[AccountTargetRequest, ...]:
+    def evaluate(
+        self,
+        market_inputs: Mapping[str, MarketInputRef],
+        *,
+        account_events: Sequence[AccountEvent] | None = None,
+    ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
         state = self.kernel.state()
         anchors = {
             anchor.target_key: anchor
             for anchor in canonical_component_execution_anchors(
                 self.kernel.journal.root,
+                account_events=account_events,
             )
         }
         for target_key, target in sorted(state.component_targets.items()):

@@ -374,6 +374,7 @@ class HistoricalAccountSession:
         market_prices: Mapping[str, float] | None = None,
         exact_batch_id: str | None = None,
         request_content_hash: str | None = None,
+        market_observed_ts_ns: int | None = None,
     ) -> tuple[AccountCycleResult, ...]:
         """Submit one causal timestamp's decisions and return immediate feedback."""
 
@@ -385,6 +386,16 @@ class HistoricalAccountSession:
         if len(wall_times) != 1:
             raise ValueError("one online decision submission must share one wall timestamp")
         wall_ts_ns = next(iter(wall_times))
+        market_ts_ns = (
+            wall_ts_ns
+            if market_observed_ts_ns is None
+            else int(market_observed_ts_ns)
+        )
+        if market_ts_ns <= 0 or market_ts_ns > wall_ts_ns:
+            raise ValueError(
+                "historical market observation time must be positive and no later "
+                "than request creation"
+            )
         ordered = sorted(
             decisions,
             key=lambda item: (
@@ -464,8 +475,8 @@ class HistoricalAccountSession:
                     symbol=symbol,
                     sequence=sequence,
                     previous_sequence=sequence - 1 if sequence > 1 else None,
-                    exchange_ts_ns=wall_ts_ns,
-                    local_receive_ts_ns=wall_ts_ns,
+                    exchange_ts_ns=market_ts_ns,
+                    local_receive_ts_ns=market_ts_ns,
                     bids=(BookLevel(price, 1e15),),
                     asks=(BookLevel(price, 1e15),),
                 )
@@ -495,6 +506,7 @@ class HistoricalAccountSession:
         *,
         equity_usdt: float,
         market_prices: Mapping[str, float],
+        market_observed_ts_ns: int | None = None,
     ) -> tuple[AccountCycleResult, ...]:
         """Replay one production-published request without losing its identity.
 
@@ -547,6 +559,7 @@ class HistoricalAccountSession:
             market_prices=normalized_prices,
             exact_batch_id=request.batch_id,
             request_content_hash=request.content_hash(),
+            market_observed_ts_ns=market_observed_ts_ns,
         )
 
     @property

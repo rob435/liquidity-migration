@@ -49,6 +49,7 @@ def canonical_entry_attempts(
     *,
     sleeve: str | None = None,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> tuple[CanonicalEntryAttempt, ...]:
     """Project every stamped entry target, including account-risk rejections.
 
@@ -58,7 +59,11 @@ def canonical_entry_attempts(
     as journal corruption rather than as retry state.
     """
 
-    events = read_account_journal(account_root, verify=True)
+    events = (
+        list(account_events)
+        if account_events is not None
+        else read_account_journal(account_root, verify=True)
+    )
     risk_by_batch = {
         event.correlation_id: event
         for event in events
@@ -148,6 +153,7 @@ def terminal_entry_attempt_keys(
     sleeve: str,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
     inbox: AccountIntentInbox | None = None,
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> frozenset[str]:
     """Return exact attempts terminal by account risk or service expiry."""
 
@@ -157,6 +163,7 @@ def terminal_entry_attempt_keys(
             account_root,
             sleeve=sleeve,
             strategy_ids=strategy_ids,
+            account_events=account_events,
         )
         if not attempt.accepted
     )
@@ -280,6 +287,7 @@ def canonical_component_execution_anchors(
     *,
     sleeve: str | None = None,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> tuple[CanonicalComponentExecutionAnchor, ...]:
     """Project component lifecycle clocks only from verified execution facts.
 
@@ -289,7 +297,11 @@ def canonical_component_execution_anchors(
     cannot reset it.
     """
 
-    events = read_account_journal(account_root, verify=True)
+    events = (
+        list(account_events)
+        if account_events is not None
+        else read_account_journal(account_root, verify=True)
+    )
     if not events:
         return ()
     state = reduce_account_events(events)
@@ -318,6 +330,7 @@ def canonical_reduction_events(
     *,
     sleeve: str | None = None,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> tuple[CanonicalReductionEvent, ...]:
     """Return one verified symbol-reduction accounting row per ``pnl_key``.
 
@@ -326,7 +339,11 @@ def canonical_reduction_events(
     individual components.
     """
 
-    events = read_account_journal(account_root, verify=True)
+    events = (
+        list(account_events)
+        if account_events is not None
+        else read_account_journal(account_root, verify=True)
+    )
     return _canonical_reduction_events_from_events(
         events,
         sleeve=sleeve,
@@ -339,6 +356,7 @@ def canonical_adverse_reduction_events(
     *,
     sleeve: str | None = None,
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
 ) -> tuple[CanonicalReductionEvent, ...]:
     """Return the adverse subset of :func:`canonical_reduction_events`."""
 
@@ -348,6 +366,7 @@ def canonical_adverse_reduction_events(
             account_root,
             sleeve=sleeve,
             strategy_ids=strategy_ids,
+            account_events=account_events,
         )
         if event.adverse
     )

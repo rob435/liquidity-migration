@@ -13,6 +13,7 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
     TargetBatchResult,
+    read_account_journal,
 )
 from liquidity_migration.account_strategy_state import (
     canonical_adverse_reduction_events,
@@ -1082,6 +1083,22 @@ def test_terminal_group_reduction_projects_one_account_pnl_event(
     assert reduction.adverse_basis == "negative_provisional_net_pending_funding"
     adverse = canonical_adverse_reduction_events(root, sleeve="long")
     assert [event.pnl_key for event in adverse] == [reduction.pnl_key]
+    event_snapshot = read_account_journal(root, verify=True)
+    assert canonical_component_execution_anchors(
+        root,
+        sleeve="long",
+        account_events=event_snapshot,
+    ) == canonical_component_execution_anchors(root, sleeve="long")
+    assert canonical_reduction_events(
+        root,
+        sleeve="long",
+        account_events=event_snapshot,
+    ) == reductions
+    assert canonical_adverse_reduction_events(
+        root,
+        sleeve="long",
+        account_events=event_snapshot,
+    ) == adverse
     assert sum(event.net_pnl_usdt for event in reductions) == pytest.approx(
         reduction.net_pnl_usdt
     )

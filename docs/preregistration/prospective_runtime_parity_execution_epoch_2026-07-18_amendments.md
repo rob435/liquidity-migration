@@ -137,3 +137,21 @@ hashes, BTC-risk chain, canonical lifecycle projection, and verified account
 hash chain. Validation may inspect discrete structure, coverage, identities,
 and flatness only. Monetary P&L, returns, equity curves, and trade-outcome
 ranking remain unopened under this engineering contract.
+
+## Amendment 7: sub-millisecond comparator ordering clock
+
+Registered 2026-07-18 after a synthetic one-symbol integration fixture, but
+before any frozen active historical decision or lifecycle was generated or
+inspected. The fixture correctly failed `stale_decision` when Amendment 6's
+ordered producer stages shared an hourly market timestamp but the execution
+port allowed zero elapsed nanoseconds between market observation and request
+creation.
+
+The deterministic boundary timestamp remains the market observation time. The
+create-only request bases are frozen within the following millisecond as
+`protection=+0ns`, `LONG=+100,000ns`, `CONTINUOUS=+200,000ns`, and terminal
+boundary flats `=+900,000ns`; production publication functions continue to add
+their exact ordinal nanoseconds. The historical execution twin's maximum
+decision age is therefore one millisecond. All modeled latency components
+remain zero. This records causal ordering without moving the market price,
+changing a source decision, or claiming live daemon timing.

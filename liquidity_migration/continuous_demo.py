@@ -729,9 +729,17 @@ def _btc_trend_gate_value(
     *,
     signal_ts_ms: int,
     config: ContinuousDemoCycleConfig | None = None,
+    trend_lookup: dict[int, float] | None = None,
 ) -> float | None:
     cfg = config or ContinuousDemoCycleConfig()
-    lookup = _btc_trend_returns(klines, lookback_days=max(int(cfg.btc_trend_lookback_days), 1))
+    lookup = (
+        trend_lookup
+        if trend_lookup is not None
+        else _btc_trend_returns(
+            klines,
+            lookback_days=max(int(cfg.btc_trend_lookback_days), 1),
+        )
+    )
     signal_day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
     return lookup.get(signal_day)
 
@@ -858,6 +866,7 @@ def _apply_btc_risk_sizing(
     unresolved_entry_requests: int = 0,
     accepted_state_authority: bool = True,
     synchronization_error: str = "",
+    btc_context: dict[int, dict[str, float | None]] | None = None,
 ) -> dict[str, Any]:
     stats: dict[str, Any] = {
         "enabled": bool(getattr(config, "entry_btc_risk_sizing_enabled", False)),
@@ -913,7 +922,14 @@ def _apply_btc_risk_sizing(
     if not candidates:
         return stats
     try:
-        lookup, score_stats = sizer.score_decisions(candidates, btc_context=btc_context_by_day(btc_klines))
+        lookup, score_stats = sizer.score_decisions(
+            candidates,
+            btc_context=(
+                btc_context
+                if btc_context is not None
+                else btc_context_by_day(btc_klines)
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - stale/base sizing is not a safe fallback
         _logger.exception("BTC-risk sizing failed; blocking new entries")
         stats["error"] = 1

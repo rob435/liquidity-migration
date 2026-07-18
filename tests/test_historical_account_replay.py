@@ -189,6 +189,7 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
         request,
         equity_usdt=100.0,
         market_prices={"BUSDT": 10.0},
+        market_observed_ts_ns=1_900,
     )
 
     assert len(outputs) == 1
@@ -197,6 +198,15 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
     risk = [event for event in events if event.event_type == AccountEventType.RISK_DECISION.value]
     assert len(risk) == 1
     assert risk[0].payload["batch_id"] == request.batch_id
+    market = [
+        event
+        for event in events
+        if event.event_type == AccountEventType.MARKET_INPUT_REF.value
+    ]
+    assert len(market) == 1
+    assert market[0].wall_ts_ns == request.created_ts_ns
+    assert market[0].payload["exchange_ts_ns"] == 1_900
+    assert market[0].payload["local_receive_ts_ns"] == 1_900
 
     conflicting_request = AccountTargetRequest(
         request_id="target-request-two",
