@@ -88,13 +88,27 @@ AMENDMENTS = REPO / "docs/preregistration/prospective_runtime_parity_execution_e
 FEATURE_RECEIPT = FEATURE_ROOT / "feature_receipt.json"
 RECONSTRUCTION_RECEIPT = EPOCH_ROOT / "reconstruction/bybit-baseline.receipt.json"
 DEFAULT_OUT = EPOCH_ROOT / "runtime-parity/active-production-comparator"
+FAILED_ATTEMPT_ROOT = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-467030bbb3c4"
+)
+FAILED_ATTEMPT_TERMINATION = FAILED_ATTEMPT_ROOT / "termination.json"
 
 EXPECTED_BASE_CONTRACT_SHA256 = "15edc498adf2bd068c33ff2f791fa3e46f161196db673a839adcf317aba35a31"
-EXPECTED_AMENDMENTS_SHA256 = "94be6cc96e32bff6e89ac0ed599868a9b0df58f231610d4d41e755fdad80d9e8"
+EXPECTED_AMENDMENTS_SHA256 = "39c425f790c82ac8469ae89f6cb3b5ff8f78f8ce0c1d94fb0774444dc18d17c3"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
 EXPECTED_FEATURE_PAYLOAD_SHA256 = "eff681990a9262a3b30781588ee80a7f7b2f67ca16c812b4edda8b86203061b0"
+EXPECTED_FAILED_ATTEMPT_TERMINATION_SHA256 = "dd5df88b6d77fe181ba1fb1737b97fa3a62841065d16c425b1f26499954063d1"
+EXPECTED_PREFIX_IDENTITIES = {
+    "traces/continuous_gates/part-00000.parquet": (
+        "ae7d56f33b6642a43227b8f4affd4c054f8be59f2fc90f27d9c777a4b5a41eb2"
+    ),
+    "traces/long_funnel/part-00000.parquet": (
+        "31f4d87816b8972b18626eb8297e726ab6aa15efb48ea8286f977fed7090d83e"
+    ),
+}
 
 LONG_START_MS = 1_677_628_800_000  # 2023-03-01T00:00:00Z
 CONTINUOUS_START_MS = 1_680_307_200_000  # 2023-04-01T00:00:00Z
@@ -414,6 +428,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
             RECONSTRUCTION_RECEIPT,
             EXPECTED_RECONSTRUCTION_RECEIPT_SHA256,
         ),
+        "failed_attempt_termination": (
+            FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
     }
     output: dict[str, dict[str, Any]] = {}
     for name, (path, expected_sha) in expected.items():
@@ -441,6 +459,27 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
     if feature.get("pit", {}).get("full_pit_universe_pass") is not True:
         raise RuntimeError("feature receipt PIT gate did not pass")
     return output
+
+
+def _prefix_equivalence(work: Path) -> dict[str, Any]:
+    files: dict[str, dict[str, Any]] = {}
+    for relative, expected_sha in EXPECTED_PREFIX_IDENTITIES.items():
+        path = work.joinpath(*relative.split("/"))
+        if not path.is_file():
+            raise RuntimeError(f"registered prefix artifact is missing: {path}")
+        actual_sha = _sha256(path)
+        matches = actual_sha == expected_sha
+        files[relative] = {
+            "bytes": path.stat().st_size,
+            "expected_sha256": expected_sha,
+            "actual_sha256": actual_sha,
+            "matches": matches,
+        }
+        if not matches:
+            raise RuntimeError(
+                f"performance-refactor prefix identity changed: {relative}"
+            )
+    return {"status": "pass", "files": files}
 
 
 def _verify_feature_files(receipt: Mapping[str, Any]) -> list[Path]:
@@ -719,6 +758,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "account_equity_usdt": CAPITAL_USDT,
         "schedule_order": ["protection", "long", "continuous"],
+        "required_performance_refactor_prefix_identities": (
+            EXPECTED_PREFIX_IDENTITIES
+        ),
         "clock_offsets_ns": {
             "protection": 0,
             "long": 100_000,
@@ -940,6 +982,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("cycle trace does not cover the registered clock")
     if trace_counts["requests"] != structural["requests"]:
         raise RuntimeError("request trace count disagrees with comparator summary")
+    prefix_equivalence = _prefix_equivalence(work)
 
     persistence = _materialize_transactions(account_root)
     persisted_events = read_account_journal(account_root, verify=True)
@@ -986,6 +1029,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     status = "pass" if (
         structural["final_flat"]
         and journal_verified
+        and prefix_equivalence["status"] == "pass"
         and structural["btc_risk_reconciliation_error"] == 0
         and trace_counts["continuous_gate_rows"] == continuous_features.height
         and trace_counts["cycles"] == total_hours
@@ -1007,6 +1051,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "continuous_source_population": "pinned_by_feature_receipt",
         },
         "trace_counts": trace_counts,
+        "performance_refactor_prefix_equivalence": prefix_equivalence,
         "boundary_flat_targets": boundary_flats,
         "structural": structural,
         "journal_verified": journal_verified,

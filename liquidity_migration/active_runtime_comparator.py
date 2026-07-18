@@ -669,7 +669,11 @@ class ActiveRuntimeComparator:
             inbox=self.inbox,
             instrument_rules=self.instrument_rules,
         )
-        requests = engine.evaluate(markets, account_events=self._events)
+        requests = engine.evaluate(
+            markets,
+            account_events=self._events,
+            verified_execution_anchors=self._anchors,
+        )
         published = tuple(
             PublishedTargetRequest(
                 request=request,

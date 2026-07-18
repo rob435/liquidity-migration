@@ -12,7 +12,10 @@ from .account_service import (
     RequestedIntent,
     SleeveAdapterKind,
 )
-from .account_strategy_state import canonical_component_execution_anchors
+from .account_strategy_state import (
+    CanonicalComponentExecutionAnchor,
+    canonical_component_execution_anchors,
+)
 from .strategy_runtime import SleeveTargetIntent
 
 
@@ -48,16 +51,31 @@ class AccountProtectionEngine:
         market_inputs: Mapping[str, MarketInputRef],
         *,
         account_events: Sequence[AccountEvent] | None = None,
+        verified_execution_anchors: (
+            Mapping[str, CanonicalComponentExecutionAnchor] | None
+        ) = None,
     ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
         state = self.kernel.state()
-        anchors = {
-            anchor.target_key: anchor
-            for anchor in canonical_component_execution_anchors(
-                self.kernel.journal.root,
-                account_events=account_events,
-            )
-        }
+        if verified_execution_anchors is None:
+            anchors = {
+                anchor.target_key: anchor
+                for anchor in canonical_component_execution_anchors(
+                    self.kernel.journal.root,
+                    account_events=account_events,
+                )
+            }
+        else:
+            if account_events is None:
+                raise ValueError(
+                    "verified protection anchors require their account event snapshot"
+                )
+            anchors = dict(verified_execution_anchors)
+            for target_key, projected_anchor in anchors.items():
+                if target_key != projected_anchor.target_key:
+                    raise ValueError(
+                        "verified protection anchor key does not match its projection"
+                    )
         for target_key, target in sorted(state.component_targets.items()):
             signed_qty = float(target.get("signed_qty") or 0.0)
             symbol = str(target.get("symbol") or "").upper()

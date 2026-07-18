@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
@@ -13,6 +13,7 @@ from .account_kernel import (
     AccountEvent,
     AccountEventType,
     AccountState,
+    OrderState,
     read_account_journal,
     reduce_account_events,
 )
@@ -420,6 +421,37 @@ def _convergence_retry_targets_by_batch(
     return candidates
 
 
+@dataclass(frozen=True, slots=True)
+class _BatchFillIndex:
+    orders_by_batch_symbol: Mapping[tuple[str, str], tuple[OrderState, ...]]
+    fills_by_command_id: Mapping[str, tuple[AccountEvent, ...]]
+
+
+def _build_batch_fill_index(
+    events: Sequence[AccountEvent],
+    *,
+    state: AccountState,
+) -> _BatchFillIndex:
+    orders: dict[tuple[str, str], list[OrderState]] = {}
+    for order in state.orders.values():
+        key = (str(order.batch_id), str(order.symbol))
+        orders.setdefault(key, []).append(order)
+    fills: dict[str, list[AccountEvent]] = {}
+    for event in events:
+        if event.event_type != AccountEventType.FILL.value:
+            continue
+        command_id = str(event.payload.get("command_id") or "")
+        fills.setdefault(command_id, []).append(event)
+    return _BatchFillIndex(
+        orders_by_batch_symbol={
+            key: tuple(values) for key, values in orders.items()
+        },
+        fills_by_command_id={
+            key: tuple(values) for key, values in fills.items()
+        },
+    )
+
+
 def _batch_fill_summary(
     events: Sequence[AccountEvent],
     *,
@@ -427,26 +459,40 @@ def _batch_fill_summary(
     batch_id: str,
     symbol: str,
     tolerance: float,
+    batch_fill_index: _BatchFillIndex | None = None,
 ) -> _BatchFillSummary:
-    orders = sorted(
-        (
+    matching_orders: Iterable[OrderState]
+    if batch_fill_index is None:
+        # Retain the direct scan as a small-input reference implementation.
+        # Canonical projections build and pass the equivalent index once.
+        matching_orders = (
             order
             for order in state.orders.values()
             if order.batch_id == batch_id and order.symbol == symbol
-        ),
-        key=lambda order: order.command_id,
-    )
+        )
+    else:
+        matching_orders = batch_fill_index.orders_by_batch_symbol.get(
+            (str(batch_id), str(symbol)),
+            (),
+        )
+    orders = sorted(matching_orders, key=lambda order: order.command_id)
     command_ids = tuple(order.command_id for order in orders)
-    command_id_set = set(command_ids)
-    fills = sorted(
-        (
+    matching_fills: Iterable[AccountEvent]
+    if batch_fill_index is None:
+        command_id_set = set(command_ids)
+        matching_fills = (
             event
             for event in events
             if event.event_type == AccountEventType.FILL.value
             and str(event.payload.get("command_id") or "") in command_id_set
-        ),
-        key=lambda event: event.sequence,
-    )
+        )
+    else:
+        matching_fills = (
+            event
+            for command_id in command_ids
+            for event in batch_fill_index.fills_by_command_id.get(command_id, ())
+        )
+    fills = sorted(matching_fills, key=lambda event: event.sequence)
     observed_signed_qty = math.fsum(
         float(event.payload.get("signed_qty") or 0.0) for event in fills
     )
@@ -520,6 +566,7 @@ def _component_execution_anchors_from_events(
     accepted_batches: set[str],
     tolerance: float,
 ) -> dict[str, CanonicalComponentExecutionAnchor]:
+    batch_fill_index = _build_batch_fill_index(events, state=state)
     targets_by_batch = _ordinary_targets_by_batch(
         events,
         accepted_batches=accepted_batches,
@@ -562,6 +609,7 @@ def _component_execution_anchors_from_events(
                 batch_id=batch_id,
                 symbol=symbol,
                 tolerance=tolerance,
+                batch_fill_index=batch_fill_index,
             )
             entries = [
                 row
@@ -807,6 +855,7 @@ def _component_execution_anchors_from_events(
                 batch_id=batch_id,
                 symbol=symbol,
                 tolerance=tolerance,
+                batch_fill_index=batch_fill_index,
             )
             desired_quantities = [
                 float(event.payload.get("signed_qty") or 0.0)
@@ -1013,6 +1062,7 @@ def _component_execution_anchors_from_events(
                     batch_id=next(iter(original_batch_ids)),
                     symbol=symbol,
                     tolerance=tolerance,
+                    batch_fill_index=batch_fill_index,
                 )
                 expected_retry_delta = (
                     expected_delta - original_summary.observed_signed_qty

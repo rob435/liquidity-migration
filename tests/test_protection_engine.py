@@ -13,7 +13,10 @@ from liquidity_migration.account_kernel import (
 )
 from liquidity_migration.account_service import AccountIntentInbox
 from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.account_strategy_state import canonical_strategy_trade_rows
+from liquidity_migration.account_strategy_state import (
+    canonical_component_execution_anchors,
+    canonical_strategy_trade_rows,
+)
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import (
     BookLevel,
@@ -169,8 +172,25 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
     # The execution twin filled at 10.1, not the 10.0 decision reference.
     # A 20% fill-anchored TP is 12.12 and rounds outward to the 12.2 tick.
     assert engine.evaluate({"BUSDT": _market(key="too-early", price=12.1, ts=1_900)}) == ()
+    account_events = tuple(kernel.journal.events())
+    verified_anchors = {
+        anchor.target_key: anchor
+        for anchor in canonical_component_execution_anchors(
+            kernel.journal.root,
+            account_events=account_events,
+        )
+    }
+    with pytest.raises(ValueError, match="account event snapshot"):
+        engine.evaluate(
+            {"BUSDT": _market(key="cached-without-events", price=12.1, ts=1_950)},
+            verified_execution_anchors=verified_anchors,
+        )
     trigger_market = _market(key="tp-book", price=12.2, ts=2_000)
-    requests = engine.evaluate({"BUSDT": trigger_market})
+    requests = engine.evaluate(
+        {"BUSDT": trigger_market},
+        account_events=account_events,
+        verified_execution_anchors=verified_anchors,
+    )
     assert len(requests) == 1
     request = requests[0]
     intent = request.intents[0]

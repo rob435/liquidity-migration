@@ -155,3 +155,44 @@ their exact ordinal nanoseconds. The historical execution twin's maximum
 decision age is therefore one millisecond. All modeled latency components
 remain zero. This records causal ordering without moving the market price,
 changing a source decision, or claiming live daemon timing.
+
+## Amendment 8: projection performance repair and failed-attempt boundary
+
+Registered 2026-07-18 after terminating the first incomplete active comparator
+attempt at code commit `467030bbb3c4b61a5ec468dfe0c9df4f6f2ab5a3`, but before
+running its replacement or inspecting any monetary outcome. The preserved
+attempt termination receipt is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-467030bbb3c4/termination.json`
+with SHA-256
+`dd5df88b6d77fe181ba1fb1737b97fa3a62841065d16c425b1f26499954063d1`.
+The incomplete attempt is invalid for any strategy or parity conclusion.
+
+A read-only `py-spy` stack sample showed the active thread rescanning every
+account event for every historical order batch inside
+`canonical_component_execution_anchors`, then repeating that same canonical
+anchor projection inside `AccountProtectionEngine.evaluate` after the
+comparator had already produced it from the identical verified event snapshot.
+The attempt was stopped because this quadratic path was not credible inside
+the registered four-hour cap. Inspection was limited to the sampled call
+stack, partial structural row counts and chronology, and file identities; no
+P&L, return, equity curve, or trade-outcome ranking was calculated or opened.
+
+The replacement may make only these semantics-preserving performance changes:
+
+- construct one order-by-batch/symbol and fill-by-command index per canonical
+  account projection while retaining the former direct scan as a test
+  reference; and
+- allow the comparator to pass the canonical component anchors it already
+  built, together with their account-event snapshot, to the protection owner.
+  Normal production callers continue to build their own verified projection.
+
+The indexed and direct-scan anchor objects must compare exactly in grouped
+entry/reduction tests. The replacement run must also reproduce the preserved
+pre-repair structural prefixes byte-for-byte: continuous-gate part 00000
+SHA-256
+`ae7d56f33b6642a43227b8f4affd4c054f8be59f2fc90f27d9c777a4b5a41eb2`
+and LONG-funnel part 00000 SHA-256
+`31f4d87816b8972b18626eb8297e726ab6aa15efb48ea8286f977fed7090d83e`.
+Failure of either identity invalidates the replacement. These comparisons are
+refactor equivalence checks only; the partial rows remain spent structural
+diagnostics and carry no thesis or economic evidentiary weight.

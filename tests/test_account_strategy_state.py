@@ -1019,6 +1019,7 @@ def test_mixed_direction_netted_batch_has_null_lifecycle_clocks(
 
 def test_terminal_group_reduction_projects_one_account_pnl_event(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=1)
     root = tmp_path / "account"
@@ -1084,11 +1085,29 @@ def test_terminal_group_reduction_projects_one_account_pnl_event(
     adverse = canonical_adverse_reduction_events(root, sleeve="long")
     assert [event.pnl_key for event in adverse] == [reduction.pnl_key]
     event_snapshot = read_account_journal(root, verify=True)
-    assert canonical_component_execution_anchors(
+    indexed_anchors = canonical_component_execution_anchors(
         root,
         sleeve="long",
         account_events=event_snapshot,
-    ) == canonical_component_execution_anchors(root, sleeve="long")
+    )
+    assert indexed_anchors == canonical_component_execution_anchors(
+        root,
+        sleeve="long",
+    )
+    import liquidity_migration.account_strategy_state as strategy_state_module
+
+    with monkeypatch.context() as reference:
+        reference.setattr(
+            strategy_state_module,
+            "_build_batch_fill_index",
+            lambda _events, *, state: None,
+        )
+        scan_reference_anchors = canonical_component_execution_anchors(
+            root,
+            sleeve="long",
+            account_events=event_snapshot,
+        )
+    assert indexed_anchors == scan_reference_anchors
     assert canonical_reduction_events(
         root,
         sleeve="long",
