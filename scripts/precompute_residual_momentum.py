@@ -176,10 +176,26 @@ def residual_momentum_from_residuals(
     )
 
 
-def _compute_signal(root: Path, *, start: str, end: str, klines_dataset: str | None = None) -> pl.DataFrame:
+def _compute_signal(
+    root: Path,
+    *,
+    start: str,
+    end: str,
+    klines_dataset: str | None = None,
+    require_pit_membership: bool = False,
+) -> pl.DataFrame:
     kname = _resolve_klines_dataset(root, klines_dataset)
     print(f"[{root.name}] build factor panel + common4 residuals [{start}..{end}) (klines={kname}) ...", flush=True)
-    panel = build_factor_panel(root, start=start, end=end, klines_dataset=kname)
+    if require_pit_membership:
+        panel = build_factor_panel(
+            root,
+            start=start,
+            end=end,
+            klines_dataset=kname,
+            require_pit_membership=True,
+        )
+    else:
+        panel = build_factor_panel(root, start=start, end=end, klines_dataset=kname)
     if panel.is_empty():
         print(f"[{root.name}] EMPTY panel -- skip")
         return pl.DataFrame(
@@ -285,6 +301,7 @@ def _append_signal(
     end: str,
     klines_dataset: str | None,
     append_overlap_days: int,
+    require_pit_membership: bool,
 ) -> int:
     if append_overlap_days < 1:
         raise ValueError("append_overlap_days must be positive")
@@ -293,7 +310,13 @@ def _append_signal(
         ["symbol", "ts_ms"]
     )
     if existing.is_empty():
-        sig = _compute_signal(root, start=START, end=end, klines_dataset=klines_dataset)
+        sig = _compute_signal(
+            root,
+            start=START,
+            end=end,
+            klines_dataset=klines_dataset,
+            require_pit_membership=require_pit_membership,
+        )
         _write_signal_atomic(out_path, sig.sort(["symbol", "ts_ms"]))
         print(f"[{root.name}] wrote {sig.height} rows (empty existing table) -> {out_path}", flush=True)
         return sig.height
@@ -310,7 +333,13 @@ def _append_signal(
 
     history_days = append_overlap_days + RMOM_WINDOW + RMOM_CAUSAL_SHIFT + 5
     append_start = _ms_to_date_str(existing_max - history_days * MS_PER_DAY)
-    rebuilt = _compute_signal(root, start=append_start, end=end, klines_dataset=klines_dataset)
+    rebuilt = _compute_signal(
+        root,
+        start=append_start,
+        end=end,
+        klines_dataset=klines_dataset,
+        require_pit_membership=require_pit_membership,
+    )
     _validate_rmom_schema(rebuilt, path=out_path)
     overlap_start_ms = existing_max - append_overlap_days * MS_PER_DAY
     matched = _assert_append_overlap_matches(
@@ -348,6 +377,7 @@ def precompute(
     append: bool = True,
     append_overlap_days: int = DEFAULT_APPEND_OVERLAP_DAYS,
     output_path: Path | None = None,
+    require_pit_membership: bool = False,
 ) -> int:
     out_path = output_path or (root / "residual_momentum.parquet")
     if append and out_path.exists():
@@ -358,9 +388,16 @@ def precompute(
             end=end,
             klines_dataset=klines_dataset,
             append_overlap_days=append_overlap_days,
+            require_pit_membership=require_pit_membership,
         )
 
-    sig = _compute_signal(root, start=start, end=end, klines_dataset=klines_dataset)
+    sig = _compute_signal(
+        root,
+        start=start,
+        end=end,
+        klines_dataset=klines_dataset,
+        require_pit_membership=require_pit_membership,
+    )
     _write_signal_atomic(out_path, sig)
     max_day = sig["ts_ms"].max() if not sig.is_empty() else None
     print(f"[{root.name}] wrote {sig.height} rows (max ts_ms={max_day}) -> {out_path}", flush=True)
@@ -398,6 +435,14 @@ def main() -> int:
         default=None,
         help="Explicit output parquet for a single root; useful for immutable run-scoped research artifacts.",
     )
+    ap.add_argument(
+        "--require-pit-membership",
+        action="store_true",
+        help=(
+            "Filter raw hourly bars through archive_trade_manifest before factor features and "
+            "cross-sectional ranks. Required for decision-grade historical research."
+        ),
+    )
     args = ap.parse_args()
     end = args.end or _default_end()
     roots = [Path(r).expanduser() for r in args.root] if args.root else DEFAULT_ROOTS
@@ -416,6 +461,7 @@ def main() -> int:
             append=not args.full_rewrite,
             append_overlap_days=args.append_overlap_days,
             output_path=output_path,
+            require_pit_membership=args.require_pit_membership,
         )
     print("DONE precompute_residual_momentum", flush=True)
     return 0

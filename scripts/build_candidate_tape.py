@@ -70,6 +70,7 @@ from liquidity_migration.long_native import (  # noqa: E402
     long_pump_family,
     long_v11a_profile,
 )
+from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
 from liquidity_migration.strategy_funnel import (  # noqa: E402
     canonical_payload,
     finalize_funnel_row,
@@ -785,7 +786,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     read_end = args.end + dt.timedelta(days=PATH_TAIL_DAYS)
     dates = _date_range(read_start, read_end)
     kline_files = _dataset_files(root, "klines_1h", dates)
-    membership_dates = sorted({args.start - dt.timedelta(days=1), *list(_date_range(args.start, args.end))})
+    # Membership must cover the complete warm-up and path-tail read interval:
+    # filtering only the decision window would still let nonmembers influence
+    # trailing features before the first evaluated timestamp.
+    membership_dates = dates
     manifest_files = _dataset_files(root, "archive_trade_manifest", membership_dates)
     rmom_path = root / "residual_momentum.parquet"
     preflight = {
@@ -864,6 +868,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw_kline_rows = klines.height
     invalid_ohlc_rows = klines.filter(~_valid_ohlc()).height
     klines = klines.filter(_valid_ohlc())
+    valid_ohlc_rows = klines.height
+    klines, pit_filter_receipt = filter_klines_to_pit_membership(klines, manifest)
     bars_by_symbol = _bars_by_symbol(klines)
     start_ms = _date_ms(args.start)
     end_ms = _date_ms(args.end)
@@ -949,7 +955,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "input_quality": {
                 "raw_kline_rows": raw_kline_rows,
                 "invalid_ohlc_rows_rejected": invalid_ohlc_rows,
+                "valid_ohlc_rows_before_pit_filter": valid_ohlc_rows,
                 "usable_kline_rows": klines.height,
+                "pit_filter": pit_filter_receipt,
             },
             "counts": {
                 "long_source_rows": long_funnel.height,

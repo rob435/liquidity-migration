@@ -36,6 +36,7 @@ import polars as pl
 
 from liquidity_migration._common import MS_PER_DAY, calendar_roll, calendar_shift
 from liquidity_migration.storage import read_dataset_columns
+from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership
 TRADING_DAYS_PER_YEAR = 365  # crypto trades 7 days/week; annualisation is calendar-day-based
 
 
@@ -806,6 +807,8 @@ def build_feature_panel(
     funding_dataset: str | None = None,
     open_interest_dataset: str | None = None,
     premium_dataset: str | None = None,
+    require_pit_membership: bool = False,
+    pit_manifest_dataset: str = "archive_trade_manifest",
 ) -> pl.DataFrame:
     """Build the (symbol, date, feature_1..k, fwd_ret_*) panel.
 
@@ -825,6 +828,12 @@ def build_feature_panel(
     premium_index_1h``, Binance roots resolve to the ``binance_usdm_``-
     prefixed equivalents. Override an arg to force a specific dataset
     name (e.g. when pointing at a side-copy with renamed dirs).
+
+    ``require_pit_membership`` is the decision-grade research mode. It
+    semi-joins hourly klines to ``pit_manifest_dataset`` before daily
+    aggregation, rolling features, forward-return construction, and every
+    cross-sectional rank. The default remains false for operational roots that
+    contain a current live universe rather than a historical manifest.
     """
     specs = resolve_feature_specs(feature_specs)
     start_ms = _date_str_to_ms(start)
@@ -855,6 +864,18 @@ def build_feature_panel(
 
     if klines_1h.is_empty():
         return pl.DataFrame()
+    if require_pit_membership:
+        archive_manifest = read_dataset_columns(
+            data_root,
+            pit_manifest_dataset,
+            columns=["date", "symbol"],
+        )
+        klines_1h, _pit_filter_receipt = filter_klines_to_pit_membership(
+            klines_1h,
+            archive_manifest,
+        )
+        if klines_1h.is_empty():
+            return pl.DataFrame()
 
     daily_klines = _aggregate_daily_klines(klines_1h)
     daily_returns = _attach_daily_returns(daily_klines)

@@ -17,6 +17,130 @@ from .archive_manifest import V5_LISTING_SOURCE, V5_LISTING_URL_SENTINEL
 from .trade_lifecycle import _has_columns
 
 
+def filter_klines_to_pit_membership(
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Semi-join hourly bars to contemporaneous manifest membership.
+
+    This helper is intentionally applied *before* any per-symbol rolling
+    feature or cross-sectional rank.  A later membership gate can stop an
+    ineligible symbol from trading, but it cannot undo that symbol's earlier
+    influence on ranks, universe cut-offs, or rolling state.
+
+    The returned frame preserves the input schema and row order.  The receipt
+    contains structural counts only; it deliberately carries no prices,
+    returns, signals, or other outcome-bearing values.
+    """
+
+    required_manifest = {"date", "symbol"}
+    missing_manifest = sorted(required_manifest - set(archive_manifest.columns))
+    if archive_manifest.is_empty() or missing_manifest:
+        detail = "empty" if archive_manifest.is_empty() else f"missing columns {missing_manifest}"
+        raise RuntimeError(f"archive_trade_manifest is not usable for PIT filtering: {detail}")
+    manifest_keys = (
+        archive_manifest.select(
+            pl.col("date").cast(pl.String, strict=True).alias("_pit_date"),
+            pl.col("symbol").cast(pl.String, strict=True).str.strip_chars().alias("_pit_symbol"),
+        )
+        .drop_nulls()
+    )
+    invalid_manifest = manifest_keys.filter(
+        (pl.col("_pit_symbol") == "")
+        | ~pl.col("_pit_date").str.contains(r"^\d{4}-\d{2}-\d{2}$")
+        | pl.col("_pit_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False).is_null()
+    )
+    if not invalid_manifest.is_empty():
+        raise RuntimeError(
+            "archive_trade_manifest contains blank symbols or invalid ISO dates; "
+            f"invalid_rows={invalid_manifest.height}"
+        )
+    manifest_pairs = manifest_keys.unique(["_pit_date", "_pit_symbol"], maintain_order=True)
+    if manifest_pairs.is_empty():
+        raise RuntimeError("archive_trade_manifest has no non-null (date, symbol) membership pairs")
+
+    if klines.is_empty():
+        return klines, {
+            "schema_version": 1,
+            "pit_membership_applied_before_features": True,
+            "date_source": "date+ts_ms_verified" if "date" in klines.columns else "ts_ms",
+            "input_rows": 0,
+            "output_rows": 0,
+            "dropped_rows": 0,
+            "input_date_symbol_pairs": 0,
+            "output_date_symbol_pairs": 0,
+            "dropped_date_symbol_pairs": 0,
+            "manifest_rows": archive_manifest.height,
+            "manifest_date_symbol_pairs": manifest_pairs.height,
+            "duplicate_manifest_rows": archive_manifest.height - manifest_pairs.height,
+        }
+    missing_klines = sorted({"ts_ms", "symbol"} - set(klines.columns))
+    if missing_klines:
+        raise RuntimeError(f"klines are not usable for PIT filtering: missing columns {missing_klines}")
+
+    derived_date = pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d")
+    prepared = klines.with_row_index("_pit_row_order").with_columns(
+        pl.col("symbol").cast(pl.String, strict=True).str.strip_chars().alias("_pit_symbol"),
+        derived_date.alias("_pit_derived_date"),
+    )
+    invalid_klines = prepared.filter(
+        pl.col("ts_ms").is_null()
+        | pl.col("_pit_symbol").is_null()
+        | (pl.col("_pit_symbol") == "")
+        | pl.col("_pit_derived_date").is_null()
+    )
+    if not invalid_klines.is_empty():
+        raise RuntimeError(
+            "klines contain null timestamps or blank symbols; "
+            f"invalid_rows={invalid_klines.height}"
+        )
+
+    date_source = "ts_ms"
+    if "date" in klines.columns:
+        prepared = prepared.with_columns(
+            pl.col("date").cast(pl.String, strict=True).alias("_pit_declared_date")
+        )
+        inconsistent_dates = prepared.filter(
+            pl.col("_pit_declared_date").is_null()
+            | (pl.col("_pit_declared_date") != pl.col("_pit_derived_date"))
+        )
+        if not inconsistent_dates.is_empty():
+            raise RuntimeError(
+                "kline date disagrees with UTC date derived from ts_ms; "
+                f"invalid_rows={inconsistent_dates.height}"
+            )
+        date_source = "date+ts_ms_verified"
+    prepared = prepared.with_columns(pl.col("_pit_derived_date").alias("_pit_date"))
+
+    input_pairs = prepared.select("_pit_date", "_pit_symbol").unique()
+    filtered = (
+        prepared.join(manifest_pairs, on=["_pit_date", "_pit_symbol"], how="semi")
+        .sort("_pit_row_order")
+        .select(klines.columns)
+    )
+    output_pairs = (
+        filtered.select(
+            derived_date.alias("_pit_date"),
+            pl.col("symbol").cast(pl.String, strict=True).str.strip_chars().alias("_pit_symbol"),
+        )
+        .unique()
+    )
+    return filtered, {
+        "schema_version": 1,
+        "pit_membership_applied_before_features": True,
+        "date_source": date_source,
+        "input_rows": klines.height,
+        "output_rows": filtered.height,
+        "dropped_rows": klines.height - filtered.height,
+        "input_date_symbol_pairs": input_pairs.height,
+        "output_date_symbol_pairs": output_pairs.height,
+        "dropped_date_symbol_pairs": input_pairs.height - output_pairs.height,
+        "manifest_rows": archive_manifest.height,
+        "manifest_date_symbol_pairs": manifest_pairs.height,
+        "duplicate_manifest_rows": archive_manifest.height - manifest_pairs.height,
+    }
+
+
 def _pit_manifest_metadata(
     archive_manifest: pl.DataFrame,
     features: pl.DataFrame,

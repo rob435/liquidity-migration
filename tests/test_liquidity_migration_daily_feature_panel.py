@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
+from polars.testing import assert_frame_equal
 import pytest
 
 from liquidity_migration.daily_feature_panel import (
@@ -470,6 +471,42 @@ def test_build_feature_panel_end_to_end_produces_features_and_forward_returns(tm
     # Every (symbol, date) in the window has a row
     assert panel.height > 0
     assert set(panel["symbol"].unique().to_list()) == {"AAA", "BBB", "CCC"}
+
+
+def test_build_feature_panel_filters_pit_membership_before_features_and_ranks(
+    tmp_path: Path,
+) -> None:
+    pit_root = tmp_path / "pit"
+    physically_filtered_root = tmp_path / "physically-filtered"
+    _write_fixture_data_root(pit_root, days=35)
+    _write_fixture_data_root(physically_filtered_root, days=35)
+
+    missing_day = "2025-01-18"
+    physical_part = physically_filtered_root / "klines_1h" / f"date={missing_day}" / "part.parquet"
+    pl.read_parquet(physical_part).filter(pl.col("symbol") != "CCC").write_parquet(physical_part)
+
+    for date_dir in sorted((pit_root / "klines_1h").glob("date=*")):
+        day = date_dir.name.removeprefix("date=")
+        symbols = ["AAA", "BBB"] if day == missing_day else ["AAA", "BBB", "CCC"]
+        manifest_dir = pit_root / "archive_trade_manifest" / f"date={day}"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"date": [day] * len(symbols), "symbol": symbols}).write_parquet(
+            manifest_dir / "part.parquet"
+        )
+
+    kwargs = {
+        "start": "2025-01-15",
+        "end": "2025-02-01",
+        "feature_specs": ["xs_rank_ret_3d", "realized_vol_7d", "liquidity_rank"],
+        "forward_horizons": (1, 3),
+    }
+    actual = build_feature_panel(pit_root, **kwargs, require_pit_membership=True)
+    expected = build_feature_panel(physically_filtered_root, **kwargs)
+
+    assert_frame_equal(actual, expected)
+    assert actual.filter(
+        (pl.col("date").cast(pl.String) == missing_day) & (pl.col("symbol") == "CCC")
+    ).is_empty()
 
 
 def test_autodetect_dataset_names_picks_binance_when_prefixed_subdirs_exist(tmp_path: Path) -> None:

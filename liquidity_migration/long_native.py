@@ -53,6 +53,7 @@ from .volume_events_pit import (
     _covered_kline_date_symbol_set,
     _full_pit_universe_coverage,
     _pit_manifest_metadata,
+    filter_klines_to_pit_membership,
 )
 
 LONG_HISTORICAL_KERNEL_EQUITY_USDT = 1_000_000.0
@@ -154,17 +155,23 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
 
-    klines = _exclude_symbols(raw_klines, cfg.exclude_symbols)
+    coverage_klines = _exclude_symbols(raw_klines, cfg.exclude_symbols)
     funding = _exclude_symbols(funding, cfg.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, cfg.exclude_symbols)
 
-    pit_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    pit_covered_date_symbols = _covered_kline_date_symbol_set(coverage_klines)
     pit_coverage = _full_pit_universe_coverage(
-        klines,
+        coverage_klines,
         archive_manifest,
         kline_covered_date_symbols=pit_covered_date_symbols,
     )
     full_pit_universe_pass = pit_coverage.passed
+    klines, pit_filter_receipt = filter_klines_to_pit_membership(
+        coverage_klines,
+        archive_manifest,
+    )
+    if klines.is_empty():
+        raise RuntimeError("No PIT-member klines remain after archive manifest filtering")
 
     features = build_long_features(klines, config=cfg)
     features = _filter_signal_window(features, start=cfg.start_date, end=cfg.end_date)
@@ -185,6 +192,7 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
         "full_pit_universe_pass": full_pit_universe_pass,
         "pit_covered_date_symbols": pit_covered_date_symbols,
         "pit_required_date_symbols": pit_coverage.required_date_symbols,
+        "pit_filter_receipt": pit_filter_receipt,
     }
 
 
@@ -416,6 +424,7 @@ def run_long_native_research(
     full_pit_universe_pass = inputs["full_pit_universe_pass"]
     pit_covered_date_symbols = inputs["pit_covered_date_symbols"]
     pit_required_date_symbols = inputs["pit_required_date_symbols"]
+    pit_filter_receipt = inputs["pit_filter_receipt"]
 
     lifecycle_strategy_id = _long_kernel_strategy_id(cfg, costs)
     lifecycle_root = output_dir / "common_kernel_execution"
@@ -555,6 +564,7 @@ def run_long_native_research(
             kline_covered_date_symbols=pit_covered_date_symbols,
             required_pit_date_symbols=pit_required_date_symbols,
         ),
+        "pit_filter": pit_filter_receipt,
         "cost_model": {
             **asdict(costs),
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,

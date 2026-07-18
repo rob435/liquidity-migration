@@ -7,6 +7,7 @@ within a symbol's traded lifespan IS required (real survivorship protection)."""
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from liquidity_migration.volume_events_pit import (
     _covered_kline_date_symbol_set,
@@ -14,6 +15,7 @@ from liquidity_migration.volume_events_pit import (
     _pit_manifest_metadata,
     _required_pit_date_symbols,
     _symbol_kline_date_bounds,
+    filter_klines_to_pit_membership,
 )
 
 
@@ -30,6 +32,67 @@ def _manifest(pairs: list[tuple[str, str]]) -> pl.DataFrame:
     return pl.DataFrame(
         {"symbol": [s for s, _ in pairs], "date": [d for _, d in pairs]}
     )
+
+
+def test_pit_filter_removes_nonmembers_before_features_and_preserves_order() -> None:
+    day = 86_400_000
+    klines = pl.DataFrame(
+        {
+            "ts_ms": [day, day, 2 * day, 2 * day],
+            "symbol": ["AAA", "BBB", "AAA", "BBB"],
+            "date": ["1970-01-02", "1970-01-02", "1970-01-03", "1970-01-03"],
+            "close": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    manifest = _manifest(
+        [
+            ("AAA", "1970-01-02"),
+            ("BBB", "1970-01-03"),
+            ("BBB", "1970-01-03"),  # duplicate provenance row must not duplicate bars
+        ]
+    )
+
+    filtered, receipt = filter_klines_to_pit_membership(klines, manifest)
+
+    assert filtered.to_dicts() == [klines.row(0, named=True), klines.row(3, named=True)]
+    assert filtered.schema == klines.schema
+    assert receipt == {
+        "schema_version": 1,
+        "pit_membership_applied_before_features": True,
+        "date_source": "date+ts_ms_verified",
+        "input_rows": 4,
+        "output_rows": 2,
+        "dropped_rows": 2,
+        "input_date_symbol_pairs": 4,
+        "output_date_symbol_pairs": 2,
+        "dropped_date_symbol_pairs": 2,
+        "manifest_rows": 3,
+        "manifest_date_symbol_pairs": 2,
+        "duplicate_manifest_rows": 1,
+    }
+
+
+def test_pit_filter_derives_utc_date_when_kline_date_is_absent() -> None:
+    klines = pl.DataFrame(
+        {"ts_ms": [86_400_000, 2 * 86_400_000], "symbol": ["AAA", "AAA"], "close": [1.0, 2.0]}
+    )
+    filtered, receipt = filter_klines_to_pit_membership(
+        klines,
+        _manifest([("AAA", "1970-01-03")]),
+    )
+    assert filtered["ts_ms"].to_list() == [2 * 86_400_000]
+    assert receipt["date_source"] == "ts_ms"
+
+
+def test_pit_filter_rejects_date_timestamp_disagreement() -> None:
+    klines = pl.DataFrame(
+        {"ts_ms": [86_400_000], "symbol": ["AAA"], "date": ["1970-01-03"]}
+    )
+    with pytest.raises(RuntimeError, match="date disagrees"):
+        filter_klines_to_pit_membership(
+            klines,
+            _manifest([("AAA", "1970-01-03")]),
+        )
 
 
 def test_required_pit_excludes_prelisting_and_postdelisting_keeps_midgap() -> None:

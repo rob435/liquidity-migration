@@ -25,6 +25,7 @@ from .continuous_profile import (
 )
 from .daily_feature_panel import _autodetect_dataset_names, _date_str_to_ms, _read_window
 from .storage import read_dataset_columns
+from .volume_events_pit import filter_klines_to_pit_membership
 from .trade_lifecycle import (
     _IndexedTradeState,
     _empty_trades,
@@ -157,13 +158,25 @@ def _exclude_tag(exclude_symbols: Any) -> str:
     return hashlib.sha256("|".join(syms).encode("utf-8")).hexdigest()[:8]
 
 
-def _panel_cache_path(root: Path, config: ContinuousEventConfig) -> Path:
+def _panel_cache_path(
+    root: Path,
+    config: ContinuousEventConfig,
+    *,
+    require_pit_membership: bool = False,
+    residual_momentum_path: Path | None = None,
+) -> Path:
     window_tag = _window_tag(config)
     # Exclusions are material because the panel is ranked cross-sectionally.
     excl_part = "" if not config.exclude_symbols else f"_excl{_exclude_tag(config.exclude_symbols)}"
+    pit_part = "_pit" if require_pit_membership else ""
+    rmom_part = ""
+    if residual_momentum_path is not None:
+        rmom_part = "_rmom" + hashlib.sha256(
+            str(residual_momentum_path.resolve()).encode("utf-8")
+        ).hexdigest()[:8]
     return root / (
         f"_continuous_engine_panel_v4_rmom{int(round(config.rmom_quantile * 100))}"
-        f"_feat{_feature_tag(config.feature_set)}{excl_part}_{window_tag}.parquet"
+        f"_feat{_feature_tag(config.feature_set)}{excl_part}{pit_part}{rmom_part}_{window_tag}.parquet"
     )
 
 
@@ -244,7 +257,12 @@ def _assert_rmom_covers_window(
 
 
 def build_continuous_panel(
-    data_root: str | Path, config: ContinuousEventConfig, *, cache: bool = True
+    data_root: str | Path,
+    config: ContinuousEventConfig,
+    *,
+    cache: bool = True,
+    require_pit_membership: bool = False,
+    residual_momentum_path: str | Path | None = None,
 ) -> pl.DataFrame:
     """Build the deciled rmom-low panel: (symbol, ts_ms, decile, composite, turnover_quote).
 
@@ -252,11 +270,25 @@ def build_continuous_panel(
     ts_ms+1h); the rmom join is a day-floor lag1 (residual_momentum[D] uses residuals <= D-1).
     This is the engine-owned decile panel builder; it computes realised fills
     downstream rather than carrying a forward-return proxy column.
+
+    Decision-grade historical callers set ``require_pit_membership=True``.
+    That filters raw bars before per-symbol features and cross-sectional ranks.
+    Operational current-universe roots retain the default because they do not
+    necessarily carry a historical archive manifest.
     """
     root = Path(str(data_root)).expanduser()
     start_ms, end_ms = _window_ms(config)
-    cache_path = _panel_cache_path(root, config)
-    rmom_path = root / "residual_momentum.parquet"
+    rmom_path = (
+        Path(residual_momentum_path).expanduser().resolve()
+        if residual_momentum_path is not None
+        else root / "residual_momentum.parquet"
+    )
+    cache_path = _panel_cache_path(
+        root,
+        config,
+        require_pit_membership=require_pit_membership,
+        residual_momentum_path=(rmom_path if residual_momentum_path is not None else None),
+    )
     if cache and cache_path.exists() and not _panel_cache_stale(cache_path, rmom_path):
         return pl.read_parquet(cache_path)
     kname = _autodetect_dataset_names(root)["klines_dataset"]
@@ -266,6 +298,15 @@ def build_continuous_panel(
     )
     if k.is_empty():
         return pl.DataFrame()
+    if require_pit_membership:
+        archive_manifest = read_dataset_columns(
+            root,
+            "archive_trade_manifest",
+            columns=["date", "symbol"],
+        )
+        k, _pit_filter_receipt = filter_klines_to_pit_membership(k, archive_manifest)
+        if k.is_empty():
+            return pl.DataFrame()
     if config.exclude_symbols:
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
     if not rmom_path.exists():

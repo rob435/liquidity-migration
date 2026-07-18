@@ -16,6 +16,8 @@ from liquidity_migration.daily_feature_panel import (
     _xs_rank,
     build_feature_panel,
 )
+from liquidity_migration.storage import read_dataset_columns
+from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership
 
 # Reuse daily feature-panel builders; rank realized volatility below and compute
 # BTC beta separately.
@@ -109,13 +111,17 @@ def build_factor_panel(
     end: str,
     btc_symbol: str = "BTCUSDT",
     klines_dataset: str | None = None,
+    require_pit_membership: bool = False,
+    pit_manifest_dataset: str = "archive_trade_manifest",
 ) -> pl.DataFrame:
     """Build the per-(symbol, ts_ms, date) factor-exposure panel, full-PIT.
 
-    Reads the venue's klines from ``data_root`` (a ``*_full_pit`` root => the full
-    delisted-inclusive PIT universe => PIT-clean cross-sections), aggregates to
-    daily bars, and attaches factor exposures. Pads 90d back so the rolling-60
-    betas warm up; the returned panel covers [start, end).
+    Reads the venue's klines from ``data_root``, aggregates to daily bars, and
+    attaches factor exposures. A root name is not evidence of PIT correctness:
+    decision-grade callers must set ``require_pit_membership=True`` so the raw
+    hourly rows are filtered by the historical manifest before features and
+    ranks. Pads 90d back so the rolling-60 betas warm up; the returned panel
+    covers [start, end).
 
     Attaches 6 factor exposures: the 5 reused daily feature-panel factors (via
     ``build_feature_panel``) + ``btc_beta``. ``realized_vol_7d`` is converted to
@@ -135,6 +141,8 @@ def build_factor_panel(
         data_root, start=start, end=end,
         feature_specs=",".join(_REUSED_FACTOR_SPECS), forward_horizons=(1,),
         klines_dataset=klines_dataset,
+        require_pit_membership=require_pit_membership,
+        pit_manifest_dataset=pit_manifest_dataset,
     )
     if feat.is_empty():
         return pl.DataFrame()
@@ -153,6 +161,16 @@ def build_factor_panel(
     if klines_1h.is_empty():
         feat = feat.with_columns(pl.lit(None, dtype=pl.Float64).alias("btc_beta"))
     else:
+        if require_pit_membership:
+            archive_manifest = read_dataset_columns(
+                data_root,
+                pit_manifest_dataset,
+                columns=["date", "symbol"],
+            )
+            klines_1h, _pit_filter_receipt = filter_klines_to_pit_membership(
+                klines_1h,
+                archive_manifest,
+            )
         daily_returns = _attach_daily_returns(_aggregate_daily_klines(klines_1h))
         feat = feat.join(compute_btc_beta(daily_returns, btc_symbol=btc_symbol), on=["symbol", "ts_ms"], how="left")
 
