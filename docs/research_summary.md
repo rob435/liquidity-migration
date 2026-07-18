@@ -44,6 +44,24 @@ funnels, paths, effects, portfolio diagnostics, deviations, independent checks,
 and non-conclusions are in
 `docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`.
 
+The subsequent comparator/accounting repair also closed invalid. The one
+run-scoped current-formula RMOM build had 117 stable keys absent from the legacy
+feature and 8,597 shared-key value mismatches, all shared-value differences
+falling on 2024-11-10 through 2024-11-30. Current kline files in the influencing
+window postdate the legacy feature, so the most direct explanation is an input-
+vintage mismatch plus current three-day delisting-tail ownership; the prior raw
+bytes were not hash-pinned, so that cause remains an evidence-backed inference.
+No exact active comparator, ablation, treatment, or holdout was run.
+
+Account-cache and state-copy repairs reproduced the exact frozen 100-key event/
+hash receipts. The prospective 200-key benchmark then found two LONG BTCUSDT
+gross-P&L differences of `1.2794e-9` and `5.1332e-10` USD outside the committed
+USD-unit `rtol=1e-12`, `atol=1e-12` rule. The tolerance was not changed after
+inspection; the full retry was not authorized. Trade diagnostics remain useful
+for hypothesis generation on their exact spent surface, not for qualifying a
+new thesis. See
+`docs/strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md`.
+
 ## Strategy Overhaul V2 Phase-3 structural checkpoint
 
 The first preregistered Bybit candidate-tape partition for

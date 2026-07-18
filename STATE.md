@@ -107,5 +107,12 @@ Research-only addendum, 2026-07-18: Strategy Overhaul V2 closed with no
 qualifying thesis and did not touch its reserved holdout. Its full diagnostic
 portfolios are model-based and negative after costs/funding; production account
 verification is a bounded 100-key sample per sleeve, not exhaustive parity.
+The later comparator/accounting repair also closed invalid: current RMOM could
+not reconcile to the legacy input vintage, and a prospective 200-key account
+benchmark exceeded its frozen numeric tolerance on two economically tiny LONG
+P&L rows. No exact comparator or full-account retry ran. The optional repository
+historical state-copy optimization is default-off and is not a deployed runtime
+change.
 This changes no live/demo/paper authority or topology above. See
-`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md`.
+`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md` and
+`docs/strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md`.
