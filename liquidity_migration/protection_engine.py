@@ -5,7 +5,13 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Mapping, Sequence
 
-from .account_kernel import AccountEvent, AccountExecutionKernel, InstrumentRules, MarketInputRef
+from .account_kernel import (
+    AccountEvent,
+    AccountExecutionKernel,
+    AccountState,
+    InstrumentRules,
+    MarketInputRef,
+)
 from .account_service import (
     AccountIntentInbox,
     AccountTargetRequest,
@@ -54,9 +60,29 @@ class AccountProtectionEngine:
         verified_execution_anchors: (
             Mapping[str, CanonicalComponentExecutionAnchor] | None
         ) = None,
+        trusted_account_state: AccountState | None = None,
     ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
-        state = self.kernel.state()
+        if trusted_account_state is None:
+            state = self.kernel.state()
+        else:
+            if account_events is None:
+                raise ValueError(
+                    "trusted protection state requires its account event snapshot"
+                )
+            expected_state_hash = (
+                account_events[-1].state_hash
+                if account_events
+                else AccountState().rolling_state_hash
+            )
+            if (
+                trusted_account_state.events_applied != len(account_events)
+                or trusted_account_state.rolling_state_hash != expected_state_hash
+            ):
+                raise RuntimeError(
+                    "trusted protection state does not match its account event snapshot"
+                )
+            state = trusted_account_state
         if verified_execution_anchors is None:
             anchors = {
                 anchor.target_key: anchor

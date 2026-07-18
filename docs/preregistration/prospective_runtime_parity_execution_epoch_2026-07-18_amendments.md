@@ -234,3 +234,30 @@ replacement remains bound to Amendment 8's two byte-identical trace prefixes.
 This is a read-model performance repair only: it cannot alter source data,
 gates, source decisions, targets, request order, execution, lifecycle rules,
 BTC-risk state, or the ban on inspecting monetary outcomes.
+
+## Amendment 10: hash-bound protection state snapshot
+
+Registered 2026-07-18 after terminating the shared-projection attempt at code
+commit `573ca637763b20687e82a7887baa4d43c1128f0a`, before another run and
+without monetary inspection. Its termination receipt is
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-573ca637763b/termination.json`
+with SHA-256
+`28eac53954835d799e066642ecba4843037ab05f8fddb587ba4fa1b89360a738`.
+The attempt again reproduced both registered prefixes exactly, but remains
+incomplete and conclusion-ineligible.
+
+The shared canonical context removed all sampled journal replays. The next
+read-only stack sample found the protection owner calling `kernel.state()`,
+which deep-copied the entire materialized account state only to iterate current
+component targets. That redundant history-sized copy prevented the next trace
+partition from closing promptly.
+
+The replacement may pass the same in-process account-owner state snapshot into
+`AccountProtectionEngine.evaluate` together with its event snapshot and
+canonical anchors. Protection must independently require the same exact
+binding as Amendment 9: applied-event count equals snapshot length and rolling
+state hash equals the last event state hash. Missing or mismatched provenance
+fails closed. Normal production callers retain the defensive replay copy. The
+trusted snapshot is read synchronously before another comparator mutation and
+does not change trigger logic, target construction, publication, accounting,
+or any registered trace identity requirement.

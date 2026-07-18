@@ -8,6 +8,7 @@ from liquidity_migration.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
+    AccountState,
     InstrumentRules,
     MarketInputRef,
 )
@@ -185,11 +186,19 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
             {"BUSDT": _market(key="cached-without-events", price=12.1, ts=1_950)},
             verified_execution_anchors=verified_anchors,
         )
+    with pytest.raises(RuntimeError, match="does not match"):
+        engine.evaluate(
+            {"BUSDT": _market(key="stale-state", price=12.1, ts=1_975)},
+            account_events=account_events,
+            verified_execution_anchors=verified_anchors,
+            trusted_account_state=AccountState(),
+        )
     trigger_market = _market(key="tp-book", price=12.2, ts=2_000)
     requests = engine.evaluate(
         {"BUSDT": trigger_market},
         account_events=account_events,
         verified_execution_anchors=verified_anchors,
+        trusted_account_state=kernel._state_ref(),
     )
     assert len(requests) == 1
     request = requests[0]

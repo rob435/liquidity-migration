@@ -690,6 +690,7 @@ class ActiveRuntimeComparator:
             markets,
             account_events=self._events,
             verified_execution_anchors=self._anchors,
+            trusted_account_state=self.session.kernel._state_ref(),
         )
         published = tuple(
             PublishedTargetRequest(
