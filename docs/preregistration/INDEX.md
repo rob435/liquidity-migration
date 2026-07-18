@@ -1,9 +1,12 @@
 # Preregistration Index
 
-No confirmatory outcome is active as of 2026-07-18. The first V2 cycle and its
-later comparator/accounting repair both closed without a qualifying thesis and
-left the holdout untouched. A new thesis-specific contract must be frozen
-before any holdout surface is generated or read.
+The prospective runtime-parity and execution epoch registered on 2026-07-18 is
+active. It evaluates immutable input reconstruction, exact production/offline
+parity, forward demo/paper structural agreement, and execution calibration. It
+does not inspect returns or test a strategy thesis. The first V2 cycle and its
+later comparator/accounting repair remain closed without a qualifying thesis
+and left their holdout untouched. A new thesis-specific contract must still be
+frozen before any holdout surface is generated or read.
 
 New decision-influencing work must follow
 `docs/parameter_pre_registration.md` and `docs/governance.md`: freeze the claim,
@@ -14,6 +17,7 @@ artifacts before inspecting affected outcomes.
 
 | Area | Record | Status |
 | --- | --- | --- |
+| Prospective runtime parity and execution | `prospective_runtime_parity_execution_epoch_2026-07-18.md` | Active: outcome-blind snapshot/parity engineering may proceed; forward and TCA clocks have not started |
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
 | Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
 | Strategy Overhaul V2 Phase-3 checkpoint | `../strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md` | First bounded partition structurally valid; outcome values not inspected and no expansion authorized |
