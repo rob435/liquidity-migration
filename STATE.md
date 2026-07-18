@@ -2,24 +2,23 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-18 13:10 UTC. These facts describe the deployed implementation
+at 2026-07-18 21:22 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `c3ebca2cab2ae26604b68d4eb45952dbc0dda197`, profile `operational`, receipt
-  SHA-256 `db06351ca9cc8ff8ec3a0019bfbbf92f16a6c6e788d891b5ca516e359ed3bab3`.
+  `f1cdb918df697f379e5749e765419eb7258d6c9f`, profile `operational`, receipt
+  SHA-256 `22560d358d7138ab0d75a1ad825dc2eabb5683de5a43489b676fed6bdd6d2679`.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. The first post-activation hedge run at 13:08 UTC exited zero and
-  queued the exact zero BTC and ETH targets. A directly invoked normal liveness
-  one-shot at 13:10 UTC exited zero with no active alerts across ten monitored
-  units.
+  liveness. The first two post-activation hedge runs at 21:16 and 21:21 UTC
+  exited zero and each queued the exact zero BTC and ETH targets. The timer
+  remains active; neither run logged a warning or restart.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -29,22 +28,21 @@ commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reads at 13:09 UTC showed one non-flat position:
-  ONDOUSDT long 1,097 at average entry 0.371 and mark 0.3447. The sole open
-  venue order was its untriggered reduce-only, close-on-trigger sell stop for
-  1,097 at 0.3397. At 09:56 UTC the canonical journal verified and applied all
-  9,959 events at head
-  `84893236def807218397c3f26c1b8a42ddf09d7948f6efc38df38d7f85cdb502`;
-  reconstructed position, aggregate target, and latest authenticated venue
-  snapshot all agreed at ONDOUSDT +1,097 with no mismatches. There were zero
-  working orders, zero pending or processing requests, and zero failed requests.
+- Authenticated Bybit demo reconciliation at 21:21 UTC showed a flat venue and
+  flat journal reconstruction, zero venue position/order rows, zero pending
+  orders, and no mismatch. The canonical journal and owner-health receipt agree
+  at sequence 12,242 and state hash
+  `81a29cb14d8d37b5a943d933f246f5daf93b08524225c10f8e030dae343d6313`.
+  This supersedes the 13:09 UTC ONDOUSDT-open snapshot: native protection
+  triggered at 13:57:05 UTC, filled the full -1,097 exit at 0.3395, and recorded
+  account-net P&L of -34.98418018 USDT.
 - Demo and paper owners publish healthy current-generation state with zero
   restarts. Repeated post-activation samples showed both required live-L2 books
   healthy and the oldest demo and paper receive ages below one second; no
   owner warning was logged after final activation.
-  Final demo health was 1.4 seconds old at journal sequence 9,959 after the
-  earlier reconciliation deployment; no `account reconciliation is stale`
-  error was logged after that activation.
+  Final demo health at 21:22 UTC was healthy and requested-symbol-ready at
+  journal sequence 12,242; no warning-or-higher account, strategy, or hedge log
+  was recorded after the 21:13 UTC activation.
   Excluding the deliberate stopped-deployment gap, the latest 18 persisted
   reconciliation-checkpoint intervals were 31.4--33.4 seconds with a 32.0-second
   median.
@@ -55,12 +53,28 @@ commit below; a later documentation-only commit may leave the branch ahead.
   1.62 ms. These are implementation benchmarks, not trading-performance
   evidence.
 - All four target producers published current-generation completed-cycle
-  receipts after activation; demo and paper LONG plus CONTINUOUS had all
-  advanced again by 09:58 UTC. Completion-age liveness was clean. The bound
+  receipts after activation and matched their exact systemd invocation. At
+  21:22 UTC their completion ages were 2.7--83.2 seconds. The bound
   operational profile retains 2x entry leverage, a 0.5 LONG notional
   multiplier, and a 1.0 CONTINUOUS multiplier. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
   not performance or fill-quality evidence.
+- The current CONTINUOUS demo receipt is exactly bound to its private mode-0600,
+  single-link notification projection. The rendered status is `BTC gate:
+  BLOCKED · uptrend · 30d -0.44%`; aggregate component-opportunity counts are
+  `D9 36 -> liquidity 0 -> event 0 -> age 0 -> capacity 0`; qualified-but-blocked
+  symbols are `none`; and the first rejection is `liquidity`. The uptrend gate
+  remains enabled and unchanged.
+- The durable CONTINUOUS cycle row records 123 exact feature-state rows with
+  state SHA-256
+  `4fa60abea760563976be75e7d8de55ce74b0eb475e6dc8c8e1455792081041c6`,
+  feature-contract SHA-256
+  `7deeb923f3609de57b7c7379bd5590fb84866636a8249ea6b989234ac99b5f36`,
+  stable RMOM-source SHA-256
+  `6b112e7b69424748f2ad0d31f77325ca4d3b704de776434054e7b648d4c9dca2`,
+  and a 495-row signal-day SHA-256
+  `1816721819dc803ed68380f7bc62c539ed90aa72c49d0afa4e51fdf2090efe43`.
+  Both observer and identity error fields are empty.
 - The account owner caps leverage at 2x, symbol notional at 5,000 USDT,
   component/account gross at 20,000 USDT, and initial margin at 10,000 USDT.
   Startup/authorization reject unknown profile fields, producer leverage above
@@ -90,8 +104,9 @@ commit below; a later documentation-only commit may leave the branch ahead.
   for that rejected attempt.
 - A distinct later strategy-qualified ONDO attempt was accepted at 2x and
   filled at 06:03:10 UTC on 2026-07-18: long 1,097 at 0.371, with component-level
-  fill attribution complete. It remains open under the native 0.3397 stop. The
-  later fill does not retroactively change the earlier rejection.
+  fill attribution complete. Its native protection later triggered and closed
+  it at 13:57:05 UTC as described above. The later fill does not retroactively
+  change the earlier rejection.
 - LONG, CONTINUOUS, and hedge leverage plus exposure/risk knobs now come from
   one strict operational profile. Independent systemd sizing variables were
   removed. New strategy-qualified attempts are eligible at 2x, subject to the
@@ -107,6 +122,11 @@ commit below; a later documentation-only commit may leave the branch ahead.
 - Position-truth reporting now distinguishes `mismatch`, `stale`, and
   `unavailable`. A stale matching venue/local snapshot therefore reports stale
   evidence instead of falsely claiming that ONDO quantities disagree.
+- Hourly notifications now label the owner/journal line `Account execution
+  health`, separately render the receipt-bound CONTINUOUS BTC gate, funnel,
+  qualified-but-blocked symbols, and first rejection, and deduplicate the same
+  reconciliation-stale cause even when its measured age changes. The growing
+  Parquet cycle ledger is not scanned by the latency-sensitive account owner.
 - The first rollout exposed a separate paper-owner startup race: a public
   WebSocket could close while a concurrent symbol refresh was sending, which
   killed the owner before readiness. Send failure now retires the unusable
