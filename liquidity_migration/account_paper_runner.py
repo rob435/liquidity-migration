@@ -345,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             requested_symbols_ready = market_readiness.ready
             symbol_health_detail = market_readiness.detail
             protection_markets = {}
-            for symbol, position in kernel.state().positions.items():
+            for symbol, position in kernel._state_ref().positions.items():
                 if position.signed_qty == 0.0:
                     continue
                 book = recorder.current_book(symbol)

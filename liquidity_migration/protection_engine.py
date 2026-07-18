@@ -12,7 +12,7 @@ from .account_service import (
     RequestedIntent,
     SleeveAdapterKind,
 )
-from .account_strategy_state import canonical_component_execution_anchors
+from .account_strategy_state import component_execution_anchors_from_snapshot
 from .strategy_runtime import SleeveTargetIntent
 
 
@@ -45,11 +45,12 @@ class AccountProtectionEngine:
 
     def evaluate(self, market_inputs: Mapping[str, MarketInputRef]) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
-        state = self.kernel.state()
+        events, state = self.kernel._snapshot_ref()
         anchors = {
             anchor.target_key: anchor
-            for anchor in canonical_component_execution_anchors(
-                self.kernel.journal.root,
+            for anchor in component_execution_anchors_from_snapshot(
+                events,
+                state=state,
             )
         }
         for target_key, target in sorted(state.component_targets.items()):

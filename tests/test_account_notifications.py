@@ -555,6 +555,28 @@ def test_venue_flat_mismatch_suppresses_phantom_position_loss_alerts(tmp_path: P
     assert "is losing" not in mismatch.message
 
 
+def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+
+    stale = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health="BLOCKED · account reconciliation is stale",
+        venue_positions={"BUSDT": 2.0},
+        position_truth_healthy=False,
+        position_truth_status="stale",
+    )
+
+    assert "Position truth stale" in stale.message
+    assert "Position truth mismatch" not in stale.message
+    assert "Venue: BUSDT long 2" in stale.message
+    assert "Local reconstruction: BUSDT long 2" in stale.message
+
+
 def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> None:
     kernel, clock, *_ = _setup_open(tmp_path / "account")
     notifier = AccountNotificationEngine(

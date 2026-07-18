@@ -28,7 +28,11 @@ from liquidity_migration.account_owner_health import (
     validate_systemd_invocation_id,
     write_account_owner_health,
 )
-from liquidity_migration.account_reconcile import AccountReconciliationReport
+from liquidity_migration.account_reconcile import (
+    AccountPositionTruthMismatchError,
+    AccountReconciliationReport,
+    AccountReconciliationStaleError,
+)
 from liquidity_migration.account_service import AccountConvergenceItem, AccountConvergenceReport
 from liquidity_migration.account_paper_runner import publish_paper_owner_health
 from liquidity_migration.account_service_runner import (
@@ -476,7 +480,7 @@ def test_notification_position_truth_is_independent_of_native_protection_health(
 
     checker = MatchingPositionTruth()
 
-    healthy, error = notification_position_truth(
+    healthy, error, status = notification_position_truth(
         reconciler=checker,
         kernel=kernel,
         report=report,
@@ -485,6 +489,7 @@ def test_notification_position_truth_is_independent_of_native_protection_health(
 
     assert healthy is True
     assert error == ""
+    assert status == "healthy"
     assert checker.checked_symbols == ()
 
 
@@ -502,7 +507,7 @@ def test_notification_position_truth_requires_a_completed_reconciliation(
         ) -> None:
             raise AssertionError("must not be called")
 
-    healthy, error = notification_position_truth(
+    healthy, error, status = notification_position_truth(
         reconciler=UnusedPositionTruth(),
         kernel=kernel,
         report=None,
@@ -511,6 +516,65 @@ def test_notification_position_truth_requires_a_completed_reconciliation(
 
     assert healthy is False
     assert error == "account reconciliation has not completed"
+    assert status == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (
+            AccountReconciliationStaleError(
+                "account reconciliation is stale: age_ns=3000"
+            ),
+            "stale",
+        ),
+        (
+            AccountPositionTruthMismatchError(
+                "requested venue position truth contradicts reduction: BUSDT"
+            ),
+            "mismatch",
+        ),
+        (RuntimeError("position truth provider unavailable"), "unavailable"),
+    ],
+)
+def test_notification_position_truth_preserves_failure_classification(
+    tmp_path: Path,
+    error: RuntimeError,
+    expected_status: str,
+) -> None:
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo-account")
+    report = AccountReconciliationReport(
+        snapshot_key="snapshot",
+        healthy=True,
+        pending_orders_checked=0,
+        execution_rows_observed=0,
+        order_rows_observed=0,
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        observed_ts_ns=10_000,
+    )
+
+    class FailingPositionTruth:
+        def require_recent_symbols_consistent(
+            self,
+            symbols: Sequence[str],
+            *,
+            max_age_ns: int,
+        ) -> None:
+            del symbols, max_age_ns
+            raise error
+
+    healthy, detail, status = notification_position_truth(
+        reconciler=FailingPositionTruth(),
+        kernel=kernel,
+        report=report,
+        max_age_ns=2_000,
+    )
+
+    assert healthy is False
+    assert detail == str(error)
+    assert status == expected_status
 
 
 @pytest.mark.parametrize(

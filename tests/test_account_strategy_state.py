@@ -20,12 +20,27 @@ from liquidity_migration.account_strategy_state import (
     canonical_entry_attempts,
     canonical_reduction_events,
     canonical_strategy_trade_rows,
+    component_execution_anchors_from_snapshot,
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
 from liquidity_migration.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
+
+
+def test_component_execution_anchor_snapshot_requires_one_coherent_head(
+    tmp_path: Path,
+) -> None:
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo")
+    events, state = kernel._snapshot_ref()
+
+    assert component_execution_anchors_from_snapshot(events, state=state) == ()
+
+    inconsistent = kernel.state()
+    inconsistent.events_applied = 1
+    with pytest.raises(RuntimeError, match="state without events"):
+        component_execution_anchors_from_snapshot(events, state=inconsistent)
 
 
 def _submit(

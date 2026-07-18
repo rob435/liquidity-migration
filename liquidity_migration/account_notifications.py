@@ -14,7 +14,6 @@ from .account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountState,
-    read_account_journal,
 )
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
@@ -22,6 +21,7 @@ from .deterministic_runtime import Clock, SystemClock
 
 NOTIFICATION_SCHEMA_VERSION = 2
 HOUR_NS = 3_600_000_000_000
+POSITION_TRUTH_STATUSES = frozenset({"healthy", "mismatch", "stale", "unavailable"})
 
 
 def _fsync_directory(path: Path) -> None:
@@ -86,11 +86,18 @@ class AccountNotificationEngine:
         health: str,
         venue_positions: Mapping[str, float] | None = None,
         position_truth_healthy: bool = True,
+        position_truth_status: str | None = None,
         now_ns: int | None = None,
     ) -> AccountNotificationBatch:
         now = int(now_ns or self.clock.wall_time_ns())
-        events = read_account_journal(self.kernel.journal.root)
-        kernel_state = self.kernel.state()
+        events, kernel_state = self.kernel._snapshot_ref()
+        truth_status = (
+            "healthy" if position_truth_healthy else "mismatch"
+        ) if position_truth_status is None else str(position_truth_status)
+        if truth_status not in POSITION_TRUTH_STATUSES:
+            raise ValueError(f"unknown position truth status {truth_status!r}")
+        if position_truth_healthy != (truth_status == "healthy"):
+            raise ValueError("position truth health and status disagree")
         persisted = self._load()
         first_run_with_history = persisted.last_sequence == 0 and bool(events)
         if first_run_with_history:
@@ -154,6 +161,7 @@ class AccountNotificationEngine:
                     health=health,
                     venue_positions=venue_positions,
                     position_truth_healthy=position_truth_healthy,
+                    position_truth_status=truth_status,
                     now_ns=now,
                     notification_state=next_state,
                 )
@@ -373,6 +381,7 @@ def _hourly_summary(
     health: str,
     venue_positions: Mapping[str, float] | None,
     position_truth_healthy: bool,
+    position_truth_status: str,
     now_ns: int,
     notification_state: AccountNotificationState,
 ) -> str:
@@ -384,7 +393,12 @@ def _hourly_summary(
             str(symbol).upper(): float(qty) for symbol, qty in (venue_positions or {}).items() if float(qty) != 0.0
         }
         lines = [f"🕐 Bybit demo · account update · {_utc_hhmm(now_ns)} UTC"]
-        lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
+        if position_truth_status == "mismatch":
+            lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
+        elif position_truth_status == "stale":
+            lines.append("⚠️ Position truth stale · last venue/local agreement is too old")
+        else:
+            lines.append("⚠️ Position truth unavailable · venue/local agreement is unproven")
         lines.append("- Venue: " + (_quantity_summary(venue) if venue else "flat"))
         local = {symbol: position.signed_qty for symbol, position in positions}
         lines.append("- Local reconstruction: " + (_quantity_summary(local) if local else "flat"))

@@ -289,6 +289,46 @@ class AccountState:
         return self.rolling_state_hash
 
 
+def _transaction_state_copy(state: AccountState) -> AccountState:
+    """Copy mutable reducer structure without cloning immutable history payloads.
+
+    Journal event payloads are normalized before reduction and existing mapping
+    values are never mutated by :func:`apply_account_event`; a transition only
+    replaces top-level mapping entries.  Orders and positions are the two
+    reducer-owned mutable value types, so they receive independent shallow
+    copies along with every top-level container.  This keeps prospective state
+    isolated from concurrent readers without making transaction latency grow
+    with all historical decision metadata.
+
+    Untrusted transaction builders still receive a full deep copy below.  This
+    optimized copy is only the reducer's private prospective state.
+    """
+
+    return AccountState(
+        latest_market_inputs=dict(state.latest_market_inputs),
+        decisions=dict(state.decisions),
+        target_proposals=dict(state.target_proposals),
+        component_target_desires=dict(state.component_target_desires),
+        component_target_desire_sequences=dict(
+            state.component_target_desire_sequences
+        ),
+        component_targets=dict(state.component_targets),
+        aggregate_targets=dict(state.aggregate_targets),
+        risk_decisions=dict(state.risk_decisions),
+        orders={key: copy.copy(value) for key, value in state.orders.items()},
+        positions={key: copy.copy(value) for key, value in state.positions.items()},
+        executions=dict(state.executions),
+        protections=dict(state.protections),
+        closes=dict(state.closes),
+        pnl=dict(state.pnl),
+        venue_snapshots=dict(state.venue_snapshots),
+        processed_batches=set(state.processed_batches),
+        events_applied=state.events_applied,
+        rolling_state_hash=state.rolling_state_hash,
+        working_order_ids=set(state.working_order_ids),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OrderCommand:
     command_id: str
@@ -993,6 +1033,25 @@ class AccountJournal:
                 self._cached_state = reduce_account_events(events)
             return self._cached_state
 
+    def _snapshot_ref(self) -> tuple[tuple[AccountEvent, ...], AccountState]:
+        """Return one coherent trusted in-process event/state snapshot.
+
+        The tuple prevents an owner-internal reader from changing the cached
+        event list.  Event objects and the state remain immutable committed
+        references and must never be exposed outside the owning process.
+        """
+
+        with self._cache_lock:
+            state = self._state_ref()
+            # Resolve state first: ``_state_ref`` may refresh both caches when
+            # another process committed since our last signature check.  Read
+            # the event reference only after that refresh so the two objects
+            # necessarily describe the same journal head.
+            events = self._cached_events
+            if events is None:  # pragma: no cover - guarded by _state_ref
+                raise AccountJournalIntegrityError("account snapshot cache is unavailable")
+            return tuple(events), state
+
     def replay(self) -> AccountState:
         with self._cache_lock:
             return copy.deepcopy(self._state_ref())
@@ -1041,7 +1100,7 @@ class AccountJournal:
                     "account events exist without authoritative transaction segments; "
                     "reset the account root explicitly"
                 )
-            prospective_state = copy.deepcopy(committed_state)
+            prospective_state = _transaction_state_copy(committed_state)
             builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
             specs = list(builder(builder_state))
             normalized = [_normalized_spec(spec) for spec in specs]
@@ -1354,6 +1413,11 @@ class AccountExecutionKernel:
         """Trusted immutable in-process owner snapshot; never expose outside the process."""
 
         return self.journal._state_ref()
+
+    def _snapshot_ref(self) -> tuple[tuple[AccountEvent, ...], AccountState]:
+        """Trusted coherent event/state snapshot for owner-internal projections."""
+
+        return self.journal._snapshot_ref()
 
     def targets_are_strictly_risk_reducing(
         self,

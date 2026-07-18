@@ -15,7 +15,6 @@ from .account_kernel import (
     AccountExecutionKernel,
     AccountState,
     AccountTransitionError,
-    read_account_journal,
 )
 from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_runtime import Clock, SystemClock
@@ -122,7 +121,7 @@ class BybitAccountExecutionConsumer:
         self._closed = False
         self._terminal_recorded = {
             str(event.payload.get("command_id") or "") + ":" + str(event.payload.get("status") or "")
-            for event in read_account_journal(kernel.journal.root)
+            for event in kernel.journal.events()
             if event.event_type == AccountEventType.ORDER_STATUS.value
         }
 
@@ -228,7 +227,7 @@ class BybitAccountExecutionConsumer:
             # External/native adoption mutates the kernel immediately. Refresh
             # per row so multiple fills for the same venue order in one Bybit
             # message join the synthetic command created by the first fill.
-            state = self.kernel.state()
+            state = self.kernel._state_ref()
             command_id = _command_id_for_row(row, state)
             if command_id not in state.orders:
                 if self.native_protection_manager is not None:
@@ -253,7 +252,7 @@ class BybitAccountExecutionConsumer:
                                 str(event.payload.get("execution_id") or "")
                             )
                     venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
-                    adopted_state = self.kernel.state()
+                    adopted_state = self.kernel._state_ref()
                     adopted_command_id = _command_id_for_row(row, adopted_state)
                     pending = self.pending_native_terminal.get(venue_order_id)
                     if pending is not None and adopted_command_id in adopted_state.orders:
@@ -324,7 +323,7 @@ class BybitAccountExecutionConsumer:
                             exchange_ts_ns=observation.exchange_ts_ns,
                             local_receive_ts_ns=observation.local_receive_ts_ns,
                         )
-                updated = self.kernel.state()
+                updated = self.kernel._state_ref()
                 self.native_protection_manager.sync_symbols([
                     updated.orders[observation.command_id].symbol
                     for observation in observations
@@ -335,7 +334,7 @@ class BybitAccountExecutionConsumer:
 
     def on_order(self, message: Mapping[str, Any], *, local_receive_ts_ns: int) -> None:
         for row in _rows(message):
-            state = self.kernel.state()
+            state = self.kernel._state_ref()
             command_id = _command_id_for_row(row, state)
             order = state.orders.get(command_id)
             if order is None:
@@ -407,7 +406,7 @@ class BybitAccountExecutionConsumer:
         terminal = self.pending_terminal.get(command_id)
         if terminal is None:
             return
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         order = state.orders.get(command_id)
         if order is None:
             self.pending_terminal.pop(command_id, None)
@@ -434,7 +433,7 @@ class BybitAccountExecutionConsumer:
                     "source": terminal.metadata.get("source"),
                 },
             )
-            order = self.kernel.state().orders[command_id]
+            order = self.kernel._state_ref().orders[command_id]
         if terminal.cumulative_filled_qty > reconstructed + tolerance:
             # Order WS raced ahead of execution WS. Wait for the missing fills;
             # a REST execution reconciliation can feed the same on_execution path.
@@ -443,7 +442,7 @@ class BybitAccountExecutionConsumer:
         if key not in self._terminal_recorded:
             self._terminal_recorded.update(
                 str(event.payload.get("command_id") or "") + ":" + str(event.payload.get("status") or "")
-                for event in read_account_journal(self.kernel.journal.root)
+                for event in self.kernel.journal.events()
                 if event.event_type == AccountEventType.ORDER_STATUS.value
             )
         if key in self._terminal_recorded:

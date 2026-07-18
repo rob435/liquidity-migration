@@ -30,7 +30,9 @@ from .account_market_readiness import (
 )
 from .account_reconcile import (
     AccountFundingReconciliationReport,
+    AccountPositionTruthMismatchError,
     AccountReconciliationReport,
+    AccountReconciliationStaleError,
     BybitAccountFundingReconciler,
     BybitAccountReconciler,
 )
@@ -107,7 +109,7 @@ def notification_position_truth(
     kernel: AccountExecutionKernel,
     report: AccountReconciliationReport | None,
     max_age_ns: int,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """Evaluate quantity truth without conflating unrelated owner health.
 
     Native-protection health can be blocked while the venue and local position
@@ -115,7 +117,7 @@ def notification_position_truth(
     """
 
     if report is None:
-        return False, "account reconciliation has not completed"
+        return False, "account reconciliation has not completed", "unavailable"
     state = kernel._state_ref()
     symbols = sorted(set(report.venue_positions) | set(state.positions))
     try:
@@ -123,9 +125,13 @@ def notification_position_truth(
             symbols,
             max_age_ns=max_age_ns,
         )
+    except AccountReconciliationStaleError as exc:
+        return False, str(exc)[:240], "stale"
+    except AccountPositionTruthMismatchError as exc:
+        return False, str(exc)[:240], "mismatch"
     except Exception as exc:  # noqa: BLE001 - concise operator-visible cause
-        return False, str(exc)[:240]
-    return True, ""
+        return False, str(exc)[:240], "unavailable"
+    return True, "", "healthy"
 
 
 def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
@@ -731,7 +737,11 @@ def main(argv: list[str] | None = None) -> int:
                 # missing native stop should block health, but must not make a
                 # matching venue/local quantity report claim that the two
                 # disagree. Derive this flag from reconciliation alone.
-                position_truth_healthy, position_truth_error = notification_position_truth(
+                (
+                    position_truth_healthy,
+                    position_truth_error,
+                    position_truth_status,
+                ) = notification_position_truth(
                     reconciler=reconciler,
                     kernel=kernel,
                     report=latest_reconcile_report,
@@ -764,6 +774,7 @@ def main(argv: list[str] | None = None) -> int:
                         else {}
                     ),
                     position_truth_healthy=position_truth_healthy,
+                    position_truth_status=position_truth_status,
                 )
                 if not notification.message:
                     notifier.commit(notification)

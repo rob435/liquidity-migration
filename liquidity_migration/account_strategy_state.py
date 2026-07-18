@@ -293,6 +293,38 @@ def canonical_component_execution_anchors(
     if not events:
         return ()
     state = reduce_account_events(events)
+    return component_execution_anchors_from_snapshot(
+        events,
+        state=state,
+        sleeve=sleeve,
+        strategy_ids=strategy_ids,
+    )
+
+
+def component_execution_anchors_from_snapshot(
+    events: Sequence[AccountEvent],
+    *,
+    state: AccountState,
+    sleeve: str | None = None,
+    strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+) -> tuple[CanonicalComponentExecutionAnchor, ...]:
+    """Project anchors from one already-verified coherent account snapshot.
+
+    The account owner uses this path with ``AccountJournal._snapshot_ref`` so
+    protection checks do not reopen and replay the full immutable journal on
+    every heartbeat.  Snapshot identity is checked before projection; callers
+    cannot pair events from one journal head with state from another.
+    """
+
+    if not events:
+        if state.events_applied != 0:
+            raise RuntimeError("component anchor snapshot has state without events")
+        return ()
+    if (
+        state.events_applied != len(events)
+        or state.rolling_state_hash != events[-1].state_hash
+    ):
+        raise RuntimeError("component anchor event/state snapshot is inconsistent")
     accepted_batches = _accepted_batches(events)
     anchors = _component_execution_anchors_from_events(
         events,
@@ -402,12 +434,12 @@ def _convergence_retry_targets_by_batch(
 
 
 def _batch_fill_summary(
-    events: Sequence[AccountEvent],
     *,
     state: AccountState,
     batch_id: str,
     symbol: str,
     tolerance: float,
+    fills_by_command_id: Mapping[str, Sequence[AccountEvent]],
 ) -> _BatchFillSummary:
     orders = sorted(
         (
@@ -418,13 +450,11 @@ def _batch_fill_summary(
         key=lambda order: order.command_id,
     )
     command_ids = tuple(order.command_id for order in orders)
-    command_id_set = set(command_ids)
     fills = sorted(
         (
             event
-            for event in events
-            if event.event_type == AccountEventType.FILL.value
-            and str(event.payload.get("command_id") or "") in command_id_set
+            for command_id in command_ids
+            for event in fills_by_command_id.get(command_id, ())
         ),
         key=lambda event: event.sequence,
     )
@@ -501,6 +531,13 @@ def _component_execution_anchors_from_events(
     accepted_batches: set[str],
     tolerance: float,
 ) -> dict[str, CanonicalComponentExecutionAnchor]:
+    fills_by_command_id: dict[str, list[AccountEvent]] = {}
+    for event in events:
+        if event.event_type != AccountEventType.FILL.value:
+            continue
+        command_id = str(event.payload.get("command_id") or "")
+        if command_id:
+            fills_by_command_id.setdefault(command_id, []).append(event)
     targets_by_batch = _ordinary_targets_by_batch(
         events,
         accepted_batches=accepted_batches,
@@ -538,11 +575,11 @@ def _component_execution_anchors_from_events(
                     transitions.append((event, prior_qty, new_qty))
 
             summary = _batch_fill_summary(
-                events,
                 state=state,
                 batch_id=batch_id,
                 symbol=symbol,
                 tolerance=tolerance,
+                fills_by_command_id=fills_by_command_id,
             )
             entries = [
                 row
@@ -783,11 +820,11 @@ def _component_execution_anchors_from_events(
                 continue
             typed_anchors = [anchor for anchor in retry_anchors if anchor is not None]
             summary = _batch_fill_summary(
-                events,
                 state=state,
                 batch_id=batch_id,
                 symbol=symbol,
                 tolerance=tolerance,
+                fills_by_command_id=fills_by_command_id,
             )
             desired_quantities = [
                 float(event.payload.get("signed_qty") or 0.0)
@@ -989,11 +1026,11 @@ def _component_execution_anchors_from_events(
                 ):
                     continue
                 original_summary = _batch_fill_summary(
-                    events,
                     state=state,
                     batch_id=next(iter(original_batch_ids)),
                     symbol=symbol,
                     tolerance=tolerance,
+                    fills_by_command_id=fills_by_command_id,
                 )
                 expected_retry_delta = (
                     expected_delta - original_summary.observed_signed_qty
@@ -1833,7 +1870,7 @@ def _latest_component_revision_convergence(
     return revisions
 
 
-def _latest_account_quantity_tolerance(events: list[AccountEvent]) -> float:
+def _latest_account_quantity_tolerance(events: Sequence[AccountEvent]) -> float:
     """Recover the tolerance governing the latest accepted account target."""
 
     for event in reversed(events):

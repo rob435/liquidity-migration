@@ -9,6 +9,7 @@ import pytest
 
 import liquidity_migration.account_kernel as account_kernel_module
 from liquidity_migration.account_kernel import (
+    AccountEvent,
     AccountEventType,
     AccountExecutionKernel,
     AccountJournalIntegrityError,
@@ -937,6 +938,71 @@ def test_cached_transaction_append_does_not_rescan_immutable_history(
 
     assert len(appended) == 1
     assert "second-cached-append" in kernel._state_ref().venue_snapshots
+
+
+def test_trusted_cached_append_does_not_deepcopy_historical_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="first-shared-history-append",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+        metadata={"large_immutable_history": [str(index) for index in range(1_000)]},
+    )
+
+    def forbid_deepcopy(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("trusted transaction deep-copied immutable history")
+
+    monkeypatch.setattr(account_kernel_module.copy, "deepcopy", forbid_deepcopy)
+
+    appended = kernel.record_venue_snapshot(
+        snapshot_key="second-shared-history-append",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=3,
+        local_receive_ts_ns=4,
+    )
+
+    assert len(appended) == 1
+    assert list(kernel._state_ref().venue_snapshots) == [
+        "second-shared-history-append"
+    ]
+
+
+def test_snapshot_ref_resolves_one_event_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="coherent-snapshot",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+    original_events_ref = kernel.journal._events_ref
+    calls = 0
+
+    def counted_events_ref() -> list[AccountEvent]:
+        nonlocal calls
+        calls += 1
+        return original_events_ref()
+
+    monkeypatch.setattr(kernel.journal, "_events_ref", counted_events_ref)
+
+    events, state = kernel._snapshot_ref()
+
+    assert calls == 1
+    assert len(events) == state.events_applied
+    assert events[-1].state_hash == state.rolling_state_hash
 
 
 def test_materialized_state_keeps_only_latest_venue_snapshot(
