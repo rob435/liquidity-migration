@@ -2,24 +2,24 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-18 09:59 UTC. These facts describe the deployed implementation
+at 2026-07-18 13:10 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `61b40ef2c39ba824252d15a234ab351d0d21a4bf`, profile `operational`, receipt
-  SHA-256 `075ffb62300f174af7d55dcfd95434432e8952cc0c86c1f41e02b9749e33b057`.
+  `c3ebca2cab2ae26604b68d4eb45952dbc0dda197`, profile `operational`, receipt
+  SHA-256 `db06351ca9cc8ff8ec3a0019bfbbf92f16a6c6e788d891b5ca516e359ed3bab3`.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. Three consecutive scheduled hedge runs at 09:44, 09:49, and 09:54
-  UTC exited zero after the final activation. The scheduled 09:54 watchdog run
-  also exited zero and emitted explicit resolutions for the demo account-owner
-  health and continuous-hedge unit alerts.
+  liveness. The first post-activation hedge run at 13:08 UTC exited zero and
+  queued the exact zero BTC and ETH targets. A directly invoked normal liveness
+  one-shot at 13:10 UTC exited zero with no active alerts across ten monitored
+  units.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -29,17 +29,22 @@ commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reads at 09:56 UTC showed one non-flat position:
-  ONDOUSDT long 1,097 at average entry 0.371. The sole open venue order was its
-  untriggered reduce-only, close-on-trigger sell stop for 1,097 at 0.3397. The
-  canonical journal verified and applied all 9,959 events at head
+- Authenticated Bybit demo reads at 13:09 UTC showed one non-flat position:
+  ONDOUSDT long 1,097 at average entry 0.371 and mark 0.3447. The sole open
+  venue order was its untriggered reduce-only, close-on-trigger sell stop for
+  1,097 at 0.3397. At 09:56 UTC the canonical journal verified and applied all
+  9,959 events at head
   `84893236def807218397c3f26c1b8a42ddf09d7948f6efc38df38d7f85cdb502`;
   reconstructed position, aggregate target, and latest authenticated venue
   snapshot all agreed at ONDOUSDT +1,097 with no mismatches. There were zero
   working orders, zero pending or processing requests, and zero failed requests.
 - Demo and paper owners publish healthy current-generation state with zero
-  restarts. Final demo health was 1.4 seconds old at journal sequence 9,959;
-  no `account reconciliation is stale` error was logged after final activation.
+  restarts. Repeated post-activation samples showed both required live-L2 books
+  healthy and the oldest demo and paper receive ages below one second; no
+  owner warning was logged after final activation.
+  Final demo health was 1.4 seconds old at journal sequence 9,959 after the
+  earlier reconciliation deployment; no `account reconciliation is stale`
+  error was logged after that activation.
   Excluding the deliberate stopped-deployment gap, the latest 18 persisted
   reconciliation-checkpoint intervals were 31.4--33.4 seconds with a 32.0-second
   median.
@@ -107,6 +112,22 @@ commit below; a later documentation-only commit may leave the branch ahead.
   killed the owner before readiness. Send failure now retires the unusable
   socket, retains the complete desired-symbol set, and restores subscriptions
   on reconnect. Final paper readiness passed with zero restarts.
+- The 12:36 UTC `account execution live L2 is 5.3 min stale` alert was a real
+  per-symbol market-subscription freshness gap, not an owner, accounting, or
+  protection failure. The owner heartbeat and reconciliation remained healthy,
+  while the aggregate readiness sidecar continued to be republished and its
+  oldest required receive age grew. The exact required set was BTCUSDT plus the
+  held ONDOUSDT, proving that one subscription was silent while the other was
+  active. The overwritten aggregate did not retain enough evidence to identify
+  the silent symbol conclusively. It recovered without an owner restart by
+  12:39 UTC. The raw public stream now tracks accepted
+  orderbook frames independently for every desired symbol. A symbol silent for
+  120 seconds causes the socket to close and rebuild the full desired set, with
+  a ten-second watchdog interval and a separate grace window for newly added
+  subscriptions. This leaves bounded recovery margin before the three-minute
+  external alert while preserving that alert for failed reconnects. Threaded
+  regression coverage proves close, reconnect, and full resubscription; the
+  full local gate passed 1,984 tests with one skipped.
 - Three CONTINUOUS candidates (`HIGHUSDT`, `PUMPBTCUSDT`, and
   `WHITEWHALEUSDT`) have venue `deliveryTime=1784538000000`. They are recorded
   prospectively in private mode-0600 retirement registries and may retire only
