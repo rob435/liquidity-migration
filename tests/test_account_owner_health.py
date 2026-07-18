@@ -36,6 +36,7 @@ from liquidity_migration.account_reconcile import (
 from liquidity_migration.account_service import AccountConvergenceItem, AccountConvergenceReport
 from liquidity_migration.account_paper_runner import publish_paper_owner_health
 from liquidity_migration.account_service_runner import (
+    append_unique_notification_health_error,
     notification_position_truth,
     owner_health_publish_decision,
     publish_demo_owner_health,
@@ -58,6 +59,24 @@ def _health(*, loop_sequence: int = 1) -> AccountOwnerHealth:
         requested_symbols_ready=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
+
+
+def test_notification_health_errors_dedupe_reconciliation_age_updates() -> None:
+    errors = ["account reconciliation is stale: age_ns=61000000000"]
+
+    append_unique_notification_health_error(
+        errors,
+        "account reconciliation is stale: age_ns=61000123456",
+    )
+    append_unique_notification_health_error(
+        errors,
+        "native protection missing: ONDOUSDT",
+    )
+
+    assert errors == [
+        "account reconciliation is stale: age_ns=61000000000",
+        "native protection missing: ONDOUSDT",
+    ]
 
 
 def test_convergence_health_is_stable_and_decision_useful() -> None:

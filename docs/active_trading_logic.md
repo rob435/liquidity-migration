@@ -43,6 +43,12 @@ contains at least eight adverse reduction batches in the preceding 1,440
 minutes; the pause never changes existing targets. That threshold is an
 operational guardrail, not a validated optimum.
 
+Each cycle also persists an observer-only component funnel (D9, liquidity,
+event, age, and capacity), qualified-but-blocked symbols, the first rejection
+reason, an exact entry-feature-state hash, and both full-file and signal-day
+RMOM identities. Those fields never grant admission authority or bypass the
+BTC, account-health, pause, capacity, or account-risk gates.
+
 ### Sizing
 
 Before account risk admission and venue discretization, a component target is:

@@ -87,13 +87,16 @@ class AccountNotificationEngine:
         venue_positions: Mapping[str, float] | None = None,
         position_truth_healthy: bool = True,
         position_truth_status: str | None = None,
+        continuous_status: str = "",
         now_ns: int | None = None,
     ) -> AccountNotificationBatch:
         now = int(now_ns or self.clock.wall_time_ns())
         events, kernel_state = self.kernel._snapshot_ref()
         truth_status = (
-            "healthy" if position_truth_healthy else "mismatch"
-        ) if position_truth_status is None else str(position_truth_status)
+            ("healthy" if position_truth_healthy else "mismatch")
+            if position_truth_status is None
+            else str(position_truth_status)
+        )
         if truth_status not in POSITION_TRUTH_STATUSES:
             raise ValueError(f"unknown position truth status {truth_status!r}")
         if position_truth_healthy != (truth_status == "healthy"):
@@ -162,6 +165,7 @@ class AccountNotificationEngine:
                     venue_positions=venue_positions,
                     position_truth_healthy=position_truth_healthy,
                     position_truth_status=truth_status,
+                    continuous_status=continuous_status,
                     now_ns=now,
                     notification_state=next_state,
                 )
@@ -382,6 +386,7 @@ def _hourly_summary(
     venue_positions: Mapping[str, float] | None,
     position_truth_healthy: bool,
     position_truth_status: str,
+    continuous_status: str,
     now_ns: int,
     notification_state: AccountNotificationState,
 ) -> str:
@@ -412,7 +417,9 @@ def _hourly_summary(
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
             lines.append(rejection_summary)
-        lines.append(f"Execution health: {health or 'unknown'}")
+        if continuous_status.strip():
+            lines.extend(continuous_status.strip().splitlines())
+        lines.append(f"Account execution health: {health or 'unknown'}")
         return "\n".join(lines)
 
     exposure = 0.0
@@ -462,10 +469,12 @@ def _hourly_summary(
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
         lines.append(rejection_summary)
+    if continuous_status.strip():
+        lines.extend(continuous_status.strip().splitlines())
     effective_health = health or "unknown"
     if unpriced_symbols and effective_health.lower().startswith("healthy"):
         effective_health = "BLOCKED · L2 midpoint valuation unavailable"
-    lines.append(f"Execution health: {effective_health}")
+    lines.append(f"Account execution health: {effective_health}")
     return "\n".join(lines)
 
 
@@ -710,10 +719,7 @@ def _prune_expired_entry_rejections(
                 _proposal_signal_valid_until_ns(proposal)
                 for proposal in proposals
                 if _entry_attempt_key(proposal) == attempt_key
-                or (
-                    target_key
-                    and str(proposal.get("target_key") or "") == target_key
-                )
+                or (target_key and str(proposal.get("target_key") or "") == target_key)
             ]
             expiry_ns = max(matching_expiries, default=0)
             if expiry_ns > 0:

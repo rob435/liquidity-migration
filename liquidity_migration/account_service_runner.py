@@ -38,6 +38,7 @@ from .account_reconcile import (
 )
 from .account_route import derive_account_route, ensure_account_route
 from .account_notifications import AccountNotificationEngine
+from .continuous_cycle_status import ContinuousCycleStatusReader
 from .account_owner_health import (
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
@@ -132,6 +133,21 @@ def notification_position_truth(
     except Exception as exc:  # noqa: BLE001 - concise operator-visible cause
         return False, str(exc)[:240], "unavailable"
     return True, "", "healthy"
+
+
+def append_unique_notification_health_error(
+    errors: list[str],
+    detail: str,
+) -> None:
+    """Append one health cause without repeating a changing age counter."""
+
+    rendered = str(detail).strip()
+    if not rendered:
+        return
+    identity = rendered.partition(": age_ns=")[0]
+    if any(existing.partition(": age_ns=")[0] == identity for existing in errors):
+        return
+    errors.append(rendered)
 
 
 def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
@@ -257,32 +273,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--telegram", action="store_true")
     parser.add_argument("--notification-state", default="")
     parser.add_argument("--notification-poll-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--continuous-cycle-root",
+        default="",
+        help="Read-only CONTINUOUS cycle status root shown in account notifications.",
+    )
+    parser.add_argument(
+        "--continuous-cycle-max-age-minutes",
+        type=float,
+        default=15.0,
+        help="Mark CONTINUOUS notification telemetry stale beyond this age.",
+    )
     parser.add_argument("--health-interval-seconds", type=float, default=5.0)
     parser.add_argument(
         "--private-ws-reconnect-seconds",
         type=float,
         default=180.0,
         help=(
-            "Continuously-disconnected bound and reconnect-attempt cooldown for "
-            "the private execution/order websocket."
+            "Continuously-disconnected bound and reconnect-attempt cooldown for the private execution/order websocket."
         ),
     )
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
-    if (
-        not math.isfinite(args.private_ws_reconnect_seconds)
-        or args.private_ws_reconnect_seconds <= 0.0
-    ):
+    if not math.isfinite(args.continuous_cycle_max_age_minutes) or args.continuous_cycle_max_age_minutes <= 0.0:
+        parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
+    if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
         parser.error("--private-ws-reconnect-seconds must be positive and finite")
     try:
-        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(
-            args.max_demo_rule_age_hours
-        )
-        args.request_market_warmup_timeout_seconds = (
-            require_registered_request_market_warmup_timeout(
-                args.request_market_warmup_timeout_seconds
-            )
+        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(args.max_demo_rule_age_hours)
+        args.request_market_warmup_timeout_seconds = require_registered_request_market_warmup_timeout(
+            args.request_market_warmup_timeout_seconds
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -360,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         kernel=kernel,
         native_order_verifier=native_protection.is_verified_native_order,
     )
+
     def build_private_stream() -> BybitPrivateWebSocketStream:
         return BybitPrivateWebSocketStream(
             category="linear",
@@ -425,11 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     startup_reconciliation.require_healthy()
     startup_funding_reconciliation.require_healthy()
     native_protection.sync_symbols(
-        [
-            symbol
-            for symbol, position in kernel._state_ref().positions.items()
-            if position.signed_qty != 0.0
-        ]
+        [symbol for symbol, position in kernel._state_ref().positions.items() if position.signed_qty != 0.0]
     )
     health_chain = AccountHealthChain(
         (
@@ -465,11 +483,18 @@ def main(argv: list[str] | None = None) -> int:
     notifier = (
         AccountNotificationEngine(
             kernel=kernel,
-            state_path=(
-                args.notification_state or str(route.account_path / "account_notifications.json")
-            ),
+            state_path=(args.notification_state or str(route.account_path / "account_notifications.json")),
         )
         if args.telegram
+        else None
+    )
+    continuous_status_reader = (
+        ContinuousCycleStatusReader(
+            args.continuous_cycle_root,
+            environment="demo",
+            max_age_minutes=args.continuous_cycle_max_age_minutes,
+        )
+        if notifier is not None and str(args.continuous_cycle_root).strip()
         else None
     )
     recovered = inbox.recover_processing()
@@ -504,9 +529,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not funding_report.healthy:
                     _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
-            private_stream_status = private_stream_supervisor.check(
-                now_monotonic=now
-            )
+            private_stream_status = private_stream_supervisor.check(now_monotonic=now)
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
                 current_state = kernel._state_ref()
                 component_target_symbols = {
@@ -515,21 +538,15 @@ def main(argv: list[str] | None = None) -> int:
                     if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
                 }
                 nonflat_symbols = {
-                    symbol
-                    for symbol, position in current_state.positions.items()
-                    if position.signed_qty != 0.0
+                    symbol for symbol, position in current_state.positions.items() if position.signed_qty != 0.0
                 }
                 desired = operational_market_symbols(
                     symbols,
                     queued=inbox.requested_symbols(),
                     nonflat=nonflat_symbols,
-                    working=current_state.working_symbols(
-                        tolerance=policy.quantity_tolerance
-                    ),
+                    working=current_state.working_symbols(tolerance=policy.quantity_tolerance),
                     component_targets=component_target_symbols,
-                    convergence=(
-                        item.symbol for item in service.convergence_report().items
-                    ),
+                    convergence=(item.symbol for item in service.convergence_report().items),
                     markouts=recorder.pending_post_fill_symbols(),
                 )
                 missing_rules = sorted(desired - set(rules))
@@ -569,11 +586,7 @@ def main(argv: list[str] | None = None) -> int:
             reconcile_healthy = bool(latest_reconcile_report is not None and latest_reconcile_report.healthy)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY
-                if (
-                    requested_symbols_ready
-                    and reconcile_healthy
-                    and private_stream_status is True
-                )
+                if (requested_symbols_ready and reconcile_healthy and private_stream_status is True)
                 else AccountOwnerHealthStatus.BLOCKED
             )
             health_details = [
@@ -581,14 +594,11 @@ def main(argv: list[str] | None = None) -> int:
             ]
             if not reconcile_healthy and latest_reconcile_report is not None:
                 health_details.append(
-                    "account reconciliation mismatch: "
-                    + "; ".join(latest_reconcile_report.mismatches)
+                    "account reconciliation mismatch: " + "; ".join(latest_reconcile_report.mismatches)
                 )
             if private_stream_status is not True:
                 health_details.append(private_stream_supervisor.health_detail)
-            health_detail = "; ".join(
-                detail for detail in health_details if detail
-            )[:1000]
+            health_detail = "; ".join(detail for detail in health_details if detail)[:1000]
             receipt = None
             try:
                 receipt = run_ready_request_or_converge(
@@ -630,9 +640,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 convergence_detail = ""
             if convergence_detail:
-                health_detail = "; ".join(
-                    part for part in (health_detail, convergence_detail) if part
-                )[:1000]
+                health_detail = "; ".join(part for part in (health_detail, convergence_detail) if part)[:1000]
             health_now = time.monotonic()
             health_signature = (
                 health_status.value,
@@ -657,9 +665,7 @@ def main(argv: list[str] | None = None) -> int:
             if publish_health:
                 if refresh_capital:
                     try:
-                        last_capital_snapshot = snapshot_provider.current(
-                            batch_id=f"owner-health/{loop_sequence}"
-                        )
+                        last_capital_snapshot = snapshot_provider.current(batch_id=f"owner-health/{loop_sequence}")
                     except Exception as exc:  # noqa: BLE001 - preserve last capital, mark blocked
                         health_status = AccountOwnerHealthStatus.BLOCKED
                         health_detail = f"wallet snapshot failed: {type(exc).__name__}: {exc}"[:1000]
@@ -689,25 +695,15 @@ def main(argv: list[str] | None = None) -> int:
                     published_health.journal_state_hash,
                 )
             if notifier is not None and now - last_notification_poll >= max(args.notification_poll_seconds, 0.25):
+                notification_now_ns = time.time_ns()
                 midpoint_by_symbol: dict[str, float] = {}
                 unavailable_midpoint_symbols: list[str] = []
                 for symbol, position in kernel._state_ref().positions.items():
                     if position.signed_qty == 0.0:
                         continue
-                    book, notification_wall_ns = (
-                        recorder.current_book_with_observed_wall_ns(symbol)
-                    )
-                    book_age_ns = (
-                        notification_wall_ns - book.local_receive_ts_ns
-                        if book is not None
-                        else -1
-                    )
-                    if (
-                        book is None
-                        or book.sequence_gap
-                        or book_age_ns < 0
-                        or book_age_ns > service.max_market_age_ns
-                    ):
+                    book, notification_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
+                    book_age_ns = notification_wall_ns - book.local_receive_ts_ns if book is not None else -1
+                    if book is None or book.sequence_gap or book_age_ns < 0 or book_age_ns > service.max_market_age_ns:
                         unavailable_midpoint_symbols.append(symbol)
                         continue
                     try:
@@ -720,17 +716,14 @@ def main(argv: list[str] | None = None) -> int:
                 notification_health_errors: list[str] = []
                 if unavailable_midpoint_symbols:
                     notification_health_errors.append(
-                        "fresh L2 midpoint unavailable: "
-                        + ", ".join(sorted(unavailable_midpoint_symbols))
+                        "fresh L2 midpoint unavailable: " + ", ".join(sorted(unavailable_midpoint_symbols))
                     )
                 reconcile_health_max_age_ns = max(
                     int(args.reconcile_seconds * 2 * 1_000_000_000),
                     1,
                 )
                 try:
-                    health_chain.require_recent_healthy(
-                        max_age_ns=reconcile_health_max_age_ns
-                    )
+                    health_chain.require_recent_healthy(max_age_ns=reconcile_health_max_age_ns)
                 except Exception as exc:  # noqa: BLE001 - rendered hourly, not spammed per cycle
                     notification_health_errors.append(str(exc)[:240])
                 # Position truth is narrower than general owner health. A
@@ -748,14 +741,15 @@ def main(argv: list[str] | None = None) -> int:
                     max_age_ns=reconcile_health_max_age_ns,
                 )
                 if position_truth_error:
-                    notification_health_errors.append(position_truth_error)
+                    append_unique_notification_health_error(
+                        notification_health_errors,
+                        position_truth_error,
+                    )
                 try:
                     convergence_report = service.convergence_report()
                     convergence_detail = format_convergence_health(convergence_report)
                 except Exception as exc:  # noqa: BLE001 - rendered hourly, not spammed per cycle
-                    notification_health_errors.append(
-                        f"convergence health failed: {type(exc).__name__}: {exc}"[:240]
-                    )
+                    notification_health_errors.append(f"convergence health failed: {type(exc).__name__}: {exc}"[:240])
                 else:
                     if not convergence_report.healthy:
                         notification_health_errors.append(convergence_detail[:240])
@@ -769,12 +763,16 @@ def main(argv: list[str] | None = None) -> int:
                     midpoint_by_symbol=midpoint_by_symbol,
                     health=health,
                     venue_positions=(
-                        latest_reconcile_report.venue_positions
-                        if latest_reconcile_report is not None
-                        else {}
+                        latest_reconcile_report.venue_positions if latest_reconcile_report is not None else {}
                     ),
                     position_truth_healthy=position_truth_healthy,
                     position_truth_status=position_truth_status,
+                    continuous_status=(
+                        continuous_status_reader.render(now_ns=notification_now_ns)
+                        if continuous_status_reader is not None
+                        else "CONTINUOUS BTC gate: unavailable · cycle root not configured"
+                    ),
+                    now_ns=notification_now_ns,
                 )
                 if not notification.message:
                     notifier.commit(notification)

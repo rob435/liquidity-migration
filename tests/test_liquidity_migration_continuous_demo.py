@@ -8,6 +8,8 @@ absent from this suite.
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +36,7 @@ from liquidity_migration.continuous_demo import (
     CONTINUOUS_DEMO_PROFILES,
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    ResidualMomentumSnapshot,
     _btc_risk_sizing_payload_fields,
     _btc_trend_gate_allows_value,
     _btc_trend_gate_payload_fields,
@@ -44,7 +47,14 @@ from liquidity_migration.continuous_demo import (
     _continuous_entry_target_intents,
     _continuous_exit_target_intents,
     _continuous_target_reservations,
+    _entry_feature_identity_payload_fields,
+    _observe_continuous_component_selection,
+    _qualified_block_reasons,
+    _blocked_rows_from_reasons,
+    _first_entry_rejection_reason,
     _load_rmom_table,
+    _load_rmom_snapshot,
+    _rmom_identity_payload_fields,
     _open_continuous_trades,
     _payload_float,
     _rmom_freshness_payload_fields,
@@ -61,6 +71,7 @@ from liquidity_migration.continuous_demo import (
     run_continuous_demo_cycle,
     select_continuous_entries,
 )
+from liquidity_migration.continuous_cycle_status import read_continuous_cycle_status
 from liquidity_migration.continuous_events import compute_continuous_decile_panel
 from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
 
@@ -75,9 +86,7 @@ def _synth(
     for symbol_index in range(n_symbols):
         price = 100.0 + symbol_index
         for bar_index in range(n_bars):
-            wobble = 1.0 + 0.02 * (
-                (symbol_index * 7 + bar_index * 13) % 11 - 5
-            ) / 5.0
+            wobble = 1.0 + 0.02 * ((symbol_index * 7 + bar_index * 13) % 11 - 5) / 5.0
             price = max(1.0, price * wobble)
             rows.append(
                 {
@@ -88,12 +97,7 @@ def _synth(
                 }
             )
     klines = pl.DataFrame(rows)
-    days = sorted(
-        {
-            ((start + bar_index * MS_PER_HOUR) // MS_PER_DAY) * MS_PER_DAY
-            for bar_index in range(n_bars)
-        }
-    )
+    days = sorted({((start + bar_index * MS_PER_HOUR) // MS_PER_DAY) * MS_PER_DAY for bar_index in range(n_bars)})
     rmom = pl.DataFrame(
         [
             {
@@ -123,11 +127,7 @@ def _dispersed_synth(
         drift = -0.002 + 0.00012 * symbol_index
         first_bar = n_bars - 160 if symbol_index >= n_symbols - 3 else 0
         for bar_index in range(first_bar, n_bars):
-            if (
-                symbol_index == n_symbols - 4
-                and bar_index % 41 == 0
-                and bar_index > first_bar + 5
-            ):
+            if symbol_index == n_symbols - 4 and bar_index % 41 == 0 and bar_index > first_bar + 5:
                 continue
             price = max(
                 0.5,
@@ -142,12 +142,7 @@ def _dispersed_synth(
                 }
             )
     klines = pl.DataFrame(rows)
-    days = sorted(
-        {
-            ((start + bar_index * MS_PER_HOUR) // MS_PER_DAY) * MS_PER_DAY
-            for bar_index in range(n_bars)
-        }
-    )
+    days = sorted({((start + bar_index * MS_PER_HOUR) // MS_PER_DAY) * MS_PER_DAY for bar_index in range(n_bars)})
     rmom_rng = np.random.default_rng(42)
     rmom = pl.DataFrame(
         [
@@ -165,11 +160,7 @@ def _dispersed_synth(
 
 def _route(tmp_path: Path, *, environment: str = "demo") -> AccountRoute:
     return ensure_account_route(
-        account_id=(
-            "bybit-demo-unified"
-            if environment == "demo"
-            else "bybit-paper-unified"
-        ),
+        account_id=("bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"),
         environment=environment,
         account_root=tmp_path / "account",
         inbox_root=tmp_path / "inbox",
@@ -192,17 +183,11 @@ def _routed_config(
 
 
 def _decile_map(frame: pl.DataFrame) -> dict[str, int]:
-    return {
-        str(row["symbol"]): int(row["decile"])
-        for row in frame.to_dicts()
-    }
+    return {str(row["symbol"]): int(row["decile"]) for row in frame.to_dicts()}
 
 
 def _composite_map(frame: pl.DataFrame) -> dict[str, float]:
-    return {
-        str(row["symbol"]): float(row["composite"])
-        for row in frame.to_dicts()
-    }
+    return {str(row["symbol"]): float(row["composite"]) for row in frame.to_dicts()}
 
 
 def test_live_state_reproduces_backtest_decile() -> None:
@@ -215,13 +200,10 @@ def test_live_state_reproduces_backtest_decile() -> None:
         rmom_quantile=config.rmom_quantile,
         start_ms=0,
     )
-    expected = _decile_map(
-        backtest.filter(pl.col("ts_ms") == current_hour)
-    )
+    expected = _decile_map(backtest.filter(pl.col("ts_ms") == current_hour))
     history = klines.filter(pl.col("ts_ms") < current_hour)
     prices = {
-        str(row["symbol"]): float(row["close"])
-        for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
+        str(row["symbol"]): float(row["close"]) for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
     }
 
     actual = build_live_continuous_state(
@@ -324,6 +306,126 @@ def test_selector_applies_confirmed_event_and_age_gates() -> None:
     )
 
     assert [row["symbol"] for row in selected] == ["FRESH"]
+
+
+def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
+    state = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1_000_000.0, 100_000.0, 900_000.0],
+            "rv_168h": [0.01, 0.02, 0.03],
+        }
+    )
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=2,
+        ensemble_components=(
+            ("first", "none", 0, 0.12, 0.4),
+            ("second", "none", 0, 0.12, 0.6),
+        ),
+    )
+    signal_ts = 1_700_000_000_000
+    prices = {"A": 10.0, "B": 20.0, "C": 30.0}
+
+    legacy: list[dict[str, Any]] = []
+    for component, _trigger, _age, take_profit_pct, weight in config.ensemble_components:
+        if len(legacy) >= 2:
+            break
+        picks = select_continuous_entries(
+            state,
+            held_symbols=set(),
+            cooldown_symbols=set(),
+            open_count=len(legacy),
+            config=config,
+            eligible_symbols=None,
+        )
+        component_candidates, _ = _continuous_entry_candidates_with_signal_metadata(
+            picks,
+            pl.DataFrame(),
+            signal_ts=signal_ts,
+            strategy_id="continuous_fade_v2",
+            price_by_symbol=prices,
+        )
+        for candidate in component_candidates:
+            if len(legacy) >= 2:
+                break
+            legacy.append(
+                {
+                    **candidate,
+                    "component": component,
+                    "component_weight": weight,
+                    "take_profit_pct": take_profit_pct,
+                    "trade_id": f"{candidate['trade_id']}-{component}",
+                }
+            )
+
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_symbols=set(),
+        reservations_count=0,
+        entry_capacity=2,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol=prices,
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+    )
+
+    assert list(observed.candidates) == legacy
+    assert observed.funnel_rows == (
+        {
+            "component": "first",
+            "d9": 3,
+            "liquidity": 2,
+            "event": 2,
+            "age": 2,
+            "available": 2,
+            "capacity": 2,
+            "reserved": 0,
+            "same_signal_reentry": 0,
+        },
+        {
+            "component": "second",
+            "d9": 3,
+            "liquidity": 2,
+            "event": 2,
+            "age": 2,
+            "available": 2,
+            "capacity": 0,
+            "reserved": 0,
+            "same_signal_reentry": 0,
+        },
+    )
+
+    reasons = _qualified_block_reasons(
+        observed,
+        preselection_reason="btc_trend_gate",
+        btc_risk_reason="",
+    )
+    blocked = _blocked_rows_from_reasons(observed, reasons)
+    assert len(blocked) == 4
+    assert {row["symbol"] for row in blocked} == {"A", "C"}
+    assert {row["first_rejection_reason"] for row in blocked} == {"btc_trend_gate"}
+    assert (
+        _first_entry_rejection_reason(
+            observed,
+            preselection_reason="btc_trend_gate",
+            btc_risk_reason="",
+            raw_entry_intent_count=0,
+            unresolved_suppressions=0,
+            terminal_suppressions=0,
+            publication_error_count=0,
+            published_entry_count=0,
+            blocked_rows=blocked,
+        )
+        == "btc_trend_gate"
+    )
 
 
 def test_listing_age_is_authoritative_over_the_rolling_kline_cache() -> None:
@@ -494,16 +596,22 @@ def test_explicit_fill_anchored_deadline_is_respected_exactly() -> None:
         "max_hold_deadline_ts_ms": now_ms,
     }
 
-    assert plan_continuous_exits(
-        [trade],
-        now_ms=now_ms - 1,
-        config=config,
-    ) == []
-    assert plan_continuous_exits(
-        [trade],
-        now_ms=now_ms,
-        config=config,
-    )[0]["exit_reason"] == "max_hold"
+    assert (
+        plan_continuous_exits(
+            [trade],
+            now_ms=now_ms - 1,
+            config=config,
+        )
+        == []
+    )
+    assert (
+        plan_continuous_exits(
+            [trade],
+            now_ms=now_ms,
+            config=config,
+        )[0]["exit_reason"]
+        == "max_hold"
+    )
 
 
 def test_target_intents_preserve_component_identity_and_duration_metadata() -> None:
@@ -547,9 +655,7 @@ def test_target_intents_preserve_component_identity_and_duration_metadata() -> N
     assert entry.metadata["decision_reference_price"] == pytest.approx(2.0)
     assert entry.metadata["take_profit_pct"] == pytest.approx(0.12)
     assert entry.metadata["max_hold_duration_ms"] == 24 * MS_PER_HOUR
-    assert entry.metadata["entry_attempt_key"] == (
-        f"entry-attempt/{entry.target_key}"
-    )
+    assert entry.metadata["entry_attempt_key"] == (f"entry-attempt/{entry.target_key}")
     assert entry.metadata["quantity_authority"] == "account_kernel_demo_rules"
     assert {
         "take_profit_price",
@@ -654,10 +760,7 @@ def test_account_publication_is_exit_first_and_component_entries_are_independent
     assert publication.errors == ()
     assert len(publication.exit_requests) == 1
     assert len(publication.entry_requests) == 2
-    assert all(
-        len(receipt.request.intents) == 1
-        for receipt in publication.entry_requests
-    )
+    assert all(len(receipt.request.intents) == 1 for receipt in publication.entry_requests)
     assert all(
         receipt.request.route_id == route.route_id
         and receipt.request.account_id == route.account_id
@@ -667,17 +770,13 @@ def test_account_publication_is_exit_first_and_component_entries_are_independent
             *publication.entry_requests,
         )
     )
-    assert publication.entry_request_ids == tuple(
-        item.request.request_id for item in publication.entry_requests
-    )
+    assert publication.entry_request_ids == tuple(item.request.request_id for item in publication.entry_requests)
 
     claimed = [publisher.inbox.claim_next() for _ in range(3)]
     requests = [item[1] for item in claimed if item is not None]
     assert len(requests) == 3
     assert requests[0].intents[0].intent.signed_notional_usdt == 0.0
-    assert [
-        request.intents[0].intent.component_id for request in requests[1:]
-    ] == ["new-p3", "new-p4p5"]
+    assert [request.intents[0].intent.component_id for request in requests[1:]] == ["new-p3", "new-p4p5"]
 
 
 def test_cycle_publishes_exit_and_independent_component_entries_through_one_route(
@@ -718,9 +817,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
             }
         ]
     )
-    universe = pl.DataFrame(
-        {"symbol": ["NEWUSDT"], "listing_age_days": [365.0]}
-    )
+    universe = pl.DataFrame({"symbol": ["NEWUSDT"], "listing_age_days": [365.0]})
     tickers = pl.DataFrame(
         {
             "symbol": ["NEWUSDT"],
@@ -786,7 +883,17 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         "_download_recent_1h_klines",
         lambda *_args, **_kwargs: (klines, {"store_rows": klines.height}),
     )
-    monkeypatch.setattr(module, "_load_rmom_table", lambda _root: rmom)
+    monkeypatch.setattr(
+        module,
+        "_load_rmom_snapshot",
+        lambda _root: ResidualMomentumSnapshot(
+            table=rmom,
+            source_path=str(tmp_path / "residual_momentum.parquet"),
+            source_sha256="b" * 64,
+            source_size_bytes=123,
+            source_mtime_ns=456,
+        ),
+    )
     monkeypatch.setattr(
         module,
         "build_live_continuous_state",
@@ -797,6 +904,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         "build_confirmed_entry_state",
         lambda *_args, **_kwargs: state,
     )
+
     def owner_health(*_args: Any, **kwargs: Any) -> SimpleNamespace:
         owner_health_call.update(kwargs)
         return SimpleNamespace(equity_usdt=10_000.0)
@@ -847,15 +955,38 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     assert len(captured["exit_intents"]) == 1
     assert captured["exit_intents"][0].intent.signed_notional_usdt == 0.0
     assert len(captured["entry_intents"]) == 2
-    assert len(
-        {item.intent.target_key for item in captured["entry_intents"]}
-    ) == 2
+    assert len({item.intent.target_key for item in captured["entry_intents"]}) == 2
     assert payload["planned_exits"] == 1
     assert payload["candidates"] == 2
     assert payload["account_target_route"] is True
     assert payload["candidate_universe_artifact_sha256"] == "a" * 64
+    assert payload["entry_funnel_d9"] == 2
+    assert payload["entry_funnel_liquidity"] == 2
+    assert payload["entry_funnel_event"] == 2
+    assert payload["entry_funnel_age"] == 2
+    assert payload["entry_funnel_capacity"] == 2
+    assert payload["qualified_but_blocked_count"] == 0
+    assert payload["entry_feature_state_rows"] == 1
+    assert len(payload["entry_feature_state_sha256"]) == 64
+    assert payload["rmom_source_sha256"] == "b" * 64
+    status = read_continuous_cycle_status(tmp_path / "producer")
+    assert status.cycle_id == payload["cycle_id"]
+    assert status.entry_funnel[0]["component"] == "p3"
     assert candidate_loads == 1
     assert "now_ns" not in owner_health_call
+
+    blocked_payload = run_continuous_demo_cycle(
+        tmp_path / "blocked-producer",
+        config=ResearchConfig(),
+        demo_config=replace(config, btc_trend_gate="uptrend"),
+        now_ms=now_ms,
+    )
+    assert blocked_payload["candidates"] == 0
+    assert blocked_payload["entry_funnel_capacity"] == 2
+    assert blocked_payload["qualified_but_blocked_count"] == 2
+    assert blocked_payload["qualified_but_blocked_symbols"] == "NEWUSDT"
+    assert blocked_payload["entry_first_rejection_reason"] == "btc_trend_gate"
+    assert captured["entry_intents"] == []
 
 
 def test_cross_wired_account_route_fails_before_cycle_resources(tmp_path: Path) -> None:
@@ -877,9 +1008,7 @@ def test_cross_wired_account_route_fails_before_cycle_resources(tmp_path: Path) 
 
 
 def test_profile_resolves_only_the_active_target_contract() -> None:
-    config = apply_continuous_demo_profile(
-        ContinuousDemoCycleConfig(execution_environment="demo")
-    )
+    config = apply_continuous_demo_profile(ContinuousDemoCycleConfig(execution_environment="demo"))
 
     assert CONTINUOUS_DEMO_PROFILES == ("continuous_ensemble_v2",)
     assert config.rmom_quantile == pytest.approx(0.25)
@@ -895,9 +1024,9 @@ def test_profile_resolves_only_the_active_target_contract() -> None:
         ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444),
     )
     assert continuous_managed_strategy_ids(config) == ("continuous_fade_v2",)
-    assert continuous_strategy_id(
-        ContinuousDemoCycleConfig(execution_environment="paper")
-    ) == "continuous_fade_v2_paper"
+    assert (
+        continuous_strategy_id(ContinuousDemoCycleConfig(execution_environment="paper")) == "continuous_fade_v2_paper"
+    )
 
 
 def test_runtime_validation_requires_exactly_one_target_environment_and_route(
@@ -906,13 +1035,9 @@ def test_runtime_validation_requires_exactly_one_target_environment_and_route(
     with pytest.raises(ValueError, match="execution_environment"):
         _validate_continuous_demo_config(ContinuousDemoCycleConfig())
     with pytest.raises(ValueError, match="execution_environment"):
-        _validate_continuous_demo_config(
-            _routed_config(tmp_path / "invalid", environment="live")
-        )
+        _validate_continuous_demo_config(_routed_config(tmp_path / "invalid", environment="live"))
     with pytest.raises(ValueError, match="operational demo/paper mode requires"):
-        _validate_continuous_demo_config(
-            ContinuousDemoCycleConfig(execution_environment="demo")
-        )
+        _validate_continuous_demo_config(ContinuousDemoCycleConfig(execution_environment="demo"))
     with pytest.raises(ValueError, match="configured together"):
         _validate_continuous_demo_config(
             ContinuousDemoCycleConfig(
@@ -922,9 +1047,7 @@ def test_runtime_validation_requires_exactly_one_target_environment_and_route(
         )
 
     _validate_continuous_demo_config(_routed_config(tmp_path / "demo"))
-    _validate_continuous_demo_config(
-        _routed_config(tmp_path / "paper", environment="paper")
-    )
+    _validate_continuous_demo_config(_routed_config(tmp_path / "paper", environment="paper"))
 
 
 def test_runtime_validation_rejects_retired_profile_and_invalid_signal_timing(
@@ -958,18 +1081,12 @@ def test_notional_multiplier_scales_exposure_and_is_validated(tmp_path: Path) ->
     assert _continuous_base_notional_pct_equity(config) == pytest.approx(20.0)
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="notional_multiplier must be positive"):
-            _validate_continuous_demo_config(
-                _routed_config(tmp_path / str(bad), notional_multiplier=bad)
-            )
+            _validate_continuous_demo_config(_routed_config(tmp_path / str(bad), notional_multiplier=bad))
 
 
 def test_cycles_datasets_keep_demo_and_paper_telemetry_separate() -> None:
-    demo = continuous_cycles_dataset(
-        ContinuousDemoCycleConfig(execution_environment="demo")
-    )
-    paper = continuous_cycles_dataset(
-        ContinuousDemoCycleConfig(execution_environment="paper")
-    )
+    demo = continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="demo"))
+    paper = continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="paper"))
 
     assert demo == "continuous_fade_demo_cycles"
     assert paper == "continuous_fade_paper_cycles"
@@ -1028,15 +1145,9 @@ def test_btc_risk_multiplier_uses_only_a_positive_causal_decision() -> None:
     enabled = ContinuousDemoCycleConfig(entry_btc_risk_sizing_enabled=True)
     disabled = ContinuousDemoCycleConfig(entry_btc_risk_sizing_enabled=False)
 
-    assert _continuous_btc_risk_multiplier(
-        enabled, {"btc_risk_stack_mult": 0.35}
-    ) == pytest.approx(0.35)
-    assert _continuous_btc_risk_multiplier(
-        enabled, {"btc_risk_stack_mult": float("nan")}
-    ) == pytest.approx(1.0)
-    assert _continuous_btc_risk_multiplier(
-        disabled, {"btc_risk_stack_mult": 0.35}
-    ) == pytest.approx(1.0)
+    assert _continuous_btc_risk_multiplier(enabled, {"btc_risk_stack_mult": 0.35}) == pytest.approx(0.35)
+    assert _continuous_btc_risk_multiplier(enabled, {"btc_risk_stack_mult": float("nan")}) == pytest.approx(1.0)
+    assert _continuous_btc_risk_multiplier(disabled, {"btc_risk_stack_mult": 0.35}) == pytest.approx(1.0)
 
 
 def test_rmom_loader_degrades_on_absent_corrupt_or_unprovenanced_data(
@@ -1046,9 +1157,7 @@ def test_rmom_loader_degrades_on_absent_corrupt_or_unprovenanced_data(
     assert _load_rmom_table(tmp_path) is None
     path.write_bytes(b"not parquet")
     assert _load_rmom_table(tmp_path) is None
-    pl.DataFrame(
-        [{"symbol": "AAA", "ts_ms": MS_PER_DAY, "residual_momentum": -0.1}]
-    ).write_parquet(path)
+    pl.DataFrame([{"symbol": "AAA", "ts_ms": MS_PER_DAY, "residual_momentum": -0.1}]).write_parquet(path)
     assert _load_rmom_table(tmp_path) is None
 
 
@@ -1073,11 +1182,76 @@ def test_rmom_loader_keeps_only_stable_daily_rows(tmp_path: Path) -> None:
     loaded = _load_rmom_table(tmp_path)
 
     assert loaded is not None
-    assert loaded.select(
-        ["symbol", "day_ts", "residual_momentum"]
-    ).to_dicts() == [
+    assert loaded.select(["symbol", "day_ts", "residual_momentum"]).to_dicts() == [
         {"symbol": "AAA", "day_ts": MS_PER_DAY, "residual_momentum": -0.1}
     ]
+
+
+def test_feature_and_rmom_identities_bind_exact_consumed_rows(tmp_path: Path) -> None:
+    path = tmp_path / "residual_momentum.parquet"
+    pl.DataFrame(
+        [
+            {
+                "symbol": "BBB",
+                "ts_ms": MS_PER_DAY,
+                "residual_momentum": -0.2,
+                "is_provisional": False,
+            },
+            {
+                "symbol": "AAA",
+                "ts_ms": MS_PER_DAY,
+                "residual_momentum": -0.1,
+                "is_provisional": False,
+            },
+        ]
+    ).write_parquet(path)
+    snapshot = _load_rmom_snapshot(tmp_path)
+    assert snapshot is not None
+    assert snapshot.source_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    rmom_first = _rmom_identity_payload_fields(
+        snapshot,
+        signal_day_ts_ms=MS_PER_DAY,
+    )
+    rmom_second = _rmom_identity_payload_fields(
+        snapshot,
+        signal_day_ts_ms=MS_PER_DAY,
+    )
+    assert rmom_first == rmom_second
+    assert rmom_first["rmom_signal_day_rows"] == 2
+    assert len(rmom_first["rmom_signal_day_sha256"]) == 64
+
+    state = pl.DataFrame(
+        {
+            "symbol": ["BBB", "AAA"],
+            "decile": [8, 9],
+            "composite": [0.5, 0.9],
+            "turnover_quote": [800_000.0, 900_000.0],
+        }
+    )
+    config = ContinuousDemoCycleConfig()
+    identity = _entry_feature_identity_payload_fields(
+        state,
+        signal_ts_ms=2 * MS_PER_DAY,
+        config=config,
+    )
+    reordered = _entry_feature_identity_payload_fields(
+        state.reverse(),
+        signal_ts_ms=2 * MS_PER_DAY,
+        config=config,
+    )
+    changed = _entry_feature_identity_payload_fields(
+        state.with_columns(
+            pl.when(pl.col("symbol") == "AAA")
+            .then(pl.col("composite") + 0.01)
+            .otherwise(pl.col("composite"))
+            .alias("composite")
+        ),
+        signal_ts_ms=2 * MS_PER_DAY,
+        config=config,
+    )
+    assert identity["entry_feature_state_sha256"] == reordered["entry_feature_state_sha256"]
+    assert identity["entry_feature_state_sha256"] != changed["entry_feature_state_sha256"]
 
 
 @pytest.mark.parametrize(
@@ -1151,8 +1325,7 @@ def test_live_panel_cache_matches_full_recompute_and_reuses_carry() -> None:
     current_hour = start + (n_bars - 1) * MS_PER_HOUR
     history = klines.filter(pl.col("ts_ms") < current_hour)
     base_prices = {
-        str(row["symbol"]): float(row["close"])
-        for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
+        str(row["symbol"]): float(row["close"]) for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
     }
     cache = LivePanelCache(
         rmom_quantile=config.rmom_quantile,
@@ -1161,9 +1334,7 @@ def test_live_panel_cache_matches_full_recompute_and_reuses_carry() -> None:
     )
 
     for ordinal, multiplier in enumerate((1.0, 1.01, 0.98), start=1):
-        prices = {
-            symbol: price * multiplier for symbol, price in base_prices.items()
-        }
+        prices = {symbol: price * multiplier for symbol, price in base_prices.items()}
         now_ms = current_hour + ordinal * 60_000
         cached = cache.state(
             history,
@@ -1181,14 +1352,10 @@ def test_live_panel_cache_matches_full_recompute_and_reuses_carry() -> None:
         )
         cached_deciles = _decile_map(cached)
         reference_deciles = _decile_map(reference)
-        assert {
-            symbol for symbol, decile in cached_deciles.items() if decile == 9
-        } == {
+        assert {symbol for symbol, decile in cached_deciles.items() if decile == 9} == {
             symbol for symbol, decile in reference_deciles.items() if decile == 9
         }
-        assert {
-            symbol for symbol, decile in cached_deciles.items() if decile >= 8
-        } == {
+        assert {symbol for symbol, decile in cached_deciles.items() if decile >= 8} == {
             symbol for symbol, decile in reference_deciles.items() if decile >= 8
         }
         cached_composite = _composite_map(cached)
@@ -1201,14 +1368,14 @@ def test_live_panel_cache_matches_full_recompute_and_reuses_carry() -> None:
             rtol=1e-6,
         )
 
+
 def test_live_panel_cache_invalidates_on_corrected_confirmed_bar() -> None:
     klines, rmom, start, n_bars = _dispersed_synth()
     config = ContinuousDemoCycleConfig()
     current_hour = start + (n_bars - 1) * MS_PER_HOUR
     history = klines.filter(pl.col("ts_ms") < current_hour)
     prices = {
-        str(row["symbol"]): float(row["close"])
-        for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
+        str(row["symbol"]): float(row["close"]) for row in klines.filter(pl.col("ts_ms") == current_hour).to_dicts()
     }
     cache = LivePanelCache(
         rmom_quantile=config.rmom_quantile,
@@ -1247,14 +1414,10 @@ def test_live_panel_cache_invalidates_on_corrected_confirmed_bar() -> None:
 
     cached_deciles = _decile_map(cached)
     reference_deciles = _decile_map(reference)
-    assert {
-        symbol for symbol, decile in cached_deciles.items() if decile == 9
-    } == {
+    assert {symbol for symbol, decile in cached_deciles.items() if decile == 9} == {
         symbol for symbol, decile in reference_deciles.items() if decile == 9
     }
-    assert {
-        symbol for symbol, decile in cached_deciles.items() if decile >= 8
-    } == {
+    assert {symbol for symbol, decile in cached_deciles.items() if decile >= 8} == {
         symbol for symbol, decile in reference_deciles.items() if decile >= 8
     }
 
@@ -1290,9 +1453,7 @@ def test_summary_formatter_is_deterministic_for_the_flat_cycle_payload() -> None
     assert first.startswith("continuous target producer ")
     assert "telegram=" not in first
     assert "risk_health=" not in first
-    assert "$0.00" in format_continuous_demo_cycle_summary(
-        {"rmom_present": False}
-    )
+    assert "$0.00" in format_continuous_demo_cycle_summary({"rmom_present": False})
     assert _payload_float("12.5") == pytest.approx(12.5)
     assert _payload_float("bad") == 0.0
 
@@ -1303,10 +1464,7 @@ def _reduction_event(
     local_receive_ts_ns: int,
     component_count: int = 1,
 ) -> CanonicalReductionEvent:
-    target_keys = tuple(
-        f"continuous/continuous_fade_v2/component-{index}/ABCUSDT"
-        for index in range(component_count)
-    )
+    target_keys = tuple(f"continuous/continuous_fade_v2/component-{index}/ABCUSDT" for index in range(component_count))
     return CanonicalReductionEvent(
         pnl_key=pnl_key,
         close_key=f"close-{pnl_key}",

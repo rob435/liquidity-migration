@@ -214,6 +214,14 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
     assert continuous_paper["EXECUTION_ENVIRONMENT"] == "paper"
 
 
+def test_demo_account_notification_reads_the_explicit_continuous_status_root() -> None:
+    demo_owner = _environment("liquidity-migration-account-execution.service")
+    assert demo_owner["CONTINUOUS_CYCLE_ROOT"] == (
+        "/opt/liquidity-migration/data/bybit-continuous-demo-event"
+    )
+    assert demo_owner["CONTINUOUS_CYCLE_MAX_AGE_MINUTES"] == "15"
+
+
 def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots() -> None:
     long_demo = _environment("liquidity-migration-bybit-long-demo.service")
     long_paper = _environment("liquidity-migration-bybit-long-paper.service")
