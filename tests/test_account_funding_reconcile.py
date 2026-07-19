@@ -262,6 +262,52 @@ def test_funding_health_floor_tolerates_slow_cycle_but_fails_wedged_loop(
         )
 
 
+def test_funding_index_advances_incrementally_and_rebuilds_on_reset(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000)
+    kernel = _kernel(tmp_path, clock)
+    first = _settlement()
+    second = dict(_settlement(), id="settlement-2", transactionTime="1800")
+    client = FundingClient([first])
+    reconciler = BybitAccountFundingReconciler(
+        kernel=kernel,
+        client=client,
+        clock=clock,
+    )
+
+    report_one = reconciler.reconcile_once()
+    assert report_one.settlement_rows_recorded == 1
+    index_after_one = dict(reconciler._funding_index)
+
+    # The second pass must index the settlement recorded by the first pass
+    # incrementally (no rebuild) and record only the newly returned row. The
+    # index advances at pass start, so settlement-2 joins it on the NEXT pass.
+    client.rows.append(second)
+    clock.advance_ns(100_000_000)
+    report_two = reconciler.reconcile_once()
+    assert report_two.settlement_rows_recorded == 1
+    assert set(reconciler._funding_index) == {"settlement-1"}
+    assert set(index_after_one) == set()
+
+    # A third pass records nothing and the idempotent identity check still
+    # verifies both settlements against the incremental index.
+    clock.advance_ns(100_000_000)
+    report_three = reconciler.reconcile_once()
+    assert report_three.settlement_rows_recorded == 0
+    assert report_three.settlement_rows_observed == 2
+
+    # A journal replacement (shorter/reset list) forces a full rebuild
+    # instead of trusting the stale incremental position.
+    reconciler._funding_index_count = 10_000
+    reconciler._funding_index_tail_hash = "not-a-real-hash"
+    reconciler._funding_index = {}
+    clock.advance_ns(100_000_000)
+    report_four = reconciler.reconcile_once()
+    assert report_four.healthy
+    assert set(reconciler._funding_index) == {"settlement-1", "settlement-2"}
+
+
 def test_funding_reconciler_requires_demo_and_owner_startup_event(
     tmp_path: Path,
 ) -> None:

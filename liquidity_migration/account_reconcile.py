@@ -451,6 +451,48 @@ class BybitAccountFundingReconciler:
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self._next_query_start_ms: int | None = None
         self.last_report: AccountFundingReconciliationReport | None = None
+        # Incremental canonical-settlement index. Scanning the complete
+        # journal for funding events on every short poll grew pass latency
+        # with journal age; the committed event list only ever extends, so
+        # the index advances from the last verified position and rebuilds
+        # whenever the remembered tail no longer matches (reset/replacement).
+        self._funding_index: dict[str, AccountEvent] = {}
+        self._funding_index_count = 0
+        self._funding_index_tail_hash = ""
+
+    def _canonical_funding_index(
+        self,
+        events: Sequence[AccountEvent],
+    ) -> dict[str, AccountEvent]:
+        """Advance the incremental settlement index over the append-only list."""
+
+        count = self._funding_index_count
+        if (
+            len(events) < count
+            or (count > 0 and events[count - 1].event_hash != self._funding_index_tail_hash)
+        ):
+            self._funding_index = _canonical_funding_events(events)
+            self._funding_index_count = len(events)
+            self._funding_index_tail_hash = events[-1].event_hash if events else ""
+            return self._funding_index
+        for event in events[count:]:
+            if event.event_type != AccountEventType.PNL.value or str(
+                event.payload.get("source") or ""
+            ) != "venue_funding_settlement":
+                continue
+            metadata = event.payload.get("metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise RuntimeError("canonical venue-funding event lacks metadata")
+            identity = str(metadata.get("venue_transaction_id") or "")
+            if not identity or identity in self._funding_index:
+                raise RuntimeError(
+                    "canonical venue-funding events have missing or duplicate transaction ids"
+                )
+            self._funding_index[identity] = event
+        self._funding_index_count = len(events)
+        if events:
+            self._funding_index_tail_hash = events[-1].event_hash
+        return self._funding_index
 
     def reconcile_once(self) -> AccountFundingReconciliationReport:
         # AccountJournal owns a verified immutable cache and invalidates it on
@@ -508,7 +550,7 @@ class BybitAccountFundingReconciler:
                 break
             chunk_start_ms = chunk_end_ms + 1
 
-        existing = _canonical_funding_events(events)
+        existing = self._canonical_funding_index(events)
         normalized: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
         seen: set[str] = set()
         for row, source_start_ms, source_end_ms in sourced_rows:

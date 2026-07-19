@@ -1922,8 +1922,19 @@ class AccountExecutionKernel:
             return specs
 
         appended = self.journal.transact(build, trusted_readonly_builder=True)
-        all_events = self.journal.events()
-        batch_events = tuple(event for event in all_events if event.correlation_id == batch_id)
+        # A freshly appended batch is its own complete event set: every spec the
+        # builder emitted carries this batch's correlation id, and a reused
+        # batch id short-circuits inside the builder. Copying and rescanning
+        # the full journal here made every accepted batch O(history); the scan
+        # survives only for the rare idempotent-replay path.
+        if appended:
+            batch_events = tuple(appended)
+        else:
+            batch_events = tuple(
+                event
+                for event in self.journal._events_ref()
+                if event.correlation_id == batch_id
+            )
         risk_events = [event for event in batch_events if event.event_type == AccountEventType.RISK_DECISION.value]
         if not risk_events:
             raise AccountJournalIntegrityError(f"batch {batch_id!r} has no risk decision")
@@ -1931,7 +1942,8 @@ class AccountExecutionKernel:
         if str(risk_payload.get("request_hash") or "") != request_hash:
             raise AccountJournalIntegrityError(f"batch id {batch_id!r} does not match its recorded request content")
         commands = _order_commands_from_events(batch_events)
-        state_hash = all_events[-1].state_hash if all_events else AccountState().state_hash()
+        tail_events = self.journal._events_ref()
+        state_hash = tail_events[-1].state_hash if tail_events else AccountState().state_hash()
         return TargetBatchResult(
             batch_id=batch_id,
             accepted=bool(risk_payload.get("accepted")),
