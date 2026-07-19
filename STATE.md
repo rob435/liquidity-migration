@@ -1,25 +1,40 @@
 # Operational State
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
-owner/journal checks, generation-bound strategy receipts, and forward-start
-evidence at 2026-07-19 13:16 UTC. These facts describe the deployed implementation
-commit below; a later documentation-only commit may leave the branch ahead.
+owner/journal checks, account-journal protection/P&L archaeology, and the full
+2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC. These facts
+describe the deployed implementation commit below; a later documentation-only
+commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `9a2f20d85df2cf6211abd65e6c66249865026ad4`, profile `operational`, receipt
+  `a1ff6fe301940ed1ab1c683fecb4e54197337f58`, profile `operational`, receipt
   artifact SHA-256
-  `5485fa21401310332f1c543cb5945a0f8dcb15cc2cccead5a87020e64db58668`.
+  `6b7f2f01b8d12c8f452ef2125aeae665762950e5acb636c0d2cd9589a0adddd8`.
+  It deploys four goal-directed runtime fixes over `9a2f20d`
+  (funding-freshness measurement, lost-subscribe first-frame watchdog, hedge
+  oneshot exit semantics, blocked-request traceback dedupe) and changes no
+  strategy decision path, sizing input, or registered estimator. This is a
+  recorded mid-epoch runtime change point: `main` was fast-forwarded to this
+  same commit (it contains the full `codex/operational-profile-guards` and
+  `codex/reconcile-prospective-epoch-20260719` lineages), and the registered
+  prospective clock, calibration/validation boundaries, and frozen comparator
+  identity in the start receipt are unchanged.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
-  and paper LONG and CONTINUOUS target producers.
+  and paper LONG and CONTINUOUS target producers. The fleet was deliberately
+  quiescent about 16:10--16:25 UTC for this staged install; the stop, install,
+  authority, and activation are part of the recorded change point.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
   liveness. Activation verified the immutable sizing-only model prior, demo
   order permissions, and a post-activation residual-momentum rewrite with
-  7,691 rows and 567 stable symbols.
+  7,691 rows and 567 stable symbols. The first hedge runs under the new
+  checkout queued their target batches (`target_queued`), and the first
+  post-activation liveness run at 16:36 UTC reported zero active alerts
+  across ten monitored units.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -29,14 +44,16 @@ commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reconciliation at 10:32 UTC was healthy and showed
-  `TLMUSDT=-21,954` at both the venue and reconstructed journal, with no
-  mismatch. The venue returned one position row and one verified conditional
-  protection order. The account is therefore protected but not flat; deployment
-  authority did not authorize flattening it. The reconciliation snapshot was
-  journal sequence 14,997. The earlier ONDOUSDT position had already closed via
-  native protection at 13:57:05 UTC on 2026-07-18: the full -1,097 exit filled
-  at 0.3395 and recorded account-net P&L of -34.98418018 USDT.
+- The `TLMUSDT=-21,954` short that the 10:32 UTC reconciliation verified was
+  later closed by its native protection at 11:17:07 UTC; the demo book has been
+  flat since the final BUSDT stop trigger at 11:36:08 UTC. The pre-deploy owner
+  health projection at ~16:10 UTC was `healthy`, zero positions, equity
+  9,979.14 USDT. Eight native-stop closes on 2026-07-19 (BUSDT 03:50, 06:10,
+  11:07, 11:36; TLMUSDT 07:09, 07:10, 09:16, 11:17) recorded a combined
+  account-net P&L of about -9.49 USDT including funding. The earlier ONDOUSDT
+  position had already closed via native protection at 13:57:05 UTC on
+  2026-07-18: the full -1,097 exit filled at 0.3395 and recorded account-net
+  P&L of -34.98418018 USDT.
 - Demo and paper owners publish healthy current-generation state with zero
   restarts. The create-only forward-start collector fully verified the demo
   and paper journals at 13:09 UTC with 15,524 and 90 canonical events,
@@ -133,6 +150,44 @@ commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Incident interpretation
 
+- The 2026-07-19 07:08 and 09:11 UTC `TLMUSDT unowned_venue_order` CRITICAL
+  bursts were native-stop replacement identity gaps under the then-deployed
+  `f1cdb91`, not foreign orders. Continued entry fills moved each position's
+  fill-anchored stop, the owner replaced the Full-position stop, and Bybit
+  issued a new conditional orderId that the old verifier could never re-own;
+  each burst blocked intents from the replacement until the position went flat
+  (07:07:55 to 07:09:41 and 09:10:07 to 09:16:51). The trigger-price/lineage
+  verifier deployed at 10:25 UTC in `296cdf8` resolved this: the 10:33 and
+  11:13 UTC BUSDT stop replacements verified without a single unowned report.
+- The 10:35--11:35 UTC `account funding reconciliation is stale:
+  age_ns~4.1-4.8e9` errors were false staleness, not accounting gaps. The
+  funding-recovery report timestamped itself before its paginated REST queries
+  and was then held to the shared 4-second position bound while the slower
+  position pass ran after it. `a1ff6fe` measures pass completion and applies a
+  documented 30-second funding floor to the chain bound; a wedged recovery
+  loop still fails closed inside one liveness cycle. Position, order, and
+  protection truth keep the tight bound.
+- The recurring ~3-minute `waiting for queue-head market data: X:stale_book`
+  CRITICALs around new-symbol entries (ETHUSDT 2026-07-18 12:51 and 22:02,
+  BUSDT 2026-07-19 06:08) were lost/rejected orderbook subscribes that only
+  the 120-second silent-stream watchdog could catch. Bybit answers a
+  successful subscribe with an immediate snapshot, so `a1ff6fe` rebuilds the
+  socket after 30 frameless seconds for a new subscription while
+  quiet-but-live books keep the full silent window.
+- The 07:09 and 09:12 UTC `continuous-hedge.service FAILED` pages duplicated
+  the owner-health root cause and arrived after it had resolved. An armed
+  hedge run blocked by unhealthy owner health now exits 0 with the blocked
+  receipt printed; equity/price/book failures and publish errors still fail
+  the oneshot. The 2026-07-18 21:00 and 2026-07-19 09:58 hedge TERM kills were
+  deliberate full-fleet deploy stops, not runtime failures.
+- A persistently blocked account request logged an identical full traceback
+  every ~4.4 seconds (about 900 traceback lines during the 09:10--09:16
+  burst). The owner now logs one traceback per distinct cause and one line per
+  repeated blocked pass, and clears the signature on the next accepted batch.
+- The paper target producers were effectively down 10:26--13:03 UTC (liveness
+  paged DAEMON DOWN/HUNG 11:19, resolved 13:15): their strict sandbox denied
+  the shared paper capture lock path, which `9a2f20d` fixed. No recurrence
+  since the 13:03 activation.
 - No trade was entered from the earlier observed ONDO signal under the old
   deployment. LONG requested 10x leverage while the account owner allowed at
   most 2x, so that exact attempt was rejected before a venue order existed.
