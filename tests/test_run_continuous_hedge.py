@@ -400,7 +400,11 @@ def test_missing_canonical_equity_blocks_publish(monkeypatch, tmp_path, capsys) 
         equity_usdt=0.0,
     )
 
-    assert hedge_runner.main() == 1
+    # Owner-unhealthy blocks the publish but exits 0: the owner-health
+    # watchdog pages that root cause itself, and the redundant FAILED-unit
+    # page for the same condition was pure alert duplication. The receipt
+    # still records the blocked status and the inbox stays untouched.
+    assert hedge_runner.main() == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "execute_blocked_account_owner_unhealthy"
     assert list((tmp_path / "inbox" / "pending").glob("*.json")) == []

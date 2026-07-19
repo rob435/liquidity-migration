@@ -54,6 +54,13 @@ OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
 OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
 DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS = 120.0
 DEFAULT_ORDERBOOK_WATCHDOG_INTERVAL_SECONDS = 10.0
+# Bybit answers a successful orderbook subscription with an immediate
+# snapshot, so a subscription that has NEVER produced a frame is a lost or
+# rejected subscribe, not a quiet market. Waiting the full silent-stream
+# window (120s) for that case left multi-minute queue-head stale_book blocks
+# around new-symbol entries; a tighter first-frame bound rebuilds the socket
+# before the external three-minute liveness alert can fire.
+DEFAULT_ORDERBOOK_FIRST_FRAME_RECONNECT_SECONDS = 30.0
 DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS = (
     1_000_000_000,
     15_000_000_000,
@@ -1292,6 +1299,7 @@ class BybitRawPublicMarketStream:
         websocket_factory: Callable[..., Any] | None = None,
         reconnect_seconds: float = 2.0,
         stale_reconnect_seconds: float = DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS,
+        first_frame_reconnect_seconds: float = DEFAULT_ORDERBOOK_FIRST_FRAME_RECONNECT_SECONDS,
         watchdog_interval_seconds: float = DEFAULT_ORDERBOOK_WATCHDOG_INTERVAL_SECONDS,
         monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -1301,6 +1309,8 @@ class BybitRawPublicMarketStream:
             raise ValueError("include_public_trades must be a boolean")
         if not math.isfinite(stale_reconnect_seconds) or stale_reconnect_seconds <= 0.0:
             raise ValueError("stale_reconnect_seconds must be positive")
+        if not math.isfinite(first_frame_reconnect_seconds) or first_frame_reconnect_seconds <= 0.0:
+            raise ValueError("first_frame_reconnect_seconds must be positive")
         if not math.isfinite(watchdog_interval_seconds) or watchdog_interval_seconds <= 0.0:
             raise ValueError("watchdog_interval_seconds must be positive")
         if watchdog_interval_seconds >= stale_reconnect_seconds:
@@ -1311,6 +1321,12 @@ class BybitRawPublicMarketStream:
         self.on_market_message = on_message
         self.reconnect_seconds = reconnect_seconds
         self.stale_reconnect_seconds = float(stale_reconnect_seconds)
+        # A subscription cannot be given a looser bound before its first frame
+        # than after it: clamp to the silent-stream window.
+        self.first_frame_reconnect_seconds = min(
+            float(first_frame_reconnect_seconds),
+            self.stale_reconnect_seconds,
+        )
         self.watchdog_interval_seconds = float(watchdog_interval_seconds)
         self._monotonic = monotonic_clock or time.monotonic
         self._symbols: set[str] = set()
@@ -1428,31 +1444,39 @@ class BybitRawPublicMarketStream:
             _logger.exception("raw Bybit public message handling failed")
 
     def check_stale_subscriptions(self) -> tuple[str, ...]:
-        """Reconnect when any desired orderbook has stopped producing frames."""
+        """Reconnect when any desired orderbook has stopped producing frames.
+
+        Two bounds apply per symbol: a subscription that has produced frames
+        and then gone quiet gets the full silent-stream window, while one that
+        has NEVER produced a frame on this socket is a lost/rejected subscribe
+        (Bybit answers a successful subscribe with an immediate snapshot) and
+        is rebuilt at the tighter first-frame bound.
+        """
 
         with self._lock:
             if self._stop.is_set() or self._socket is None:
                 return ()
             now = self._monotonic()
-            stale = tuple(
-                sorted(
-                    symbol
-                    for symbol in self._symbols
-                    if (
-                        started_at := self._subscription_started_monotonic.get(symbol)
-                    ) is not None
-                    and now
-                    - self._last_orderbook_message_monotonic.get(symbol, started_at)
-                    >= self.stale_reconnect_seconds
-                )
-            )
+            overdue: list[str] = []
+            for symbol in self._symbols:
+                started_at = self._subscription_started_monotonic.get(symbol)
+                if started_at is None:
+                    continue
+                last_frame_at = self._last_orderbook_message_monotonic.get(symbol)
+                if last_frame_at is None:
+                    if now - started_at >= self.first_frame_reconnect_seconds:
+                        overdue.append(symbol)
+                elif now - last_frame_at >= self.stale_reconnect_seconds:
+                    overdue.append(symbol)
+            stale = tuple(sorted(overdue))
             if not stale:
                 return ()
             socket = self._detach_socket_locked()
         _logger.warning(
             "Bybit public orderbook subscription stale; reconnecting socket: "
-            "symbols=%s threshold_seconds=%.1f",
+            "symbols=%s first_frame_threshold_seconds=%.1f silent_threshold_seconds=%.1f",
             ",".join(stale),
+            self.first_frame_reconnect_seconds,
             self.stale_reconnect_seconds,
         )
         close = getattr(socket, "close", None)

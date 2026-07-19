@@ -752,11 +752,14 @@ def test_raw_stream_reconnects_when_one_required_orderbook_is_stale() -> None:
     first = Socket()
     stream._on_open(first)
 
+    now[0] = 105.0
+    stream._on_message(first, json.dumps(_snapshot(symbol="ONDOUSDT")))
     now[0] = 219.0
     stream._on_message(first, json.dumps(_snapshot(symbol="BTCUSDT")))
+    now[0] = 224.0
     assert stream.check_stale_subscriptions() == ()
 
-    now[0] = 221.0
+    now[0] = 226.0
     assert stream.check_stale_subscriptions() == ("ONDOUSDT",)
     assert first.closed is True
     assert stream._socket is None
@@ -767,10 +770,18 @@ def test_raw_stream_reconnects_when_one_required_orderbook_is_stale() -> None:
         "op": "subscribe",
         "args": ["orderbook.50.BTCUSDT", "orderbook.50.ONDOUSDT"],
     }]
-    assert seen[0]["data"]["s"] == "BTCUSDT"
+    assert seen[0]["data"]["s"] == "ONDOUSDT"
 
 
-def test_raw_stream_gives_new_subscription_a_full_staleness_window() -> None:
+def test_raw_stream_rebuilds_lost_new_subscription_at_first_frame_bound() -> None:
+    """A subscribe that never yields a frame is rebuilt at the tight bound.
+
+    Bybit answers a successful orderbook subscribe with an immediate snapshot,
+    so a frameless subscription is a lost/rejected subscribe. Waiting the full
+    silent-stream window for it left multi-minute queue-head stale_book blocks
+    around new-symbol entries.
+    """
+
     class Socket:
         def __init__(self) -> None:
             self.closed = False
@@ -789,6 +800,7 @@ def test_raw_stream_gives_new_subscription_a_full_staleness_window() -> None:
         on_message=lambda _message: None,
         websocket_factory=lambda *_args, **_kwargs: None,
         stale_reconnect_seconds=120.0,
+        first_frame_reconnect_seconds=30.0,
         watchdog_interval_seconds=10.0,
         monotonic_clock=lambda: now[0],
     )
@@ -800,17 +812,66 @@ def test_raw_stream_gives_new_subscription_a_full_staleness_window() -> None:
 
     now[0] = 125.0
     stream.update_symbols({"BTCUSDT", "ONDOUSDT"})
-    now[0] = 150.0
-    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
-    now[0] = 220.0
-
-    assert stream.check_stale_subscriptions() == ()
-    assert socket.closed is False
     assert socket.sent[-1] == {
         "op": "subscribe",
         "args": ["orderbook.50.ONDOUSDT"],
     }
-    now[0] = 246.0
+    now[0] = 150.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
+    now[0] = 154.0
+
+    assert stream.check_stale_subscriptions() == ()
+    assert socket.closed is False
+
+    now[0] = 155.0
+    assert stream.check_stale_subscriptions() == ("ONDOUSDT",)
+    assert socket.closed is True
+
+
+def test_raw_stream_new_subscription_with_frames_keeps_full_silent_window() -> None:
+    """Once a new subscription has produced a frame it is a live quiet book:
+    only the full silent-stream window applies, exactly as for old symbols."""
+
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [10.0]
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=120.0,
+        first_frame_reconnect_seconds=30.0,
+        watchdog_interval_seconds=10.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT"})
+    socket = Socket()
+    stream._on_open(socket)
+    now[0] = 100.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
+
+    now[0] = 125.0
+    stream.update_symbols({"BTCUSDT", "ONDOUSDT"})
+    now[0] = 130.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="ONDOUSDT")))
+    now[0] = 200.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
+
+    now[0] = 249.0
+    assert stream.check_stale_subscriptions() == ()
+    assert socket.closed is False
+
+    now[0] = 250.0
     assert stream.check_stale_subscriptions() == ("ONDOUSDT",)
     assert socket.closed is True
 

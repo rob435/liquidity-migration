@@ -12,6 +12,10 @@ malformed, future-dated, or estimator-inadequate prior data fails closed.
 
 An armed run that is blocked or fails publication exits nonzero so the systemd
 oneshot fails and liveness can alert. Dry runs and genuine no-action runs exit 0.
+One deliberate exception: an armed run blocked ONLY by unhealthy account-owner
+health exits 0 with its blocked status recorded — the owner-health watchdog
+already pages that root cause directly, and a duplicate FAILED-unit page for
+the same condition was alert noise, not additional protection.
 
 Usage:
     .venv/bin/python scripts/run_continuous_hedge.py --execution-environment demo
@@ -555,9 +559,12 @@ def main() -> int:
         out["status"] = "dry_run_ok"
     print(json.dumps(out))
     # A blocked or failed publish makes the oneshot fail so liveness can page.
+    # execute_blocked_account_owner_unhealthy is deliberately absent: the
+    # owner-health watchdog pages that root cause itself, and the redundant
+    # FAILED-unit page arrived out of order (often after the root cause had
+    # already resolved). The blocked status stays in the printed receipt.
     failing_statuses = {
         "execute_blocked_equity_unavailable",
-        "execute_blocked_account_owner_unhealthy",
         "execute_blocked_btc_price_unavailable",
         "execute_blocked_book_state_unknown",
         "execute_blocked_eth_price_unavailable",

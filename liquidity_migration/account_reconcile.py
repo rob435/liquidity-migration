@@ -21,6 +21,14 @@ from .deterministic_runtime import Clock, SystemClock
 NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS = 5_000_000_000
 BYBIT_ACCOUNTING_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
+# Funding settlements are discrete venue accounting events (hourly at the
+# fastest), and one recovery pass issues several paginated REST calls before
+# the slower position-truth reconciliation runs. Holding that pass to the
+# 2x-reconcile-cadence position bound turned one slow venue response into a
+# false staleness page while accounting stayed correct. This floor still fails
+# a wedged funding-recovery loop well inside one liveness cycle; position and
+# order truth keep their own tight bound.
+FUNDING_HEALTH_MAX_AGE_FLOOR_NS = 30 * 1_000_000_000
 # The watchdog requires a journaled venue fact younger than one minute. A
 # 30-second checkpoint leaves room for one delayed reconciliation cycle.
 VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
@@ -391,7 +399,14 @@ class BybitAccountReconciler:
 
 @dataclass(frozen=True, slots=True)
 class AccountFundingReconciliationReport:
-    """One strict, bounded transaction-log recovery pass."""
+    """One strict, bounded transaction-log recovery pass.
+
+    ``query_end_ms`` is the recovered-through bound sampled before the venue
+    queries; ``observed_ts_ns`` is when the pass completed. They differ by the
+    REST recovery duration: freshness measures how recently a full recovery
+    pass finished, not when its query window was chosen, so a slow venue
+    response cannot birth an already-stale report.
+    """
 
     healthy: bool
     query_start_ms: int
@@ -421,15 +436,19 @@ class BybitAccountFundingReconciler:
         client: Any,
         clock: Clock | None = None,
         overlap_ms: int = DEFAULT_FUNDING_OVERLAP_MS,
+        health_max_age_floor_ns: int = FUNDING_HEALTH_MAX_AGE_FLOOR_NS,
     ) -> None:
         if not bool(getattr(client, "demo", False)):
             raise ValueError("Bybit account funding reconciler is demo-only")
         if int(overlap_ms) <= 0 or int(overlap_ms) > BYBIT_ACCOUNTING_MAX_WINDOW_MS:
             raise ValueError("funding reconciliation overlap must be in (0, 7 days]")
+        if int(health_max_age_floor_ns) <= 0:
+            raise ValueError("funding health max-age floor must be positive")
         self.kernel = kernel
         self.client = client
         self.clock = clock or SystemClock()
         self.overlap_ms = int(overlap_ms)
+        self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self._next_query_start_ms: int | None = None
         self.last_report: AccountFundingReconciliationReport | None = None
 
@@ -545,7 +564,7 @@ class BybitAccountFundingReconciler:
             query_end_ms=observed_ms,
             settlement_rows_observed=len(normalized),
             settlement_rows_recorded=recorded,
-            observed_ts_ns=observed_ns,
+            observed_ts_ns=self.clock.wall_time_ns(),
         )
         self.last_report = report
         return report
@@ -555,7 +574,8 @@ class BybitAccountFundingReconciler:
         if report is None:
             raise RuntimeError("account funding reconciliation has not completed")
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
-        if age_ns < 0 or age_ns > max_age_ns:
+        bound_ns = max(int(max_age_ns), self.health_max_age_floor_ns)
+        if age_ns < 0 or age_ns > bound_ns:
             raise RuntimeError(f"account funding reconciliation is stale: age_ns={age_ns}")
         report.require_healthy()
 

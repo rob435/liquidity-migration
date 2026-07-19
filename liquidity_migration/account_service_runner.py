@@ -511,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     loop_sequence = 0
     requested_symbols_ready = True
     symbol_health_detail = ""
+    last_request_failure_signature = ""
     latest_reconcile_report = reconciler.last_report
     last_capital_snapshot = snapshot_provider.current(batch_id="owner-health/bootstrap")
     try:
@@ -608,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if receipt is not None:
                     last_batch_id = receipt.batch_id
+                    last_request_failure_signature = ""
                     native_protection.sync_symbols(
                         [
                             symbol
@@ -623,7 +625,18 @@ def main(argv: list[str] | None = None) -> int:
                         receipt.final_state_hash[:12],
                     )
             except Exception as exc:  # noqa: BLE001 - request was released for retry
-                _logger.exception("account request failed and was returned to pending")
+                # A persistently blocked request retries every few seconds; one
+                # full traceback per distinct cause keeps the journal usable
+                # while each blocked pass still leaves a one-line record.
+                failure_signature = f"{type(exc).__name__}: {exc}"[:500]
+                if failure_signature != last_request_failure_signature:
+                    last_request_failure_signature = failure_signature
+                    _logger.exception("account request failed and was returned to pending")
+                else:
+                    _logger.error(
+                        "account request failed again (traceback suppressed, unchanged cause): %s",
+                        failure_signature,
+                    )
                 health_status = AccountOwnerHealthStatus.BLOCKED
                 health_detail = f"{type(exc).__name__}: {exc}"[:1000]
                 time.sleep(max(min(args.reconcile_seconds, 5.0), 0.5))

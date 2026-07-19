@@ -58,7 +58,13 @@ class NativeProtectionPlan:
 
 
 class AccountHealthChain:
-    """Require every account-owner health check to pass."""
+    """Require every account-owner health check to pass.
+
+    Each provider receives the caller's freshness bound; a provider whose
+    evidence moves on a slower timescale may apply a documented domain floor
+    to it (funding-settlement recovery does), so the chain bound is the
+    minimum strictness, not an exact shared window.
+    """
 
     def __init__(self, providers: Sequence[Any]) -> None:
         self.providers = tuple(providers)
