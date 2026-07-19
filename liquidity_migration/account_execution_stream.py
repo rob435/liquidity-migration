@@ -274,6 +274,18 @@ class BybitAccountExecutionConsumer:
             execution_id = str(row.get("execId") or row.get("exec_id") or "")
             price = _float(row.get("execPrice") or row.get("exec_price"))
             if not execution_id or signed_qty == 0.0 or price <= 0.0:
+                # A malformed execution row for a KNOWN command is missing
+                # accounting, not noise: silently dropping it lets the kernel
+                # position diverge from the venue with no causal record. Latch
+                # it as an adoption failure so owner health blocks until the
+                # row parses or reconciliation resolves the divergence.
+                if execution_id and self.native_protection_manager is not None:
+                    malformed = AccountTransitionError(
+                        f"known-command execution row is malformed: "
+                        f"command={command_id} side={side!r} qty={qty!r} price={price!r}"
+                    )
+                    _logger.error("dropped malformed execution row: %s", malformed)
+                    self.native_protection_manager.note_adoption_failure(row, malformed)
                 continue
             observations.append(ExecutionObservation(
                 observation_type=ExecutionObservationType.FILL,

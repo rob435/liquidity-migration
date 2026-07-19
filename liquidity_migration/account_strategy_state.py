@@ -221,6 +221,10 @@ class CanonicalComponentExecutionAnchor:
     entry_attribution_basis: str
     entry_attribution_status: str
     entry_group_target_keys: tuple[str, ...]
+    # True when every entry command reached a terminal venue status; with a
+    # nonzero observed fill this proves no entry remainder can still trade,
+    # which is what component stop/TP eligibility actually requires.
+    entry_commands_terminal: bool = False
     close_target_batch_id: str = ""
     close_execution_batch_id: str = ""
     close_target_sequence: int | None = None
@@ -864,6 +868,7 @@ def _component_execution_anchors_from_events(
                         entry_attribution_basis=basis,
                         entry_attribution_status=status,
                         entry_group_target_keys=group_keys,
+                        entry_commands_terminal=summary.commands_terminal,
                     )
 
             if exits:
@@ -1137,6 +1142,9 @@ def _component_execution_anchors_from_events(
                                 else 0.0,
                                 tolerance=tolerance,
                             )
+                        ),
+                        entry_commands_terminal=(
+                            anchor.entry_commands_terminal and summary.commands_terminal
                         ),
                         entry_attribution_scope=(
                             "component"

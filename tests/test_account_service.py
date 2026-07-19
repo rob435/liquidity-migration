@@ -827,6 +827,101 @@ def test_committed_entry_resumes_after_crash_even_if_signal_expires(tmp_path: Pa
     assert len(list((inbox.root / "completed").glob("*.json"))) == 1
 
 
+def test_committed_batch_replays_instead_of_superseding_under_later_flat(tmp_path: Path) -> None:
+    """A journal-committed batch must replay after a crash, never supersede.
+
+    Completing it as superseded would strand its journaled-but-unsubmitted
+    commands in working state forever: convergence then reports "working" for
+    the symbol and can never flatten the venue position the submitted part
+    opened.
+    """
+
+    root = tmp_path / "account"
+    inbox = _inbox(tmp_path)
+    target_key = "long/long-v1/replay-vs-supersede/BUSDT"
+    entry = _request(_route(tmp_path),
+        request_id="entry-committed-crash",
+        batch_id="entry-committed-crash",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+        target_key=target_key,
+        decision_key="long-target/long-v1/1100/entry/replay-vs-supersede",
+        metadata={
+            "entry_attempt_key": f"entry-attempt/{target_key}",
+            "signal_ts_ms": 1_000,
+            "signal_valid_until_ms": 1_200,
+        },
+    )
+    inbox.submit(entry)
+    adapter = ScriptedExecutionAdapter("crash", "fill", "fill")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(root, adapter, clock=clock)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_once(inbox)
+    assert entry.batch_id in service.kernel.state().processed_batches
+
+    clock.advance_ns(200_000_000)
+    flat = _request(_route(tmp_path),
+        request_id="flat-after-crash",
+        batch_id="flat-after-crash",
+        kind=SleeveAdapterKind.LONG,
+        notional=0.0,
+        target_key=target_key,
+        decision_key="long-target/long-v1/1101/flat/replay-vs-supersede",
+    )
+    inbox.submit(flat)
+
+    receipt = service.run_once(inbox)
+
+    assert receipt is not None
+    assert receipt.request_id == "entry-committed-crash"
+    assert receipt.disposition == "processed"
+    assert receipt.accepted
+    # The committed batch's unsubmitted command was actually replayed.
+    assert adapter.submit_calls >= 2
+    completed = list((inbox.root / "completed").glob("*.json"))
+    assert len(completed) == 1
+
+
+def test_failing_queue_head_does_not_starve_convergence(tmp_path: Path) -> None:
+    root = tmp_path / "account"
+    inbox = _inbox(tmp_path)
+    target_key = "long/long-v1/starved-head/BUSDT"
+    inbox.submit(_request(_route(tmp_path),
+        request_id="head-that-always-fails",
+        batch_id="head-that-always-fails",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+        target_key=target_key,
+        decision_key="long-target/long-v1/1100/entry/starved-head",
+        metadata={
+            "entry_attempt_key": f"entry-attempt/{target_key}",
+            "signal_ts_ms": 1_000,
+            "signal_valid_until_ms": 1_200,
+        },
+    ))
+    adapter = ScriptedExecutionAdapter("crash")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(root, adapter, clock=clock)
+
+    converge_calls: list[int] = []
+    original_converge = service.converge_once
+
+    def counting_converge():
+        converge_calls.append(1)
+        return original_converge()
+
+    service.converge_once = counting_converge  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_once(inbox)
+
+    # The head failure still surfaced, but canonical convergence work ran in
+    # the same cycle instead of being starved by the perpetually failing head.
+    assert converge_calls
+
+
 def test_flat_exit_does_not_expire_even_with_stale_entry_metadata(tmp_path: Path) -> None:
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)

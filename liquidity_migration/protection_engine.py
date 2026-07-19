@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Mapping, Sequence
 
@@ -120,12 +121,20 @@ class AccountProtectionEngine:
                 continue
             anchor = anchors.get(target_key)
             # A strategy TARGET is not a fill. Require the component's entry
-            # batch to be completely filled before a software component close
-            # can supersede it; otherwise a racing entry remainder could trade
-            # after the zero target was published.
+            # commands to be beyond racing before a software component close
+            # can supersede them: either completely filled, or terminal with a
+            # real observed fill (a partially-filled-then-cancelled entry holds
+            # a live position that must not lose stop/TP evaluation forever —
+            # no working remainder can trade after a terminal status).
             if (
                 anchor is None
-                or not anchor.entry_fill_complete
+                or not (
+                    anchor.entry_fill_complete
+                    or (
+                        anchor.entry_commands_terminal
+                        and abs(anchor.entry_observed_signed_qty) > 0.0
+                    )
+                )
                 or anchor.entry_fill_vwap is None
                 or anchor.entry_fill_vwap <= 0.0
                 or anchor.entry_attribution_scope == "none"
@@ -273,13 +282,29 @@ def _protection_trigger_reason(
 
 
 def _optional_fraction(value: object) -> float | None:
-    if not isinstance(value, (str, int, float)):
+    """Absent means no configured protection; present-but-invalid fails closed.
+
+    Silently mapping an out-of-range value (e.g. ``8`` meaning 8 percent) to
+    None disabled the intended component stop/TP with no operator-visible
+    signal anywhere in the chain. The raise surfaces through protection
+    evaluation as blocked owner health, never as a crash.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError(f"protection fraction has unsupported type {type(value).__name__}")
+    if isinstance(value, str) and not value.strip():
         return None
     try:
         output = float(value)
-    except (TypeError, ValueError):
-        return None
-    return output if 0.0 < output < 1.0 else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"protection fraction is not numeric: {value!r}") from exc
+    if not math.isfinite(output) or not 0.0 < output < 1.0:
+        raise ValueError(
+            f"protection fraction must be a fraction in (0, 1), got {value!r}"
+        )
+    return output
 
 
 def _protection_price(

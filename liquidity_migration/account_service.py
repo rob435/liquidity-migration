@@ -1066,6 +1066,13 @@ class AccountExecutionService:
         self.convergence_health_grace_ns = convergence_health_grace_ns
         self.convergence_retry_backoff_ns = convergence_retry_backoff_ns
         self.max_convergence_retries = max_convergence_retries
+        # First wall time each symbol was observed unconverged, cleared when it
+        # converges. Revision-based ages re-arm on every accepted desire
+        # republication, so periodic re-assertion of an unchanged target could
+        # suppress the grace-based health trip indefinitely; this latch cannot
+        # be reset by republication. In-memory: a restart grants one fresh
+        # grace window, which the ten-minute generation SLA already tolerates.
+        self._unconverged_first_observed_ns: dict[str, int] = {}
         if (
             max_market_age_ns < 0
             or max_snapshot_age_ns < 0
@@ -1544,7 +1551,21 @@ class AccountExecutionService:
                 projected_signed_qty=projected_qty,
                 residual_signed_qty=residual,
                 desired_since_ns=desired_since_ns,
-                age_ns=max(0, now_ns - desired_since_ns),
+                # A future desire timestamp (wall-clock regression between the
+                # journal write and this read) must fail closed like every
+                # other freshness check, not report a fresh age-zero item.
+                # The age also honors the unconverged-first-observed latch so
+                # periodic republication of an unchanged desire cannot keep
+                # resetting the grace clock while a residual persists.
+                age_ns=max(
+                    (
+                        now_ns - desired_since_ns
+                        if now_ns >= desired_since_ns
+                        else self.convergence_health_grace_ns
+                    ),
+                    now_ns
+                    - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
+                ),
                 retry_attempts=attempts,
                 retry_limit=self.max_convergence_retries,
                 next_retry_ts_ns=next_retry_ts_ns,
@@ -1554,6 +1575,10 @@ class AccountExecutionService:
                 status=status,
             )
             plans.append(_ConvergencePlan(item=item, targets=target_rows))
+        unconverged_symbols = {plan.item.symbol for plan in plans}
+        for symbol in list(self._unconverged_first_observed_ns):
+            if symbol not in unconverged_symbols:
+                del self._unconverged_first_observed_ns[symbol]
         return tuple(plans)
 
     @staticmethod
@@ -1729,12 +1754,18 @@ class AccountExecutionService:
             # independent canonical work and remain safe to service.
             self.converge_once()
             return None
+        committed_claim: tuple[Path, AccountTargetRequest] | None = None
         if strict_arrival and expected_request_id:
             expected = inbox.claim_expected_next(expected_request_id)
             if expected is None:
                 return None
             path, request, replacements = expected
-            if replacements:
+            # A request whose kernel batch already committed must REPLAY, never
+            # supersede: its journaled commands may be partially or wholly
+            # unsubmitted after a crash, and completing it as superseded would
+            # strand them in working state forever (convergence then reports
+            # "working" and can never flatten the venue position they opened).
+            if replacements and request.batch_id not in self.kernel._state_ref().processed_batches:
                 replacement_ids = tuple(item.request_id for item in replacements)
                 state = self.kernel._state_ref()
                 last_superseded = AccountServiceReceipt(
@@ -1760,6 +1791,11 @@ class AccountExecutionService:
             if superseded is None:
                 break
             path, request, replacements = superseded
+            if request.batch_id in self.kernel._state_ref().processed_batches:
+                # Same replay-over-supersede rule as the strict path: handle
+                # this committed request now; later queue entries wait their turn.
+                committed_claim = (path, request)
+                break
             replacement_ids = tuple(item.request_id for item in replacements)
             state = self.kernel._state_ref()
             last_superseded = AccountServiceReceipt(
@@ -1779,7 +1815,7 @@ class AccountExecutionService:
         claimed = (
             strict_claimed
             if strict_arrival
-            else inbox.claim_next()
+            else (committed_claim or inbox.claim_next())
         )
         if claimed is None:
             self.converge_once()
@@ -1795,6 +1831,14 @@ class AccountExecutionService:
                 inbox.fail(path, error=exc)
             else:
                 inbox.release(path)
+            # A deterministically failing queue head must not starve canonical
+            # convergence: pending reduce-only closes for other symbols are
+            # independent work and stay due while the head retries forever.
+            # Convergence failures here must not mask the original cause.
+            try:
+                self.converge_once()
+            except Exception:  # noqa: BLE001 - reported via the raised head failure
+                pass
             raise
         inbox.complete(path, receipt)
         return receipt

@@ -2200,3 +2200,99 @@ def test_notional_adapter_rounds_quantity_to_venue_step_without_hidden_notional_
     assert target.signed_qty == pytest.approx(2.0)
     assert target.metadata["raw_signed_qty"] == pytest.approx(20.0 / 9.95)
     assert target.metadata["quantity_rounding"] == "toward_zero_to_venue_step"
+
+
+def test_chunked_commands_carry_exact_step_quantities(tmp_path: Path) -> None:
+    """Float chunk subtraction must not leak binary dust into command qty.
+
+    2.7 split into 1.0-unit chunks leaves 0.7000000000000002 under float
+    accumulation; the adapter transmits qty verbatim and the venue rejects an
+    off-step quantity, permanently wedging the final chunk of a close.
+    """
+
+    kernel = _kernel(tmp_path)
+    rules = _rules(max_order_qty=1.0)
+    market = _book().market_ref(input_key="dust-book")
+    result = kernel.submit_targets(
+        batch_id="dust-open",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="dust-d",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=2.7,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+    )
+    assert result.accepted
+    quantities = [command.qty for command in result.commands]
+    assert quantities == [1.0, 1.0, 0.7]
+    from decimal import Decimal as _Decimal
+
+    assert format(_Decimal(str(quantities[-1])), "f") == "0.7"
+
+
+def test_duplicate_terminal_status_from_second_consumer_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """WS and REST recovery race the same terminal fact with different local
+    timestamps; the second commit must be a no-op, not an integrity error."""
+
+    kernel = _kernel(tmp_path)
+    rules = _rules()
+    market = _book().market_ref(input_key="terminal-book")
+    result = kernel.submit_targets(
+        batch_id="terminal-race",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="terminal-race-d",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+    )
+    assert result.accepted and len(result.commands) == 1
+    command = result.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-terminal-race",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_201_000_000,
+    )
+    kernel.record_fill(
+        command_id=command.command_id,
+        execution_id="fill-terminal-race",
+        signed_qty=1.0,
+        price=10.0,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_202_000_000,
+        local_receive_ts_ns=1_203_000_000,
+    )
+
+    first = kernel.record_order_status(
+        command_id=command.command_id,
+        status="filled",
+        cumulative_filled_qty=1.0,
+        exchange_ts_ns=1_204_000_000,
+        local_receive_ts_ns=1_205_000_000,
+    )
+    assert len(first) == 1
+
+    second = kernel.record_order_status(
+        command_id=command.command_id,
+        status="filled",
+        cumulative_filled_qty=1.0,
+        exchange_ts_ns=1_204_000_000,
+        local_receive_ts_ns=1_299_000_000,
+    )
+    assert second == ()

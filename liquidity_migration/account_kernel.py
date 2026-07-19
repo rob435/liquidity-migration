@@ -2220,10 +2220,18 @@ class AccountExecutionKernel:
                     continue
                 max_qty = rules.max_order_qty if rules.max_order_qty > 0.0 else qty
                 chunk_count = max(1, math.ceil(qty / max_qty - tolerance))
-                remaining = qty
+                # Chunk in exact Decimal arithmetic: accumulating float
+                # subtraction leaves binary dust on the final chunk (e.g.
+                # 250.7 into 100-unit chunks yields 50.69999999999999), which
+                # the adapter would transmit verbatim and the venue rejects as
+                # an off-step quantity. ``qty`` is already step-quantized, so
+                # exact chunks keep every command a step multiple.
+                remaining_dec = Decimal(str(qty))
+                max_qty_dec = Decimal(str(max_qty))
                 for chunk_index in range(chunk_count):
-                    chunk_qty = min(remaining, max_qty)
-                    remaining -= chunk_qty
+                    chunk_dec = min(remaining_dec, max_qty_dec)
+                    remaining_dec -= chunk_dec
+                    chunk_qty = float(chunk_dec)
                     signed_chunk = math.copysign(chunk_qty, delta)
                     command_id = self.ids.make("order-command", batch_id, symbol, chunk_index)
                     commands.append(
@@ -3319,34 +3327,44 @@ class AccountExecutionKernel:
         rejection_key: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> tuple[AccountEvent, ...]:
-        state = self._state_ref()
-        order = state.orders.get(command_id)
-        if order is None:
-            raise AccountTransitionError(f"unknown command {command_id!r}")
         normalized = status.lower()
-        specs = [
-            AccountEventSpec(
-                event_type=AccountEventType.ORDER_STATUS,
-                idempotency_key=f"order-status:{command_id}:{normalized}",
-                correlation_id=order.batch_id,
-                causation_id=command_id,
-                account_id=self.account_id,
-                sleeve="account_execution",
-                symbol=order.symbol,
-                wall_ts_ns=max(int(local_receive_ts_ns), 1),
-                monotonic_ns=self.clock.monotonic_ns(),
-                payload={
-                    "command_id": command_id,
-                    "status": normalized,
-                    "cumulative_filled_qty": _finite(cumulative_filled_qty, label="cumulative_filled_qty"),
-                    "exchange_ts_ns": int(exchange_ts_ns),
-                    "local_receive_ts_ns": int(local_receive_ts_ns),
-                    "rejection_key": rejection_key,
-                    "metadata": json_safe(dict(metadata or {})),
-                },
-            )
-        ]
-        return tuple(self.journal.transact(lambda _: specs, trusted_readonly_builder=True))
+        monotonic_ns = self.clock.monotonic_ns()
+
+        def build(state: AccountState) -> list[AccountEventSpec]:
+            order = state.orders.get(command_id)
+            if order is None:
+                raise AccountTransitionError(f"unknown command {command_id!r}")
+            # WS delivery and REST recovery race the same terminal fact from
+            # separate consumer threads; the builder runs under the journal
+            # lock, so re-checking here makes the second commit an idempotent
+            # no-op instead of a duplicate-content integrity error (the two
+            # observations legitimately differ in local timestamps).
+            if order.terminal_status_recorded and order.status == normalized:
+                return []
+            return [
+                AccountEventSpec(
+                    event_type=AccountEventType.ORDER_STATUS,
+                    idempotency_key=f"order-status:{command_id}:{normalized}",
+                    correlation_id=order.batch_id,
+                    causation_id=command_id,
+                    account_id=self.account_id,
+                    sleeve="account_execution",
+                    symbol=order.symbol,
+                    wall_ts_ns=max(int(local_receive_ts_ns), 1),
+                    monotonic_ns=monotonic_ns,
+                    payload={
+                        "command_id": command_id,
+                        "status": normalized,
+                        "cumulative_filled_qty": _finite(cumulative_filled_qty, label="cumulative_filled_qty"),
+                        "exchange_ts_ns": int(exchange_ts_ns),
+                        "local_receive_ts_ns": int(local_receive_ts_ns),
+                        "rejection_key": rejection_key,
+                        "metadata": json_safe(dict(metadata or {})),
+                    },
+                )
+            ]
+
+        return tuple(self.journal.transact(build, trusted_readonly_builder=True))
 
     def record_close(
         self,

@@ -491,3 +491,45 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
     assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-$REPO_ROOT/data/bybit-continuous-demo-event}"' in wrapper
     assert '--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"' in wrapper
+
+
+def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
+    """A dropped L2 delta must cost one protection cycle, never the owner
+    process: market_ref raises for gapped books and the runner's protection
+    loop has no other handler between it and process exit."""
+
+    from liquidity_migration.account_service_runner import protection_market_refs
+    from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
+
+    healthy = L2BookSnapshot(
+        symbol="BTCUSDT",
+        sequence=100,
+        previous_sequence=99,
+        exchange_ts_ns=900,
+        local_receive_ts_ns=1_000,
+        bids=(BookLevel(9.9, 1.0),),
+        asks=(BookLevel(10.1, 1.0),),
+        sequence_gap=False,
+        clock_offset_estimate_ns=None,
+    )
+    gapped = L2BookSnapshot(
+        symbol="BUSDT",
+        sequence=200,
+        previous_sequence=150,
+        exchange_ts_ns=900,
+        local_receive_ts_ns=1_000,
+        bids=(BookLevel(9.9, 1.0),),
+        asks=(BookLevel(10.1, 1.0),),
+        sequence_gap=True,
+        clock_offset_estimate_ns=None,
+    )
+
+    class Recorder:
+        def current_book(self, symbol: str):
+            return {"BTCUSDT": healthy, "BUSDT": gapped, "TLMUSDT": None}[symbol]
+
+    refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT", "BUSDT", "TLMUSDT"])
+
+    assert set(refs) == {"BTCUSDT"}
+    assert "book_sequence_gap" in skipped["BUSDT"]
+    assert skipped["TLMUSDT"] == "no_book"

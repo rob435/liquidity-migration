@@ -345,19 +345,32 @@ class BybitPrivateClient:
             params["endTime"] = int(end_time_ms)
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        for _ in range(max(1, int(max_pages))):
+        seen_cursors: set[str] = set()
+        page_limit = max(1, int(max_pages))
+        for _ in range(page_limit):
             page_params = dict(params)
             if cursor:
                 page_params["cursor"] = cursor
             payload = self._call_optional(("get_order_history",), **page_params)
             if not payload:
-                break
+                return rows
             result = payload.get("result", {})
             rows.extend(result.get("list", []))
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
-                break
-        return rows
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise BybitDataError(
+                    "Bybit get_order_history returned a non-advancing pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        # Recovery callers reconstruct accounting from these rows; a silently
+        # truncated tail is worse than a failed pass.
+        raise BybitDataError(
+            f"Bybit get_order_history pagination exceeded max_pages={page_limit}; "
+            "refusing an incomplete result"
+        )
 
     def get_trade_history(
         self,
@@ -380,7 +393,9 @@ class BybitPrivateClient:
             params["orderLinkId"] = order_link_id
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        for _ in range(max(1, int(max_pages))):
+        seen_cursors: set[str] = set()
+        page_limit = max(1, int(max_pages))
+        for _ in range(page_limit):
             page_params = dict(params)
             if cursor:
                 page_params["cursor"] = cursor
@@ -389,13 +404,24 @@ class BybitPrivateClient:
                 **page_params,
             )
             if not payload:
-                break
+                return rows
             result = payload.get("result", {})
             rows.extend(result.get("list", []))
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
-                break
-        return rows
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise BybitDataError(
+                    "Bybit get_trade_history returned a non-advancing pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        # Fill recovery reconstructs position truth from these rows; a
+        # silently truncated tail is worse than a failed pass.
+        raise BybitDataError(
+            f"Bybit get_trade_history pagination exceeded max_pages={page_limit}; "
+            "refusing an incomplete result"
+        )
 
     def get_positions(
         self,
@@ -476,7 +502,9 @@ class BybitPrivateClient:
             base_params["endTime"] = int(end_time_ms)
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        for _ in range(max(1, int(max_pages))):
+        seen_cursors: set[str] = set()
+        page_limit = max(1, int(max_pages))
+        for _ in range(page_limit):
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
@@ -486,18 +514,29 @@ class BybitPrivateClient:
             if not payload:
                 if strict:
                     raise BybitDataError("Bybit get_closed_pnl returned no payload")
-                break
+                return rows
             result = payload.get("result", {})
             page_rows = result.get("list") if isinstance(result, Mapping) else None
             if not isinstance(page_rows, list) or any(not isinstance(row, Mapping) for row in page_rows):
                 if strict:
                     raise BybitDataError("Bybit get_closed_pnl returned an invalid result list")
-                break
+                return rows
             rows.extend(dict(row) for row in page_rows)
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
-                break
-        return rows
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise BybitDataError(
+                    "Bybit get_closed_pnl returned a non-advancing pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        # Truncation would silently drop the actual closing record; the
+        # non-strict mode tolerates missing endpoints, never missing tails.
+        raise BybitDataError(
+            f"Bybit get_closed_pnl pagination exceeded max_pages={page_limit}; "
+            "refusing an incomplete result"
+        )
 
     def get_account_transactions(
         self,
@@ -535,7 +574,9 @@ class BybitPrivateClient:
         }
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
-        for _ in range(max(1, int(max_pages))):
+        seen_cursors: set[str] = set()
+        page_limit = max(1, int(max_pages))
+        for _ in range(page_limit):
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
@@ -547,18 +588,30 @@ class BybitPrivateClient:
             if not payload:
                 if strict:
                     raise BybitDataError("Bybit get_transaction_log returned no payload")
-                break
+                return rows
             result = payload.get("result", {})
             page_rows = result.get("list") if isinstance(result, Mapping) else None
             if not isinstance(page_rows, list) or any(not isinstance(row, Mapping) for row in page_rows):
                 if strict:
                     raise BybitDataError("Bybit get_transaction_log returned an invalid result list")
-                break
+                return rows
             rows.extend(dict(row) for row in page_rows)
-            cursor = result.get("nextPageCursor") or None
-            if not cursor:
-                break
-        return rows
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise BybitDataError(
+                    "Bybit get_transaction_log returned a non-advancing pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        # The funding reconciler advances its query window past whatever this
+        # returns; a silently truncated settlement tail would be permanently
+        # skipped while the pass reported healthy.
+        raise BybitDataError(
+            f"Bybit get_transaction_log pagination exceeded max_pages={page_limit}; "
+            "refusing an incomplete result"
+        )
 
     def set_leverage(
         self, *, symbol: str, buy_leverage: float = 1.0, sell_leverage: float | None = None

@@ -158,12 +158,23 @@ class BybitNativeProtectionManager:
                 or anchor.entry_attribution_scope == "none"
             ):
                 continue
+            raw_stop_fraction = metadata.get("stop_loss_pct")
+            if raw_stop_fraction is None or raw_stop_fraction == "":
+                continue
             try:
-                stop_fraction = float(metadata.get("stop_loss_pct") or 0.0)
-            except (TypeError, ValueError):
-                continue
+                stop_fraction = float(str(raw_stop_fraction))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"{symbol} stop_loss_pct is not numeric: {raw_stop_fraction!r}"
+                ) from exc
             if not math.isfinite(stop_fraction) or not 0.0 < stop_fraction < 1.0:
-                continue
+                # Present-but-invalid must fail closed: silently ignoring it
+                # replaced the intended component-anchored stop with the much
+                # wider account fallback fraction and no operator signal.
+                raise RuntimeError(
+                    f"{symbol} stop_loss_pct must be a fraction in (0, 1), "
+                    f"got {raw_stop_fraction!r}"
+                )
             fill_price = float(anchor.entry_fill_vwap)
             explicit.append(
                 fill_price

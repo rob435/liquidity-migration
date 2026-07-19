@@ -263,3 +263,83 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
     assert accepted_target["strategy_id"] == "long-v1"
     assert accepted_target["metadata"]["requested_by_strategy_id"] == "account-protection"
     assert accepted_target["metadata"]["requested_by"] == "account_risk"
+
+
+def test_terminal_partial_entry_keeps_component_protection(tmp_path: Path) -> None:
+    """A partially-filled-then-cancelled entry holds a live position; it must
+    not lose stop/TP evaluation forever (no working remainder can trade after
+    a terminal status, so the anti-race rationale no longer applies)."""
+
+    route = ensure_account_route(
+        account_id="protection",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    clock = VirtualClock(current_wall_ns=1_000, current_monotonic_ns=0)
+    kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id, clock=clock)
+    runtime = AccountKernelRuntime(kernel)
+    entry_market = _market(key="entry-book", price=10.0, ts=1_000)
+    result = runtime.process_cycle(
+        batch_id="entry-partial-terminal",
+        intents=[AdaptedIntent(LongTargetAdapter(), SleeveTargetIntent(
+            decision_key="entry-d",
+            target_key="long/main/BUSDT",
+            strategy_id="long-v1",
+            component_id="main",
+            symbol="BUSDT",
+            signed_notional_usdt=20.0,
+            leverage=10.0,
+            reason="entry",
+            metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
+        ))],
+        market_inputs={"BUSDT": entry_market},
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet-1", 990),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+        execution_adapter=None,
+    )
+    command = result.target_result.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-partial-terminal",
+        exchange_ts_ns=1_100,
+        local_ack_ts_ns=1_150,
+    )
+    kernel.record_fill(
+        command_id=command.command_id,
+        execution_id="partial-then-cancelled",
+        signed_qty=command.signed_qty / 2.0,
+        price=10.0,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_200,
+        local_receive_ts_ns=1_250,
+        metadata={"terminal": True},
+    )
+    order = kernel.state().orders[command.command_id]
+    assert order.status == "partially_filled_cancelled"
+    position_qty = kernel.state().positions["BUSDT"].signed_qty
+    assert position_qty > 0.0
+
+    engine = AccountProtectionEngine(
+        kernel=kernel,
+        inbox=AccountIntentInbox(route),
+        instrument_rules=RULES,
+    )
+    requests = engine.evaluate({"BUSDT": _market(key="tp-book", price=12.1, ts=2_000)})
+    assert len(requests) == 1
+    intent = requests[0].intents[0]
+    assert intent.intent.signed_notional_usdt == 0.0
+    assert intent.intent.reason == "take_profit"
+
+
+def test_present_but_invalid_protection_fraction_fails_closed() -> None:
+    from liquidity_migration.protection_engine import _optional_fraction
+
+    assert _optional_fraction(None) is None
+    assert _optional_fraction("") is None
+    assert _optional_fraction(0.12) == 0.12
+    for invalid in (8, 1.0, 0.0, -0.1, "8", float("nan"), True, object()):
+        with pytest.raises(ValueError):
+            _optional_fraction(invalid)

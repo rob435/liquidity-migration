@@ -525,3 +525,39 @@ def test_duplicate_execution_and_terminal_messages_are_idempotent(tmp_path: Path
     assert len(state.executions) == 1
     assert state.positions["BUSDT"].signed_qty == pytest.approx(2.0)
     assert state.orders[command_id].status == "filled"
+
+
+def test_malformed_known_command_execution_latches_health_failure(tmp_path: Path) -> None:
+    """A fill for a KNOWN command whose qty/price cannot be parsed is missing
+    accounting: it must latch a health-blocking error, never vanish silently."""
+
+    kernel, command_id = _command(tmp_path)
+    kernel.record_ack(
+        command_id=command_id,
+        accepted=True,
+        venue_order_id="venue-malformed",
+        exchange_ts_ns=1_150_000_000,
+        local_ack_ts_ns=1_151_000_000,
+    )
+    message = _execution(command_id)
+    message["data"][0]["execPrice"] = None  # type: ignore[index]
+
+    class RecordingManager:
+        def __init__(self) -> None:
+            self.failures: list[tuple[dict, Exception]] = []
+
+        def is_position_execution(self, row) -> bool:
+            return True
+
+        def note_adoption_failure(self, row, exc) -> None:
+            self.failures.append((dict(row), exc))
+
+    manager = RecordingManager()
+    BybitAccountExecutionConsumer(
+        kernel=kernel,
+        native_protection_manager=manager,  # type: ignore[arg-type]
+    ).on_execution(message, local_receive_ts_ns=1_210_000_000)
+
+    assert "exec-1" not in kernel.state().executions
+    assert len(manager.failures) == 1
+    assert "malformed" in str(manager.failures[0][1])

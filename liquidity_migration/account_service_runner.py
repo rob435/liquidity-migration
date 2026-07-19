@@ -6,7 +6,7 @@ import argparse
 import logging
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -22,6 +22,7 @@ from .account_execution_config import (
 from .account_kernel import (
     AccountExecutionKernel,
     AccountRiskSnapshot,
+    MarketInputRef,
 )
 from .account_market_readiness import (
     RequestedMarketWarmupGate,
@@ -102,6 +103,37 @@ def _run_reconciliation_cycle(
     funding_report = funding_reconciler.reconcile_once()
     position_report = reconciler.reconcile_once()
     return position_report, funding_report
+
+
+def protection_market_refs(
+    recorder: Any,
+    symbols: Iterable[str],
+) -> tuple[dict[str, MarketInputRef], dict[str, str]]:
+    """Build component-protection market refs, skipping unusable books.
+
+    ``L2BookSnapshot.market_ref`` fails closed (ValueError) for gapped,
+    crossed, empty, or otherwise invalid books. The protection loop must
+    skip that symbol for one cycle — the venue-native disaster stop stays
+    armed independently — instead of letting the exception kill the owner
+    process, which would stop execution, reconciliation, health publishing,
+    and every protection at once.
+    """
+
+    refs: dict[str, MarketInputRef] = {}
+    skipped: dict[str, str] = {}
+    for symbol in symbols:
+        book = recorder.current_book(symbol)
+        if book is None:
+            skipped[symbol] = "no_book"
+            continue
+        try:
+            refs[symbol] = book.market_ref(
+                input_key=f"protection:{symbol}:{book.sequence}",
+                source="bybit_raw_l2",
+            )
+        except ValueError as exc:
+            skipped[symbol] = str(exc)[:120]
+    return refs, skipped
 
 
 def notification_position_truth(
@@ -570,28 +602,42 @@ def main(argv: list[str] | None = None) -> int:
             )
             requested_symbols_ready = market_readiness.ready
             symbol_health_detail = market_readiness.detail
-            protection_markets = {}
-            for symbol in {
-                str(target.get("symbol") or "").upper()
-                for target in kernel._state_ref().component_targets.values()
-                if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
-            }:
-                book = recorder.current_book(symbol)
-                if book is not None:
-                    protection_markets[symbol] = book.market_ref(
-                        input_key=f"protection:{symbol}:{book.sequence}",
-                        source="bybit_raw_l2",
-                    )
+            protection_markets, protection_skipped = protection_market_refs(
+                recorder,
+                {
+                    str(target.get("symbol") or "").upper()
+                    for target in kernel._state_ref().component_targets.values()
+                    if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
+                },
+            )
+            if protection_skipped:
+                _logger.warning(
+                    "component protection skipped unusable books this cycle: %s",
+                    "; ".join(f"{symbol}={reason}" for symbol, reason in sorted(protection_skipped.items())),
+                )
+            protection_evaluation_error = ""
             if protection_markets:
-                protection_engine.evaluate(protection_markets)
+                try:
+                    protection_engine.evaluate(protection_markets)
+                except Exception as exc:  # noqa: BLE001 - protection failure blocks health, never the owner
+                    _logger.exception("component protection evaluation failed")
+                    protection_evaluation_error = (
+                        f"component protection evaluation failed: {type(exc).__name__}: {exc}"
+                    )[:240]
             reconcile_healthy = bool(latest_reconcile_report is not None and latest_reconcile_report.healthy)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY
-                if (requested_symbols_ready and reconcile_healthy and private_stream_status is True)
+                if (
+                    requested_symbols_ready
+                    and reconcile_healthy
+                    and private_stream_status is True
+                    and not protection_evaluation_error
+                )
                 else AccountOwnerHealthStatus.BLOCKED
             )
             health_details = [
                 symbol_health_detail if not requested_symbols_ready else "",
+                protection_evaluation_error,
             ]
             if not reconcile_healthy and latest_reconcile_report is not None:
                 health_details.append(

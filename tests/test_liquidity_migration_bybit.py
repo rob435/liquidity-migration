@@ -2255,3 +2255,56 @@ def test_private_transport_fails_unknown_methods_into_mutation_boundary(
         mutation_lease=held_demo_mutation_lease("k"),
     )
     assert owner._call("amend_order", orderId="o1")["result"]["orderId"] == "amended"
+
+
+def test_get_transaction_log_refuses_truncated_pagination(monkeypatch) -> None:
+    """The funding reconciler advances its window past whatever this returns;
+    silently truncating at max_pages would permanently skip settlements."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.page = 0
+
+        def get_transaction_log(self, **params):
+            self.page += 1
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"id": f"row-{self.page}"}],
+                    "nextPageCursor": f"page-{self.page + 1}",
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    with pytest.raises(bybit.BybitDataError, match="exceeded max_pages"):
+        client.get_account_transactions(
+            transaction_type="SETTLEMENT",
+            start_time_ms=1_000,
+            end_time_ms=2_000,
+            max_pages=3,
+            strict=True,
+        )
+
+
+def test_get_trade_history_refuses_non_advancing_cursor(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.calls = 0
+
+        def get_executions(self, **params):
+            self.calls += 1
+            return {
+                "retCode": 0,
+                "result": {
+                    "list": [{"execId": f"dup-{self.calls}"}],
+                    "nextPageCursor": "stuck",
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    with pytest.raises(bybit.BybitDataError, match="non-advancing"):
+        client.get_trade_history(symbol="FOOUSDT", max_pages=10)
