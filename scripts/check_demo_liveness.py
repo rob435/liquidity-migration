@@ -48,6 +48,7 @@ from liquidity_migration._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
 from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
 from liquidity_migration.account_owner_health import (  # noqa: E402
+    AccountOwnerMarketWarmupPending,
     require_recent_account_owner_health,
     validate_systemd_invocation_id,
 )
@@ -79,9 +80,6 @@ _LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
 _LONG_PAPER_UNIT = "liquidity-migration-bybit-long-paper.service"
 _CONTINUOUS_DEMO_UNIT = "liquidity-migration-bybit-continuous-demo.service"
 _CONTINUOUS_PAPER_UNIT = "liquidity-migration-bybit-continuous-paper.service"
-_QUEUE_HEAD_STARTUP_DETAIL_PREFIX = "account owner is blocked: waiting for queue-head market data:"
-
-
 def _default_root(rel: str) -> str:
     """Anchor a default data root at the repo dir (NOT the CWD).
 
@@ -987,17 +985,11 @@ def gather_account_owner_health_alerts(
                 now_ns=now_ms * 1_000_000,
             )
     except (OSError, RuntimeError, ValueError) as exc:
-        if (
-            type(exc) is RuntimeError
-            and str(exc).startswith(_QUEUE_HEAD_STARTUP_DETAIL_PREFIX)
-            and _within_startup_grace(
-                unit_runtime,
-                max_age_minutes=startup_grace_minutes,
-            )
-        ):
+        if isinstance(exc, AccountOwnerMarketWarmupPending):
             # The owner remains blocked and target producers still fail closed.
-            # Suppress only the observer page while this generation establishes
-            # its dynamic queue-head L2 subscription.
+            # This exact detail is the nonterminal <=30s dynamic-subscription
+            # transition. Suppress only its observer page; a latched timeout has
+            # a different detail and still pages regardless of service age.
             return []
         return [
             Alert(
@@ -1010,6 +1002,36 @@ def gather_account_owner_health_alerts(
             )
         ]
     return []
+
+
+def coalesce_demo_account_alerts(
+    reconciliation_alerts: list[Alert],
+    owner_alerts: list[Alert],
+) -> list[Alert]:
+    """Drop only the owner-health echo of an already-reported root mismatch."""
+
+    reconciliation_unhealthy = any(
+        alert.key == "account_health_unhealthy"
+        for alert in reconciliation_alerts
+    )
+    if not reconciliation_unhealthy:
+        return [*reconciliation_alerts, *owner_alerts]
+    dependent_fragments = (
+        "account reconciliation unhealthy",
+        "account reconciliation mismatch",
+    )
+    independent_owner_alerts = [
+        alert
+        for alert in owner_alerts
+        if not (
+            alert.key == "account_owner_health:demo"
+            and any(
+                fragment in alert.message.lower()
+                for fragment in dependent_fragments
+            )
+        )
+    ]
+    return [*reconciliation_alerts, *independent_owner_alerts]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1199,19 +1221,21 @@ def main() -> int:
                 expected_owner_uid=paper_owner_uid,
             )
         )
-    alerts.extend(
-        gather_account_health_alerts(
-            account_root=Path(args.account_root),
-            max_age_minutes=args.max_account_health_age_min,
-        )
+    demo_reconciliation_alerts = gather_account_health_alerts(
+        account_root=Path(args.account_root),
+        max_age_minutes=args.max_account_health_age_min,
+    )
+    demo_owner_alerts = gather_account_owner_health_alerts(
+        account_root=Path(args.account_root),
+        environment="demo",
+        max_age_minutes=args.max_account_health_age_min,
+        startup_grace_minutes=args.max_cycle_age_min,
+        unit_runtime=unit_runtime.get(_DEMO_ACCOUNT_OWNER_UNIT),
     )
     alerts.extend(
-        gather_account_owner_health_alerts(
-            account_root=Path(args.account_root),
-            environment="demo",
-            max_age_minutes=args.max_account_health_age_min,
-            startup_grace_minutes=args.max_cycle_age_min,
-            unit_runtime=unit_runtime.get(_DEMO_ACCOUNT_OWNER_UNIT),
+        coalesce_demo_account_alerts(
+            demo_reconciliation_alerts,
+            demo_owner_alerts,
         )
     )
     if args.account_scope == "demo-paper" and paper_root_alert is None:

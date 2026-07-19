@@ -61,9 +61,15 @@ builder an isolated committed state, validates and reduces every proposed event,
 writes one immutable transaction, then publishes the new in-process cache. A
 projection-write failure cannot roll back or replace the committed transaction.
 
-Current readers use `read_account_journal(..., verify=True)` or
+Cold/stateful readers use `read_account_journal(..., verify=True)` or
 `verify_account_journal(...)`. Strategy state, reconciliation, venue accounting,
-owner health, and reset receipts reopen the verified account journal directly.
+reset receipts, owner startup, and the liveness journal audit reopen and reduce
+the full verified journal. Hot owner-health consumers instead scan the immutable
+transaction filename sequence and authenticate only the latest transaction
+payload before matching its exact sequence, account ID, and state hash to a
+fresh health projection. That head read avoids replaying payload history; it is
+valid only because every serving owner generation completed the full startup
+verification, and it does not replace the independent full liveness audit.
 There is no separate journal CLI or parallel lifecycle journal.
 
 ## Epoch reset

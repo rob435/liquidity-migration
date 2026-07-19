@@ -398,21 +398,40 @@ class BybitNativeProtectionManager:
                 sl_trigger_by="MarkPrice",
                 tp_trigger_by=None,
             )
-            superseded_venue_order_ids = {
+            prior_venue_order_ids = {
                 str(value)
                 for value in (
-                    ((active[1].get("metadata") or {}).get("superseded_venue_order_ids") or ())
+                    (
+                        (active[1].get("metadata") or {}).get("native_venue_order_id_lineage")
+                        or ()
+                    )
                     if active is not None
                     else ()
                 )
                 if str(value)
             }
+            if active is not None:
+                active_metadata = active[1].get("metadata") or {}
+                prior_venue_order_ids.update(
+                    str(value)
+                    for value in (
+                        active_metadata.get("superseded_venue_order_ids") or ()
+                    )
+                    if str(value)
+                )
+                installed_venue_order_id = str(
+                    active_metadata.get("venue_order_id") or ""
+                )
+                if installed_venue_order_id:
+                    prior_venue_order_ids.add(installed_venue_order_id)
             prior_observed_order_id = self.observed_native_order_ids.get(symbol, "")
             if prior_observed_order_id:
-                superseded_venue_order_ids.add(prior_observed_order_id)
-            # A replacement/repair creates a new exchange-owned conditional
-            # order identity. Never let an order id observed for the prior plan
-            # authenticate an execution against the replacement.
+                prior_venue_order_ids.add(prior_observed_order_id)
+            # Bybit Full-position TP/SL updates modify an existing system order
+            # and adjust its quantity; they do not promise a new orderId. Clear
+            # the current binding until REST/WS proves the post-update row, but
+            # retain the verified native lineage so an exchange-reused identity
+            # is not misclassified as a foreign conditional order.
             self.observed_native_order_ids.pop(symbol, None)
             observed_ns = self.clock.wall_time_ns()
             activation_key, activation_revision = self._next_activation(plan)
@@ -444,7 +463,11 @@ class BybitNativeProtectionManager:
                         "native_exchange": True,
                         "protection_plan_key": plan.protection_key,
                         "activation_revision": activation_revision,
-                        "superseded_venue_order_ids": sorted(superseded_venue_order_ids),
+                        # Retain the historical key for replay compatibility.
+                        # These IDs are prior revisions, not an authentication
+                        # blacklist: Bybit may reuse one for the active Full stop.
+                        "superseded_venue_order_ids": sorted(prior_venue_order_ids),
+                        "native_venue_order_id_lineage": sorted(prior_venue_order_ids),
                         "symbol": symbol,
                         "signed_qty": plan.signed_qty,
                         "stop_source": plan.stop_source,
@@ -775,27 +798,40 @@ class BybitNativeProtectionManager:
         venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
         if not venue_order_id:
             return False
-        expected = str((active[1].get("metadata") or {}).get("venue_order_id") or "")
+        metadata = active[1].get("metadata") or {}
+        expected = str(metadata.get("venue_order_id") or "")
         observed = self.observed_native_order_ids.get(symbol, "")
-        superseded = {
+        lineage = {
             str(value)
             for value in (
-                (active[1].get("metadata") or {}).get("superseded_venue_order_ids") or ()
+                metadata.get("native_venue_order_id_lineage") or ()
             )
             if str(value)
         }
-        if venue_order_id in superseded:
-            return False
-        if expected:
-            return venue_order_id == expected
-        if observed:
-            return venue_order_id == observed
+        lineage.update(
+            str(value)
+            for value in (metadata.get("superseded_venue_order_ids") or ())
+            if str(value)
+        )
+        if venue_order_id == expected and expected:
+            return True
+        if venue_order_id == observed and observed:
+            return True
         trigger = _optional_float(row.get("triggerPrice") or row.get("trigger_price"))
         active_stop = _optional_float(active[1].get("stop_price"))
         rule = self.rules.get(symbol)
         if trigger is None or active_stop is None or rule is None:
             return False
-        return abs(trigger - active_stop) <= max(rule.tick_size / 2.0, 1e-12)
+        trigger_matches = abs(trigger - active_stop) <= max(rule.tick_size / 2.0, 1e-12)
+        if venue_order_id in lineage:
+            if (expected and venue_order_id != expected) or (
+                observed and venue_order_id != observed
+            ):
+                return False
+            return trigger_matches
+        if expected or observed:
+            return False
+        return trigger_matches
 
     @_serialized_manager_method
     def native_execution_identity_evidence(self, row: Mapping[str, Any]) -> str:
@@ -806,12 +842,27 @@ class BybitNativeProtectionManager:
         venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
         if not venue_order_id:
             return ""
-        expected = str((active[1].get("metadata") or {}).get("venue_order_id") or "")
+        metadata = active[1].get("metadata") or {}
+        expected = str(metadata.get("venue_order_id") or "")
         observed = self.observed_native_order_ids.get(symbol, "")
-        if expected:
-            return "matched_installed_venue_order_id" if venue_order_id == expected else ""
-        if observed:
-            return "matched_verified_native_order_event" if venue_order_id == observed else ""
+        if venue_order_id == expected and expected:
+            return "matched_installed_venue_order_id"
+        if venue_order_id == observed and observed:
+            return "matched_verified_native_order_event"
+        lineage = {
+            str(value)
+            for value in (metadata.get("native_venue_order_id_lineage") or ())
+            if str(value)
+        }
+        lineage.update(
+            str(value)
+            for value in (metadata.get("superseded_venue_order_ids") or ())
+            if str(value)
+        )
+        if venue_order_id in lineage and _has_native_stop_provenance(row):
+            return "matched_known_native_order_lineage"
+        if expected or observed:
+            return ""
         return "bybit_stop_provenance_unbound" if _has_native_stop_provenance(row) else ""
 
     @_serialized_manager_method

@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, DeterministicIds, SystemClock
 from .storage import exclusive_file_lock
@@ -42,6 +44,9 @@ ACCOUNT_JOURNAL_LOCK_FILENAME = "journal.lock"
 ACCOUNT_TRANSACTIONS_DIRECTORY = "transactions"
 GENESIS_HASH = "0" * 64
 _EVENT_NAMESPACE = uuid.UUID("16cac165-fc18-4d5b-b0f7-44bdf47bbac9")
+_ACCOUNT_TRANSACTION_FILENAME = re.compile(
+    r"(?P<first>[0-9]{20})-(?P<last>[0-9]{20})-(?P<hash>[0-9a-f]{16})[.]json"
+)
 
 
 class AccountKernelError(RuntimeError):
@@ -812,6 +817,129 @@ def read_account_journal(root: str | Path, *, verify: bool = True) -> list[Accou
             "reset the account root explicitly"
         )
     return []
+
+
+def read_account_journal_head(root: str | Path) -> AccountEvent | None:
+    """Read the current immutable head without replaying payload history.
+
+    This metadata-only hot-path binding primitive is not a replacement for
+    :func:`read_account_journal` or startup/full integrity verification.  It
+    validates the complete filename sequence, the latest transaction hash,
+    every event shape/hash inside that latest transaction, and its local hash
+    chain.  Earlier transaction payloads remain the responsibility of the full
+    verifier that every account-owner generation runs before serving.
+    """
+
+    directory = account_transactions_path(root)
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(
+                entry.name
+                for entry in entries
+                if entry.name.endswith(".json")
+            )
+    except FileNotFoundError:
+        names = []
+    except NotADirectoryError as exc:
+        raise AccountJournalIntegrityError(
+            f"account transaction path is not a directory: {directory}"
+        ) from exc
+
+    if not names:
+        projection = account_journal_path(root)
+        if projection.exists() and projection.stat().st_size > 0:
+            raise AccountJournalIntegrityError(
+                "account journal has events.jsonl but no authoritative transaction segments; "
+                "reset the account root explicitly"
+            )
+        return None
+
+    expected_first = 1
+    latest_match: re.Match[str] | None = None
+    for name in names:
+        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
+        if match is None:
+            raise AccountJournalIntegrityError(
+                f"invalid account transaction filename: {name}"
+            )
+        first_sequence = int(match.group("first"))
+        last_sequence = int(match.group("last"))
+        if first_sequence != expected_first:
+            raise AccountJournalIntegrityError(
+                "account transaction filename sequence gap: "
+                f"got {first_sequence}, expected {expected_first}"
+            )
+        if last_sequence < first_sequence:
+            raise AccountJournalIntegrityError(
+                f"account transaction filename has an inverted range: {name}"
+            )
+        expected_first = last_sequence + 1
+        latest_match = match
+
+    assert latest_match is not None
+    latest_name = names[-1]
+    latest_path = directory / latest_name
+    try:
+        snapshot = read_stable_file(
+            latest_path,
+            label="latest account transaction",
+            reject_empty=True,
+            require_single_link=True,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AccountJournalIntegrityError(
+            f"cannot read latest account transaction {latest_path}: {exc}"
+        ) from exc
+    transaction_events = _read_transaction_event_bytes(
+        [(str(snapshot.path), snapshot.data)]
+    )
+    assert transaction_events is not None
+    try:
+        payload = json.loads(snapshot.data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover - parsed above
+        raise AccountJournalIntegrityError(
+            f"invalid latest account transaction {latest_path}: {exc}"
+        ) from exc
+    transaction_hash = str(payload.get("transaction_hash") or "")
+    if transaction_hash[:16] != latest_match.group("hash"):
+        raise AccountJournalIntegrityError(
+            f"account transaction filename hash mismatch: {latest_name}"
+        )
+    if transaction_events[0].sequence != int(latest_match.group("first")):
+        raise AccountJournalIntegrityError(
+            f"account transaction filename first sequence mismatch: {latest_name}"
+        )
+    if transaction_events[-1].sequence != int(latest_match.group("last")):
+        raise AccountJournalIntegrityError(
+            f"account transaction filename last sequence mismatch: {latest_name}"
+        )
+
+    account_id = transaction_events[0].account_id
+    previous: AccountEvent | None = None
+    for expected_sequence, event in enumerate(
+        transaction_events,
+        start=transaction_events[0].sequence,
+    ):
+        _validate_event_shape(event)
+        if event.sequence != expected_sequence:
+            raise AccountJournalIntegrityError(
+                "account sequence gap inside latest transaction: "
+                f"got {event.sequence}, expected {expected_sequence}"
+            )
+        if event.account_id != account_id:
+            raise AccountJournalIntegrityError(
+                "latest account transaction contains multiple account ids"
+            )
+        if previous is not None and event.prev_event_hash != previous.event_hash:
+            raise AccountJournalIntegrityError(
+                f"account hash-chain break inside latest transaction at sequence {event.sequence}"
+            )
+        if event.event_hash != _event_hash(event.to_dict()):
+            raise AccountJournalIntegrityError(
+                f"account event hash mismatch at sequence {event.sequence}"
+            )
+        previous = event
+    return transaction_events[-1]
 
 
 def read_account_journal_bytes(

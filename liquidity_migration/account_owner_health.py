@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .artifact_snapshot import read_stable_file
-from .account_kernel import GENESIS_HASH, read_account_journal
+from .account_kernel import GENESIS_HASH, AccountEvent, read_account_journal_head
 from .deterministic_serialization import canonical_json
 
 
@@ -32,11 +32,16 @@ TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
 # operator-facing watchdog. Owners normally publish every five seconds.
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS = 3
+QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX = "waiting for queue-head market data:"
 
 
 class AccountOwnerHealthStatus(StrEnum):
     HEALTHY = "healthy"
     BLOCKED = "blocked"
+
+
+class AccountOwnerMarketWarmupPending(RuntimeError):
+    """Fresh owner health is fail-closed during bounded queue-head L2 warmup."""
 
 
 def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
@@ -290,7 +295,14 @@ def require_recent_account_owner_health(
     expected_account_id: str | None = None,
     expected_invocation_id: str | None = None,
 ) -> AccountOwnerHealth:
-    """Require fresh health bound to the verified canonical journal head."""
+    """Require fresh health bound to a current authoritative journal head.
+
+    The owner verifies and reconstructs the full journal before publishing any
+    health for its systemd generation. Hot-path consumers bind that health to
+    the latest immutable transaction segment without parsing and reducing every
+    historical payload. Full journal audits remain separate and are not
+    weakened by this metadata-only head read.
+    """
 
     if environment not in {"demo", "paper"}:
         raise ValueError("expected owner environment must be 'demo' or 'paper'")
@@ -314,10 +326,6 @@ def require_recent_account_owner_health(
                 "account-owner health invocation id does not match the current systemd generation: "
                 f"health={health.invocation_id}, expected={expected_generation}"
             )
-        if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
-            raise RuntimeError(f"account owner is blocked: {health.detail or 'no detail'}")
-        if not health.requested_symbols_ready:
-            raise RuntimeError("account owner has unready requested symbols")
         observed_now = time.time_ns() if now_ns is None else int(now_ns)
         age_ns = observed_now - health.observed_ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
@@ -327,35 +335,54 @@ def require_recent_account_owner_health(
                 f"account-owner health account_id is {health.account_id!r}, "
                 f"expected {expected_account_id!r}"
             )
+        # Freshness and generation precede status detail. Otherwise a process
+        # that hangs while blocked can leave a nonterminal message masking a
+        # stale heartbeat indefinitely from the watchdog.
+        if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
+            detail = health.detail or "no detail"
+            error = f"account owner is blocked: {detail}"
+            if detail.startswith(QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX):
+                raise AccountOwnerMarketWarmupPending(error)
+            raise RuntimeError(error)
+        if not health.requested_symbols_ready:
+            raise RuntimeError("account owner has unready requested symbols")
 
-    # The projection is replaced every few seconds. A replacement that retains
-    # the same journal binding is harmless heartbeat churn and must not take a
-    # producer down merely because journal verification spans that heartbeat.
-    # A projection pointing at a different head is retried and still fails
-    # closed if the journal never converges to it.
+    def matches_head(
+        candidate: AccountOwnerHealth,
+        head: AccountEvent | None,
+    ) -> bool:
+        journal_sequence = head.sequence if head is not None else 0
+        journal_state_hash = head.state_hash if head is not None else GENESIS_HASH
+        return (
+            candidate.journal_sequence == journal_sequence
+            and candidate.journal_state_hash == journal_state_hash
+            and (head is None or candidate.account_id == head.account_id)
+        )
+
+    # Health publication follows the journal transaction it names. Read a
+    # health/head/health triplet so either health observation may bind to the
+    # immutable head's linearization point. Ordinary heartbeat replacement and
+    # a concurrent append are harmless; a head with no matching fresh health
+    # still fails closed after bounded retries.
     saw_churn = False
     health: AccountOwnerHealth | None = None
-    events: list[Any] = []
+    head: AccountEvent | None = None
     for _attempt in range(ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS):
         before = read_account_owner_health(root)
         validate_health(before)
-        events = read_account_journal(root, verify=True)
+        head = read_account_journal_head(root)
         health = read_account_owner_health(root)
         validate_health(health)
         saw_churn = saw_churn or health != before
-        journal_sequence = events[-1].sequence if events else 0
-        journal_state_hash = events[-1].state_hash if events else GENESIS_HASH
-        if (
-            health.journal_sequence == journal_sequence
-            and health.journal_state_hash == journal_state_hash
-            and (not events or health.account_id == events[-1].account_id)
-        ):
+        if matches_head(health, head):
             return health
+        if matches_head(before, head):
+            return before
     if saw_churn:
         raise RuntimeError("account-owner health changed while binding the journal head")
     assert health is not None
-    journal_sequence = events[-1].sequence if events else 0
-    journal_state_hash = events[-1].state_hash if events else GENESIS_HASH
+    journal_sequence = head.sequence if head is not None else 0
+    journal_state_hash = head.state_hash if head is not None else GENESIS_HASH
     if health.journal_sequence != journal_sequence:
         raise RuntimeError(
             "account-owner health journal sequence mismatch: "
@@ -363,7 +390,8 @@ def require_recent_account_owner_health(
         )
     if health.journal_state_hash != journal_state_hash:
         raise RuntimeError("account-owner health journal state hash mismatch")
+    assert head is not None
     raise RuntimeError(
         f"account-owner health account_id {health.account_id!r} does not match "
-        f"journal account_id {events[-1].account_id!r}"
+        f"journal account_id {head.account_id!r}"
     )

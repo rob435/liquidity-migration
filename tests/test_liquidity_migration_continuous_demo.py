@@ -428,6 +428,62 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
     )
 
 
+def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
+    signal_ts = 1_700_000_000_000
+    state = pl.DataFrame(
+        {
+            "symbol": ["TLMUSDT"],
+            "decile": [9],
+            "composite": [0.9],
+            "turnover_quote": [1_000_000.0],
+            "rv_168h": [0.01],
+        }
+    )
+    prior = pl.DataFrame(
+        [{
+            "trade_id": f"continuous_fade_v2-TLMUSDT-{signal_ts}",
+            "strategy_id": "continuous_fade_v2",
+            "symbol": "TLMUSDT",
+            "status": "closed",
+            "signal_ts_ms": signal_ts,
+        }]
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_symbols=set(),
+        reservations_count=0,
+        entry_capacity=1,
+        all_trades=prior,
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"TLMUSDT": 0.0017},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=ContinuousDemoCycleConfig(
+            max_active=1,
+            max_new_entries_per_cycle=1,
+            ensemble_components=(("p3", "none", 0, 0.12, 1.0),),
+        ),
+        active_entries_enabled=True,
+    )
+
+    reasons = _qualified_block_reasons(
+        observed,
+        preselection_reason="",
+        btc_risk_reason="",
+    )
+    blocked = _blocked_rows_from_reasons(observed, reasons)
+
+    assert observed.funnel_rows[0]["age"] == 1
+    assert observed.funnel_rows[0]["capacity"] == 0
+    assert blocked == [{
+        "component": "p3",
+        "symbol": "TLMUSDT",
+        "first_rejection_reason": "same_signal_reentry",
+    }]
+
+
 def test_listing_age_is_authoritative_over_the_rolling_kline_cache() -> None:
     now_ms = 1_000 * MS_PER_DAY
     universe = pl.DataFrame(
