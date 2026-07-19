@@ -1092,6 +1092,30 @@ def _enable_portable_account_io() -> None:
     setattr(replay_module, "JsonlStrategyEventTape", lambda _path: MemoryStrategyEventTape())
 
 
+@contextlib.contextmanager
+def _portable_account_io() -> Iterator[None]:
+    """Scope the non-durable historical replay port to one replay call."""
+
+    originals = (
+        account_kernel_module.exclusive_file_lock,
+        account_kernel_module._atomic_replace,
+        account_kernel_module._write_transaction,
+        account_kernel_module._append_jsonl_projection,
+        replay_module.JsonlStrategyEventTape,
+    )
+    _enable_portable_account_io()
+    try:
+        yield
+    finally:
+        (
+            account_kernel_module.exclusive_file_lock,
+            account_kernel_module._atomic_replace,
+            account_kernel_module._write_transaction,
+            account_kernel_module._append_jsonl_projection,
+            replay_module.JsonlStrategyEventTape,
+        ) = originals
+
+
 def _account_sample(ledger: pl.DataFrame) -> pl.DataFrame:
     selected: list[pl.DataFrame] = []
     for sleeve in ("long", "continuous"):
@@ -1110,9 +1134,25 @@ def _replay_account(
     work_root: Path,
     long_costs: CostConfig,
 ) -> dict[str, Any]:
-    _enable_portable_account_io()
     if _PORTABLE_TRANSACTION_BUFFER:
         raise RuntimeError("portable transaction buffer was not empty at replay start")
+    try:
+        with _portable_account_io():
+            return _replay_account_with_portable_io(
+                ledger,
+                work_root=work_root,
+                long_costs=long_costs,
+            )
+    finally:
+        _PORTABLE_TRANSACTION_BUFFER.clear()
+
+
+def _replay_account_with_portable_io(
+    ledger: pl.DataFrame,
+    *,
+    work_root: Path,
+    long_costs: CostConfig,
+) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for sleeve in ("long", "continuous"):
         part = ledger.filter(pl.col("sleeve") == sleeve).sort(["entry_ts_ms", "symbol"])

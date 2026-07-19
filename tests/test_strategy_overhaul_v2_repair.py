@@ -24,6 +24,10 @@ def _load():
 
 
 MOD = _load()
+REQUIRES_LOCAL_LEDGER = pytest.mark.skipif(
+    not MOD.BAREBONES_LEDGER.is_file(),
+    reason="frozen Strategy Overhaul V2 ledger is a local research artifact",
+)
 
 
 def test_compare_rmom_requires_exact_stable_key_set_and_values() -> None:
@@ -57,6 +61,7 @@ def test_compare_rmom_requires_exact_stable_key_set_and_values() -> None:
         )
 
 
+@REQUIRES_LOCAL_LEDGER
 def test_load_ledger_pins_counts_keys_and_pnl_identities() -> None:
     ledger = MOD._load_and_validate_ledger()
 
@@ -64,6 +69,7 @@ def test_load_ledger_pins_counts_keys_and_pnl_identities() -> None:
     assert ledger["source_key"].n_unique() == ledger.height
 
 
+@REQUIRES_LOCAL_LEDGER
 def test_source_key_hash_matches_frozen_samples() -> None:
     ledger = MOD._load_and_validate_ledger()
     sample = MOD.phase3._account_sample(ledger)

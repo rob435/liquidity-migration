@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import scripts.analyze_strategy_overhaul_v2 as analysis_module
 from liquidity_migration._common import MS_PER_HOUR
 from liquidity_migration.config import CostConfig
 from scripts.analyze_strategy_overhaul_v2 import (
@@ -211,11 +212,25 @@ def test_portable_account_replay_reconciles_and_finishes_flat(tmp_path: Path, mo
     )
 
     monkeypatch.setattr("scripts.analyze_strategy_overhaul_v2.os.fsync", lambda _fd: pytest.fail("unexpected fsync"))
+    originals = (
+        analysis_module.account_kernel_module.exclusive_file_lock,
+        analysis_module.account_kernel_module._atomic_replace,
+        analysis_module.account_kernel_module._write_transaction,
+        analysis_module.account_kernel_module._append_jsonl_projection,
+        analysis_module.replay_module.JsonlStrategyEventTape,
+    )
     receipt = _replay_account(
         ledger,
         work_root=tmp_path / "account-work",
         long_costs=CostConfig(),
     )
+    assert (
+        analysis_module.account_kernel_module.exclusive_file_lock,
+        analysis_module.account_kernel_module._atomic_replace,
+        analysis_module.account_kernel_module._write_transaction,
+        analysis_module.account_kernel_module._append_jsonl_projection,
+        analysis_module.replay_module.JsonlStrategyEventTape,
+    ) == originals
 
     assert receipt["long"]["final_flat"] is True
     assert receipt["continuous"]["final_flat"] is True
