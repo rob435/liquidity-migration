@@ -135,13 +135,20 @@ DELISTING_FAILED_ATTEMPT_ROOT = (
 DELISTING_FAILED_ATTEMPT_TERMINATION = (
     DELISTING_FAILED_ATTEMPT_ROOT / "termination.json"
 )
+FOUR_HOUR_CAP_FAILED_ATTEMPT_ROOT = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-f0ece1a035cc-four-hour-cap"
+)
+FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION = (
+    FOUR_HOUR_CAP_FAILED_ATTEMPT_ROOT / "termination.json"
+)
 SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION = (
     EPOCH_ROOT
     / "venue-lifecycle/.bybit-census-search-v2.working-query-highlight/termination.json"
 )
 
 EXPECTED_BASE_CONTRACT_SHA256 = "15edc498adf2bd068c33ff2f791fa3e46f161196db673a839adcf317aba35a31"
-EXPECTED_AMENDMENTS_SHA256 = "9f4105b1a6c267fb40546ff6769c8be143ba1f250e40ae6f7f559d9c6e70862b"
+EXPECTED_AMENDMENTS_SHA256 = "b1e00187f94c796dc74862fc5ff38efac3ce3cf5864b0f4244c327db5a0fb282"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
@@ -155,6 +162,7 @@ EXPECTED_SHARED_PROJECTION_FAILED_ATTEMPT_TERMINATION_SHA256 = "28eac53954835d79
 EXPECTED_PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION_SHA256 = "ec37b1bb95d8e7aac4780716504f74d87aba6a93ec9082e824d796906167c80a"
 EXPECTED_OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION_SHA256 = "75382d0ed1c6e75f9fbdb2bd0f018c955a488850ca39539b9d9f427d211d6dae"
 EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256 = "aa4ed1e13dfb8c0828647d10dea4dd09fac5532764f907cfc52321f08e12288e"
+EXPECTED_FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION_SHA256 = "56c51f48f05ebe289ed9abe6e4b6beb59762bf5fd33fafff1b54de3d2be50c6b"
 EXPECTED_SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION_SHA256 = "f9eb3ff6c9311da43db8a156ce883022ea963b35a9245b8fdfafc0f54d3d961f"
 EXPECTED_PREFIX_IDENTITIES = {
     "traces/continuous_gates/part-00000.parquet": (
@@ -226,7 +234,7 @@ LONG_START_MS = 1_677_628_800_000  # 2023-03-01T00:00:00Z
 CONTINUOUS_START_MS = 1_680_307_200_000  # 2023-04-01T00:00:00Z
 END_MS = 1_783_641_600_000  # 2026-07-10T00:00:00Z
 CAPITAL_USDT = 1_000_000.0
-MAX_ELAPSED_SECONDS = 14_400
+MAX_ELAPSED_SECONDS = 28_800
 PORTABLE_SEGMENT_MAX_EVENTS = 4096
 
 
@@ -581,6 +589,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "delisting_failed_attempt_termination": (
             DELISTING_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "four_hour_cap_failed_attempt_termination": (
+            FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION_SHA256,
         ),
         "search_highlight_failed_attempt_termination": (
             SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION,
@@ -1141,7 +1153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
         if time.perf_counter() - started > MAX_ELAPSED_SECONDS:
-            raise RuntimeError("active comparator exceeded its registered four-hour cap")
+            raise RuntimeError("active comparator exceeded its registered elapsed-time cap")
 
     boundary_flats = comparator.boundary_flatten(END_MS)
     structural = comparator.final_structural_summary()

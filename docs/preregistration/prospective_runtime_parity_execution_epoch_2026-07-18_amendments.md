@@ -513,3 +513,35 @@ remain byte-identical. A required frozen price that is missing before the
 post-selection gate still fails closed; the comparator may not invent a price
 to preserve a trace. This environment gate grants no alpha, fill-price, cost,
 deployment, or real-money conclusion.
+
+## Amendment 17: full-window comparator elapsed-time ceiling
+
+Registered 2026-07-19 after the lifecycle-integrated comparator stopped at its
+predeclared four-hour orchestration ceiling, before its replacement and without
+inspecting any monetary or strategy outcome. The incomplete attempt is
+preserved at
+`reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/.active-production-comparator.working-f0ece1a035cc-four-hour-cap`.
+Its termination receipt SHA-256 is
+`56c51f48f05ebe289ed9abe6e4b6beb59762bf5fd33fafff1b54de3d2be50c6b`.
+
+The attempt ran from clean commit
+`f0ece1a035cccf28339e8955dfaeaca9940396ad`, stopped after 14,403.9 seconds
+with `active comparator exceeded its registered four-hour cap`, and published
+no final output or parity decision. Its last weekly progress record covered
+28,224 of 29,449 hours (95.840266223%) through
+`2026-05-19T23:00:00Z`. All 21 registered prefix files remained exact. The
+preserved 68 pre-termination files total 113,851,782 bytes and have logical
+SHA-256 `c347a59fd3de16c91a9712ad5a62630a55c2c265f5a9b09112c89ea3c522918d`
+under the definition recorded in the termination receipt. Buffered trace
+partitions have different last clocks and are not promoted to a completed-hour
+claim.
+
+The replacement changes only the outcome-blind runner ceiling from 14,400 to
+28,800 seconds and must preserve the attempt above as a registered input. It
+must run in a hidden detached process with stdout and stderr retained so a tool
+session deadline cannot terminate it. The immutable snapshot, features,
+lifecycle table, account/equity configuration, production authorities,
+schedule, clock offsets, execution port, source windows, prefix identities,
+structural gates, and final decision rule are unchanged. The incomplete attempt
+is invalid for full-window parity and authorizes no P&L, alpha, thesis, cost,
+fill, deployment, or real-money conclusion.
