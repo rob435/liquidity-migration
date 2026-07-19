@@ -38,6 +38,8 @@ artifacts before inspecting affected outcomes.
 | Strategy Overhaul V2 comparator/accounting repair | `../strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md` | Closed invalid evidence card; diagnostic leads remain exploratory only |
 | Prospective runtime-parity forward start | `../prospective_runtime_parity_forward_start_receipt_2026-07-19.md` | Exact final comparator and create-only 90-day boundary; no forward result, alpha claim, promotion, or real-money authority |
 | 1000TAGUSDT incident | `../incidents/2026-07-10-1000tag.md` | Contained; demo venue flat at incident close |
+| Strategy Research V3 (Lane-1 draft) | `DRAFT_strategy_research_v3_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface; all four theses closed (evidence cards in `reports/strategy-research-v3/`); holdout untouched; no prototype advanced |
+| Strategy Research V4 (Lane-1 draft) | `DRAFT_strategy_research_v4_2026-07-19.md` | UNREGISTERED draft generated from inspected V3 residue (post-hoc, elevated selection risk); grids declared, nothing run |
 
 ## Cancelled without result
 
