@@ -1,52 +1,44 @@
-# Prospective Experiment Registration
+# Committing Work Into The Rolling Record
 
-Register decision-influencing work before inspecting the affected outcomes.
-Exploration and debugging may remain unregistered only when labelled
-exploratory and excluded from later confirmatory claims. `docs/governance.md`
-is the governing policy.
+`docs/governance.md` (the Progressive Evidence Model) is the governing
+policy. This page is the mechanical how-to.
 
-## Minimum contract
+## Lane 1 — exploration needs nothing
 
-Record:
+Explore freely on any already-seen data. Label outputs exploratory and note
+which data they touched. That single provenance note is the only ask,
+because it is what keeps Lane 2 honest later.
 
-- experiment ID, owner, timestamp, and study mode;
-- exact claim, intended action, and plausible failure mechanism;
-- data roots, venue/population scope, end-exclusive boundary, and prior exposure;
-- effective sample unit, horizon or stopping rule, and tested variant set;
-- comparator, primary decision method, guardrails, and justified thresholds;
-- `supports`, `contradicts`, and `inconclusive` outcomes;
-- multiplicity/dependence treatment;
-- relevant PIT, timing, fill, cost, funding, capacity, and accounting assumptions;
-- exact code/config/data identities and expected artifact paths;
-- conditions that could justify a later, genuinely new test.
+## Lane 2 — the commit is the registration
 
-Choose venues and metrics from the claim. A venue-specific result stays
-venue-specific; multiple correlated venues are robustness evidence, not
-automatic independence.
+To move a prototype into the rolling forward record:
 
-## Compact skeleton
+1. Put its exact config (rule, parameters, feature definitions, cost model)
+   in the repository and commit. The commit hash and date ARE the
+   registration — no separate contract document is needed.
+2. Declare the scoring recipe in the config or its manifest: metric,
+   comparator/baseline, and the grid if there is one (all cells report).
+3. Let the scorer append one row per config per new day. The config's
+   evidence is the run of days after its commit; editing the config starts
+   a new run under the new commit.
+
+## Promotion note
+
+When a rolling record earns a live change, record five lines alongside the
+deploy change point:
 
 ```text
-ID / owner / registered time / study mode:
-Claim and intended decision:
-Prior exposure and untouched evaluation surface:
-Venue / population / data roots / [start, end):
-Sample unit / horizon / stopping rule:
-Control and complete tested set:
-Primary rule / guardrails / inconclusive outcome:
-Validity assumptions and required artifacts:
-Code / config / data identities:
-Permitted deviations before exposure:
-Explicit non-conclusions:
+Claim:
+Config commit:
+Forward record (days, net delta vs baseline, tail behavior):
+Decision:
+Date:
 ```
 
-## After exposure
+## Optional historical reserves
 
-Append without rewriting the prospective contract: every completed, failed,
-skipped, and aborted cell; effect sizes and uncertainty; deviations and spent
-data; validity/result/scope; artifact identities; and the justified next action.
-
-An exposed rule cannot be changed to rescue its result. A revision is
-prospective on a new surface or exploratory on spent data. Preserve the original
-contract in a content-addressed run artifact even if the repository later
-consolidates its human-readable summary.
+If an untouched historical window exists for a genuinely new idea, it can be
+opened once for instant forward-style evidence — the provenance note simply
+records that it is now seen. Reserves are an accelerant, never a
+prerequisite; the rolling forward record is always available and never runs
+out.

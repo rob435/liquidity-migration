@@ -1,190 +1,99 @@
-# Evidence-First Research Governance
+# Progressive Evidence Model
 
-This document defines how evidence is judged in this repository. It is policy,
-not a strategy thesis and not a substitute for inspecting code, data, or run
-artifacts.
+This repository runs on continuous motion: explore every day, ship
+improvements when they are ready, and let evidence accumulate as a rolling
+record instead of arriving through one-shot ceremonies. Nothing in this
+document is a waiting room. It describes how we keep moving fast *and* know
+that what we learned is real.
 
-The objective is not “zero bias”—that is unattainable. The objective is to make
-assumptions, data exposure, incentives, uncertainty, and authority visible enough
-that contrary evidence can change the conclusion.
+The objective is not "zero bias" — that is unattainable. The objective is
+that assumptions, data exposure, and uncertainty stay visible enough that
+contrary evidence can change our minds quickly.
 
-## 1. Separate The Axes
+## 1. Two lanes, always open
 
-Do not compress methodology, result, deployment, and permission into one label.
-Every material conclusion should state:
+**Lane 1 — explore, continuously.** Any data we have already seen is open
+for unlimited exploration: plots, prototypes, threshold sweeps, diagnostics,
+ad-hoc scripts, many ideas in parallel. No registration, no ceremony. Label
+the output exploratory and note which data it touched. This is where most of
+the work lives, every day.
 
-- **Claim:** the exact proposition being evaluated.
-- **Validity:** `valid`, `limited`, or `invalid` for that claim.
-- **Study mode:** `exploratory`, `confirmatory`, or `forward_execution`.
-- **Result:** `supports`, `contradicts`, or `inconclusive` relative to the
-  registered decision rule.
-- **Scope:** venue, instruments, period, operating scale, and mechanism to which
-  the result applies.
-- **Deployment:** `offline`, `shadow`, `paper`, `demo`, or `mainnet`.
-- **Authorization:** `unauthorized` or the exact owner authorization reference.
+**Lane 2 — rolling forward scoring.** When a prototype looks good, commit
+its config. From that moment, every new day of data it could not have seen
+becomes one more row of honest evidence — the git commit date is the entire
+registration. Evidence accumulates continuously; there is no unveiling
+moment, no sealed envelope, no waiting for a distant date. A rule that keeps
+winning on days it predates is confirmed by construction, day by day.
 
-Names such as `candidate`, `paper_ready`, `promoted`, and `frozen` are retained
-where code expects them, but they are compatibility/status labels. They are not
-evidence and never authorize a deployment.
+The one habit that makes Lane 2 work: we grade a rule on data it did not
+shape. Not because a document demands it, but because a rule graded on the
+data that suggested it always passes and teaches nothing. Historical
+reserves (windows nobody has opened) are an optional accelerant when one
+exists — a way to get forward-style evidence instantly — not a requirement
+and not sacred.
 
-## 2. Hard Validity Constraints
+## 2. What makes a number real
 
-These constraints are not inherited preferences. They are what make the affected
-claim identifiable and reconstructable.
+These are not process hurdles. They are the physics of evidence — drop any
+of them and the number stops meaning anything, no matter how progressive the
+workflow around it is:
 
-### Causal information
+- **Causality.** A simulated decision uses only information available at
+  decision time: PIT membership, causal features, honest latency, adaptive
+  state initialized when the live system could first know it.
+- **Executability.** A performance number includes plausible fills, fees,
+  spread, funding, and capacity at the stated scale. Costs are where most
+  paper edges die; a gross number is a diagnostic, not a result.
+- **Accounting.** Positions, cash, fees, and funding reconcile, and the
+  inputs/code/config that produced a result can be identified again.
+- **Provenance.** We keep a running note of which data has shaped which
+  ideas. This is bookkeeping, not restriction — it is what lets us say
+  "this config never saw these days" and have it be true. Deleting the
+  record of what was seen is the one way to make all future evidence fake.
 
-- Record decision time, data availability time, order time, fill window, exit
-  activation, and state initialization when those times affect the result.
-- Use only information actually available at the decision. Model uncertain
-  vendor or processing latency, or run a delayed sensitivity copy.
-- Initialize adaptive state when the live system could first know it. Do not
-  warm-start exits, highs/lows, cooldowns, or risk memory from future history.
+A miss on one of these makes the affected number a diagnostic instead of a
+result. Diagnostics are valuable — they generate the next idea — they just
+do not get graded as evidence.
 
-### Population and survivorship
+## 3. Promotion is a note, not a treatise
 
-- Use point-in-time membership when historical universe selection is part of the
-  claim. Include launches, delistings, renames, migrations, status changes, and
-  missing dead instruments to the extent the source supports them.
-- A current-universe run may still answer a current-universe diagnostic. It
-  cannot support a historical-universe or portability claim.
-- State provenance limits honestly. “Full PIT” means full coverage under the
-  repository's declared manifest contract; it does not prove facts the source
-  never observed.
+When a config's rolling record earns a change to the live system, the
+promotion record is five lines: claim, config commit, forward record,
+decision, date. Ship it through the normal deploy flow and record the change
+point. That is the entire process.
 
-### Executability and economics
+Live runtime is **continuous with recorded change points**, not frozen.
+Improvements deploy when they are ready; each change is recorded so the
+rolling record stays interpretable across it (a config's evidence is the run
+of days between its commit and its replacement). Fix bugs immediately —
+correctness never waits.
 
-- Performance claims require plausible order timing, fill logic, venue rules,
-  fees, spread/slippage, material funding or carry, and capacity at the stated
-  scale.
-- Model partial fills, rejects, minimum notionals, rate limits, maintenance,
-  margin/liquidation, and market impact when they could change the conclusion.
-- Logic, data-quality, or entry-agreement studies need not backfill irrelevant
-  PnL costs, but they must not be presented as net-performance evidence.
+Negative results are priors, not prohibitions. A refuted idea can return
+with a new mechanism, new data, or a corrected defect; the record simply
+shows what its predecessor saw. Rules in this document included: change them
+when reasoning warrants, prospectively, and keep moving.
 
-### Accounting and reconstruction
+## 4. Reporting that keeps pace
 
-- Preserve data-root identity, code/config identity, tested variants, effective
-  sample unit, and the artifacts needed to reproduce the conclusion.
-- Strategy-performance work normally needs a trade ledger and equity/accounting
-  reconciliation. Feature diagnostics may instead need event rows or a panel;
-  artifact requirements follow the claim.
-- Resolve strange synchronization, impossible prices, unexplained live drift,
-  and ledger imbalance before relying on affected results.
+A decision-influencing result travels with a short evidence note:
 
-A violation makes the affected claim `invalid`; it does not require deleting a
-useful diagnostic artifact. Missing but non-fatal evidence makes the claim
-`limited`, not secretly valid.
+1. Claim, and the decision it informs.
+2. What data shaped the idea; what data graded it.
+3. Scope: venue, population, period, scale.
+4. Effect size and uncertainty (not only pass/fail), including costs.
+5. Where the artifacts and config commit live.
+6. What this does not show.
 
-## 3. Evidence Is Proportional To The Decision
+Grids report all cells, results split by era halves (a pooled number that
+hides decay is a wrong answer), and forgone upside is reported next to
+avoided cost. `docs/backtesting_errors_we_never_repeat.md` remains the
+failure-mode reference — lessons, not law.
 
-### Exploratory diagnostics
+## 5. Real money is a separate door
 
-Exploration may use partial data, flexible plots, ad hoc scripts, or many ideas.
-Record important data limitations and all materially inspected variants. Its
-purpose is hypothesis generation and debugging, not acceptance or deployment.
-
-### Confirmatory research
-
-Before inspecting the affected result, freeze a claim, comparison, data/exposure
-boundary, primary decision method, guardrails, multiplicity treatment, and
-expected artifacts. Use the strongest feasible controls for the declared claim.
-Report effect sizes and uncertainty, not only pass/fail.
-
-### Forward execution evidence
-
-Paper/demo can test signal agreement, order lifecycle, fills, slippage, fees,
-funding, and operational reliability. It supports alpha only when the profile and
-evaluation clock were frozen prospectively and the sample is large enough for the
-registered performance claim.
-
-Forward data is not an uncapped arbiter. Looking, adapting, resetting clocks, or
-stopping opportunistically spends it. Keep immutable epochs, record every change
-point, and predeclare either a fixed horizon/event count or a valid sequential
-stopping rule.
-
-### Mainnet readiness
-
-Research quality and permission are separate. Mainnet requires all of:
-
-- a decision-grade evidence pack for the exact code/config and target venue;
-- explicit capital, gross, per-order, leverage, loss, and expiry limits;
-- reconciliation, monitoring, kill/recovery paths, and independent liveness;
-- separate, narrow owner authorization immediately before enablement.
-
-Safety controls for real money are constraints on ruin and exposure. They are not
-required to improve MAR or any alpha metric. Broad repository authority, a green
-report, or a notification never satisfies this boundary.
-
-## 4. Choose Validation From The Claim
-
-### Venues
-
-- A venue-specific claim may be tested on that venue and must remain
-  venue-specific.
-- A portability or shared-microstructure claim needs multiple relevant venues.
-- A second venue is usually valuable as a robustness probe, but Bybit and Binance
-  share instruments and crypto regimes; agreement is not independent OOS proof.
-- Analyze disagreement as heterogeneity, data quality, or mechanism evidence.
-  Do not automatically pool it away or call either side an artefact.
-- If an experiment contract requires both venues, that requirement remains
-  binding for that experiment.
-
-### Time and out-of-sample data
-
-A root containing all available history does not prevent temporal holdouts,
-walk-forward evaluation, purging, or embargoes. What matters is exposure: once a
-window influences design, it is no longer untouched.
-
-For strategies already mined across the full historical range, prospective
-paper/demo epochs may be the cleanest remaining surface. For a genuinely new
-claim, a historical window can still be reserved before inspection. Record an
-exposure ledger rather than declaring all historical data permanently in-sample
-or all forward data permanently pristine.
-
-### Metrics and thresholds
-
-- Choose metrics from the objective and failure modes. Return, drawdown, tail
-  loss, turnover, capacity, concentration, calibration, and execution error may
-  matter; no metric is universally primary.
-- Give thresholds an economic, operational, or statistical rationale. Arbitrary
-  constants inherited from an older experiment are not policy.
-- Historical artifacts may contain legacy decision presets and labels. They are
-  binding only when the active experiment prospectively names the exact rule;
-  otherwise treat them as clearly labelled diagnostics.
-- Predeclare how many variants, symbols, segments, and metrics will influence
-  selection. Address dependence and effective trials; showing only the winner is
-  invalid selection evidence.
-
-## 5. Prospective Rule Changes
-
-- Change policy when reasoning or evidence warrants it; do not preserve a bad
-  rule for consistency.
-- Once confirmatory outcomes are inspected, do not lower or swap that study's
-  rule to rescue a result. Amendments after exposure must use a fresh evaluation
-  surface and retain the original result.
-- A negative result closes only the precise tested claim under its conditions.
-  Reopen work when there is new data, a corrected defect, a genuinely different
-  mechanism, or a better-identified question. State why the new test is not the
-  same mining loop.
-- “Closed” and “rejected” entries in the research summary are current evidence
-  states and compute priors, not prohibitions.
-
-## 6. Minimum Evidence Card
-
-Every decision-influencing report should answer:
-
-1. What exact claim and action were under consideration?
-2. What data was available, what had already been inspected, and what was held
-   out?
-3. What population and venue scope does the evidence cover?
-4. What was the effective independent sample unit and tested-set size?
-5. What comparator, decision rule, stopping rule, and guardrails were frozen?
-6. Were timing, PIT, fills, costs, capacity, and accounting valid for this claim?
-7. What effect size, uncertainty, concentration, and failure modes were observed?
-8. Which artifacts and identities reconstruct the result?
-9. What changed after preregistration, and does that spend the evaluation data?
-10. What conclusion is justified—and what is explicitly not justified?
-
-Use the failure taxonomy in `docs/backtesting_errors_we_never_repeat.md` as a
-review aid. Artifact presence is necessary but never substitutes for judgment.
+Everything above is research velocity. Real capital is not: mainnet,
+`REAL_MONEY`, and live credentials require a separate, narrow owner
+instruction naming the deployment, capital/risk limits, controls, and
+expiry. No rolling record, green report, or repository authority opens that
+door on its own. Demo and paper remain the default operating surfaces, and
+capital-preservation controls are never traded away for velocity.

@@ -1,6 +1,6 @@
 ---
 name: research-report
-description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence card and claim-scoped validity policy in docs/governance.md rather than a fixed metric checklist or historical promotion gate.
+description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the Progressive Evidence Model in docs/governance.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
 ---
 
 # Interpret research reports

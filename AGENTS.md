@@ -39,24 +39,27 @@ scope.
   matching NaN positions. Byte-identical floats are not a general requirement.
 - An intended strategy change is not a refactor: explain and test the numerical
   difference rather than forcing equivalence.
-- Prefer reversible changes and focused validation. Do not turn a historical
+- Ship improvements when they are ready and record the change point. Prefer
+  reversible changes and focused validation. Do not turn a historical
   implementation detail into permanent policy.
 
 ## Research And Evidence
 
-- Follow `docs/governance.md` for evidence grades, claim scoping, validation,
-  forward-data discipline, and authorization boundaries.
+- Follow `docs/governance.md` — the Progressive Evidence Model: explore
+  continuously on seen data (Lane 1), grade committed configs on the rolling
+  run of days they predate (Lane 2), promote with a five-line note and a
+  recorded change point. The commit is the registration.
 - Use `docs/backtesting_errors_we_never_repeat.md` as a failure-mode reference,
   not as borrowed authority.
-- PIT membership is required when the claim depends on historical universe
-  selection. Causal availability, material costs/funding, realistic fills and
-  capacity, and reconstructable accounting apply whenever they are relevant to
-  the claim.
-- Neither two-venue agreement nor forward-only validation is a universal rule.
-  Choose venues, holdouts, metrics, and thresholds from the declared claim and
-  record the rationale before confirmatory results are inspected.
-- Do not change a registered decision rule after seeing the affected result.
-  Revisions are prospective; previously viewed data stays spent.
+- What makes a number real is physics, not process: causal/PIT inputs,
+  executable economics, reconstructable accounting, and an honest provenance
+  note of which data shaped which idea. A miss turns a result into a
+  diagnostic — still useful, differently labelled.
+- Choose venues, metrics, and evaluation surfaces from the claim, not from
+  folklore. Grade a rule on data it did not shape; report all grid cells and
+  era-split results; put costs next to gross.
+- Negative results are priors, not prohibitions. Revisions are always open
+  prospectively; the provenance record simply shows what each version saw.
 
 ## Runtime Safety
 

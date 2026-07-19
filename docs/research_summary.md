@@ -69,12 +69,12 @@ outcomes or changing the registered estimator. See
 
 Corrected PIT trade diagnostics are decision-useful for generating narrow new
 mechanism hypotheses and for debugging coverage, path, selection, and
-execution assumptions. Their already inspected historical surface is spent:
-it cannot qualify a new thesis. Any thesis must freeze its claim, complete
-tested set, economic rule, and genuinely unseen holdout or new-data boundary
-before affected outcomes are read. Execution/TCA is a separate prospective
-45-day calibration plus 45-day validation problem and cannot establish
-strategy alpha by itself.
+execution assumptions. Their already inspected historical surface shapes
+ideas rather than grading them: under the Progressive Evidence Model a new
+thesis is committed as a config and graded on the rolling run of forward
+days it predates (an untouched historical reserve is an optional
+accelerant). Execution/TCA models likewise accumulate rolling forward
+evidence; execution quality by itself does not establish strategy alpha.
 
 ## Strategy Overhaul V2 cycle closed 2026-07-18
 
@@ -330,6 +330,13 @@ rolling ledger.
 | T-D funding forecast | Cumulative funding is modestly predictable beyond persistence, concentrated in tails and 48–72h horizons (up to −17% tail MAE via short-half-life EWMA / mean-reversion). The pre-declared Stage-2 bar (≥10% on both overall and q95-tail MAE at 24h) was not met; the T-B floor substitution did not run. |
 | T-A regime-gate ablation | Thesis refuted on paired full-history renders (2023-04→2026-07): removing the BTC uptrend gate doubles entries (2,300→4,019) yet loses ~1.0pp total return, takes ~5× the max drawdown (−6.35% vs −1.30%), and nearly doubles negative common-loss tail days (28 vs 15). Early era alone favors removal on return; the late era decisively favors the gate. Gate-off fails the declared mean+tail test; no prototype advances. |
 
-No confirmatory research contract is active. New decision-influencing work must
-register a new claim, exposure boundary, tested set, rule, and artifact plan
-before outcomes are inspected.
+## Progressive model adopted (2026-07-19)
+
+By owner direction the repository operates under the Progressive Evidence
+Model (`docs/governance.md`, rewritten this date): continuous Lane-1
+exploration on seen data, rolling Lane-2 forward scoring where a config's
+git commit is its registration, five-line promotion notes with recorded
+change points, and no one-shot confirmatory ceremonies. Historical
+registrations and receipts above remain unrewritten provenance. The
+real-money owner boundary is unchanged. New decision-influencing work
+follows `docs/parameter_pre_registration.md` (commit-and-note mechanics).

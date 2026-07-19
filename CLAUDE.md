@@ -10,8 +10,8 @@ Research and demo/paper execution for crypto-perpetual strategies.
 - Current operations: `STATE.md`, then `deploy/sleeves.env` and systemd units.
 - Research interpretation: `docs/research_summary.md` and the relevant raw
   artifacts.
-- Active experiment contracts: `docs/preregistration/INDEX.md` and the named
-  preregistration.
+- Research model and provenance: `docs/governance.md` (Progressive Evidence
+  Model) and `docs/preregistration/INDEX.md` (receipts, not waiting rooms).
 - Data provenance: `docs/data_roots.md` and `docs/pit_gate.md`.
 
 Do not copy sleeve status or decision thresholds into this file. Derive live

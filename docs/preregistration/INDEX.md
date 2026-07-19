@@ -1,17 +1,18 @@
-# Preregistration Index
+# Provenance Records Index
 
-The prospective runtime-parity and execution epoch registered on 2026-07-18 is
-active. It evaluates immutable input reconstruction, exact production/offline
-parity, forward demo/paper structural agreement, and execution calibration. It
-does not inspect returns or test a strategy thesis. The first V2 cycle and its
-later comparator/accounting repair remain closed without a qualifying thesis
-and left their holdout untouched. A new thesis-specific contract must still be
-frozen before any holdout surface is generated or read.
+These files are the provenance record: what was declared, seen, and concluded,
+and when. They are receipts, not waiting rooms — historical entries are never
+rewritten, and nothing here blocks new work.
 
-New decision-influencing work must follow
-`docs/parameter_pre_registration.md` and `docs/governance.md`: freeze the claim,
-exposure boundary, comparison, complete tested set, decision/stopping rule, and
-artifacts before inspecting affected outcomes.
+Current model: `docs/governance.md` (Progressive Evidence Model). New work
+explores freely on seen data, commits configs into the rolling forward record
+(the commit is the registration, per `docs/parameter_pre_registration.md`),
+and promotes with a five-line note plus a recorded change point. The
+runtime-parity forward stream registered on 2026-07-18 continues as a rolling
+evidence surface with recorded change points; its declared 45/45 window read
+remains available on file. The V2 cycle and its repair closed without a
+qualifying thesis; their untouched holdout remains an optional reserve for a
+genuinely new idea, recorded here when opened.
 
 ## Exploratory records
 

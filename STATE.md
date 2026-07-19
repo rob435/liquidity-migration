@@ -21,7 +21,7 @@ commit may leave the branch ahead.
   plus two O(history) scaling removals, each pinned by regression tests
   (gate: 2,088 passed / 3 skipped). No strategy decision path, sizing
   input, or registered estimator changed. This is a recorded mid-epoch
-  runtime change point; the registered prospective clock and frozen
+  runtime change point; the registered prospective clock and recorded
   comparator identity are unchanged.
 - The prior change point remains on record: `386120b` (receipt
   `5e203d84...`) replaced the asdict-based event serializer.
@@ -139,9 +139,16 @@ commit may leave the branch ahead.
   `db508862314972da310404814519bd701ffc18d2be51a3d39debddee1ef79376`
   and its self-hashed artifact identity is
   `25441106b82adf95364d4e602d4b5912ecc0d2871b18778d8fe47684e8ddafbf`.
-- The registered clock starts 2026-07-19 14:00 UTC. Calibration is
-  `[2026-07-19 14:00, 2026-09-02 14:00)` and validation is
-  `[2026-09-02 14:00, 2026-10-17 14:00)`. No pre-boundary row is eligible.
+- The registered clock starts 2026-07-19 14:00 UTC. The start receipt
+  declared a calibration window `[2026-07-19 14:00, 2026-09-02 14:00)` and a
+  validation window `[2026-09-02 14:00, 2026-10-17 14:00)`; no pre-boundary
+  row is eligible.
+- Operating interpretation (2026-07-19, per the Progressive Evidence Model in
+  `docs/governance.md`): the forward stream is a rolling evidence surface.
+  Each committed model or config is graded on the run of days it predates,
+  continuously, with recorded change points; the receipt's 45/45 window
+  structure remains on file as one declared read that may still be taken, not
+  as a waiting period that blocks progressive evaluation of the same stream.
 - The receipt binds the exact final comparator at implementation commit
   `9a2f20d`: receipt SHA-256
   `f9ad5a6bfcc8948f742ae9bd877b8dda0e3f79d3908d96f274967445d6431e77`
@@ -318,9 +325,12 @@ commit may leave the branch ahead.
 
 The tracked hedge history is an immutable sizing-only model prior through
 2026-07-09. It is not live-extended calibration or performance evidence. The
-prospective execution epoch is registered but has not inspected a forward
-outcome at this snapshot. It is not a strategy-alpha experiment, and no runtime
-status or paper result authorizes research promotion or real-money deployment.
+forward execution stream accumulates rolling evidence continuously under the
+Progressive Evidence Model; at this snapshot no committed config has a graded
+forward record, and it is not a strategy-alpha experiment. Promotion is a
+five-line note plus a recorded change point when a rolling record earns it.
+Real money remains a separate owner door: no runtime status, paper result, or
+rolling record opens it on its own.
 
 Research-only addendum, 2026-07-18: Strategy Overhaul V2 closed with no
 qualifying thesis and did not touch its reserved holdout. Its full diagnostic
