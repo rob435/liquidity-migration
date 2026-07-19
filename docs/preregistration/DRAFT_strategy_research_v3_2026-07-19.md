@@ -53,21 +53,49 @@ Fresh-cycle principles (V3):
 - **Explicitly not claimed:** nothing about LONG; nothing about mainnet; no
   mid-epoch runtime change regardless of outcome.
 
-## T-B. Funding-conditional entry (CONTINUOUS)
+## T-B. Funding-floor entry and exit economics (CONTINUOUS)
 
-- **Proposition:** Skipping CONTINUOUS entries when the current (PIT-known)
-  funding rate is below a frozen threshold improves net-after-cost economics
-  per trade, because the −15.9% modeled funding drag concentrates in entries
-  taken into already-crowded shorts.
-- **Mechanism:** Short-side funding is the price of crowding; extreme negative
-  funding at entry predicts continued negative carry over the holding window.
-- **Comparator:** identical admission and exit rules, entry-skip rule as the
-  only difference. Tested set: the exact threshold grid must be enumerated in
-  the frozen contract; no post-hoc threshold selection.
+- **Proposition:** Requiring the take-profit distance to clear
+  `modeled costs + known-funding floor` at entry, and exiting when realized
+  plus projected funding consumes a frozen fraction of the TP distance,
+  improves net-after-cost economics per trade.
+- **Mechanism:** On Bybit the next settlement's funding rate and each
+  symbol's funding interval are PIT-known at decision time. A short held
+  through many 1-hour intervals at extreme negative funding can lose net
+  even when TP fills (owner-reported trade: TP hit, net loss from funding).
+  The −15.9% modeled funding drag concentrates in exactly these trades. No
+  forecasting is required for this contract: the funding floor is
+  `known next rate × intervals in expected hold`, a deliberate underestimate.
+- **Comparator:** identical admission and signals; the entry economic gate
+  and funding-drain exit rule are the only differences. Tested set: the
+  exact TP-clearance multiple and drain-fraction grid enumerated at freeze;
+  no post-hoc selection.
 - **Hurdle:** per-trade net improvement must exceed the modeled cost delta of
-  the changed turnover profile; era-stability gate applies.
+  the changed turnover/exit profile; era-stability gate applies.
 - **Surface:** forward accrual post-2026-07-06; does not require the exact
   deployed comparator, so it is NOT blocked on the RMOM provenance repair.
+
+## T-D. Funding forecast beyond the next interval (CONTINUOUS)
+
+- **Proposition:** A frozen forecast of cumulative funding over the intended
+  holding window, built only from PIT-known inputs (current predicted rate,
+  premium-index trend, basis, open-interest change, funding-interval
+  length), predicts realized per-trade funding cost materially better than
+  the T-B constant floor, and substituting it into the T-B entry/exit
+  economics further improves net-after-cost results.
+- **Mechanism:** Funding is strongly autocorrelated at short horizons and
+  mean-reverts from extremes; a persistence-with-decay baseline plus a
+  crowding term should dominate the naive floor precisely on the crazy-
+  funding symbols where the floor is most wrong.
+- **Structure:** two frozen stages. Stage 1 is a pure forecasting claim
+  (forecast vs realized funding, scored out-of-sample; model class and
+  feature list enumerated at freeze; persistence baseline must be beaten).
+  Stage 2 plugs the frozen Stage-1 model into the T-B rules; Stage 2 may
+  only be read after Stage 1 passes and its model is frozen.
+- **Hurdle:** Stage 1: pre-declared forecast-error improvement over
+  persistence. Stage 2: same economic hurdle structure as T-B.
+- **Surface:** forward accrual post-2026-07-06 for both stages, split so
+  Stage 2 never reuses Stage 1's scored window.
 
 ## T-C. Pump-deceleration entry timing (CONTINUOUS)
 
