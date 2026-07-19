@@ -281,6 +281,20 @@ def test_install_provisions_a_credential_fenced_paper_runtime_boundary() -> None
     assert "lm_load_group_systemd_environment" in text
 
 
+def test_install_binds_one_shared_strategy_target_tape_per_environment() -> None:
+    text = _read(DEPLOY)
+    boundary = text[
+        text.index("prepare_paper_runtime_boundary()") : text.index("require_checkout()")
+    ]
+
+    assert '"$demo_capture/strategy-targets.jsonl"' in boundary
+    assert 'values["STRATEGY_TARGET_CAPTURE_PATH"] = str(target_capture)' in boundary
+    assert (
+        '"STRATEGY_TARGET_CAPTURE_PATH": str(Path(sys.argv[4]) / "strategy-targets.jsonl")'
+        in boundary
+    )
+
+
 def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it() -> None:
     text = _read(DEPLOY)
     activate = text[text.index("activate_mode()") : text.index('case "$MODE" in', text.index("activate_mode()"))]

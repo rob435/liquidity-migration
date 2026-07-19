@@ -688,6 +688,8 @@ def require_clean_authorized_checkout(
 
 
 _CANDIDATE_UNIVERSE_KEY = "CANDIDATE_UNIVERSE_FILE"
+_STRATEGY_TARGET_CAPTURE_KEY = "STRATEGY_TARGET_CAPTURE_PATH"
+_STRATEGY_TARGET_CAPTURE_FILENAME = "strategy-targets.jsonl"
 _ROOT_KEYS = {
     "account-execution.env": (
         "ACCOUNT_EXECUTION_ROOT",
@@ -700,6 +702,27 @@ _ROOT_KEYS = {
         "ACCOUNT_PAPER_CAPTURE_ROOT",
     ),
 }
+
+
+def _validate_strategy_target_capture_path(
+    environment: Mapping[str, str],
+    *,
+    capture_root_key: str,
+    label: str,
+) -> None:
+    """Require the producer tape to live at one authorization-bound path."""
+
+    root = Path(environment.get(capture_root_key, "")).expanduser()
+    target = Path(environment.get(_STRATEGY_TARGET_CAPTURE_KEY, "")).expanduser()
+    if not root.is_absolute() or not target.is_absolute():
+        raise ValueError(f"{label} strategy target capture path must be absolute")
+    expected = root / _STRATEGY_TARGET_CAPTURE_FILENAME
+    if target != expected:
+        raise ValueError(
+            f"{label} {_STRATEGY_TARGET_CAPTURE_KEY} must equal {expected}"
+        )
+
+
 _PROFILE_ENVIRONMENT_NAMES = {
     DEMO_OPERATIONAL_PROFILE: (
         "account-execution.env",
@@ -1005,6 +1028,18 @@ def _validate_environments(
             "demo-operational profile requires CONTINUOUS_PAPER_SLEEVE=off"
         )
 
+    _validate_strategy_target_capture_path(
+        demo,
+        capture_root_key="ACCOUNT_CAPTURE_ROOT",
+        label="demo operational environment",
+    )
+    if paper is not None:
+        _validate_strategy_target_capture_path(
+            paper,
+            capture_root_key="ACCOUNT_PAPER_CAPTURE_ROOT",
+            label="paper operational environment",
+        )
+
     roots: list[Path] = []
     root_identities: dict[str, dict[str, Any]] = {}
     root_filenames = (
@@ -1127,6 +1162,11 @@ def _validate_paper_runtime_environments(
         )
     if any(paper.get(key) for key in _EXCHANGE_CREDENTIAL_ENVIRONMENT_KEYS):
         raise ValueError("paper operational environment must not contain exchange credentials")
+    _validate_strategy_target_capture_path(
+        paper,
+        capture_root_key="ACCOUNT_PAPER_CAPTURE_ROOT",
+        label="paper operational environment",
+    )
     for key in (
         "LONG_SLEEVE",
         "CONTINUOUS_SLEEVE",

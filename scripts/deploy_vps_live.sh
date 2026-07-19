@@ -200,11 +200,16 @@ prepare_paper_runtime_boundary() {
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
         ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE ACCOUNT_CAPTURE_ROOT
     demo_symbols="$ACCOUNT_SYMBOLS_FILE"
     demo_candidate="${CANDIDATE_UNIVERSE_FILE:-}"
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     demo_risk="$ACCOUNT_RISK_POLICY_FILE"
+    demo_capture="$ACCOUNT_CAPTURE_ROOT"
+    [ "${demo_capture#/}" != "$demo_capture" ] \
+        || fail "demo account capture root must be absolute: $demo_capture"
+    [ -d "$demo_capture" ] && [ ! -L "$demo_capture" ] \
+        || fail "missing real demo account capture root: $demo_capture"
     for path in "$demo_symbols" "$demo_rules" "$demo_risk"; do
         [ "${path#/}" != "$path" ] || fail "demo account input must be absolute: $path"
         [ -f "$path" ] && [ ! -L "$path" ] || fail "missing real demo account input: $path"
@@ -264,6 +269,41 @@ PY
     [ "$demo_candidate" = "$demo_symbols" ] \
         || fail "demo candidate universe is not the owner symbols file"
 
+    "$PYTHON" - /etc/liquidity-migration/account-execution.env \
+        "$demo_capture/strategy-targets.jsonl" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+
+from liquidity_migration.systemd_environment import load_private_systemd_environment
+
+path = Path(sys.argv[1])
+target_capture = Path(sys.argv[2])
+if not target_capture.is_absolute() or target_capture.name != "strategy-targets.jsonl":
+    raise SystemExit("demo strategy target capture path is invalid")
+values = load_private_systemd_environment(path)
+values["STRATEGY_TARGET_CAPTURE_PATH"] = str(target_capture)
+descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        for key, value in sorted(values.items()):
+            handle.write(f"{key}={shlex.quote(value)}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+
     install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 0710 /etc/liquidity-migration
     install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 0750 "$PAPER_CONFIG_DIR"
     install -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0600 \
@@ -322,6 +362,7 @@ values.update(
         "ACCOUNT_EXECUTION_ROOT": sys.argv[2],
         "ACCOUNT_INTENT_INBOX_ROOT": sys.argv[3],
         "ACCOUNT_PAPER_CAPTURE_ROOT": sys.argv[4],
+        "STRATEGY_TARGET_CAPTURE_PATH": str(Path(sys.argv[4]) / "strategy-targets.jsonl"),
         "ACCOUNT_SYMBOLS_FILE": sys.argv[5],
         "CANDIDATE_UNIVERSE_FILE": sys.argv[5],
         "ACCOUNT_DEMO_RULES_FILE": sys.argv[6],

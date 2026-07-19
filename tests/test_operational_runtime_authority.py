@@ -274,6 +274,7 @@ def _fixture(
             f"ACCOUNT_EXECUTION_ROOT={roots['demo-account']}\n"
             f"ACCOUNT_INTENT_INBOX_ROOT={roots['demo-inbox']}\n"
             f"ACCOUNT_CAPTURE_ROOT={roots['demo-market']}\n"
+            f"STRATEGY_TARGET_CAPTURE_PATH={roots['demo-market'] / 'strategy-targets.jsonl'}\n"
             f"ACCOUNT_SYMBOLS_FILE={symbols}\n"
             f"CANDIDATE_UNIVERSE_FILE={symbols}\n"
             f"ACCOUNT_DEMO_RULES_FILE={rules}\n"
@@ -286,6 +287,7 @@ def _fixture(
             f"ACCOUNT_EXECUTION_ROOT={roots['paper-account']}\n"
             f"ACCOUNT_INTENT_INBOX_ROOT={roots['paper-inbox']}\n"
             f"ACCOUNT_PAPER_CAPTURE_ROOT={roots['paper-market']}\n"
+            f"STRATEGY_TARGET_CAPTURE_PATH={roots['paper-market'] / 'strategy-targets.jsonl'}\n"
             f"ACCOUNT_SYMBOLS_FILE={paper_symbols}\n"
             f"CANDIDATE_UNIVERSE_FILE={paper_symbols}\n"
             f"ACCOUNT_DEMO_RULES_FILE={paper_rules}\n"
@@ -608,6 +610,38 @@ def test_authority_rejects_raw_research_mode_and_wrong_acknowledgement(
             authorization_reference="owner authorization",
             owner_acknowledgement="yes",
         )
+
+
+@pytest.mark.parametrize(
+    "environment_name",
+    ("account-execution.env", "account-paper-execution.env"),
+)
+def test_authority_requires_capture_root_bound_strategy_target_tape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+) -> None:
+    repository, commit, machine_id, paths = _fixture(tmp_path, monkeypatch)
+    environment_path = paths[environment_name]
+    environment = environment_path.read_text(encoding="utf-8")
+    current = next(
+        line
+        for line in environment.splitlines()
+        if line.startswith("STRATEGY_TARGET_CAPTURE_PATH=")
+    )
+    environment_path.write_text(
+        environment.replace(
+            current,
+            f"STRATEGY_TARGET_CAPTURE_PATH={tmp_path / 'outside' / 'strategy-targets.jsonl'}",
+        ),
+        encoding="utf-8",
+    )
+    environment_path.chmod(
+        0o640 if environment_name == "account-paper-execution.env" else 0o600
+    )
+
+    with pytest.raises(ValueError, match="STRATEGY_TARGET_CAPTURE_PATH must equal"):
+        _issue(tmp_path, repository, commit, machine_id)
 
 
 def test_demo_operational_profile_requires_one_source_bound_candidate_population(

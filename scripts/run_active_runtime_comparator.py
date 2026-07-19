@@ -109,6 +109,10 @@ POST21_AMENDMENTS = (
     REPO
     / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post21_amendments.md"
 )
+POST22_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post22_amendments.md"
+)
 FEATURE_RECEIPT = FEATURE_ROOT / "feature_receipt.json"
 RECONSTRUCTION_RECEIPT = EPOCH_ROOT / "reconstruction/bybit-baseline.receipt.json"
 LIFECYCLE_ROOT = EPOCH_ROOT / "venue-lifecycle/bybit-census-search-v2"
@@ -187,6 +191,7 @@ EXPECTED_POST18_AMENDMENTS_SHA256 = "ffc366010e374be572874c1c5609e04394a44f5dbd9
 EXPECTED_POST19_AMENDMENTS_SHA256 = "a168d845fa8ede5052c802baf06464537474d2cd1cd0e287ce91b11c955d24fa"
 EXPECTED_POST20_AMENDMENTS_SHA256 = "c859894a6cb49a93450fd7a7f3d321980a7312ddd17e2a7131f33a5c90941fc4"
 EXPECTED_POST21_AMENDMENTS_SHA256 = "14816e4710f98d4735f3e3621fcfcada116ea0b0f097a7f5f1dc9cb3e0230ba6"
+EXPECTED_POST22_AMENDMENTS_SHA256 = "c10fd87913310ff6b6f6bade08e532f9b58a966b3ad5ee95dddfb2c79b70d13e"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
@@ -614,6 +619,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "post21_amendments": (
             POST21_AMENDMENTS,
             EXPECTED_POST21_AMENDMENTS_SHA256,
+        ),
+        "post22_amendments": (
+            POST22_AMENDMENTS,
+            EXPECTED_POST22_AMENDMENTS_SHA256,
         ),
         "feature_receipt": (FEATURE_RECEIPT, EXPECTED_FEATURE_RECEIPT_SHA256),
         "reconstruction_receipt": (
