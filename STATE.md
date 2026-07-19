@@ -9,16 +9,22 @@ commit may leave the branch ahead.
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `386120b19fdf64bee623b83e0872d60b5ece30f7`, deployed from canonical `main`,
+  `d520792f3b4a92b2cf0acce5f4fb6818d25bdeb9`, deployed from canonical `main`,
   profile `operational`, receipt artifact SHA-256
-  `5e203d8406ad49028b4e2cbd31a662dcc451c9ac78298838f09a745d6c8bb025`.
-  Over the previously authorized `a1ff6fe` it adds one runtime change — the
-  account-event serializer no longer uses `dataclasses.asdict`, removing an
-  O(payload) copy from the trusted append path and the Python-3.11 CI
-  failure — plus documentation only (V3 draft theses and this state record).
-  This is a recorded mid-epoch runtime change point; the registered
-  prospective clock, calibration/validation boundaries, and frozen comparator
-  identity in the start receipt are unchanged.
+  `d689e3e60a26dfbd9ad7d20a03e8653b71bbd02fe3aafc453f45c26e61edcaa0`.
+  Over `386120b` it deploys the 2026-07-19 load-bearing audit outcome
+  (`docs/audit/2026-07-19-load-bearing-audit.md`): ten verified runtime
+  defect fixes — most significantly the owner-process kill via an unguarded
+  gapped-book protection read, committed-batch replay over supersession,
+  strict REST pagination (no silent settlement truncation), exact Decimal
+  order chunking, and terminal-partial component-protection eligibility —
+  plus two O(history) scaling removals, each pinned by regression tests
+  (gate: 2,088 passed / 3 skipped). No strategy decision path, sizing
+  input, or registered estimator changed. This is a recorded mid-epoch
+  runtime change point; the registered prospective clock and frozen
+  comparator identity are unchanged.
+- The prior change point remains on record: `386120b` (receipt
+  `5e203d84...`) replaced the asdict-based event serializer.
 - The prior mid-epoch change point remains on record: `a1ff6fe` (receipt
   `6b7f2f01...`) deployed four goal-directed runtime fixes over `9a2f20d`
   (funding-freshness measurement, lost-subscribe first-frame watchdog, hedge
