@@ -606,12 +606,15 @@ def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeyp
     assert "age_ns=-84000000" in explicit_future[0].message
 
 
-def test_queue_head_market_data_block_is_suppressed_only_during_startup(
+def test_nonterminal_queue_head_market_warmup_is_suppressed_until_its_latched_timeout(
     tmp_path,
     monkeypatch,
 ) -> None:
     def queue_head_block(*_args, **_kwargs) -> None:
-        raise RuntimeError("account owner is blocked: waiting for queue-head market data: ETHUSDT:stale_book")
+        raise M.AccountOwnerMarketWarmupPending(
+            "account owner is blocked: waiting for queue-head market data: "
+            "ETHUSDT:stale_book"
+        )
 
     monkeypatch.setattr(M, "require_recent_account_owner_health", queue_head_block)
     starting = M.UnitRuntime(
@@ -629,7 +632,7 @@ def test_queue_head_market_data_block_is_suppressed_only_during_startup(
         == []
     )
 
-    expired = M.gather_account_owner_health_alerts(
+    established_service = M.gather_account_owner_health_alerts(
         account_root=tmp_path,
         environment="demo",
         max_age_minutes=1,
@@ -639,7 +642,23 @@ def test_queue_head_market_data_block_is_suppressed_only_during_startup(
             active_age_minutes=10.01,
         ),
     )
-    assert [alert.key for alert in expired] == ["account_owner_health:demo"]
+    assert established_service == []
+
+    def terminal_timeout(*_args, **_kwargs) -> None:
+        raise RuntimeError(
+            "account owner is blocked: queue-head market warmup timed out after 30s; "
+            "request remains pending and owner epoch is closed: ETHUSDT"
+        )
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", terminal_timeout)
+    terminal = M.gather_account_owner_health_alerts(
+        account_root=tmp_path,
+        environment="demo",
+        max_age_minutes=1,
+        startup_grace_minutes=10,
+        unit_runtime=starting,
+    )
+    assert [alert.key for alert in terminal] == ["account_owner_health:demo"]
 
     def other_block(*_args, **_kwargs) -> None:
         raise RuntimeError("account owner is blocked: reconciliation mismatch")
@@ -653,6 +672,31 @@ def test_queue_head_market_data_block_is_suppressed_only_during_startup(
         unit_runtime=starting,
     )
     assert [alert.key for alert in unrelated] == ["account_owner_health:demo"]
+
+
+def test_demo_account_alerts_coalesce_only_the_dependent_owner_echo() -> None:
+    root = M.Alert(
+        key="account_health_unhealthy",
+        severity=M.CRITICAL,
+        message="canonical account reconciliation is UNHEALTHY: TLMUSDT:unowned",
+    )
+    dependent = M.Alert(
+        key="account_owner_health:demo",
+        severity=M.CRITICAL,
+        message=(
+            "demo account owner has no fresh healthy status/capital evidence: "
+            "RuntimeError: account reconciliation unhealthy: TLMUSDT:unowned"
+        ),
+    )
+    capital = M.Alert(
+        key="account_owner_health:demo",
+        severity=M.CRITICAL,
+        message="demo account owner has no fresh capital evidence: wallet unavailable",
+    )
+
+    assert M.coalesce_demo_account_alerts([root], [dependent]) == [root]
+    assert M.coalesce_demo_account_alerts([root], [capital]) == [root, capital]
+    assert M.coalesce_demo_account_alerts([], [dependent]) == [dependent]
 
 
 def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:

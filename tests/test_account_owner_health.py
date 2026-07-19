@@ -9,6 +9,7 @@ import pytest
 
 import liquidity_migration.account_owner_health as owner_health_module
 from liquidity_migration.account_kernel import (
+    AccountEvent,
     AccountExecutionKernel,
     AccountRiskSnapshot,
     GENESIS_HASH,
@@ -19,6 +20,7 @@ from liquidity_migration.account_owner_health import (
     TEST_ACCOUNT_OWNER_INVOCATION_ID,
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
+    AccountOwnerMarketWarmupPending,
     account_owner_health_path,
     fold_convergence_health,
     format_convergence_health,
@@ -419,6 +421,59 @@ def test_recent_health_retries_one_concurrent_projection_replacement(
     ) == second
 
 
+def test_recent_health_accepts_health_that_matches_the_observed_head_during_advance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = AccountExecutionKernel(tmp_path, account_id="paper-account")
+    first_head = kernel.record_venue_snapshot(
+        snapshot_key="first-head",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=1,
+    )[-1]
+    second_head = kernel.record_venue_snapshot(
+        snapshot_key="second-head",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=2,
+    )[-1]
+
+    def bound_health(loop_sequence: int, head: AccountEvent) -> AccountOwnerHealth:
+        return AccountOwnerHealth(
+            **{
+                **_health(loop_sequence=loop_sequence).to_dict(),
+                "journal_sequence": head.sequence,
+                "journal_state_hash": head.state_hash,
+            }
+        )
+
+    before = bound_health(1, first_head)
+    after = bound_health(2, second_head)
+    health_reads = iter((before, after))
+    monkeypatch.setattr(
+        owner_health_module,
+        "read_account_owner_health",
+        lambda _root: next(health_reads),
+    )
+    monkeypatch.setattr(
+        owner_health_module,
+        "read_account_journal_head",
+        lambda _root: first_head,
+    )
+
+    assert require_recent_account_owner_health(
+        tmp_path,
+        environment="paper",
+        max_age_ns=2_000,
+        now_ns=11_000,
+    ) == before
+
+
 def test_recent_health_accepts_sustained_same_journal_heartbeat_churn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -718,6 +773,43 @@ def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path)
             max_age_ns=2_000,
             now_ns=11_000,
         )
+    with pytest.raises(RuntimeError, match="stale"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=13_000,
+        )
+
+
+def test_queue_head_warmup_is_transient_only_while_owner_health_is_fresh(
+    tmp_path: Path,
+) -> None:
+    waiting = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "status": AccountOwnerHealthStatus.BLOCKED,
+            "requested_symbols_ready": False,
+            "detail": "waiting for queue-head market data: ETHUSDT:stale_book",
+        }
+    )
+    write_account_owner_health(tmp_path, waiting)
+
+    with pytest.raises(AccountOwnerMarketWarmupPending):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
+    with pytest.raises(RuntimeError, match="stale") as stale:
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=13_000,
+        )
+    assert not isinstance(stale.value, AccountOwnerMarketWarmupPending)
 
 
 def test_require_recent_health_binds_exact_verified_journal_head(tmp_path: Path) -> None:

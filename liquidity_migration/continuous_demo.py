@@ -108,7 +108,7 @@ CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
 CONTINUOUS_V2_PROFILE = CONTINUOUS_PROFILE_ID
 BTC_TREND_SYMBOL = "BTCUSDT"
 CONTINUOUS_DEMO_PROFILES = (CONTINUOUS_V2_PROFILE,)
-CONTINUOUS_ENTRY_OBSERVABILITY_SCHEMA_VERSION = 1
+CONTINUOUS_ENTRY_OBSERVABILITY_SCHEMA_VERSION = 2
 CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION = 1
 CONTINUOUS_RMOM_IDENTITY_SCHEMA_VERSION = 1
 
@@ -132,6 +132,7 @@ class ContinuousEntrySelectionObservation:
     funnel_rows: tuple[dict[str, Any], ...]
     qualified_opportunities: tuple[dict[str, str], ...]
     admitted_opportunities: tuple[dict[str, str], ...]
+    selection_rejections: tuple[dict[str, str], ...]
     skipped_same_signal_reentry: int
     observed_same_signal_reentry: int
     observer_error: str = ""
@@ -942,6 +943,7 @@ def _observe_continuous_component_selection(
     funnel_rows: list[dict[str, Any]] = []
     qualified: list[dict[str, str]] = []
     admitted: list[dict[str, str]] = []
+    selection_rejections: list[dict[str, str]] = []
     skipped_same_signal_reentry = 0
     observed_same_signal_reentry = 0
     observer_errors: list[str] = []
@@ -994,8 +996,18 @@ def _observe_continuous_component_selection(
             )
             continue
         observed_same_signal_reentry += same_signal.height
-        for row in available.to_dicts():
-            qualified.append({"component": component, "symbol": str(row["symbol"])})
+        for row in age.to_dicts():
+            symbol = str(row["symbol"])
+            opportunity = {"component": component, "symbol": symbol}
+            qualified.append(opportunity)
+            if symbol in reserved_symbols:
+                selection_rejections.append(
+                    {**opportunity, "first_rejection_reason": "already_reserved"}
+                )
+            elif symbol in prior_symbols:
+                selection_rejections.append(
+                    {**opportunity, "first_rejection_reason": "same_signal_reentry"}
+                )
 
         component_capacity_count = 0
         if len(candidates) < entry_capacity:
@@ -1048,6 +1060,7 @@ def _observe_continuous_component_selection(
         funnel_rows=tuple(funnel_rows),
         qualified_opportunities=tuple(qualified),
         admitted_opportunities=tuple(admitted),
+        selection_rejections=tuple(selection_rejections),
         skipped_same_signal_reentry=skipped_same_signal_reentry,
         observed_same_signal_reentry=observed_same_signal_reentry,
         observer_error=" · ".join(observer_errors)[:500],
@@ -1081,11 +1094,16 @@ def _qualified_block_reasons(
     btc_risk_reason: str,
 ) -> dict[tuple[str, str], str]:
     admitted = {(row["component"], row["symbol"]) for row in observation.admitted_opportunities}
-    reasons: dict[tuple[str, str], str] = {}
+    reasons = {
+        (row["component"], row["symbol"]): row["first_rejection_reason"]
+        for row in observation.selection_rejections
+    }
     for row in observation.qualified_opportunities:
         key = (row["component"], row["symbol"])
         if preselection_reason:
             reasons[key] = preselection_reason
+        elif key in reasons:
+            continue
         elif key not in admitted:
             reasons[key] = "capacity"
         elif btc_risk_reason:
@@ -2110,6 +2128,7 @@ def run_continuous_demo_cycle(
                 funnel_rows=(),
                 qualified_opportunities=(),
                 admitted_opportunities=(),
+                selection_rejections=(),
                 skipped_same_signal_reentry=0,
                 observed_same_signal_reentry=0,
                 observer_error=observer_error,

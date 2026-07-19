@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
@@ -23,6 +24,7 @@ from liquidity_migration.account_kernel import (
     account_journal_path,
     account_transactions_path,
     read_account_journal,
+    read_account_journal_head,
     verify_account_journal,
 )
 from liquidity_migration.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
@@ -966,6 +968,75 @@ def test_atomic_transaction_segments_remain_authoritative_if_jsonl_projection_is
         local_ack_ts_ns=1_201_000_000,
     )
     assert len(list(account_transactions_path(tmp_path).glob("*.json"))) == 2
+
+
+def test_account_journal_head_reads_and_authenticates_only_latest_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="head-1",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+    kernel.record_venue_snapshot(
+        snapshot_key="head-2",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=3,
+        local_receive_ts_ns=4,
+    )
+    expected = read_account_journal(tmp_path)[-1]
+    observed_files: list[tuple[str, ...]] = []
+    original_reader = account_kernel_module._read_transaction_event_bytes
+
+    def observe_latest(files: object):
+        rows = tuple(files)  # type: ignore[arg-type]
+        observed_files.append(tuple(label for label, _data in rows))
+        return original_reader(rows)
+
+    monkeypatch.setattr(
+        account_kernel_module,
+        "_read_transaction_event_bytes",
+        observe_latest,
+    )
+
+    assert read_account_journal_head(tmp_path) == expected
+    assert len(observed_files) == 1
+    assert len(observed_files[0]) == 1
+    assert observed_files[0][0].endswith(sorted(account_transactions_path(tmp_path).glob("*.json"))[-1].name)
+
+
+def test_account_journal_head_rejects_self_hashed_latest_event_tampering(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="head-tamper",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+    transaction = next(account_transactions_path(tmp_path).glob("*.json"))
+    payload = json.loads(transaction.read_bytes())
+    payload["events"][-1]["state_hash"] = "f" * 64
+    payload["transaction_hash"] = account_kernel_module._transaction_hash(payload)
+    renamed = transaction.with_name(
+        f"{int(payload['first_sequence']):020d}-{int(payload['last_sequence']):020d}-"
+        f"{payload['transaction_hash'][:16]}.json"
+    )
+    transaction.rename(renamed)
+    renamed.write_bytes(account_kernel_module.canonical_json(payload) + b"\n")
+
+    with pytest.raises(AccountJournalIntegrityError, match="event hash mismatch"):
+        read_account_journal_head(tmp_path)
 
 
 def test_account_journal_reader_sees_only_committed_state_while_write_is_blocked(

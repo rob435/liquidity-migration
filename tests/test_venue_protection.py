@@ -17,6 +17,7 @@ from liquidity_migration.account_kernel import (
     TargetBatchResult,
     read_account_journal,
 )
+from liquidity_migration.account_service_bybit import inspect_bybit_demo_order_ownership
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import ExecutionObservation, KernelExecutionDriver
 from liquidity_migration.venue_protection import BybitNativeProtectionManager
@@ -526,6 +527,91 @@ def test_venue_snapshot_repairs_missing_native_stop_even_when_local_state_is_act
     assert active[1]["metadata"]["activation_revision"] == 2
     assert kernel.state().protections[plan.protection_key]["status"] == "replaced"
     manager.require_recent_healthy(max_age_ns=1)
+
+
+def test_full_stop_update_accepts_bybit_reused_order_id_as_native_lineage(
+    tmp_path: Path,
+) -> None:
+    kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
+    manager, client = _manager(kernel, clock)
+    first = manager.sync("BUSDT")
+    assert first is not None
+    original_order = {
+        "symbol": "BUSDT",
+        "orderId": "reused-full-stop",
+        "orderLinkId": "",
+        "orderStatus": "Untriggered",
+        "cumExecQty": "0",
+        "triggerPrice": "10.7",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }
+    assert manager.observe_order(original_order) is True
+
+    # A Full-position repair/update can mutate the existing system order. The
+    # API response has no order identity, so the next REST/WS row is the proof
+    # that Bybit retained the same orderId for the active stop.
+    repaired = manager.sync("BUSDT", force=True)
+    assert repaired == first
+    assert len(client.stops) == 2
+    assert manager.observed_native_order_ids == {}
+    active = manager.active("BUSDT")
+    assert active is not None
+    assert active[1]["metadata"]["native_venue_order_id_lineage"] == [
+        "reused-full-stop"
+    ]
+    assert manager.is_verified_native_order(original_order) is True
+    assert manager.is_verified_native_order(
+        {**original_order, "triggerPrice": "10.8"}
+    ) is False
+    assert manager.native_execution_identity_evidence(original_order) == (
+        "matched_known_native_order_lineage"
+    )
+
+    class ConditionalOrderClient:
+        demo = True
+
+        def get_open_orders(self, **_params: object):
+            return [original_order]
+
+    ownership = inspect_bybit_demo_order_ownership(
+        client=ConditionalOrderClient(),
+        state=kernel._state_ref(),
+        native_order_verifier=manager.is_verified_native_order,
+    )
+    assert ownership.unowned_orders == ()
+
+    consumer = BybitAccountExecutionConsumer(
+        kernel=kernel,
+        native_protection_manager=manager,
+        clock=clock,
+    )
+    consumer.on_execution(
+        {"data": [{
+            "symbol": "BUSDT",
+            "orderId": "reused-full-stop",
+            "orderLinkId": "",
+            "execId": "reused-full-stop-fill",
+            "side": "Buy",
+            "execQty": "2",
+            "execPrice": "10.8",
+            "execFee": "0.02",
+            "execTime": "2100",
+            "execType": "Trade",
+            "createType": "CreateByStopLoss",
+            "stopOrderType": "StopLoss",
+        }]},
+        local_receive_ts_ns=2_100_000_000,
+    )
+
+    state = kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    execution = state.executions["reused-full-stop-fill"]
+    assert execution["metadata"]["external_execution_origin"] == "verified_native_stop"
+    assert execution["metadata"]["native_identity"] == (
+        "matched_known_native_order_lineage"
+    )
+    assert next(iter(state.closes.values()))["reason"] == "native_protection_triggered"
 
 
 def test_unknown_bybit_stop_execution_is_adopted_and_never_reopens(tmp_path: Path) -> None:

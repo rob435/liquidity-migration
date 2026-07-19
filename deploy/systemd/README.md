@@ -37,9 +37,10 @@ uses that receipt for age and current WS-store size, and binds it back to the
 exact causal cycle row. A prior service generation cannot mask a hung restart.
 Before the first receipt, only the current generation receives the same bounded
 ten-minute grace as the cycle SLA. The account owner remains fail-closed during
-that window; the observer suppresses only its exact initial queue-head L2
-subscription transition, never missing, stale, reconciliation, or capital
-health failures.
+that window. The observer suppresses only the exact nonterminal queue-head L2
+subscription transition: the owner latches it to a maximum of 30 seconds, and
+the resulting terminal timeout still pages. Missing, stale, reconciliation, and
+capital health failures are never suppressed.
 
 ## Deployment lifecycle
 
