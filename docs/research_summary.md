@@ -330,6 +330,31 @@ rolling ledger.
 | T-D funding forecast | Cumulative funding is modestly predictable beyond persistence, concentrated in tails and 48–72h horizons (up to −17% tail MAE via short-half-life EWMA / mean-reversion). The pre-declared Stage-2 bar (≥10% on both overall and q95-tail MAE at 24h) was not met; the T-B floor substitution did not run. |
 | T-A regime-gate ablation | Thesis refuted on paired full-history renders (2023-04→2026-07): removing the BTC uptrend gate doubles entries (2,300→4,019) yet loses ~1.0pp total return, takes ~5× the max drawdown (−6.35% vs −1.30%), and nearly doubles negative common-loss tail days (28 vs 15). Early era alone favors removal on return; the late era decisively favors the gate. Gate-off fails the declared mean+tail test; no prototype advances. |
 
+## Strategy Research V4 (exploratory, 2026-07-19)
+
+Lane-1 execution of `docs/preregistration/DRAFT_strategy_research_v4_2026-07-19.md`
+(evidence cards, grids, and manifests under `reports/strategy-research-v3/t-e`
+… `t-i/`). All five theses closed; **no forward-ledger prototype advanced.**
+The `[2025-01-01, 2026-07-06)` label-level holdout stays unread (render-book
+diagnostics touch already-rendered T-A outputs only, the boundary T-A
+declared). None of this is alpha, robustness, or promotion evidence.
+
+**Program-level finding (the owner-directed double-verification rule did its
+job):** every entry-quality cut that works on the barebones ledger inverts on
+the deployed-shape render books. Fresh-high and deep-negative-funding
+conditioning are large, era-stable improvements on the barebones surface, yet
+the same conditions mark the render books' *best* trades under both gate
+states — the barebones 12%-TP/24h-hold shape, not the entry, is what those
+cuts measure. Future entry-conditioning work needs render-native surfaces.
+
+| Thesis | Exploratory outcome |
+| --- | --- |
+| T-E fresh-high conditioning | At-high (≤1h since 168h high) bucket is positive in both eras and every year; skip rules gain up to +28pp on the barebones ledger (mostly cost/funding savings) but only skip_h6 clears both eras, and all skip rules would *forfeit* net-positive mass on both render books (>24h entries are +15.0% net on the gate-on book). Real ranking signal, non-transferable hard filter; no prototype. |
+| T-G funding-state conditioner | Only fully era-stable ledger family: all 9 cells positive in both eras; best is combo (skip deep-neg only when the T-D meanrev forecast agrees, +7.99pp; the forecast rescues 296 trades worth +2.08pp). Sign inverts on both render books — deep-neg entries are their best funding bucket (+16.5/+19.6% net, 40%+ TP rates). Shape artifact; no prototype. Bybit funding-timing verified: next-settlement rate is only final at settlement since 2022-06-30/07-05, so T-B's "next-rate" floor is not registrable; the `prev` convention stays valid. |
+| T-F MFE give-back ladder | Re-simulator reproduces all 16,745 recorded exits exactly, then no cell survives: tight arms forfeit more TP completions than the give-back they capture (−148pp vs +144pp flows at A=4%/R=0.7); best cell nets +1.2pp as the residue of ±54pp opposing flows and inverts (−1.25pp) on the T-E-filtered axis. Adaptive exits now closed on both 1m (2026-06-20) and 1h granularities. |
+| T-H expected-net ranker | Refuted on its own declared tests: drop-bottom-decile (+4.7pp) and quintile sizing (+2.6pp, worse maxDD) lose to the simple T-E∧T-G conditioner (+41.1pp) by an order of magnitude; 4 of 9 ridge coefficients flip sign across the 10 walk-forward refits; decile ranking is non-monotone mid-distribution and only extreme-bottom toxicity transfers to the render books (n=51). |
+| T-I regime intensity | No member advances under the registered MAR+tail rule. The linear intensity member Pareto-dominates the binary gate on every risk dimension (equal net, −5pp maxDD, better tail everywhere) but loses the MAR comparison because MAR is ill-posed at negative net — recorded as a decision-metric lesson for any future registration. Two-sided intensity decisively refuted (retains 155/156 negative tail days). |
+
 ## Progressive model adopted (2026-07-19)
 
 By owner direction the repository operates under the Progressive Evidence

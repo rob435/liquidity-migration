@@ -1,0 +1,79 @@
+{
+ "code_commit": "49e729ca17b9692d6ecc197b35fea688d2b0f30b",
+ "created_utc": "2026-07-19T23:00:25.196062+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory re-simulation of a spent discovery surface; no alpha claim",
+  "changed trades keep the original modeled round-trip cost; exit-side slippage of the new bar-close exits is not separately modeled",
+  "no capacity backfill; no promotion or deployment implication"
+ ],
+ "files": {
+  "tf_grid.csv": {
+   "bytes": 19865,
+   "sha256": "ff411d50fb87e4ea9aeb7e2163c78c31b4501f81a9f57fae33c346713a8bcb56"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "shared_cache": {
+   "funding_events.parquet": "f27e49e737bf819a2d89f05f32acfa3234ba76ae3fbdf1424ccec96858dd6676",
+   "kline_slice_1h.parquet": "4b1727269d14176824604fb9d07e00dd93ff92e83837ac6adc62f3ec386b9078"
+  },
+  "shared_cache_dir": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-research-v3\\shared\\2026-07-19",
+  "te_trade_features.parquet": {
+   "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-research-v3\\t-e\\2026-07-19\\te_trade_features.parquet",
+   "sha256": "8a511a51a7ed1590be542b3f23c000fc7eb60d4d4e76a48762e983802213296d"
+  },
+  "v2": {
+   "barebones_ledger.parquet": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\barebones_ledger.parquet",
+    "sha256": "368a7c04640dd362179d4c00897948d036ce38dc6136da12eedd47b4b6c64ddd"
+   },
+   "manifest.json": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\manifest.json",
+    "payload_sha256": "0a14862522af6e37ea05facbb47f9f4564e6f298ccb4a2d3559f5a79b0f06d9d"
+   }
+  }
+ },
+ "kind": "strategy_research_v4_tf_mfe_giveback",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "440a0bb9dae653209927eac0dddc37657a2096aa8283b2ef43c05d836f52b00d",
+ "params": {
+  "axes": {
+   "full": "all continuous trades",
+   "te_skip_h6": "hours_since_high_168h <= 6.0 or null"
+  },
+  "changed_trade_cost_assumption": "original modeled round-trip cost retained",
+  "era_midpoint": "2023-02-22",
+  "grid": {
+   "breakeven": {
+    "arm_pct": [
+     0.04,
+     0.06,
+     0.08
+    ]
+   },
+   "giveback": {
+    "arm_pct": [
+     0.04,
+     0.06,
+     0.08
+    ],
+    "retain_frac": [
+     0.5,
+     0.7
+    ]
+   }
+  },
+  "reproduction_check": {
+   "mismatches": 0,
+   "trades": 16745,
+   "worst_exit_price_rel_diff": 0.0
+  },
+  "rule_semantics": "mirrors trade_lifecycle.on_bar: mae/mfe updated with current bar, TP touch precedence, adaptive exit at bar close (<= comparisons), then 24h boundary close",
+  "sleeve": "continuous"
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

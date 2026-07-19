@@ -40,7 +40,7 @@ genuinely new idea, recorded here when opened.
 | Prospective runtime-parity forward start | `../prospective_runtime_parity_forward_start_receipt_2026-07-19.md` | Exact final comparator and create-only 90-day boundary; no forward result, alpha claim, promotion, or real-money authority |
 | 1000TAGUSDT incident | `../incidents/2026-07-10-1000tag.md` | Contained; demo venue flat at incident close |
 | Strategy Research V3 (Lane-1 draft) | `DRAFT_strategy_research_v3_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface; all four theses closed (evidence cards in `reports/strategy-research-v3/`); holdout untouched; no prototype advanced |
-| Strategy Research V4 (Lane-1 draft) | `DRAFT_strategy_research_v4_2026-07-19.md` | UNREGISTERED draft generated from inspected V3 residue (post-hoc, elevated selection risk); grids declared, nothing run |
+| Strategy Research V4 (Lane-1 draft) | `DRAFT_strategy_research_v4_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface + T-A render books; all five theses closed (evidence cards in `reports/strategy-research-v3/t-e`…`t-i/`); holdout untouched; no prototype advanced; Bybit funding-timing question closed (next-rate not registrable post-2022-07) |
 
 ## Cancelled without result
 

@@ -1,0 +1,98 @@
+{
+ "code_commit": "49e729ca17b9692d6ecc197b35fea688d2b0f30b",
+ "created_utc": "2026-07-19T22:57:53.052415+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory post-processing of a spent discovery surface; no alpha claim",
+  "no capacity backfill: removed or down-weighted trades admit no substitutes",
+  "render-book arm is a diagnostic on already-rendered T-A outputs; no engine change",
+  "no promotion or deployment implication"
+ ],
+ "files": {
+  "tg_bucket_diagnostic.csv": {
+   "bytes": 1451,
+   "sha256": "f599912d31947989011e29c8ef9528262f083a99a6f09b469f15c4e327c86569"
+  },
+  "tg_grid.csv": {
+   "bytes": 9701,
+   "sha256": "bb8a1565e3559c1901deb7f655e779807f8cb57fdd873015e47d8e25f1e74619"
+  },
+  "tg_render_buckets.csv": {
+   "bytes": 1995,
+   "sha256": "67755ebc05250bd68483140fe0dd86fb019351fb2101c91d872cd00c2173f89f"
+  },
+  "tg_trade_panel.parquet": {
+   "bytes": 2005275,
+   "sha256": "b08153367fefb1322cf47c459988c46a7836fe82e1297dc9f593183fcc6a164c"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "render_funding_cache": {
+   "dir": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-research-v3\\shared\\2026-07-19-render",
+   "sha256": "5f75b179e08917cc0885896c166930aae7840737b11117dfc61e8bc53c16595a"
+  },
+  "shared_cache": {
+   "funding_events.parquet": "f27e49e737bf819a2d89f05f32acfa3234ba76ae3fbdf1424ccec96858dd6676",
+   "kline_slice_1h.parquet": "4b1727269d14176824604fb9d07e00dd93ff92e83837ac6adc62f3ec386b9078"
+  },
+  "shared_cache_dir": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-research-v3\\shared\\2026-07-19",
+  "ta_render_books": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-research-v3\\t-a\\2026-07-19",
+  "v2": {
+   "barebones_ledger.parquet": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\barebones_ledger.parquet",
+    "sha256": "368a7c04640dd362179d4c00897948d036ce38dc6136da12eedd47b4b6c64ddd"
+   },
+   "manifest.json": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\manifest.json",
+    "payload_sha256": "0a14862522af6e37ea05facbb47f9f4564e6f298ccb4a2d3559f5a79b0f06d9d"
+   }
+  }
+ },
+ "kind": "strategy_research_v4_tg_funding_state",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "c8e134ea100bfe504c210738738dd66b650c9f4e6edb9eac2c86eac3216577f1",
+ "params": {
+  "buckets": {
+   "deep_neg": "r < -0.1%",
+   "neg": "-0.1% <= r < 0",
+   "pos": "r > +0.01%",
+   "zero": "0 <= r <= +0.01%"
+  },
+  "draft_bucket_counts_check": {
+   "deep_neg": 1305,
+   "neg": 2303,
+   "pos": 2947,
+   "zero": 10190
+  },
+  "era_midpoint": "2023-02-22",
+  "feature": "known_rate_prev = last settled funding rate at or before entry (strictly PIT)",
+  "grid": {
+   "combo_rule": "skip iff known_prev < K AND meanrev_phi0.5 24h forecast < K * n_settlements",
+   "kinds": [
+    "skip",
+    "half_weight",
+    "combo_with_meanrev_forecast"
+   ],
+   "meanrev": {
+    "mu": "trailing mean of last 90 settlements (min 10, else known_prev)",
+    "phi": 0.5
+   },
+   "missing_rate_treatment": "pass through at weight 1.0",
+   "rate_cuts_per_interval": [
+    -0.0005,
+    -0.001,
+    -0.002
+   ]
+  },
+  "overlap_with_te": "see reports/strategy-research-v3/t-e/<date>/te_overlap_funding.csv",
+  "render_missing_prev_rate": {
+   "gate_off": 0,
+   "gate_on": 0
+  },
+  "sleeve": "continuous"
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}
