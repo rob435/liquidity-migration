@@ -102,8 +102,37 @@ direct-child roots and cache/lock directories are then created relative to the
 held data-root descriptor; owner and mode changes never use recursive pathname
 `chown` or `find` traversal.
 
+Install also validates `configs/operational.demo.json`, installs its exact bytes
+at the demo `ACCOUNT_RISK_POLICY_FILE`, and creates the isolated byte-exact
+paper mirror. All strategy producers, the demo hedge, and both account owners
+consume that one schema. The later operational receipt binds both installed
+copies.
+
 Do not issue authority until the installed environment files and runtime inputs
 are final. Installing another commit invalidates the sequence.
+
+### Operational sizing profile
+
+Edit `configs/operational.demo.json` to change operational leverage, notional
+scale, entry capacity, the BTC trend gate, or account caps. Do not edit the
+installed `/etc` copies: authorization binds their bytes and a live edit makes
+runtime verification fail.
+
+Validate a proposed edit before committing it:
+
+```bash
+.venv/bin/python -c \
+  'from liquidity_migration.operational_profile import load_operational_profile; print(load_operational_profile("configs/operational.demo.json"))'
+.venv/bin/python -m pytest -q tests/test_operational_profile.py
+```
+
+The validator rejects unknown keys, non-finite values, producer leverage above
+the account maximum, and active LONG/CONTINUOUS sizing envelopes that cannot fit
+the owner caps at `capital_reference_usdt`. Absolute account limits still
+govern actual state, including hedge and simultaneous sleeve exposure, so a
+coherent profile does not promise that every future signal will pass risk.
+Apply changes through the normal stopped install, new authority, and activation
+sequence; changing this operational profile is not research promotion.
 
 ### 2. Issue operational authority
 

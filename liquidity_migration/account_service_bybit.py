@@ -350,7 +350,8 @@ def require_bybit_demo_order_ownership(
     identify; this function never cancels or adopts an order.
     """
 
-    state = kernel.state()
+    state_ref = getattr(kernel, "_state_ref", None)
+    state = state_ref() if callable(state_ref) else kernel.state()
     snapshot = inspect_bybit_demo_order_ownership(
         client=client,
         state=state,

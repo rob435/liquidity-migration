@@ -52,6 +52,8 @@ OWNER_MARKET_READINESS_FILENAME = "account_owner_market_readiness.json"
 OWNER_MARKET_READINESS_KIND = "account_owner_market_readiness"
 OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
 OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
+DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS = 120.0
+DEFAULT_ORDERBOOK_WATCHDOG_INTERVAL_SECONDS = 10.0
 DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS = (
     1_000_000_000,
     15_000_000_000,
@@ -1274,6 +1276,10 @@ class BybitRawPublicMarketStream:
 
     The factory is injectable for tests.  Production uses ``websocket-client``
     (already a pybit dependency) and reconnects in a daemon thread until closed.
+    A second daemon watches every desired orderbook subscription independently:
+    traffic for one symbol does not prove that the other subscriptions remain
+    live.  Any symbol silent past the bounded threshold rebuilds the socket so
+    Bybit sends fresh snapshots for the full desired set.
     """
 
     def __init__(
@@ -1285,24 +1291,50 @@ class BybitRawPublicMarketStream:
         on_message: Callable[[Mapping[str, Any]], Any],
         websocket_factory: Callable[..., Any] | None = None,
         reconnect_seconds: float = 2.0,
+        stale_reconnect_seconds: float = DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS,
+        watchdog_interval_seconds: float = DEFAULT_ORDERBOOK_WATCHDOG_INTERVAL_SECONDS,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         self.url = TESTNET_PUBLIC_LINEAR_WS if testnet else MAINNET_PUBLIC_LINEAR_WS
         self.depth = depth
         if type(include_public_trades) is not bool:
             raise ValueError("include_public_trades must be a boolean")
+        if not math.isfinite(stale_reconnect_seconds) or stale_reconnect_seconds <= 0.0:
+            raise ValueError("stale_reconnect_seconds must be positive")
+        if not math.isfinite(watchdog_interval_seconds) or watchdog_interval_seconds <= 0.0:
+            raise ValueError("watchdog_interval_seconds must be positive")
+        if watchdog_interval_seconds >= stale_reconnect_seconds:
+            raise ValueError(
+                "watchdog_interval_seconds must be less than stale_reconnect_seconds"
+            )
         self.include_public_trades = include_public_trades
         self.on_market_message = on_message
         self.reconnect_seconds = reconnect_seconds
+        self.stale_reconnect_seconds = float(stale_reconnect_seconds)
+        self.watchdog_interval_seconds = float(watchdog_interval_seconds)
+        self._monotonic = monotonic_clock or time.monotonic
         self._symbols: set[str] = set()
         self._socket: Any | None = None
         self._thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.RLock()
+        self._subscription_started_monotonic: dict[str, float] = {}
+        self._last_orderbook_message_monotonic: dict[str, float] = {}
         if websocket_factory is None:
             from websocket import WebSocketApp
 
             websocket_factory = WebSocketApp
         self._factory = websocket_factory
+
+    def _detach_socket_locked(self, socket: Any | None = None) -> Any | None:
+        if socket is not None and self._socket is not socket:
+            return None
+        detached = self._socket
+        self._socket = None
+        self._subscription_started_monotonic.clear()
+        self._last_orderbook_message_monotonic.clear()
+        return detached
 
     def _topics(self, symbols: Iterable[str]) -> list[str]:
         topics: list[str] = []
@@ -1312,13 +1344,37 @@ class BybitRawPublicMarketStream:
                 topics.append(f"publicTrade.{symbol}")
         return topics
 
-    def _send(self, operation: str, symbols: Iterable[str]) -> None:
+    def _send(self, operation: str, symbols: Iterable[str]) -> bool:
         topics = self._topics(symbols)
         socket = self._socket
         if not topics or socket is None:
-            return
-        for index in range(0, len(topics), 10):
-            socket.send(json.dumps({"op": operation, "args": topics[index : index + 10]}))
+            return False
+        try:
+            for index in range(0, len(topics), 10):
+                socket.send(
+                    json.dumps(
+                        {"op": operation, "args": topics[index : index + 10]}
+                    )
+                )
+        except Exception:  # noqa: BLE001 - a closed socket must enter reconnect
+            # ``run_forever`` can still be unwinding after its transport has
+            # closed.  A concurrent symbol refresh must retain the desired set
+            # for the next ``on_open`` instead of killing the account owner.
+            self._detach_socket_locked(socket)
+            close = getattr(socket, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - preserve the reconnect path
+                    _logger.debug("failed to close unusable Bybit public socket", exc_info=True)
+            if not self._stop.is_set():
+                _logger.warning(
+                    "Bybit public %s failed; reconnect will restore desired subscriptions",
+                    operation,
+                    exc_info=True,
+                )
+            return False
+        return True
 
     def update_symbols(self, symbols: Iterable[str]) -> None:
         desired = {symbol.upper() for symbol in symbols if symbol}
@@ -1326,23 +1382,93 @@ class BybitRawPublicMarketStream:
             adds = desired - self._symbols
             removes = self._symbols - desired
             self._send("unsubscribe", removes)
-            self._send("subscribe", adds)
+            subscribed = self._send("subscribe", adds)
+            for symbol in removes:
+                self._subscription_started_monotonic.pop(symbol, None)
+                self._last_orderbook_message_monotonic.pop(symbol, None)
+            if subscribed and self._socket is not None:
+                subscribed_at = self._monotonic()
+                for symbol in adds:
+                    self._subscription_started_monotonic[symbol] = subscribed_at
+                    self._last_orderbook_message_monotonic.pop(symbol, None)
             self._symbols = desired
 
     def _on_open(self, socket: Any) -> None:
+        close_immediately = False
         with self._lock:
-            self._socket = socket
-            self._send("subscribe", self._symbols)
+            if self._stop.is_set():
+                close_immediately = True
+            else:
+                self._socket = socket
+                subscribed_at = self._monotonic()
+                self._subscription_started_monotonic = {
+                    symbol: subscribed_at for symbol in self._symbols
+                }
+                self._last_orderbook_message_monotonic.clear()
+                self._send("subscribe", self._symbols)
+        if close_immediately:
+            close = getattr(socket, "close", None)
+            if callable(close):
+                close()
 
-    def _on_message(self, _socket: Any, raw: str | bytes) -> None:
+    def _on_message(self, socket: Any, raw: str | bytes) -> None:
         local_ns = time.time_ns()
         try:
             message = json.loads(raw)
             if isinstance(message, Mapping) and message.get("topic"):
                 # Capture receive time before parsing/storage work.
                 self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
+                topic = str(message.get("topic") or "")
+                if topic.startswith("orderbook."):
+                    symbol = topic.rsplit(".", 1)[-1].upper()
+                    with self._lock:
+                        if self._socket is socket and symbol in self._symbols:
+                            self._last_orderbook_message_monotonic[symbol] = self._monotonic()
         except Exception:  # noqa: BLE001 - malformed public frames must not kill reconnect loop
             _logger.exception("raw Bybit public message handling failed")
+
+    def check_stale_subscriptions(self) -> tuple[str, ...]:
+        """Reconnect when any desired orderbook has stopped producing frames."""
+
+        with self._lock:
+            if self._stop.is_set() or self._socket is None:
+                return ()
+            now = self._monotonic()
+            stale = tuple(
+                sorted(
+                    symbol
+                    for symbol in self._symbols
+                    if (
+                        started_at := self._subscription_started_monotonic.get(symbol)
+                    ) is not None
+                    and now
+                    - self._last_orderbook_message_monotonic.get(symbol, started_at)
+                    >= self.stale_reconnect_seconds
+                )
+            )
+            if not stale:
+                return ()
+            socket = self._detach_socket_locked()
+        _logger.warning(
+            "Bybit public orderbook subscription stale; reconnecting socket: "
+            "symbols=%s threshold_seconds=%.1f",
+            ",".join(stale),
+            self.stale_reconnect_seconds,
+        )
+        close = getattr(socket, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - the runner still owns reconnect
+                _logger.exception("failed to close stale Bybit public socket")
+        return stale
+
+    def _watchdog_loop(self) -> None:
+        while not self._stop.wait(self.watchdog_interval_seconds):
+            try:
+                self.check_stale_subscriptions()
+            except Exception:  # noqa: BLE001 - watchdog failure must not kill capture
+                _logger.exception("Bybit public orderbook watchdog failed")
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1360,21 +1486,27 @@ class BybitRawPublicMarketStream:
             finally:
                 with self._lock:
                     if self._socket is socket:
-                        self._socket = None
+                        self._detach_socket_locked(socket)
             self._stop.wait(self.reconnect_seconds)
 
     def start(self, symbols: Iterable[str]) -> None:
         self.update_symbols(symbols)
-        if self._thread is not None and self._thread.is_alive():
-            return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="bybit-raw-market", daemon=True)
-        self._thread.start()
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._run, name="bybit-raw-market", daemon=True)
+            self._thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop,
+                name="bybit-raw-market-watchdog",
+                daemon=True,
+            )
+            self._watchdog_thread.start()
 
     def close(self) -> None:
         self._stop.set()
         with self._lock:
-            socket = self._socket
+            socket = self._detach_socket_locked()
         if socket is not None:
             close = getattr(socket, "close", None)
             if callable(close):
@@ -1382,6 +1514,9 @@ class BybitRawPublicMarketStream:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if self._watchdog_thread is not None:
+            self._watchdog_thread.join(timeout=5.0)
+            self._watchdog_thread = None
 
 
 def recorder_callback(recorder: SequenceAwareMarketRecorder) -> Callable[[Mapping[str, Any]], Any]:

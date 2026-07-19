@@ -249,6 +249,14 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         help="Per-position notional multiplier vs the base gross/max_concurrent. "
         "Default 1×; levered demo sizing is explicit opt-in.",
     )
+    long_demo.add_argument(
+        "--operational-profile-file",
+        default="",
+        help=(
+            "Strict shared producer/account operational profile. When supplied, "
+            "its LONG sizing fields override the individual sizing flags."
+        ),
+    )
     long_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
     long_demo.add_argument(
         "--max-projected-initial-margin-pct-equity",
@@ -375,6 +383,14 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         help="Causal prior-30d BTC regime gate for new entries.",
     )
     p.add_argument("--entry-leverage", type=float, default=d.entry_leverage)
+    p.add_argument(
+        "--operational-profile-file",
+        default="",
+        help=(
+            "Strict shared producer/account operational profile. When supplied, "
+            "its CONTINUOUS sizing fields override the individual sizing flags."
+        ),
+    )
     p.add_argument(
         "--notional-multiplier",
         type=float,

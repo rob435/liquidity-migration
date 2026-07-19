@@ -11,6 +11,7 @@ from .account_kernel import (
     AccountState,
     InstrumentRules,
     MarketInputRef,
+    reduce_account_events,
 )
 from .account_service import (
     AccountIntentInbox,
@@ -20,7 +21,7 @@ from .account_service import (
 )
 from .account_strategy_state import (
     CanonicalComponentExecutionAnchor,
-    canonical_component_execution_anchors,
+    component_execution_anchors_from_snapshot,
 )
 from .strategy_runtime import SleeveTargetIntent
 
@@ -63,39 +64,43 @@ class AccountProtectionEngine:
         trusted_account_state: AccountState | None = None,
     ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
-        if trusted_account_state is None:
-            state = self.kernel.state()
-        else:
-            if account_events is None:
+        if account_events is None:
+            if trusted_account_state is not None:
                 raise ValueError(
                     "trusted protection state requires its account event snapshot"
                 )
-            expected_state_hash = (
-                account_events[-1].state_hash
-                if account_events
-                else AccountState().rolling_state_hash
-            )
-            if (
-                trusted_account_state.events_applied != len(account_events)
-                or trusted_account_state.rolling_state_hash != expected_state_hash
-            ):
-                raise RuntimeError(
-                    "trusted protection state does not match its account event snapshot"
-                )
-            state = trusted_account_state
-        if verified_execution_anchors is None:
-            anchors = {
-                anchor.target_key: anchor
-                for anchor in canonical_component_execution_anchors(
-                    self.kernel.journal.root,
-                    account_events=account_events,
-                )
-            }
-        else:
-            if account_events is None:
+            if verified_execution_anchors is not None:
                 raise ValueError(
                     "verified protection anchors require their account event snapshot"
                 )
+            events, state = self.kernel._snapshot_ref()
+        else:
+            events = tuple(account_events)
+            expected_state_hash = (
+                events[-1].state_hash
+                if events
+                else AccountState().rolling_state_hash
+            )
+            if trusted_account_state is None:
+                state = reduce_account_events(events)
+            else:
+                if (
+                    trusted_account_state.events_applied != len(events)
+                    or trusted_account_state.rolling_state_hash != expected_state_hash
+                ):
+                    raise RuntimeError(
+                        "trusted protection state does not match its account event snapshot"
+                    )
+                state = trusted_account_state
+        if verified_execution_anchors is None:
+            anchors = {
+                anchor.target_key: anchor
+                for anchor in component_execution_anchors_from_snapshot(
+                    events,
+                    state=state,
+                )
+            }
+        else:
             anchors = dict(verified_execution_anchors)
             for target_key, projected_anchor in anchors.items():
                 if target_key != projected_anchor.target_key:

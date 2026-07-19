@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -684,6 +685,198 @@ def test_operational_stream_subscribes_only_to_required_orderbooks() -> None:
     stream._on_open(socket)
 
     assert socket.sent == [{"op": "subscribe", "args": ["orderbook.50.BUSDT"]}]
+
+
+def test_raw_stream_closed_socket_defers_desired_symbols_to_reconnect() -> None:
+    class ClosedSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def send(self, _value: str) -> None:
+            raise RuntimeError("socket is already closed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class ReconnectedSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+    )
+    closed = ClosedSocket()
+    stream._socket = closed
+
+    stream.update_symbols({"BUSDT"})
+
+    assert closed.closed is True
+    assert stream._socket is None
+    reconnected = ReconnectedSocket()
+    stream._on_open(reconnected)
+    assert reconnected.sent == [
+        {"op": "subscribe", "args": ["orderbook.50.BUSDT"]}
+    ]
+
+
+def test_raw_stream_reconnects_when_one_required_orderbook_is_stale() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [100.0]
+    seen: list[Mapping[str, Any]] = []
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=seen.append,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=120.0,
+        watchdog_interval_seconds=10.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT", "ONDOUSDT"})
+    first = Socket()
+    stream._on_open(first)
+
+    now[0] = 219.0
+    stream._on_message(first, json.dumps(_snapshot(symbol="BTCUSDT")))
+    assert stream.check_stale_subscriptions() == ()
+
+    now[0] = 221.0
+    assert stream.check_stale_subscriptions() == ("ONDOUSDT",)
+    assert first.closed is True
+    assert stream._socket is None
+
+    reconnected = Socket()
+    stream._on_open(reconnected)
+    assert reconnected.sent == [{
+        "op": "subscribe",
+        "args": ["orderbook.50.BTCUSDT", "orderbook.50.ONDOUSDT"],
+    }]
+    assert seen[0]["data"]["s"] == "BTCUSDT"
+
+
+def test_raw_stream_gives_new_subscription_a_full_staleness_window() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [10.0]
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=120.0,
+        watchdog_interval_seconds=10.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT"})
+    socket = Socket()
+    stream._on_open(socket)
+    now[0] = 100.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
+
+    now[0] = 125.0
+    stream.update_symbols({"BTCUSDT", "ONDOUSDT"})
+    now[0] = 150.0
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BTCUSDT")))
+    now[0] = 220.0
+
+    assert stream.check_stale_subscriptions() == ()
+    assert socket.closed is False
+    assert socket.sent[-1] == {
+        "op": "subscribe",
+        "args": ["orderbook.50.ONDOUSDT"],
+    }
+    now[0] = 246.0
+    assert stream.check_stale_subscriptions() == ("ONDOUSDT",)
+    assert socket.closed is True
+
+
+def test_raw_stream_watchdog_reconnects_and_resubscribes() -> None:
+    class Socket:
+        def __init__(
+            self,
+            *,
+            index: int,
+            on_open: Any,
+            second_opened: threading.Event,
+        ) -> None:
+            self.index = index
+            self.on_open = on_open
+            self.second_opened = second_opened
+            self.closed = threading.Event()
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+        def run_forever(self, **_kwargs: object) -> None:
+            self.on_open(self)
+            if self.index == 1:
+                self.second_opened.set()
+            self.closed.wait(timeout=1.0)
+
+        def close(self) -> None:
+            self.closed.set()
+
+    class Factory:
+        def __init__(self) -> None:
+            self.built: list[Socket] = []
+            self.second_opened = threading.Event()
+
+        def __call__(self, _url: str, **kwargs: Any) -> Socket:
+            socket = Socket(
+                index=len(self.built),
+                on_open=kwargs["on_open"],
+                second_opened=self.second_opened,
+            )
+            self.built.append(socket)
+            return socket
+
+    factory = Factory()
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=factory,
+        reconnect_seconds=0.01,
+        stale_reconnect_seconds=0.04,
+        watchdog_interval_seconds=0.01,
+    )
+    try:
+        stream.start({"BUSDT"})
+        assert factory.second_opened.wait(timeout=1.0)
+    finally:
+        stream.close()
+
+    assert len(factory.built) >= 2
+    assert factory.built[0].closed.is_set()
+    assert factory.built[1].sent == [
+        {"op": "subscribe", "args": ["orderbook.50.BUSDT"]}
+    ]
 
 
 def test_capture_rotates_segments_before_size_limit(tmp_path: Path) -> None:

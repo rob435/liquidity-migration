@@ -160,6 +160,13 @@ def load_demo_rules(
 
 def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
     payload = _load_json_bytes(data, label="risk policy")
+    if payload.get("kind") == "liquidity_migration_operational_profile":
+        # Operational demo/paper uses one profile for producers and owner. Keep
+        # the legacy flat policy shape readable for isolated tools/tests, but
+        # authorization requires the strict shared profile.
+        from .operational_profile import load_operational_profile_bytes  # noqa: PLC0415
+
+        return load_operational_profile_bytes(data).account_risk.to_policy()
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=float(payload["max_component_gross_notional_usdt"]),
         max_account_gross_notional_usdt=float(payload["max_account_gross_notional_usdt"]),

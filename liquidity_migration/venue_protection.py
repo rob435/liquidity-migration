@@ -18,7 +18,7 @@ from .account_kernel import (
     InstrumentRules,
     PositionState,
 )
-from .account_strategy_state import canonical_component_execution_anchors
+from .account_strategy_state import component_execution_anchors_from_snapshot
 from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
@@ -110,7 +110,7 @@ class BybitNativeProtectionManager:
     @_serialized_manager_method
     def plan(self, symbol: str) -> NativeProtectionPlan | None:
         symbol = symbol.upper()
-        state = self.kernel.state()
+        events, state = self.kernel._snapshot_ref()
         position = state.positions.get(symbol)
         if position is None or position.signed_qty == 0.0:
             return None
@@ -134,8 +134,9 @@ class BybitNativeProtectionManager:
             raise RuntimeError(f"{symbol} position has no same-direction component target owner")
         anchors = {
             anchor.target_key: anchor
-            for anchor in canonical_component_execution_anchors(
-                self.kernel.journal.root,
+            for anchor in component_execution_anchors_from_snapshot(
+                events,
+                state=state,
             )
         }
         explicit = []
@@ -317,7 +318,7 @@ class BybitNativeProtectionManager:
     @_serialized_manager_method
     def active(self, symbol: str) -> tuple[str, Mapping[str, Any]] | None:
         symbol = symbol.upper()
-        return self._active_from_state(self.kernel.state(), symbol)
+        return self._active_from_state(self.kernel._state_ref(), symbol)
 
     @staticmethod
     def _active_from_state(
@@ -344,7 +345,7 @@ class BybitNativeProtectionManager:
     def _next_activation(self, plan: NativeProtectionPlan) -> tuple[str, int]:
         revisions = [
             int((protection.get("metadata") or {}).get("activation_revision") or 1)
-            for key, protection in self.kernel.state().protections.items()
+            for key, protection in self.kernel._state_ref().protections.items()
             if key == plan.protection_key
             or str((protection.get("metadata") or {}).get("protection_plan_key") or "")
             == plan.protection_key
@@ -476,7 +477,7 @@ class BybitNativeProtectionManager:
             if symbol and side in {"buy", "sell"} and size is not None:
                 venue_rows[symbol] = row
 
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         for symbol, position in sorted(state.positions.items()):
             if position.signed_qty == 0.0:
                 self.sync(symbol)
@@ -673,13 +674,13 @@ class BybitNativeProtectionManager:
         """Persist loss of a partially-filled native stop's working remainder."""
 
         if status != "partially_filled_cancelled":
-            state = self.kernel.state()
+            state = self.kernel._state_ref()
             order = state.orders.get(command_id)
             position = state.positions.get(order.symbol) if order is not None else None
             if order is not None and (position is None or abs(position.signed_qty) <= 1e-12):
                 self.last_error = ""
             return
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         order = state.orders.get(command_id)
         if order is None or not order.batch_id.startswith("external-protection/"):
             return
@@ -727,7 +728,7 @@ class BybitNativeProtectionManager:
     ) -> None:
         """Finish protection provenance when later fills join by venue order id."""
 
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         order = state.orders.get(command_id)
         if order is None or order.status != "filled":
             return
@@ -817,7 +818,7 @@ class BybitNativeProtectionManager:
     def require_recent_healthy(self, *, max_age_ns: int) -> None:
         if self.last_error:
             raise RuntimeError(self.last_error)
-        state = self.kernel.state()
+        state = self.kernel._state_ref()
         open_symbols = [
             symbol for symbol, position in state.positions.items() if position.signed_qty != 0.0
         ]

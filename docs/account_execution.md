@@ -25,6 +25,12 @@ venue credentials and do not submit, adopt, repair, or close venue orders.
 The account journal is authoritative. Parquet, reports, notifications, and
 strategy read models are projections or telemetry. See `docs/account_journal.md`.
 
+The demo hourly account notification labels owner/reconciliation state as
+`Account execution health`. Separately, it displays the latest completed
+CONTINUOUS BTC gate and entry funnel from a small receipt-bound projection.
+The owner never scans the growing strategy-cycle ledger, and unavailable or
+stale strategy telemetry changes only the message—not account admission.
+
 Each owner derives its requested route without filesystem mutation, acquires
 its persistent account-owner lease, and only then ensures or creates the paired
 account/inbox route manifests. A losing owner therefore cannot initialize route

@@ -51,6 +51,7 @@ from .account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
     long_profile_universe_inputs,
+    require_scheduled_retirements_flat,
     require_profile_binding,
 )
 from .account_owner_health import (
@@ -127,6 +128,9 @@ class LongNativeDemoCycleConfig:
     max_projected_initial_margin_pct_equity: float = 0.50
     wallet_balance_fraction: float = 1.0
     max_new_entries_per_cycle: int = 5
+    # SHA-256 of the shared operational profile when runtime sizing came from
+    # that profile. Empty is retained for isolated diagnostics/tests.
+    operational_profile_sha256: str = ""
     # No default is intentional: runtime callers must select exactly one
     # target owner. This producer has no order-submission capability.
     execution_environment: str = ""
@@ -343,6 +347,7 @@ def run_long_native_demo_cycle(
         tickers = _normalize_tickers(raw_tickers)
         universe = _build_long_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
         candidate_universe = None
+        candidate_reconciliation = None
         if demo.candidate_universe_file:
             candidate_universe = load_candidate_universe(demo.candidate_universe_file)
             require_profile_binding(
@@ -350,14 +355,27 @@ def run_long_native_demo_cycle(
                 profile="long",
                 current_inputs=long_profile_universe_inputs(demo),
             )
-            enforce_frozen_candidate_frames(
+            candidate_reconciliation = enforce_frozen_candidate_frames(
                 instruments,
                 tickers,
                 candidate_universe,
+                profile="long",
                 snapshot_ts_ms=cycle_now_ms,
                 context="LONG cycle",
+                retirement_registry_path=(
+                    root
+                    / "candidate_retirements"
+                    / f"{candidate_universe.artifact_sha256}.json"
+                ),
             )
-            universe = universe.filter(pl.col("symbol").is_in(list(candidate_universe.symbols)))
+            require_scheduled_retirements_flat(
+                candidate_reconciliation,
+                route=route,
+                context="LONG cycle",
+            )
+            universe = universe.filter(
+                pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))
+            )
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
@@ -544,6 +562,21 @@ def run_long_native_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
+            "temporarily_ineligible_candidates_json": json.dumps(
+                candidate_reconciliation.temporarily_ineligible_rows()
+                if candidate_reconciliation is not None
+                else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "scheduled_candidate_retirements_json": json.dumps(
+                candidate_reconciliation.retirement_rows()
+                if candidate_reconciliation is not None
+                else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "operational_profile_sha256": demo.operational_profile_sha256,
             "symbols": len(symbols),
             "universe_fallback_24h": universe_fallback_24h,  # ls-4: cold-start 24h backfill count (0 = warm)
             "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing

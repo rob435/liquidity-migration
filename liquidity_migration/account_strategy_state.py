@@ -323,21 +323,65 @@ def canonical_component_execution_anchors(
             )
         anchors = account_projection.execution_anchors
     else:
-        events = (
-            list(account_events)
+        events = tuple(
+            account_events
             if account_events is not None
             else read_account_journal(account_root, verify=True)
         )
         if not events:
             return ()
         state = reduce_account_events(events)
-        accepted_batches = _accepted_batches(events)
-        anchors = _component_execution_anchors_from_events(
+        return component_execution_anchors_from_snapshot(
             events,
             state=state,
-            accepted_batches=accepted_batches,
-            tolerance=_latest_account_quantity_tolerance(events),
+            sleeve=sleeve,
+            strategy_ids=strategy_ids,
         )
+    wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
+    wanted_strategies = {str(value) for value in strategy_ids if str(value)}
+    return tuple(
+        anchor
+        for anchor in sorted(
+            anchors.values(),
+            key=lambda item: (item.entry_target_sequence, item.target_key),
+        )
+        if (not wanted_sleeve or anchor.sleeve == wanted_sleeve)
+        and (not wanted_strategies or anchor.strategy_id in wanted_strategies)
+    )
+
+
+def component_execution_anchors_from_snapshot(
+    events: Sequence[AccountEvent],
+    *,
+    state: AccountState,
+    sleeve: str | None = None,
+    strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+) -> tuple[CanonicalComponentExecutionAnchor, ...]:
+    """Project anchors from one verified coherent account snapshot.
+
+    The account owner uses this path with ``AccountJournal._snapshot_ref`` so
+    protection checks do not reopen and replay immutable history on every
+    heartbeat. Snapshot identity is checked before projection.
+    """
+
+    event_snapshot = tuple(events)
+    if not event_snapshot:
+        if state.events_applied != 0:
+            raise RuntimeError("component anchor snapshot has state without events")
+        return ()
+    if (
+        state.events_applied != len(event_snapshot)
+        or state.rolling_state_hash != event_snapshot[-1].state_hash
+    ):
+        raise RuntimeError("component anchor event/state snapshot is inconsistent")
+    accepted_batches = _accepted_batches(event_snapshot)
+    anchors = _component_execution_anchors_from_events(
+        event_snapshot,
+        state=state,
+        accepted_batches=accepted_batches,
+        tolerance=_latest_account_quantity_tolerance(event_snapshot),
+        batch_fill_index=_build_batch_fill_index(event_snapshot, state=state),
+    )
     wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     return tuple(

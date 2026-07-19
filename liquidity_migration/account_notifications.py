@@ -14,7 +14,6 @@ from .account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountState,
-    read_account_journal,
 )
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
@@ -22,6 +21,7 @@ from .deterministic_runtime import Clock, SystemClock
 
 NOTIFICATION_SCHEMA_VERSION = 2
 HOUR_NS = 3_600_000_000_000
+POSITION_TRUTH_STATUSES = frozenset({"healthy", "mismatch", "stale", "unavailable"})
 
 
 def _fsync_directory(path: Path) -> None:
@@ -86,11 +86,21 @@ class AccountNotificationEngine:
         health: str,
         venue_positions: Mapping[str, float] | None = None,
         position_truth_healthy: bool = True,
+        position_truth_status: str | None = None,
+        continuous_status: str = "",
         now_ns: int | None = None,
     ) -> AccountNotificationBatch:
         now = int(now_ns or self.clock.wall_time_ns())
-        events = read_account_journal(self.kernel.journal.root)
-        kernel_state = self.kernel.state()
+        events, kernel_state = self.kernel._snapshot_ref()
+        truth_status = (
+            ("healthy" if position_truth_healthy else "mismatch")
+            if position_truth_status is None
+            else str(position_truth_status)
+        )
+        if truth_status not in POSITION_TRUTH_STATUSES:
+            raise ValueError(f"unknown position truth status {truth_status!r}")
+        if position_truth_healthy != (truth_status == "healthy"):
+            raise ValueError("position truth health and status disagree")
         persisted = self._load()
         first_run_with_history = persisted.last_sequence == 0 and bool(events)
         if first_run_with_history:
@@ -125,6 +135,11 @@ class AccountNotificationEngine:
                         kernel_state=kernel_state,
                     )
             _clear_recent_entry_rejection_counters(next_state)
+        _prune_expired_entry_rejections(
+            next_state,
+            kernel_state=kernel_state,
+            now_ns=now,
+        )
         event_messages = self._event_messages(
             new_events,
             next_state,
@@ -149,6 +164,8 @@ class AccountNotificationEngine:
                     health=health,
                     venue_positions=venue_positions,
                     position_truth_healthy=position_truth_healthy,
+                    position_truth_status=truth_status,
+                    continuous_status=continuous_status,
                     now_ns=now,
                     notification_state=next_state,
                 )
@@ -368,6 +385,8 @@ def _hourly_summary(
     health: str,
     venue_positions: Mapping[str, float] | None,
     position_truth_healthy: bool,
+    position_truth_status: str,
+    continuous_status: str,
     now_ns: int,
     notification_state: AccountNotificationState,
 ) -> str:
@@ -379,7 +398,12 @@ def _hourly_summary(
             str(symbol).upper(): float(qty) for symbol, qty in (venue_positions or {}).items() if float(qty) != 0.0
         }
         lines = [f"🕐 Bybit demo · account update · {_utc_hhmm(now_ns)} UTC"]
-        lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
+        if position_truth_status == "mismatch":
+            lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
+        elif position_truth_status == "stale":
+            lines.append("⚠️ Position truth stale · last venue/local agreement is too old")
+        else:
+            lines.append("⚠️ Position truth unavailable · venue/local agreement is unproven")
         lines.append("- Venue: " + (_quantity_summary(venue) if venue else "flat"))
         local = {symbol: position.signed_qty for symbol, position in positions}
         lines.append("- Local reconstruction: " + (_quantity_summary(local) if local else "flat"))
@@ -393,7 +417,9 @@ def _hourly_summary(
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
             lines.append(rejection_summary)
-        lines.append(f"Execution health: {health or 'unknown'}")
+        if continuous_status.strip():
+            lines.extend(continuous_status.strip().splitlines())
+        lines.append(f"Account execution health: {health or 'unknown'}")
         return "\n".join(lines)
 
     exposure = 0.0
@@ -443,10 +469,12 @@ def _hourly_summary(
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
         lines.append(rejection_summary)
+    if continuous_status.strip():
+        lines.extend(continuous_status.strip().splitlines())
     effective_health = health or "unknown"
     if unpriced_symbols and effective_health.lower().startswith("healthy"):
         effective_health = "BLOCKED · L2 midpoint valuation unavailable"
-    lines.append(f"Execution health: {effective_health}")
+    lines.append(f"Account execution health: {effective_health}")
     return "\n".join(lines)
 
 
@@ -519,6 +547,7 @@ def _entry_risk_decision_messages(
             "first_rejected_ts_ns": first_rejected_ts_ns,
             "last_rejected_ts_ns": now_ns,
             "last_batch_id": batch_id,
+            "signal_valid_until_ns": _proposal_signal_valid_until_ns(proposal),
         }
         notification_state.recent_entry_rejection_attempts[attempt_key] = (
             notification_state.recent_entry_rejection_attempts.get(attempt_key, 0) + 1
@@ -665,6 +694,40 @@ def _clear_recent_entry_rejection_counters(state: AccountNotificationState) -> N
     state.recent_entry_rejection_reasons.clear()
 
 
+def _proposal_signal_valid_until_ns(proposal: Mapping[str, Any]) -> int:
+    metadata = proposal.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        return 0
+    valid_until_ms = _safe_int(metadata.get("signal_valid_until_ms"), default=0)
+    return valid_until_ms * 1_000_000 if valid_until_ms > 0 else 0
+
+
+def _prune_expired_entry_rejections(
+    state: AccountNotificationState,
+    *,
+    kernel_state: AccountState,
+    now_ns: int,
+) -> None:
+    """Remove unresolved projections once their immutable signal window ends."""
+
+    proposals = tuple(kernel_state.target_proposals.values())
+    for attempt_key, row in list(state.entry_rejections.items()):
+        expiry_ns = max(_safe_int(row.get("signal_valid_until_ns"), default=0), 0)
+        if expiry_ns <= 0:
+            target_key = str(row.get("target_key") or "")
+            matching_expiries = [
+                _proposal_signal_valid_until_ns(proposal)
+                for proposal in proposals
+                if _entry_attempt_key(proposal) == attempt_key
+                or (target_key and str(proposal.get("target_key") or "") == target_key)
+            ]
+            expiry_ns = max(matching_expiries, default=0)
+            if expiry_ns > 0:
+                row["signal_valid_until_ns"] = expiry_ns
+        if expiry_ns > 0 and expiry_ns <= now_ns:
+            state.entry_rejections.pop(attempt_key, None)
+
+
 def _loaded_entry_rejection(row: Mapping[str, Any]) -> dict[str, Any]:
     raw_reasons = row.get("reasons") or ()
     if isinstance(raw_reasons, str):
@@ -687,6 +750,10 @@ def _loaded_entry_rejection(row: Mapping[str, Any]) -> dict[str, Any]:
             0,
         ),
         "last_batch_id": str(row.get("last_batch_id") or ""),
+        "signal_valid_until_ns": max(
+            _safe_int(row.get("signal_valid_until_ns"), default=0),
+            0,
+        ),
     }
 
 

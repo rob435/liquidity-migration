@@ -22,14 +22,9 @@ Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
-# Component selection and sizing match the demo producer. There is no paper
-# hedge service, so this unit alone is not full portfolio parity.
-Environment=MAX_ACTIVE=25
-Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=BTC_TREND_GATE=uptrend
-Environment=ENTRY_LEVERAGE=10
-Environment=NOTIONAL_MULTIPLIER=10
-Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
+# Component selection and sizing come from the isolated byte-exact paper copy
+# of ACCOUNT_RISK_POLICY_FILE. There is no paper hedge service, so this unit
+# alone is not full portfolio parity.
 # Follow the demo producer's bounded public store read-only. Paper retains its
 # own strategy/journal roots and falls back to public REST for missing bars.
 Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event

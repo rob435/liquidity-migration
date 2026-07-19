@@ -63,6 +63,7 @@ from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     load_hedge_model_prior,
     require_usable_hedge_model_prior,
 )
+from liquidity_migration.operational_profile import load_operational_profile  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,10 +316,20 @@ def main() -> int:
         default=30.0,
         help="maximum age of the selected account owner's healthy capital observation",
     )
+    ap.add_argument(
+        "--operational-profile-file",
+        default=os.environ.get("ACCOUNT_RISK_POLICY_FILE", ""),
+        help="shared producer/account operational profile; required with --execute",
+    )
     args = ap.parse_args()
 
     if args.account_health_max_age_seconds <= 0.0:
         ap.error("--account-health-max-age-seconds must be positive")
+    operational_profile = None
+    if args.operational_profile_file:
+        operational_profile = load_operational_profile(args.operational_profile_file)
+    if args.execute and operational_profile is None:
+        ap.error("--execute requires --operational-profile-file")
 
     model_prior_path = Path(args.model_prior)
     if not model_prior_path.is_absolute():
@@ -516,7 +527,11 @@ def main() -> int:
             out["pending_target_refresh_skips"] = sorted(target.symbol.upper() for target in pending_unchanged_targets)
         submittable_targets = list(refreshable_targets)
         if submittable_targets:
-            leverage = float(os.environ.get("HEDGE_ENTRY_LEVERAGE") or os.environ.get("ENTRY_LEVERAGE") or 10.0)
+            leverage = (
+                operational_profile.hedge.entry_leverage
+                if operational_profile is not None
+                else 2.0
+            )
             try:
                 queued = _publish_hedge_target_batch(
                     submittable_targets,

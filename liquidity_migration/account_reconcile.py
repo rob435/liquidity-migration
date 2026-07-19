@@ -26,6 +26,14 @@ DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
 VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
 
 
+class AccountReconciliationStaleError(RuntimeError):
+    """The last authenticated position fact is outside its freshness bound."""
+
+
+class AccountPositionTruthMismatchError(RuntimeError):
+    """Authenticated venue position truth contradicts the canonical journal."""
+
+
 @dataclass(frozen=True, slots=True)
 class AccountReconciliationReport:
     snapshot_key: str
@@ -318,7 +326,9 @@ class BybitAccountReconciler:
             raise RuntimeError("account reconciliation has not completed")
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
-            raise RuntimeError(f"account reconciliation is stale: age_ns={age_ns}")
+            raise AccountReconciliationStaleError(
+                f"account reconciliation is stale: age_ns={age_ns}"
+            )
         report.require_healthy()
 
     def require_recent_symbols_consistent(
@@ -342,7 +352,9 @@ class BybitAccountReconciler:
             raise RuntimeError("account reconciliation has not completed")
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
-            raise RuntimeError(f"account reconciliation is stale: age_ns={age_ns}")
+            raise AccountReconciliationStaleError(
+                f"account reconciliation is stale: age_ns={age_ns}"
+            )
         state = self.kernel._state_ref()
         contradictions = [
             mismatch
@@ -371,7 +383,7 @@ class BybitAccountReconciler:
                     f"tol={tolerance:.16g}"
                 )
         if contradictions:
-            raise RuntimeError(
+            raise AccountPositionTruthMismatchError(
                 "requested venue position truth contradicts reduction: "
                 + "; ".join(contradictions)
             )

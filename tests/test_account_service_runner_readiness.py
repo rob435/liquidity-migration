@@ -489,3 +489,5 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     )
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
+    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-$REPO_ROOT/data/bybit-continuous-demo-event}"' in wrapper
+    assert '--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"' in wrapper

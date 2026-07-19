@@ -249,7 +249,11 @@ def evaluate_unit_states(
                 Alert(
                     key=f"unit:{unit}",
                     severity=CRITICAL,
-                    message=f"systemd unit {unit} is FAILED (systemd gave up restarting it). Check positions.",
+                    message=(
+                        f"systemd unit {unit} is FAILED. Inspect its journal and "
+                        "verify account positions; a timer-driven oneshot may retry "
+                        "on its next scheduled activation."
+                    ),
                 )
             )
     return alerts

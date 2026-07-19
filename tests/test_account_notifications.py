@@ -147,6 +147,7 @@ def _submit_entry_risk_decision(
     components: tuple[str, ...] = ("trade-a",),
     rejection: str | None = "below_min_notional",
     explicit_attempt_keys: bool = True,
+    signal_valid_until_ms: int | None = None,
 ):
     policy = loose_policy
     min_notional = 0.1
@@ -165,6 +166,13 @@ def _submit_entry_risk_decision(
     targets = []
     for component in components:
         metadata = {"entry_attempt_key": f"attempt:{component}"} if explicit_attempt_keys else {}
+        if signal_valid_until_ms is not None:
+            metadata.update(
+                {
+                    "signal_ts_ms": signal_valid_until_ms - 3_600_000,
+                    "signal_valid_until_ms": signal_valid_until_ms,
+                }
+            )
         targets.append(
             DesiredTarget(
                 decision_key=(f"continuous-target/notify/{batch_id}/entry/{component}"),
@@ -547,6 +555,28 @@ def test_venue_flat_mismatch_suppresses_phantom_position_loss_alerts(tmp_path: P
     assert "is losing" not in mismatch.message
 
 
+def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+
+    stale = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health="BLOCKED · account reconciliation is stale",
+        venue_positions={"BUSDT": 2.0},
+        position_truth_healthy=False,
+        position_truth_status="stale",
+    )
+
+    assert "Position truth stale" in stale.message
+    assert "Position truth mismatch" not in stale.message
+    assert "Venue: BUSDT long 2" in stale.message
+    assert "Local reconstruction: BUSDT long 2" in stale.message
+
+
 def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> None:
     kernel, clock, *_ = _setup_open(tmp_path / "account")
     notifier = AccountNotificationEngine(
@@ -613,7 +643,7 @@ def test_hourly_open_position_without_fresh_midpoint_reports_unknown_valuation(
 
     assert "L2 midpoint/notional/estimated uPnL unavailable" in report.message
     assert "L2 midpoint valuation unavailable: BUSDT" in report.message
-    assert "Execution health: BLOCKED · L2 midpoint valuation unavailable" in report.message
+    assert "Account execution health: BLOCKED · L2 midpoint valuation unavailable" in report.message
     assert "BUSDT long 2 · $20.00 · uPnL +$0.00" not in report.message
 
 
@@ -636,7 +666,44 @@ def test_native_protection_failure_does_not_claim_position_truth_mismatch(
 
     assert "Position truth mismatch" not in report.message
     assert "BUSDT long 2" in report.message
-    assert "Execution health: BLOCKED · native protection missing" in report.message
+    assert "Account execution health: BLOCKED · native protection missing" in report.message
+
+
+@pytest.mark.parametrize(
+    ("position_truth_healthy", "position_truth_status"),
+    [(True, "healthy"), (False, "mismatch")],
+)
+def test_hourly_summary_explicitly_separates_continuous_gate_from_account_health(
+    tmp_path: Path,
+    position_truth_healthy: bool,
+    position_truth_status: str,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+    continuous_status = (
+        "CONTINUOUS BTC gate: BLOCKED · uptrend · 30d -0.44%\n"
+        "CONTINUOUS funnel (component opportunities): "
+        "D9 3 → liquidity 2 → event 2 → age 1 → capacity 1\n"
+        "CONTINUOUS qualified but blocked: AAAUSDT · "
+        "first rejection btc trend gate"
+    )
+
+    report = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health=("healthy" if position_truth_healthy else "BLOCKED · account reconciliation mismatch"),
+        venue_positions={"BUSDT": 2.0},
+        position_truth_healthy=position_truth_healthy,
+        position_truth_status=position_truth_status,
+        continuous_status=continuous_status,
+    )
+
+    assert continuous_status in report.message
+    assert "Account execution health:" in report.message
+    assert "\nExecution health:" not in report.message
 
 
 def test_entry_risk_first_rejection_sends_one_actionable_alert(tmp_path: Path) -> None:
@@ -687,6 +754,33 @@ def test_identical_entry_risk_rejections_increment_durably_without_spam(
     notifier.commit(repeated)
     persisted = json.loads(notifier.state_path.read_text())
     assert persisted["entry_rejections"]["attempt:trade-a"]["count"] == 2
+
+
+def test_expired_entry_signal_does_not_remain_an_unresolved_risk_block(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, notifier, snapshot, policy = _setup_risk_notifications(
+        tmp_path / "account"
+    )
+    valid_until_ms = clock.wall_time_ns() // 1_000_000 + 1_000
+    _submit_entry_risk_decision(
+        kernel,
+        snapshot=snapshot,
+        loose_policy=policy,
+        batch_id="risk-expiring",
+        signal_valid_until_ms=valid_until_ms,
+    )
+    first = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+    assert first.next_state.entry_rejections["attempt:trade-a"][
+        "signal_valid_until_ns"
+    ] == valid_until_ms * 1_000_000
+    notifier.commit(first)
+
+    clock.advance_ns(2_000_000_000)
+    expired = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+
+    assert expired.next_state.entry_rejections == {}
+    assert "unresolved attempt" not in expired.message
 
 
 def test_entry_risk_reason_change_sends_one_changed_alert(tmp_path: Path) -> None:

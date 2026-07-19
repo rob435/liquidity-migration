@@ -14,6 +14,8 @@ sizing, a fill-anchored account-owned TP, and a fill-anchored 24h max hold.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import logging
 import math
@@ -37,7 +39,10 @@ from .account_intent_client import (
     publish_exit_first_target_requests,
     unresolved_target_snapshot,
 )
-from .account_candidate_universe import load_candidate_universe
+from .account_candidate_universe import (
+    load_candidate_universe,
+    require_scheduled_retirements_flat,
+)
 from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
@@ -51,6 +56,7 @@ from .account_strategy_state import (
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
+from .artifact_snapshot import read_stable_file
 from .bybit_market_data import BybitMarketData
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig
 from .continuous_btc_risk import (
@@ -60,6 +66,10 @@ from .continuous_btc_risk import (
     BtcRiskLiveSizer,
     btc_context_by_day,
     normalize_btc_risk_decision_evidence,
+)
+from .continuous_cycle_status import (
+    ContinuousCycleStatus,
+    write_continuous_cycle_status,
 )
 from .continuous_events import (
     FEATURES,
@@ -75,6 +85,7 @@ from .continuous_profile import (
     CONTINUOUS_PROFILE_ID,
     CONTINUOUS_RUNTIME_COMPONENTS as CONTINUOUS_COMPONENTS,
 )
+from .deterministic_serialization import canonical_json
 from .event_demo_data import (
     _float,
     _kline_window,
@@ -97,6 +108,33 @@ CONTINUOUS_STRATEGY_ID = "continuous_fade_v2"
 CONTINUOUS_V2_PROFILE = CONTINUOUS_PROFILE_ID
 BTC_TREND_SYMBOL = "BTCUSDT"
 CONTINUOUS_DEMO_PROFILES = (CONTINUOUS_V2_PROFILE,)
+CONTINUOUS_ENTRY_OBSERVABILITY_SCHEMA_VERSION = 1
+CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION = 1
+CONTINUOUS_RMOM_IDENTITY_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualMomentumSnapshot:
+    """Descriptor-bound RMOM table plus the exact source-file identity."""
+
+    table: pl.DataFrame
+    source_path: str
+    source_sha256: str
+    source_size_bytes: int
+    source_mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousEntrySelectionObservation:
+    """Counterfactual selection facts that never grant entry authority."""
+
+    candidates: tuple[dict[str, Any], ...]
+    funnel_rows: tuple[dict[str, Any], ...]
+    qualified_opportunities: tuple[dict[str, str], ...]
+    admitted_opportunities: tuple[dict[str, str], ...]
+    skipped_same_signal_reentry: int
+    observed_same_signal_reentry: int
+    observer_error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +184,9 @@ class ContinuousDemoCycleConfig:
     entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
     # Explicit demo/paper scale multiplier, recorded in configs and ledgers.
     notional_multiplier: float = 1.0
+    # SHA-256 of the shared operational profile when runtime sizing came from
+    # that profile. Empty is retained for isolated diagnostics/tests.
+    operational_profile_sha256: str = ""
     workers: int = 8
     # 0/0 keeps the full resolved universe; the signal's liquidity gate filters it.
     universe_rank_end: int = 0
@@ -319,6 +360,103 @@ def _select_live_state_columns(panel: pl.DataFrame) -> pl.DataFrame:
         "turnover_spike_168h",
     ]
     return panel.select(base + [c for c in event_cols if c in panel.columns])
+
+
+def _sha256_canonical(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def _entry_feature_contract(config: ContinuousDemoCycleConfig) -> dict[str, Any]:
+    """Return the explicit signal/admission contract behind the live state."""
+
+    return {
+        "schema_version": CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION,
+        "strategy_profile": config.strategy_profile,
+        "decile": int(config.decile),
+        "rmom_quantile": float(config.rmom_quantile),
+        "feature_set": list(config.feature_set),
+        "liq_turnover_min": float(config.liq_turnover_min),
+        "lookback_days": int(config.lookback_days),
+        "entry_confirm_delay_hours": int(config.entry_confirm_delay_hours),
+        "ensemble_components": [list(component) for component in config.ensemble_components],
+        "exclude_symbols": list(config.exclude_symbols),
+        "max_active": int(config.max_active),
+        "max_new_entries_per_cycle": int(config.max_new_entries_per_cycle),
+        "btc_trend_gate": config.btc_trend_gate,
+        "btc_trend_lookback_days": int(config.btc_trend_lookback_days),
+    }
+
+
+def _entry_feature_identity_payload_fields(
+    entry_state: pl.DataFrame,
+    *,
+    signal_ts_ms: int,
+    config: ContinuousDemoCycleConfig,
+) -> dict[str, Any]:
+    """Hash the exact cross-sectional feature state consumed by admission."""
+
+    columns = list(entry_state.columns)
+    ordered = entry_state.sort("symbol") if "symbol" in columns else entry_state
+    material = {
+        "schema_version": CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION,
+        "kind": "continuous_entry_feature_state",
+        "signal_ts_ms": int(signal_ts_ms),
+        "columns": columns,
+        "rows": ordered.select(columns).to_dicts() if columns else [],
+    }
+    contract = _entry_feature_contract(config)
+    return {
+        "entry_feature_identity_schema_version": CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION,
+        "entry_feature_signal_ts_ms": int(signal_ts_ms),
+        "entry_feature_state_rows": entry_state.height,
+        "entry_feature_state_columns_json": json.dumps(columns, separators=(",", ":")),
+        "entry_feature_state_sha256": _sha256_canonical(material),
+        "entry_feature_contract_sha256": _sha256_canonical(contract),
+    }
+
+
+def _rmom_identity_payload_fields(
+    snapshot: ResidualMomentumSnapshot | None,
+    *,
+    signal_day_ts_ms: int,
+) -> dict[str, Any]:
+    """Persist both the full stable RMOM source and exact signal-day slice."""
+
+    base: dict[str, Any] = {
+        "rmom_identity_schema_version": CONTINUOUS_RMOM_IDENTITY_SCHEMA_VERSION,
+        "rmom_source_path": "",
+        "rmom_source_sha256": "",
+        "rmom_source_size_bytes": 0,
+        "rmom_source_mtime_ns": 0,
+        "rmom_signal_day_ts_ms": int(signal_day_ts_ms),
+        "rmom_signal_day_rows": 0,
+        "rmom_signal_day_sha256": "",
+    }
+    if snapshot is None:
+        return base
+    signal_rows = (
+        snapshot.table.filter(pl.col("day_ts") == int(signal_day_ts_ms))
+        .select("symbol", "day_ts", "residual_momentum")
+        .sort("symbol")
+    )
+    material = {
+        "schema_version": CONTINUOUS_RMOM_IDENTITY_SCHEMA_VERSION,
+        "kind": "continuous_signal_day_residual_momentum",
+        "signal_day_ts_ms": int(signal_day_ts_ms),
+        "columns": list(signal_rows.columns),
+        "rows": signal_rows.to_dicts(),
+    }
+    base.update(
+        {
+            "rmom_source_path": snapshot.source_path,
+            "rmom_source_sha256": snapshot.source_sha256,
+            "rmom_source_size_bytes": snapshot.source_size_bytes,
+            "rmom_source_mtime_ns": snapshot.source_mtime_ns,
+            "rmom_signal_day_rows": signal_rows.height,
+            "rmom_signal_day_sha256": _sha256_canonical(material),
+        }
+    )
+    return base
 
 
 class LivePanelCache:
@@ -609,6 +747,7 @@ def plan_continuous_exits(
         exits.append({**trade, "exit_reason": "max_hold", "exit_trigger_ts_ms": now_ms})
     return exits
 
+
 def _recent_adverse_reduction_count(
     adverse_events: Sequence[CanonicalReductionEvent],
     *,
@@ -646,6 +785,21 @@ def entry_circuit_breaker_tripped(
     return count >= config.entry_pause_after_adverse_exits, count
 
 
+def _prior_continuous_signal_symbols(
+    all_trades: pl.DataFrame,
+    *,
+    signal_ts: int,
+    strategy_id: str,
+) -> set[str]:
+    prior_symbols: set[str] = set()
+    if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
+        frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
+        if "strategy_id" in frame.columns:
+            frame = frame.filter(pl.col("strategy_id") == strategy_id)
+        prior_symbols = {str(symbol) for symbol in frame.get_column("symbol").to_list()}
+    return prior_symbols
+
+
 def _continuous_entry_candidates_with_signal_metadata(
     picks: list[dict[str, Any]],
     all_trades: pl.DataFrame,
@@ -655,12 +809,11 @@ def _continuous_entry_candidates_with_signal_metadata(
     price_by_symbol: dict[str, float],
 ) -> tuple[list[dict[str, Any]], int]:
     """Attach signal metadata and enforce one entry per symbol/signal window."""
-    prior_symbols: set[str] = set()
-    if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
-        frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
-        if "strategy_id" in frame.columns:
-            frame = frame.filter(pl.col("strategy_id") == strategy_id)
-        prior_symbols = {str(symbol) for symbol in frame.get_column("symbol").to_list()}
+    prior_symbols = _prior_continuous_signal_symbols(
+        all_trades,
+        signal_ts=signal_ts,
+        strategy_id=strategy_id,
+    )
     candidates: list[dict[str, Any]] = []
     skipped_same_signal_reentry = 0
     for c in picks:
@@ -677,6 +830,342 @@ def _continuous_entry_candidates_with_signal_metadata(
             }
         )
     return candidates, skipped_same_signal_reentry
+
+
+def _entry_stage_frames(
+    entry_state: pl.DataFrame,
+    *,
+    component_config: ContinuousDemoCycleConfig,
+    eligible_symbols: set[str] | None,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    if entry_state.is_empty():
+        empty = entry_state
+        return empty, empty, empty, empty
+    d9 = entry_state.filter(pl.col("decile") == component_config.decile)
+    liquid = d9.filter(pl.col("turnover_quote") >= component_config.liq_turnover_min)
+    event = liquid
+    if component_config.entry_event_trigger != "none":
+        event = event.filter(_entry_event_expr(component_config.entry_event_trigger))
+    age = event
+    if eligible_symbols is not None:
+        age = age.filter(pl.col("symbol").is_in(sorted(eligible_symbols)))
+    return d9, liquid, event, age
+
+
+def _component_funnel_state(
+    entry_state: pl.DataFrame,
+    *,
+    universe: pl.DataFrame,
+    klines: pl.DataFrame,
+    reserved_symbols: set[str],
+    prior_symbols: set[str],
+    trigger: str,
+    age_days: int,
+    now_ms: int,
+    config: ContinuousDemoCycleConfig,
+) -> tuple[
+    ContinuousDemoCycleConfig,
+    set[str] | None,
+    pl.DataFrame,
+    pl.DataFrame,
+    pl.DataFrame,
+    pl.DataFrame,
+    pl.DataFrame,
+    pl.DataFrame,
+    int,
+]:
+    component_config = replace(config, entry_event_trigger=trigger)
+    eligible = _continuous_age_eligible_symbols(
+        universe,
+        klines,
+        age_days_min=age_days,
+        now_ms=now_ms,
+    )
+    d9, liquid, event, age = _entry_stage_frames(
+        entry_state,
+        component_config=component_config,
+        eligible_symbols=eligible,
+    )
+    fresh = age
+    if not fresh.is_empty() and reserved_symbols:
+        fresh = fresh.filter(~pl.col("symbol").is_in(sorted(reserved_symbols)))
+    reserved_count = age.height - fresh.height
+    same_signal = (
+        fresh.filter(pl.col("symbol").is_in(sorted(prior_symbols)))
+        if not fresh.is_empty() and prior_symbols
+        else fresh.head(0)
+    )
+    available = (
+        fresh.filter(~pl.col("symbol").is_in(sorted(prior_symbols)))
+        if not fresh.is_empty() and prior_symbols
+        else fresh
+    )
+    if not available.is_empty():
+        available = available.sort("composite", descending=True)
+    return (
+        component_config,
+        eligible,
+        d9,
+        liquid,
+        event,
+        age,
+        same_signal,
+        available,
+        reserved_count,
+    )
+
+
+def _observe_continuous_component_selection(
+    entry_state: pl.DataFrame,
+    *,
+    universe: pl.DataFrame,
+    klines: pl.DataFrame,
+    reserved_symbols: set[str],
+    reservations_count: int,
+    entry_capacity: int,
+    all_trades: pl.DataFrame,
+    signal_ts: int,
+    strategy_id: str,
+    price_by_symbol: dict[str, float],
+    now_ms: int,
+    config: ContinuousDemoCycleConfig,
+    active_entries_enabled: bool,
+) -> ContinuousEntrySelectionObservation:
+    """Evaluate the entry funnel without bypassing any admission control.
+
+    The candidate loop intentionally calls the same selector and metadata
+    helper as the historical active path.  Continuing after capacity is full is
+    telemetry-only; those later rows never enter ``candidates``.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    funnel_rows: list[dict[str, Any]] = []
+    qualified: list[dict[str, str]] = []
+    admitted: list[dict[str, str]] = []
+    skipped_same_signal_reentry = 0
+    observed_same_signal_reentry = 0
+    observer_errors: list[str] = []
+    prior_symbols = _prior_continuous_signal_symbols(
+        all_trades,
+        signal_ts=signal_ts,
+        strategy_id=strategy_id,
+    )
+
+    for component, trigger, age_days, take_profit_pct, component_weight in config.ensemble_components:
+        component_is_authoritative = active_entries_enabled and len(candidates) < entry_capacity
+        try:
+            (
+                component_config,
+                eligible,
+                d9,
+                liquid,
+                event,
+                age,
+                same_signal,
+                available,
+                reserved_count,
+            ) = _component_funnel_state(
+                entry_state,
+                universe=universe,
+                klines=klines,
+                reserved_symbols=reserved_symbols,
+                prior_symbols=prior_symbols,
+                trigger=trigger,
+                age_days=age_days,
+                now_ms=now_ms,
+                config=config,
+            )
+        except Exception as exc:
+            if component_is_authoritative:
+                raise
+            observer_errors.append(f"{component}:{type(exc).__name__}:{exc}"[:300])
+            funnel_rows.append(
+                {
+                    "component": component,
+                    "d9": 0,
+                    "liquidity": 0,
+                    "event": 0,
+                    "age": 0,
+                    "available": 0,
+                    "capacity": 0,
+                    "reserved": 0,
+                    "same_signal_reentry": 0,
+                }
+            )
+            continue
+        observed_same_signal_reentry += same_signal.height
+        for row in available.to_dicts():
+            qualified.append({"component": component, "symbol": str(row["symbol"])})
+
+        component_capacity_count = 0
+        if len(candidates) < entry_capacity:
+            picks = select_continuous_entries(
+                entry_state,
+                held_symbols=reserved_symbols,
+                cooldown_symbols=reserved_symbols,
+                open_count=reservations_count + len(candidates),
+                config=component_config,
+                eligible_symbols=eligible,
+            )
+            component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
+                picks,
+                all_trades,
+                signal_ts=signal_ts,
+                strategy_id=strategy_id,
+                price_by_symbol=price_by_symbol,
+            )
+            skipped_same_signal_reentry += skipped
+            for candidate in component_candidates:
+                if len(candidates) >= entry_capacity:
+                    break
+                candidates.append(
+                    {
+                        **candidate,
+                        "component": component,
+                        "component_weight": component_weight,
+                        "take_profit_pct": take_profit_pct,
+                        "trade_id": f"{candidate['trade_id']}-{component}",
+                    }
+                )
+                admitted.append({"component": component, "symbol": str(candidate["symbol"])})
+                component_capacity_count += 1
+        funnel_rows.append(
+            {
+                "component": component,
+                "d9": d9.height,
+                "liquidity": liquid.height,
+                "event": event.height,
+                "age": age.height,
+                "available": available.height,
+                "capacity": component_capacity_count,
+                "reserved": reserved_count,
+                "same_signal_reentry": same_signal.height,
+            }
+        )
+
+    return ContinuousEntrySelectionObservation(
+        candidates=tuple(candidates),
+        funnel_rows=tuple(funnel_rows),
+        qualified_opportunities=tuple(qualified),
+        admitted_opportunities=tuple(admitted),
+        skipped_same_signal_reentry=skipped_same_signal_reentry,
+        observed_same_signal_reentry=observed_same_signal_reentry,
+        observer_error=" · ".join(observer_errors)[:500],
+    )
+
+
+def _preselection_entry_gate_reason(
+    *,
+    entry_health_ok: bool,
+    entry_paused: bool,
+    entry_capacity: int,
+    btc_trend_gate_allows_entry: bool,
+) -> str:
+    """Mirror the existing active gate order exactly."""
+
+    if not entry_health_ok:
+        return "account_execution_health"
+    if entry_paused:
+        return "entry_pause"
+    if entry_capacity <= 0:
+        return "capacity"
+    if not btc_trend_gate_allows_entry:
+        return "btc_trend_gate"
+    return ""
+
+
+def _qualified_block_reasons(
+    observation: ContinuousEntrySelectionObservation,
+    *,
+    preselection_reason: str,
+    btc_risk_reason: str,
+) -> dict[tuple[str, str], str]:
+    admitted = {(row["component"], row["symbol"]) for row in observation.admitted_opportunities}
+    reasons: dict[tuple[str, str], str] = {}
+    for row in observation.qualified_opportunities:
+        key = (row["component"], row["symbol"])
+        if preselection_reason:
+            reasons[key] = preselection_reason
+        elif key not in admitted:
+            reasons[key] = "capacity"
+        elif btc_risk_reason:
+            reasons[key] = btc_risk_reason
+    return reasons
+
+
+def _blocked_rows_from_reasons(
+    observation: ContinuousEntrySelectionObservation,
+    reasons: dict[tuple[str, str], str],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for opportunity in observation.qualified_opportunities:
+        key = (opportunity["component"], opportunity["symbol"])
+        reason = reasons.get(key, "")
+        if not reason or key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "component": key[0],
+                "symbol": key[1],
+                "first_rejection_reason": reason,
+            }
+        )
+    return rows
+
+
+def _first_entry_rejection_reason(
+    observation: ContinuousEntrySelectionObservation,
+    *,
+    preselection_reason: str,
+    btc_risk_reason: str,
+    raw_entry_intent_count: int,
+    unresolved_suppressions: int,
+    terminal_suppressions: int,
+    publication_error_count: int,
+    published_entry_count: int,
+    blocked_rows: Sequence[dict[str, str]],
+) -> str:
+    if observation.observer_error and not observation.funnel_rows:
+        return preselection_reason or "entry_observer_error"
+    totals = {
+        field: sum(int(row[field]) for row in observation.funnel_rows)
+        for field in ("d9", "liquidity", "event", "age", "available", "capacity", "reserved", "same_signal_reentry")
+    }
+    if totals["d9"] == 0:
+        return "d9"
+    if totals["liquidity"] == 0:
+        return "liquidity"
+    if totals["event"] == 0:
+        return "event"
+    if totals["age"] == 0:
+        return "age"
+    if totals["available"] == 0:
+        if totals["reserved"] > 0:
+            return "already_reserved"
+        if totals["same_signal_reentry"] > 0:
+            return "same_signal_reentry"
+        return "capacity"
+    if preselection_reason:
+        return preselection_reason
+    if totals["capacity"] == 0:
+        if observation.skipped_same_signal_reentry > 0:
+            return "same_signal_reentry"
+        return "capacity"
+    if btc_risk_reason:
+        return btc_risk_reason
+    if raw_entry_intent_count == 0:
+        return "target_intent_validation"
+    if unresolved_suppressions > 0 and published_entry_count == 0:
+        return "unresolved_account_target"
+    if terminal_suppressions > 0 and published_entry_count == 0:
+        return "terminal_entry_attempt"
+    if publication_error_count > 0 and published_entry_count == 0:
+        return "target_publication"
+    if blocked_rows:
+        return blocked_rows[0]["first_rejection_reason"]
+    return ""
 
 
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
@@ -1196,14 +1685,26 @@ def _continuous_entry_target_intents(
     return intents
 
 
-def _load_rmom_table(root: Path) -> pl.DataFrame | None:
+def _load_rmom_snapshot(root: Path) -> ResidualMomentumSnapshot | None:
     path = root / "residual_momentum.parquet"
     if not path.exists():
         return None
     try:
-        table = pl.read_parquet(path)
+        snapshot = read_stable_file(
+            path,
+            label="CONTINUOUS residual-momentum source",
+            reject_empty=True,
+            require_single_link=True,
+        )
+        table = pl.read_parquet(io.BytesIO(snapshot.data))
         table = require_stable_residual_momentum(table, source=path)
-        return table.rename({"ts_ms": "day_ts"})
+        return ResidualMomentumSnapshot(
+            table=table.rename({"ts_ms": "day_ts"}),
+            source_path=str(snapshot.path),
+            source_sha256=snapshot.sha256,
+            source_size_bytes=snapshot.size,
+            source_mtime_ns=snapshot.mtime_ns,
+        )
     except Exception as exc:  # noqa: BLE001 - a corrupt rmom file must DEGRADE, not crash the cycle
         # A partially-written/corrupt parquet (mid-write crash, disk issue) or a
         # schema drift (missing ts_ms) would otherwise raise out of the cycle,
@@ -1214,6 +1715,13 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
         # authoritative even on a corrupted file.
         _logger.warning("continuous: failed to load rmom table %s: %s; degrading to rmom-absent", path, exc)
         return None
+
+
+def _load_rmom_table(root: Path) -> pl.DataFrame | None:
+    """Compatibility reader returning only the validated stable rows."""
+
+    snapshot = _load_rmom_snapshot(root)
+    return snapshot.table if snapshot is not None else None
 
 
 def _signal_source_root(config: ContinuousDemoCycleConfig, own_root: Path) -> Path:
@@ -1231,6 +1739,7 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
             f"sizing={_payload_float(payload.get('notional_multiplier')):g}x_notional/"
             f"{_payload_float(payload.get('entry_leverage')):g}x_leverage "
         )
+    gate_state = "open" if payload.get("btc_trend_gate_allows_entry") else "BLOCKED"
     return (
         "continuous target producer "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
@@ -1241,6 +1750,8 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
         f"{sizing}"
         f"equity=${_payload_float(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
+        f"btc_gate={gate_state}/{payload.get('btc_trend_gate', 'unknown')} "
+        f"first_rejection={payload.get('entry_first_rejection_reason', '') or 'none'} "
         f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)}"
     )
 
@@ -1384,7 +1895,13 @@ def run_continuous_demo_cycle(
         candidate_universe = (
             load_candidate_universe(demo.candidate_universe_file) if demo.candidate_universe_file else None
         )
-        universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
+        (
+            universe,
+            symbols,
+            tickers,
+            ticker_source,
+            candidate_reconciliation,
+        ) = _resolve_cycle_universe(
             public=public,
             demo=demo,
             config=config,
@@ -1394,6 +1911,12 @@ def run_continuous_demo_cycle(
             state_cache_stale_seconds=state_cache_stale_seconds,
             frozen_candidate_universe=candidate_universe,
         )
+        if candidate_reconciliation is not None:
+            require_scheduled_retirements_flat(
+                candidate_reconciliation,
+                route=account_route,
+                context="CONT cycle",
+            )
 
         account_owner_health_error = ""
         try:
@@ -1433,7 +1956,8 @@ def run_continuous_demo_cycle(
                 kline_store=kline_store,
             )
 
-        rmom = _load_rmom_table(_signal_source_root(demo, root))
+        rmom_snapshot = _load_rmom_snapshot(_signal_source_root(demo, root))
+        rmom = rmom_snapshot.table if rmom_snapshot is not None else None
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         live_state = pl.DataFrame()
         if rmom is not None and not klines.is_empty():
@@ -1541,8 +2065,6 @@ def run_continuous_demo_cycle(
             btc_trend_gate_value,
         )
         entry_health_ok = not account_owner_health_error and equity_usdt > 0.0
-        candidates: list[dict[str, Any]] = []
-        skipped_same_signal_reentry = 0
         entry_capacity = max(
             0,
             min(
@@ -1550,45 +2072,54 @@ def run_continuous_demo_cycle(
                 demo.max_active - reservations.height,
             ),
         )
-        if entry_health_ok and not entry_paused and entry_capacity > 0 and btc_trend_gate_allows_entry:
-            for component, trigger, age_days, take_profit_pct, component_weight in demo.ensemble_components:
-                if len(candidates) >= entry_capacity:
-                    break
-                component_config = replace(demo, entry_event_trigger=trigger)
-                eligible = _continuous_age_eligible_symbols(
-                    universe,
-                    klines,
-                    age_days_min=age_days,
-                    now_ms=cycle_now_ms,
-                )
-                picks = select_continuous_entries(
-                    entry_state,
-                    held_symbols=reserved_symbols,
-                    cooldown_symbols=reserved_symbols,
-                    open_count=reservations.height + len(candidates),
-                    config=component_config,
-                    eligible_symbols=eligible,
-                )
-                component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
-                    picks,
-                    canonical_trades,
-                    signal_ts=signal_ts,
-                    strategy_id=strategy_id,
-                    price_by_symbol=price_by_symbol,
-                )
-                skipped_same_signal_reentry += skipped
-                for candidate in component_candidates:
-                    if len(candidates) >= entry_capacity:
-                        break
-                    candidates.append(
-                        {
-                            **candidate,
-                            "component": component,
-                            "component_weight": component_weight,
-                            "take_profit_pct": take_profit_pct,
-                            "trade_id": f"{candidate['trade_id']}-{component}",
-                        }
-                    )
+        preselection_reason = _preselection_entry_gate_reason(
+            entry_health_ok=entry_health_ok,
+            entry_paused=entry_paused,
+            entry_capacity=entry_capacity,
+            btc_trend_gate_allows_entry=btc_trend_gate_allows_entry,
+        )
+        try:
+            selection_observation = _observe_continuous_component_selection(
+                entry_state,
+                universe=universe,
+                klines=klines,
+                reserved_symbols=reserved_symbols,
+                reservations_count=reservations.height,
+                entry_capacity=entry_capacity,
+                all_trades=canonical_trades,
+                signal_ts=signal_ts,
+                strategy_id=strategy_id,
+                price_by_symbol=price_by_symbol,
+                now_ms=cycle_now_ms,
+                config=demo,
+                active_entries_enabled=not preselection_reason,
+            )
+        except Exception as exc:
+            # The observer path must never turn a pre-existing hard block into a
+            # cycle failure.  When entries are enabled, preserve the legacy
+            # behavior and surface selection failures normally.
+            if not preselection_reason:
+                raise
+            observer_error = f"{type(exc).__name__}: {exc}"[:500]
+            _logger.exception(
+                "CONTINUOUS entry-funnel observation failed behind %s",
+                preselection_reason,
+            )
+            selection_observation = ContinuousEntrySelectionObservation(
+                candidates=(),
+                funnel_rows=(),
+                qualified_opportunities=(),
+                admitted_opportunities=(),
+                skipped_same_signal_reentry=0,
+                observed_same_signal_reentry=0,
+                observer_error=observer_error,
+            )
+        candidates = (
+            [dict(candidate) for candidate in selection_observation.candidates] if not preselection_reason else []
+        )
+        skipped_same_signal_reentry = (
+            selection_observation.skipped_same_signal_reentry if not preselection_reason else 0
+        )
 
         btc_risk_sizing_stats = _apply_btc_risk_sizing(
             candidates,
@@ -1599,10 +2130,12 @@ def run_continuous_demo_cycle(
             unresolved_entry_requests=unresolved_targets.entry_request_count,
             accepted_state_authority=True,
         )
+        btc_risk_reason = ""
         if bool(btc_risk_sizing_stats["entry_blocked"]):
+            btc_risk_reason = "btc_risk_sizing"
             candidates = []
 
-        entry_target_intents = _continuous_entry_target_intents(
+        raw_entry_target_intents = _continuous_entry_target_intents(
             candidates,
             demo=demo,
             equity_usdt=equity_usdt,
@@ -1611,6 +2144,26 @@ def run_continuous_demo_cycle(
             now_ms=cycle_now_ms,
             strategy_id=strategy_id,
         )
+        entry_target_intents = list(raw_entry_target_intents)
+        qualified_block_reasons = _qualified_block_reasons(
+            selection_observation,
+            preselection_reason=preselection_reason,
+            btc_risk_reason=btc_risk_reason,
+        )
+        candidate_opportunity_by_trade_id = {
+            str(candidate.get("trade_id") or ""): (
+                str(candidate.get("component") or ""),
+                str(candidate.get("symbol") or ""),
+            )
+            for candidate in selection_observation.candidates
+        }
+        raw_entry_component_ids = {
+            item.intent.component_id for item in raw_entry_target_intents
+        }
+        if not preselection_reason and not btc_risk_reason:
+            for trade_id, candidate_opportunity in candidate_opportunity_by_trade_id.items():
+                if trade_id and trade_id not in raw_entry_component_ids:
+                    qualified_block_reasons[candidate_opportunity] = "target_intent_validation"
 
         unresolved_exit_suppressions = sum(
             item.intent.target_key in unresolved_targets.target_keys for item in exit_target_intents
@@ -1627,6 +2180,24 @@ def run_continuous_demo_cycle(
             for item in entry_target_intents
             if item.intent.target_key not in unresolved_targets.target_keys
         )
+        simultaneous_exit_suppressions = sum(
+            item.intent.target_key in exit_target_keys
+            for item in entry_target_intents
+            if item.intent.target_key not in unresolved_targets.target_keys
+            and str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
+        )
+        for item in entry_target_intents:
+            suppressed_opportunity = candidate_opportunity_by_trade_id.get(
+                item.intent.component_id
+            )
+            if suppressed_opportunity is None:
+                continue
+            if item.intent.target_key in unresolved_targets.target_keys:
+                qualified_block_reasons[suppressed_opportunity] = "unresolved_account_target"
+            elif str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts:
+                qualified_block_reasons[suppressed_opportunity] = "terminal_entry_attempt"
+            elif item.intent.target_key in exit_target_keys:
+                qualified_block_reasons[suppressed_opportunity] = "simultaneous_exit"
         entry_target_intents = [
             item
             for item in entry_target_intents
@@ -1648,6 +2219,64 @@ def run_continuous_demo_cycle(
         )
         published_exit_target_count = len(publication.exit_requests)
         published_entry_target_count = len(publication.entry_requests)
+        entry_opportunity_by_target_key = {
+            item.intent.target_key: candidate_opportunity_by_trade_id.get(item.intent.component_id)
+            for item in raw_entry_target_intents
+        }
+        for error in publication.errors:
+            publication_opportunity = entry_opportunity_by_target_key.get(
+                error.target_key
+            )
+            if publication_opportunity is not None:
+                qualified_block_reasons[publication_opportunity] = "target_publication"
+        entry_publication_error_count = sum(
+            entry_opportunity_by_target_key.get(error.target_key) is not None for error in publication.errors
+        )
+        qualified_but_blocked = _blocked_rows_from_reasons(
+            selection_observation,
+            qualified_block_reasons,
+        )
+        entry_first_rejection_reason = _first_entry_rejection_reason(
+            selection_observation,
+            preselection_reason=preselection_reason,
+            btc_risk_reason=btc_risk_reason,
+            raw_entry_intent_count=len(raw_entry_target_intents),
+            unresolved_suppressions=unresolved_entry_suppressions,
+            terminal_suppressions=terminal_entry_attempt_suppressions,
+            publication_error_count=entry_publication_error_count,
+            published_entry_count=published_entry_target_count,
+            blocked_rows=qualified_but_blocked,
+        )
+        identity_error = ""
+        try:
+            feature_identity_fields = _entry_feature_identity_payload_fields(
+                entry_state,
+                signal_ts_ms=signal_ts,
+                config=demo,
+            )
+            rmom_identity_fields = _rmom_identity_payload_fields(
+                rmom_snapshot,
+                signal_day_ts_ms=(signal_ts // MS_PER_DAY) * MS_PER_DAY,
+            )
+        except Exception as exc:  # noqa: BLE001 - identity is observer-only
+            identity_error = f"{type(exc).__name__}: {exc}"[:500]
+            _logger.exception("CONTINUOUS feature/RMOM identity projection failed")
+            feature_identity_fields = {
+                "entry_feature_identity_schema_version": CONTINUOUS_FEATURE_IDENTITY_SCHEMA_VERSION,
+                "entry_feature_signal_ts_ms": signal_ts,
+                "entry_feature_state_rows": entry_state.height,
+                "entry_feature_state_columns_json": "[]",
+                "entry_feature_state_sha256": "",
+                "entry_feature_contract_sha256": "",
+            }
+            rmom_identity_fields = _rmom_identity_payload_fields(
+                None,
+                signal_day_ts_ms=(signal_ts // MS_PER_DAY) * MS_PER_DAY,
+            )
+        funnel_totals = {
+            field: sum(int(row[field]) for row in selection_observation.funnel_rows)
+            for field in ("d9", "liquidity", "event", "age", "available", "capacity")
+        }
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
             "exit_requests": [
@@ -1687,6 +2316,17 @@ def run_continuous_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
+            "temporarily_ineligible_candidates_json": json.dumps(
+                candidate_reconciliation.temporarily_ineligible_rows() if candidate_reconciliation is not None else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "scheduled_candidate_retirements_json": json.dumps(
+                candidate_reconciliation.retirement_rows() if candidate_reconciliation is not None else [],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "operational_profile_sha256": demo.operational_profile_sha256,
             "feature_set": ",".join(demo.feature_set),
             "entry_leverage": demo.entry_leverage,
             "per_position_notional_pct_equity": demo.per_position_notional_pct_equity,
@@ -1721,6 +2361,7 @@ def run_continuous_demo_cycle(
             "unresolved_exit_target_suppressions": unresolved_exit_suppressions,
             "unresolved_entry_target_suppressions": unresolved_entry_suppressions,
             "terminal_entry_attempt_suppressions": terminal_entry_attempt_suppressions,
+            "simultaneous_exit_entry_suppressions": simultaneous_exit_suppressions,
             "account_owner_health_error": account_owner_health_error,
             "wallet_error": account_owner_health_error,
             "entry_risk_health_ok": entry_health_ok,
@@ -1731,7 +2372,34 @@ def run_continuous_demo_cycle(
             "entry_paused": entry_paused,
             "recent_adverse_exits": recent_adverse,
             "skipped_same_signal_reentry": skipped_same_signal_reentry,
+            "entry_observability_schema_version": CONTINUOUS_ENTRY_OBSERVABILITY_SCHEMA_VERSION,
+            "entry_observability_scope": "observer_only_no_admission_authority",
+            "entry_funnel_d9": funnel_totals["d9"],
+            "entry_funnel_liquidity": funnel_totals["liquidity"],
+            "entry_funnel_event": funnel_totals["event"],
+            "entry_funnel_age": funnel_totals["age"],
+            "entry_funnel_available": funnel_totals["available"],
+            "entry_funnel_capacity": funnel_totals["capacity"],
+            "entry_funnel_json": json.dumps(
+                selection_observation.funnel_rows,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "entry_preselection_rejection_reason": preselection_reason,
+            "entry_first_rejection_reason": entry_first_rejection_reason,
+            "entry_observer_error": selection_observation.observer_error,
+            "entry_identity_error": identity_error,
+            "observed_same_signal_reentry": selection_observation.observed_same_signal_reentry,
+            "qualified_but_blocked_count": len(qualified_but_blocked),
+            "qualified_but_blocked_symbols": ",".join(sorted({row["symbol"] for row in qualified_but_blocked})),
+            "qualified_but_blocked_json": json.dumps(
+                qualified_but_blocked,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         }
+        payload.update(feature_identity_fields)
+        payload.update(rmom_identity_fields)
         payload.update(
             _rmom_freshness_payload_fields(
                 rmom,
@@ -1753,6 +2421,13 @@ def run_continuous_demo_cycle(
             cycles_dataset,
             partition_by=(),
         )
+        try:
+            write_continuous_cycle_status(
+                root,
+                ContinuousCycleStatus.from_cycle_payload(payload),
+            )
+        except Exception:  # noqa: BLE001 - projection loss never changes targets
+            _logger.exception("CONTINUOUS notification projection failed after durable cycle write")
     return PublishedTargetCyclePayload(
         payload,
         publication=publication,
