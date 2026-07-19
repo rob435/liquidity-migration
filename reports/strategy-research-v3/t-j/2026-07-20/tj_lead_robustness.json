@@ -1,0 +1,55 @@
+{
+ "blocked_at_high_full": {
+  "n": 833,
+  "net_pct": 5.937608314135043
+ },
+ "deep_neg_barebones_crosscheck": [
+  {
+   "downtrend": false,
+   "late": false,
+   "n": 139,
+   "net_pct": 0.5394977503705845
+  },
+  {
+   "downtrend": false,
+   "late": true,
+   "n": 414,
+   "net_pct": 3.1845378162381173
+  },
+  {
+   "downtrend": true,
+   "late": false,
+   "n": 311,
+   "net_pct": -2.373881920869631
+  },
+  {
+   "downtrend": true,
+   "late": true,
+   "n": 441,
+   "net_pct": -7.258696724240315
+  }
+ ],
+ "late_era": {
+  "months": 18,
+  "n": 617,
+  "net_pct": 5.718034199977571,
+  "net_pct_after_dropping_top5_trades": 4.5770796768998725,
+  "per_component_net_pct": {
+   "age240_turn4pop3_crowd2": 1.6595275228550186,
+   "age240_turn4pop5_crowd2": 2.3793539620062103,
+   "merged_signal": 1.6791527151163408
+  },
+  "positive_months": 13,
+  "symbols": 158,
+  "top3_symbol_net_pct": 2.978203749077877,
+  "unique_net_pct": 2.4048332154522356,
+  "unique_signals": 219,
+  "win_rate": 0.747163695299838
+ },
+ "tail_arm_full": {
+  "negative_net_pct": -4.879614625845939,
+  "negative_trades": 34,
+  "net_pct": -2.3646761865331856,
+  "trades_touching_tail_days": 78
+ }
+}

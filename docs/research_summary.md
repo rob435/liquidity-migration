@@ -355,6 +355,32 @@ cuts measure. Future entry-conditioning work needs render-native surfaces.
 | T-H expected-net ranker | Refuted on its own declared tests: drop-bottom-decile (+4.7pp) and quintile sizing (+2.6pp, worse maxDD) lose to the simple T-E∧T-G conditioner (+41.1pp) by an order of magnitude; 4 of 9 ridge coefficients flip sign across the 10 walk-forward refits; decile ranking is non-monotone mid-distribution and only extreme-bottom toxicity transfers to the render books (n=51). |
 | T-I regime intensity | No member advances under the registered MAR+tail rule. The linear intensity member Pareto-dominates the binary gate on every risk dimension (equal net, −5pp maxDD, better tail everywhere) but loses the MAR comparison because MAR is ill-posed at negative net — recorded as a decision-metric lesson for any future registration. Two-sided intensity decisively refuted (retains 155/156 negative tail days). |
 
+## Strategy Research V5 — deployed-book conditioning (exploratory, 2026-07-20)
+
+Owner-directed iteration after V4 moved the discovery surface to the
+deployed-shape render books (`reports/strategy-research-v3/t-j/2026-07-20/`).
+Three candidates fell to their controls: the exit-geometry hypothesis died on
+anatomy (render books carry the identical TP-12%/24h shape; the deployed edge
+on deep-neg entries is selection, 41% vs 26% TP completion), the deep-neg gate
+override died on the barebones cross-check (deep-neg ∩ downtrend negative in
+both eras), and the freshness sizing tilt died on the deployed book itself —
+at-high entries are already ~62% of its notional, so the tilt lands inside the
+label-permutation noise band (75th percentile) and is not component-consistent.
+Program-level conclusion: the deployed CONTINUOUS sleeve is at a local optimum
+for every coarse 1h-bar observable measured across V4+V5 and the prior
+closures; entry/exit/sizing conditioning at this granularity is mined out on
+spent surfaces.
+
+One lead survives and is frozen as a Lane-2 prototype
+(`t-j/2026-07-20/prototype_freshness_gate_override.json`): admit an
+otherwise-BTC-gate-blocked entry iff `hours_since_high_168h ≤ 1` at the entry
+bar close. Support: +5.72% (component-summed) / +2.40% (single-counted) over
+2024-11 → 2026-07, 74.7% win rate, 158 symbols, all three components positive,
+13/18 months — but the support is one era of one surface, with a stated
+failure mode (2025-03/04 −17.7pp) and −2.36pp on tail-day trades. Its evidence
+is exclusively post-commit forward days; promotion or any runtime change
+remains an owner decision.
+
 ## Progressive model adopted (2026-07-19)
 
 By owner direction the repository operates under the Progressive Evidence

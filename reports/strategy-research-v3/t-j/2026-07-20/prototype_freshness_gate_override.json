@@ -1,0 +1,12 @@
+{
+ "prototype": "continuous_fresh_high_gate_override",
+ "status": "forward-ledger prototype (Lane 2); newest-render-era lead only; no promotion",
+ "rule": {
+  "base": "deployed CONTINUOUS chain, bybit, unchanged",
+  "override": "admit an otherwise-gate-blocked entry iff hours_since_high_168h <= 1.0 at the entry bar close (T-C feature definition; min history 24 bars; unknown does NOT override)",
+  "everything_else": "identical to deployed (sizing, TP 12%, 24h max hold, hedge)"
+ },
+ "known_failure_mode": "2025-03/2025-04 lost -17.7pp (component-summed gate-off units) before the favorable 2025-08..2026-07 run; tail-day trades net -2.36pp over the render window",
+ "grading": "rolling forward ledger only: days after this file's git commit date; spent-surface numbers in tj_* artifacts are context, not evidence",
+ "declared_at_utc": "2026-07-19T23:36:36.593731+00:00"
+}

@@ -203,6 +203,29 @@ def test_th_quarterly_refits() -> None:
     assert [common.iso_date(r) for r in refits] == ["2022-07-01", "2022-10-01", "2023-01-01"]
 
 
+def test_tj_budget_neutral_tilt_identity() -> None:
+    from scripts.research_v3.tj_deployed_conditioning import tilt_rows
+
+    frame = pl.DataFrame(
+        {
+            "fresh_bucket": ["at_high_le1h", "gt_24h", "gt_24h"],
+            "notional_weight": [0.02, 0.01, 0.01],
+            "net_return": [0.002, -0.001, 0.0005],
+            "entry_ts_ms": [BASE, BASE, BASE + 30 * MS_PER_HOUR],
+            "entry_date": ["2021-06-01"] * 3,
+            "exit_date": ["2021-06-02"] * 3,
+        }
+    )
+    rows = tilt_rows("test", frame, BASE + 24 * MS_PER_HOUR, set(), np.random.default_rng(0))
+    row = rows[0]  # mult = 1.25
+    # Budget neutrality: 1.25 * 0.02 + c * 0.02 == 0.04 -> c = 0.75.
+    assert row["c_rest"] == pytest.approx(0.75)
+    expected = 0.25 * 0.002 + (0.75 - 1.0) * (-0.001 + 0.0005)
+    assert row["delta_net_pct"] == pytest.approx(100.0 * expected)
+    # Era decomposition sums back to the full delta.
+    assert row["delta_early_pct"] + row["delta_late_pct"] == pytest.approx(row["delta_net_pct"])
+
+
 def test_ti_member_weights() -> None:
     for member in ("binary_gate", "linear", "two_sided"):
         assert member_weight(member, None) == 0.0  # fail closed

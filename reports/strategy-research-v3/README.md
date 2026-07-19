@@ -62,3 +62,19 @@ render books — they measure the barebones exit shape, not the entry.
 | T-F MFE give-back ladder | Re-simulator engine-exact (16,745/16,745 exits reproduced); every cell fails — forfeited TP completions ≈ captured give-back, and the best cell inverts on the T-E axis. Adaptive exits dead on 1h and 1m granularities. |
 | T-H expected-net ranker | Loses to the simple T-E∧T-G conditioner by an order of magnitude; 4/9 coefficients sign-flip across refits (declared refutation); mid-distribution ranking non-monotone. |
 | T-I regime intensity | No member passes the registered MAR+tail rule. Linear intensity Pareto-dominates the binary gate on risk at equal net but MAR is ill-posed at negative net — recorded as a metric lesson. Two-sided refuted. |
+
+## V5 — deployed-book conditioning search (2026-07-20)
+
+`t-j/` moves the discovery surface to the deployed-shape render books
+(`scripts/research_v3/tj_deployed_conditioning.py`, run via `run_with_stub.py`).
+Three candidates, judged with era/component/permutation/tail/concentration
+controls: the exit-geometry hypothesis is killed by anatomy (identical exit
+shape; the deployed edge is selection), the deep-neg gate override is refuted
+on barebones, and the freshness sizing tilt fails on the deployed book because
+its selection already saturates the signal (at-high ≈ 62% of notional; tilt
+inside permutation noise). Program-level answer: the deployed sleeve is at a
+local optimum for every coarse 1h observable measured — which is why closures
+are fast. One lead survives (blocked at-high entries, newest era only) and is
+frozen as a Lane-2 forward-ledger prototype
+(`t-j/2026-07-20/prototype_freshness_gate_override.json`); its evidence is
+post-commit forward days only.
