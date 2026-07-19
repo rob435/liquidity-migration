@@ -105,6 +105,10 @@ POST20_AMENDMENTS = (
     REPO
     / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post20_amendments.md"
 )
+POST21_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post21_amendments.md"
+)
 FEATURE_RECEIPT = FEATURE_ROOT / "feature_receipt.json"
 RECONSTRUCTION_RECEIPT = EPOCH_ROOT / "reconstruction/bybit-baseline.receipt.json"
 LIFECYCLE_ROOT = EPOCH_ROOT / "venue-lifecycle/bybit-census-search-v2"
@@ -163,6 +167,14 @@ BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION = (
     EPOCH_ROOT
     / "runtime-parity/.active-production-comparator.working-d54eb524c208-boundary-flat-xrp/termination.json"
 )
+PREFIX_BASELINE_ROOT = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-d54eb524c208-boundary-flat-xrp"
+)
+REPAIR_PREFIX_FAILED_ATTEMPT_TERMINATION = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-8f3fd034d199/termination.json"
+)
 SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION = (
     EPOCH_ROOT
     / "venue-lifecycle/.bybit-census-search-v2.working-query-highlight/termination.json"
@@ -174,6 +186,7 @@ EXPECTED_POST17_AMENDMENTS_SHA256 = "5c094359fc7052ed2d2e56eb6a44f5d53efd71b4a25
 EXPECTED_POST18_AMENDMENTS_SHA256 = "ffc366010e374be572874c1c5609e04394a44f5dbd907e42edbb80d6647cb8b8"
 EXPECTED_POST19_AMENDMENTS_SHA256 = "a168d845fa8ede5052c802baf06464537474d2cd1cd0e287ce91b11c955d24fa"
 EXPECTED_POST20_AMENDMENTS_SHA256 = "c859894a6cb49a93450fd7a7f3d321980a7312ddd17e2a7131f33a5c90941fc4"
+EXPECTED_POST21_AMENDMENTS_SHA256 = "14816e4710f98d4735f3e3621fcfcada116ea0b0f097a7f5f1dc9cb3e0230ba6"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
@@ -189,6 +202,7 @@ EXPECTED_OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION_SHA256 = "75382d0ed1c6e75f9fb
 EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256 = "aa4ed1e13dfb8c0828647d10dea4dd09fac5532764f907cfc52321f08e12288e"
 EXPECTED_FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION_SHA256 = "56c51f48f05ebe289ed9abe6e4b6beb59762bf5fd33fafff1b54de3d2be50c6b"
 EXPECTED_BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION_SHA256 = "7f5959e06e973617f511e74849dda0187a305032856c92340a7dbf2cddbc437c"
+EXPECTED_REPAIR_PREFIX_FAILED_ATTEMPT_TERMINATION_SHA256 = "b4f7e4a383e475eea4ddcf05b2d98de7a15c724cd6321a3c57a8101c6d16f4e7"
 EXPECTED_SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION_SHA256 = "f9eb3ff6c9311da43db8a156ce883022ea963b35a9245b8fdfafc0f54d3d961f"
 EXPECTED_PREFIX_IDENTITIES = {
     "traces/continuous_gates/part-00000.parquet": (
@@ -597,6 +611,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
             POST20_AMENDMENTS,
             EXPECTED_POST20_AMENDMENTS_SHA256,
         ),
+        "post21_amendments": (
+            POST21_AMENDMENTS,
+            EXPECTED_POST21_AMENDMENTS_SHA256,
+        ),
         "feature_receipt": (FEATURE_RECEIPT, EXPECTED_FEATURE_RECEIPT_SHA256),
         "reconstruction_receipt": (
             RECONSTRUCTION_RECEIPT,
@@ -645,6 +663,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "boundary_flat_failed_attempt_termination": (
             BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "repair_prefix_failed_attempt_termination": (
+            REPAIR_PREFIX_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_REPAIR_PREFIX_FAILED_ATTEMPT_TERMINATION_SHA256,
         ),
         "search_highlight_failed_attempt_termination": (
             SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION,
@@ -695,25 +717,228 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
     return output
 
 
+_REPAIR_AWARE_PREFIX_COLUMNS = frozenset(
+    {"gate_existing_exposure", "gate_cooldown", "gate_state_sha256"}
+)
+_REQUIRED_REPAIR_AWARE_PREFIX_COLUMNS = frozenset(
+    {
+        "symbol",
+        "gate_existing_exposure",
+        "gate_cooldown",
+        "gate_state_sha256",
+        "first_rejection",
+        "barebones_accepted",
+    }
+)
+
+
+def _series_exact(left: pl.Series, right: pl.Series) -> bool:
+    return left.equals(
+        right,
+        check_dtypes=True,
+        check_names=True,
+        null_equal=True,
+    )
+
+
+def _repair_aware_prefix_file(
+    *,
+    relative: str,
+    baseline_path: Path,
+    actual_path: Path,
+    expected_sha: str,
+) -> dict[str, Any]:
+    if not baseline_path.is_file():
+        raise RuntimeError(
+            f"registered prefix baseline artifact is missing: {baseline_path}"
+        )
+    baseline_sha = _sha256(baseline_path)
+    if baseline_sha != expected_sha:
+        raise RuntimeError(
+            f"registered prefix baseline identity changed: {relative}: {baseline_sha} != {expected_sha}"
+        )
+    if not actual_path.is_file():
+        raise RuntimeError(f"registered prefix artifact is missing: {actual_path}")
+
+    actual_sha = _sha256(actual_path)
+    common = {
+        "baseline_bytes": baseline_path.stat().st_size,
+        "actual_bytes": actual_path.stat().st_size,
+        "expected_baseline_sha256": expected_sha,
+        "baseline_sha256": baseline_sha,
+        "actual_sha256": actual_sha,
+        "byte_identical": actual_sha == baseline_sha,
+    }
+    if actual_sha == baseline_sha:
+        return {
+            **common,
+            "semantic_equivalence": True,
+            "rows": int(pl.scan_parquet(actual_path).select(pl.len()).collect().item()),
+            "changed_rows": 0,
+            "gate_existing_exposure_fail_to_pass": 0,
+            "gate_cooldown_pass_to_fail": 0,
+            "gate_state_sha256_changes": 0,
+            "barebones_accepted_exact": True,
+            "first_rejection_exact": True,
+        }
+
+    baseline = pl.read_parquet(baseline_path)
+    actual = pl.read_parquet(actual_path)
+    if baseline.schema != actual.schema:
+        raise RuntimeError(f"prefix schema changed: {relative}")
+    if baseline.height != actual.height:
+        raise RuntimeError(
+            f"prefix row count changed: {relative}: {baseline.height} != {actual.height}"
+        )
+    if baseline.equals(actual, null_equal=True):
+        return {
+            **common,
+            "semantic_equivalence": True,
+            "rows": baseline.height,
+            "changed_rows": 0,
+            "gate_existing_exposure_fail_to_pass": 0,
+            "gate_cooldown_pass_to_fail": 0,
+            "gate_state_sha256_changes": 0,
+            "barebones_accepted_exact": True,
+            "first_rejection_exact": True,
+        }
+
+    if not relative.startswith("traces/long_funnel/"):
+        raise RuntimeError(f"non-LONG registered prefix values changed: {relative}")
+    missing = _REQUIRED_REPAIR_AWARE_PREFIX_COLUMNS.difference(baseline.columns)
+    if missing:
+        raise RuntimeError(
+            f"repair-aware prefix columns missing from {relative}: {sorted(missing)}"
+        )
+
+    for column in baseline.columns:
+        if column in _REPAIR_AWARE_PREFIX_COLUMNS:
+            continue
+        if not _series_exact(baseline[column], actual[column]):
+            raise RuntimeError(
+                f"unregistered prefix field changed: {relative}: {column}"
+            )
+
+    symbols = baseline["symbol"].to_list()
+    baseline_exposure = baseline["gate_existing_exposure"].to_list()
+    actual_exposure = actual["gate_existing_exposure"].to_list()
+    baseline_cooldown = baseline["gate_cooldown"].to_list()
+    actual_cooldown = actual["gate_cooldown"].to_list()
+    baseline_hashes = baseline["gate_state_sha256"].to_list()
+    actual_hashes = actual["gate_state_sha256"].to_list()
+
+    exposure_transitions = 0
+    cooldown_transitions = 0
+    hash_changes = 0
+    changed_rows = 0
+    for row_index, values in enumerate(
+        zip(
+            symbols,
+            baseline_exposure,
+            actual_exposure,
+            baseline_cooldown,
+            actual_cooldown,
+            baseline_hashes,
+            actual_hashes,
+            strict=True,
+        )
+    ):
+        (
+            symbol,
+            old_exposure,
+            new_exposure,
+            old_cooldown,
+            new_cooldown,
+            old_hash,
+            new_hash,
+        ) = values
+        exposure_changed = old_exposure != new_exposure
+        cooldown_changed = old_cooldown != new_cooldown
+        hash_changed = old_hash != new_hash
+        gate_changed = exposure_changed or cooldown_changed
+        if not gate_changed and not hash_changed:
+            continue
+        changed_rows += 1
+        if symbol != "XRPUSDT":
+            raise RuntimeError(
+                f"repair-aware prefix change is not XRPUSDT: {relative}: row {row_index}"
+            )
+        if exposure_changed:
+            if (old_exposure, new_exposure) != ("fail", "pass"):
+                raise RuntimeError(
+                    f"invalid exposure-gate transition: {relative}: row {row_index}"
+                )
+            exposure_transitions += 1
+        if cooldown_changed:
+            if (old_cooldown, new_cooldown) != ("pass", "fail"):
+                raise RuntimeError(
+                    f"invalid cooldown-gate transition: {relative}: row {row_index}"
+                )
+            cooldown_transitions += 1
+        if hash_changed != gate_changed:
+            raise RuntimeError(
+                f"derived gate hash does not track allowed transition: {relative}: row {row_index}"
+            )
+        hash_changes += int(hash_changed)
+
+    return {
+        **common,
+        "semantic_equivalence": True,
+        "rows": baseline.height,
+        "changed_rows": changed_rows,
+        "gate_existing_exposure_fail_to_pass": exposure_transitions,
+        "gate_cooldown_pass_to_fail": cooldown_transitions,
+        "gate_state_sha256_changes": hash_changes,
+        "barebones_accepted_exact": True,
+        "first_rejection_exact": True,
+    }
+
+
 def _prefix_equivalence(work: Path) -> dict[str, Any]:
     files: dict[str, dict[str, Any]] = {}
+    totals = {
+        "files": 0,
+        "byte_identical_files": 0,
+        "semantic_only_files": 0,
+        "changed_rows": 0,
+        "gate_existing_exposure_fail_to_pass": 0,
+        "gate_cooldown_pass_to_fail": 0,
+        "gate_state_sha256_changes": 0,
+    }
     for relative, expected_sha in EXPECTED_PREFIX_IDENTITIES.items():
-        path = work.joinpath(*relative.split("/"))
-        if not path.is_file():
-            raise RuntimeError(f"registered prefix artifact is missing: {path}")
-        actual_sha = _sha256(path)
-        matches = actual_sha == expected_sha
-        files[relative] = {
-            "bytes": path.stat().st_size,
-            "expected_sha256": expected_sha,
-            "actual_sha256": actual_sha,
-            "matches": matches,
-        }
-        if not matches:
-            raise RuntimeError(
-                f"performance-refactor prefix identity changed: {relative}"
-            )
-    return {"status": "pass", "files": files}
+        result = _repair_aware_prefix_file(
+            relative=relative,
+            baseline_path=PREFIX_BASELINE_ROOT.joinpath(*relative.split("/")),
+            actual_path=work.joinpath(*relative.split("/")),
+            expected_sha=expected_sha,
+        )
+        files[relative] = result
+        totals["files"] += 1
+        if result["byte_identical"]:
+            totals["byte_identical_files"] += 1
+        else:
+            totals["semantic_only_files"] += 1
+        for key in (
+            "changed_rows",
+            "gate_existing_exposure_fail_to_pass",
+            "gate_cooldown_pass_to_fail",
+            "gate_state_sha256_changes",
+        ):
+            totals[key] += int(result[key])
+
+    if totals["gate_existing_exposure_fail_to_pass"] <= 0:
+        raise RuntimeError(
+            "repair-aware prefix guard observed no XRP exposure-gate transition"
+        )
+    return {
+        "status": "pass",
+        "comparison": "repair_aware_field_exact_v1",
+        "baseline_root": str(PREFIX_BASELINE_ROOT.resolve()),
+        "barebones_accepted_exact": True,
+        "first_rejection_exact": True,
+        "totals": totals,
+        "files": files,
+    }
 
 
 def _verify_feature_files(receipt: Mapping[str, Any]) -> list[Path]:
