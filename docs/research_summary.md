@@ -314,6 +314,22 @@ no population, alpha, promotion, deployment, or real-money conclusion. Durable
 diagnostics and reusable constraints are recorded in
 `docs/strategy_overhaul_lessons.md`.
 
+## Strategy Research V3 (exploratory, 2026-07-19)
+
+Lane-1 execution of `docs/preregistration/DRAFT_strategy_research_v3_2026-07-19.md`
+on the spent V2 discovery surface (per-thesis evidence cards, grids, and
+manifests under `reports/strategy-research-v3/`). The `[2025-01-01,
+2026-07-06)` label-level holdout stays unread. None of this is alpha,
+robustness, or promotion evidence; prototypes advance only through the forward
+rolling ledger.
+
+| Thesis | Exploratory outcome |
+| --- | --- |
+| T-B funding floor | Floor rarely binds at the barebones 12% TP shape (23–83 of 16,745 trades). Strictly-PIT prev-rate variant is not era-stable (+0.95pp early, −0.42pp late). Advance-known next-rate variant improves both eras (up to +3.1pp full, funding saved 3.6% vs gross forgone 0.7%) but its PIT status requires verifying Bybit fixes the next settlement's rate at interval start. Drain-exit rule refuted everywhere (−5 to −11pp; early exits forfeit more gross than the funding they save). |
+| T-C pump deceleration | Premise refuted on this ledger: adverse excursion concentrates in decelerating entries (MAE<−10% share 31.4%) not accelerating ones (23.9%), era-stable. Delay-until-deceleration is neutral-to-worse; skip-accelerating improves totals only by shrinking a negative-mean book while worsening per-trade net and deep-MAE share. |
+| T-D funding forecast | Cumulative funding is modestly predictable beyond persistence, concentrated in tails and 48–72h horizons (up to −17% tail MAE via short-half-life EWMA / mean-reversion). The pre-declared Stage-2 bar (≥10% on both overall and q95-tail MAE at 24h) was not met; the T-B floor substitution did not run. |
+| T-A regime-gate ablation | Thesis refuted on paired full-history renders (2023-04→2026-07): removing the BTC uptrend gate doubles entries (2,300→4,019) yet loses ~1.0pp total return, takes ~5× the max drawdown (−6.35% vs −1.30%), and nearly doubles negative common-loss tail days (28 vs 15). Early era alone favors removal on return; the late era decisively favors the gate. Gate-off fails the declared mean+tail test; no prototype advances. |
+
 No confirmatory research contract is active. New decision-influencing work must
 register a new claim, exposure boundary, tested set, rule, and artifact plan
 before outcomes are inspected.

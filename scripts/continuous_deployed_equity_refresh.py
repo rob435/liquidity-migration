@@ -126,6 +126,7 @@ def active_component_config(
     end_date: str,
     start_date: str | None = None,
     backtest_leverage: float = 1.0,
+    research_disable_btc_gate: bool = False,
 ) -> ContinuousEventConfig:
     spec = ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[component]
     cfg = ContinuousEventConfig(
@@ -137,6 +138,10 @@ def active_component_config(
     )
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
+    if research_disable_btc_gate:
+        # Research-render ablation only (T-A). Never set by operational entry
+        # points; the runtime demo/paper producers own their separate gate.
+        cfg = replace(cfg, btc_trend_gate="off")
     return _with_backtest_leverage(cfg, backtest_leverage=backtest_leverage)
 
 
@@ -448,11 +453,16 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
     return rows
 
 
-def _assert_active_component_reports(payloads: list[dict[str, Any]]) -> None:
+def _assert_active_component_reports(
+    payloads: list[dict[str, Any]],
+    *,
+    research_disable_btc_gate: bool = False,
+) -> None:
     expected = {
         component.artifact_cell: component
         for component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values()
     }
+    expected_gate = "off" if research_disable_btc_gate else "uptrend"
     actual = {str(payload.get("_component") or "") for payload in payloads}
     if actual != set(expected):
         raise RuntimeError(
@@ -470,7 +480,7 @@ def _assert_active_component_reports(payloads: list[dict[str, Any]]) -> None:
             "entry_event_trigger": (cfg.get("entry_event_trigger"), component.entry_event_trigger),
             "age_days_min": (cfg.get("age_days_min"), component.age_days_min),
             "take_profit_pct": (cfg.get("take_profit_pct"), component.take_profit_pct),
-            "btc_trend_gate": (cfg.get("btc_trend_gate"), "uptrend"),
+            "btc_trend_gate": (cfg.get("btc_trend_gate"), expected_gate),
         }
         mismatches = [
             f"{name}={actual_value!r} expected {expected_value!r}"
@@ -497,9 +507,10 @@ def write_continuous_equity_report(
     chart_leverage: float | None,
     backtest_leverage: float,
     market_data_end_date: str | None = None,
+    research_disable_btc_gate: bool = False,
 ) -> None:
     payloads = _component_report_payloads(output_root, venue)
-    _assert_active_component_reports(payloads)
+    _assert_active_component_reports(payloads, research_disable_btc_gate=research_disable_btc_gate)
     component_rows = _component_report_rows(payloads)
     first_payload = payloads[0] if payloads else {}
     first_cfg = first_payload.get("config") or {}
@@ -652,6 +663,7 @@ def run_components(
     start_date: str | None = None,
     data_root: Path | None = None,
     backtest_leverage: float = 1.0,
+    research_disable_btc_gate: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root if data_root is not None else SHARED / f"{venue}_full_pit"
     meta: dict[str, Any] = {}
@@ -664,6 +676,7 @@ def run_components(
             end_date=end_date,
             start_date=start_date,
             backtest_leverage=backtest_leverage,
+            research_disable_btc_gate=research_disable_btc_gate,
         )
         t0 = time.time()
         if report_path.exists():
@@ -790,7 +803,17 @@ def run_venue(
     backtest_leverage: float = 1.0,
     exit_data_end_date: str | None = None,
     strict_hedge_coverage: bool = False,
+    research_disable_btc_gate: bool = False,
 ) -> dict[str, Any]:
+    if research_disable_btc_gate:
+        # Research ablation renders must never overwrite the standard
+        # operational report root; require an isolated output root.
+        default_root = (SHARED / "continuous_equity").resolve()
+        if output_root.resolve() == default_root or default_root in output_root.resolve().parents:
+            raise RuntimeError(
+                "--research-disable-btc-gate requires an isolated --output-root; "
+                f"refusing to write the ablation into {output_root}"
+            )
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
     if exit_data_end_date is not None and exit_data_end_date < end_date:
@@ -811,6 +834,7 @@ def run_venue(
             start_date=start_date,
             data_root=data_root,
             backtest_leverage=backtest_leverage,
+            research_disable_btc_gate=research_disable_btc_gate,
         )
         pieces = {}
         for component in WINNER_WEIGHTS:
@@ -856,6 +880,7 @@ def run_venue(
             "signal_end_date": end_date,
             "market_data_end_date": market_data_end_date,
             "strict_hedge_coverage": strict_hedge_coverage,
+            "research_disable_btc_gate": research_disable_btc_gate,
         }
     raw_klines = (
         panel.filter(pl.col("symbol") == "BTCUSDT")
@@ -888,6 +913,7 @@ def run_venue(
         chart_leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
         market_data_end_date=market_data_end_date,
+        research_disable_btc_gate=research_disable_btc_gate,
     )
     return venue_summary
 
@@ -928,6 +954,15 @@ def main() -> int:
         default=1.0,
         help="Modeled backtest leverage: scales component gross exposure before costs/funding and scales hedge cap.",
     )
+    parser.add_argument(
+        "--research-disable-btc-gate",
+        action="store_true",
+        help=(
+            "RESEARCH RENDER ONLY (T-A ablation): run the continuous components with "
+            "btc_trend_gate='off'. Requires an isolated --output-root; never affects "
+            "the runtime demo/paper producers or the hedge service."
+        ),
+    )
     args = parser.parse_args()
     data_root = Path(args.data_root).expanduser() if args.data_root else None
     if data_root is not None and len(args.venues) != 1:
@@ -945,6 +980,7 @@ def main() -> int:
             data_root=data_root,
             chart_leverage=args.chart_leverage,
             backtest_leverage=args.backtest_leverage,
+            research_disable_btc_gate=args.research_disable_btc_gate,
         )
     if not args.render_only:
         (output_root / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

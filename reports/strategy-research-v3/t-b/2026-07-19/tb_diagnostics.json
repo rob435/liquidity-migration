@@ -1,0 +1,21 @@
+{
+ "era_midpoint": "2023-02-22",
+ "floor_next": {
+  "binding_at_multiple_1": 35,
+  "max_bps": 3000.0000000000005,
+  "nonzero_share": 0.23738429381905046,
+  "p50_bps": 0.0,
+  "p90_bps": 28.1685,
+  "p99_bps": 530.7813
+ },
+ "floor_prev": {
+  "binding_at_multiple_1": 23,
+  "max_bps": 2786.5032,
+  "nonzero_share": 0.2152284263959391,
+  "p50_bps": 0.0,
+  "p90_bps": 19.0581,
+  "p99_bps": 469.5486
+ },
+ "known_rate_next_missing": 7,
+ "known_rate_prev_missing": 0
+}

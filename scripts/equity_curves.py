@@ -117,6 +117,7 @@ def _run_continuous(
     render_only: bool = False,
     chart_leverage: float | None = 4.0,
     backtest_leverage: float = 1.0,
+    research_disable_btc_gate: bool = False,
 ) -> dict[str, Any]:
     del costs, pit_tol
     scripts_dir = REPO / "scripts"
@@ -136,6 +137,7 @@ def _run_continuous(
         data_root=data_root,
         chart_leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
+        research_disable_btc_gate=research_disable_btc_gate,
     )
     return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
 
@@ -302,6 +304,15 @@ def main() -> int:
         default=1.0,
         help="Modeled continuous leverage: scales component gross exposure before costs/funding and scales hedge cap.",
     )
+    p.add_argument(
+        "--research-disable-btc-gate",
+        action="store_true",
+        help=(
+            "RESEARCH RENDER ONLY (T-A ablation): render the continuous sleeve with the "
+            "BTC uptrend entry gate off. Requires an explicit --out; never touches the "
+            "runtime demo/paper producers or the hedge service."
+        ),
+    )
     # Default --years to a sentinel so an unset window preserves the active
     # profile's full history instead of forcing a rolling 3y override.
     p.add_argument(
@@ -329,6 +340,8 @@ def main() -> int:
     bad = [s for s in sleeves if s not in RUNNERS]
     if bad:
         raise SystemExit(f"unknown sleeve(s) {bad}; valid: {', '.join(RUNNERS)}")
+    if args.research_disable_btc_gate and not args.out:
+        raise SystemExit("--research-disable-btc-gate requires an isolated --out directory")
 
     today = _today()
     end = args.end or (today + dt.timedelta(days=1)).isoformat()
@@ -371,6 +384,7 @@ def main() -> int:
                     render_only=args.continuous_render_only,
                     chart_leverage=args.continuous_chart_leverage,
                     backtest_leverage=args.continuous_backtest_leverage,
+                    research_disable_btc_gate=args.research_disable_btc_gate,
                 )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)

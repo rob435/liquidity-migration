@@ -1,0 +1,55 @@
+{
+ "code_commit": "386120b19fdf64bee623b83e0872d60b5ece30f7",
+ "created_utc": "2026-07-19T20:40:35.532019+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory render comparison; equity renders over 2025+ were already deployed-profile-visible, and label-level holdout data remains unread",
+  "no promotion claim; live profile changes only via the normal post-epoch deploy flow"
+ ],
+ "files": {
+  "ta_paired_diff.csv": {
+   "bytes": 1486,
+   "sha256": "4836413348abf2565da8f1817f861bd31f660ff8749cdc1be5aeb7a4a45a9e1e"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "baseline_equity_csv_sha256": "56cc85a3473a04b013532e3380ebd05e323e4af4b06269d7077a7ae5ed6df7c9",
+  "baseline_render": "reports\\strategy-research-v3\\t-a\\2026-07-19\\render-baseline",
+  "baseline_summary": null,
+  "gate_off_equity_csv_sha256": "505ad6320649cbfa1cbb0429022bf6ad70b7de65bcfdb34e0e9e98ef575f8133",
+  "gate_off_render": "reports\\strategy-research-v3\\t-a\\2026-07-19\\render-gate-off",
+  "gate_off_summary": null,
+  "v2": {
+   "barebones_ledger.parquet": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\barebones_ledger.parquet",
+    "sha256": "368a7c04640dd362179d4c00897948d036ce38dc6136da12eedd47b4b6c64ddd"
+   },
+   "manifest.json": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\manifest.json",
+    "payload_sha256": "0a14862522af6e37ea05facbb47f9f4564e6f298ccb4a2d3559f5a79b0f06d9d"
+   }
+  }
+ },
+ "kind": "strategy_research_v3_ta_gate_ablation",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "01d27c28454ad0ff29a2d9c07fb828be13eeb4263c365fd071f4e5c36f5815eb",
+ "params": {
+  "ablation_flag": "--research-disable-btc-gate (render-only)",
+  "active_days": {
+   "baseline": 626,
+   "gate_off": 1034
+  },
+  "alignment": "union daily calendar; days without an active book are flat (return 0, equity held)",
+  "era_midpoint": "2024-11-21",
+  "identical_components": true,
+  "identical_cost_model": true,
+  "named_tail_date": "2024-08-06",
+  "tail_dates_total": 156,
+  "tail_definition": "V2 common-loss dates (both sleeves negative) within the render window",
+  "venue": "bybit"
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

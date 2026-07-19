@@ -123,6 +123,7 @@ def test_run_continuous_delegates_to_refresh(monkeypatch, tmp_path: Path) -> Non
         "data_root": root,
         "chart_leverage": 2.5,
         "backtest_leverage": 5.0,
+        "research_disable_btc_gate": False,
     }
     assert payload["run_label"] == CONTINUOUS_HISTORICAL_RUN_LABEL
     assert payload["summary"]["total_return"] == 0.1

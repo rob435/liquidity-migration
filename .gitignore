@@ -21,6 +21,11 @@ data/
 reports/*
 !reports/autonomous-improvement/
 !reports/autonomous-improvement/**
+# V3 research: summaries, tables, and manifests are committed; heavy parquet
+# and full render outputs stay local with hashes recorded in each manifest.json.
+!reports/strategy-research-v3/
+reports/strategy-research-v3/**/*.parquet
+reports/strategy-research-v3/*/*/render-*/
 backtest-runs/
 graphify-out/cache/
 graphify-out/manifest.json
