@@ -9,25 +9,32 @@ commit may leave the branch ahead.
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `a1ff6fe301940ed1ab1c683fecb4e54197337f58`, profile `operational`, receipt
-  artifact SHA-256
-  `6b7f2f01b8d12c8f452ef2125aeae665762950e5acb636c0d2cd9589a0adddd8`.
-  It deploys four goal-directed runtime fixes over `9a2f20d`
-  (funding-freshness measurement, lost-subscribe first-frame watchdog, hedge
-  oneshot exit semantics, blocked-request traceback dedupe) and changes no
-  strategy decision path, sizing input, or registered estimator. This is a
-  recorded mid-epoch runtime change point: `main` was fast-forwarded to this
-  same commit (it contains the full `codex/operational-profile-guards` and
-  `codex/reconcile-prospective-epoch-20260719` lineages), and the registered
+  `386120b19fdf64bee623b83e0872d60b5ece30f7`, deployed from canonical `main`,
+  profile `operational`, receipt artifact SHA-256
+  `5e203d8406ad49028b4e2cbd31a662dcc451c9ac78298838f09a745d6c8bb025`.
+  Over the previously authorized `a1ff6fe` it adds one runtime change — the
+  account-event serializer no longer uses `dataclasses.asdict`, removing an
+  O(payload) copy from the trusted append path and the Python-3.11 CI
+  failure — plus documentation only (V3 draft theses and this state record).
+  This is a recorded mid-epoch runtime change point; the registered
   prospective clock, calibration/validation boundaries, and frozen comparator
   identity in the start receipt are unchanged.
+- The prior mid-epoch change point remains on record: `a1ff6fe` (receipt
+  `6b7f2f01...`) deployed four goal-directed runtime fixes over `9a2f20d`
+  (funding-freshness measurement, lost-subscribe first-frame watchdog, hedge
+  oneshot exit semantics, blocked-request traceback dedupe), and `main` was
+  fast-forwarded over the full `codex/operational-profile-guards` and
+  `codex/reconcile-prospective-epoch-20260719` lineages.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers. The fleet was deliberately
-  quiescent about 16:10--16:25 UTC for this staged install; the stop, install,
-  authority, and activation are part of the recorded change point.
+  quiescent about 16:10--16:25 UTC for the `a1ff6fe` staged install and again
+  about 19:12--19:36 UTC for the `386120b` install; both stops are part of
+  their recorded change points. The demo book was flat and healthy at both
+  stop boundaries, and the first post-activation liveness run after `386120b`
+  (19:37 UTC) reported zero active alerts across ten monitored units.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
   liveness. Activation verified the immutable sizing-only model prior, demo
   order permissions, and a post-activation residual-momentum rewrite with
