@@ -157,11 +157,15 @@ def load_integrated_comparator_receipt(
     path: str | Path,
     *,
     expected_commit: str,
+    require_mode: int | None = None,
+    require_owner: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     snapshot = read_stable_file(
         path,
         label="integrated comparator receipt",
         reject_empty=True,
+        require_mode=require_mode,
+        require_owner=require_owner,
         require_single_link=True,
         max_bytes=2 * 1024 * 1024,
     )
@@ -274,11 +278,18 @@ def validate_comparator_verification_payload(payload: Mapping[str, Any]) -> None
         raise ValueError("comparator verification logical hash is invalid")
 
 
-def load_comparator_verification_receipt(path: str | Path) -> dict[str, Any]:
+def load_comparator_verification_receipt(
+    path: str | Path,
+    *,
+    require_mode: int | None = None,
+    require_owner: bool = False,
+) -> dict[str, Any]:
     snapshot = read_stable_file(
         path,
         label="integrated comparator verification receipt",
         reject_empty=True,
+        require_mode=require_mode,
+        require_owner=require_owner,
         require_single_link=True,
         max_bytes=128 * 1024,
     )

@@ -15,12 +15,13 @@ from liquidity_migration.forward_epoch_start import (
     build_comparator_verification_receipt,
     build_start_receipt,
     contract_identities,
+    load_integrated_comparator_receipt,
     next_whole_utc_hour,
     validate_comparator_verification_payload,
     validate_integrated_comparator_payload,
     validate_start_receipt_bytes,
 )
-from scripts.freeze_forward_epoch_start import _strict_directory
+from scripts.freeze_forward_epoch_start import _prepare_output_parent, _strict_directory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -156,6 +157,21 @@ def test_integrated_comparator_payload_requires_every_frozen_gate() -> None:
         validate_integrated_comparator_payload(invalid, expected_commit=COMMIT)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are enforced on Linux")
+def test_live_comparator_loader_can_require_private_issuer_ownership(tmp_path: Path) -> None:
+    path = tmp_path / "receipt.json"
+    path.write_bytes(canonical_json(_comparator_payload()) + b"\n")
+    path.chmod(0o644)
+
+    with pytest.raises(ValueError, match="mode 0600"):
+        load_integrated_comparator_receipt(
+            path,
+            expected_commit=COMMIT,
+            require_mode=0o600,
+            require_owner=True,
+        )
+
+
 def test_start_receipt_fixes_one_future_hour_and_two_45_day_halves() -> None:
     collected = 1_800 * 1_000_000_000
     receipt = _start_receipt(collected_ts_ns=collected)
@@ -216,6 +232,30 @@ def test_target_capture_parent_must_be_owner_writable(tmp_path: Path) -> None:
             parent,
             label="target capture parent",
             require_owner_writable=True,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="receipt parents require POSIX owner identities")
+def test_start_receipt_allows_only_primary_or_named_create_only_attempt(tmp_path: Path) -> None:
+    primary = (
+        tmp_path
+        / "reports"
+        / "prospective-runtime-parity-execution-epoch-2026-07-18"
+        / "forward"
+        / "start"
+        / "receipt.json"
+    )
+    retry = primary.parent / "attempts" / "retry-20260719t1000z" / "receipt.json"
+
+    _prepare_output_parent(primary, repo=tmp_path)
+    _prepare_output_parent(retry, repo=tmp_path)
+    assert primary.parent.is_dir()
+    assert retry.parent.is_dir()
+
+    with pytest.raises(ValueError, match="attempt path is invalid"):
+        _prepare_output_parent(
+            primary.parent / "attempts" / "../escape" / "receipt.json",
+            repo=tmp_path,
         )
 
 

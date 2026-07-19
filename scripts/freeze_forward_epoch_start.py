@@ -50,6 +50,7 @@ STRATEGY_EVENT_TAPE_FILENAME = "strategy_event_tape.jsonl"
 MAX_OWNER_AGE_NS = 30_000_000_000
 MAX_PRODUCER_AGE_NS = 600_000_000_000
 _SEGMENT = re.compile(r"segment-[0-9]{6}\.jsonl")
+_ATTEMPT_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 
 
 def _default_receipt(repo: Path) -> Path:
@@ -550,7 +551,19 @@ def _market_capture_inventory(root: Path, *, expected_uid: int) -> dict[str, Any
 def _prepare_output_parent(output: Path, *, repo: Path) -> None:
     expected = _default_receipt(repo)
     if output != expected:
-        raise ValueError(f"forward start receipt path must be exactly {expected}")
+        attempts = expected.parent / "attempts"
+        try:
+            relative = output.relative_to(attempts)
+        except ValueError as exc:
+            raise ValueError(
+                f"forward start receipt must be {expected} or one named attempt under {attempts}"
+            ) from exc
+        if (
+            len(relative.parts) != 2
+            or relative.name != "receipt.json"
+            or not _ATTEMPT_ID.fullmatch(relative.parts[0])
+        ):
+            raise ValueError("forward start receipt attempt path is invalid")
     current = repo
     for part in output.parent.relative_to(repo).parts:
         current /= part
@@ -663,9 +676,15 @@ def _main(argv: Sequence[str] | None = None) -> int:
     comparator_payload, comparator = load_integrated_comparator_receipt(
         comparator_path,
         expected_commit=commit,
+        require_mode=0o600,
+        require_owner=True,
     )
     del comparator_payload
-    comparator_verification = load_comparator_verification_receipt(verification_path)
+    comparator_verification = load_comparator_verification_receipt(
+        verification_path,
+        require_mode=0o600,
+        require_owner=True,
+    )
     attested = comparator_verification["comparator"]
     if not isinstance(attested, Mapping) or any(
         attested.get(key) != comparator.get(key)

@@ -72,6 +72,12 @@ That protection is an account safety control, not a strategy stop or alpha claim
 Both profiles require `ACCOUNT_RAW_MARKET_PERSISTENCE=0`. Owners still maintain
 live sequence-aware L2, bounded readiness, exact decision books, journals,
 reconciliation, and protection; they simply do not append every public frame.
+Deployment derives one authorization-bound scheduling-capture path per
+environment: `<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl` for demo and
+`<ACCOUNT_PAPER_CAPTURE_ROOT>/strategy-targets.jsonl` for paper. LONG and
+CONTINUOUS share that tape within an environment through the existing locked,
+hash-chained writer. Older per-producer fallback tapes remain preserved as
+pre-boundary history; they are not silently merged into a prospective epoch.
 
 Neither profile asserts alpha, historical replay agreement, promotion, or
 mainnet readiness.
@@ -132,6 +138,8 @@ The issuer and verifier bind:
 - complete candidate-to-demo-rule coverage;
 - risk-policy and credential-file identities;
 - resolved sleeve toggles and raw-persistence/liveness settings;
+- the exact shared strategy-target tape derived from each authorized capture
+  root;
 - `paper_execution_model_scope=integration_only_uncalibrated` for
   `operational` (and `not_applicable_no_paper` for `demo-operational`).
 

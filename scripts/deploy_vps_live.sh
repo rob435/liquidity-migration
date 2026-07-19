@@ -610,6 +610,7 @@ install_mode() {
     "$PYTHON" -m ruff check liquidity_migration scripts tests
     "$PYTHON" -m mypy liquidity_migration
     "$PYTHON" -m pytest -q \
+        tests/test_forward_epoch_start.py \
         tests/test_operational_profile.py \
         tests/test_operational_runtime_authority.py \
         tests/test_runtime_scripts.py

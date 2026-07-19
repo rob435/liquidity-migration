@@ -246,6 +246,7 @@ def test_install_is_stopped_exact_commit_preparation_only() -> None:
     assert install.index("git_fetch fetch") < install.index("git checkout -B")
     assert "requirements.lock" in install
     assert "--no-deps" in install and "--only-binary=:all:" in install
+    assert "tests/test_forward_epoch_start.py" in install
     assert "lm_install_current_systemd_units" in install
     assert "systemctl disable --now" in install
     assert "systemctl start" not in install

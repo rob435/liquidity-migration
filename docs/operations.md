@@ -231,6 +231,52 @@ Every guarded workload also runs `verify-runtime` immediately before `exec`.
 roots, effective unit surface, profile, or enabled topology differs. A failed
 verification is not permission to hand-start a partial fleet.
 
+### 4. Freeze a prospective execution epoch
+
+This is research evidence only. It does not authorize activation, mainnet,
+capital, alpha, or profile promotion. First run the complete registered
+comparator from the final clean commit and independently verify every listed
+artifact:
+
+```bash
+.venv/bin/python scripts/run_active_runtime_comparator.py \
+  --out reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/integrated-production-comparator
+.venv/bin/python scripts/verify_integrated_runtime_comparator.py
+```
+
+The verifier publishes one create-only mode-`0600` compact receipt. Preserve
+the comparator output, then copy the comparator `receipt.json` and compact
+verification receipt to the root-owned mode-`0700` VPS directory
+`/var/lib/liquidity-migration/research-evidence`, with the two destination
+files root-owned mode `0600`. Refuse an existing destination rather than
+overwriting it.
+
+Only after stopped install, a new `operational` authorization, activation,
+and successful `status` verification may root freeze the boundary:
+
+```bash
+cd /opt/liquidity-migration
+.venv/bin/python scripts/freeze_forward_epoch_start.py
+```
+
+The collector requires the exact authorized clean commit, both current owner
+health/readiness records, four fresh producer-cycle records, six clean service
+generations, verified demo and paper journals, all scheduling tapes, stable
+queue inventories, and absence of any pre-start forward analysis. It records
+inherited positions, targets, requests, and tape prefixes without flattening,
+cancelling, resetting, copying, or deleting them. Publication is create-only
+and must finish at least five minutes before the next whole UTC hour; that hour
+is the immutable start, followed by 45 days of calibration and 45 days of
+validation. A failed attempt never backdates—preserve it and use a new reviewed
+attempt path only after diagnosis, for example
+`forward/start/attempts/retry-yyyymmddthhmmz/receipt.json` supplied with
+`--receipt`.
+
+Do not open forward outcome aggregates during the epoch. Every later code,
+configuration, authorization, input, capture-path, or service-generation
+change is an incident/change point; preserve its exact receipts and journals
+without resetting or extending the clock.
+
 ## Profiles and sleeve toggles
 
 - `demo-operational` permits the demo owner, demo LONG/CONTINUOUS producers,

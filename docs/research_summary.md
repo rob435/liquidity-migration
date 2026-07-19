@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated 2026-07-18 UTC. This is a decision log, not policy or deployment authority.
+Updated 2026-07-19 UTC. This is a decision log, not policy or deployment authority.
 Apply `docs/governance.md` and inspect the named artifacts before relying on a
 claim. Current host state belongs in `STATE.md`.
 
@@ -12,6 +12,47 @@ claim. Current host state belongs in `STATE.md`.
 | `LongV11aDivWeekendVol` | Positive current full-PIT result on both venues, but still strongly dependent on take-profit winners and not validated by its tiny skewed forward sample | Demo/paper profile only; no size or mainnet authority |
 
 Binance is a research/replay venue, not a live execution venue.
+
+## Runtime-parity rebaseline 2026-07-19
+
+The historical backtesting stack was not uniformly wrong, but its economic
+claims were broader than the implementation evidence justified. The legacy
+equity engines did not reproduce the complete account-owner runtime, accepted-
+decision BTC-risk state, venue lifecycle, or canonical accounting path. A
+separate comparator defect also failed open after an XRP strict-reduction
+request was rejected as a sign flip, leaving replay state open. Those defects
+invalidate use of the affected historical results as confirmatory alpha or
+deployment evidence; they do not make every signal, fill, journal event, or
+diagnostic field fictitious.
+
+The rebaseline froze 528,560 raw files (2.496 GB) under logical SHA-256
+`9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe`,
+rebuilt features with PIT membership applied before cross-sectional ranks and
+trailing features, and completed a full 18,644-key ledger comparison with
+242,372 unit-aware comparisons and no failures. Runtime repairs made strict
+risk reductions fail closed, clamped staged exposure, made terminal flattening
+atomic, and reconciled BTC-risk and all registered venue lifecycle events.
+
+The clean repaired comparator at commit
+`d8c9c051b4ffcb6116d4332b3244471de6f79e32` passed all 29,449 hourly cycles,
+12,812 account events, 911 accepted requests, all 235 lifecycle events, exact
+BTC-risk reconciliation, journal verification, zero rejected strict-reduction
+batches, and a flat terminal account. Receipt file SHA-256 is
+`c2bcd3ebe2e7524bf7370f8209bf471dbf75e59f2e88bf33147a476b5d348c19`;
+receipt-payload SHA-256 is
+`ad168fddc155a36604e4be0a1b6e002b15d5c7242e9e999508511fda00ef6cf7`.
+This is structural/accounting engineering evidence, not a return or alpha
+result. A final comparator at the exact forward deployment candidate and the
+create-only forward start receipt remain pending.
+
+Corrected PIT trade diagnostics are decision-useful for generating narrow new
+mechanism hypotheses and for debugging coverage, path, selection, and
+execution assumptions. Their already inspected historical surface is spent:
+it cannot qualify a new thesis. Any thesis must freeze its claim, complete
+tested set, economic rule, and genuinely unseen holdout or new-data boundary
+before affected outcomes are read. Execution/TCA is a separate prospective
+45-day calibration plus 45-day validation problem and cannot establish
+strategy alpha by itself.
 
 ## Strategy Overhaul V2 cycle closed 2026-07-18
 
