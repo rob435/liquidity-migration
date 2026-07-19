@@ -239,6 +239,31 @@ def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots()
     assert rmom.count("precompute_residual_momentum.py") == 1
 
 
+def test_paper_producer_sandboxes_include_the_authorized_shared_capture_root() -> None:
+    common = {
+        "/opt/liquidity-migration/data/bybit-account-paper",
+        "/opt/liquidity-migration/data/bybit-account-paper-intents",
+        "/opt/liquidity-migration/data/bybit-account-paper-market-capture",
+    }
+    strategy_roots = {
+        "liquidity-migration-bybit-long-paper.service": (
+            "/opt/liquidity-migration/data/bybit-long-paper-event"
+        ),
+        "liquidity-migration-bybit-continuous-paper.service": (
+            "/opt/liquidity-migration/data/bybit-continuous-paper-event"
+        ),
+    }
+    for unit, strategy_root in strategy_roots.items():
+        fragment = _unit(unit)
+        directive = next(
+            line for line in fragment.splitlines() if line.startswith("ReadWritePaths=")
+        )
+        assert set(directive.removeprefix("ReadWritePaths=").split()) == {
+            *common,
+            strategy_root,
+        }
+
+
 def test_install_is_stopped_exact_commit_preparation_only() -> None:
     text = _read(DEPLOY)
     install = text[text.index("install_mode()") : text.index("load_authorization()")]
