@@ -338,6 +338,72 @@ def test_durable_service_is_single_venue_owner_across_sequential_sleeve_requests
     assert adapter.submit_calls == 2
 
 
+def test_component_exit_stages_opposing_aggregate_to_flat_before_convergence(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    adapter = ScriptedExecutionAdapter("fill", "fill", "fill", "fill")
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=1,
+    )
+    route = _route(tmp_path)
+
+    short = service.handle(_request(
+        route,
+        request_id="short-open",
+        batch_id="short-open",
+        kind=SleeveAdapterKind.CONTINUOUS,
+        notional=-50.0,
+    ))
+    long = service.handle(_request(
+        route,
+        request_id="long-open",
+        batch_id="long-open",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    ))
+    assert short.accepted and long.accepted
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-3.0)
+
+    close_request = _request(
+        route,
+        request_id="short-close",
+        batch_id="short-close",
+        kind=SleeveAdapterKind.CONTINUOUS,
+        notional=0.0,
+        created_ts_ns=NOW_NS + 1,
+    )
+    close = service.handle(close_request)
+    assert close.accepted
+    staged = adapter.submissions[-1]
+    assert staged.signed_qty == pytest.approx(3.0)
+    assert staged.target_signed_qty == 0.0
+    assert staged.reduce_only
+    state = service.kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    assert state.aggregate_targets["BUSDT"] == pytest.approx(2.0)
+    assert set(state.component_targets) == {"long/main/BUSDT"}
+    risk = state.risk_decisions["short-close"]
+    assert risk["staged_component_flat_symbols"] == ["BUSDT"]
+    assert risk["staged_sign_flip_symbols"] == ["BUSDT"]
+
+    submissions_before_replay = adapter.submit_calls
+    assert service.handle(close_request) == close
+    assert adapter.submit_calls == submissions_before_replay
+
+    clock.advance_ns(1)
+    converged = service.converge_once()
+    assert converged is not None and converged.accepted
+    reopened = adapter.submissions[-1]
+    assert reopened.signed_qty == pytest.approx(2.0)
+    assert not reopened.reduce_only
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+    assert service.convergence_report().converged
+
+
 def test_crash_after_kernel_execution_replays_request_without_resubmitting_filled_command(tmp_path: Path) -> None:
     adapter = CountingTwin()
     service = _service(tmp_path / "account", adapter)

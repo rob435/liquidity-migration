@@ -1280,6 +1280,89 @@ def _aggregate_target_quantities(
     return {symbol: math.fsum(quantities) for symbol, quantities in by_symbol.items()}
 
 
+def _opposite_nonzero_sides(
+    left: float,
+    right: float,
+    *,
+    tolerance: float,
+) -> bool:
+    """Compare signs only after both quantities independently clear tolerance."""
+
+    return (left > tolerance and right < -tolerance) or (
+        left < -tolerance and right > tolerance
+    )
+
+
+def _exposure_clamped_component_flat_targets(
+    state: AccountState,
+    target_payloads: Sequence[Mapping[str, Any]],
+    *,
+    tolerance: float,
+) -> dict[str, float] | None:
+    """Return immediate venue targets for an all-component-flat replacement.
+
+    Removing an offsetting component can expose a retained aggregate that is
+    farther from zero or on the other side of the venue position.  Committing
+    the zero desire is safe, but that intermediate request must not add venue
+    exposure.  A later owner-convergence batch performs any residual increase
+    under ordinary entry admission.
+    """
+
+    if not target_payloads:
+        return None
+    requested_symbols: set[str] = set()
+    for payload in target_payloads:
+        target_key = str(payload.get("target_key") or "")
+        symbol = str(payload.get("symbol") or "").upper()
+        if not target_key or not symbol:
+            return None
+        signed_qty = _finite(
+            payload.get("signed_qty"),
+            label=f"{target_key} component-flat signed_qty",
+        )
+        if abs(signed_qty) > tolerance:
+            return None
+        prior = state.component_target_desires.get(target_key)
+        if prior is None:
+            prior = state.component_targets.get(target_key)
+        if prior is None or str(prior.get("symbol") or "").upper() != symbol:
+            return None
+        prior_qty = _finite(
+            prior.get("signed_qty", 0.0),
+            label=f"{target_key} prior component-flat signed_qty",
+        )
+        if abs(prior_qty) <= tolerance:
+            return None
+        requested_symbols.add(symbol)
+
+    updates = _projected_nonzero_targets(
+        state,
+        target_payloads,
+        tolerance=tolerance,
+    )
+    aggregates = _aggregate_target_quantities(updates)
+    immediate_targets: dict[str, float] = {}
+    for symbol in sorted(requested_symbols):
+        target_qty = float(aggregates.get(symbol, 0.0))
+        projected_qty = math.fsum(
+            (
+                state.positions.get(symbol, PositionState()).signed_qty,
+                state.working_signed_qty(symbol),
+            )
+        )
+        if _opposite_nonzero_sides(
+            projected_qty,
+            target_qty,
+            tolerance=tolerance,
+        ) or (abs(projected_qty) <= tolerance and abs(target_qty) > tolerance):
+            immediate_targets[symbol] = 0.0
+        elif abs(target_qty) > abs(projected_qty) + tolerance:
+            immediate_targets[symbol] = projected_qty
+        else:
+            immediate_targets[symbol] = target_qty
+    return immediate_targets
+
+
 def _strictly_risk_reducing_target_batch(
     state: AccountState,
     target_payloads: Sequence[Mapping[str, Any]],
@@ -1289,12 +1372,13 @@ def _strictly_risk_reducing_target_batch(
     """Prove that a target replacement cannot add venue or component risk.
 
     The exemption is intentionally narrower than ``reduceOnly`` inference.  A
-    component may only stay the same or move toward zero, and the resulting net
+    component may only stay the same or move toward zero.  The immediate venue
     target may only stay on the reconstructed/projected position's side while
-    moving toward zero.  This rejects new nonzero components, sign flips, and
-    targets that look smaller than an old desire but would add to the actual
-    position.  Reasserting a durable zero desire against a still-open position
-    remains eligible, which is what a convergence close needs after a reject.
+    moving toward zero.  An explicit removal of an existing nonzero component
+    is evaluated with its exposure-clamped immediate target; any retained
+    residual that would add risk is left for ordinary owner convergence.
+    Reasserting a durable zero desire against a still-open position remains
+    eligible, which is what a convergence close needs after a reject.
     """
 
     if not target_payloads:
@@ -1341,17 +1425,28 @@ def _strictly_risk_reducing_target_batch(
         tolerance=tolerance,
     )
     aggregates = _aggregate_target_quantities(updates)
+    component_flat_targets = _exposure_clamped_component_flat_targets(
+        state,
+        target_payloads,
+        tolerance=tolerance,
+    )
     position_reduced = False
     all_requested_flat = True
     for symbol in requested_symbols:
         target_qty = float(aggregates.get(symbol, 0.0))
+        if component_flat_targets is not None:
+            target_qty = component_flat_targets[symbol]
         projected_qty = math.fsum(
             (
                 state.positions.get(symbol, PositionState()).signed_qty,
                 state.working_signed_qty(symbol),
             )
         )
-        if abs(target_qty) > tolerance and abs(projected_qty) > tolerance and target_qty * projected_qty < 0.0:
+        if _opposite_nonzero_sides(
+            target_qty,
+            projected_qty,
+            tolerance=tolerance,
+        ):
             return False
         if abs(target_qty) > abs(projected_qty) + tolerance:
             return False
@@ -1828,6 +1923,34 @@ class AccountExecutionKernel:
             if abs(quantized - signed_qty) > risk_policy.quantity_tolerance:
                 rejections.append(_risk_rejection_key(batch_id, "qty_step_mismatch", symbol))
 
+        component_flat_targets = _exposure_clamped_component_flat_targets(
+            state,
+            target_payloads,
+            tolerance=risk_policy.quantity_tolerance,
+        )
+        staged_component_flat_symbols: set[str] = set()
+        staged_sign_flip_symbols: set[str] = set()
+        if component_flat_targets is not None:
+            for symbol, immediate_target_qty in component_flat_targets.items():
+                aggregate_target_qty = float(aggregates.get(symbol, 0.0))
+                if (
+                    abs(immediate_target_qty - aggregate_target_qty)
+                    > risk_policy.quantity_tolerance
+                ):
+                    staged_component_flat_symbols.add(symbol)
+                    projected_qty = math.fsum(
+                        (
+                            state.positions.get(symbol, PositionState()).signed_qty,
+                            state.working_signed_qty(symbol),
+                        )
+                    )
+                    if _opposite_nonzero_sides(
+                        projected_qty,
+                        aggregate_target_qty,
+                        tolerance=risk_policy.quantity_tolerance,
+                    ):
+                        staged_sign_flip_symbols.add(symbol)
+
         commands: list[OrderCommand] = []
         if not rejections:
             working_symbols = state.working_symbols(tolerance=risk_policy.quantity_tolerance)
@@ -1849,15 +1972,34 @@ class AccountExecutionKernel:
                     # reduce-only offset while venue position is still zero is
                     # both unsafe and the source of Bybit 110017 reject loops.
                     continue
-                if projected_qty * target_qty < -tolerance:
-                    rejections.append(_risk_rejection_key(batch_id, "sign_flip_requires_flat", symbol))
+                execution_target_qty = (
+                    component_flat_targets[symbol]
+                    if component_flat_targets is not None
+                    and symbol in component_flat_targets
+                    else target_qty
+                )
+                if _opposite_nonzero_sides(
+                    projected_qty,
+                    target_qty,
+                    tolerance=tolerance,
+                ) and symbol not in staged_sign_flip_symbols:
+                    rejections.append(
+                        _risk_rejection_key(
+                            batch_id,
+                            "sign_flip_requires_flat",
+                            symbol,
+                        )
+                    )
                     continue
-                delta = target_qty - projected_qty
+                delta = execution_target_qty - projected_qty
                 if abs(delta) <= tolerance:
                     continue
                 rules = instrument_rules[symbol]
                 qty = abs(_quantized_down(delta, rules.qty_step))
-                reduce_only = abs(target_qty) + tolerance < abs(projected_qty)
+                reduce_only = (
+                    symbol in staged_component_flat_symbols
+                    or abs(target_qty) + tolerance < abs(projected_qty)
+                )
                 if qty + tolerance < rules.min_qty:
                     rejections.append(_risk_rejection_key(batch_id, "below_min_qty", symbol))
                     continue
@@ -1882,7 +2024,7 @@ class AccountExecutionKernel:
                             signed_qty=signed_chunk,
                             reduce_only=reduce_only,
                             reference_price=prices[symbol],
-                            target_signed_qty=target_qty,
+                            target_signed_qty=execution_target_qty,
                             chunk_index=chunk_index,
                             chunk_count=chunk_count,
                             leverage=min(symbol_leverages[symbol]),
@@ -1911,6 +2053,10 @@ class AccountExecutionKernel:
             "strictly_risk_reducing": risk_reducing_only,
             "strict_risk_reduction_required": require_strict_risk_reduction,
             "risk_evaluation_symbols": sorted(requested_symbols if risk_reducing_only else aggregates),
+            "staged_component_flat_symbols": sorted(
+                staged_component_flat_symbols
+            ),
+            "staged_sign_flip_symbols": sorted(staged_sign_flip_symbols),
         }
         return accepted, sorted(set(rejections)), risk_payload, commands
 

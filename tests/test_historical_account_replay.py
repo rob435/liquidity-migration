@@ -12,12 +12,20 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     read_account_journal,
 )
+from liquidity_migration.account_route import AccountRoute, ensure_account_route
 from liquidity_migration.account_service import (
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
 )
-from liquidity_migration.execution_adapters import BookLevel, ExecutionTwinConfig, L2BookSnapshot, LatencyProfile
+from liquidity_migration.execution_adapters import (
+    BookLevel,
+    ExecutionObservation,
+    ExecutionObservationType,
+    ExecutionTwinConfig,
+    L2BookSnapshot,
+    LatencyProfile,
+)
 from liquidity_migration.historical_account_replay import (
     HistoricalAccountSession,
     HistoricalReplayCycle,
@@ -53,6 +61,58 @@ def _intent(*, decision: str, notional: float) -> RequestedIntent:
             reason=decision,
         ),
     )
+
+
+def _owner_request(
+    route: AccountRoute,
+    *,
+    request_id: str,
+    created_ts_ns: int,
+    adapter_kind: SleeveAdapterKind,
+    target_key: str,
+    notional: float,
+) -> AccountTargetRequest:
+    return AccountTargetRequest(
+        request_id=request_id,
+        batch_id=request_id,
+        created_ts_ns=created_ts_ns,
+        route_id=route.route_id,
+        account_id=route.account_id,
+        environment=route.environment,
+        intents=(RequestedIntent(
+            adapter_kind=adapter_kind,
+            intent=SleeveTargetIntent(
+                decision_key=f"decision:{request_id}",
+                target_key=target_key,
+                strategy_id="historical-owner-test",
+                component_id=target_key.split("/")[-2],
+                symbol="BUSDT",
+                signed_notional_usdt=notional,
+                leverage=10.0,
+                reason="test",
+                metadata={"decision_reference_price": 10.0},
+            ),
+        ),),
+    )
+
+
+class _RejectExecution:
+    name = "historical-owner-reject"
+
+    def __init__(self) -> None:
+        self.submissions = 0
+
+    def submit(self, command, market_input):
+        del market_input
+        self.submissions += 1
+        return (ExecutionObservation(
+            observation_type=ExecutionObservationType.ACK,
+            command_id=command.command_id,
+            exchange_ts_ns=command.created_ts_ns,
+            local_receive_ts_ns=command.created_ts_ns,
+            accepted=False,
+            rejection_key="test:historical-convergence-rejected",
+        ),)
 
 
 def test_online_historical_session_returns_risk_feedback_before_next_decision(
@@ -163,6 +223,8 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
     rules = synthetic_historical_rules_for_symbols(
         ["BUSDT"], max_leverage=10.0, observed_ts_ns=1_000
     )
+
+
     session = HistoricalAccountSession(
         tmp_path,
         account_id="published-account",
@@ -194,6 +256,13 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
 
     assert len(outputs) == 1
     assert outputs[0].target_result.accepted
+    assert session.kernel is not None
+    target = session.kernel._state_ref().component_targets["long/main/BUSDT"]
+    assert target["metadata"]["account_request_id"] == request.request_id
+    assert (
+        target["metadata"]["account_request_created_ts_ns"]
+        == request.created_ts_ns
+    )
     events = read_account_journal(tmp_path, verify=True)
     risk = [event for event in events if event.event_type == AccountEventType.RISK_DECISION.value]
     assert len(risk) == 1
@@ -223,3 +292,107 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
             equity_usdt=100.0,
             market_prices={"BUSDT": 10.0},
         )
+
+
+def test_owner_convergence_fails_immediately_on_execution_rejection(
+    tmp_path: Path,
+) -> None:
+    route = ensure_account_route(
+        account_id="historical-owner-convergence",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    session = HistoricalAccountSession(
+        route.account_path,
+        account_id=route.account_id,
+        risk_policy=AccountRiskPolicy(
+            1_000.0,
+            1_000.0,
+            1_000.0,
+            1_000.0,
+            10.0,
+        ),
+        instrument_rules={
+            "BUSDT": InstrumentRules(
+                "BUSDT",
+                qty_step=0.1,
+                min_qty=0.1,
+                min_notional=0.0,
+                max_order_qty=100.0,
+                max_leverage=10.0,
+            )
+        },
+        execution_config=ExecutionTwinConfig(
+            fee_bps=0.0,
+            latency=LatencyProfile(0, 0, 0),
+            max_decision_age_ns=0,
+        ),
+        id_seed="historical-owner-convergence",
+        route=route,
+    )
+    for request in (
+        _owner_request(
+            route,
+            request_id="open-short",
+            created_ts_ns=1_000,
+            adapter_kind=SleeveAdapterKind.CONTINUOUS,
+            target_key="continuous/main/BUSDT",
+            notional=-50.0,
+        ),
+        _owner_request(
+            route,
+            request_id="open-long",
+            created_ts_ns=1_100,
+            adapter_kind=SleeveAdapterKind.LONG,
+            target_key="long/main/BUSDT",
+            notional=20.0,
+        ),
+        _owner_request(
+            route,
+            request_id="close-short",
+            created_ts_ns=1_200,
+            adapter_kind=SleeveAdapterKind.CONTINUOUS,
+            target_key="continuous/main/BUSDT",
+            notional=0.0,
+        ),
+    ):
+        submitted = session.submit_request_via_owner(
+            request,
+            equity_usdt=100.0,
+            market_prices={"BUSDT": 10.0},
+            market_observed_ts_ns=request.created_ts_ns,
+        )
+        assert submitted.feedback.accepted
+
+    assert session.kernel is not None
+    staged = session.kernel.state()
+    assert staged.positions["BUSDT"].signed_qty == pytest.approx(0.0)
+    assert staged.aggregate_targets["BUSDT"] == pytest.approx(2.0)
+    assert session.account_service is not None
+    session.account_service.risk_policy = AccountRiskPolicy(
+        1.0,
+        1.0,
+        1.0,
+        0.1,
+        1.0,
+    )
+    blocked = session.converge_until_stable()
+    assert len(blocked) == 1 and not blocked[0].accepted
+    assert any("component_gross_limit" in key for key in blocked[0].rejection_keys)
+    assert session.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(0.0)
+
+    session.account_service.risk_policy = session.risk_policy
+    rejection = _RejectExecution()
+    session.account_service.execution_adapter = rejection
+
+    with pytest.raises(
+        RuntimeError,
+        match="historical account convergence execution rejected",
+    ):
+        session.converge_until_stable()
+
+    assert rejection.submissions == 1
+    rejected_state = session.kernel.state()
+    assert rejected_state.positions["BUSDT"].signed_qty == pytest.approx(0.0)
+    assert rejected_state.aggregate_targets["BUSDT"] == pytest.approx(2.0)

@@ -28,6 +28,7 @@ from .account_intent_client import (
 )
 from .account_kernel import (
     AccountEvent,
+    AccountEventType,
     InstrumentRules,
     MarketInputRef,
 )
@@ -70,10 +71,7 @@ from .continuous_demo import (
 from .continuous_events import _btc_trend_returns
 from .execution_adapters import ExecutionTwinConfig
 from .entry_attempts import ENTRY_ATTEMPT_METADATA_KEY
-from .historical_account_replay import (
-    HistoricalAccountSession,
-    historical_submission_feedback,
-)
+from .historical_account_replay import HistoricalAccountSession
 from .long_native import LongNativeConfig, long_pump_family
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
@@ -633,9 +631,97 @@ class ActiveRuntimeComparator:
                     tolerance=tolerance,
                 )
                 if abs(position_before) <= tolerance:
-                    if (
-                        nonzero_targets
-                        or abs(aggregate_target) > tolerance
+                    if nonzero_targets:
+                        intents: list[RequestedIntent] = []
+                        for target_key in nonzero_targets:
+                            target = state.component_targets[target_key]
+                            owner_sleeve = str(
+                                target.get("sleeve")
+                                or target_key.split("/", 1)[0]
+                            )
+                            strategy_id = str(
+                                target.get("strategy_id") or ""
+                            ).strip()
+                            component_id = str(
+                                target.get("component_id") or ""
+                            ).strip()
+                            if not strategy_id or not component_id:
+                                raise RuntimeError(
+                                    "venue lifecycle target lacks canonical "
+                                    f"ownership: {target_key!r}"
+                                )
+                            intents.append(RequestedIntent(
+                                adapter_kind=SleeveAdapterKind.RISK,
+                                intent=SleeveTargetIntent(
+                                    decision_key=(
+                                        f"risk:{target.get('decision_key') or target_key}:"
+                                        "venue_delisting_target_flat"
+                                    ),
+                                    target_key=target_key,
+                                    strategy_id=strategy_id,
+                                    component_id=component_id,
+                                    symbol=event.symbol,
+                                    signed_notional_usdt=0.0,
+                                    leverage=float(target.get("leverage") or 1.0),
+                                    reason="venue_delisting_target_flat",
+                                    metadata={
+                                        "owner_sleeve": owner_sleeve,
+                                        "requested_by_strategy_id": (
+                                            "active-runtime-comparator"
+                                        ),
+                                        "decision_reference_price": (
+                                            event.proxy_price
+                                        ),
+                                        **self._venue_lifecycle_identity(event),
+                                        "excluded_from_strategy_source_decisions": (
+                                            True
+                                        ),
+                                    },
+                                ),
+                            ))
+                            self.trace_sink.source_decision(
+                                {
+                                    "sleeve": owner_sleeve,
+                                    "action": "venue_delisting_target_flat",
+                                    "cycle_ts_ms": boundary_ts_ms,
+                                    "signal_ts_ms": 0,
+                                    "trade_id": component_id,
+                                    "component": component_id,
+                                    "symbol": event.symbol,
+                                    "reason": "venue_delisting_target_flat",
+                                    "selected": True,
+                                    "boundary_only": True,
+                                }
+                            )
+                        published = self.publisher.publish(
+                            batch_id=(
+                                "active-runtime-comparator/venue-lifecycle/"
+                                f"{event.symbol}/{event.effective_ts_ms}/"
+                                "atomic-flat"
+                            ),
+                            intents=tuple(intents),
+                            created_ts_ns=(
+                                boundary_ts_ms * 1_000_000
+                                + self.run_config.clock_offsets.protection_ns
+                            ),
+                        )
+                        processed = self._process_requests(
+                            (published,),
+                            stage="venue_lifecycle_target_flat",
+                            boundary_ts_ms=boundary_ts_ms,
+                            require_accepted=True,
+                            market_price_overrides={
+                                event.symbol: event.proxy_price
+                            },
+                        )
+                        if processed != 1:
+                            raise RuntimeError(
+                                "venue lifecycle target invalidation did not "
+                                "process exactly one atomic request"
+                            )
+                        action = "flat_target_invalidation"
+                    elif (
+                        abs(aggregate_target) > tolerance
                         or abs(working_qty) > tolerance
                         or working_orders
                     ):
@@ -677,39 +763,39 @@ class ActiveRuntimeComparator:
                             f"existing execution: {execution_id}"
                         )
                     self._projection_dirty = True
-                    self._refresh_projection(force=True)
-                    final_state = self.session.kernel._state_ref()
-                    final_position = final_state.positions.get(event.symbol)
-                    final_position_qty = (
-                        float(final_position.signed_qty)
-                        if final_position is not None
-                        else 0.0
-                    )
-                    final_targets = {
-                        key: float(target.get("signed_qty") or 0.0)
-                        for key, target in final_state.component_targets.items()
-                        if str(target.get("symbol") or "").upper()
-                        == event.symbol
-                        and abs(float(target.get("signed_qty") or 0.0))
-                        > tolerance
-                    }
-                    final_working = final_state.working_symbols(
-                        tolerance=tolerance
-                    )
-                    if (
-                        abs(final_position_qty) > tolerance
-                        or final_targets
-                        or event.symbol in final_working
-                    ):
-                        raise RuntimeError(
-                            "venue lifecycle settlement did not converge flat: "
-                            f"symbol={event.symbol}, position={final_position_qty}, "
-                            f"targets={final_targets}, working="
-                            f"{event.symbol in final_working}"
-                        )
                     fills += 1
                     self._venue_lifecycle_fill_count += 1
                     action = "settlement_fill"
+                self._refresh_projection(force=True)
+                final_state = self.session.kernel._state_ref()
+                final_position = final_state.positions.get(event.symbol)
+                final_position_qty = (
+                    float(final_position.signed_qty)
+                    if final_position is not None
+                    else 0.0
+                )
+                final_targets = {
+                    key: float(target.get("signed_qty") or 0.0)
+                    for key, target in final_state.component_targets.items()
+                    if str(target.get("symbol") or "").upper()
+                    == event.symbol
+                    and abs(float(target.get("signed_qty") or 0.0))
+                    > tolerance
+                }
+                final_working = final_state.working_symbols(
+                    tolerance=tolerance
+                )
+                if (
+                    abs(final_position_qty) > tolerance
+                    or final_targets
+                    or event.symbol in final_working
+                ):
+                    raise RuntimeError(
+                        "venue lifecycle settlement did not converge flat: "
+                        f"symbol={event.symbol}, position={final_position_qty}, "
+                        f"targets={final_targets}, working="
+                        f"{event.symbol in final_working}"
+                    )
             self._venue_lifecycle_observed_count += 1
             self.trace_sink.venue_lifecycle(
                 {
@@ -849,25 +935,36 @@ class ActiveRuntimeComparator:
         *,
         stage: str,
         boundary_ts_ms: int,
+        require_accepted: bool = False,
+        market_price_overrides: Mapping[str, float] | None = None,
     ) -> int:
+        overrides = {
+            str(symbol).upper(): float(price)
+            for symbol, price in (market_price_overrides or {}).items()
+        }
+        if any(not math.isfinite(price) or price <= 0.0 for price in overrides.values()):
+            raise ValueError("account request market price overrides must be positive and finite")
         processed = 0
         for published in requests:
             request = published.request
             required = self._current_account_symbols()
             required.update(item.intent.symbol.upper() for item in request.intents)
-            prices = self.price_port.prices(required, boundary_ts_ms)
-            outputs = self.session.submit_request(
+            prices = self.price_port.prices(required - set(overrides), boundary_ts_ms)
+            prices.update(
+                {
+                    symbol: overrides[symbol]
+                    for symbol in required
+                    if symbol in overrides
+                }
+            )
+            submission = self.session.submit_request_via_owner(
                 request,
                 equity_usdt=self.run_config.equity_usdt,
                 market_prices=prices,
                 market_observed_ts_ns=boundary_ts_ms * 1_000_000,
             )
-            feedback = historical_submission_feedback(outputs)
-            command_ids = [
-                command.command_id
-                for output in outputs
-                for command in output.target_result.commands
-            ]
+            feedback = submission.feedback
+            command_ids = list(submission.command_ids)
             self._record_request(
                 published,
                 stage=stage,
@@ -876,13 +973,23 @@ class ActiveRuntimeComparator:
                 command_ids=command_ids,
             )
             if not feedback.accepted:
-                if feedback.target_committed:
+                if require_accepted or feedback.target_committed:
+                    timing = (
+                        "after target commit"
+                        if feedback.target_committed
+                        else "before target commit"
+                    )
                     raise RuntimeError(
-                        "active runtime comparator execution failed after target "
-                        f"commit {request.batch_id!r}: {feedback.rejection_keys}"
+                        "active runtime comparator "
+                        f"{stage} request failed {timing} "
+                        f"{request.batch_id!r}: {feedback.rejection_keys}"
                     )
             processed += 1
             self._projection_dirty = True
+        if processed:
+            convergence = self.session.converge_until_stable()
+            if convergence:
+                self._projection_dirty = True
         return processed
 
     @staticmethod
@@ -993,6 +1100,7 @@ class ActiveRuntimeComparator:
             published,
             stage="protection",
             boundary_ts_ms=boundary_ts_ms,
+            require_accepted=True,
         )
         self._protection_trigger_count += processed
         if requests:
@@ -1159,6 +1267,7 @@ class ActiveRuntimeComparator:
             publication.exit_requests,
             stage="long_exit",
             boundary_ts_ms=boundary_ts_ms,
+            require_accepted=True,
         )
         entries_processed = self._process_requests(
             publication.entry_requests,
@@ -1577,6 +1686,7 @@ class ActiveRuntimeComparator:
             publication.exit_requests,
             stage="continuous_exit",
             boundary_ts_ms=boundary_ts_ms,
+            require_accepted=True,
         )
         entries_processed = self._process_requests(
             publication.entry_requests,
@@ -1655,79 +1765,122 @@ class ActiveRuntimeComparator:
         self._refresh_projection(force=True)
         if self.session.kernel is None:
             return 0
-        state = self.session.kernel._state_ref()
-        intents: list[RequestedIntent] = []
-        for target_key, target in sorted(state.component_targets.items()):
-            signed_qty = float(target.get("signed_qty") or 0.0)
-            if signed_qty == 0.0:
-                continue
-            symbol = str(target.get("symbol") or "").upper()
-            owner_sleeve = str(target.get("sleeve") or target_key.split("/", 1)[0])
-            strategy_id = str(target.get("strategy_id") or "").strip()
-            component_id = str(target.get("component_id") or "").strip()
-            if not symbol or not strategy_id or not component_id:
-                raise RuntimeError(
-                    f"boundary target {target_key!r} lacks canonical ownership"
-                )
-            price = self.price_port.price(symbol, boundary)
-            intents.append(
-                RequestedIntent(
-                    adapter_kind=SleeveAdapterKind.RISK,
-                    intent=SleeveTargetIntent(
-                        decision_key=(
-                            f"risk:{target.get('decision_key') or target_key}:"
-                            "comparator_boundary_flat"
-                        ),
-                        target_key=target_key,
-                        strategy_id=strategy_id,
-                        component_id=component_id,
-                        symbol=symbol,
-                        signed_notional_usdt=0.0,
-                        leverage=float(target.get("leverage") or 1.0),
-                        reason="comparator_boundary_flat",
-                        metadata={
-                            "owner_sleeve": owner_sleeve,
-                            "requested_by_strategy_id": "active-runtime-comparator",
-                            "decision_reference_price": price,
-                            "boundary_ts_ms": boundary,
-                            "excluded_from_strategy_source_decisions": True,
-                        },
-                    ),
-                )
-            )
-            self.trace_sink.source_decision(
-                {
-                    "sleeve": owner_sleeve,
-                    "action": "boundary_flat",
-                    "cycle_ts_ms": boundary,
-                    "signal_ts_ms": 0,
-                    "trade_id": component_id,
-                    "component": component_id,
-                    "symbol": symbol,
-                    "reason": "comparator_boundary_flat",
-                    "selected": True,
-                    "boundary_only": True,
-                }
-            )
-        if not intents:
-            return 0
+        initial_state = self.session.kernel._state_ref()
+        initial_target_count = sum(
+            abs(float(target.get("signed_qty") or 0.0)) > 1e-12
+            for target in initial_state.component_targets.values()
+        )
+        max_passes = max(2, initial_target_count + 1)
         created_ns = (
             boundary * 1_000_000
             + self.run_config.clock_offsets.boundary_flat_ns
         )
-        publication = publish_exit_first_target_requests(
-            self.publisher,
-            batch_prefix=f"active-runtime-comparator/boundary/{boundary}",
-            exit_intents=intents,
-            entry_intents=(),
-            created_ts_ns=created_ns,
-        )
-        self._require_publication(publication, stage="boundary_flat")
-        processed = self._process_requests(
-            publication.exit_requests,
-            stage="boundary_flat",
-            boundary_ts_ms=boundary,
-        )
+        processed = 0
+        previous_signature: tuple[Any, ...] | None = None
+        for pass_index in range(max_passes):
+            self._refresh_projection(force=True)
+            state = self.session.kernel._state_ref()
+            intents: list[RequestedIntent] = []
+            signature_targets: list[tuple[str, float]] = []
+            for target_key, target in sorted(state.component_targets.items()):
+                signed_qty = float(target.get("signed_qty") or 0.0)
+                if abs(signed_qty) <= 1e-12:
+                    continue
+                signature_targets.append((target_key, signed_qty))
+                symbol = str(target.get("symbol") or "").upper()
+                owner_sleeve = str(
+                    target.get("sleeve") or target_key.split("/", 1)[0]
+                )
+                strategy_id = str(target.get("strategy_id") or "").strip()
+                component_id = str(target.get("component_id") or "").strip()
+                if not symbol or not strategy_id or not component_id:
+                    raise RuntimeError(
+                        f"boundary target {target_key!r} lacks canonical ownership"
+                    )
+                price = self.price_port.price(symbol, boundary)
+                intents.append(
+                    RequestedIntent(
+                        adapter_kind=SleeveAdapterKind.RISK,
+                        intent=SleeveTargetIntent(
+                            decision_key=(
+                                f"risk:{target.get('decision_key') or target_key}:"
+                                f"comparator_boundary_flat:{pass_index}"
+                            ),
+                            target_key=target_key,
+                            strategy_id=strategy_id,
+                            component_id=component_id,
+                            symbol=symbol,
+                            signed_notional_usdt=0.0,
+                            leverage=float(target.get("leverage") or 1.0),
+                            reason="comparator_boundary_flat",
+                            metadata={
+                                "owner_sleeve": owner_sleeve,
+                                "requested_by_strategy_id": (
+                                    "active-runtime-comparator"
+                                ),
+                                "decision_reference_price": price,
+                                "boundary_ts_ms": boundary,
+                                "boundary_flat_pass": pass_index,
+                                "excluded_from_strategy_source_decisions": True,
+                            },
+                        ),
+                    )
+                )
+                self.trace_sink.source_decision(
+                    {
+                        "sleeve": owner_sleeve,
+                        "action": "boundary_flat",
+                        "cycle_ts_ms": boundary,
+                        "signal_ts_ms": 0,
+                        "trade_id": component_id,
+                        "component": component_id,
+                        "symbol": symbol,
+                        "reason": "comparator_boundary_flat",
+                        "selected": True,
+                        "boundary_only": True,
+                        "boundary_flat_pass": pass_index,
+                    }
+                )
+            signature = (
+                tuple(signature_targets),
+                tuple(
+                    sorted(
+                        (symbol, float(position.signed_qty))
+                        for symbol, position in state.positions.items()
+                        if abs(float(position.signed_qty)) > 1e-12
+                    )
+                ),
+                tuple(sorted(state.working_symbols(tolerance=1e-12))),
+            )
+            if not intents:
+                self.session.converge_until_stable()
+                break
+            if signature == previous_signature:
+                raise RuntimeError(
+                    "active runtime comparator boundary flatten made no progress: "
+                    f"pass={pass_index}, signature={signature}"
+                )
+            previous_signature = signature
+            published = self.publisher.publish(
+                batch_id=(
+                    f"active-runtime-comparator/boundary/{boundary}/"
+                    f"pass-{pass_index:04d}/atomic-flat"
+                ),
+                intents=tuple(intents),
+                created_ts_ns=created_ns,
+            )
+            request_count = self._process_requests(
+                (published,),
+                stage="boundary_flat",
+                boundary_ts_ms=boundary,
+                require_accepted=True,
+            )
+            if request_count != 1:
+                raise RuntimeError(
+                    "atomic boundary flatten did not process exactly one request"
+                )
+            processed += len(intents)
+            created_ns += 1
         self._refresh_projection(force=True)
         final_state = self.session.kernel._state_ref()
         nonzero_targets = {
@@ -1756,6 +1909,20 @@ class ActiveRuntimeComparator:
         self._refresh_projection(force=True)
         events = self._events
         grouped = Counter(event.event_type for event in events)
+        risk_events = [
+            event
+            for event in events
+            if event.event_type == AccountEventType.RISK_DECISION.value
+        ]
+        rejected_strict_risk_reductions = sum(
+            bool(event.payload.get("strictly_risk_reducing"))
+            and not bool(event.payload.get("accepted"))
+            for event in risk_events
+        )
+        staged_component_flat_batches = sum(
+            bool(event.payload.get("staged_component_flat_symbols"))
+            for event in risk_events
+        )
         final_state_hash = ""
         final_flat = True
         working_symbols: list[str] = []
@@ -1820,6 +1987,10 @@ class ActiveRuntimeComparator:
             ),
             "account_events": len(events),
             "account_event_counts": dict(sorted(grouped.items())),
+            "rejected_strict_risk_reduction_batches": (
+                rejected_strict_risk_reductions
+            ),
+            "staged_component_flat_batches": staged_component_flat_batches,
             "last_sequence": events[-1].sequence if events else 0,
             "last_event_hash": events[-1].event_hash if events else "",
             "final_state_hash": final_state_hash,

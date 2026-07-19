@@ -14,9 +14,10 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,22 @@ KLINE_ROOT = RECONSTRUCTED_ROOT / "klines_1h"
 MANIFEST_ROOT = RECONSTRUCTED_ROOT / "archive_trade_manifest"
 BASE_CONTRACT = REPO / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18.md"
 AMENDMENTS = REPO / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md"
+POST17_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post17_amendments.md"
+)
+POST18_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post18_amendments.md"
+)
+POST19_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post19_amendments.md"
+)
+POST20_AMENDMENTS = (
+    REPO
+    / "docs/preregistration/prospective_runtime_parity_execution_epoch_2026-07-18_post20_amendments.md"
+)
 FEATURE_RECEIPT = FEATURE_ROOT / "feature_receipt.json"
 RECONSTRUCTION_RECEIPT = EPOCH_ROOT / "reconstruction/bybit-baseline.receipt.json"
 LIFECYCLE_ROOT = EPOCH_ROOT / "venue-lifecycle/bybit-census-search-v2"
@@ -142,6 +159,10 @@ FOUR_HOUR_CAP_FAILED_ATTEMPT_ROOT = (
 FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION = (
     FOUR_HOUR_CAP_FAILED_ATTEMPT_ROOT / "termination.json"
 )
+BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION = (
+    EPOCH_ROOT
+    / "runtime-parity/.active-production-comparator.working-d54eb524c208-boundary-flat-xrp/termination.json"
+)
 SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION = (
     EPOCH_ROOT
     / "venue-lifecycle/.bybit-census-search-v2.working-query-highlight/termination.json"
@@ -149,6 +170,10 @@ SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION = (
 
 EXPECTED_BASE_CONTRACT_SHA256 = "15edc498adf2bd068c33ff2f791fa3e46f161196db673a839adcf317aba35a31"
 EXPECTED_AMENDMENTS_SHA256 = "b1e00187f94c796dc74862fc5ff38efac3ce3cf5864b0f4244c327db5a0fb282"
+EXPECTED_POST17_AMENDMENTS_SHA256 = "5c094359fc7052ed2d2e56eb6a44f5d53efd71b4a25ae5006de5492b8479db49"
+EXPECTED_POST18_AMENDMENTS_SHA256 = "ffc366010e374be572874c1c5609e04394a44f5dbd907e42edbb80d6647cb8b8"
+EXPECTED_POST19_AMENDMENTS_SHA256 = "a168d845fa8ede5052c802baf06464537474d2cd1cd0e287ce91b11c955d24fa"
+EXPECTED_POST20_AMENDMENTS_SHA256 = "c859894a6cb49a93450fd7a7f3d321980a7312ddd17e2a7131f33a5c90941fc4"
 EXPECTED_FEATURE_RECEIPT_SHA256 = "1d50aeb731e0cc82a1963d57576f032228df5b375dbdb20375c01541d397af31"
 EXPECTED_RECONSTRUCTION_RECEIPT_SHA256 = "c0aa73d8b2f9851f4cb5d46ba2b238bdb411da34eed0736997aeeb825c10d45a"
 EXPECTED_RECONSTRUCTION_LOGICAL_SHA256 = "9fa1e3a87e813e7449464cf6b512c40cb82d0a13dbce60978e01079e688a81fe"
@@ -163,6 +188,7 @@ EXPECTED_PRICE_OVERREQUEST_FAILED_ATTEMPT_TERMINATION_SHA256 = "ec37b1bb95d8e7aa
 EXPECTED_OBSERVER_PRICE_FAILED_ATTEMPT_TERMINATION_SHA256 = "75382d0ed1c6e75f9fbdb2bd0f018c955a488850ca39539b9d9f427d211d6dae"
 EXPECTED_DELISTING_FAILED_ATTEMPT_TERMINATION_SHA256 = "aa4ed1e13dfb8c0828647d10dea4dd09fac5532764f907cfc52321f08e12288e"
 EXPECTED_FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION_SHA256 = "56c51f48f05ebe289ed9abe6e4b6beb59762bf5fd33fafff1b54de3d2be50c6b"
+EXPECTED_BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION_SHA256 = "7f5959e06e973617f511e74849dda0187a305032856c92340a7dbf2cddbc437c"
 EXPECTED_SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION_SHA256 = "f9eb3ff6c9311da43db8a156ce883022ea963b35a9245b8fdfafc0f54d3d961f"
 EXPECTED_PREFIX_IDENTITIES = {
     "traces/continuous_gates/part-00000.parquet": (
@@ -342,14 +368,18 @@ def _enable_historical_io() -> None:
     account_kernel_module._atomic_replace = _portable_atomic_replace
     account_kernel_module._write_transaction = _buffer_transaction
     account_kernel_module._append_jsonl_projection = lambda *_args, **_kwargs: None
-    replay_module.JsonlStrategyEventTape = lambda _path: MemoryStrategyEventTape()
+    setattr(
+        replay_module,
+        "JsonlStrategyEventTape",
+        lambda _path: MemoryStrategyEventTape(),
+    )
     if os.name == "nt":
         account_route_module.exclusive_file_lock = _single_process_lock
         account_route_module._atomic_create = _portable_route_create
-        account_route_module._fsync_directory = lambda _path: None
+        setattr(account_route_module, "_fsync_directory", lambda _path: None)
         account_route_module.read_stable_file = _portable_stable_read
-        btc_risk_module._fsync_file = lambda _path: None
-        btc_risk_module._fsync_directory = lambda _path: None
+        setattr(btc_risk_module, "_fsync_file", lambda _path: None)
+        setattr(btc_risk_module, "_fsync_directory", lambda _path: None)
 
 
 def _materialize_transactions(account_root: Path) -> dict[str, Any]:
@@ -450,6 +480,7 @@ class _ComparatorTraceWriter:
         self.gate_part = 0
         self.accepted_requests = 0
         self.rejected_requests = 0
+        self.last_request_feedback: dict[str, Any] | None = None
 
     def cycle(self, row: Mapping[str, Any]) -> None:
         self.cycles.append(row)
@@ -484,6 +515,7 @@ class _ComparatorTraceWriter:
             self.accepted_requests += 1
         else:
             self.rejected_requests += 1
+        self.last_request_feedback = _normalized_trace_row(row)
         self.requests.append(row)
 
     def request_intent(self, row: Mapping[str, Any]) -> None:
@@ -549,6 +581,22 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
     expected = {
         "base_contract": (BASE_CONTRACT, EXPECTED_BASE_CONTRACT_SHA256),
         "amendments": (AMENDMENTS, EXPECTED_AMENDMENTS_SHA256),
+        "post17_amendments": (
+            POST17_AMENDMENTS,
+            EXPECTED_POST17_AMENDMENTS_SHA256,
+        ),
+        "post18_amendments": (
+            POST18_AMENDMENTS,
+            EXPECTED_POST18_AMENDMENTS_SHA256,
+        ),
+        "post19_amendments": (
+            POST19_AMENDMENTS,
+            EXPECTED_POST19_AMENDMENTS_SHA256,
+        ),
+        "post20_amendments": (
+            POST20_AMENDMENTS,
+            EXPECTED_POST20_AMENDMENTS_SHA256,
+        ),
         "feature_receipt": (FEATURE_RECEIPT, EXPECTED_FEATURE_RECEIPT_SHA256),
         "reconstruction_receipt": (
             RECONSTRUCTION_RECEIPT,
@@ -593,6 +641,10 @@ def _registered_inputs() -> dict[str, dict[str, Any]]:
         "four_hour_cap_failed_attempt_termination": (
             FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION,
             EXPECTED_FOUR_HOUR_CAP_FAILED_ATTEMPT_TERMINATION_SHA256,
+        ),
+        "boundary_flat_failed_attempt_termination": (
+            BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION,
+            EXPECTED_BOUNDARY_FLAT_FAILED_ATTEMPT_TERMINATION_SHA256,
         ),
         "search_highlight_failed_attempt_termination": (
             SEARCH_HIGHLIGHT_FAILED_ATTEMPT_TERMINATION,
@@ -911,6 +963,145 @@ def _validate_existing(output: Path) -> dict[str, Any]:
     return receipt
 
 
+@dataclass(slots=True)
+class _FailureContext:
+    work: Path
+    run_identity: Mapping[str, Any]
+    started_at: str
+    started_perf: float
+    trace: _ComparatorTraceWriter | None = None
+    account_root: Path | None = None
+    session: HistoricalAccountSession | None = None
+    comparator: ActiveRuntimeComparator | None = None
+    progress_hours: int = 0
+    total_hours: int = 0
+    last_boundary_ts_ms: int = 0
+
+
+_ACTIVE_FAILURE_CONTEXT: _FailureContext | None = None
+
+
+def _capture_structural_failure(
+    context: _FailureContext,
+    exc: BaseException,
+) -> None:
+    """Best-effort create-only evidence; never calculate monetary outcomes."""
+
+    if not context.work.is_dir():
+        return
+    termination_path = context.work / "termination.json"
+    if termination_path.exists():
+        return
+    diagnostic_errors: dict[str, str] = {}
+    trace_counts: Mapping[str, int] | None = None
+    if context.trace is not None:
+        try:
+            trace_counts = context.trace.close()
+        except Exception as trace_exc:  # noqa: BLE001 - preserve original failure
+            diagnostic_errors["trace_flush"] = (
+                f"{type(trace_exc).__name__}: {trace_exc}"
+            )
+
+    persistence: Mapping[str, Any] | None = None
+    journal_identity: dict[str, Any] | None = None
+    if context.account_root is not None:
+        try:
+            persistence = _materialize_transactions(context.account_root)
+            events = read_account_journal(context.account_root, verify=True)
+            journal_identity = {
+                "verified": True,
+                "events": len(events),
+                "last_event_hash": events[-1].event_hash if events else "",
+                "last_state_hash": events[-1].state_hash if events else "",
+            }
+        except Exception as journal_exc:  # noqa: BLE001 - preserve original failure
+            diagnostic_errors["journal_materialization"] = (
+                f"{type(journal_exc).__name__}: {journal_exc}"
+            )
+
+    prefix_equivalence: Mapping[str, Any] | None = None
+    try:
+        prefix_equivalence = _prefix_equivalence(context.work)
+    except Exception as prefix_exc:  # noqa: BLE001 - evidence can be partial
+        diagnostic_errors["prefix_equivalence"] = (
+            f"{type(prefix_exc).__name__}: {prefix_exc}"
+        )
+
+    state_identity: dict[str, Any] | None = None
+    if context.session is not None and context.session.kernel is not None:
+        try:
+            state = context.session.kernel._state_ref()
+            state_identity = {
+                "state_hash": state.state_hash(),
+                "events_applied": state.events_applied,
+                "component_targets": {
+                    key: {
+                        "symbol": str(target.get("symbol") or "").upper(),
+                        "signed_qty": float(target.get("signed_qty") or 0.0),
+                    }
+                    for key, target in sorted(state.component_targets.items())
+                    if abs(float(target.get("signed_qty") or 0.0)) > 1e-12
+                },
+                "positions": {
+                    symbol: float(position.signed_qty)
+                    for symbol, position in sorted(state.positions.items())
+                    if abs(float(position.signed_qty)) > 1e-12
+                },
+                "working_symbols": sorted(
+                    state.working_symbols(tolerance=1e-12)
+                ),
+            }
+        except Exception as state_exc:  # noqa: BLE001 - evidence can be partial
+            diagnostic_errors["state_identity"] = (
+                f"{type(state_exc).__name__}: {state_exc}"
+            )
+
+    try:
+        files = _artifact_identities(context.work)
+    except Exception as files_exc:  # noqa: BLE001 - evidence can be partial
+        diagnostic_errors["file_identities"] = (
+            f"{type(files_exc).__name__}: {files_exc}"
+        )
+        files = {}
+    termination = {
+        **dict(context.run_identity),
+        "status": "invalid_structural_failure",
+        "started_at": context.started_at,
+        "failed_at": dt.datetime.now(dt.timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "elapsed_seconds": time.perf_counter() - context.started_perf,
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "exception_traceback": "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ),
+        "progress_hours": context.progress_hours,
+        "total_hours": context.total_hours,
+        "last_boundary_ts_ms": context.last_boundary_ts_ms,
+        "trace_counts": trace_counts,
+        "last_request_feedback": (
+            context.trace.last_request_feedback
+            if context.trace is not None
+            else None
+        ),
+        "performance_refactor_prefix_equivalence": prefix_equivalence,
+        "persistence": persistence,
+        "journal": journal_identity,
+        "state": state_identity,
+        "diagnostic_errors": diagnostic_errors,
+        "files": files,
+        "monetary_outcomes_inspected": False,
+        "explicit_non_conclusions": [
+            "invalid for runtime parity",
+            "no alpha, return, cost, fill, thesis, or deployment conclusion",
+            "no mainnet, capital, or real-money authority",
+        ],
+    }
+    termination["receipt_payload_sha256"] = payload_sha256(termination)
+    _write_json_create(termination_path, termination)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -918,7 +1109,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv: Sequence[str] | None = None) -> int:
+    global _ACTIVE_FAILURE_CONTEXT
+    _ACTIVE_FAILURE_CONTEXT = None
     args = _parser().parse_args(argv)
     output = args.out.expanduser().resolve()
     inputs = _registered_inputs()
@@ -1021,6 +1214,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     )
     started = time.perf_counter()
+    _ACTIVE_FAILURE_CONTEXT = _FailureContext(
+        work=work,
+        run_identity=run_identity,
+        started_at=started_at,
+        started_perf=started,
+    )
     _enable_historical_io()
     if _TRANSACTION_BUFFER:
         raise RuntimeError("portable transaction buffer was not empty at run start")
@@ -1049,6 +1248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     account_root = work / "account"
     inbox_root = work / "inbox"
+    _ACTIVE_FAILURE_CONTEXT.account_root = account_root
     route = ensure_account_route(
         account_id="active-runtime-comparator-demo",
         environment="demo",
@@ -1075,7 +1275,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         id_seed="active-runtime-comparator:account",
         execution_id_seed="active-runtime-comparator:execution",
         unsafe_single_process_inplace_research=True,
+        route=route,
     )
+    _ACTIVE_FAILURE_CONTEXT.session = session
     long_demo = LongNativeDemoCycleConfig(
         execution_environment="demo",
         account_execution_root=str(account_root),
@@ -1099,6 +1301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     trace = _ComparatorTraceWriter(work)
+    _ACTIVE_FAILURE_CONTEXT.trace = trace
     price_port = HistoricalHourlyCloseProvider(KLINE_ROOT)
     comparator = ActiveRuntimeComparator(
         route=route,
@@ -1121,8 +1324,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         venue_lifecycle_events=venue_lifecycle_events,
         trace_sink=trace,
     )
+    _ACTIVE_FAILURE_CONTEXT.comparator = comparator
 
     total_hours = (END_MS - LONG_START_MS) // MS_PER_HOUR + 1
+    _ACTIVE_FAILURE_CONTEXT.total_hours = total_hours
     for ordinal, boundary_ms in enumerate(
         range(LONG_START_MS, END_MS + MS_PER_HOUR, MS_PER_HOUR),
         start=1,
@@ -1139,6 +1344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             long_recent_features=recent_long,
             continuous_entry_state=continuous_state,
         )
+        _ACTIVE_FAILURE_CONTEXT.progress_hours = ordinal
+        _ACTIVE_FAILURE_CONTEXT.last_boundary_ts_ms = boundary_ms
         if ordinal % (7 * 24) == 0 or ordinal == total_hours:
             print(
                 json.dumps(
@@ -1154,6 +1361,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if time.perf_counter() - started > MAX_ELAPSED_SECONDS:
             raise RuntimeError("active comparator exceeded its registered elapsed-time cap")
+
+    pre_boundary_trace_counts = trace.close()
+    pre_boundary_prefix = _prefix_equivalence(work)
+    if pre_boundary_prefix["status"] != "pass":
+        raise RuntimeError("pre-boundary registered prefix equivalence failed")
+    pre_boundary_persistence = _materialize_transactions(account_root)
+    pre_boundary_events = read_account_journal(account_root, verify=True)
+    pre_boundary_state = session.kernel._state_ref() if session.kernel is not None else None
+    pre_boundary_journal_verified = (
+        pre_boundary_state is not None
+        and len(pre_boundary_events) == pre_boundary_state.events_applied
+        and (pre_boundary_events[-1].state_hash if pre_boundary_events else "")
+        == pre_boundary_state.state_hash()
+    )
+    if not pre_boundary_journal_verified:
+        raise RuntimeError("pre-boundary materialized account journal identity changed")
+    _write_json_create(
+        work / "checkpoints/pre_boundary.json",
+        {
+            "kind": "active_comparator_pre_boundary_structural_checkpoint",
+            "code_commit": head,
+            "boundary_ts_ms": END_MS,
+            "progress_hours": total_hours,
+            "trace_counts": pre_boundary_trace_counts,
+            "performance_refactor_prefix_equivalence": pre_boundary_prefix,
+            "persistence": pre_boundary_persistence,
+            "journal": {
+                "verified": True,
+                "events": len(pre_boundary_events),
+                "last_event_hash": (
+                    pre_boundary_events[-1].event_hash
+                    if pre_boundary_events
+                    else ""
+                ),
+                "last_state_hash": (
+                    pre_boundary_events[-1].state_hash
+                    if pre_boundary_events
+                    else ""
+                ),
+            },
+            "monetary_outcomes_inspected": False,
+        },
+    )
 
     boundary_flats = comparator.boundary_flatten(END_MS)
     structural = comparator.final_structural_summary()
@@ -1183,7 +1433,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     prefix_equivalence = _prefix_equivalence(work)
 
-    persistence = _materialize_transactions(account_root)
+    terminal_persistence = _materialize_transactions(account_root)
+    persistence = {
+        "pre_boundary": pre_boundary_persistence,
+        "terminal": terminal_persistence,
+    }
     persisted_events = read_account_journal(account_root, verify=True)
     journal_verified = (
         len(persisted_events) == structural["account_events"]
@@ -1235,6 +1489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         and journal_verified
         and prefix_equivalence["status"] == "pass"
         and structural["btc_risk_reconciliation_error"] == 0
+        and structural["rejected_strict_risk_reduction_batches"] == 0
         and trace_counts["continuous_gate_rows"] == continuous_features.height
         and trace_counts["cycles"] == total_hours
         and structural["venue_lifecycle_observed_events"]
@@ -1242,6 +1497,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         and trace_counts["venue_lifecycle"]
         == expected_lifecycle_trace_rows
     ) else "fail"
+    if status != "pass":
+        raise RuntimeError("active production-function comparator failed")
     files = _artifact_identities(work)
     receipt: dict[str, Any] = {
         **run_identity,
@@ -1280,6 +1537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     receipt["receipt_payload_sha256"] = payload_sha256(receipt)
     _write_json_create(work / "receipt.json", receipt)
     os.replace(work, output)
+    _ACTIVE_FAILURE_CONTEXT = None
     print(
         json.dumps(
             {
@@ -1295,9 +1553,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         flush=True,
     )
-    if status != "pass":
-        raise RuntimeError("active production-function comparator failed")
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    global _ACTIVE_FAILURE_CONTEXT
+
+    try:
+        return _main(argv)
+    except BaseException as exc:
+        context = _ACTIVE_FAILURE_CONTEXT
+        if context is not None:
+            try:
+                _capture_structural_failure(context, exc)
+            except Exception as capture_exc:  # noqa: BLE001 - preserve root cause
+                print(
+                    json.dumps(
+                        {
+                            "stage": "failure_capture_failed",
+                            "root_exception": f"{type(exc).__name__}: {exc}",
+                            "capture_exception": (
+                                f"{type(capture_exc).__name__}: {capture_exc}"
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+        _ACTIVE_FAILURE_CONTEXT = None
+        raise
 
 
 if __name__ == "__main__":

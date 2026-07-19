@@ -104,7 +104,7 @@ def _max_int(frame: pl.DataFrame, column: str) -> int:
     if frame.is_empty() or column not in frame.columns:
         return 0
     value = frame[column].max()
-    return int(value) if value is not None else 0  # type: ignore[arg-type]
+    return int(value) if value is not None else 0
 
 
 def _price_lookup_from_tickers_and_klines(

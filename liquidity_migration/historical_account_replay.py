@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .account_kernel import (
     AccountEventType,
@@ -19,8 +19,18 @@ from .account_kernel import (
     AccountRiskSnapshot,
     InstrumentRules,
     MarketInputRef,
+    PositionState,
+    TargetBatchResult,
 )
-from .account_service import AccountTargetRequest, RequestedIntent, SleeveAdapterKind
+from .account_route import AccountRoute
+from .account_service import (
+    AccountExecutionService,
+    AccountServiceReceipt,
+    AccountTargetRequest,
+    RequestedIntent,
+    SleeveAdapterKind,
+    prepare_account_request_intents,
+)
 from .deterministic_runtime import VirtualClock
 from .execution_adapters import ExecutionTwinConfig, L2BookSnapshot, MarketOrderExecutionTwin
 from .execution_adapters import BookLevel
@@ -88,11 +98,92 @@ class HistoricalTargetDecision:
             raise ValueError("historical target decision requires positive time and price")
 
 
+@dataclass(slots=True)
+class _HistoricalServiceInputs:
+    """Mutable deterministic ports read only by the production account owner."""
+
+    instrument_rules: Mapping[str, InstrumentRules]
+    market_inputs: dict[str, MarketInputRef] = field(default_factory=dict)
+    risk_snapshot: AccountRiskSnapshot | None = None
+
+    def bind(
+        self,
+        *,
+        market_inputs: Mapping[str, MarketInputRef],
+        risk_snapshot: AccountRiskSnapshot,
+    ) -> None:
+        self.market_inputs = {
+            str(symbol).upper(): market
+            for symbol, market in market_inputs.items()
+        }
+        self.risk_snapshot = risk_snapshot
+
+    def current(
+        self,
+        symbols: Sequence[str],
+        *,
+        batch_id: str,
+    ) -> Mapping[str, MarketInputRef]:
+        del batch_id
+        normalized = [str(symbol).upper() for symbol in symbols]
+        missing = sorted(set(normalized) - set(self.market_inputs))
+        if missing:
+            raise RuntimeError(
+                "historical account service lacks current markets for: "
+                + ", ".join(missing)
+            )
+        return {symbol: self.market_inputs[symbol] for symbol in normalized}
+
+    def current_snapshot(self, *, batch_id: str) -> AccountRiskSnapshot:
+        del batch_id
+        if self.risk_snapshot is None:
+            raise RuntimeError("historical account service snapshot is not bound")
+        return self.risk_snapshot
+
+    def current_rules(
+        self,
+        symbols: Sequence[str],
+    ) -> Mapping[str, InstrumentRules]:
+        normalized = [str(symbol).upper() for symbol in symbols]
+        missing = sorted(set(normalized) - set(self.instrument_rules))
+        if missing:
+            raise RuntimeError(
+                "historical account service lacks instrument rules for: "
+                + ", ".join(missing)
+            )
+        return {symbol: self.instrument_rules[symbol] for symbol in normalized}
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoricalSnapshotProvider:
+    inputs: _HistoricalServiceInputs
+
+    def current(self, *, batch_id: str) -> AccountRiskSnapshot:
+        return self.inputs.current_snapshot(batch_id=batch_id)
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoricalRulesProvider:
+    inputs: _HistoricalServiceInputs
+
+    def current(self, symbols: Sequence[str]) -> Mapping[str, InstrumentRules]:
+        return self.inputs.current_rules(symbols)
+
+
 @dataclass(frozen=True, slots=True)
 class HistoricalSubmissionFeedback:
     accepted: bool
     rejection_keys: tuple[str, ...]
     target_committed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalOwnerSubmission:
+    """Immediate exact account-owner result without reconstructing trade rows."""
+
+    receipt: AccountServiceReceipt
+    feedback: HistoricalSubmissionFeedback
+    command_ids: tuple[str, ...]
 
 
 def historical_submission_feedback(
@@ -207,6 +298,7 @@ class HistoricalAccountSession:
         id_seed: str,
         execution_id_seed: str | None = None,
         unsafe_single_process_inplace_research: bool = False,
+        route: AccountRoute | None = None,
     ) -> None:
         self.root = Path(root)
         self.account_id = account_id
@@ -220,10 +312,19 @@ class HistoricalAccountSession:
         self.unsafe_single_process_inplace_research = bool(
             unsafe_single_process_inplace_research
         )
+        if route is not None and (
+            route.account_id != account_id
+            or Path(route.account_root).resolve(strict=False)
+            != self.root.resolve(strict=False)
+        ):
+            raise ValueError("historical account route does not match session root/account")
+        self.route = route
         self.clock: VirtualClock | None = None
-        self.event_clock: DeterministicEventClock[AccountCycleResult] | None = None
+        self.event_clock: DeterministicEventClock[Any] | None = None
         self.kernel: AccountExecutionKernel | None = None
         self.runtime: AccountKernelRuntime | None = None
+        self.account_service: AccountExecutionService | None = None
+        self._service_inputs = _HistoricalServiceInputs(self.instrument_rules)
         self.execution_adapter = MarketOrderExecutionTwin(
             books={},
             instrument_rules=self.instrument_rules,
@@ -267,6 +368,21 @@ class HistoricalAccountSession:
             ),
         )
         self.runtime = AccountKernelRuntime(self.kernel)
+        if self.route is not None:
+            self.account_service = AccountExecutionService(
+                route=self.route,
+                kernel=self.kernel,
+                market_provider=self._service_inputs,
+                snapshot_provider=_HistoricalSnapshotProvider(self._service_inputs),
+                rules_provider=_HistoricalRulesProvider(self._service_inputs),
+                risk_policy=self.risk_policy,
+                execution_adapter=self.execution_adapter,
+                clock=self.clock,
+                max_market_age_ns=self.execution_config.max_decision_age_ns,
+                max_snapshot_age_ns=self.execution_config.max_decision_age_ns,
+                convergence_retry_backoff_ns=0,
+                max_convergence_retries=8,
+            )
 
     def process_cycle(self, cycle: HistoricalReplayCycle) -> AccountCycleResult:
         if cycle.wall_ts_ns < self._last_wall_ts_ns:
@@ -348,22 +464,113 @@ class HistoricalAccountSession:
         self.execution_adapter.books = {
             symbol.upper(): book for symbol, book in cycle.books.items()
         }
+        adapted = [AdaptedIntent(item.adapter(), item.intent) for item in cycle.intents]
+        require_strict_risk_reduction = cycle.require_strict_risk_reduction
+        if cycle.request_content_hash is not None and cycle.command_symbols is not None:
+            assert self.kernel is not None
+            preview_targets = [
+                item.adapter.desired_target(
+                    item.intent,
+                    market_inputs[item.intent.symbol.upper()],
+                    self.instrument_rules[item.intent.symbol.upper()],
+                )
+                for item in adapted
+            ]
+            require_strict_risk_reduction = (
+                self.kernel.targets_are_strictly_risk_reducing(
+                    preview_targets,
+                    quantity_tolerance=self.risk_policy.quantity_tolerance,
+                )
+            )
+        self._service_inputs.bind(
+            market_inputs=market_inputs,
+            risk_snapshot=cycle.risk_snapshot,
+        )
         output = self.runtime.process_cycle(
             batch_id=cycle.batch_id,
-            intents=[AdaptedIntent(item.adapter(), item.intent) for item in cycle.intents],
+            intents=adapted,
             market_inputs=market_inputs,
             risk_snapshot=cycle.risk_snapshot,
             risk_policy=self.risk_policy,
             instrument_rules=self.instrument_rules,
             execution_adapter=self.execution_adapter,
             command_symbols=cycle.command_symbols,
-            require_strict_risk_reduction=cycle.require_strict_risk_reduction,
+            require_strict_risk_reduction=require_strict_risk_reduction,
             request_content_hash=cycle.request_content_hash,
         )
         self.outputs.append(output)
         self._last_wall_ts_ns = cycle.wall_ts_ns
         self._last_monotonic_ns = self.clock.monotonic_ns() if self.clock is not None else -1
         return output
+
+    def _targets_converged(self) -> bool:
+        if self.kernel is None:
+            return True
+        state = self.kernel._state_ref()
+        tolerance = self.risk_policy.quantity_tolerance
+        symbols = set(state.aggregate_targets) | set(state.positions)
+        symbols.update(state.working_symbols(tolerance=tolerance))
+        return all(
+            abs(
+                float(state.aggregate_targets.get(symbol, 0.0))
+                - float(
+                    state.positions.get(symbol, PositionState()).signed_qty
+                )
+            )
+            <= tolerance
+            and state.working_order_count(symbol, tolerance=tolerance) == 0
+            for symbol in symbols
+        )
+
+    def converge_until_stable(
+        self,
+        *,
+        max_batches: int = 16,
+    ) -> tuple[TargetBatchResult, ...]:
+        """Drive the owner until converged or an explicit admission blocks it."""
+
+        if max_batches <= 0:
+            raise ValueError("historical convergence max_batches must be positive")
+        if self._targets_converged():
+            return ()
+        if self.account_service is None:
+            raise RuntimeError(
+                "historical target state requires route-bound production convergence"
+            )
+        results: list[TargetBatchResult] = []
+        for _ in range(max_batches):
+            result = self.account_service.converge_once()
+            if result is None:
+                return tuple(results)
+            results.append(result)
+            if not result.accepted:
+                # Exposure-increasing residual convergence is entry-like.  A
+                # capital, health, market, or rules gate may validly leave the
+                # already-accepted desired state unresolved for a later owner
+                # pass; do not relabel that admission decision as an exit
+                # failure or force it through.
+                return tuple(results)
+            state = self.kernel._state_ref() if self.kernel is not None else None
+            execution_rejection_keys: list[str] = []
+            if state is not None:
+                for command in result.commands:
+                    order = state.orders.get(command.command_id)
+                    if order is not None and order.status == "rejected":
+                        execution_rejection_keys.append(
+                            order.rejection_key
+                            or f"{order.command_id}:execution_status:{order.status}"
+                        )
+            execution_rejections = tuple(sorted(execution_rejection_keys))
+            if execution_rejections:
+                raise RuntimeError(
+                    "historical account convergence execution rejected "
+                    f"{result.batch_id!r}: {execution_rejections}"
+                )
+            if self._targets_converged():
+                return tuple(results)
+        raise RuntimeError(
+            "historical account convergence exceeded its deterministic batch cap"
+        )
 
     def submit_decisions(
         self,
@@ -495,6 +702,14 @@ class HistoricalAccountSession:
                     f"historical-fixed:{equity_usdt:g}:{wall_ts_ns}:{sequence}",
                     wall_ts_ns,
                 ),
+                command_symbols=(
+                    frozenset(
+                        item.intent.intent.symbol.upper()
+                        for item in layer
+                    )
+                    if request_content_hash is not None
+                    else None
+                ),
                 request_content_hash=request_content_hash,
             )
             outputs.append(self.process_cycle(cycle))
@@ -528,15 +743,15 @@ class HistoricalAccountSession:
             for symbol, price in market_prices.items()
         }
         decisions: list[HistoricalTargetDecision] = []
-        for item in request.intents:
-            symbol = item.intent.symbol.upper()
+        for item, prepared_intent in prepare_account_request_intents(request):
+            symbol = prepared_intent.symbol.upper()
             try:
                 reference_price = normalized_prices[symbol]
             except KeyError as exc:
                 raise ValueError(
                     f"historical target request lacks a market price for {symbol}"
                 ) from exc
-            metadata_price = item.intent.metadata.get("decision_reference_price")
+            metadata_price = prepared_intent.metadata.get("decision_reference_price")
             if metadata_price is not None and float(metadata_price) != reference_price:
                 raise ValueError(
                     f"published decision and historical market prices differ for {symbol}: "
@@ -545,7 +760,10 @@ class HistoricalAccountSession:
             decisions.append(
                 HistoricalTargetDecision(
                     wall_ts_ns=request.created_ts_ns,
-                    intent=item,
+                    intent=RequestedIntent(
+                        adapter_kind=item.adapter_kind,
+                        intent=prepared_intent,
+                    ),
                     reference_price=reference_price,
                     metadata={
                         "request_id": request.request_id,
@@ -560,6 +778,182 @@ class HistoricalAccountSession:
             exact_batch_id=request.batch_id,
             request_content_hash=request.content_hash(),
             market_observed_ts_ns=market_observed_ts_ns,
+        )
+
+    def submit_request_via_owner(
+        self,
+        request: AccountTargetRequest,
+        *,
+        equity_usdt: float,
+        market_prices: Mapping[str, float],
+        market_observed_ts_ns: int | None = None,
+    ) -> HistoricalOwnerSubmission:
+        """Dispatch one published request through ``AccountExecutionService``."""
+
+        if type(request) is not AccountTargetRequest:
+            raise TypeError("historical owner replay requires AccountTargetRequest")
+        if request.account_id != self.account_id:
+            raise ValueError(
+                "historical target request account does not match the replay session: "
+                f"{request.account_id!r} != {self.account_id!r}"
+            )
+        if equity_usdt <= 0.0:
+            raise ValueError("historical account session equity must be positive")
+        if request.created_ts_ns < self._last_wall_ts_ns:
+            raise ValueError(
+                "historical account session cannot move backward in wall time: "
+                f"batch={request.batch_id!r} cycle={request.created_ts_ns} "
+                f"last={self._last_wall_ts_ns}"
+            )
+        market_ts_ns = (
+            request.created_ts_ns
+            if market_observed_ts_ns is None
+            else int(market_observed_ts_ns)
+        )
+        if market_ts_ns <= 0 or market_ts_ns > request.created_ts_ns:
+            raise ValueError(
+                "historical market observation time must be positive and no later "
+                "than request creation"
+            )
+        normalized_prices = {
+            str(symbol).upper(): float(price)
+            for symbol, price in market_prices.items()
+        }
+        for item in request.intents:
+            symbol = item.intent.symbol.upper()
+            if symbol not in normalized_prices:
+                raise ValueError(
+                    f"historical target request lacks a market price for {symbol}"
+                )
+            metadata_price = item.intent.metadata.get("decision_reference_price")
+            if (
+                metadata_price is not None
+                and float(metadata_price) != normalized_prices[symbol]
+            ):
+                raise ValueError(
+                    "published decision and historical market prices differ for "
+                    f"{symbol}: {float(metadata_price):g} vs "
+                    f"{normalized_prices[symbol]:g}"
+                )
+
+        self._ensure_started(request.created_ts_ns)
+        assert self.kernel is not None
+        assert self.clock is not None
+        assert self.event_clock is not None
+        if self.account_service is None or self.route is None:
+            raise RuntimeError(
+                "historical owner replay requires a verified account route"
+            )
+        account_service = self.account_service
+        request.require_route(self.route)
+        state = self.kernel._state_ref()
+        required_symbols = {
+            item.intent.symbol.upper()
+            for item in request.intents
+        }
+        required_symbols.update(
+            str(target.get("symbol") or "").upper()
+            for target in state.component_targets.values()
+            if abs(float(target.get("signed_qty") or 0.0)) > 0.0
+        )
+        required_symbols.update(
+            symbol
+            for symbol, position in state.positions.items()
+            if abs(position.signed_qty) > 0.0
+        )
+        required_symbols.update(state.working_symbols())
+        missing_prices = sorted(required_symbols - set(normalized_prices))
+        if missing_prices:
+            raise ValueError(
+                "online historical account batch lacks current prices for active "
+                "symbols: " + ", ".join(missing_prices)
+            )
+
+        self._synthetic_sequence += 1
+        sequence = self._synthetic_sequence
+        books = {
+            symbol: L2BookSnapshot(
+                symbol=symbol,
+                sequence=sequence,
+                previous_sequence=sequence - 1 if sequence > 1 else None,
+                exchange_ts_ns=market_ts_ns,
+                local_receive_ts_ns=market_ts_ns,
+                bids=(BookLevel(normalized_prices[symbol], 1e15),),
+                asks=(BookLevel(normalized_prices[symbol], 1e15),),
+            )
+            for symbol in sorted(required_symbols)
+        }
+        market_inputs = {
+            symbol: book.market_ref(
+                input_key=(
+                    f"owner-replay:{request.batch_id}:{symbol}:{sequence}"
+                ),
+                source="historical_owner_hourly_close",
+            )
+            for symbol, book in books.items()
+        }
+        snapshot = AccountRiskSnapshot(
+            equity_usdt,
+            equity_usdt,
+            (
+                f"historical-owner-fixed:{equity_usdt:g}:"
+                f"{request.created_ts_ns}:{sequence}"
+            ),
+            request.created_ts_ns,
+        )
+        self._service_inputs.bind(
+            market_inputs=market_inputs,
+            risk_snapshot=snapshot,
+        )
+        self.execution_adapter.books = books
+        self._strategy_event_sequence += 1
+        event = StrategyEvent(
+            event_ts_ns=request.created_ts_ns,
+            ingest_ts_ns=request.created_ts_ns,
+            source=f"historical:{self.account_id}",
+            source_sequence=self._strategy_event_sequence,
+            kind="market_boundary",
+            payload={
+                "batch_id": request.batch_id,
+                "request_id": request.request_id,
+                "request_content_hash": request.content_hash(),
+                "books": [
+                    {
+                        "symbol": symbol,
+                        "sequence": book.sequence,
+                        "exchange_ts_ns": book.exchange_ts_ns,
+                        "input_key": market_inputs[symbol].input_key,
+                    }
+                    for symbol, book in sorted(books.items())
+                ],
+                "decision_keys": sorted(
+                    item.intent.decision_key for item in request.intents
+                ),
+            },
+        )
+        receipt = self.event_clock.dispatch(
+            event,
+            lambda _event: account_service.handle(request),
+        )
+        if not isinstance(receipt, AccountServiceReceipt):
+            raise RuntimeError("historical account owner returned an invalid receipt")
+        self._last_wall_ts_ns = request.created_ts_ns
+        self._last_monotonic_ns = self.clock.monotonic_ns()
+        final_state = self.kernel._state_ref()
+        rejection_keys = set(receipt.rejection_keys)
+        for command_id in receipt.command_ids:
+            order = final_state.orders.get(command_id)
+            if order is not None and order.rejection_key:
+                rejection_keys.add(order.rejection_key)
+        feedback = HistoricalSubmissionFeedback(
+            accepted=not rejection_keys,
+            rejection_keys=tuple(sorted(rejection_keys)),
+            target_committed=receipt.accepted,
+        )
+        return HistoricalOwnerSubmission(
+            receipt=receipt,
+            feedback=feedback,
+            command_ids=receipt.command_ids,
         )
 
     @property

@@ -12,6 +12,11 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
 )
 from liquidity_migration.account_route import ensure_account_route
+from liquidity_migration.account_service import (
+    AccountTargetRequest,
+    RequestedIntent,
+    SleeveAdapterKind,
+)
 from liquidity_migration.active_runtime_comparator import (
     ActiveRuntimeComparator,
     ComparatorRunConfig,
@@ -28,6 +33,7 @@ from liquidity_migration.execution_adapters import (
 from liquidity_migration.historical_account_replay import HistoricalAccountSession
 from liquidity_migration.long_native import long_v11a_profile
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.strategy_runtime import SleeveTargetIntent
 from liquidity_migration.venue_lifecycle import (
     DELISTING_PROXY_EXACTNESS,
     DELISTING_PROXY_METHOD,
@@ -182,6 +188,7 @@ def test_shared_comparator_preserves_requests_btc_chain_and_boundary_flat(
         execution_config=execution,
         id_seed="active-comparator-test",
         unsafe_single_process_inplace_research=True,
+        route=route,
     )
     long_demo = LongNativeDemoCycleConfig(
         execution_environment="demo",
@@ -321,8 +328,70 @@ def test_shared_comparator_preserves_requests_btc_chain_and_boundary_flat(
     assert any(row["accepted"] is False for row in continuous_requests) is (
         expect_account_rejection
     )
-    boundary_target_count = 1 + accepted_continuous
+    seeded_offsetting_target = 0
+    bus_orders_before_boundary: int | None = None
+    if long_symbol == "AUSDT":
+        assert session.kernel is not None
+        bus_position = session.kernel.state().positions["BUSDT"].signed_qty
+        assert bus_position < 0.0
+        seed_created_ns = (
+            boundary * 1_000_000
+            + comparator.run_config.clock_offsets.boundary_flat_ns
+            - 1
+        )
+        assert session.clock is not None
+        assert seed_created_ns > session.clock.wall_time_ns()
+        seed_request = AccountTargetRequest(
+            request_id="seed-zero-net-offset",
+            batch_id="seed-zero-net-offset",
+            created_ts_ns=seed_created_ns,
+            route_id=route.route_id,
+            account_id=route.account_id,
+            environment=route.environment,
+            intents=(RequestedIntent(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                intent=SleeveTargetIntent(
+                    decision_key="seed-zero-net-offset",
+                    target_key="hedge/zero-net/BUSDT",
+                    strategy_id="boundary-atomic-test",
+                    component_id="zero-net",
+                    symbol="BUSDT",
+                    signed_notional_usdt=-bus_position * 10.0,
+                    leverage=10.0,
+                    reason="test_zero_net_boundary",
+                    metadata={"decision_reference_price": 10.0},
+                ),
+            ),),
+        )
+        seeded = session.submit_request_via_owner(
+            seed_request,
+            equity_usdt=1_000_000.0,
+            market_prices={"AUSDT": 10.0, "BUSDT": 10.0},
+            market_observed_ts_ns=boundary * 1_000_000,
+        )
+        assert seeded.feedback.accepted
+        zero_net_state = session.kernel.state()
+        assert zero_net_state.positions["BUSDT"].signed_qty == pytest.approx(0.0)
+        assert zero_net_state.aggregate_targets["BUSDT"] == pytest.approx(0.0)
+        assert len([
+            target
+            for target in zero_net_state.component_targets.values()
+            if str(target.get("symbol") or "").upper() == "BUSDT"
+        ]) > 1
+        seeded_offsetting_target = 1
+        bus_orders_before_boundary = sum(
+            order.symbol == "BUSDT"
+            for order in zero_net_state.orders.values()
+        )
+
+    boundary_target_count = 1 + accepted_continuous + seeded_offsetting_target
     assert comparator.boundary_flatten(boundary) == boundary_target_count
+    if bus_orders_before_boundary is not None:
+        assert session.kernel is not None
+        assert sum(
+            order.symbol == "BUSDT"
+            for order in session.kernel.state().orders.values()
+        ) == bus_orders_before_boundary
     summary = comparator.final_structural_summary()
     assert summary["final_flat"] is True
     assert summary["long_lifecycle_rows"] == 1
@@ -331,6 +400,7 @@ def test_shared_comparator_preserves_requests_btc_chain_and_boundary_flat(
         accepted_continuous > 0
     )
     assert summary["monetary_outcomes_inspected"] is False
+    assert summary["rejected_strict_risk_reduction_batches"] == 0
     assert sum(row["boundary_only"] is True for row in trace.decisions) == (
         boundary_target_count
     )
@@ -415,6 +485,7 @@ def test_venue_lifecycle_settles_open_position_and_blocks_future_entries(
         execution_config=execution,
         id_seed="active-comparator-lifecycle-test",
         unsafe_single_process_inplace_research=True,
+        route=route,
     )
     long_demo = LongNativeDemoCycleConfig(
         execution_environment="demo",
@@ -522,6 +593,72 @@ def test_venue_lifecycle_settles_open_position_and_blocks_future_entries(
     )
     assert first_cycle["long_entry_requests"] == 1
 
+    def latent_target_request(
+        *,
+        request_id: str,
+        created_offset_ns: int,
+        component: str,
+        notional: float,
+    ) -> AccountTargetRequest:
+        return AccountTargetRequest(
+            request_id=request_id,
+            batch_id=request_id,
+            created_ts_ns=(
+                first_boundary * 1_000_000 + created_offset_ns
+            ),
+            route_id=route.route_id,
+            account_id=route.account_id,
+            environment=route.environment,
+            intents=(RequestedIntent(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                intent=SleeveTargetIntent(
+                    decision_key=request_id,
+                    target_key=f"hedge/{component}/BUSDT",
+                    strategy_id="lifecycle-latent-target-test",
+                    component_id=component,
+                    symbol="BUSDT",
+                    signed_notional_usdt=notional,
+                    leverage=10.0,
+                    reason="test_flat_delisting_target_invalidation",
+                    metadata={"decision_reference_price": 10.0},
+                ),
+            ),),
+        )
+
+    for latent_request in (
+        latent_target_request(
+            request_id="latent-short",
+            created_offset_ns=300_000,
+            component="latent-short",
+            notional=-20.0,
+        ),
+        latent_target_request(
+            request_id="latent-long",
+            created_offset_ns=400_000,
+            component="latent-long",
+            notional=20.0,
+        ),
+    ):
+        latent_submission = session.submit_request_via_owner(
+            latent_request,
+            equity_usdt=1_000_000.0,
+            market_prices={"AUSDT": 10.0, "BUSDT": 10.0},
+            market_observed_ts_ns=first_boundary * 1_000_000,
+        )
+        assert latent_submission.feedback.accepted
+    assert session.kernel is not None
+    latent_state = session.kernel.state()
+    assert latent_state.positions["BUSDT"].signed_qty == pytest.approx(0.0)
+    assert latent_state.aggregate_targets["BUSDT"] == pytest.approx(0.0)
+    assert {
+        key
+        for key, target in latent_state.component_targets.items()
+        if str(target.get("symbol") or "").upper() == "BUSDT"
+    } == {"hedge/latent-long/BUSDT", "hedge/latent-short/BUSDT"}
+    bus_orders_before_lifecycle = sum(
+        order.symbol == "BUSDT" for order in latent_state.orders.values()
+    )
+
     continuous_state = pl.DataFrame(
         {
             "symbol": ["BUSDT"],
@@ -552,6 +689,23 @@ def test_venue_lifecycle_settles_open_position_and_blocks_future_entries(
     assert lifecycle_cycle["continuous_venue_blocked_entries"] == 3
     assert lifecycle_cycle["long_entry_requests"] == 0
     assert lifecycle_cycle["continuous_entry_requests"] == 0
+    assert session.kernel is not None
+    assert sum(
+        order.symbol == "BUSDT"
+        for order in session.kernel.state().orders.values()
+    ) == bus_orders_before_lifecycle
+    invalidations = [
+        row
+        for row in trace.requests
+        if row["stage"] == "venue_lifecycle_target_flat"
+    ]
+    assert len(invalidations) == 1
+    assert invalidations[0]["accepted"] is True
+    assert len([
+        row
+        for row in trace.intents
+        if row["request_id"] == invalidations[0]["request_id"]
+    ]) == 2
     assert trace.gates[0]["targeted_p3"].item()
     assert trace.gates[0]["targeted_p4p3"].item()
     assert trace.gates[0]["targeted_p4p5"].item()
@@ -565,11 +719,12 @@ def test_venue_lifecycle_settles_open_position_and_blocks_future_entries(
     assert summary["venue_lifecycle_inactive_symbols"] == 2
     assert summary["btc_risk_authoritative_rows"] == 0
     assert summary["final_flat"] is True
+    assert summary["rejected_strict_risk_reduction_batches"] == 0
     assert [row["action"] for row in trace.lifecycle].count(
         "settlement_fill"
     ) == 1
     assert [row["action"] for row in trace.lifecycle].count(
-        "flat_observed"
+        "flat_target_invalidation"
     ) == 1
     assert [row["action"] for row in trace.lifecycle].count(
         "entry_blocked"

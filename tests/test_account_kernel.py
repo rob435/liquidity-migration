@@ -211,6 +211,85 @@ def test_account_batch_nets_all_same_symbol_components_before_one_command(tmp_pa
     assert risk.payload["aggregate_targets"] == {"BUSDT": -2.0}
 
 
+def test_sign_flip_guard_compares_each_quantity_to_tolerance_not_their_product(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=1_000.0,
+        max_account_gross_notional_usdt=1_000.0,
+        max_symbol_notional_usdt=1_000.0,
+        max_initial_margin_usdt=1_000.0,
+        max_leverage=10.0,
+        quantity_tolerance=1e-6,
+    )
+    rules = {
+        "BUSDT": InstrumentRules(
+            symbol="BUSDT",
+            qty_step=1e-7,
+            min_qty=1e-7,
+            min_notional=0.0,
+            max_order_qty=100.0,
+            max_leverage=20.0,
+        )
+    }
+    opened = kernel.submit_targets(
+        batch_id="tiny-open",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="tiny-open",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=2e-4,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=policy,
+        instrument_rules=rules,
+    )
+    assert opened.accepted
+    command = opened.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-tiny-open",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_201_000_000,
+    )
+    kernel.record_fill(
+        command_id=command.command_id,
+        execution_id="fill-tiny-open",
+        signed_qty=2e-4,
+        price=10.0,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_202_000_000,
+        local_receive_ts_ns=1_203_000_000,
+    )
+
+    flipped = kernel.submit_targets(
+        batch_id="tiny-direct-flip",
+        market_inputs=[_market(key="book-tiny-flip")],
+        targets=[
+            _target(
+                decision="tiny-direct-flip",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=-2e-4,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=policy,
+        instrument_rules=rules,
+    )
+
+    assert not flipped.accepted
+    assert flipped.rejection_keys == (
+        "account-risk:tiny-direct-flip:sign_flip_requires_flat:BUSDT",
+    )
+    assert flipped.commands == ()
+
+
 def test_risk_rejection_is_atomic_and_does_not_commit_targets(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     tight = AccountRiskPolicy(

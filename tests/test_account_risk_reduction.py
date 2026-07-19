@@ -392,6 +392,66 @@ def test_low_margin_and_breached_caps_still_block_increase_and_sign_flip(
     assert len(adapter.submissions) == 1
 
 
+def test_offsetting_component_removal_never_turns_exit_into_same_side_increase(
+    tmp_path: Path,
+) -> None:
+    adapter = ScriptedAdapter("fill", "fill")
+    service, _, _, snapshot, _, clock = _service(
+        tmp_path / "account",
+        adapter=adapter,
+    )
+    assert service.handle(_request(
+        service.route,
+        "open-short",
+        symbol="BUSDT",
+        notional=-50.0,
+        target_key="continuous/main/BUSDT",
+    )).accepted
+    assert service.handle(_request(
+        service.route,
+        "open-offsetting-long",
+        symbol="BUSDT",
+        notional=20.0,
+        kind=SleeveAdapterKind.LONG,
+        target_key="long/main/BUSDT",
+    )).accepted
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-3.0)
+
+    service.risk_policy = _policy(tight=True)
+    snapshot.available_margin_usdt = -5.0
+    submissions_before_exit = len(adapter.submissions)
+    removed = service.handle(_request(
+        service.route,
+        "remove-offsetting-long",
+        symbol="BUSDT",
+        notional=0.0,
+        kind=SleeveAdapterKind.LONG,
+        target_key="long/main/BUSDT",
+    ))
+
+    assert removed.accepted
+    assert removed.command_ids == ()
+    assert len(adapter.submissions) == submissions_before_exit
+    state = service.kernel.state()
+    assert state.positions["BUSDT"].signed_qty == pytest.approx(-3.0)
+    assert state.aggregate_targets["BUSDT"] == pytest.approx(-5.0)
+    risk = state.risk_decisions["remove-offsetting-long"]
+    assert risk["strictly_risk_reducing"] is True
+    assert risk["staged_component_flat_symbols"] == ["BUSDT"]
+    assert risk["staged_sign_flip_symbols"] == []
+
+    clock.advance_ns(100)
+    convergence = service.converge_once()
+    assert convergence is not None and not convergence.accepted
+    assert any(
+        "negative_available_margin" in key
+        for key in convergence.rejection_keys
+    )
+    assert any("component_gross_limit" in key for key in convergence.rejection_keys)
+    assert len(adapter.submissions) == submissions_before_exit
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-3.0)
+
+
 def test_exit_exemption_keeps_current_symbol_venue_quantity_rules(
     tmp_path: Path,
 ) -> None:
