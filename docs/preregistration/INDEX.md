@@ -17,7 +17,7 @@ artifacts before inspecting affected outcomes.
 
 | Area | Record | Status |
 | --- | --- | --- |
-| Prospective runtime parity and execution | `prospective_runtime_parity_execution_epoch_2026-07-18.md` | Active: immutable snapshot, PIT rebuild, full-ledger replay, and repaired exact historical comparator passed; final integrated candidate/start receipt remain pending, and forward/TCA clocks have not started |
+| Prospective runtime parity and execution | `prospective_runtime_parity_execution_epoch_2026-07-18.md` | Active: immutable snapshot, PIT rebuild, full-ledger replay, and exact final comparator passed; create-only start receipt fixes 2026-07-19 14:00 UTC through 2026-10-17 14:00 UTC, with the first 45 days calibration-only |
 | Prospective runtime parity amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md` | Active append-only amendments pinned separately from the immutable base-contract hash |
 | Prospective runtime parity post-22 amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_post22_amendments.md` | Registered before forward capture/outcome exposure: final comparator/start gates, shared capture plane, and exact TCA estimator |
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
@@ -36,6 +36,7 @@ artifacts before inspecting affected outcomes.
 | Continuous and LONG decisions | `../research_summary.md` | Compact evidence/decision log |
 | Strategy Overhaul V2 completion | `../strategy_overhaul_v2_completion_receipt_2026-07-18.md` | Four-payload exploratory evidence card; no thesis, no holdout read, no implementation |
 | Strategy Overhaul V2 comparator/accounting repair | `../strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md` | Closed invalid evidence card; diagnostic leads remain exploratory only |
+| Prospective runtime-parity forward start | `../prospective_runtime_parity_forward_start_receipt_2026-07-19.md` | Exact final comparator and create-only 90-day boundary; no forward result, alpha claim, promotion, or real-money authority |
 | 1000TAGUSDT incident | `../incidents/2026-07-10-1000tag.md` | Contained; demo venue flat at incident close |
 
 ## Cancelled without result

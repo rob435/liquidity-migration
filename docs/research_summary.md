@@ -42,8 +42,30 @@ batches, and a flat terminal account. Receipt file SHA-256 is
 receipt-payload SHA-256 is
 `ad168fddc155a36604e4be0a1b6e002b15d5c7242e9e999508511fda00ef6cf7`.
 This is structural/accounting engineering evidence, not a return or alpha
-result. A final comparator at the exact forward deployment candidate and the
-create-only forward start receipt remain pending.
+result.
+
+The final deployment candidate at
+`9a2f20d85df2cf6211abd65e6c66249865026ad4` reproduced the same frozen
+structural gates. Its comparator receipt file SHA-256 is
+`f9ad5a6bfcc8948f742ae9bd877b8dda0e3f79d3908d96f274967445d6431e77`;
+independent Linux verification covered 87 files and 175,721,151 bytes under
+logical SHA-256
+`6babc66a5445d43f2559e2d6fc6838cceaf848c37cdd256398591928ed499699`,
+with verification-receipt SHA-256
+`bb6a8e755c2f07c7361dcb483fb46348b5806931a2027024c64659805dbb5a22`.
+An earlier same-commit run completed structurally but failed its final Windows
+atomic-directory publication and remains a terminated, unpromoted attempt.
+
+The create-only forward receipt was collected at 2026-07-19 13:09:37 UTC,
+with file SHA-256
+`db508862314972da310404814519bd701ffc18d2be51a3d39debddee1ef79376`.
+It fixes calibration to `[2026-07-19 14:00, 2026-09-02 14:00)` and validation
+to `[2026-09-02 14:00, 2026-10-17 14:00)`. Two pre-publication calls failed
+closed and created no receipt: one exposed privileged route-owner validation,
+and the other exposed a missing paper-capture write path in the strict producer
+sandbox. Both were repaired and requalified without inspecting affected
+outcomes or changing the registered estimator. See
+`docs/prospective_runtime_parity_forward_start_receipt_2026-07-19.md`.
 
 Corrected PIT trade diagnostics are decision-useful for generating narrow new
 mechanism hypotheses and for debugging coverage, path, selection, and

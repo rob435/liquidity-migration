@@ -1,25 +1,25 @@
 # Operational State
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
-owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-19 10:32 UTC. These facts describe the deployed implementation
+owner/journal checks, generation-bound strategy receipts, and forward-start
+evidence at 2026-07-19 13:16 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `296cdf84576d8e5ad434289f4b74458ad261c1c0`, profile `operational`, receipt
-  SHA-256 `4c7a50296573b8ba4a3740cf0c05813b45c9a61a129f1cf51ee09db432ef005b`.
+  `9a2f20d85df2cf6211abd65e6c66249865026ad4`, profile `operational`, receipt
+  artifact SHA-256
+  `5485fa21401310332f1c543cb5945a0f8dcb15cc2cccead5a87020e64db58668`.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. The required post-activation residual-momentum rewrite completed
-  with 7,691 rows and 567 stable symbols; the first hedge run exited zero. An
-  immediate liveness run at 10:31 UTC reported zero active alerts across ten
-  monitored units.
+  liveness. Activation verified the immutable sizing-only model prior, demo
+  order permissions, and a post-activation residual-momentum rewrite with
+  7,691 rows and 567 stable symbols.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -38,11 +38,10 @@ commit below; a later documentation-only commit may leave the branch ahead.
   native protection at 13:57:05 UTC on 2026-07-18: the full -1,097 exit filled
   at 0.3395 and recorded account-net P&L of -34.98418018 USDT.
 - Demo and paper owners publish healthy current-generation state with zero
-  restarts. Independent full-journal audits at 10:30 UTC passed at demo
-  sequence 14,993 and paper sequence 62; each fresh owner-health projection
-  matched its exact journal head, current systemd invocation, and requested-
-  symbol readiness. No warning-or-higher account, strategy, or liveness log was
-  recorded after the 10:25 UTC activation.
+  restarts. The create-only forward-start collector fully verified the demo
+  and paper journals at 13:09 UTC with 15,524 and 90 canonical events,
+  respectively; each fresh owner-health projection matched its exact journal
+  head, current systemd invocation, and required-book readiness.
   Excluding the deliberate stopped-deployment gap, a pre-deploy sample of 18
   persisted reconciliation-checkpoint intervals were 31.4--33.4 seconds with a
   32.0-second median.
@@ -53,8 +52,12 @@ commit below; a later documentation-only commit may leave the branch ahead.
   1.62 ms. These are implementation benchmarks, not trading-performance
   evidence.
 - All four target producers published current-generation completed-cycle
-  receipts after activation and matched their exact systemd invocation. The
-  10:31 UTC watchdog accepted all four inside the declared cycle SLA. The bound
+  receipts after final activation and matched their exact systemd invocation
+  by 13:08 UTC. Both paper producers completed only after successfully writing
+  the shared paper target-capture tape through the corrected strict systemd
+  sandbox. At 13:16 UTC that private tape was still advancing, all six
+  persistent services retained zero restarts, and neither paper producer had a
+  warning-or-higher log record since activation. The bound
   operational profile retains 2x entry leverage, a 0.5 LONG notional
   multiplier, and a 1.0 CONTINUOUS multiplier. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
@@ -97,6 +100,36 @@ commit below; a later documentation-only commit may leave the branch ahead.
   `/var/lib/liquidity-migration/retired-state/20260716T0948Z-btc-risk-pre-evidence/`
   with SHA-256
   `be80dc76002dc8a0c943798e23b58c29f3894e83f9d6d7a72414008df1d9f146`.
+
+## Prospective execution epoch
+
+- The create-only start receipt was collected at 13:09:37 UTC and published at
+  `reports/prospective-runtime-parity-execution-epoch-2026-07-18/forward/start/receipt.json`.
+  Its file SHA-256 is
+  `db508862314972da310404814519bd701ffc18d2be51a3d39debddee1ef79376`
+  and its self-hashed artifact identity is
+  `25441106b82adf95364d4e602d4b5912ecc0d2871b18778d8fe47684e8ddafbf`.
+- The registered clock starts 2026-07-19 14:00 UTC. Calibration is
+  `[2026-07-19 14:00, 2026-09-02 14:00)` and validation is
+  `[2026-09-02 14:00, 2026-10-17 14:00)`. No pre-boundary row is eligible.
+- The receipt binds the exact final comparator at implementation commit
+  `9a2f20d`: receipt SHA-256
+  `f9ad5a6bfcc8948f742ae9bd877b8dda0e3f79d3908d96f274967445d6431e77`
+  and independent Linux verification SHA-256
+  `bb6a8e755c2f07c7361dcb483fb46348b5806931a2027024c64659805dbb5a22`.
+  That verification covered 87 files, 175,721,151 bytes, under logical
+  SHA-256 `6babc66a5445d43f2559e2d6fc6838cceaf848c37cdd256398591928ed499699`.
+- At collection, all six persistent services had zero restarts; demo and paper
+  queues each had zero pending, processing, and failed requests; and the valid
+  shared target tapes contained 123 demo and six paper pre-boundary rows. Those
+  rows were inventoried but are not forward observations.
+- Two earlier start calls failed before publication: the root collector first
+  used a current-user route-owner check against the correctly paper-owned
+  manifest, then current-generation paper health exposed that both paper
+  producer sandboxes lacked the already-authorized shared capture root. Commits
+  `ba51bd6` and `9a2f20d` repaired those boundaries without changing the
+  registered estimator or reading an affected outcome. No failed call created
+  a start receipt.
 
 ## Incident interpretation
 
@@ -216,9 +249,10 @@ commit below; a later documentation-only commit may leave the branch ahead.
 ## Evidence boundary
 
 The tracked hedge history is an immutable sizing-only model prior through
-2026-07-09. It is not live-extended calibration or performance evidence. No
-confirmatory research experiment is active, and no runtime status or paper
-result authorizes research promotion or real-money deployment.
+2026-07-09. It is not live-extended calibration or performance evidence. The
+prospective execution epoch is registered but has not inspected a forward
+outcome at this snapshot. It is not a strategy-alpha experiment, and no runtime
+status or paper result authorizes research promotion or real-money deployment.
 
 Research-only addendum, 2026-07-18: Strategy Overhaul V2 closed with no
 qualifying thesis and did not touch its reserved holdout. Its full diagnostic
@@ -227,7 +261,8 @@ verification is a bounded 100-key sample per sleeve, not exhaustive parity.
 The later comparator/accounting repair also closed invalid: current RMOM could
 not reconcile to the legacy input vintage, and a prospective 200-key account
 benchmark exceeded its frozen numeric tolerance on two economically tiny LONG
-P&L rows. No exact comparator or full-account retry ran. The optional repository
+P&L rows. No exact comparator or full-account retry ran within that closed V2
+repair. The optional repository
 historical state-copy optimization is default-off and is not a deployed runtime
 change.
 This changes no live/demo/paper authority or topology above. See
