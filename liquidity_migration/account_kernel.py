@@ -197,7 +197,15 @@ class AccountEvent:
             raise AccountJournalIntegrityError(f"invalid account event: {exc}") from exc
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # dataclasses.asdict deep-copies every leaf — and before Python
+        # 3.12's atomic fast path it routes even plain scalars through
+        # copy.deepcopy — putting an O(payload) copy on the trusted append
+        # path for consumers that only hash or JSON-serialize the result.
+        # Events are immutable after publication; serialize by reference
+        # with a top-level payload copy against accidental caller aliasing.
+        output = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        output["payload"] = dict(self.payload)
+        return output
 
 
 @dataclass(slots=True)
