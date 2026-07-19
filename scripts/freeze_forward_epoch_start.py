@@ -236,6 +236,7 @@ def _account_owner_boundary(
         environment=environment,
         account_root=account_root,
         inbox_root=inbox_root,
+        expected_owner_uid=owner_uid,
     )
     health = require_recent_account_owner_health(
         account_root,

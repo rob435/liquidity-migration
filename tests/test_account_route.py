@@ -273,6 +273,39 @@ def test_owner_initializes_deterministic_canonical_mirrors_and_reader_validates(
     )
 
 
+def test_privileged_observer_binds_route_read_to_explicit_owner_uid(
+    tmp_path: Path,
+) -> None:
+    account_root = tmp_path / "account"
+    inbox_root = tmp_path / "inbox"
+    route = ensure_account_route(
+        account_id="bybit-paper-unified",
+        environment="paper",
+        account_root=account_root,
+        inbox_root=inbox_root,
+    )
+    manifest_uid = account_route_manifest_path(account_root).stat().st_uid
+
+    assert (
+        require_account_route(
+            account_id="bybit-paper-unified",
+            environment="paper",
+            account_root=account_root,
+            inbox_root=inbox_root,
+            expected_owner_uid=manifest_uid,
+        )
+        == route
+    )
+    with pytest.raises(AccountRouteIntegrityError, match="expected"):
+        require_account_route(
+            account_id="bybit-paper-unified",
+            environment="paper",
+            account_root=account_root,
+            inbox_root=inbox_root,
+            expected_owner_uid=manifest_uid + 1,
+        )
+
+
 def test_unbound_account_journal_requires_explicit_cutover(tmp_path: Path) -> None:
     account_root = tmp_path / "account"
     inbox_root = tmp_path / "inbox"

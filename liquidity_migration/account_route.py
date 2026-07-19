@@ -217,8 +217,24 @@ def require_account_route(
     environment: str,
     account_root: str | Path,
     inbox_root: str | Path,
+    expected_owner_uid: int | None = None,
 ) -> AccountRoute:
-    """Read-only, fail-closed validation for strategy producers and tools."""
+    """Read-only, fail-closed validation for producers and privileged tools.
+
+    Runtime callers normally leave ``expected_owner_uid`` unset, preserving
+    the invariant that both manifests belong to the current process owner. A
+    root-only observer may instead bind the read to the already-established
+    owner UID of another isolated runtime account.
+    """
+
+    if expected_owner_uid is not None and (
+        isinstance(expected_owner_uid, bool)
+        or not isinstance(expected_owner_uid, int)
+        or expected_owner_uid < 0
+    ):
+        raise AccountRouteConfigurationError(
+            "expected account route owner UID must be a nonnegative integer"
+        )
 
     expected = derive_account_route(
         account_id=account_id,
@@ -230,8 +246,14 @@ def require_account_route(
     missing = [str(path) for path in (account_manifest_path, inbox_manifest_path) if not os.path.lexists(path)]
     if missing:
         raise AccountRouteMissingError("account route manifest is missing from: " + ", ".join(missing))
-    account_manifest = _read_manifest(account_manifest_path)
-    inbox_manifest = _read_manifest(inbox_manifest_path)
+    account_manifest = _read_manifest(
+        account_manifest_path,
+        expected_owner_uid=expected_owner_uid,
+    )
+    inbox_manifest = _read_manifest(
+        inbox_manifest_path,
+        expected_owner_uid=expected_owner_uid,
+    )
     _require_matching_manifests(
         account_manifest,
         inbox_manifest,
@@ -359,7 +381,11 @@ def _route_mismatch(observed: AccountRoute, expected: AccountRoute) -> AccountRo
     )
 
 
-def _read_manifest(path: Path) -> AccountRoute:
+def _read_manifest(
+    path: Path,
+    *,
+    expected_owner_uid: int | None = None,
+) -> AccountRoute:
     if path.is_symlink():
         raise AccountRouteIntegrityError(
             f"account route manifest must not be a symlink: {path}"
@@ -369,9 +395,14 @@ def _read_manifest(path: Path) -> AccountRoute:
             path,
             label="account route manifest",
             require_mode=0o600,
-            require_owner=True,
+            require_owner=expected_owner_uid is None,
             require_single_link=True,
         )
+        if expected_owner_uid is not None and snapshot.uid != expected_owner_uid:
+            raise ValueError(
+                "account route manifest has owner UID "
+                f"{snapshot.uid}, expected {expected_owner_uid}: {path}"
+            )
         raw = snapshot.data
         payload = json.loads(raw)
     except ValueError as exc:
