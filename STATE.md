@@ -2,23 +2,24 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, generation-bound strategy receipts, and watchdog evidence
-at 2026-07-18 21:22 UTC. These facts describe the deployed implementation
+at 2026-07-19 10:32 UTC. These facts describe the deployed implementation
 commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `f1cdb918df697f379e5749e765419eb7258d6c9f`, profile `operational`, receipt
-  SHA-256 `22560d358d7138ab0d75a1ad825dc2eabb5683de5a43489b676fed6bdd6d2679`.
+  `296cdf84576d8e5ad434289f4b74458ad261c1c0`, profile `operational`, receipt
+  SHA-256 `4c7a50296573b8ba4a3740cf0c05813b45c9a61a129f1cf51ee09db432ef005b`.
 - The installed demo and paper operational-profile bytes are identical, with
   SHA-256 `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`.
   The tracked editable source is `configs/operational.demo.json`.
 - Active with zero restarts: demo and isolated-paper account owners plus demo
   and paper LONG and CONTINUOUS target producers.
 - Active timers: continuous hedge, residual-momentum refresh, and demo-paper
-  liveness. The first two post-activation hedge runs at 21:16 and 21:21 UTC
-  exited zero and each queued the exact zero BTC and ETH targets. The timer
-  remains active; neither run logged a warning or restart.
+  liveness. The required post-activation residual-momentum rewrite completed
+  with 7,691 rows and 567 stable symbols; the first hedge run exited zero. An
+  immediate liveness run at 10:31 UTC reported zero active alerts across ten
+  monitored units.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 - Paper runs as the non-login `liquidity-migration-paper` user with private
@@ -28,24 +29,23 @@ commit below; a later documentation-only commit may leave the branch ahead.
 
 ## Verified health and resource state
 
-- Authenticated Bybit demo reconciliation at 21:21 UTC showed a flat venue and
-  flat journal reconstruction, zero venue position/order rows, zero pending
-  orders, and no mismatch. The canonical journal and owner-health receipt agree
-  at sequence 12,242 and state hash
-  `81a29cb14d8d37b5a943d933f246f5daf93b08524225c10f8e030dae343d6313`.
-  This supersedes the 13:09 UTC ONDOUSDT-open snapshot: native protection
-  triggered at 13:57:05 UTC, filled the full -1,097 exit at 0.3395, and recorded
-  account-net P&L of -34.98418018 USDT.
+- Authenticated Bybit demo reconciliation at 10:32 UTC was healthy and showed
+  `TLMUSDT=-21,954` at both the venue and reconstructed journal, with no
+  mismatch. The venue returned one position row and one verified conditional
+  protection order. The account is therefore protected but not flat; deployment
+  authority did not authorize flattening it. The reconciliation snapshot was
+  journal sequence 14,997. The earlier ONDOUSDT position had already closed via
+  native protection at 13:57:05 UTC on 2026-07-18: the full -1,097 exit filled
+  at 0.3395 and recorded account-net P&L of -34.98418018 USDT.
 - Demo and paper owners publish healthy current-generation state with zero
-  restarts. Repeated post-activation samples showed both required live-L2 books
-  healthy and the oldest demo and paper receive ages below one second; no
-  owner warning was logged after final activation.
-  Final demo health at 21:22 UTC was healthy and requested-symbol-ready at
-  journal sequence 12,242; no warning-or-higher account, strategy, or hedge log
-  was recorded after the 21:13 UTC activation.
-  Excluding the deliberate stopped-deployment gap, the latest 18 persisted
-  reconciliation-checkpoint intervals were 31.4--33.4 seconds with a 32.0-second
-  median.
+  restarts. Independent full-journal audits at 10:30 UTC passed at demo
+  sequence 14,993 and paper sequence 62; each fresh owner-health projection
+  matched its exact journal head, current systemd invocation, and requested-
+  symbol readiness. No warning-or-higher account, strategy, or liveness log was
+  recorded after the 10:25 UTC activation.
+  Excluding the deliberate stopped-deployment gap, a pre-deploy sample of 18
+  persisted reconciliation-checkpoint intervals were 31.4--33.4 seconds with a
+  32.0-second median.
 - On a read-only copy of the pre-deploy 9,874-event journal, the optimized
   component-anchor projection was exactly equal to the prior projection and
   reduced local runtime from 1.416 seconds to 0.0116 seconds. Warm snapshot
@@ -53,20 +53,22 @@ commit below; a later documentation-only commit may leave the branch ahead.
   1.62 ms. These are implementation benchmarks, not trading-performance
   evidence.
 - All four target producers published current-generation completed-cycle
-  receipts after activation and matched their exact systemd invocation. At
-  21:22 UTC their completion ages were 2.7--83.2 seconds. The bound
+  receipts after activation and matched their exact systemd invocation. The
+  10:31 UTC watchdog accepted all four inside the declared cycle SLA. The bound
   operational profile retains 2x entry leverage, a 0.5 LONG notional
   multiplier, and a 1.0 CONTINUOUS multiplier. Paper is explicitly
   `integration_only_uncalibrated`; its cycles are routing/lifecycle evidence,
   not performance or fill-quality evidence.
 - The current CONTINUOUS demo receipt is exactly bound to its private mode-0600,
-  single-link notification projection. The rendered status is `BTC gate:
-  BLOCKED · uptrend · 30d -0.44%`; aggregate component-opportunity counts are
-  `D9 36 -> liquidity 0 -> event 0 -> age 0 -> capacity 0`; qualified-but-blocked
-  symbols are `none`; and the first rejection is `liquidity`. The uptrend gate
-  remains enabled and unchanged.
-- The durable CONTINUOUS cycle row records 123 exact feature-state rows with
-  state SHA-256
+  single-link notification projection. The rendered demo status is `BTC gate:
+  OPEN · uptrend · 30d +3.37%`; aggregate component-opportunity counts are
+  `D9 36 -> liquidity 15 -> event 3 -> age 3 -> capacity 3`; qualified-but-
+  blocked symbols are `none`. The independently bound paper projection reports
+  the same funnel through age, capacity zero, and names `BUSDT` as qualified but
+  blocked by an already-reserved target. The uptrend gate remains enabled and
+  unchanged.
+- The 2026-07-18 21:22 durable CONTINUOUS cycle row recorded 123 exact
+  feature-state rows with state SHA-256
   `4fa60abea760563976be75e7d8de55ce74b0eb475e6dc8c8e1455792081041c6`,
   feature-contract SHA-256
   `7deeb923f3609de57b7c7379bd5590fb84866636a8249ea6b989234ac99b5f36`,
@@ -81,13 +83,14 @@ commit below; a later documentation-only commit may leave the branch ahead.
   the owner cap, or registered exposure envelopes outside the same profile.
 - The prior demo owner retained raw depth for the full universe, reached about
   2.75 GiB resident memory, and stalled reconciliation through swap pressure.
-  At the final sample the bounded demo owner used about 129 MiB and the isolated
-  paper owner about 70 MiB, both with zero restarts.
+  At the 10:31 UTC post-deploy sample the bounded demo owner used about 108 MiB
+  and the isolated paper owner about 9.6 MiB, both with zero restarts.
 - Live cgroup evidence found the first LONG demo soft threshold below its
   working set. Soft thresholds were retuned from measured footprints while all
-  hard maxima remained unchanged. At that cutover sample the 4 GiB host had about
-  2.3 GiB available; full memory-pressure averages were 0.22% over 60 seconds
-  and 0.49% over 300 seconds, with no managed-unit restart.
+  hard maxima remained unchanged. At the 10:32 UTC post-deploy sample the 4 GiB
+  host had about 1.8 GiB available; full memory-pressure averages were 0.35%
+  over 60 seconds and 0.42% over 300 seconds, with no managed-unit restart.
+  This clean start is not a longer-horizon capacity result.
 - A pre-evidence BTC-risk state file was rejected rather than migrated. With
   zero authoritative CONTINUOUS trade rows and zero pending requests, it was
   archived at
@@ -153,10 +156,10 @@ commit below; a later documentation-only commit may leave the branch ahead.
   prospectively in private mode-0600 retirement registries and may retire only
   while account positions, targets, orders, and inbox exposure are all flat.
 - Normal live LONG turnover/rank movement is no longer mistaken for a
-  disappearance: the latest cycles recorded 20 temporarily ineligible symbols
-  with exact reasons and continued. Missing ticker/instrument rows, structural
-  contract changes, malformed inputs, retirement evidence changes, or retained
-  exposure still fail closed.
+  disappearance: the 2026-07-18 validation cycles recorded 20 temporarily
+  ineligible symbols with exact reasons and continued. Missing ticker/instrument
+  rows, structural contract changes, malformed inputs, retirement evidence
+  changes, or retained exposure still fail closed.
 - Unresolved Telegram risk blocks now carry signal expiry and are removed after
   the immutable signal window ends. Timer-driven oneshot failures no longer say
   that systemd has permanently stopped retrying; the alert identifies the
@@ -195,6 +198,14 @@ commit below; a later documentation-only commit may leave the branch ahead.
   store size. A no-receipt service generation receives at most the existing
   ten-minute SLA as startup grace; only the exact queue-head warm-up state is
   suppressed inside that bound. Unknown or expired state still fails closed.
+- Follow-on Telegram evidence exposed several independent defects now deployed
+  in `296cdf84576d8e5ad434289f4b74458ad261c1c0`: Bybit Full stop replacements
+  retain native order-ID lineage; owner health republishes against each new
+  immutable journal head without replaying the full payload history; typed
+  queue-head warm-up is suppressed only while fresh, while stale and timed-out
+  states still page; dependent account alerts coalesce behind their root cause;
+  and CONTINUOUS reports same-signal qualified-but-blocked symbols by name. The
+  exact full local/pre-push gate passed Ruff, mypy, 2,001 tests, and one skip.
 - Live deployment of the hardened checkout found two further Linux-only
   boundaries. Wide-tree normalization now retains a bounded descriptor set
   instead of exhausting the process limit, and the non-root paper owner safely
