@@ -401,6 +401,25 @@ edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
 
+## P2.1 squeeze-state feature set built with per-feature PIT audit (2026-07-20)
+
+Claim: the R2 governor's raw material now exists as causally-lagged hourly
+features from fields none of the 29 prior families used — a build, not a
+result; no outcome column was read or joined. Groups over the spent
+discovery window [2021-05-01, 2024-12-01) on `bybit_full_pit` (receipt with
+hashes: `reports/tail-risk-program/p21-squeeze-features-2026-07-20/`): OI
+change/acceleration (4.53M rows, 296 symbols), premium level/24h-change-z
+(6.53M, 497), funding level/jump/extreme-share (878k, 497), melt-up/crash
+breadth over the PIT-manifest universe (31,440 book-hours), taker-buy
+imbalance (31k symbol-hours — sparse local 5m coverage from 2023-04, a
+data-coverage fact P2.2 must respect). `positioning_lsr` is data-gated
+(absent from the root; acquisition is a separate task). PIT policy enforced
+uniformly (one-bar availability lag; funding strictly-after settlement;
+breadth universe manifest-gated) and tested per group with future-mutation
+invariance + same-bar leak tests. Non-conclusions: no squeeze-index design,
+no relationship to outcomes examined, no governor claim — that is P2.2 on
+the spent window, then the R2 registration path.
+
 ## R1 risk intensity: T-I revived under tail metrics, registered as shadow A/B (2026-07-20)
 
 Claim: one monotone gross multiplier (linear trend ramp × monotonized

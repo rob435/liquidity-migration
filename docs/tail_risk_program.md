@@ -47,11 +47,31 @@ One owner rule: whoever flips a row to `active` finishes or reverts it.
 | P1.3 | **R3b — correlated-cluster caps** (the 2026-06-20 study's own unbuilt recommendation) | Lane-1 estimate of cluster structure on seen data; cap design + config commit; deploy-when-ready with recorded change point | done 2026-07-20 — Lane-1 cards `reports/tail-risk-program/p13-r3b-cluster-caps-lane1-2026-07-20*/`: deployed book never binds the cap (mean 1.11 open at entry); stacked barebones book binds 2.66% at ≈zero net premium with losses concentrated on tail days. Registered frozen cell ρ≥0.7/K=3 + hash-parity A/B (`docs/preregistration/r3b_cluster_cap_experiment_2026-07-20.md`); staged decision layer `liquidity_migration/cluster_cap.py` + tests. Wiring = separate operator go |
 | P1.4 | **R3c — protection-layer accounting.** Native-stop realized cost as an explicit insurance-premium line in the forward record | Cost line present in the weekly kill-criteria/forward reporting path | done 2026-07-20 — `protection_premium` section in `liquidity_migration/sleeve_kill_criteria.py` (verified_native_stop fills matched to PNL rows by symbol ±3 min; unmatched ⇒ provisional flag; fees + realized net + symbols), carried automatically by `scripts/ops.sh kill-criteria`; tests `tests/test_protection_premium.py`. Code committed+tested; the VPS picks it up at the next normal deploy (separate operator go) |
 
+## Queued next actions (recorded 2026-07-20, session end)
+
+1. **G1 one-time grade of R1/R3 configs** (now unlocked: configs committed
+   2026-07-20, G1 verified pristine). Needs its own registered unit: a
+   Binance CONTINUOUS-shape render over G1 (`[2021-01-01, 2021-04-30)`
+   entries) including an RMOM rebuild for that window into a **separate
+   labelled root/copy — do not mutate `binance_full_pit`'s
+   `residual_momentum.parquet` in place** — then the frozen §Grading
+   metrics via the committed replay scripts; opening recorded in
+   `docs/preregistration/INDEX.md` before the first outcome read.
+2. **R1 forward rows** accrue via `scripts/research_v3/r1_forward_scorer.py`
+   once the T-A render root refreshes past 2026-07-21 (boundary verified);
+   run it with each render refresh, weekly check of R1-K1/K2/K3.
+3. **P0.3 forward recorders** (liquidation stream + L2 depth summaries):
+   recorder code not yet written this session; when written, implement +
+   test only — installation is a separate operator go.
+4. **R3a/R3b activation** awaits the operator decision registered in their
+   prereg docs; shadow tooling is staged (`loss_budget_shadow_check.py`,
+   `cluster_cap.py`).
+
 ## P2 — R2 squeeze-state governor (flagship; the holdout spend)
 
 | ID | Task | Definition of done | Status |
 | --- | --- | --- | --- |
-| P2.1 | Causal squeeze/crash index features from fields unused by the 29 prior families: OI level/acceleration, positioning LSR, taker-flow imbalance, premium spikes, melt-up/crash breadth (+ forward liquidations from P0.3 as they accrue) | Feature build with PIT audit; Lane-1 exploration on the spent window only | todo |
+| P2.1 | Causal squeeze/crash index features from fields unused by the 29 prior families: OI level/acceleration, positioning LSR, taker-flow imbalance, premium spikes, melt-up/crash breadth (+ forward liquidations from P0.3 as they accrue) | Feature build with PIT audit; Lane-1 exploration on the spent window only | done 2026-07-20 (feature build + PIT audit) — `scripts/research_v3/r2_squeeze_features.py` + no-lookahead property tests per group (`tests/test_r2_squeeze_features.py`); built over [2021-05-01, 2024-12-01): OI 4.53M rows/296 sym, premium 6.53M/497, funding 878k/497, breadth 31,440 book-hours, taker 31k symbol-hours (sparse; from 2023-04) — receipt `reports/tail-risk-program/p21-squeeze-features-2026-07-20/`. `positioning_lsr` is DATA-GATED (absent from the root). Exploration vs squeeze outcomes = P2.2, not started |
 | P2.2 | Governor design: gross multiplier per side + hedge-intensity modulation + extreme-state entry veto; **no per-trade exit changes** | Design note + Lane-1 evidence card (all cells, era-split, §Grading metrics) | todo |
 | P2.3 | Config commit, then **single registered holdout read** on `[2025-01-01, 2026-07-06)` | Metrics frozen at commit; holdout opening recorded in `docs/preregistration/INDEX.md` + hypothesis ledger (non-descended family justification stated); one scripted read, no iteration; then rolling forward | todo |
 

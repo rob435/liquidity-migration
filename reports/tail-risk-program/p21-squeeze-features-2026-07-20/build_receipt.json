@@ -1,0 +1,76 @@
+{
+ "kind": "tail_risk_p21_squeeze_feature_build",
+ "window": [
+  "2021-05-01",
+  "2024-12-01"
+ ],
+ "warm_input_start": "2021-03-17",
+ "pit_policy": "one-bar availability lag (shift 1) per source; funding consumed strictly after settlement ts; breadth universe gated by archive_trade_manifest",
+ "no_outcome_columns": "no forward return, label, or trade outcome is read or joined here",
+ "groups": {
+  "oi": {
+   "rows": 4528651,
+   "symbols": 296,
+   "first_ts": "2021-05-01",
+   "last_ts": "2024-11-30",
+   "null_share": {
+    "oi_change_1h": 0.00012674856154735705,
+    "oi_change_24h": 0.001584357019341963,
+    "oi_accel_24h": 0.0031053397579102475
+   },
+   "sha256": "dff2254c12f2c27c2a0cf5206c2c06d0d0c63603a60f6f496a591102f54568d6"
+  },
+  "taker": {
+   "rows": 31008,
+   "symbols": 195,
+   "first_ts": "2023-04-03",
+   "last_ts": "2024-11-30",
+   "null_share": {
+    "taker_imbalance_1h": 0.0062886996904024765,
+    "taker_imbalance_z24": 0.07546439628482972
+   },
+   "sha256": "8e5f4349756615b9b617478383fc9968ee39fa04b00cd5cd694389d1f470f467"
+  },
+  "premium": {
+   "rows": 6533883,
+   "symbols": 497,
+   "first_ts": "2021-05-01",
+   "last_ts": "2024-11-30",
+   "null_share": {
+    "premium_level": 7.484064223372228e-05,
+    "premium_change_24h": 0.0018710160558430568,
+    "premium_change_z30d": 0.019586974544845693
+   },
+   "sha256": "c96304beaadd270e98e2922967f4c73c5e6637c9a95b20ae39a0f7b75379ebb4"
+  },
+  "funding": {
+   "rows": 878554,
+   "symbols": 497,
+   "first_ts": "2021-05-01",
+   "last_ts": "2024-11-30",
+   "null_share": {
+    "funding_rate": 0.0,
+    "funding_jump": 0.0005554581733166089,
+    "funding_extreme": 0.0
+   },
+   "sha256": "38f24191fbe4696da10f2734c88bcd4c51111b2cca61c2bcadac193287fb90b9"
+  },
+  "breadth": {
+   "rows": 31440,
+   "symbols": null,
+   "first_ts": "2021-05-01",
+   "last_ts": "2024-11-30",
+   "null_share": {
+    "breadth_universe_n": 3.1806615776081425e-05,
+    "breadth_melt_1h": 6.361323155216285e-05,
+    "breadth_crash_1h": 6.361323155216285e-05,
+    "breadth_melt_24h": 0.0007951653944020356,
+    "breadth_crash_24h": 0.0007951653944020356
+   },
+   "sha256": "0f116113e587723704f29811a6a8c142c62f2022a4671ec1daf931c54e04fe73"
+  },
+  "positioning_lsr": {
+   "status": "DATA-GATED: positioning_lsr dataset absent from bybit_full_pit as of 2026-07-20; acquisition is a separate task before this group can exist"
+  }
+ }
+}
