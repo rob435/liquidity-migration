@@ -401,6 +401,27 @@ edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
 
+## P0.2 slice provenance: D1's "untouched" claim corrected (2026-07-20)
+
+Claim: of the two "never-opened" pre-2021-05 slices, only **Binance
+[2021-01-01, 2021-05-01) is pristine** (no outcome or feature read by any
+program, live or dead; 80→111 listed perps). Corrections found by
+git-history archaeology (receipts quoted in
+`docs/preregistration/untouched_slice_provenance_2026-07-20.md`): (a)
+Binance [2020-01-01, 2021-01-01) **was outcome-graded on 2026-05-24** as the
+V1 momentum-factor tri-root `binance_OOS_2020` gate (two preset baselines
+recorded, Sharpe 5.68/6.38, plus creative-gate hypotheses; artifacts purged
+in the 2026-05-27 reset; family killed, descends into nothing deployed); (b)
+the Bybit slice is outcome-unread but **feature-touched end-to-end** (the V2
+discovery `read_window` began 2021-01-01) with a 5–8-symbol universe that
+in-slice warm-up mostly consumes. Grading windows are now frozen: G1
+Binance-pristine (entries [2021-01-01→2021-04-30) CONT / 04-28 LONG), G2
+Binance-2020 (dead-family caveat permanent), G3 Bybit (regime-evidence only,
+never standalone). Commit-before-open ordering unchanged; the hypothesis
+ledger carries the correction. Non-conclusions: no statement about the
+reserved V2 label-level holdout (unread); no power claim — three thin months
+under item-29 accounting is regime evidence, not per-name evidence.
+
 ## P0.1 1m re-simulation harness passes the exact-reproduction bar (2026-07-20)
 
 Claim: a render-native 1m re-simulator now exists that reproduces recorded

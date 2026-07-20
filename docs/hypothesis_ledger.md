@@ -59,6 +59,24 @@ sixth-generation read.
   families in, 2 deployed sleeves (both from Generation 1) and 1 undeployed
   prototype out.
 
+## Correction (2026-07-20, P0.2 verification)
+
+The claim above that the reserved holdout is "the only untouched historical
+surface" — and the tail-risk proposal's D1 claim that no generation touched
+the pre-2021-05 slices — required correction after git-history archaeology
+(`docs/preregistration/untouched_slice_provenance_2026-07-20.md`):
+
+- **Binance [2020-01-01, 2021-01-01) was outcome-graded on 2026-05-24** by
+  the V1-era momentum-factor tri-root gate (`binance_OOS_2020`; receipts at
+  commit `4e2d943`, artifacts since purged). That family was killed/shelved
+  2026-05-26/27 and descends into nothing deployed — but the read happened
+  and is now on the ledger.
+- **Bybit [2021-01-01, 2021-05-01) is outcome-unread but feature-touched in
+  full** (V2 discovery `read_window` began 2021-01-01), with a 5–8 symbol
+  universe.
+- **Binance [2021-01-01, 2021-05-01) is pristine** — the only genuinely
+  unopened historical surface besides the reserved V2 label-level holdout.
+
 ## Direction note (2026-07-20)
 
 The repository's main focus is the book-level tail-risk program
