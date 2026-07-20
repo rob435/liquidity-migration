@@ -207,7 +207,11 @@ def parse_funding(symbol: str, rows: list[list[str]]) -> pl.DataFrame:
             "symbol": symbol,
             "funding_interval_hours": [float(r[1]) if r[1].strip() else None for r in body],
             "funding_rate": [float(r[2]) for r in body],
-        }
+        },
+        schema={
+            "ts_ms": pl.Int64, "symbol": pl.String,
+            "funding_interval_hours": pl.Float64, "funding_rate": pl.Float64,
+        },
     ).unique("ts_ms").sort("ts_ms")
 
 
@@ -228,7 +232,13 @@ def parse_metrics(symbol: str, rows: list[list[str]]) -> pl.DataFrame:
             "sum_toptrader_long_short_ratio": [opt(r[5]) for r in body],
             "count_long_short_ratio": [opt(r[6]) for r in body],
             "sum_taker_long_short_vol_ratio": [opt(r[7]) for r in body],
-        }
+        },
+        schema={
+            "ts_ms": pl.Int64, "symbol": pl.String,
+            "sum_open_interest": pl.Float64, "sum_open_interest_value": pl.Float64,
+            "count_toptrader_long_short_ratio": pl.Float64, "sum_toptrader_long_short_ratio": pl.Float64,
+            "count_long_short_ratio": pl.Float64, "sum_taker_long_short_vol_ratio": pl.Float64,
+        },
     ).unique("ts_ms").sort("ts_ms")
 
 
