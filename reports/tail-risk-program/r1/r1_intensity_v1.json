@@ -1,0 +1,29 @@
+{
+  "config_id": "r1_intensity_v1",
+  "status": "registered_shadow_only",
+  "declared_at_utc": "2026-07-20",
+  "descends_from": "T-I regime-intensity family (linear member), sixth-generation prior; hypothesis-ledger row 2026-07-20",
+  "rule": {
+    "weight": "m_trend_linear10(btc_trend_30d at signal day) * m_risk_ramp(btc_risk_score)",
+    "m_trend_linear10": "clip(trend / 0.10, 0, 1); missing trend -> 0 (fail closed)",
+    "m_risk_ramp": "1.0 if warm-up or score <= 0.70; 0.35 if score >= 0.90; linear in between (floor 0.35)",
+    "score_replay": "ExpandingBtcRiskState from-origin causal replay over BTCUSDT daily context, one decision per day (liquidity_migration/continuous_btc_risk.py semantics)",
+    "replaces_in_shadow": "binary gate (1{trend>0}) * CTRL_BTC_RISK_70_90_35 discrete band"
+  },
+  "scoring_recipe": {
+    "scorer": "scripts/research_v3/r1_forward_scorer.py",
+    "surface": "T-A render gate_off book (v4_shared.load_render_book), extended as renders refresh",
+    "row": "one per completed UTC day after the registration boundary: entry-attributed completed-trade net under deployed weight vs r1 weight, hash-chained",
+    "boundary": "first UTC midnight at/after this config's registration commit timestamp",
+    "metrics_frozen": "ES95/ES99 of daily book net, max drawdown, native tail days (reference day net <= -1%), registered V2 tail set, net incl. costs+funding; MAR banned",
+    "slice_grades": "G1/G2/G3 per docs/preregistration/untouched_slice_provenance_2026-07-20.md, one scripted read after this commit, opening recorded in INDEX.md"
+  },
+  "kill_criteria": {
+    "R1-K1_premium_runaway": "cumulative (r1 - deployed) shadow net <= -3% of book with >= 30 divergence days (|m_r1 - m_dep| >= 0.25) at a weekly check -> candidate killed",
+    "R1-K2_tail_failure": "at >= 60 forward days AND >= 10 native tail days: if r1 summed net on tail days is not better than deployed -> candidate killed",
+    "R1-K3_insufficient_divergence": "if < 20 divergence days after 120 forward days, extend once by 120 days; still short -> closed as insufficient-sample",
+    "checked_by": "weekly cadence alongside scripts/ops.sh kill-criteria (shadow-level; no runtime authority)"
+  },
+  "runtime_authority": "none: shadow A/B only; any deployment needs a five-line promotion note + recorded change point + operator go",
+  "lane1_receipt": "reports/tail-risk-program/p11-r1-intensity-lane1-2026-07-20/"
+}

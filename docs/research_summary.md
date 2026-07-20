@@ -401,6 +401,32 @@ edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
 
+## R1 risk intensity: T-I revived under tail metrics, registered as shadow A/B (2026-07-20)
+
+Claim: one monotone gross multiplier (linear trend ramp × monotonized
+BTC-risk band, `linear10_ramp`) is a well-posed *priced-insurance* candidate
+for the CONTINUOUS book — informing the P1.1 registration decision, not a
+deployment. Data that shaped: V2 barebones ledger + T-A render books +
+BTCUSDT klines (all seen; Lane-1); grading data: none yet — the forward
+record starts at the registration commit. Scope: Bybit CONTINUOUS shape,
+2021-05→2024-12 (barebones) and 2023-04→2026-07 (render), ledger-level
+weighting (capacity proxy error bounded at −0.28pp by the gate_off×binary
+vs rendered-gate-on check). Effects (full grids in
+`reports/tail-risk-program/p11-r1-intensity-lane1-2026-07-20/`): on the
+discovery surface the T-I Pareto story reproduces exactly under tail metrics
+(equal net, maxDD −0.359→−0.308, ES95 −0.0164→−0.0146, tail-day losses
+−1.13→−0.93); on the deployed-era render book it becomes a tradeoff —
+**~3.8pp/yr net premium buys era-stable tail relief** (ES95 −23%, ES99 −19%,
+native-tail-day losses −33%, maxDD unchanged; premium concentrated in the
+late bull half: −1.4pp early vs −10.9pp late). The discrete-0.35 overlay is
+nearly inert post-2023; the operative axis is binary→linear on trend.
+Registered: `r1_intensity_v1` (shadow A/B vs deployed weights; hash-chained
+daily scorer; kill criteria R1-K1 premium-runaway / R1-K2 tail-failure /
+R1-K3 insufficient-divergence pre-committed). Non-conclusions: no alpha or
+promotion claim; sixth-generation T-I descent priors apply; the linear
+member's true render-arm interaction (capacity/admission) is untested; the
+one-shot G1/G2/G3 slice grades remain unopened until after this commit.
+
 ## P0.2 slice provenance: D1's "untouched" claim corrected (2026-07-20)
 
 Claim: of the two "never-opened" pre-2021-05 slices, only **Binance
