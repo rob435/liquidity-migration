@@ -401,6 +401,31 @@ edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
 
+## P0.1 1m re-simulation harness passes the exact-reproduction bar (2026-07-20)
+
+Claim: a render-native 1m re-simulator now exists that reproduces recorded
+CONTINUOUS exits exactly, so future registered variant work has a
+granularity-honest instrument (the T-F standard extended to 1m). Result:
+walking `bybit_render_1m` (2023-03-26→2026-07-09), **0 harness mismatches
+across 23,064 recorded trades** — T-A `render_gate_on` 2,297/2,300 exact,
+`render_gate_off` 4,008/4,019, V2 barebones 10,609 of the 10,614 in-window —
+with 0.0 exit-price and mae/mfe diffs on every match. The 16 non-reproduced
+paths are venue-surface divergences at listing/delisting edges, mechanically
+attributed by bar-for-bar 1m-vs-raw-1h comparison (12 delisting tails where
+the 1m tape ends hours before the 1h tape; 4 feed-content divergences, e.g.
+SAHARAUSDT's first-day hour closing 0.012474 on 1m vs 0.013045 on 1h) —
+quarantined from any variant analysis. 6,131 barebones trades predate the 1m
+window or its render-universe symbols (enumerated, not walked). Data that
+shaped: all inputs are seen surfaces (Lane-1 tooling; no new outcome surface
+opened). Artifacts: `scripts/research_v3/resim_1m.py`,
+`tests/test_resim_1m.py` (oracle regression, no-lookahead property, item-14
+ambiguity policy, item-15 warm-state), receipt
+`reports/tail-risk-program/p01-resim-1m-2026-07-20/`, scope/limits
+`docs/resim_1m_harness_2026-07-20.md`. Non-conclusions: no exit variant is
+thereby licensed (closed lines stand); no execution-cost model for intrabar
+fills exists yet; Bybit 1m-vs-1h feed divergence at tape edges is a data
+finding to respect in any future 1m work.
+
 ## P0.4 Binance backward backfill: frontier already reached (2026-07-20)
 
 Claim: `binance_full_pit` cannot be extended backward through the canonical
