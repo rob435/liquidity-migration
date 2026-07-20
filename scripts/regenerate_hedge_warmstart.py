@@ -53,7 +53,9 @@ from liquidity_migration.continuous_profile import (  # noqa: E402
     ACTIVE_CONTINUOUS_CONFIG,
 )
 from liquidity_migration.continuous_rebalance import (  # noqa: E402
+    ContinuousHedgeRule,
     combine_continuous_components,
+    compute_hedge_betas_2f,
     scaled_entry_cost,
 )
 
@@ -63,6 +65,10 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "deploy" / "hedge_warmstart"
 WINNER = dict(ACTIVE_CONTINUOUS_CONFIG["weights"])
 MS_DAY = 86_400_000
 MIN_OBJECT_REFERENCE_OVERLAP = 60
+# Bound on how far the estimated (b1, b2) may move between the deployed and a
+# regenerated prior without an explicit --force review. 0.25 of hedge-ratio
+# units is roughly a quarter of the per-leg cap.
+MAX_PRIOR_BETA_DRIFT = 0.25
 
 
 def utc_day_start_ms(now: dt.datetime | None = None) -> int:
@@ -351,20 +357,49 @@ def compare_unit_rows(
     overlap = sorted(set(old) & set(new))
     if not overlap:
         print(f"  {label}: no date overlap")
-        return {"max_drift": 0.0, "old_rows": len(old), "new_rows": len(new), "overlap": 0}
+        return {
+            "max_drift": 0.0,
+            "beta_drift": 0.0,
+            "old_rows": len(old),
+            "new_rows": len(new),
+            "overlap": 0,
+        }
     diffs = [abs(old[d] - new[d]) for d in overlap]
     import statistics
     max_drift = max(diffs)
+    beta_drift = _beta_drift(reference_rows, candidate_rows)
     print(
         f"  {label}: overlap {len(overlap)}d, max|delta_unit| {max_drift:.2e}, "
-        f"mean|delta| {statistics.mean(diffs):.2e}"
+        f"mean|delta| {statistics.mean(diffs):.2e}, max|delta_beta| {beta_drift:.3f}"
     )
     return {
         "max_drift": max_drift,
+        "beta_drift": beta_drift,
         "old_rows": len(old),
         "new_rows": len(new),
         "overlap": len(overlap),
     }
+
+
+def _series_betas(rows: list[dict]) -> tuple[float, float]:
+    """Runtime-identical trailing 2f betas for one date-ordered row series."""
+    raw = [float(r["unit_ret"]) for r in rows]
+    h1: list[float | None] = [float(r["btc_ret"]) for r in rows]
+    h2: list[float | None] = [float(r["eth_ret"]) for r in rows]
+    return compute_hedge_betas_2f(raw, h1, h2, len(raw), ContinuousHedgeRule())
+
+
+def _beta_drift(reference_rows: list[dict], candidate_rows: list[dict]) -> float:
+    """Max coefficient move between the deployed and regenerated priors.
+
+    The unit-return drift gate catches input revisions; this catches the
+    consequence that actually resizes the live hedge — the estimated betas
+    jumping between vintages — even when every overlapping input row agrees
+    (for example a window that merely slides forward over a regime break).
+    """
+    old_b1, old_b2 = _series_betas(reference_rows)
+    new_b1, new_b2 = _series_betas(candidate_rows)
+    return max(abs(new_b1 - old_b1), abs(new_b2 - old_b2))
 
 
 def component_tape_metadata(component_root: Path, payload: dict) -> dict[str, str]:
@@ -395,6 +430,11 @@ def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool
     if report["old_rows"] and report["new_rows"] < report["old_rows"]:
         return (f"regeneration has {report['new_rows']} rows < existing {report['old_rows']} "
                 f"(short/regressed run)")
+    if report["overlap"] and report.get("beta_drift", 0.0) > MAX_PRIOR_BETA_DRIFT:
+        return (f"max|delta_beta| {report['beta_drift']:.3f} exceeds the "
+                f"coefficient-drift bound {MAX_PRIOR_BETA_DRIFT:.2f}; a vintage shift "
+                f"that resizes the live hedge this much needs --force and a review "
+                f"per docs/hedge_refresh_policy.md")
     return None
 
 

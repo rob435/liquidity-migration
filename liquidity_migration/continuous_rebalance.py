@@ -53,6 +53,27 @@ class ContinuousHedgeRule:
     hedge_cap: float = 2.0
     cost_bps: float = 5.0
     beta_extra_lag_days: int = 0
+    # Statistical shrinkage of estimated betas toward a registered prior
+    # coefficient vector: beta = (1-w)*OLS + w*prior. The default 0.0
+    # reproduces plain OLS exactly. Shrinkage applies only to coefficients the
+    # window can estimate; insufficient-sample and degenerate paths still
+    # return zero (no hedge) rather than falling back to the prior blind.
+    # Policy and guardrails: docs/hedge_refresh_policy.md.
+    shrinkage_weight: float = 0.0
+    prior_beta_1: float = 0.0
+    prior_beta_2: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= float(self.shrinkage_weight) <= 1.0:
+            raise ValueError("hedge shrinkage_weight must be within [0, 1]")
+        for name in ("prior_beta_1", "prior_beta_2"):
+            value = float(getattr(self, name))
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError(f"hedge {name} must be finite")
+
+
+def _shrunk_beta(estimated: float, prior: float, weight: float) -> float:
+    return (1.0 - weight) * estimated + weight * prior
 
 
 @dataclass(frozen=True)
@@ -281,7 +302,7 @@ def compute_hedge_beta(
     if var <= 0.0:
         return 0.0
     cov = sum((h - h_mean) * (y - y_mean) for h, y in zip(hs, ys)) / n
-    return cov / var
+    return _shrunk_beta(cov / var, hedge_rule.prior_beta_1, hedge_rule.shrinkage_weight)
 
 
 HEDGE_2F_COLLINEARITY_GUARD = 0.995
@@ -329,11 +350,15 @@ def compute_hedge_betas_2f(
     sy2 = sum((b - m2) * (y - my) for b, y in zip(x2, ys))
     corr = s12 / (s11 * s22) ** 0.5
     det = s11 * s22 - s12 * s12
+    weight = hedge_rule.shrinkage_weight
     if abs(corr) > HEDGE_2F_COLLINEARITY_GUARD or det <= 0.0:
-        return sy1 / s11, 0.0
+        return _shrunk_beta(sy1 / s11, hedge_rule.prior_beta_1, weight), 0.0
     b1 = (s22 * sy1 - s12 * sy2) / det
     b2 = (s11 * sy2 - s12 * sy1) / det
-    return b1, b2
+    return (
+        _shrunk_beta(b1, hedge_rule.prior_beta_1, weight),
+        _shrunk_beta(b2, hedge_rule.prior_beta_2, weight),
+    )
 
 
 def _capped_hedge_legs(

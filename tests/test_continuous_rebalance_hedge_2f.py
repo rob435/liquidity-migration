@@ -225,3 +225,72 @@ def test_live_planner_parity_two_leg() -> None:
         )
         assert math.isclose(live1, float(df["hedge_ratio_leg1"][i]), rel_tol=0, abs_tol=1e-15), i
         assert math.isclose(live2, float(df["hedge_ratio_leg2"][i]), rel_tol=0, abs_tol=1e-15), i
+
+
+def _aligned(raw, h1, h2):
+    days = sorted(h1)[: len(raw)]
+    return [h1[d] for d in days], [h2[d] for d in days]
+
+
+def test_shrinkage_weight_zero_reproduces_plain_ols() -> None:
+    raw, h1, h2 = _two_factor_world(40)
+    h1, h2 = _aligned(raw, h1, h2)
+    plain = compute_hedge_betas_2f(raw, h1, h2, len(raw), _hedge_rule())
+    shrunk_zero = compute_hedge_betas_2f(
+        raw,
+        h1,
+        h2,
+        len(raw),
+        _hedge_rule(shrinkage_weight=0.0, prior_beta_1=-9.0, prior_beta_2=9.0),
+    )
+    assert shrunk_zero == plain
+
+
+def test_shrinkage_weight_one_returns_prior_when_estimable() -> None:
+    raw, h1, h2 = _two_factor_world(40)
+    h1, h2 = _aligned(raw, h1, h2)
+    b1, b2 = compute_hedge_betas_2f(
+        raw,
+        h1,
+        h2,
+        len(raw),
+        _hedge_rule(shrinkage_weight=1.0, prior_beta_1=-0.7, prior_beta_2=-0.2),
+    )
+    assert math.isclose(b1, -0.7, rel_tol=1e-12)
+    assert math.isclose(b2, -0.2, rel_tol=1e-12)
+
+
+def test_shrinkage_blends_linearly_between_ols_and_prior() -> None:
+    raw, h1, h2 = _two_factor_world(40)
+    h1, h2 = _aligned(raw, h1, h2)
+    ols1, ols2 = compute_hedge_betas_2f(raw, h1, h2, len(raw), _hedge_rule())
+    mid1, mid2 = compute_hedge_betas_2f(
+        raw,
+        h1,
+        h2,
+        len(raw),
+        _hedge_rule(shrinkage_weight=0.4, prior_beta_1=-1.0, prior_beta_2=0.5),
+    )
+    assert math.isclose(mid1, 0.6 * ols1 + 0.4 * -1.0, rel_tol=1e-12)
+    assert math.isclose(mid2, 0.6 * ols2 + 0.4 * 0.5, rel_tol=1e-12)
+
+
+def test_shrinkage_never_replaces_an_unestimable_beta() -> None:
+    # Below beta_min_obs the estimator must stay at (0, 0) — no blind prior.
+    raw, h1, h2 = _two_factor_world(4)
+    h1, h2 = _aligned(raw, h1, h2)
+    b1, b2 = compute_hedge_betas_2f(
+        raw,
+        h1,
+        h2,
+        len(raw),
+        _hedge_rule(shrinkage_weight=1.0, prior_beta_1=-0.7, prior_beta_2=-0.2),
+    )
+    assert (b1, b2) == (0.0, 0.0)
+
+
+def test_shrinkage_weight_out_of_range_is_rejected() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="shrinkage_weight"):
+        _hedge_rule(shrinkage_weight=1.5)

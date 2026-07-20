@@ -55,12 +55,21 @@ A miss on one of these makes the affected number a diagnostic instead of a
 result. Diagnostics are valuable — they generate the next idea — they just
 do not get graded as evidence.
 
-## 3. Promotion is a note, not a treatise
+## 3. Promotion is a note, not a treatise — and demotion is too
 
 When a config's rolling record earns a change to the live system, the
 promotion record is five lines: claim, config commit, forward record,
 decision, date. Ship it through the normal deploy flow and record the change
 point. That is the entire process.
+
+Demotion is the exact mirror. Every deployed sleeve carries pre-registered
+kill criteria (drawdown, dead-run, and insufficient-sample rules), written
+before the evidence arrives and checked on a fixed cadence; a tripped
+criterion executes as a five-line note, a sleeve toggle, and a recorded
+change point. Deciding the exit rule while we do not know the outcome is
+what keeps the rolling record honest in both directions; ad-hoc demotion
+decisions are where self-deception lives. The active registrations live
+under `docs/preregistration/`.
 
 Live runtime is **continuous with recorded change points**, not frozen.
 Improvements deploy when they are ready; each change is recorded so the

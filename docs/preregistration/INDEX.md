@@ -22,6 +22,7 @@ genuinely new idea, recorded here when opened.
 | Prospective runtime parity amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md` | Active append-only amendments pinned separately from the immutable base-contract hash |
 | Prospective runtime parity post-22 amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_post22_amendments.md` | Registered before forward capture/outcome exposure: final comparator/start gates, shared capture plane, and exact TCA estimator |
 | Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
+| Sleeve kill criteria | `sleeve_kill_criteria_2026-07-20.md` | Active: pre-committed demotion/retirement rules for both deployed sleeves, registered before any epoch outcome read; checked weekly |
 | Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
 | Strategy Overhaul V2 Phase-3 checkpoint | `../strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md` | First bounded partition structurally valid; outcome values not inspected and no expansion authorized |
 | Strategy Overhaul V2 completion cycle | `strategy_overhaul_v2_completion_cycle_2026-07-17.md` | Closed with no qualifying thesis; the registered holdout remains untouched |
