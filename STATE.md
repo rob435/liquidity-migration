@@ -228,6 +228,21 @@ branch ahead.
 
 ## Incident interpretation
 
+- The 2026-07-20 16:36 UTC `BLUAIUSDT unowned_venue_order` CRITICAL was the
+  demo owner disowning its own just-consumed Full stop, not a foreign order.
+  The stop (venue id `4bf19243…`, kept by Bybit across the 16:13:30
+  replacement and therefore in recorded lineage) triggered at 16:35:30 and
+  its adopted fill moved the protection record to `triggered`, which removed
+  it from the `{active, triggering}` ownership set while Bybit's open-order
+  cache still listed the consumed conditional row; the next reconciliation
+  pass paged until the row drained (resolved 16:39). The fix (committed after
+  `f2ad171`, not yet deployed at that commit) gives the ownership verifier a
+  bounded 10-minute terminal-visibility grace: provenance-bearing rows are
+  verified against the latest native protection record under the identical
+  identity contract after it leaves the active statuses. Lingering rows past
+  the window fail closed again, the stream/observe path is byte-identical,
+  and foreign conditional orders still page inside the window; a
+  consumer-driven regression test replays the exact incident shape.
 - The 2026-07-19 07:08 and 09:11 UTC `TLMUSDT unowned_venue_order` CRITICAL
   bursts were native-stop replacement identity gaps under the then-deployed
   `f1cdb91`, not foreign orders. Continued entry fills moved each position's
