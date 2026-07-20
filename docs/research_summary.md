@@ -558,6 +558,39 @@ proposal's D2 assumption ("backfill deeper") is closed as already-complete;
 the tail-event library grows only via new fields (D4), a third venue (D5), or
 forward days (D6).
 
+## T-L conditional listing study, Bybit: calendar arm flips at 2024/2025; one conditional survivor (2026-07-20)
+
+Claim: the unconditional new-listing short (d1/d2→d7) is dead — +226/+263
+bp/trade net pre-2025 flips to −180/−335 bp post-2025, with funding turning
+against shorts (−92 to −117 bp/trade; post-2025 listings carry negative
+rates — the listing short is crowded). One declared conditioning cell
+survives all robustness checks: the **turnover-collapse short** (entry-day
+per-hour turnover < 30% of listing-day's), era-stable at both entry days
+(d2: e2122 +247 n=9, e2324 +246 n=114, e2526 +510 n=116; ±169/±241
+week-cluster s.e.), stable across the 0.2–0.4 threshold band, with a
+mechanism-consistent post-2025 gradient (sustained-turnover shorts −520 to
+−887). Permutation control: nominal p=0.015 vs random same-size cells, but
+a random cell clears the raw +40 bp admission bar 26% of the time — every
+other bar-clearing cell is recorded as scanned, not banked. Execution
+reality (1m, 278 paired symbols, optimistic coverage): listing-week
+rel-range 2.18× mature; 45 bp round trip realistic at demo scale; the cell
+is not dead symbols ($4.8M/$17.8M median entry-day turnover). Shaped and
+graded on the same seen data (Lane-1, 30th family); G1/G2/G3 and the
+reserved holdout unread — event floor 2021-05-01 keeps them available to
+grade a committed config later. Tail honesty: worst cell trade −195%;
+implementation would need the book-level sizing/insurance layers.
+**Cross-venue verdict: the cell failed the Binance pass** (same design,
+659 events): negative in all three eras at d2 (−415/−41/−290 bp) with no
+stable threshold region — only the population-level 2024/2025 flip
+replicates across venues (Binance pre-2025 +105/+135 → post-2025
+negative, funding −80/−96 bp against shorts). **T-L closed, no Lane-2
+candidate** — the Bybit cell is a selected fluke or venue quirk; this
+study cannot distinguish and neither is admissible. Artifacts:
+`reports/strategy-research-v3/t-l/2026-07-20/` (evidence_card.md,
+manifest.json, `binance/divergence_note.md`). Non-conclusions: long
+mirror is noise (s.e. ~400+ bp); ≥5 bets/day bar unreachable (~45
+events/yr); no Binance 1m cost read.
+
 ## Tail-risk program adopted as main focus (2026-07-20)
 
 By operator instruction the repository's main research focus is the book-level

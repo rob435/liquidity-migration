@@ -67,6 +67,20 @@ One owner rule: whoever flips a row to `active` finishes or reverts it.
    prereg docs; shadow tooling is staged (`loss_budget_shadow_check.py`,
    `cluster_cap.py`).
 
+## T — operator-directed listing/carry studies (queued 2026-07-20)
+
+Note: the queue instruction referenced a "T-L v1" artifact at
+`reports/strategy-research-v3/t-l/2026-07-20/`; no such artifact existed on
+this host or in git history when this session started (a prior session's
+uncommitted claim). T-L below is the first committed T-L study and covers
+the population and conditional reads in one declared design.
+
+| ID | Task | Definition of done | Status |
+| --- | --- | --- | --- |
+| T-L | **Conditional listing study, Bybit** — d1/d2→d7 arms conditioned on pump, turnover decay, funding state, crowding, BTC trend; all cells × eras; listing-week execution-cost read from 1m data; admission bar decides | Evidence card + hashed artifacts; ledger row; no Lane-2 without cross-checks | done 2026-07-20 — `reports/strategy-research-v3/t-l/2026-07-20/` (evidence_card.md, manifest.json). Unconditional arm flips sign at 2024/2025 (funding turns against shorts); one survivor cell (turnover-collapse short, era-stable both entry days, threshold-band-stable, permutation p=0.015 nominal vs 26% random-cell bar-clear rate); 1m cost read: 45 bp RT realistic at demo scale, listing week 2.18× mature. Cross-venue verdict: **closed, no Lane-2 candidate** — the Bybit survivor cell failed the Binance pass |
+| T-L-B | **T-L Binance robustness pass** — same script, `binance_full_pit`; divergences reported; venues never pooled as independent | Same-design run + divergence note in the T-L card | done 2026-07-20 — `reports/strategy-research-v3/t-l/2026-07-20/binance/` (divergence_note.md, manifest.json). Population-level 2024/2025 flip replicates; the turnover-collapse short does NOT (negative all three eras at d2) → T-L family closed |
+| T-M | **Funding-extreme carry** — episode inventory (rate ≥ {0.15, 0.3, 0.5}%/8h × persistence × symbol age) from Bybit 2021→ / Binance 2019-09→ funding roots; hedged carry-capture P&L with explicit BTC-leg hedge-cost model; era-split; admission bar | Evidence card + hashed artifacts; ledger row | todo |
+
 ## P2 — R2 squeeze-state governor (flagship; the holdout spend)
 
 | ID | Task | Definition of done | Status |
