@@ -1007,3 +1007,266 @@ def test_funding_execution_is_not_treated_as_unaccounted_position_mutation(
     assert "funding-1" not in kernel.state().executions
     assert manager.last_error == ""
     manager.require_recent_healthy(max_age_ns=1_000_000_000)
+
+
+def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
+    tmp_path: Path,
+) -> None:
+    """2026-07-20 BLUAIUSDT page: a consumed Full stop lingering in the venue
+    open-order cache must stay owned for a bounded window after the protection
+    record leaves {active, triggering}, then fail closed again."""
+
+    from liquidity_migration.venue_protection import (
+        NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,
+    )
+
+    kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
+    manager, _client = _manager(kernel, clock)
+    first = manager.sync("BUSDT")
+    assert first is not None
+    stop_row = {
+        "symbol": "BUSDT",
+        "orderId": "consumed-full-stop",
+        "orderLinkId": "",
+        "orderStatus": "Untriggered",
+        "cumExecQty": "0",
+        "triggerPrice": "10.7",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }
+    assert manager.observe_order(stop_row) is True
+
+    # The incident shape: the owner replaced the Full stop (id moves into
+    # lineage, live binding cleared), then the stop triggered and its adopted
+    # fill flattened the position.
+    repaired = manager.sync("BUSDT", force=True)
+    assert repaired == first
+    consumer = BybitAccountExecutionConsumer(
+        kernel=kernel,
+        native_protection_manager=manager,
+        clock=clock,
+    )
+    consumer.on_execution({"data": [{
+        "symbol": "BUSDT",
+        "orderLinkId": "",
+        "orderId": "consumed-full-stop",
+        "execId": "consumed-full-stop-fill",
+        "side": "Buy",
+        "execQty": "2",
+        "execPrice": "10.8",
+        "execFee": "0.02",
+        "execTime": "2100",
+        "execType": "Trade",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }]}, local_receive_ts_ns=2_100_000_000)
+    assert kernel.state().positions["BUSDT"].signed_qty == 0.0
+    assert manager.active("BUSDT") is None
+
+    clock.advance_ns(200_000_000)
+    lingering = {**stop_row, "orderStatus": "Filled", "cumExecQty": "2"}
+
+    # Within the visibility grace the lingering consumed row is still ours.
+    assert manager.is_verified_native_order(lingering) is True
+
+    class _LingeringOrderClient:
+        demo = True
+
+        def get_open_orders(self, **_params: object):
+            return [lingering]
+
+    ownership = inspect_bybit_demo_order_ownership(
+        client=_LingeringOrderClient(),
+        state=kernel._state_ref(),
+        native_order_verifier=manager.is_verified_native_order,
+    )
+    assert ownership.unowned_orders == ()
+
+    # The stream path is unchanged: nothing is observed without an active
+    # protection, and no stale binding is recorded.
+    assert manager.observe_order(lingering) is False
+    assert manager.observed_native_order_ids == {}
+
+    # A foreign conditional row stays unowned even inside the grace window.
+    foreign = {
+        **lingering,
+        "orderId": "foreign-conditional",
+        "triggerPrice": "9.9",
+    }
+    assert manager.is_verified_native_order(foreign) is False
+
+    # Past the grace window the same lingering row fails closed again.
+    clock.advance_ns(NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS + 1)
+    assert manager.is_verified_native_order(lingering) is False
+    ownership_after = inspect_bybit_demo_order_ownership(
+        client=_LingeringOrderClient(),
+        state=kernel._state_ref(),
+        native_order_verifier=manager.is_verified_native_order,
+    )
+    assert len(ownership_after.unowned_orders) == 1
+
+
+def test_visibility_grace_rejects_same_price_foreign_and_partial_rows(
+    tmp_path: Path,
+) -> None:
+    """Tightened grace contract: identity evidence must match when it exists,
+    partial-stop provenance is never grace-owned, and a restart keeps both
+    properties via the journaled record."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
+    manager, _client = _manager(kernel, clock)
+    assert manager.sync("BUSDT") is not None
+    stop_row = {
+        "symbol": "BUSDT",
+        "orderId": "consumed-full-stop",
+        "orderLinkId": "",
+        "orderStatus": "Untriggered",
+        "cumExecQty": "0",
+        "triggerPrice": "10.7",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }
+    assert manager.observe_order(stop_row) is True
+    manager.sync("BUSDT", force=True)
+    consumer = BybitAccountExecutionConsumer(
+        kernel=kernel,
+        native_protection_manager=manager,
+        clock=clock,
+    )
+    consumer.on_execution({"data": [{
+        "symbol": "BUSDT",
+        "orderLinkId": "",
+        "orderId": "consumed-full-stop",
+        "execId": "consumed-full-stop-fill",
+        "side": "Buy",
+        "execQty": "2",
+        "execPrice": "10.8",
+        "execFee": "0.02",
+        "execTime": "2100",
+        "execType": "Trade",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }]}, local_receive_ts_ns=2_100_000_000)
+    assert manager.active("BUSDT") is None
+    clock.advance_ns(200_000_000)
+
+    lingering = {**stop_row, "orderStatus": "Filled", "cumExecQty": "2"}
+    assert manager.is_verified_native_order(lingering) is True
+
+    # A different orderId at the SAME trigger price must not be grace-owned
+    # while identity evidence (lineage/observed) exists.
+    same_price_foreign = {**lingering, "orderId": "foreign-same-price"}
+    assert manager.is_verified_native_order(same_price_foreign) is False
+
+    # Partial-stop provenance can never be the lingering consumed Full stop.
+    partial = {
+        **lingering,
+        "stopOrderType": "PartialStopLoss",
+        "createType": "CreateByPartialStopLoss",
+    }
+    assert manager.is_verified_native_order(partial) is False
+
+    # Restart shape: a fresh manager (empty in-memory observed map) keeps both
+    # properties from the journaled record alone.
+    manager_restarted, _ = _manager(kernel, clock)
+    assert manager_restarted.is_verified_native_order(lingering) is True
+    assert manager_restarted.is_verified_native_order(same_price_foreign) is False
+
+
+def test_visibility_grace_first_install_uses_live_observed_binding(
+    tmp_path: Path,
+) -> None:
+    """First-install trigger (no replacement, record lineage empty): the live
+    in-memory observed id rejects same-price foreign rows; after a restart no
+    identity evidence exists and the bounded price-fallback residual applies
+    (documented in STATE.md)."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
+    manager, _client = _manager(kernel, clock)
+    assert manager.sync("BUSDT") is not None
+    stop_row = {
+        "symbol": "BUSDT",
+        "orderId": "first-install-stop",
+        "orderLinkId": "",
+        "orderStatus": "Untriggered",
+        "cumExecQty": "0",
+        "triggerPrice": "10.7",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }
+    assert manager.observe_order(stop_row) is True
+    consumer = BybitAccountExecutionConsumer(
+        kernel=kernel,
+        native_protection_manager=manager,
+        clock=clock,
+    )
+    consumer.on_execution({"data": [{
+        "symbol": "BUSDT",
+        "orderLinkId": "",
+        "orderId": "first-install-stop",
+        "execId": "first-install-stop-fill",
+        "side": "Buy",
+        "execQty": "2",
+        "execPrice": "10.8",
+        "execFee": "0.02",
+        "execTime": "2100",
+        "execType": "Trade",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }]}, local_receive_ts_ns=2_100_000_000)
+    assert manager.active("BUSDT") is None
+    clock.advance_ns(200_000_000)
+
+    lingering = {**stop_row, "orderStatus": "Filled", "cumExecQty": "2"}
+    assert manager.is_verified_native_order(lingering) is True
+    same_price_foreign = {**lingering, "orderId": "foreign-same-price"}
+    assert manager.is_verified_native_order(same_price_foreign) is False
+
+    # Restart with an identity-empty record: the price fallback is the only
+    # evidence left. This bounded residual acceptance is deliberate and
+    # documented; pin it so a future change is a conscious decision.
+    manager_restarted, _ = _manager(kernel, clock)
+    assert manager_restarted.is_verified_native_order(lingering) is True
+    assert manager_restarted.is_verified_native_order(same_price_foreign) is True
+
+
+def test_visibility_grace_bounds_record_exchange_time(tmp_path: Path) -> None:
+    """An owner-downtime recovery writes the terminal record late; the grace
+    window must also bound the record's exchange time so it cannot reopen a
+    long-dead venue window."""
+
+    from liquidity_migration.venue_protection import (
+        NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,
+    )
+
+    kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
+    manager, _client = _manager(kernel, clock)
+    clock.advance_ns(2 * NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS)
+    kernel.record_protection(
+        protection_key="native-disaster:BUSDT:test",
+        symbol="BUSDT",
+        status="triggered",
+        stop_price=10.7,
+        take_profit_price=None,
+        exchange_ts_ns=clock.wall_time_ns()
+        - NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS
+        - 1,
+        local_receive_ts_ns=clock.wall_time_ns(),
+        metadata={
+            "native_exchange": True,
+            "symbol": "BUSDT",
+            "native_venue_order_id_lineage": ["stale-stop"],
+        },
+    )
+    assert manager.active("BUSDT") is None
+    row = {
+        "symbol": "BUSDT",
+        "orderId": "stale-stop",
+        "orderLinkId": "",
+        "orderStatus": "Filled",
+        "cumExecQty": "2",
+        "triggerPrice": "10.7",
+        "createType": "CreateByStopLoss",
+        "stopOrderType": "StopLoss",
+    }
+    assert manager.is_verified_native_order(row) is False

@@ -5,11 +5,18 @@ Date: 2026-07-20. Lane-1 exploratory, on seen data. Scripts:
 `scripts/research_v3/tl_listing_execution_cost.py`. Raw outputs + hashes:
 this directory's `manifest.json` and `execution-cost/manifest.json`.
 
-Note on lineage: the mission queue referenced a "T-L v1" at this path; no
-such artifact ever existed on this host or in git history (verified against
-`git log --all` and the working tree). This is the first committed T-L
-study; it covers the population read AND the conditional read in one
-declared design.
+Note on lineage (corrected at the 2026-07-20 merge): this card originally
+claimed no T-L v1 artifact existed — that check was run against LOCAL
+history only and the working tree; v1 in fact existed on `origin/main`
+(commit `acc0732`, a parallel session on another box) and had not been
+fetched here at session start. The correction is recorded rather than
+hidden: verify against origin, not only local history, before calling a
+claim phantom. This study (v2) was designed and executed independently of
+v1's artifacts and its unconditional arms replicate v1's almost exactly
+(short d1→d7 net by era: +251/+269/−180 bp here vs +275/+273/−175 in v1),
+so the two studies mutually corroborate. This card covers the population
+read AND the conditional read in one declared design; it now lives under
+`v2/` with v1's artifacts at the directory root.
 
 ## Claim and decision
 

@@ -3,16 +3,36 @@
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, account-journal protection/P&L archaeology, and the full
 2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC, with the
-2026-07-20 11:04 UTC rollout recorded below. These facts describe the deployed
+2026-07-20 rollouts (11:04, 14:04, and 17:22 UTC) recorded below. These facts describe the deployed
 implementation commit below; a later documentation-only commit may leave the
 branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `f2ad17167bc683cec7a44c1a21ddba20726e09e2`, deployed from canonical `main`,
-  profile `operational`, receipt artifact SHA-256 `43ce6490c8b0dee4...`,
-  activated 2026-07-20 14:04 UTC (fleet quiescent ~13:44--14:04; the install
+  `a7363070008266888b652104dfdd64f907507f3e`, deployed from canonical `main`,
+  profile `operational`, receipt artifact SHA-256 `dc95caaf0be2776f...`,
+  activated 2026-07-20 ~17:22 UTC (fleet quiescent ~17:12--17:22 with the
+  demo book flat and the owner healthy at the stop boundary; install,
+  authority issuance, and activation each verified `a736307` exactly, and
+  the first post-activation pinned status reported verify-ok with all six
+  persistent services running). Over `f2ad171` it deploys exactly one
+  runtime surface: the native-stop ownership verifier in
+  `liquidity_migration/venue_protection.py` — the 2026-07-20 16:36 UTC
+  BLUAIUSDT false `unowned_venue_order` fix (bounded 10-minute
+  terminal-visibility grace) plus the same-day pre-deploy adversarial
+  tightenings (Full-stop-only grace provenance, identity-evidence-required
+  matching including the live observed binding, exchange-time bound), each
+  pinned by consumer-driven regression tests; see the incident entry below.
+  No strategy decision path, sizing input, or registered estimator changed.
+  The delta also carries research-only artifacts (T-K breadth-funnel
+  receipts and scripts) and the tail-risk program adoption docs, none on a
+  deployed service path (audited pre-deploy; full local gate, remote
+  install gate, and two independent review passes all green). Recorded
+  mid-epoch change point; clock and comparator identity unchanged.
+- The prior change point remains on record: `f2ad171` (receipt
+  `43ce6490c8b0dee4...`), activated 2026-07-20 14:04 UTC (fleet quiescent
+  ~13:44--14:04; the install
   ran long in normalize-paper over the ~60k-file paper event trees and the
   client-side SSH timed out at 10 min — the orphaned remote install
   completed correctly and the authority issuance revalidated the stopped
@@ -228,6 +248,33 @@ branch ahead.
 
 ## Incident interpretation
 
+- The 2026-07-20 16:36 UTC `BLUAIUSDT unowned_venue_order` CRITICAL was the
+  demo owner disowning its own just-consumed Full stop, not a foreign order.
+  The stop (venue id `4bf19243…`, kept by Bybit across the 16:13:30
+  replacement and therefore in recorded lineage) triggered at 16:35:30 and
+  its adopted fill moved the protection record to `triggered`, which removed
+  it from the `{active, triggering}` ownership set while Bybit's open-order
+  cache still listed the consumed conditional row; the next reconciliation
+  pass paged until the row drained (resolved 16:39). The fix (deployed in
+  the `a736307` rollout above) gives the ownership verifier a
+  bounded 10-minute terminal-visibility grace: provenance-bearing rows are
+  verified against the latest native protection record after it leaves the
+  active statuses. Pre-deploy adversarial review tightened the window's
+  contract: grace rows must carry Full-stop provenance (the only kind the
+  manager creates), must match recorded/live identity evidence (recorded
+  venue id, lineage, or the still-held in-memory observed id) whenever any
+  exists, and the record's exchange time is bounded by the same window so an
+  owner-downtime recovery cannot reopen a long-dead venue window. Lingering
+  rows past the window fail closed again and the stream/observe path is
+  byte-identical. Two residual page/acceptance classes are documented, not
+  hidden: (1) same-symbol re-entry while the old consumed row still lingers
+  re-pages under the unchanged active-path contract (pre-existing
+  strictness, errs safe); (2) after a restart following a first-install
+  fast trigger whose record carries no identity evidence, a same-price
+  Full-stop row is accepted on the price fallback alone for the bounded
+  window (pinned by test as a deliberate residual). Consumer-driven
+  regression tests replay the incident shape, same-price foreign rejection,
+  partial-stop rejection, restart identity, and the exchange-time bound.
 - The 2026-07-19 07:08 and 09:11 UTC `TLMUSDT unowned_venue_order` CRITICAL
   bursts were native-stop replacement identity gaps under the then-deployed
   `f1cdb91`, not foreign orders. Continued entry fills moved each position's

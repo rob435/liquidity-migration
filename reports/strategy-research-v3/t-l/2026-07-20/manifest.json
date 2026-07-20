@@ -1,93 +1,32 @@
 {
- "code_commit": "821f09752b70fc8f02c20dbd2aa815e9446a096b",
- "created_utc": "2026-07-20T19:36:53.922253+00:00",
- "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
- "files": {
-  "arms_conditioned.csv": {
-   "bytes": 63287,
-   "sha256": "00d2efff68774f31e12991bf860c34aff4ced94f29f30a770a2ea4553ed3ede1"
+  "study": "t-l listing lifecycle v1",
+  "run_date": "2026-07-20",
+  "code_commit": "13837cd66675d2b0fafcd7c3aaba84e90ba4c08f",
+  "data_root": "/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_full_pit",
+  "dataset_start": "2021-01-01",
+  "dataset_end": "2026-07-16",
+  "left_censor_cutoff": "2021-01-09",
+  "listings_total": 925,
+  "listings_left_censored": 5,
+  "listings_eligible": 920,
+  "round_trip_cost": 0.0045,
+  "bootstrap": {
+    "iters": 2000,
+    "seed": 20260720,
+    "block": "listing_month"
   },
-  "arms_interaction_pump_x_funding.csv": {
-   "bytes": 48763,
-   "sha256": "b4bd40c5b243432d9edcb9d3bd000f5dc8284eed584f082365f199a7f96377c8"
-  },
-  "arms_unconditional.csv": {
-   "bytes": 3943,
-   "sha256": "c2b80591d735938016742059162d02cf86e60c116b7869c738cf5999be644d1a"
-  },
-  "exclusions.csv": {
-   "bytes": 387,
-   "sha256": "9ceb1cc92a3ad7d933d6451f0f0ba3a7a493a074a58064ea6a96f4480dacafd5"
-  },
-  "population.csv": {
-   "bytes": 48214,
-   "sha256": "735464ed490ac8db2553e04087c5659644b398ccbfc69ba9cc97c6397967f4a1"
-  },
-  "trades.csv": {
-   "bytes": 823541,
-   "sha256": "228bc64fc501fd2cadde8869c42c78b8efbf7d7059ed38fe2548fb265feeab22"
+  "limitations": [
+    "listing anchor is the first 1h bar in this root; reused ticker incarnations collapse to the earliest",
+    "45bp hurdle understates listing-week execution costs; dedicated cost read required before any Lane-2 commit",
+    "funding approximated as UTC-day sums over the hold window",
+    "Bybit only; Binance robustness pass not yet run",
+    "lane-1 exploratory on seen root; not alpha or promotion evidence"
+  ],
+  "outputs": {
+    "event_panel.parquet": "447f368f460bc58c01874f07096558f608daca5eaadd33c31a8f2c799765df11",
+    "listings.parquet": "c599681ff64e08925edda2bef05a9cecef1bfe6ae7162d2f1dd98f855b216c7e",
+    "summary.md": "bffa1a006f1f1244a47ea27cc58e8c45e82ac7d02d032240bcbd81ac45f74caf",
+    "tl_arm_grid.csv": "1a1ba44447e5212c2ae3bf3d1e494d5542342296c125ecc8e0e9eced43bd8d55",
+    "tl_trades.parquet": "39e0539ecf05e22cff47a721b2459e413a527c8c9b192d54d27121bac1169610"
   }
- },
- "git_dirty": true,
- "grading_windows_preserved": [
-  "G1 binance [2021-01-01,2021-05-01)",
-  "G2 binance 2020",
-  "G3 bybit [2021-01-01,2021-05-01)"
- ],
- "holdout_touched": false,
- "inputs": {
-  "funding_end": "2026-07-10",
-  "kline_end": "2026-07-09",
-  "manifest_partitions": 2016,
-  "venue": "bybit"
- },
- "kind": "tl_listing_conditional",
- "lane": "lane-1",
- "manifest_payload_sha256": "19730f6cea39194683caeb5dcd06119b6fb792ed6b8d74c58f23a4edc8f2991e",
- "n_candidates": 881,
- "n_events": 881,
- "n_trade_rows": 3516,
- "params": {
-  "bins": {
-   "crowd7d": [
-    2,
-    5
-   ],
-   "fund8h": [
-    -0.0005,
-    0.0005
-   ],
-   "pump01": [
-    0.0,
-    0.25,
-    1.0
-   ],
-   "tdecay": [
-    0.3,
-    0.7
-   ]
-  },
-  "boot": {
-   "cluster": "7d-ordinal-block",
-   "n": 2000,
-   "seed": 20260720
-  },
-  "cost_rt": 0.0045,
-  "cost_rt_stress": 0.009,
-  "entry_days": [
-   1,
-   2
-  ],
-  "era_bounds": [
-   "2023-01-01",
-   "2025-01-01"
-  ],
-  "event_floor": "2021-05-01",
-  "exit_day": 7,
-  "gap_quarantine_days": 30,
-  "last_d0": "2026-07-01"
- },
- "schema_version": 1,
- "study": "t-l",
- "study_mode": "exploratory"
 }

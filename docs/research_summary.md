@@ -558,7 +558,13 @@ proposal's D2 assumption ("backfill deeper") is closed as already-complete;
 the tail-event library grows only via new fields (D4), a third venue (D5), or
 forward days (D6).
 
-## T-L conditional listing study, Bybit: calendar arm flips at 2024/2025; one conditional survivor (2026-07-20)
+## T-L v2 conditional listing study: v1 replicated, conditional survivor killed cross-venue (2026-07-20)
+
+Executed on the Windows chain as an independent implementation before the
+v1 commit (`acc0732`) had been fetched; the unconditional arms replicate
+v1 almost exactly (short d1→d7 net by era: v2 +251/+269/−180 bp vs v1
++275/+273/−175 — two implementations, same facts), which upgrades the
+population-level finding to independently-reproduced.
 
 Claim: the unconditional new-listing short (d1/d2→d7) is dead — +226/+263
 bp/trade net pre-2025 flips to −180/−335 bp post-2025, with funding turning
@@ -586,7 +592,7 @@ replicates across venues (Binance pre-2025 +105/+135 → post-2025
 negative, funding −80/−96 bp against shorts). **T-L closed, no Lane-2
 candidate** — the Bybit cell is a selected fluke or venue quirk; this
 study cannot distinguish and neither is admissible. Artifacts:
-`reports/strategy-research-v3/t-l/2026-07-20/` (evidence_card.md,
+`reports/strategy-research-v3/t-l/2026-07-20/v2/` (evidence_card.md,
 manifest.json, `binance/divergence_note.md`). Non-conclusions: long
 mirror is noise (s.e. ~400+ bp); ≥5 bets/day bar unreachable (~45
 events/yr); no Binance 1m cost read.
@@ -633,6 +639,30 @@ forward liquidation/depth recording, and extends the backfill. Rationale and
 receipts: `docs/tail_risk_overhaul_proposal_2026-07-20.md`. Execution state
 and next actions: `docs/tail_risk_program.md`. The adoption itself authorizes
 no runtime change.
+
+## Strategy Research V7 — offensive slate opened (Lane-1, 2026-07-20)
+
+Operator redirection (same day as the tail-risk adoption): the program's
+center of gravity is new-edge theses large enough to change the strategy and
+to be verifiable — slate and admission bar (net ≥ +40 bp/trade era-stable, or
+≥ 5 independent bets/day; from T-K's measured power arithmetic) in
+`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`. The reserved
+V2 label tape stays closed; V7 reads kline/funding/OI/manifest surfaces only.
+
+**T-L v1 (young-listing lifecycle, Bybit, 920 eligible listings 2021-01→
+2026-07):** no unconditional calendar arm clears the bar. The 2021–2024
+post-listing bleed (short d1/d2→d7: +270–310 bp net in both early eras,
+win rates 0.62–0.72) **inverts in 2025–26** (−175 to −332 bp; d2→d14
+−829 bp) — recent listings keep pumping longer and funding drag on shorts
+grows. Day-0 long chase is negative/flat everywhere. The lone large late-era
+positive (d2→d30: +1,171 bp, CI [+323, +2,072]) is sign-unstable mid-era and
+holds illiquid names 28 days. Calendar-time-only rules dropped; the v2 pass
+conditions on pump size, turnover-decay, funding state, and wave crowding
+from the built day-0..30 panel, with 2024/2025-boundary era stability as the
+primary acceptance test. Costs: frozen 45 bp hurdle understates listing-week
+execution; a dedicated cost read is mandatory before any Lane-2 commit.
+Evidence card + hashes: `reports/strategy-research-v3/t-l/2026-07-20/`.
+Not alpha, robustness, or promotion evidence.
 
 ## Progressive model adopted (2026-07-19)
 
