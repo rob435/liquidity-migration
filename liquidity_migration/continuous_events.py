@@ -38,8 +38,8 @@ from .execution_adapters import ExecutionTwinConfig, LatencyProfile
 from .historical_account_replay import (
     HistoricalAccountSession,
     HistoricalTargetDecision,
-    historical_submission_feedback,
-    neutralize_historical_decisions,
+    neutralize_rejected_entry_decisions,
+    submit_historical_decisions,
     synthetic_historical_rules_for_symbols,
 )
 from .strategy_targets import component_target_intent
@@ -855,49 +855,27 @@ def _run_trades(
     def _submit_kernel_decisions(
         decisions: list[HistoricalTargetDecision],
     ) -> tuple[bool, tuple[str, ...], bool]:
-        if not decisions:
-            return True, (), False
-        if kernel_decision_sink is not None:
-            kernel_decision_sink.extend(decisions)
-        if kernel_session is None:
-            return True, (), False
-        decision_symbols = {
-            decision.intent.intent.symbol.upper() for decision in decisions
-        }
-        outputs = kernel_session.submit_decisions(
+        return submit_historical_decisions(
             decisions,
+            kernel_session=kernel_session,
+            kernel_decision_sink=kernel_decision_sink,
             equity_usdt=config.deploy_capital_usd,
             batch_prefix="continuous-chronological",
-            market_prices={
+            market_prices_for=lambda decision_symbols: {
                 position.state.symbol: position.last_mark_price
                 for position in open_positions.values()
                 if position.state.symbol.upper() not in decision_symbols
             },
         )
-        feedback = historical_submission_feedback(outputs)
-        return feedback.accepted, feedback.rejection_keys, feedback.target_committed
 
     def _cancel_committed_entries_after_execution_rejection() -> None:
-        """Remove desired targets after the venue/twin refused their orders.
-
-        An accepted account target followed by a rejected execution is not an
-        open position, but leaving the desired target behind would silently
-        retry or reopen it on a later unrelated cycle. Submit explicit zero
-        replacements before the local provisional positions are discarded.
-        """
-
         assert kernel_session is not None
-        cancellations = neutralize_historical_decisions(
+        neutralize_rejected_entry_decisions(
             pending_entry_decisions,
-            reason="entry_execution_rejected",
             source="continuous_events_execution_rejection_compensation",
+            error_label="historical account kernel could not neutralize rejected entries",
+            submit=_submit_kernel_decisions,
         )
-        accepted, rejection_keys, _ = _submit_kernel_decisions(list(cancellations))
-        if not accepted:
-            raise RuntimeError(
-                "historical account kernel could not neutralize rejected entries: "
-                + ", ".join(rejection_keys)
-            )
 
     def _flush_pending_entries() -> None:
         nonlocal pending_entry_ts_ms, skipped_account_kernel
