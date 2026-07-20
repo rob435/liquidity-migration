@@ -90,12 +90,13 @@ MISSION QUEUE — work top-down; live statuses in `docs/tail_risk_program.md`:
    forward day, and a daily forward shadow comparison (intensity-gross vs
    deployed gate — an always-on A/B in the rolling ledger, no runtime
    change).
-8. **P0.4 — history backfill.** A FULL-WINDOW run
-   (`BINANCE_START=2019-09-01`, default END) is required — a narrow
-   backward slice is refused by the builder's staging-coverage protection
-   (verified 2026-07-20). If no run is live (`ps` + the recorded log path),
-   launch it detached first; acceptance is the coverage receipt.
-   Acquisition only — no outcome inspection.
+8. **P0.4 — history backfill: BIG-PC JOB, do NOT run it on the Mac**
+   (operator instruction 2026-07-20). On the big PC only: a FULL-WINDOW run
+   (`BINANCE_START=2019-09-01`, default END) — a narrow backward slice is
+   refused by the builder's staging-coverage protection (verified).
+   Mac-side sessions treat P0.4 as delegated: verify the coverage receipt
+   when it lands, launch nothing locally. Acquisition only — no outcome
+   inspection.
 
 REPORTING:
 - An evidence note in `docs/research_summary.md` per completed study:
