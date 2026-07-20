@@ -686,7 +686,19 @@ class BybitPrivateClient:
             params["tpTriggerBy"] = tp_trigger_by
         if sl_trigger_by:
             params["slTriggerBy"] = sl_trigger_by
-        payload = self._call_once("set_trading_stop", **params)
+        try:
+            payload = self._call_once("set_trading_stop", **params)
+        except BybitDataError as exc:
+            # ErrCode 34040 "not modified": the requested stop levels are the
+            # levels already installed on the venue. The desired protection
+            # exists, so this is a converged no-op, not a failure — the same
+            # classification set_leverage applies to its 110043 twin. Treating
+            # it as a rejection latched reconciliation unhealthy and blocked
+            # execution health while venue protection was correct.
+            message = str(exc).lower()
+            if "34040" not in message and "not modified" not in message:
+                raise
+            return {"symbol": symbol, "retCode": 34040}
         return payload.get("result", {})
 
     def _call_optional(self, method_names: Iterable[str], **params: Any) -> dict[str, Any] | None:

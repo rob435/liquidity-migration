@@ -2308,3 +2308,74 @@ def test_get_trade_history_refuses_non_advancing_cursor(monkeypatch) -> None:
 
     with pytest.raises(bybit.BybitDataError, match="non-advancing"):
         client.get_trade_history(symbol="FOOUSDT", max_pages=10)
+
+
+def test_bybit_private_client_treats_trading_stop_not_modified_retcode_as_success(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_trading_stop(self, **params):
+            del params
+            return {"retCode": 34040, "retMsg": "not modified"}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+    result = client.set_trading_stop(symbol="TLMUSDT", stop_loss="0.0023054")
+
+    assert result == {"symbol": "TLMUSDT", "retCode": 34040}
+
+
+def test_bybit_private_client_treats_pybit_trading_stop_not_modified_exception_as_success(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_trading_stop(self, **params):
+            del params
+            raise RuntimeError("not modified (ErrCode: 34040) (ErrTime: 09:59:57)")
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+    result = client.set_trading_stop(symbol="TLMUSDT", stop_loss="0.0023054")
+
+    assert result == {"symbol": "TLMUSDT", "retCode": 34040}
+
+
+def test_bybit_private_client_still_rejects_other_trading_stop_errors(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_trading_stop(self, **params):
+            del params
+            return {"retCode": 10001, "retMsg": "params error"}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+    with pytest.raises(bybit_errors.BybitRequestRejected, match="set_trading_stop failed"):
+        client.set_trading_stop(symbol="TLMUSDT", stop_loss="0.0023054")

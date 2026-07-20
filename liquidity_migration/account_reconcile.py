@@ -29,6 +29,16 @@ DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
 # a wedged funding-recovery loop well inside one liveness cycle; position and
 # order truth keep their own tight bound.
 FUNDING_HEALTH_MAX_AGE_FLOOR_NS = 30 * 1_000_000_000
+# Position truth shares the failure mode: one reconciliation cycle runs the
+# multi-page funding recovery pass first (deliberately, so position truth is
+# refreshed last and freshest), so the previous position report legitimately
+# ages by cadence + funding duration + position duration. The 2x-cadence bound
+# (4s at the 2s default) turned that ordinary sequencing into false
+# "age_ns=~4-5s" staleness pages and BLOCKED execution health while venue and
+# local truth agreed. This floor absorbs one slow pass while still failing a
+# wedged reconciler well inside the 60s venue-fact liveness bound; it is half
+# the funding floor because position truth gates reduction admission.
+POSITION_HEALTH_MAX_AGE_FLOOR_NS = 15 * 1_000_000_000
 # The watchdog requires a journaled venue fact younger than one minute. A
 # 30-second checkpoint leaves room for one delayed reconciliation cycle.
 VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
@@ -72,13 +82,17 @@ class BybitAccountReconciler:
         fill_observer: Callable[[str], Any] | None = None,
         clock: Clock | None = None,
         settle_coin: str = "USDT",
+        health_max_age_floor_ns: int = POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     ) -> None:
         if not bool(getattr(client, "demo", False)):
             raise ValueError("Bybit account reconciler is demo-only")
+        if int(health_max_age_floor_ns) <= 0:
+            raise ValueError("position health max-age floor must be positive")
         self.kernel = kernel
         self.client = client
         self.rules = {symbol.upper(): rule for symbol, rule in instrument_rules.items()}
         self.clock = clock or SystemClock()
+        self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self.settle_coin = settle_coin
         self.native_protection_manager = native_protection_manager
         self.consumer = BybitAccountExecutionConsumer(
@@ -333,7 +347,8 @@ class BybitAccountReconciler:
         if report is None:
             raise RuntimeError("account reconciliation has not completed")
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
-        if age_ns < 0 or age_ns > max_age_ns:
+        bound_ns = max(int(max_age_ns), self.health_max_age_floor_ns)
+        if age_ns < 0 or age_ns > bound_ns:
             raise AccountReconciliationStaleError(
                 f"account reconciliation is stale: age_ns={age_ns}"
             )
@@ -359,7 +374,8 @@ class BybitAccountReconciler:
         if report is None:
             raise RuntimeError("account reconciliation has not completed")
         age_ns = self.clock.wall_time_ns() - report.observed_ts_ns
-        if age_ns < 0 or age_ns > max_age_ns:
+        bound_ns = max(int(max_age_ns), self.health_max_age_floor_ns)
+        if age_ns < 0 or age_ns > bound_ns:
             raise AccountReconciliationStaleError(
                 f"account reconciliation is stale: age_ns={age_ns}"
             )
