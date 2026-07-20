@@ -21,6 +21,17 @@ covers/24h). Exits: TP touch, left-decile, 48h cap. Window 2023-04 →
 Declared grid: liq ∈ {500k, 250k, 100k} × cap ∈ {5, 10} — the design doc
 does not pin the "one notch" number, so both relaxations are reported.
 
+## Verification verdict
+
+**The candidate knobs do NOT produce 8–10 admitted bets/day.** Candidate
+cell (250k / cap 10): mean 7.30 per gate-open day, **median 6**, p25 = 3,
+**88 of 683 open days with zero bets** (pump-clustered arrivals). Only 40%
+of open days reach ≥8. The prerequisite question is answered in the
+negative on both of its parts: the admitted-count target is missed, and the
+measured (ρ, per-bet vol) break the power table's day-count promises (see
+below). This is a completed verification with a negative result, not a
+failed replay.
+
 ## The two numbers (deployed constraints on)
 
 | liq | cap | bets/open-day | days ≥8 | ρ̂ | per-bet vol |
@@ -41,11 +52,14 @@ Stage totals (baseline cell, gate-open cycles): D9 202,151 → liquidity
 69,544 (34% pass) → event triggers 13,948 (**20% pass — the binding
 stage**) → age 7,989 → available 4,552 → admitted 4,473. Raising the cap
 5 → 10 adds only +0.1–0.2 bets/day (it binds on <2% of component-cycles);
-the liquidity notch adds +0.7 (250k) to +1.1 (100k). **The target ≥8–10
-bets/day is NOT reached by the candidate knobs under deployed constraints**
-(7.3 at 250k/10; 7.7 at 100k/10; 8.3–8.9 only with the circuit breaker and
-max_active removed). Getting past ~8 requires touching the event/age gates —
-explicitly a strategy change beyond this candidate.
+the liquidity notch adds +0.7 (250k) to +1.1 (100k); 8.3–8.9 is reached
+only with the circuit breaker and max_active removed, which is not the
+deployed object. Headroom arithmetic: the age-stage flow is ≈ 12.8
+component-entries per open day at the candidate liquidity notch — the
+no-event-gate ceiling — so reaching 8–10 requires substantially widening
+the event triggers, a lever the redesign doc names under lever 2 but the
+candidate config deliberately did not bundle. That would be a new declared
+design, not a re-parameterization of this one.
 
 ## Whether the power table's promises hold: they do not, as parameterized
 
