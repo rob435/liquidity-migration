@@ -1,0 +1,73 @@
+{
+ "code_commit": "910b03a70fb03632c7a0c846bba3884541bd6baa",
+ "created_utc": "2026-07-20T14:14:59.823776+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory Lane-1 funnel replay on seen data; no alpha or promotion claim",
+  "per-bet returns realize the deployed shape over the already-rendered window; V2 label-level holdout stays unread",
+  "the config commit, not this replay, is the registration"
+ ],
+ "files": {
+  "tk_daily_bets.parquet": {
+   "bytes": 12567,
+   "sha256": "5eee5ec45b44afd75de273c448984bfffadd647420f1963635e5ed6210c5f0a9"
+  },
+  "tk_funnel_grid.csv": {
+   "bytes": 1266,
+   "sha256": "6b31b3b9b155fc39f977ce382ac9aeadeae114f8a5690bd379f619f98f7d285e"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+  "residual_momentum": "c61d5a7ef643c7aab79b88dadf60185c33c1b6ea37926fb54123e07199ba2bc8",
+  "signal_window": [
+   "2023-04-04",
+   "2026-07-08"
+  ]
+ },
+ "kind": "strategy_research_v6_tk_breadth_funnel_replay",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "3eb8b55a574233062ec4302807e5ab8df30f33e0bea3cc3322b57c9fed55421e",
+ "params": {
+  "age_days_min": 240,
+  "btc_gate": "uptrend (deployed definition, fail closed)",
+  "components": [
+   [
+    "turn3p3",
+    "turn3_pop3",
+    0.3333333333333333
+   ],
+   [
+    "turn4p3",
+    "turn4_pop3",
+    0.2222222222222222
+   ],
+   [
+    "turn4p5",
+    "turn4_pop5",
+    0.4444444444444444
+   ]
+  ],
+  "cooldown": "held-while-open only (live semantics; no post-exit cooldown)",
+  "entry_delay_hours": 2,
+  "grid": {
+   "liq_turnover_min": [
+    500000.0,
+    250000.0,
+    100000.0
+   ],
+   "max_new_entries_per_cycle": [
+    5,
+    10
+   ]
+  },
+  "max_hold_hours": 48,
+  "rho_estimator": "pooled same-day pairwise MoM over demeaned gross returns",
+  "rmom_quantile_live": 0.33,
+  "take_profit_pct": 0.12
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

@@ -381,6 +381,26 @@ failure mode (2025-03/04 −17.7pp) and −2.36pp on tail-day trades. Its eviden
 is exclusively post-commit forward days; promotion or any runtime change
 remains an owner decision.
 
+## Breadth funnel replay T-K (exploratory, 2026-07-20)
+
+The Lane-1 prerequisite for `continuous_breadth_v1`
+(`reports/strategy-research-v3/t-k/2026-07-20/`): the live CONTINUOUS
+admission funnel replayed over 2023-04 → 2026-07 (683 gate-open days) with
+the candidate knobs, under deployed constraints (BTC gate, max_active,
+adverse-exit circuit breaker). The two numbers: **7.30 admitted
+bets/gate-open day** at the candidate 250k/cap-10 knobs (baseline 6.55;
+7.70 at 100k; the ≥8–10 target is not reached — the cap binds on <2% of
+cycles and the event triggers are the true bottleneck at 20% pass), and
+**ρ̂ ≈ 0.21** (pooled same-day pairwise estimator). The decisive third
+number: measured per-bet vol ≈ **1,000 bps**, not the power table's assumed
+300 — with measured inputs, a 15/25 bps edge needs ≈15.6/5.6 years at any
+achievable breadth, and the candidate knobs cut days-to-significance by
+only ~9% versus baseline. Admission breadth alone cannot deliver the
+promised learning rate; the operative levers are per-bet vol (trade shape),
+edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
+owner decision; if committed, its forward record accrues correctly but
+cannot adjudicate a 15–25 bps edge on a useful horizon.
+
 ## Progressive model adopted (2026-07-19)
 
 By owner direction the repository operates under the Progressive Evidence
