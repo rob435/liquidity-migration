@@ -39,6 +39,94 @@ K3_MIN_ROUND_TRIPS_AT_DAY90 = {"continuous": 30, "long": 15}
 # this share of the tightest drawdown limit.
 UNATTRIBUTED_PROVISIONAL_FRACTION = 0.10
 
+# R3c protection-premium accounting (tail-risk program P1.4): a PNL row is
+# attributed to a native-stop close when its symbol matches and its exchange
+# timestamp lies within this window of a verified_native_stop fill.
+NATIVE_STOP_MATCH_WINDOW_NS = 180 * 1_000_000_000
+
+
+def _native_stop_fills(events: Sequence[AccountEvent]) -> list[dict[str, Any]]:
+    fills: list[dict[str, Any]] = []
+    for event in events:
+        if event.event_type != AccountEventType.FILL.value:
+            continue
+        payload = event.payload
+        if str(payload.get("external_execution_origin") or "") != "verified_native_stop":
+            continue
+        fills.append(
+            {
+                "symbol": str(event.symbol or payload.get("symbol") or "").upper(),
+                "ts_ns": int(payload.get("exchange_ts_ns") or event.wall_ts_ns),
+                "fee_usdt": float(payload.get("fee_usdt") or 0.0),
+                "execution_id": str(payload.get("execution_id") or ""),
+            }
+        )
+    return fills
+
+
+def protection_premium_section(
+    events: Sequence[AccountEvent],
+    *,
+    epoch_start_ns: int,
+) -> dict[str, Any]:
+    """R3c: native-stop realized cost as an explicit insurance-premium line.
+
+    The venue's native stops are an operational seatbelt research never owned;
+    this section attributes their realized P&L so the safety/alpha boundary
+    stays visible in the weekly forward record. Attribution: PNL rows matched
+    by symbol within ±3 minutes of a verified_native_stop fill (the fill and
+    its closed-PnL row are separate journal producers); unmatched fills are
+    reported and flag the line provisional rather than silently wrong.
+    """
+    fills = [f for f in _native_stop_fills(events) if f["ts_ns"] >= epoch_start_ns]
+    pnl_rows: list[dict[str, Any]] = []
+    for event in events:
+        if event.event_type != AccountEventType.PNL.value:
+            continue
+        payload = event.payload
+        ts_ns = int(payload.get("exchange_ts_ns") or event.wall_ts_ns)
+        if ts_ns < epoch_start_ns:
+            continue
+        pnl_rows.append(
+            {
+                "symbol": str(event.symbol or payload.get("symbol") or "").upper(),
+                "ts_ns": ts_ns,
+                "net_pnl_usdt": float(payload.get("net_pnl_usdt") or 0.0),
+                "pnl_key": str(payload.get("pnl_key") or ""),
+            }
+        )
+    matched_keys: set[str] = set()
+    matched_net = 0.0
+    unmatched_fills = 0
+    for fill in fills:
+        candidates = [
+            row
+            for row in pnl_rows
+            if row["symbol"] == fill["symbol"]
+            and abs(row["ts_ns"] - fill["ts_ns"]) <= NATIVE_STOP_MATCH_WINDOW_NS
+            and row["pnl_key"] not in matched_keys
+        ]
+        if not candidates:
+            unmatched_fills += 1
+            continue
+        best = min(candidates, key=lambda row: abs(row["ts_ns"] - fill["ts_ns"]))
+        matched_keys.add(best["pnl_key"])
+        matched_net += best["net_pnl_usdt"]
+    return {
+        "native_stop_fills_in_epoch": len(fills),
+        "symbols": sorted({f["symbol"] for f in fills}),
+        "fill_fees_usdt": round(sum(f["fee_usdt"] for f in fills), 8),
+        "matched_pnl_rows": len(matched_keys),
+        "realized_premium_net_usdt": round(matched_net, 8),
+        "unmatched_fills": unmatched_fills,
+        "provisional": unmatched_fills > 0,
+        "note": (
+            "R3c insurance-premium line: realized P&L of venue-native protection"
+            " closes (matched by symbol within ±3 min); negative = premium paid"
+            " for the operational seatbelt"
+        ),
+    }
+
 
 def _pnl_rows_by_key(events: Sequence[AccountEvent]) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
@@ -157,6 +245,9 @@ def evaluate_kill_criteria(
             "material amount makes the per-sleeve K1 read provisional"
         ),
     }
+    report["protection_premium"] = protection_premium_section(
+        pnl_events, epoch_start_ns=epoch_start_ns
+    )
     report["tripped"] = tripped
     report["verdict"] = ("TRIP: " + ", ".join(tripped)) if tripped else "NO TRIP"
     return report
