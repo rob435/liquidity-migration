@@ -23,6 +23,7 @@ import polars as pl
 import pytest
 
 import liquidity_migration.long_native_event_demo as lnd
+import liquidity_migration.strategy_planning as planning_module
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from liquidity_migration.account_route import (
     AccountRoute,
@@ -1016,7 +1017,7 @@ def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, 
         "signal_close": 100.0,
         "live_price": 99.0,
         "retrace_threshold": 99.0,
-        "sniper_deadline_ms": signal_ts_ms + 6 * lnd.MS_PER_HOUR,
+        "sniper_deadline_ms": signal_ts_ms + 6 * MS_PER_HOUR,
         "entry_reason": "sniper_retrace",
         "entry_ready_ts_ms": signal_ts_ms,
         "stop_loss_pct": 0.1,
@@ -1148,14 +1149,14 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
         environment="demo",
         equity_usdt=12_345.0,
     )
-    real_health_check = lnd.require_recent_account_owner_health
+    real_health_check = planning_module.require_recent_account_owner_health
     owner_health_call: dict[str, Any] = {}
 
     def owner_health(*args: Any, **kwargs: Any) -> Any:
         owner_health_call.update(kwargs)
         return real_health_check(*args, **kwargs)
 
-    monkeypatch.setattr(lnd, "require_recent_account_owner_health", owner_health)
+    monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
 
     payload = _run_cycle(tmp_path / "long", demo)
 

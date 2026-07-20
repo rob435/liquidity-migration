@@ -8,13 +8,13 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
-from .account_kernel import (
-    AccountExecutionKernel,
+from .account_contracts import (
     AccountRiskSnapshot,
     AccountState,
     InstrumentRules,
     MarketInputRef,
 )
+from .account_kernel import AccountExecutionKernel
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import (

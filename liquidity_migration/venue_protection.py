@@ -11,13 +11,13 @@ from functools import wraps
 from threading import RLock
 from typing import Any, Concatenate, Mapping, ParamSpec, Sequence, TypeVar
 
-from .account_kernel import (
-    AccountExecutionKernel,
+from .account_contracts import (
     AccountState,
     AccountTransitionError,
     InstrumentRules,
     PositionState,
 )
+from .account_kernel import AccountExecutionKernel
 from .account_strategy_state import component_execution_anchors_from_snapshot
 from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_serialization import canonical_json

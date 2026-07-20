@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
+)
+from .account_kernel import (
     account_transactions_path,
     read_account_journal_bytes,
     reduce_account_events,

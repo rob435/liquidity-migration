@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
+)
+from .account_kernel import (
     read_account_journal,
     verify_account_journal,
 )

@@ -14,7 +14,9 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
 )
 from liquidity_migration.account_reconcile import (
+    POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
+    AccountReconciliationStaleError,
     BybitAccountReconciler,
 )
 from liquidity_migration.deterministic_runtime import VirtualClock
@@ -809,3 +811,38 @@ def test_rest_reconcile_queries_adopted_native_order_by_venue_id(
     assert len(adopted) == 1
     assert adopted[0].status == "partially_filled_cancelled"
     assert kernel.state().working_signed_qty("BUSDT") == 0.0
+
+
+def test_position_health_floor_absorbs_one_slow_reconcile_pass(tmp_path: Path) -> None:
+    """A 4-5s report age from ordinary funding-then-position sequencing must not page."""
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(command_id),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.reconcile_once()
+
+    clock.advance_ns(5_000_000_000)
+    reconciler.require_recent_healthy(max_age_ns=4_000_000_000)
+    reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=4_000_000_000)
+
+
+def test_position_health_floor_still_fails_a_wedged_reconciler(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(command_id),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.reconcile_once()
+
+    clock.advance_ns(POSITION_HEALTH_MAX_AGE_FLOOR_NS + 1)
+    with pytest.raises(AccountReconciliationStaleError, match="is stale"):
+        reconciler.require_recent_healthy(max_age_ns=4_000_000_000)
+    with pytest.raises(AccountReconciliationStaleError, match="is stale"):
+        reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=4_000_000_000)

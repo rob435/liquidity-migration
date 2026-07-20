@@ -20,11 +20,11 @@ from typing import Any, Mapping, Sequence, cast
 import polars as pl
 
 from .artifact_snapshot import read_stable_file
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
-    reduce_account_events,
 )
+from .account_kernel import reduce_account_events
 from .deterministic_serialization import canonical_json
 from .market_capture import (
     DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS,

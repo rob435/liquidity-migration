@@ -40,13 +40,8 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms, is_weekend_ms
-from .account_intent_client import (
-    ENTRY_ATTEMPT_METADATA_KEY,
-    AccountTargetPublisher,
-    publish_exit_first_target_requests,
-    unresolved_target_snapshot,
-)
+from ._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
+from .account_intent_client import publish_exit_first_target_requests
 from .account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
@@ -54,17 +49,9 @@ from .account_candidate_universe import (
     require_scheduled_retirements_flat,
     require_profile_binding,
 )
-from .account_owner_health import (
-    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    require_recent_account_owner_health,
-)
 from .account_route import require_account_route
 from .account_service import RequestedIntent, SleeveAdapterKind
-from .account_strategy_state import (
-    canonical_strategy_trade_rows,
-    target_reservation_rows,
-    terminal_entry_attempt_keys,
-)
+from .account_strategy_state import target_reservation_rows
 from .bybit_market_data import BybitMarketData
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
@@ -73,7 +60,7 @@ from .event_demo_data import (
     _demo_instruments,
     _download_recent_1h_klines,
     _float,
-    _floor_hour_ms,
+    _kline_window,
     _max_int,
     _prune_cycle_reports,
     _price_lookup_from_tickers_and_klines,
@@ -97,13 +84,18 @@ from .long_native import (
 )
 from .storage import exclusive_file_lock, write_dataset
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME, long_trade_id
+from .strategy_planning import (
+    account_owner_equity_or_error,
+    sleeve_planning_snapshot,
+    suppress_target_intents,
+)
 from .strategy_funnel import (
     DecisionFunnelObserver,
     finalize_funnel_row,
     gate_state,
     observe_funnel_rows_safely,
 )
-from .strategy_targets import component_target_intent
+from .strategy_targets import component_target_intent, exit_target_intents
 from .strategy_target_replay import PublishedTargetCyclePayload
 from .universe import build_current_universe_table
 
@@ -381,19 +373,10 @@ def run_long_native_demo_cycle(
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
         mark_stage("universe")
 
-        account_owner_health_error = ""
-        try:
-            owner_health = require_recent_account_owner_health(
-                route.account_path,
-                environment=owner_environment,
-                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-                expected_account_id=route.account_id,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            account_owner_health_error = f"{type(exc).__name__}: {exc}"[:500]
-            equity_usdt = 0.0
-        else:
-            equity_usdt = owner_health.equity_usdt
+        equity_usdt, account_owner_health_error = account_owner_equity_or_error(
+            route,
+            environment=owner_environment,
+        )
         account_state_source = f"account_owner_health:{owner_environment}"
         mark_stage("account_health")
 
@@ -434,23 +417,15 @@ def run_long_native_demo_cycle(
         )
         mark_stage("features")
 
-        target_publisher = AccountTargetPublisher(route)
-        unresolved_targets = unresolved_target_snapshot(
-            target_publisher.inbox,
+        planning = sleeve_planning_snapshot(
+            route,
             sleeve=SleeveAdapterKind.LONG,
-        )
-        account_root = route.account_path
-        all_trades = canonical_strategy_trade_rows(
-            account_root,
-            sleeve=SleeveAdapterKind.LONG.value,
             strategy_ids=(strategy_id,),
         )
-        terminal_entry_attempts = terminal_entry_attempt_keys(
-            account_root,
-            sleeve=SleeveAdapterKind.LONG.value,
-            strategy_ids=(strategy_id,),
-            inbox=target_publisher.inbox,
-        )
+        target_publisher = planning.publisher
+        unresolved_targets = planning.unresolved_targets
+        all_trades = planning.canonical_trades
+        terminal_entry_attempts = planning.terminal_entry_attempts
         margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -465,12 +440,6 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             default_leverage=demo.entry_leverage,
         )
-        unresolved_exit_suppressions = sum(
-            intent.intent.target_key in unresolved_targets.target_keys for intent in exit_target_intents
-        )
-        exit_target_intents = [
-            intent for intent in exit_target_intents if intent.intent.target_key not in unresolved_targets.target_keys
-        ]
         mark_stage("exit_targets")
 
         # Entry detection: derive FC candidates from the latest closed daily
@@ -506,22 +475,17 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             strategy_id=strategy_id,
         )
-        unresolved_entry_suppressions = sum(
-            intent.intent.target_key in unresolved_targets.target_keys for intent in entry_target_intents
+        suppression = suppress_target_intents(
+            exit_intents=exit_target_intents,
+            entry_intents=entry_target_intents,
+            unresolved_target_keys=unresolved_targets.target_keys,
+            terminal_entry_attempts=terminal_entry_attempts,
         )
-        terminal_entry_suppressions = sum(
-            str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts
-            for intent in entry_target_intents
-            if intent.intent.target_key not in unresolved_targets.target_keys
-        )
-        exit_target_keys = {intent.intent.target_key for intent in exit_target_intents}
-        entry_target_intents = [
-            intent
-            for intent in entry_target_intents
-            if intent.intent.target_key not in unresolved_targets.target_keys
-            and str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
-            and intent.intent.target_key not in exit_target_keys
-        ]
+        exit_target_intents = suppression.exit_intents
+        entry_target_intents = suppression.entry_intents
+        unresolved_exit_suppressions = suppression.unresolved_exit_suppressions
+        unresolved_entry_suppressions = suppression.unresolved_entry_suppressions
+        terminal_entry_suppressions = suppression.terminal_entry_attempt_suppressions
         publication = publish_exit_first_target_requests(
             target_publisher,
             batch_prefix=f"long-target/{strategy_id}/{cycle_now_ms}",
@@ -672,12 +636,6 @@ def run_long_native_demo_cycle(
         publication=publication,
         route=target_publisher.route,
     )
-
-
-def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
-    end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-    start_ms = end_ms - exact_duration_ms(days=lookback_days)
-    return start_ms, end_ms
 
 
 def _apply_median_universe_selection(
@@ -1158,34 +1116,19 @@ def _long_exit_target_intents(
 ) -> list[RequestedIntent]:
     """Translate strategy exits to replacement zero targets without venue I/O."""
 
-    lookup = {str(row.get("trade_id") or ""): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
-    intents: list[RequestedIntent] = []
-    for plan in exits:
-        trade_id = str(plan.get("trade_id") or "")
-        trade = lookup.get(trade_id)
-        if not trade:
-            continue
-        symbol = str(plan.get("symbol") or trade.get("symbol") or "").upper()
-        intents.append(
-            component_target_intent(
-                adapter_kind=SleeveAdapterKind.LONG,
-                action="exit",
-                decision_ts_ms=now_ms,
-                strategy_id=strategy_id,
-                component_id=trade_id,
-                symbol=symbol,
-                signed_notional_usdt=0.0,
-                leverage=_float(trade.get("entry_leverage")) or default_leverage,
-                reason=str(plan.get("exit_reason") or "time_stop"),
-                metadata={
-                    "source": "long_native_target_adapter",
-                    "owner_sleeve": "long",
-                    "prior_trade_id": trade_id,
-                    "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
-                },
-            )
-        )
-    return intents
+    return exit_target_intents(
+        exits,
+        all_trades,
+        adapter_kind=SleeveAdapterKind.LONG,
+        strategy_id=strategy_id,
+        now_ms=now_ms,
+        default_leverage=default_leverage,
+        source="long_native_target_adapter",
+        default_reason="time_stop",
+        extra_metadata=lambda plan, trade: {
+            "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
+        },
+    )
 
 
 def _long_entry_target_intents(

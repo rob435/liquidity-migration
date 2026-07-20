@@ -87,6 +87,41 @@ def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     return end_ms - exact_duration_ms(days=lookback_days), end_ms
 
 
+def top_turnover_kline_universe(
+    market: BybitMarketData,
+    *,
+    top_n: int,
+    label: str,
+) -> list[str]:
+    """Top-N active linear USDT-perps by 24h turnover.
+
+    Shared universe fetcher for every sleeve's KlineStreamManager hook; the
+    hourly refresh in the manager re-runs this, so newly admitted symbols join
+    the bootstrap+WS stream within the refresh interval.  A fetch failure
+    returns an empty universe so the manager falls back to per-cycle REST.
+    """
+
+    try:
+        tickers = market.get_tickers()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("%s kline universe fetch failed (tickers): %s", label, exc)
+        return []
+    candidates: list[tuple[float, str]] = []
+    for row in tickers:
+        symbol = str(row.get("symbol") or "")
+        if not symbol or not symbol.endswith("USDT"):
+            continue
+        try:
+            turnover = float(row.get("turnover24h") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if turnover <= 0.0:
+            continue
+        candidates.append((turnover, symbol))
+    candidates.sort(reverse=True)
+    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+
+
 def _utc_now_ms() -> int:
     return int(datetime.now(tz=UTC).timestamp() * 1000)
 

@@ -10,7 +10,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .account_kernel import AccountRiskPolicy, InstrumentRules
+from .account_contracts import (
+    AccountRiskPolicy,
+    InstrumentRules,
+)
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .account_service_bybit import VerifiedBybitDemoRulesProvider
 from .demo_rule_probe import (

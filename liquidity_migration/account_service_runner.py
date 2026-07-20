@@ -19,11 +19,11 @@ from .account_execution_config import (
     load_risk_policy,
     require_registered_demo_rule_max_age_hours,
 )
-from .account_kernel import (
-    AccountExecutionKernel,
+from .account_contracts import (
     AccountRiskSnapshot,
     MarketInputRef,
 )
+from .account_kernel import AccountExecutionKernel
 from .account_market_readiness import (
     RequestedMarketWarmupGate,
     require_registered_request_market_warmup_timeout,

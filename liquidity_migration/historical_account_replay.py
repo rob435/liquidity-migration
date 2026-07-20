@@ -10,11 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEventType,
-    AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
     InstrumentRules,
@@ -22,6 +21,7 @@ from .account_kernel import (
     PositionState,
     TargetBatchResult,
 )
+from .account_kernel import AccountExecutionKernel
 from .account_route import AccountRoute
 from .account_service import (
     AccountExecutionService,
@@ -250,6 +250,69 @@ def neutralize_historical_decisions(
             ),
         ))
     return tuple(output)
+
+
+def submit_historical_decisions(
+    decisions: Sequence["HistoricalTargetDecision"],
+    *,
+    kernel_session: "HistoricalAccountSession | None",
+    kernel_decision_sink: "list[HistoricalTargetDecision] | None",
+    equity_usdt: float,
+    batch_prefix: str,
+    market_prices_for: "Callable[[set[str]], Mapping[str, float]]",
+) -> tuple[bool, tuple[str, ...], bool]:
+    """Submit one historical decision batch and report normalized feedback.
+
+    Shared submission core for every historical engine.  The modeled decision
+    reference is the executable book for a symbol being changed in this batch
+    (for example a stop/TP price); supplying a bar close for that same symbol
+    would create two contradictory books.  ``HistoricalAccountSession`` injects
+    every decision reference itself, so ``market_prices_for`` receives the
+    batch's upper-cased symbols and must return marks only for the other
+    active symbols.
+    """
+
+    if not decisions:
+        return True, (), False
+    if kernel_decision_sink is not None:
+        kernel_decision_sink.extend(decisions)
+    if kernel_session is None:
+        return True, (), False
+    decision_symbols = {
+        decision.intent.intent.symbol.upper() for decision in decisions
+    }
+    outputs = kernel_session.submit_decisions(
+        list(decisions),
+        equity_usdt=equity_usdt,
+        batch_prefix=batch_prefix,
+        market_prices=dict(market_prices_for(decision_symbols)),
+    )
+    feedback = historical_submission_feedback(outputs)
+    return feedback.accepted, feedback.rejection_keys, feedback.target_committed
+
+
+def neutralize_rejected_entry_decisions(
+    decisions: Sequence["HistoricalTargetDecision"],
+    *,
+    source: str,
+    error_label: str,
+    submit: "Callable[[list[HistoricalTargetDecision]], tuple[bool, tuple[str, ...], bool]]",
+) -> None:
+    """Replace committed-but-execution-rejected entries with explicit zeros.
+
+    An accepted account target followed by a rejected execution is not an open
+    position, but leaving the desired target behind would silently retry or
+    reopen it on a later unrelated cycle.
+    """
+
+    cancellations = neutralize_historical_decisions(
+        decisions,
+        reason="entry_execution_rejected",
+        source=source,
+    )
+    accepted, rejection_keys, _ = submit(list(cancellations))
+    if not accepted:
+        raise RuntimeError(f"{error_label}: " + ", ".join(rejection_keys))
 
 
 def synthetic_historical_rules_for_symbols(

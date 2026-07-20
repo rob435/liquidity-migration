@@ -26,6 +26,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .env_flags import explicitly_false_or_unset
 from .account_reset_receipt import MANAGED_UNITS as ISSUANCE_QUIESCENCE_UNITS
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .candidate_rule_coverage import build_candidate_rule_coverage
@@ -87,7 +88,6 @@ REQUIRED_ENVIRONMENT_PATHS = (
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _UNIT = re.compile(r"liquidity-migration-[a-z0-9-]+\.service")
-_FALSE_VALUES = {"", "0", "false", "no", "off"}
 _MAX_RECEIPT_SIZE = 1024 * 1024
 _MAX_GIT_TREE_MANIFEST_SIZE = 16 * 1024 * 1024
 _TRUSTED_GIT = Path("/usr/bin/git")
@@ -1010,7 +1010,7 @@ def _validate_environments(
         raise ValueError("demo credentials are missing")
     if any(credentials.get(key) for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")):
         raise ValueError("operational credential file must not contain mainnet credentials")
-    if credentials.get("REAL_MONEY", "").strip().lower() not in _FALSE_VALUES:
+    if not explicitly_false_or_unset(credentials.get("REAL_MONEY")):
         raise ValueError("operational credential file does not explicitly disable REAL_MONEY")
     for key in (
         "LONG_SLEEVE",
@@ -1484,7 +1484,7 @@ def verify_operational_authorization(
         machine_id_path=machine_id_path,
         unit=unit,
     )
-    if os.environ.get("REAL_MONEY", "").strip().lower() not in _FALSE_VALUES:
+    if not explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
         raise ValueError("runtime environment enables or ambiguously sets REAL_MONEY")
     if os.environ.get("BYBIT_REAL_API_KEY") or os.environ.get("BYBIT_REAL_API_SECRET"):
         raise ValueError("runtime environment contains mainnet credentials")

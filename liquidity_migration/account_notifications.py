@@ -9,12 +9,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
-    AccountExecutionKernel,
     AccountState,
 )
+from .account_kernel import AccountExecutionKernel
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 

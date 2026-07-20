@@ -24,7 +24,8 @@ from ._common import (
     is_weekend_ms,
     pct,
 )
-from .account_kernel import AccountRiskPolicy, verify_account_journal
+from .account_contracts import AccountRiskPolicy
+from .account_kernel import verify_account_journal
 from .account_service import SleeveAdapterKind
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
@@ -41,8 +42,8 @@ from .execution_adapters import ExecutionTwinConfig, LatencyProfile
 from .historical_account_replay import (
     HistoricalAccountSession,
     HistoricalTargetDecision,
-    historical_submission_feedback,
-    neutralize_historical_decisions,
+    neutralize_rejected_entry_decisions,
+    submit_historical_decisions,
     synthetic_historical_rules_for_symbols,
 )
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, long_trade_id
@@ -952,46 +953,33 @@ def _run_long_pipeline(
         *,
         batch_prefix: str,
     ) -> tuple[bool, tuple[str, ...], bool]:
-        if not decisions:
-            return True, (), False
-        if kernel_decision_sink is not None:
-            kernel_decision_sink.extend(decisions)
-        decision_symbols = {
-            decision.intent.intent.symbol.upper() for decision in decisions
-        }
-        market_prices = _market_prices(
-            max(decision.wall_ts_ns for decision in decisions) // 1_000_000
-        )
-        # The modeled decision reference is the executable book for a symbol
-        # being changed in this batch (for example a stop/TP price).  Supplying
-        # the bar close for that same symbol creates two contradictory books.
-        # HistoricalAccountSession injects every decision reference itself, so
-        # pass only marks required for the other active symbols.
-        for symbol in decision_symbols:
-            market_prices.pop(symbol, None)
-        outputs = kernel_session.submit_decisions(
+        def _marks(decision_symbols: set[str]) -> dict[str, float]:
+            market_prices = _market_prices(
+                max(decision.wall_ts_ns for decision in decisions) // 1_000_000
+            )
+            for symbol in decision_symbols:
+                market_prices.pop(symbol, None)
+            return market_prices
+
+        return submit_historical_decisions(
             decisions,
+            kernel_session=kernel_session,
+            kernel_decision_sink=kernel_decision_sink,
             equity_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT,
             batch_prefix=batch_prefix,
-            market_prices=market_prices,
+            market_prices_for=_marks,
         )
-        feedback = historical_submission_feedback(outputs)
-        return feedback.accepted, feedback.rejection_keys, feedback.target_committed
 
     def _neutralize_rejected_entries(decisions: list[HistoricalTargetDecision]) -> None:
-        cancellations = neutralize_historical_decisions(
+        neutralize_rejected_entry_decisions(
             decisions,
-            reason="entry_execution_rejected",
             source="long_native_execution_rejection_compensation",
+            error_label="historical LONG account kernel could not neutralize rejected entries",
+            submit=lambda cancellations: _submit_kernel_decisions(
+                cancellations,
+                batch_prefix="long-native-entry-compensation",
+            ),
         )
-        accepted, rejection_keys, _ = _submit_kernel_decisions(
-            list(cancellations),
-            batch_prefix="long-native-entry-compensation",
-        )
-        if not accepted:
-            raise RuntimeError(
-                "historical LONG account kernel could not neutralize rejected entries: " + ", ".join(rejection_keys)
-            )
 
     pending_exits: list[tuple[dict[str, Any], HistoricalTargetDecision]] = []
 

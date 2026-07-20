@@ -19,14 +19,14 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Iterable, Mapping
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
-    AccountExecutionKernel,
     InstrumentRules,
     MarketInputRef,
     OrderCommand,
     TargetBatchResult,
 )
+from .account_kernel import AccountExecutionKernel
 from .deterministic_runtime import DeterministicIds
 
 
