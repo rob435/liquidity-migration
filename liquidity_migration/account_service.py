@@ -29,6 +29,7 @@ from .account_kernel import (
     MarketInputRef,
     PositionState,
     TargetBatchResult,
+    _quantized_down,
 )
 from .account_route import AccountRoute, require_account_route
 from .artifact_snapshot import read_stable_file
@@ -328,6 +329,11 @@ class AccountConvergenceItem:
     exhausted: bool
     reduce_only: bool
     status: str
+    # True when no venue-admissible order can express the residual (below
+    # minimum qty, or below minimum notional for an exposure increase). The
+    # position is as converged as venue granularity allows; retrying an
+    # inexpressible order could only exhaust and page.
+    venue_minimum_dust: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +351,8 @@ class AccountConvergenceReport:
     @property
     def healthy(self) -> bool:
         return all(
-            not item.exhausted and item.age_ns < self.grace_ns
+            item.venue_minimum_dust
+            or (not item.exhausted and item.age_ns < self.grace_ns)
             for item in self.items
         )
 
@@ -355,7 +362,8 @@ class AccountConvergenceReport:
         overdue = [
             item
             for item in self.items
-            if item.exhausted or item.age_ns >= self.grace_ns
+            if not item.venue_minimum_dust
+            and (item.exhausted or item.age_ns >= self.grace_ns)
         ]
         detail = ", ".join(
             f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
@@ -1515,26 +1523,45 @@ class AccountExecutionService:
             no_working = working_order_count == 0
             residual_pending = abs(residual) > tolerance
             can_rebuild = bool(target_rows)
+            reduce_only = (
+                abs(target_qty) + tolerance < abs(position_qty)
+                and target_qty * position_qty >= -tolerance
+            )
+            venue_minimum_dust = (
+                no_working
+                and residual_pending
+                and self._residual_below_venue_minimum(
+                    symbol=symbol,
+                    residual=residual,
+                    reduce_only=reduce_only,
+                    state=state,
+                )
+            )
             exhausted = (
                 no_working
                 and residual_pending
+                and not venue_minimum_dust
                 and (attempts >= self.max_convergence_retries or not can_rebuild)
             )
-            retryable = no_working and residual_pending and can_rebuild and not exhausted
+            retryable = (
+                no_working
+                and residual_pending
+                and can_rebuild
+                and not exhausted
+                and not venue_minimum_dust
+            )
             next_retry_ts_ns: int | None = None
             if retryable:
                 exponent = min(attempts, 62)
                 next_retry_ts_ns = retry_anchor_ns + (
                     self.convergence_retry_backoff_ns * (2**exponent)
                 )
-            reduce_only = (
-                abs(target_qty) + tolerance < abs(position_qty)
-                and target_qty * position_qty >= -tolerance
-            )
             if not no_working:
                 status = "working"
-            elif not can_rebuild:
+            elif not can_rebuild and not venue_minimum_dust:
                 status = "missing_desire"
+            elif venue_minimum_dust:
+                status = "converged_within_venue_minimum"
             elif exhausted:
                 status = "retry_exhausted"
             elif next_retry_ts_ns is not None and now_ns < next_retry_ts_ns:
@@ -1573,6 +1600,7 @@ class AccountExecutionService:
                 exhausted=exhausted,
                 reduce_only=reduce_only,
                 status=status,
+                venue_minimum_dust=venue_minimum_dust,
             )
             plans.append(_ConvergencePlan(item=item, targets=target_rows))
         unconverged_symbols = {plan.item.symbol for plan in plans}
@@ -1580,6 +1608,46 @@ class AccountExecutionService:
             if symbol not in unconverged_symbols:
                 del self._unconverged_first_observed_ns[symbol]
         return tuple(plans)
+
+    def _residual_below_venue_minimum(
+        self,
+        *,
+        symbol: str,
+        residual: float,
+        reduce_only: bool,
+        state: Any,
+    ) -> bool:
+        """True when no venue-admissible order can express the residual.
+
+        A partial terminal fill can leave dust smaller than the venue's
+        minimum order (minimum qty always; minimum notional for an exposure
+        increase). The position is then as converged as venue granularity
+        allows, and retrying an inexpressible order could only exhaust and
+        page. Unknown rules or prices fail toward the ordinary retry path.
+        """
+
+        try:
+            rules = self.rules_provider.current([symbol])
+        except Exception:  # noqa: BLE001 - unknown rules keep ordinary retries
+            return False
+        rule = rules.get(symbol) if isinstance(rules, Mapping) else None
+        if rule is None or rule.qty_step <= 0.0:
+            return False
+        tolerance = self.risk_policy.quantity_tolerance
+        qty = abs(_quantized_down(residual, rule.qty_step))
+        if qty <= tolerance:
+            return True
+        if qty + tolerance < rule.min_qty:
+            return True
+        if not reduce_only and rule.min_notional > 0.0:
+            market = state.latest_market_inputs.get(symbol) or {}
+            try:
+                price = float(market.get("reference_price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0.0 and qty * price + tolerance < rule.min_notional:
+                return True
+        return False
 
     @staticmethod
     def _orphan_observed_since_ns(

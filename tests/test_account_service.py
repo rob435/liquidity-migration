@@ -1909,3 +1909,76 @@ def test_queued_replacement_does_not_cross_an_outstanding_working_order(tmp_path
     assert service.convergence_report().converged
     assert service.run_once(inbox) is None
     assert adapter.submit_calls == 1
+
+
+def test_sub_minimum_residual_is_converged_within_venue_granularity(tmp_path: Path) -> None:
+    """A partial terminal fill can leave dust no venue-admissible order can
+    express (here 0.05 against a 0.1 qty step). Retrying an impossible order
+    only exhausts and pages; the item must classify as converged within venue
+    granularity and stay healthy without retries."""
+
+    adapter = ScriptedExecutionAdapter("partial_cancel", partial_qty=1.95)
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        convergence_health_grace_ns=500,
+        max_convergence_retries=1,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(_request(_route(tmp_path),
+        request_id="dust-entry",
+        batch_id="dust-entry",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    ))
+    assert service.run_once(inbox) is not None
+
+    report = service.convergence_report()
+    assert report.items
+    item = report.items[0]
+    assert item.position_signed_qty == pytest.approx(1.95)
+    assert abs(item.residual_signed_qty) == pytest.approx(0.05)
+    assert item.venue_minimum_dust
+    assert item.status == "converged_within_venue_minimum"
+    assert not item.retryable
+    assert not item.exhausted
+    assert report.healthy
+    report.require_healthy()
+
+    # Dust is not ageable work: far beyond the grace window it stays healthy
+    # and convergence has nothing to retry.
+    clock.advance_ns(1_000_000)
+    later = service.convergence_report()
+    assert later.healthy
+    assert service.converge_once() is None
+
+
+def test_expressible_residual_still_retries_and_can_exhaust(tmp_path: Path) -> None:
+    adapter = ScriptedExecutionAdapter("partial_cancel", "reject", partial_qty=1.9)
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        convergence_health_grace_ns=500,
+        max_convergence_retries=1,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(_request(_route(tmp_path),
+        request_id="expressible-entry",
+        batch_id="expressible-entry",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    ))
+    assert service.run_once(inbox) is not None
+
+    report = service.convergence_report()
+    assert report.items
+    item = report.items[0]
+    assert abs(item.residual_signed_qty) == pytest.approx(0.1)
+    assert not item.venue_minimum_dust
+    assert item.status in {"retry_due", "retry_backoff"}
