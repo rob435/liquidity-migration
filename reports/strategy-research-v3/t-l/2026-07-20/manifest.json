@@ -1,0 +1,32 @@
+{
+  "study": "t-l listing lifecycle v1",
+  "run_date": "2026-07-20",
+  "code_commit": "13837cd66675d2b0fafcd7c3aaba84e90ba4c08f",
+  "data_root": "/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_full_pit",
+  "dataset_start": "2021-01-01",
+  "dataset_end": "2026-07-16",
+  "left_censor_cutoff": "2021-01-09",
+  "listings_total": 925,
+  "listings_left_censored": 5,
+  "listings_eligible": 920,
+  "round_trip_cost": 0.0045,
+  "bootstrap": {
+    "iters": 2000,
+    "seed": 20260720,
+    "block": "listing_month"
+  },
+  "limitations": [
+    "listing anchor is the first 1h bar in this root; reused ticker incarnations collapse to the earliest",
+    "45bp hurdle understates listing-week execution costs; dedicated cost read required before any Lane-2 commit",
+    "funding approximated as UTC-day sums over the hold window",
+    "Bybit only; Binance robustness pass not yet run",
+    "lane-1 exploratory on seen root; not alpha or promotion evidence"
+  ],
+  "outputs": {
+    "event_panel.parquet": "447f368f460bc58c01874f07096558f608daca5eaadd33c31a8f2c799765df11",
+    "listings.parquet": "c599681ff64e08925edda2bef05a9cecef1bfe6ae7162d2f1dd98f855b216c7e",
+    "summary.md": "bffa1a006f1f1244a47ea27cc58e8c45e82ac7d02d032240bcbd81ac45f74caf",
+    "tl_arm_grid.csv": "1a1ba44447e5212c2ae3bf3d1e494d5542342296c125ecc8e0e9eced43bd8d55",
+    "tl_trades.parquet": "39e0539ecf05e22cff47a721b2459e413a527c8c9b192d54d27121bac1169610"
+  }
+}

@@ -419,6 +419,30 @@ receipts: `docs/tail_risk_overhaul_proposal_2026-07-20.md`. Execution state
 and next actions: `docs/tail_risk_program.md`. The adoption itself authorizes
 no runtime change.
 
+## Strategy Research V7 — offensive slate opened (Lane-1, 2026-07-20)
+
+Operator redirection (same day as the tail-risk adoption): the program's
+center of gravity is new-edge theses large enough to change the strategy and
+to be verifiable — slate and admission bar (net ≥ +40 bp/trade era-stable, or
+≥ 5 independent bets/day; from T-K's measured power arithmetic) in
+`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`. The reserved
+V2 label tape stays closed; V7 reads kline/funding/OI/manifest surfaces only.
+
+**T-L v1 (young-listing lifecycle, Bybit, 920 eligible listings 2021-01→
+2026-07):** no unconditional calendar arm clears the bar. The 2021–2024
+post-listing bleed (short d1/d2→d7: +270–310 bp net in both early eras,
+win rates 0.62–0.72) **inverts in 2025–26** (−175 to −332 bp; d2→d14
+−829 bp) — recent listings keep pumping longer and funding drag on shorts
+grows. Day-0 long chase is negative/flat everywhere. The lone large late-era
+positive (d2→d30: +1,171 bp, CI [+323, +2,072]) is sign-unstable mid-era and
+holds illiquid names 28 days. Calendar-time-only rules dropped; the v2 pass
+conditions on pump size, turnover-decay, funding state, and wave crowding
+from the built day-0..30 panel, with 2024/2025-boundary era stability as the
+primary acceptance test. Costs: frozen 45 bp hurdle understates listing-week
+execution; a dedicated cost read is mandatory before any Lane-2 commit.
+Evidence card + hashes: `reports/strategy-research-v3/t-l/2026-07-20/`.
+Not alpha, robustness, or promotion evidence.
+
 ## Progressive model adopted (2026-07-19)
 
 By owner direction the repository operates under the Progressive Evidence

@@ -4,6 +4,13 @@
 receipts: `docs/tail_risk_overhaul_proposal_2026-07-20.md`. Evidence policy:
 `docs/governance.md`. Selection accounting: `docs/hypothesis_ledger.md`.
 
+**Operator redirection, 2026-07-20 (same day, later):** the program's center
+of gravity is offense — new-edge theses large enough to change the strategy
+and be verifiable (Track O below, slate registered in
+`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`, admission
+bar ≥ +40 bp/trade net era-stable or ≥ 5 independent bets/day at deployable
+gross). The R-layers remain the risk chassis and continue in parallel.
+
 This file is the one mutable "what to do next" surface for the program. Update
 the status tables in place as work completes (with dates); evidence notes go to
 `docs/research_summary.md`, provenance receipts to `docs/preregistration/`,
@@ -35,7 +42,7 @@ One owner rule: whoever flips a row to `active` finishes or reverts it.
 | P0.1 | **1m re-simulation harness** on the already-local Bybit `tick_ohlc_1m` (2023-03→2026-05), extended by the `bybit_render_1m` fetch when it lands | Harness reproduces every recorded exit of the canonical CONTINUOUS ledger exactly (T-F standard) before any variant is expressible; focused tests; short doc note of scope/limits | todo |
 | P0.2 | **Untouched-slice verification** for Binance `[2020-01-01, 2021-05-01)` and Bybit `[2021-01-01, 2021-05-01)` | Provenance note in `docs/preregistration/` stating the exact *outcome-unread* boundary. Honest subtlety: V2 features had trailing lookbacks (168h, 90d, RMOM warm-up) that read spring-2021 bars as inputs, so the clean boundary is earlier than 2021-05; the task computes it from the actual feature specs, states feature-touched vs outcome-unread ranges, and freezes the grading window | todo |
 | P0.3 | **Forward recorders** for Bybit liquidation stream + live-L2 depth summaries | Recorder units deployed through the normal flow with a recorded change point (additive telemetry; no sizing/decision path). Fields land in a research-readable root with coverage receipts | todo |
-| P0.4 | **History backfill** — extend `binance_full_pit` toward venue origin via `scripts/build_full_pit_binance.sh` (earlier `BINANCE_START`), respecting upstream availability | Extended root + coverage/manifest receipt; no interpretation, acquisition only | todo |
+| P0.4 | **History backfill** — extend `binance_full_pit` toward venue origin via `scripts/build_full_pit_binance.sh` (earlier `BINANCE_START`), respecting upstream availability | Extended root + coverage/manifest receipt; no interpretation, acquisition only | active 2026-07-20 (backward slice `[2019-09-01, 2020-01-01)` running) |
 | P0.5 | **Re-anchor the pruned 2026-06-20 disaster-stop receipt** from git history (commit `1fa7045`; the receipt and the local `backtest-runs/` artifacts were both pruned — nothing remains on this host) | Reconstruction doc (labelled as such) so the sizing-is-the-disaster-control claim has a citable anchor | todo |
 
 ## P1 — First registrations (commit = registration; forward clocks start)
@@ -54,6 +61,19 @@ One owner rule: whoever flips a row to `active` finishes or reverts it.
 | P2.1 | Causal squeeze/crash index features from fields unused by the 29 prior families: OI level/acceleration, positioning LSR, taker-flow imbalance, premium spikes, melt-up/crash breadth (+ forward liquidations from P0.3 as they accrue) | Feature build with PIT audit; Lane-1 exploration on the spent window only | todo |
 | P2.2 | Governor design: gross multiplier per side + hedge-intensity modulation + extreme-state entry veto; **no per-trade exit changes** | Design note + Lane-1 evidence card (all cells, era-split, §Grading metrics) | todo |
 | P2.3 | Config commit, then **single registered holdout read** on `[2025-01-01, 2026-07-06)` | Metrics frozen at commit; holdout opening recorded in `docs/preregistration/INDEX.md` + hypothesis ledger (non-descended family justification stated); one scripted read, no iteration; then rolling forward | todo |
+
+## Track O — Offense (operator priority as of 2026-07-20)
+
+Slate, mechanisms, admission bar, and reserve-safety note:
+`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`.
+
+| ID | Thesis | Status |
+| --- | --- | --- |
+| T-L | Young-listing lifecycle sleeve (<240d population, untraded today) | active 2026-07-20 — v1 unconditional arms closed: no era-stable cell clears the bar; 2025-26 inverts the 2021-24 listing bleed. v2 = conditional pass on the built panel (`reports/strategy-research-v3/t-l/2026-07-20/`) |
+| T-M | Funding-extreme carry harvest (hedged carry, not momentum) | todo |
+| T-N | Cascade-riding long (C-H1/C-H2 estimands; shares P2.1 features) | todo |
+| T-O | Cross-venue listing lead-lag | blocked: needs incumbent-venue data (P3 acquisition) |
+| T-P | Young-listing long continuation (from the T-L panel) | dropped 2026-07-20 — naive d0→d2 negative/flat in every era (T-L card); revisit only in conditioned form |
 
 ## P3 — Extensions (behind P1/P2)
 
