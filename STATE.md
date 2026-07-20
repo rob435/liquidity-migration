@@ -9,9 +9,19 @@ commit may leave the branch ahead.
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `d520792f3b4a92b2cf0acce5f4fb6818d25bdeb9`, deployed from canonical `main`,
+  `97d0ee08743bc7d19d1edab1d508a39e3057a8ff`, deployed from canonical `main`,
   profile `operational`, receipt artifact SHA-256
-  `d689e3e60a26dfbd9ad7d20a03e8653b71bbd02fe3aafc453f45c26e61edcaa0`.
+  `64c3d64b689c9c9d99886ca7e9040e945fe8397a5877f734d92b94cbafca2119`.
+  Over `d520792` it adds one runtime change — a convergence residual that no
+  venue-admissible order can express (the 2026-07-20 00:04 UTC ACEUSDT paper
+  block: 0.1 units against a ~$5 venue minimum) now classifies as
+  `converged_within_venue_minimum` instead of exhausting retries and
+  latching owner health blocked — plus the repo-wide Progressive Evidence
+  Model documentation alignment and the big-PC V4/V5 research artifacts
+  (Lane-2 forward scorer; research-only, no runtime surface). Recorded
+  mid-epoch change point; clock and comparator identity unchanged.
+- The prior change point remains on record: `d520792` (receipt
+  `d689e3e6...`) deployed the 2026-07-19 load-bearing audit fixes.
   Over `386120b` it deploys the 2026-07-19 load-bearing audit outcome
   (`docs/audit/2026-07-19-load-bearing-audit.md`): ten verified runtime
   defect fixes — most significantly the owner-process kill via an unguarded
