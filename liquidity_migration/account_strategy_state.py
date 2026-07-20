@@ -9,11 +9,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
     AccountState,
     OrderState,
+)
+from .account_kernel import (
     read_account_journal,
     reduce_account_events,
 )

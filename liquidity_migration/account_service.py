@@ -19,9 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEventType,
-    AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
     DesiredTarget,
@@ -29,6 +28,9 @@ from .account_kernel import (
     MarketInputRef,
     PositionState,
     TargetBatchResult,
+)
+from .account_kernel import (
+    AccountExecutionKernel,
     quantized_down,
 )
 from .account_route import AccountRoute, require_account_route

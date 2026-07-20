@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Mapping
 
-from .account_kernel import InstrumentRules
+from .account_contracts import InstrumentRules
 from .account_service_bybit import instrument_rules_from_bybit_row
 
 

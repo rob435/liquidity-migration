@@ -12,9 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEventType,
-    AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
     InstrumentRules,
@@ -22,6 +21,7 @@ from .account_kernel import (
     PositionState,
     TargetBatchResult,
 )
+from .account_kernel import AccountExecutionKernel
 from .account_route import AccountRoute
 from .account_service import (
     AccountExecutionService,

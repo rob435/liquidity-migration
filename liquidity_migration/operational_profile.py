@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .account_kernel import AccountRiskPolicy
+from .account_contracts import AccountRiskPolicy
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
 
 

@@ -24,7 +24,8 @@ from ._common import (
     is_weekend_ms,
     pct,
 )
-from .account_kernel import AccountRiskPolicy, verify_account_journal
+from .account_contracts import AccountRiskPolicy
+from .account_kernel import verify_account_journal
 from .account_service import SleeveAdapterKind
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age

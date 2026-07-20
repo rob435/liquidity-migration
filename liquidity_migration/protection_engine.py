@@ -6,12 +6,14 @@ import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Mapping, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
-    AccountExecutionKernel,
     AccountState,
     InstrumentRules,
     MarketInputRef,
+)
+from .account_kernel import (
+    AccountExecutionKernel,
     reduce_account_events,
 )
 from .account_service import (

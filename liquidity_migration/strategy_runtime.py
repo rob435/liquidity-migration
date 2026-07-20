@@ -13,9 +13,8 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Mapping, Protocol, Sequence
 
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
-    AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
     DesiredTarget,
@@ -23,6 +22,7 @@ from .account_kernel import (
     MarketInputRef,
     TargetBatchResult,
 )
+from .account_kernel import AccountExecutionKernel
 from .execution_adapters import KernelExecutionDriver
 
 

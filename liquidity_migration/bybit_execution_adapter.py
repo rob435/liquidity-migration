@@ -5,7 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
-from .account_kernel import MarketInputRef, OrderCommand
+from .account_contracts import (
+    MarketInputRef,
+    OrderCommand,
+)
 from .bybit_errors import BybitRequestRejected
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import ExecutionObservation, ExecutionObservationType

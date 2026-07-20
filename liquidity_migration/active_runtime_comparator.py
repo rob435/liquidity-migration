@@ -26,7 +26,7 @@ from .account_intent_client import (
     PublishedTargetRequest,
     publish_exit_first_target_requests,
 )
-from .account_kernel import (
+from .account_contracts import (
     AccountEvent,
     AccountEventType,
     InstrumentRules,

@@ -14,7 +14,8 @@ import numpy as np
 import polars as pl
 
 from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
-from .account_kernel import AccountRiskPolicy, verify_account_journal
+from .account_contracts import AccountRiskPolicy
+from .account_kernel import verify_account_journal
 from .account_service import SleeveAdapterKind
 from .config import DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .continuous_profile import (

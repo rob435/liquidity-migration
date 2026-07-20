@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .artifact_snapshot import read_stable_file
-from .account_kernel import GENESIS_HASH, AccountEvent, read_account_journal_head
+from .account_contracts import (
+    AccountEvent,
+    GENESIS_HASH,
+)
+from .account_kernel import read_account_journal_head
 from .deterministic_serialization import canonical_json
 
 
