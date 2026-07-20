@@ -10,9 +10,25 @@ branch ahead.
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `cd9377265f7053946b5122ff94974eee3a0c3223`, deployed from canonical `main`,
-  profile `operational`, receipt artifact SHA-256
-  `6e76b2271988694696d934406a7f4be3ef1778516c783fd195e1bd86800a05f2`.
+  `93133ff9e6284a3d0d737a4aca55a96b6bd3795b`, deployed from canonical `main`,
+  profile `operational`, receipt artifact SHA-256 `2e819c8c7da0fe10...`.
+  Over `cd93772` it deploys exactly one runtime change, scoped to the PAPER
+  owner: the registered passive-execution A/B
+  (`docs/preregistration/passive_execution_experiment_2026-07-20.md`) —
+  eligible CONTINUOUS paper entries alternate by trade-id hash parity
+  between the unchanged market-IOC twin (arm A) and a post-only
+  at-the-touch arm with re-peg and 20s/10bps market fallback (arm B), with
+  per-arm metadata on every execution event and startup recovery that
+  terminal-cancels orphaned working orders. Demo behavior is unchanged; the
+  same install carries runtime-neutral additions (hedge shrinkage support
+  at weight 0.0, the weekly `ops.sh kill-criteria` checker, the measured
+  execution-cost tooling, and the 2026-07-20 governance registrations).
+  The fleet was deliberately quiescent about 13:24--13:34 UTC for this
+  staged install; the first post-activation weekly kill-criteria check
+  reported NO TRIP. Recorded mid-epoch change point; clock and comparator
+  identity unchanged. Prior receipt on record:
+  `6e76b2271988694696d934406a7f4be3ef1778516c783fd195e1bd86800a05f2`
+  (`cd93772`, 11:04 UTC same day).
   Over `70d666c` it deploys two runtime fixes for the 2026-07-20 morning
   Telegram defects — a 15s freshness floor on position-truth reconciliation
   staleness (the funding-floor pattern; kills the false `age_ns=~4-5e9`
