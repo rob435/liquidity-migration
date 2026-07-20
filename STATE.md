@@ -3,16 +3,36 @@
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, account-journal protection/P&L archaeology, and the full
 2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC, with the
-2026-07-20 11:04 UTC rollout recorded below. These facts describe the deployed
+2026-07-20 rollouts (11:04, 14:04, and 17:22 UTC) recorded below. These facts describe the deployed
 implementation commit below; a later documentation-only commit may leave the
 branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `f2ad17167bc683cec7a44c1a21ddba20726e09e2`, deployed from canonical `main`,
-  profile `operational`, receipt artifact SHA-256 `43ce6490c8b0dee4...`,
-  activated 2026-07-20 14:04 UTC (fleet quiescent ~13:44--14:04; the install
+  `a7363070008266888b652104dfdd64f907507f3e`, deployed from canonical `main`,
+  profile `operational`, receipt artifact SHA-256 `dc95caaf0be2776f...`,
+  activated 2026-07-20 ~17:22 UTC (fleet quiescent ~17:12--17:22 with the
+  demo book flat and the owner healthy at the stop boundary; install,
+  authority issuance, and activation each verified `a736307` exactly, and
+  the first post-activation pinned status reported verify-ok with all six
+  persistent services running). Over `f2ad171` it deploys exactly one
+  runtime surface: the native-stop ownership verifier in
+  `liquidity_migration/venue_protection.py` — the 2026-07-20 16:36 UTC
+  BLUAIUSDT false `unowned_venue_order` fix (bounded 10-minute
+  terminal-visibility grace) plus the same-day pre-deploy adversarial
+  tightenings (Full-stop-only grace provenance, identity-evidence-required
+  matching including the live observed binding, exchange-time bound), each
+  pinned by consumer-driven regression tests; see the incident entry below.
+  No strategy decision path, sizing input, or registered estimator changed.
+  The delta also carries research-only artifacts (T-K breadth-funnel
+  receipts and scripts) and the tail-risk program adoption docs, none on a
+  deployed service path (audited pre-deploy; full local gate, remote
+  install gate, and two independent review passes all green). Recorded
+  mid-epoch change point; clock and comparator identity unchanged.
+- The prior change point remains on record: `f2ad171` (receipt
+  `43ce6490c8b0dee4...`), activated 2026-07-20 14:04 UTC (fleet quiescent
+  ~13:44--14:04; the install
   ran long in normalize-paper over the ~60k-file paper event trees and the
   client-side SSH timed out at 10 min — the orphaned remote install
   completed correctly and the authority issuance revalidated the stopped
@@ -235,8 +255,8 @@ branch ahead.
   its adopted fill moved the protection record to `triggered`, which removed
   it from the `{active, triggering}` ownership set while Bybit's open-order
   cache still listed the consumed conditional row; the next reconciliation
-  pass paged until the row drained (resolved 16:39). The fix (committed after
-  `f2ad171`, not yet deployed at that commit) gives the ownership verifier a
+  pass paged until the row drained (resolved 16:39). The fix (deployed in
+  the `a736307` rollout above) gives the ownership verifier a
   bounded 10-minute terminal-visibility grace: provenance-bearing rows are
   verified against the latest native protection record after it leaves the
   active statuses. Pre-deploy adversarial review tightened the window's
