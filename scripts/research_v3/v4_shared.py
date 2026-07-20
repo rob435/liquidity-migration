@@ -147,17 +147,21 @@ RENDER_FUNDING_START = dt.date(2023, 3, 26)
 RENDER_FUNDING_END_EXCLUSIVE = dt.date(2026, 7, 10)
 
 
-def load_render_book(arm: str) -> pl.DataFrame:
-    """Concatenate the three component trade books of one T-A render arm.
+def load_render_book(arm: str, base_dir: Path | None = None) -> pl.DataFrame:
+    """Concatenate the three component trade books of one render arm.
 
     T-A's entry counts (2,300 gate-on / 4,019 gate-off) are the sum over the
     three component books; a symbol can appear in more than one component on
     the same day, and each component row is a real sized entry in that arm.
+    ``base_dir`` selects a different paired-render root with the same layout
+    (default: the T-A 2026-07-19 renders).
     """
     frames = []
     for component in RENDER_COMPONENTS:
         path = (
-            TA_DIR / RENDER_ARMS[arm] / "continuous" / "components" / "bybit" / component / "continuous_trades.csv"
+            (base_dir or TA_DIR)
+            / RENDER_ARMS[arm]
+            / "continuous" / "components" / "bybit" / component / "continuous_trades.csv"
         )
         frame = pl.read_csv(path)
         frames.append(frame.with_columns(pl.lit(component).alias("component")))

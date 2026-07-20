@@ -69,6 +69,27 @@ Use command help for targeted kline/data downloads. Preserve the exact command,
 root identity, source labels, boundary, warnings, config, and output receipt for
 decision-influencing work.
 
+### Research-grade granular/alternative roots (owner-directed, 2026-07-20)
+
+Exploratory acquisition for render-native granular research; research-only,
+never operational inputs, and NOT covered by the full-PIT manifest gate:
+
+- `~/SHARED_DATA/bybit_render_1m` — full-coverage Bybit 1m klines for the
+  T-A render-book symbol universe, 2023-03-26 → 2026-07-10, from v5
+  `market/kline` (`scripts/research_v3/fetch_bybit_render_1m.py`; per-symbol
+  resume markers under `_markers/`, run/summary JSON at the root). Full
+  coverage by design — the June 2026 event-sliced roots (`continuous_v2_1m`,
+  `continuous_v2_tick`) condition on entries having happened and are left
+  untouched.
+- `~/SHARED_DATA/binance_vision_alt` — Binance Vision (checksummed CDN
+  archive; the FAPI-REST region caveat does not apply): 1m klines incl.
+  taker-buy flow, 1m premium-index klines, 5m metrics (OI, long/short and
+  taker ratios), monthly settled funding, for the render symbols mappable to
+  Binance USD-M (mapping and unmatched list in `fetch_run.json`;
+  `scripts/research_v3/fetch_binance_vision_alt.py`). `liquidationSnapshot`
+  is absent from the Vision catalog as of 2026-07-20 and is recorded as
+  unavailable. Empty parquet outputs are absent-upstream markers, not data.
+
 ## Population and exposure limits
 
 “Full PIT” means full coverage under the repository's declared manifest

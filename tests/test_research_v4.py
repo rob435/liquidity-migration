@@ -226,6 +226,37 @@ def test_tj_budget_neutral_tilt_identity() -> None:
     assert row["delta_early_pct"] + row["delta_late_pct"] == pytest.approx(row["delta_net_pct"])
 
 
+def test_tj_forward_ledger_chain(tmp_path) -> None:
+    import hashlib
+
+    from scripts.research_v3.tj_forward_scorer import LEDGER_COLUMNS, chain_hash, verify_ledger
+
+    prev = hashlib.sha256(b"tj-forward-genesis").hexdigest()
+    rows = []
+    for date, net in (("2026-07-20", 0.001), ("2026-07-21", -0.0005)):
+        row = {
+            "date": date, "btc_trend_30d": -0.05, "gate_blocked": True,
+            "n_blocked_entries": 3, "n_override_admitted": 1, "n_pending_exits": 0,
+            "net_admitted_components": net, "net_admitted_unique": net, "n_admitted_unique": 1,
+            "prev_hash": prev,
+        }
+        row["row_hash"] = chain_hash(prev, row)
+        prev = row["row_hash"]
+        rows.append(row)
+    path = tmp_path / "forward_ledger.csv"
+    pl.from_dicts(rows).select(LEDGER_COLUMNS).write_csv(path)
+    verified, tip = verify_ledger(path)
+    assert len(verified) == 2 and tip == rows[-1]["row_hash"]
+
+    tampered = pl.read_csv(path).with_columns(
+        pl.when(pl.col("date") == "2026-07-20").then(0.002).otherwise(pl.col("net_admitted_components"))
+        .alias("net_admitted_components")
+    )
+    tampered.write_csv(path)
+    with pytest.raises(RuntimeError, match="chain broken"):
+        verify_ledger(path)
+
+
 def test_ti_member_weights() -> None:
     for member in ("binary_gate", "linear", "two_sided"):
         assert member_weight(member, None) == 0.0  # fail closed
