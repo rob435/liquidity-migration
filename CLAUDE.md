@@ -7,6 +7,8 @@ Research and demo/paper execution for crypto-perpetual strategies.
 ## Read By Purpose
 
 - Governance and evidence: `docs/governance.md`.
+- Active research program (main focus) and next actions:
+  `docs/tail_risk_program.md`.
 - Current operations: `STATE.md`, then `deploy/sleeves.env` and systemd units.
 - Research interpretation: `docs/research_summary.md` and the relevant raw
   artifacts.

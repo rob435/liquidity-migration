@@ -422,3 +422,9 @@ lead is a prospective repair of CONTINUOUS residual-momentum provenance before
 constructing an exact current-profile comparator. Cost/funding mechanisms may
 also be investigated on genuinely untouched data. A real demo/paper epoch
 still requires separate owner authorization; mainnet remains unauthorized.
+
+*Update 2026-07-20:* that new cycle now exists — the repository's main
+research focus is the book-level tail-risk program. Execution state:
+`docs/tail_risk_program.md`; rationale:
+`docs/tail_risk_overhaul_proposal_2026-07-20.md`. The forward-work leads
+above are historical context, not the active queue.

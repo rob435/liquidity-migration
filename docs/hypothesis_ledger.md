@@ -58,3 +58,13 @@ sixth-generation read.
   ratio here (families in → survivors out). Five generations in: 29
   families in, 2 deployed sleeves (both from Generation 1) and 1 undeployed
   prototype out.
+
+## Direction note (2026-07-20)
+
+The repository's main focus is the book-level tail-risk program
+(`docs/tail_risk_program.md`); new families route through it. Per-trade
+price-exit families are closed on the spent surface (see
+`docs/research_summary.md`). The reserved holdout remains earmarked for the
+first genuinely non-descended family — currently the R2 squeeze-state
+governor, built on fields none of the 29 families above used — and its
+opening will be recorded here and in `docs/preregistration/INDEX.md`.

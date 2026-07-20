@@ -1,6 +1,6 @@
 # Research Summary
 
-Updated 2026-07-19 UTC. This is a decision log, not policy or deployment authority.
+Updated 2026-07-20 UTC. This is a decision log, not policy or deployment authority.
 Apply `docs/governance.md` and inspect the named artifacts before relying on a
 claim. Current host state belongs in `STATE.md`.
 
@@ -400,6 +400,24 @@ promised learning rate; the operative levers are per-bet vol (trade shape),
 edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
+
+## Tail-risk program adopted as main focus (2026-07-20)
+
+By operator instruction the repository's main research focus is the book-level
+tail-risk program. Per-trade price-exit research is closed on the spent
+surface under both grading styles — alpha metrics (mechanism table above,
+2026-06-18 exit-cause ablation) and tail metrics (2026-06-20 disaster-stop
+study, commit `1fa7045`, receipt pruned/to be re-anchored) — and tail control
+moves to the book level: continuous risk intensity (T-I revival under
+ES-based metrics), a squeeze-state governor built from fields unused by the
+29 prior hypothesis families (earmarked for the reserved `[2025-01-01,
+2026-07-06)` holdout as the first non-descended family), and structural
+insurance graded as insurance. The data program opens never-read pre-2021-05
+slices, builds a 1m re-simulation harness on already-local paths, starts
+forward liquidation/depth recording, and extends the backfill. Rationale and
+receipts: `docs/tail_risk_overhaul_proposal_2026-07-20.md`. Execution state
+and next actions: `docs/tail_risk_program.md`. The adoption itself authorizes
+no runtime change.
 
 ## Progressive model adopted (2026-07-19)
 

@@ -5,9 +5,13 @@ description: Route, execute, and record research work under the Progressive Evid
 
 # Run research work
 
-Read `STATE.md`, `docs/research_summary.md`, and
-`docs/preregistration/INDEX.md` for current context and provenance. Decide
-which lane the work is in; neither lane has a waiting room.
+Read `STATE.md`, `docs/research_summary.md`,
+`docs/preregistration/INDEX.md`, and the active program doc
+`docs/tail_risk_program.md` for current context, provenance, and the
+program's open workstreams and closed lines. Before selecting new
+decision-influencing work, check that it is not on a closed line and check
+its family descent in `docs/hypothesis_ledger.md`. Decide which lane the
+work is in; neither lane has a waiting room.
 
 ## Lane 1 — exploration
 
@@ -19,10 +23,13 @@ costs next to gross — a pooled number that hides decay is a wrong answer.
 ## Lane 2 — rolling forward record
 
 To graduate a prototype: commit its exact config plus scoring recipe
-(metric, baseline, declared grid) — the commit is the registration. The
+(metric, baseline, declared grid) — the commit is the registration, and its
+evidence note records the hypothesis-ledger row it descends from. The
 scorer appends one row per config per new day; a config's evidence is the
 run of days after its commit, and editing it starts a new run. Grade a rule
-only on data it did not shape.
+only on data it did not shape; commit configs before opening a new surface
+(reserved holdout, freshly backfilled history), and record the opening in
+`docs/preregistration/INDEX.md`.
 
 Keep the physics intact in both lanes — causal/PIT inputs, executable
 economics (fills, fees, funding, capacity), reconstructable accounting, and

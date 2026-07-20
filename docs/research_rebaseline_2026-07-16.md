@@ -130,3 +130,7 @@ The new overhaul must produce a decision-useful table before expanding its
 infrastructure. Its plan and artifact budget are in
 `docs/strategy_overhaul_v2_plan.md`; metric definitions are in
 `docs/trade_diagnostics.md`.
+
+*Update 2026-07-20:* the V2 cycle closed with no qualifying thesis; the
+current main research focus is the book-level tail-risk program
+(`docs/tail_risk_program.md`).
