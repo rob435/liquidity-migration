@@ -10,8 +10,23 @@ branch ahead.
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `93133ff9e6284a3d0d737a4aca55a96b6bd3795b`, deployed from canonical `main`,
-  profile `operational`, receipt artifact SHA-256 `2e819c8c7da0fe10...`.
+  `f2ad17167bc683cec7a44c1a21ddba20726e09e2`, deployed from canonical `main`,
+  profile `operational`, receipt artifact SHA-256 `43ce6490c8b0dee4...`,
+  activated 2026-07-20 14:04 UTC (fleet quiescent ~13:44--14:04; the install
+  ran long in normalize-paper over the ~60k-file paper event trees and the
+  client-side SSH timed out at 10 min — the orphaned remote install
+  completed correctly and the authority issuance revalidated the stopped
+  manifest before activation). Over `93133ff` it deploys two watchdog
+  false-CRITICAL fixes from the 13:06 UTC pages: a 2-minute floor on the
+  journaled venue-snapshot age (the 30s checkpoint heartbeat can legally
+  slip past 1 minute during one busy owner iteration; a wedged owner still
+  pages via the independent owner-health freshness bound) and
+  `head_binding="allow_behind"` for the liveness consumer of
+  `require_recent_account_owner_health` (the background fill thread
+  ordinarily advances the journal one transaction past the on-disk health;
+  exact head binding remains the default and stays mandatory for sizing
+  consumers). No strategy, sizing, or execution-path change. Prior receipt
+  on record: `2e819c8c7da0fe10...` (`93133ff`, 13:34 UTC same day).
   Over `cd93772` it deploys exactly one runtime change, scoped to the PAPER
   owner: the registered passive-execution A/B
   (`docs/preregistration/passive_execution_experiment_2026-07-20.md`) —
