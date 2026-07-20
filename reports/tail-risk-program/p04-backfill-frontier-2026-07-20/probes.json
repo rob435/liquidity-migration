@@ -1,0 +1,55 @@
+{
+  "probe_date_utc": "2026-07-20",
+  "purpose": "P0.4 upstream-availability verification for extending binance_full_pit backward toward venue origin (docs/tail_risk_program.md P0.4; proposal D2)",
+  "host": "windows big PC (research box), curl over public endpoints; no credentials used",
+  "vision_cdn_head_probes": {
+    "monthly_klines_BTCUSDT_1h": {
+      "2019-09": 404,
+      "2019-10": 404,
+      "2019-12": 404,
+      "2020-01": 200
+    },
+    "daily_klines_BTCUSDT_1h": {
+      "2019-09-10": 404,
+      "2019-12-31": 200,
+      "2020-01-01": 200
+    },
+    "s3_listing_earliest_monthly_objects": [
+      "BTCUSDT-1h-2020-01.zip",
+      "BTCUSDT-1h-2020-02.zip",
+      "BTCUSDT-1h-2020-03.zip",
+      "BTCUSDT-1h-2020-04.zip"
+    ],
+    "listing_endpoint": "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&prefix=data/futures/um/monthly/klines/BTCUSDT/1h/"
+  },
+  "fapi_rest_origin_probes": {
+    "reachability": {"fapi_v1_ping_http": 200, "note": "FAPI REST reachable from this box at probe time; the recorded region caveat did not bind on these unauthenticated reads"},
+    "markPriceKlines_earliest_open_ms": 1577098800000,
+    "markPriceKlines_earliest_open_iso": "2019-12-23T11:00:00Z",
+    "indexPriceKlines_earliest_open_ms": 1577098800000,
+    "premiumIndexKlines_earliest_open_ms": 1577156400000,
+    "premiumIndexKlines_earliest_open_iso": "2019-12-24T03:00:00Z",
+    "klines_earliest_open_ms": 1567962000000,
+    "klines_earliest_open_iso": "2019-09-08T17:00:00Z",
+    "fundingRate_startTime0_behavior": "endpoint returned latest rows for startTime=0; venue funding origin instead established from the local dataset first row (below)"
+  },
+  "local_root_coverage": {
+    "root": "~/SHARED_DATA/binance_full_pit",
+    "klines_1h": {"first_partition": "2020-01-01", "last_partition": "2026-07-09", "first_row_ts": "2020-01-01T00:00:00Z", "first_day_symbols": ["BCHUSDT", "BTCUSDT", "ETHUSDT"], "partition_count_days": 2382},
+    "archive_trade_manifest": {"first_partition": "2020-01-01", "partition_count_days": 2382, "first_day_symbol_count": 3},
+    "binance_usdm_funding": {"first_partition": "2019-09-10", "first_row_ts": "2019-09-10T08:00:00Z", "last_partition": "2026-06-25"},
+    "binance_usdm_mark_price_1h": {"first_partition": "2019-12-23", "first_row_ts": "2019-12-23T11:00:00Z", "last_partition": "2026-06-12"},
+    "binance_usdm_index_price_1h": {"first_partition": "2019-12-23", "last_partition": "2026-06-12"},
+    "binance_usdm_premium_index_1h": {"first_partition": "2019-12-24", "last_partition": "2026-06-12"},
+    "binance_usdm_open_interest": {"first_partition": "2026-04-25", "last_partition": "2026-06-12", "note": "shallow REST endpoint history; deep OI/LSR history lives in binance_usdm_metrics_5m (Vision metrics, per-symbol parquet, separate fetcher)"},
+    "binance_usdm_taker_flow_1h": {"first_partition": "2026-04-25", "last_partition": "2026-06-11"}
+  },
+  "frontier_conclusion": {
+    "klines_1h": "AT UPSTREAM FLOOR: Vision monthly archives begin 2020-01 (404 + S3 listing); local root begins 2020-01-01",
+    "binance_usdm_funding": "AT VENUE ORIGIN: local first row 2019-09-10T08:00:00Z is the first USD-M funding settlement (venue launched 2019-09-08)",
+    "binance_usdm_mark_price_1h": "AT REST ORIGIN: local first row equals endpoint earliest (1577098800000)",
+    "binance_usdm_index_price_1h": "AT REST ORIGIN: same first partition as mark (2019-12-23)",
+    "binance_usdm_premium_index_1h": "AT REST ORIGIN: local first partition 2019-12-24 equals endpoint earliest day",
+    "not_acquired": "REST-only trade klines 2019-09-08T17:00Z -> 2020-01-01 (and the single Vision daily 2019-12-31): outside the canonical builder's Vision-only kline provenance contract; essentially BTCUSDT-only era; would need a separate labelled research root if ever wanted"
+  }
+}

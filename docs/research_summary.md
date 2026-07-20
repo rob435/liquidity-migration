@@ -401,6 +401,24 @@ edge size ≥40–50 bps, or decorrelated sources. Config commitment remains an
 owner decision; if committed, its forward record accrues correctly but
 cannot adjudicate a 15–25 bps edge on a useful horizon.
 
+## P0.4 Binance backward backfill: frontier already reached (2026-07-20)
+
+Claim: `binance_full_pit` cannot be extended backward through the canonical
+builder — every dataset it owns already sits at its upstream origin. Probes
+(HEAD + S3 listing + REST-earliest + local first rows, receipt with hashes at
+`reports/tail-risk-program/p04-backfill-frontier-2026-07-20/`): Vision monthly
+USD-M klines begin 2020-01 and the local root begins 2020-01-01; local funding
+begins at the venue's first-ever settlement (2019-09-10 08:00 UTC); local
+mark/index/premium first rows equal their REST-origin timestamps (2019-12-23 /
+2019-12-24). The only unheld pre-2020 window is REST-only trade klines
+2019-09-08→2020-01 (essentially BTCUSDT-only), outside the Vision-only kline
+provenance contract; acquiring it would need a separate labelled root. Scope:
+acquisition/coverage verification only — no outcome surface opened, no
+statement about slice untouched-ness (P0.2) or strategy performance. The
+proposal's D2 assumption ("backfill deeper") is closed as already-complete;
+the tail-event library grows only via new fields (D4), a third venue (D5), or
+forward days (D6).
+
 ## Tail-risk program adopted as main focus (2026-07-20)
 
 By operator instruction the repository's main research focus is the book-level
