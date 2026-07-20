@@ -42,6 +42,7 @@ genuinely new idea, recorded here when opened.
 | Strategy Overhaul V2 comparator/accounting repair | `../strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md` | Closed invalid evidence card; diagnostic leads remain exploratory only |
 | Prospective runtime-parity forward start | `../prospective_runtime_parity_forward_start_receipt_2026-07-19.md` | Exact final comparator and create-only 90-day boundary; no forward result, alpha claim, promotion, or real-money authority |
 | 1000TAGUSDT incident | `../incidents/2026-07-10-1000tag.md` | Contained; demo venue flat at incident close |
+| 2026-06-20 disaster-stop TAIL study | `../disaster_stop_tail_reconstruction_2026-07-20.md` | Reconstruction (labelled as such) of the pruned receipt from commit `1fa7045`; numbers survive only in the receipt text; anchors the sizing-is-the-disaster-control claim and the unbuilt correlated-squeeze-cap recommendation (R3b) |
 | Strategy Research V3 (Lane-1 draft) | `DRAFT_strategy_research_v3_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface; all four theses closed (evidence cards in `reports/strategy-research-v3/`); holdout untouched; no prototype advanced |
 | Strategy Research V4 (Lane-1 draft) | `DRAFT_strategy_research_v4_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface + T-A render books; all five theses closed (evidence cards in `reports/strategy-research-v3/t-e`…`t-i/`); holdout untouched; no prototype advanced; Bybit funding-timing question closed (next-rate not registrable post-2022-07) |
 
