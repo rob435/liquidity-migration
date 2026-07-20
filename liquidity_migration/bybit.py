@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .account_owner_lease import DemoAccountMutationLease
+from .env_flags import env_flag, reject_ambiguous_flag
 from .bybit_errors import (
     BybitDataError,
     BybitRequestRejected,
@@ -44,15 +45,6 @@ __all__ = [
     "validate_demo_order_permission",
 ]
 
-_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
-_FALSEY_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
-
-
-def _env_flag(name: str) -> bool:
-    """True when environment variable ``name`` is set to a truthy value."""
-    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
-
-
 def resolve_demo_credentials() -> tuple[str | None, str | None]:
     """Resolve only the Bybit demo credential pair.
 
@@ -61,32 +53,14 @@ def resolve_demo_credentials() -> tuple[str | None, str | None]:
     function never reads ``BYBIT_REAL_API_KEY`` or ``BYBIT_REAL_API_SECRET``.
     """
 
-    _reject_ambiguous_flag("REAL_MONEY")
-    _reject_ambiguous_flag("DEMO")
-    if _env_flag("REAL_MONEY"):
+    reject_ambiguous_flag("REAL_MONEY")
+    reject_ambiguous_flag("DEMO")
+    if env_flag("REAL_MONEY"):
         raise RuntimeError("Bybit account cutover is demo/paper only; REAL_MONEY must be unset or false")
     _logger_account.info("resolved account: demo")
     return (
         os.environ.get("BYBIT_DEMO_API_KEY"),
         os.environ.get("BYBIT_DEMO_API_SECRET"),
-    )
-
-
-def _reject_ambiguous_flag(name: str) -> None:
-    """Raise if ``name`` is set to a value that is neither clearly true nor
-    clearly false. Keeps the fail-safe direction (an unrecognised value never
-    silently means 'on'), but surfaces a typo'd high-stakes toggle at startup
-    instead of letting it coerce to the default."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return
-    normalised = raw.strip().lower()
-    if normalised in _TRUTHY_ENV_VALUES or normalised in _FALSEY_ENV_VALUES:
-        return
-    raise RuntimeError(
-        f"{name}={raw!r} is not a recognised boolean. Use one of "
-        f"{sorted(_TRUTHY_ENV_VALUES)} to enable or {sorted(_FALSEY_ENV_VALUES - {''})} "
-        f"(or unset) to disable -- refusing to guess for a safety-critical toggle."
     )
 
 

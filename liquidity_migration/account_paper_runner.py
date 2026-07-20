@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Mapping
 
+from .env_flags import explicitly_false_or_unset
 from .account_execution_config import (
     load_demo_rules,
     load_risk_policy,
@@ -82,7 +83,6 @@ _PRIVATE_EXCHANGE_ENVIRONMENT_KEYS = (
     "BYBIT_REAL_API_KEY",
     "BYBIT_REAL_API_SECRET",
 )
-_FALSE_VALUES = {"", "0", "false", "no", "off"}
 
 
 def require_paper_runtime_isolation(
@@ -93,7 +93,7 @@ def require_paper_runtime_isolation(
         raise RuntimeError(
             "paper owner received private exchange credentials: " + ", ".join(present)
         )
-    if environment.get("REAL_MONEY", "").strip().lower() not in _FALSE_VALUES:
+    if not explicitly_false_or_unset(environment.get("REAL_MONEY")):
         raise RuntimeError("paper owner requires REAL_MONEY=false or unset")
 
 

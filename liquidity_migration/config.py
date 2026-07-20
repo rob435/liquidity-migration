@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from .env_flags import FALSE_ENV_VALUES, TRUE_ENV_VALUES
+
 _CONSUMED_TOP_LEVEL_KEYS = frozenset({"exchange", "universe", "cost_model", "data_root"})
 
 DEFAULT_STABLECOIN_SYMBOLS = (
@@ -119,9 +121,9 @@ def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     s = str(value).strip().lower()
-    if s in ("true", "1", "yes", "on"):
+    if s in TRUE_ENV_VALUES:
         return True
-    if s in ("false", "0", "no", "off", ""):
+    if s in FALSE_ENV_VALUES:
         return False
     raise ValueError(f"cannot parse boolean from {value!r}")
 
