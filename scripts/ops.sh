@@ -34,6 +34,7 @@ Safe operator commands:
   operational-authority --execute issue [ARGS...]
                                issue narrow demo or demo+paper authority
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
+  kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
   test [PYTEST_ARGS...]        run pytest
   deploy --execute MODE        run stopped install or authorized activation
   help                         show this help and do nothing else
@@ -251,6 +252,14 @@ case "$command" in
     ;;
   venue-accounting)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"
+    ;;
+  kill-criteria)
+    # Weekly read-only K1/K2/K3 evaluation on the VPS demo journal per
+    # docs/preregistration/sleeve_kill_criteria_2026-07-20.md. Exit 3 on trip.
+    if [[ "$#" -eq 0 ]]; then
+      set -- --account-root "$REPO_DIR/data/bybit-account-execution"
+    fi
+    remote_python_script scripts/check_kill_criteria.py "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"

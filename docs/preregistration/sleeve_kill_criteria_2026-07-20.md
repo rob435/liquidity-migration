@@ -56,9 +56,11 @@ work of 2026-07-20; see `docs/forward_record_annotations.md`.)
 ## Process
 
 - Checked weekly (operator or standing audit loop) from the canonical
-  journal; any trip is executed as a five-line demotion note, a
-  `deploy/sleeves.env` toggle (demo off, paper unchanged), and a recorded
-  change point — the exact mirror of promotion.
+  journal via `scripts/ops.sh kill-criteria` (read-only; exit 3 on any
+  trip; implementation `liquidity_migration/sleeve_kill_criteria.py`).
+  Any trip is executed as a five-line demotion note, a `deploy/sleeves.env`
+  toggle (demo off, paper unchanged), and a recorded change point — the
+  exact mirror of promotion.
 - Bug fixes and behavior-preserving refactors never reset these clocks.
   A deliberate strategy-config replacement starts a new config record per
   the Progressive Evidence Model, but these criteria carry to the successor
