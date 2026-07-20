@@ -1,0 +1,81 @@
+{
+ "code_commit": "1d11ce138e5e119b44768f3199a24b360d6869a2",
+ "counters": {
+  "btc_history_missing": 0,
+  "entry_bar_missing": 1,
+  "exit_bar_missing": 54
+ },
+ "created_utc": "2026-07-20T20:46:13.753679+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "files": {
+  "estimands.csv": {
+   "bytes": 332,
+   "sha256": "1b7a6f8ba4171c14537deca7b1632c4afec4e7d4524444d116d2786e5f93b5c9"
+  },
+  "events.csv": {
+   "bytes": 4029490,
+   "sha256": "5b002f11f3730ef4fc8f61437a9da48238f887815070ff6705587e206fbf7a09"
+  },
+  "exclusions.csv": {
+   "bytes": 75,
+   "sha256": "7b5c47d607392cf379f7ac2c09f1fcf6928b36d28d8e738fc516c2862ef8c46b"
+  },
+  "long_arms.csv": {
+   "bytes": 1644,
+   "sha256": "a7c97727410f5ad1b50e9b9f8b95a310f7295f53a35205fa812d52583de3229c"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "funding_rows": 2372113,
+  "panel": "_continuous_engine_panel_v4_rmom25_feat4a91acf4_excl1916e9b4_dc35f0ca.parquet",
+  "panel_rows": 2868768,
+  "venue": "bybit"
+ },
+ "kind": "tn_cascade_long",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "1edfc1c61d41749cfd02e2d8d67b6a64aed34fc6803ea1cf601d132856f93f5a",
+ "n_events": 19660,
+ "params": {
+  "age_days_min": 240,
+  "block_days": 28,
+  "boot": {
+   "n": 2000,
+   "seed": 20260720
+  },
+  "control_tercile_edges": {
+   "max_ret168": [
+    0.0521658127619935,
+    0.07597608160393943
+   ],
+   "ret1": [
+    -0.004242549668874163,
+    0.0071652485445588
+   ],
+   "turnover_spike_168h": [
+    0.5007938320257969,
+    1.2859252874341431
+   ]
+  },
+  "cooldown_h": 24,
+  "cost_rt": 0.0045,
+  "deciles": [
+   7,
+   8,
+   9
+  ],
+  "entry_delay_h": 1,
+  "era_boundary": "2025-01-01",
+  "family": {
+   "alpha": 0.05,
+   "primary_tests": 4
+  },
+  "hold_h": 24,
+  "liq_turnover_min": 500000.0,
+  "min_stratum_side": 5
+ },
+ "schema_version": 1,
+ "study": "t-n",
+ "study_mode": "exploratory"
+}

@@ -66,7 +66,7 @@ threshold bands, cross-venue sign) decide.
 | --- | --- | --- |
 | T-L | Young-listing lifecycle (<240d population; untraded by the deployed universe gate) | **closed 2026-07-20 (v1 + v2), no Lane-2 candidate.** v1 (`reports/strategy-research-v3/t-l/2026-07-20/`): no calendar-only arm era-stable. v2 (`…/t-l/2026-07-20/v2/`, Windows chain, independent implementation): replicated v1's arms (short d1→d7 net +251/+269/−180 bp by era vs v1's +275/+273/−175); conditioned on pump, turnover decay, funding state, crowding, BTC trend — one Bybit survivor (turnover-collapse short, era-stable both entry days, threshold-band 0.2–0.4, permutation p=0.015) **failed the Binance same-design cross-venue pass** (negative all three eras at d2; `v2/binance/divergence_note.md`). The mandatory 1m execution-cost read is done (listing week 2.18× mature rel-range; 45 bp RT realistic at demo scale). Only the population-level 2024/2025 flip (funding turning against listing shorts) is cross-venue robust. Reopen only with a new conditioning mechanism or new data |
 | T-M | Funding-extreme carry harvest (hedged carry, not momentum) | **closed 2026-07-20, below bar** — `reports/strategy-research-v3/t-m/2026-07-20/` (+ `binance/`). Episode inventory built (Bybit 84,761 / Binance 41,357 episodes; post-2025 negative-funding regime shift quantified: 28.3k/13.6k episodes ≤−0.15%/8h in e2526, concentrated in 30d+ symbols). 12 declared arms × 2 venues × hedged/unhedged, all reported: 0 era-stable hedged arms anywhere (episodes resolve in 2.5–16 h; funding cannot amortize 45 bp/leg; the paying crowd is directionally right at negative extremes); 2 Binance unhedged bar-clearers (n=28/n=3 pre-2025) fail the Bybit cross-check. Entries floored 2021-05-01 both venues to keep G1/G2 unread (the 2019-09→ inventory span deliberately narrowed; recorded). Residual value: the episode tape is R2 state-feature context |
-| T-N | Cascade-riding long (C-H1/C-H2 estimands; shares P2.1 features) | todo — next Track-O item |
+| T-N | Cascade-riding long (C-H1/C-H2 estimands; shares P2.1 features) | **closed 2026-07-20 (unconditioned + BTC-state variants), no Lane-2 candidate** — `reports/strategy-research-v3/t-n/2026-07-20/` (+ `binance/`). The frozen C-H1/C-H2 backlog finally measured under its own multiplicity rule: all 4 primary tests positive and cross-venue sign-consistent (D9 −28/−31 bp harder 24h fall than D7/8; uptrend-state D9 −62/−26 bp harder) but none significant (p 0.075–0.47) — the deployed decile-9 + uptrend-gate design is directionally validated, with no decile-expansion case. The long inversion is dead: 23/24 era cells negative net45 on 39.8k events. The squeeze-state-CONDITIONED long is explicitly NOT closed — it is P2.2's design surface |
 | T-O | Cross-venue listing lead-lag | blocked: needs incumbent-venue data (P3 acquisition) |
 | T-P | Young-listing long continuation | dropped 2026-07-20 — naive d0→d2 negative/flat in every era (T-L card); v2's long mirror also noise post-2025 (s.e. ~400+ bp); revisit only conditioned |
 
@@ -108,9 +108,9 @@ threshold bands, cross-venue sign) decide.
 
 ## Queued next actions (updated 2026-07-20, Windows chain merge)
 
-1. **T-N cascade-riding long** — next Track-O offense item (shares P2.1
-   features; starts from the frozen C-H1/C-H2 estimands and their frozen
-   multiplicity rule).
+1. **P2.2 — R2 squeeze-state governor design** — now also carries the
+   squeeze-CONDITIONED long question T-N left open (T-N closed the
+   unconditioned and BTC-state-conditioned inversions, 2026-07-20).
 2. **G1 one-time grade of the committed R1/R3 configs** (configs committed
    2026-07-20; G1 verified pristine). Needs its own registered unit: a
    Binance CONTINUOUS-shape render over G1 (`[2021-01-01, 2021-04-30)`

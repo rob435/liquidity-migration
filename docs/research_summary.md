@@ -622,6 +622,30 @@ stated as a non-conclusion). Lane-1, 31st family. Artifacts:
 manifest.json, binance/). Non-conclusions: no intraday path stats
 (missing, not zero); maker execution and perp-vs-perp basis untested.
 
+## T-N cascade-riding long: naive anti-book dead both venues; C-H1/C-H2 backlog finally measured (2026-07-20)
+
+Two results from one study on the deployed CONTINUOUS trigger surface
+(production decile panels, static eligibility applied, 24h-cooldown events;
+Bybit 19,660 / Binance 20,129 events, 2023-04→2026-07). (1) The frozen
+backlog estimands (`docs/strategy_overhaul_lessons.md`) ran under their
+frozen multiplicity rule (4 primary tests, family-α 0.05, Bonferroni,
+28-day-block bootstrap): all four points positive and cross-venue
+sign-consistent — D9 falls ~+28/+31 bp more than D7/8 over 24h, and
+BTC-uptrend D9 events fall +62/+26 bp more than downtrend ones — i.e. the
+deployed book's decile-9 selection and uptrend gate point the right way,
+but none clears the per-test bar (p = 0.075–0.47) and the magnitudes sit
+at/below the 45 bp hurdle: no decile-expansion case; "directionally
+consistent, underpowered" is the resolved status of the two-year backlog.
+(2) The T-N long inversion (ride the pump events) is **dead on both
+venues**: 23 of 24 era cells negative net45 (the lone positive, Binance
+D9/btc-down e2324 +12.8±26, flips to −58 post-2025); frequency exists
+(3–15 events/day) but no deployable gross — **closed below bar**. Scope
+boundary: the squeeze-state-CONDITIONED long is NOT closed — it belongs to
+P2.2, which owns the P2.1 features. No TP/stop variants touched (closed
+lines). Lane-1, 32nd family (descends from the registered C-H1/C-H2
+backlog). Artifacts: `reports/strategy-research-v3/t-n/2026-07-20/`
+(evidence_card.md, manifest.json, binance/).
+
 ## Tail-risk program adopted as main focus (2026-07-20)
 
 By operator instruction the repository's main research focus is the book-level

@@ -55,15 +55,20 @@ HARD RAILS — no exceptions:
   opening in `docs/preregistration/INDEX.md`.
 
 MISSION QUEUE — work top-down; live statuses in `docs/tail_risk_program.md`
-(T-L v1+v2, T-M, P0.1, P0.2, P0.5, P1.1–P1.4, P2.1 are DONE as of
+(T-L v1+v2, T-M, T-N, P0.1, P0.2, P0.5, P1.1–P1.4, P2.1 are DONE as of
 2026-07-20 — do not redo them; read their status cells for artifacts):
 
-1. **T-N — cascade-riding long (top Track-O priority).** Start from the
-   frozen C-H1/C-H2 estimands and their frozen multiplicity rule; shares
-   the P2.1 squeeze-feature build
-   (`reports/tail-risk-program/p21-squeeze-features-2026-07-20/`). All
-   cells × eras; admission bar decides; cross-venue check before any
-   Lane-2 talk (the T-L v2 lesson: a Bybit-only survivor died on Binance).
+1. **P2.2 — R2 squeeze-state governor design (top priority).** Gross
+   multiplier per side, hedge modulation, extreme-state veto; NO per-trade
+   exit changes. Lane-1 card on the spent window only, from the P2.1
+   feature build
+   (`reports/tail-risk-program/p21-squeeze-features-2026-07-20/`). This
+   also owns the squeeze-CONDITIONED long that T-N left open (T-N closed
+   the unconditioned inversion on both venues). T-M's episode tape
+   (`reports/strategy-research-v3/t-m/2026-07-20/`) is available state
+   context. All cells × eras; cross-venue check before any Lane-2 talk
+   (the T-L v2 lesson: a Bybit-only survivor died on Binance). P2.3 (the
+   holdout spend) needs its own registered opening — NOT part of P2.2.
 2. **G1 one-time grade of the committed R1/R3 configs.** A registered
    unit: record the opening in `docs/preregistration/INDEX.md` BEFORE the
    first outcome read; Binance CONTINUOUS-shape render over G1
@@ -72,15 +77,10 @@ MISSION QUEUE — work top-down; live statuses in `docs/tail_risk_program.md`
    the frozen §Grading metrics via the committed replay scripts. G1 is
    pristine and spends once — do not start it casually at the tail of a
    long session.
-3. **P2.2 — R2 squeeze-state governor design** (gross multiplier per side,
-   hedge modulation, extreme-state veto; NO per-trade exit changes).
-   Lane-1 card on the spent window only; T-M's episode tape
-   (`reports/strategy-research-v3/t-m/2026-07-20/`) is available state
-   context. P2.3 (the holdout spend) needs its own registered opening.
-4. **R1 forward rows** — run `scripts/research_v3/r1_forward_scorer.py`
+3. **R1 forward rows** — run `scripts/research_v3/r1_forward_scorer.py`
    with each T-A render-root refresh past 2026-07-21; weekly R1-K1/K2/K3
    check.
-5. **P0.4 — verify only.** Assigned to the big PC; when its coverage
+4. **P0.4 — verify only.** Assigned to the big PC; when its coverage
    receipt lands, verify it. Launch nothing locally.
 
 Operator-gated (not agent work): P0.3 recorder install, R3a/R3b

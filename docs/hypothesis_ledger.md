@@ -40,7 +40,9 @@ the only other unmined data and accrue at one day per day.
 
 | 11 | T-M funding-extreme carry (2026-07-20, operator-directed) | 1 (episode-state carry against the paying crowd, BTC-hedged; not descended from the 29 pre-T-L families; funding-STATE features overlap T-G/T-B ancestry — stated) | 12 declared arms (3 thresholds × 2 signs × persistence {1,2}) × 6 era groups × 2 venues × hedged/unhedged, all reported | Both full-PIT funding tapes + 1h klines, entries ≥ 2021-05-01 (G1/G2 preserved unread; queue's 2019-09→ span deliberately narrowed) | **Closed below bar**: 0 era-stable hedged arms either venue; episodes resolve in hours so funding can't amortize per-leg costs; 2 Binance unhedged bar-clearers (n=28/n=3 pre-2025) fail the Bybit cross-check. Durable residual: episode inventory quantifying the post-2025 negative-funding regime (28.3k Bybit episodes ≤−0.15%/8h in e2526) as R2 context |
 
-Running totals against the shared discovery surface: **~31 hypothesis
+| 12 | T-N cascade-riding long + C-H1/C-H2 estimands (2026-07-20) | 1 (anti-book long inversion of the deployed trigger surface; descends from the REGISTERED C-H1/C-H2 backlog priors — their frozen multiplicity rule honored: exactly 4 primary tests, family-α 0.05, Bonferroni) | 4 primary estimand tests + 24 declared descriptive long cells ({D9, D7/8} × BTC state × era × 2 venues), all reported | Production decile panels (rmom25 caches, both venues, 2023-04→2026-07) + funding tapes + 1h klines (all seen; holdout, G1/G2/G3 unread) | Estimands: all 4 points positive, cross-venue sign-consistent (D9 and uptrend-state validate the deployed short's design) but none significant — "directionally consistent, underpowered", magnitudes at/below the cost hurdle. Long inversion **closed below bar**: 23/24 era cells negative. Squeeze-conditioned long explicitly NOT closed (→ P2.2) |
+
+Running totals against the shared discovery surface: **~32 hypothesis
 families** and on the order of **150+ distinct configurations** evaluated
 across five generations (grid rows including era splits total several
 hundred). Anything now proposed from that surface is at minimum a
