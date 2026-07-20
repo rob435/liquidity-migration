@@ -16,8 +16,12 @@ from .account_execution_config import (
     load_risk_policy,
     require_registered_demo_rule_max_age_hours,
 )
-from .account_contracts import AccountRiskSnapshot
+from .account_contracts import AccountEventType, AccountRiskSnapshot, OrderCommand
 from .account_kernel import AccountExecutionKernel
+from .passive_execution import (
+    PassivePaperExecutionAdapter,
+    recover_orphaned_working_orders,
+)
 from .account_market_readiness import (
     RequestedMarketWarmupGate,
     require_registered_request_market_warmup_timeout,
@@ -35,7 +39,6 @@ from .account_route import derive_account_route, ensure_account_route
 from .account_service import AccountExecutionService, AccountIntentInbox
 from .account_service_bybit import (
     CapturedBybitMarketProvider,
-    CapturedPaperExecutionAdapter,
     VerifiedBybitDemoRulesProvider,
 )
 from .deterministic_runtime import Clock, SystemClock
@@ -267,6 +270,28 @@ def main(argv: list[str] | None = None) -> int:
         name=f"paper_{INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE}",
         id_seed=f"{route.account_id}:paper-execution",
     )
+
+    def _component_for_command(command: OrderCommand) -> tuple[str, str]:
+        """Resolve the registered A/B identity (trade id, sleeve) for a command."""
+        for event in reversed(kernel.journal.events()):
+            if (
+                event.event_type == AccountEventType.TARGET.value
+                and event.correlation_id == command.batch_id
+                and event.symbol == command.symbol.upper()
+            ):
+                payload = event.payload
+                return (
+                    str(payload.get("component_id") or ""),
+                    str(payload.get("sleeve") or ""),
+                )
+        return "", ""
+
+    execution_adapter = PassivePaperExecutionAdapter(
+        market_provider=market_provider,
+        twin=twin,
+        component_resolver=_component_for_command,
+        clock=runtime_clock,
+    )
     service = AccountExecutionService(
         route=route,
         kernel=kernel,
@@ -274,13 +299,24 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_provider=FixedCapitalSnapshotProvider(args.equity_usdt, clock=runtime_clock),
         rules_provider=VerifiedBybitDemoRulesProvider(rules),
         risk_policy=policy,
-        execution_adapter=CapturedPaperExecutionAdapter(
-            market_provider=market_provider,
-            twin=twin,
-        ),
+        execution_adapter=execution_adapter,
         required_rules_environment="demo",
         clock=runtime_clock,
     )
+    # Passive pending state is in-memory: after a restart, terminal-cancel any
+    # working order left by a prior process so nothing stays phantom-working;
+    # the convergence loop re-plans the remainder deterministically.
+    restart_recovery = recover_orphaned_working_orders(
+        kernel._state_ref(),
+        now_ns=runtime_clock.wall_time_ns(),
+        tolerance=policy.quantity_tolerance,
+    )
+    if restart_recovery:
+        service.runtime.driver.ingest(restart_recovery)
+        _logger.warning(
+            "cancelled %d orphaned paper working order(s) after restart",
+            len(restart_recovery),
+        )
     inbox = AccountIntentInbox(route)
     market_warmup_gate = RequestedMarketWarmupGate(
         timeout_seconds=args.request_market_warmup_timeout_seconds,
@@ -357,6 +393,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
             if protection_markets:
                 protection.evaluate(protection_markets)
+            if execution_adapter.pending_count():
+                passive_observations = execution_adapter.poll()
+                if passive_observations:
+                    service.runtime.driver.ingest(passive_observations)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY if requested_symbols_ready else AccountOwnerHealthStatus.BLOCKED
             )

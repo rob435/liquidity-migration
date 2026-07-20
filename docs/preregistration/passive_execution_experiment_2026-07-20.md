@@ -57,6 +57,17 @@ degrading signal capture (fills within the same decision hour).
   opportunity cost exceeds its measured cost saving over any 50-entry
   window.
 
+## Implementation status
+
+Arm B shipped 2026-07-20 in `liquidity_migration/passive_execution.py`
+(paper owner only; the implementing commit is the config registration). The
+fill model is deliberately conservative: strict opposite-touch crossing with
+no queue-position credit, so the measured passive fill rate is a lower
+bound. Fills carry `execution_arm`, passive limit/re-peg/fallback metadata,
+and the cost report groups by arm. Restart safety: pending passive state is
+in-memory and the paper owner terminal-cancels orphaned working orders at
+startup before convergence re-plans.
+
 ## What this does not show
 
 The 23-fill baseline cannot establish the reversion is stable; it
