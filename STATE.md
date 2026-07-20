@@ -2,24 +2,41 @@
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, account-journal protection/P&L archaeology, and the full
-2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC. These facts
-describe the deployed implementation commit below; a later documentation-only
-commit may leave the branch ahead.
+2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC, with the
+2026-07-20 11:04 UTC rollout recorded below. These facts describe the deployed
+implementation commit below; a later documentation-only commit may leave the
+branch ahead.
 
 ## Live authority and topology
 
 - Installed and authorized implementation commit:
-  `97d0ee08743bc7d19d1edab1d508a39e3057a8ff`, deployed from canonical `main`,
+  `cd9377265f7053946b5122ff94974eee3a0c3223`, deployed from canonical `main`,
   profile `operational`, receipt artifact SHA-256
-  `64c3d64b689c9c9d99886ca7e9040e945fe8397a5877f734d92b94cbafca2119`.
-  Over `d520792` it adds one runtime change — a convergence residual that no
-  venue-admissible order can express (the 2026-07-20 00:04 UTC ACEUSDT paper
-  block: 0.1 units against a ~$5 venue minimum) now classifies as
+  `6e76b2271988694696d934406a7f4be3ef1778516c783fd195e1bd86800a05f2`.
+  Over `70d666c` it deploys two runtime fixes for the 2026-07-20 morning
+  Telegram defects — a 15s freshness floor on position-truth reconciliation
+  staleness (the funding-floor pattern; kills the false `age_ns=~4-5e9`
+  BLOCKED pages, the "Position truth stale" banner on an in-agreement book,
+  and the false owner-health CRITICAL) and Bybit `set_trading_stop` ErrCode
+  34040 "not modified" classified as a converged no-op instead of latching
+  reconciliation unhealthy — plus the behavior-preserving architecture
+  consolidation (account_contracts/strategy_planning/env_flags extraction,
+  shared exit-intent, kline-universe, and historical-submission tiers; no
+  strategy decision path, sizing input, or registered estimator changed; full
+  gate 2,144 passed / 3 skipped). The fleet was deliberately quiescent about
+  10:52--11:04 UTC for this staged install; activation verified order
+  permissions, the immutable sizing-only model prior, and a fresh
+  residual-momentum gate (485 current stable symbols). Recorded mid-epoch
+  change point; clock and comparator identity unchanged.
+- The prior change point remains on record: `97d0ee0` (receipt
+  `64c3d64b...`) deployed the dust-convergence fix. Over `d520792` it added
+  one runtime change — a convergence residual that no venue-admissible order
+  can express (the 2026-07-20 00:04 UTC ACEUSDT paper block: 0.1 units
+  against a ~$5 venue minimum) now classifies as
   `converged_within_venue_minimum` instead of exhausting retries and
   latching owner health blocked — plus the repo-wide Progressive Evidence
   Model documentation alignment and the big-PC V4/V5 research artifacts
-  (Lane-2 forward scorer; research-only, no runtime surface). Recorded
-  mid-epoch change point; clock and comparator identity unchanged.
+  (Lane-2 forward scorer; research-only, no runtime surface).
 - The prior change point remains on record: `d520792` (receipt
   `d689e3e6...`) deployed the 2026-07-19 load-bearing audit fixes.
   Over `386120b` it deploys the 2026-07-19 load-bearing audit outcome
