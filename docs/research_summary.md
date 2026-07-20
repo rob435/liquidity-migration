@@ -591,6 +591,31 @@ manifest.json, `binance/divergence_note.md`). Non-conclusions: long
 mirror is noise (s.e. ~400+ bp); ≥5 bets/day bar unreachable (~45
 events/yr); no Binance 1m cost read.
 
+## T-M funding-extreme carry: inventory built; every carry arm fails the bar (2026-07-20)
+
+Claim tested: extreme-funding episodes (settled 8h-equiv rate ≥ {0.15, 0.30,
+0.50}%/8h, either sign; cadence derived from observed spacing, never the
+stale `funding_interval_min` label) support a BTC-hedged carry clearing the
+admission bar. Verdict: **no arm is era-stable ≥ +40 bp hedged on either
+venue — family closed below bar.** Episodes resolve in hours (mean holds
+2.5–16 h; the 14-day cap never binds), so collected funding (+12–145 bp
+depending on sign) cannot amortize 45 bp/leg; at negative extremes the alt
+price keeps falling while you collect (the paying crowd is directionally
+right short-term). Binance pre-2025 hedged positives (+47/+86 bp at
+negative extremes) die post-2025 AND have negative Bybit twins; two
+Binance unhedged bar-clearing cells (n=28/n=3 pre-2025) fail the Bybit
+cross-check — scanned, not banked. Durable deliverable: the episode
+inventory (Bybit 84,761 / Binance 41,357 episodes, era × age × persistence
+tables) quantifies the **post-2025 negative-funding regime shift**
+(Bybit ≤−0.15%/8h: 3.5k/2.9k/28.3k episodes by era; Binance replicates) —
+context for R2 squeeze-state design, concentrated in 30d+ symbols, not a
+listing-week artifact. Entries floored at 2021-05-01 both venues to keep
+G1/G2 unread (the queue's 2019-09→ Binance span was deliberately narrowed;
+stated as a non-conclusion). Lane-1, 31st family. Artifacts:
+`reports/strategy-research-v3/t-m/2026-07-20/` (evidence_card.md,
+manifest.json, binance/). Non-conclusions: no intraday path stats
+(missing, not zero); maker execution and perp-vs-perp basis untested.
+
 ## Tail-risk program adopted as main focus (2026-07-20)
 
 By operator instruction the repository's main research focus is the book-level

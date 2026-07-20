@@ -1,0 +1,85 @@
+{
+ "code_commit": "d3dde0e9449a11eea1843212a4273e12c357fc11",
+ "counters": {
+  "entry_bar_missing": 159,
+  "exit_bar_missing": 377,
+  "pre_floor_entry": 0,
+  "right_censored_run": 38
+ },
+ "created_utc": "2026-07-20T19:54:09.175902+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "files": {
+  "arms_summary.csv": {
+   "bytes": 17674,
+   "sha256": "b6c6817f5f4b5af5a5a3be417a0c542cae1a19f47c939e942e6cbfc7e7438e9e"
+  },
+  "episodes.csv": {
+   "bytes": 6828016,
+   "sha256": "101c1b56e135c12d3f3eec4510725dbff8cd3d31cc9e12e0127c07183ef80f7f"
+  },
+  "exclusions.csv": {
+   "bytes": 96,
+   "sha256": "9323f99d2587241075ca4323439d031d49b8e2da56bb72b9a82a07f57c94e64c"
+  },
+  "inventory_summary.csv": {
+   "bytes": 3043,
+   "sha256": "c81f20c42eee31715af6e330a71ab3f4858289534bc2143599aaf64f85060697"
+  },
+  "trades.csv": {
+   "bytes": 20611782,
+   "sha256": "d201901b7c728e15f080acf37a3d20e3fe5b369956ce3e6c040745781fb1caa5"
+  }
+ },
+ "g1_g2_note": "entries and inventory floored at 2021-05-01; pre-2021-05 funding unread by this family",
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "funding_rows": 2665439,
+  "funding_symbols": 903,
+  "kline_end": "2026-07-09",
+  "venue": "bybit"
+ },
+ "kind": "tm_funding_extreme_carry",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "6e84d2217758208f22f4ef66f06e047c48b0021bbb1d5dabf00526dfeb3ba554",
+ "params": {
+  "age_edges_days": [
+   30,
+   240
+  ],
+  "boot": {
+   "cluster": "7d-ordinal-block",
+   "n": 2000,
+   "seed": 20260720
+  },
+  "cost_per_leg_rt": 0.0045,
+  "entry_floor": "2021-05-01",
+  "era_bounds": [
+   "2023-01-01",
+   "2025-01-01"
+  ],
+  "max_hold_days": 14,
+  "persistence": [
+   1,
+   2
+  ],
+  "signs": [
+   1,
+   -1
+  ],
+  "snap_intervals_min": [
+   60.0,
+   120.0,
+   240.0,
+   480.0
+  ],
+  "thresholds_8h": [
+   0.0015,
+   0.003,
+   0.005
+  ]
+ },
+ "schema_version": 1,
+ "study": "t-m",
+ "study_mode": "exploratory"
+}

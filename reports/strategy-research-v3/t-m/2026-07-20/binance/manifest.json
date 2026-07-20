@@ -1,0 +1,85 @@
+{
+ "code_commit": "d3dde0e9449a11eea1843212a4273e12c357fc11",
+ "counters": {
+  "entry_bar_missing": 9,
+  "exit_bar_missing": 9,
+  "pre_floor_entry": 4,
+  "right_censored_run": 36
+ },
+ "created_utc": "2026-07-20T19:58:01.429662+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\binance_full_pit",
+ "files": {
+  "arms_summary.csv": {
+   "bytes": 17573,
+   "sha256": "940bc71bb4816bf81d8c60dcc79d6d00fc961b5cc6fd81e499c7f428e77e8dd0"
+  },
+  "episodes.csv": {
+   "bytes": 3507831,
+   "sha256": "2c2b1987cb1b715e2350ebaab4276cd2d624aec70e11abd8c05b7655e722feec"
+  },
+  "exclusions.csv": {
+   "bytes": 92,
+   "sha256": "bf88c63ef4fa8e77fa36f1314310011db32a4473876960e3d49692178f5eb838"
+  },
+  "inventory_summary.csv": {
+   "bytes": 2870,
+   "sha256": "36c5de3a019bb9a042b395381d2167acfa1a07e4a074e22f1bad99cd4f807222"
+  },
+  "trades.csv": {
+   "bytes": 10242770,
+   "sha256": "ee54c990d3d96a60d20e29e04d0509e967c8f4aadb12291852403c5d6d913e66"
+  }
+ },
+ "g1_g2_note": "entries and inventory floored at 2021-05-01; pre-2021-05 funding unread by this family",
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "funding_rows": 2320000,
+  "funding_symbols": 780,
+  "kline_end": "2026-07-09",
+  "venue": "binance"
+ },
+ "kind": "tm_funding_extreme_carry",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "f78fe7b6799778e0cb92cbf15f0f06450bc3e549feb2f3d69300b9cbd71c60b3",
+ "params": {
+  "age_edges_days": [
+   30,
+   240
+  ],
+  "boot": {
+   "cluster": "7d-ordinal-block",
+   "n": 2000,
+   "seed": 20260720
+  },
+  "cost_per_leg_rt": 0.0045,
+  "entry_floor": "2021-05-01",
+  "era_bounds": [
+   "2023-01-01",
+   "2025-01-01"
+  ],
+  "max_hold_days": 14,
+  "persistence": [
+   1,
+   2
+  ],
+  "signs": [
+   1,
+   -1
+  ],
+  "snap_intervals_min": [
+   60.0,
+   120.0,
+   240.0,
+   480.0
+  ],
+  "thresholds_8h": [
+   0.0015,
+   0.003,
+   0.005
+  ]
+ },
+ "schema_version": 1,
+ "study": "t-m",
+ "study_mode": "exploratory"
+}
