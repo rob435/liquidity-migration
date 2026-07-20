@@ -29,7 +29,7 @@ from .account_kernel import (
     MarketInputRef,
     PositionState,
     TargetBatchResult,
-    _quantized_down,
+    quantized_down,
 )
 from .account_route import AccountRoute, require_account_route
 from .artifact_snapshot import read_stable_file
@@ -1634,7 +1634,7 @@ class AccountExecutionService:
         if rule is None or rule.qty_step <= 0.0:
             return False
         tolerance = self.risk_policy.quantity_tolerance
-        qty = abs(_quantized_down(residual, rule.qty_step))
+        qty = abs(quantized_down(residual, rule.qty_step))
         if qty <= tolerance:
             return True
         if qty + tolerance < rule.min_qty:
