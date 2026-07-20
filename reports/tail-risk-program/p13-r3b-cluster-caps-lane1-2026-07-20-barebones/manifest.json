@@ -1,0 +1,65 @@
+{
+ "code_commit": "50cae3cdc85bcc9750f597a4f84418edb861f1d1",
+ "created_utc": "2026-07-20T17:43:56.063802+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory Lane-1 on a seen surface; no deployment implication",
+  "component rows share entry decisions; veto counterfactual removes whole rows",
+  "no capacity backfill: a vetoed slot is left empty, not refilled",
+  "young listings (insufficient overlap) cannot join a cluster and are counted separately"
+ ],
+ "files": {
+  "r3b_cluster_structure.json": {
+   "bytes": 604,
+   "sha256": "695e1fe2e927a498ce0c17b6f340cb30b7f3ac60443da55f6bf097b5d92efc6c"
+  },
+  "r3b_grid.csv": {
+   "bytes": 2124,
+   "sha256": "b03f7f086445871f01162ad2e549a9ae597f7bbd4e9c672a96d9c765dc612802"
+  },
+  "r3b_vetoed_entries.json": {
+   "bytes": 1689577,
+   "sha256": "871f6a1180d3b139ca51bea4d25e4e62bb83401676e1eb5f78898a8eff1581b0"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "render_caches": {
+   "render_funding_events.parquet": "f27e49e737bf819a2d89f05f32acfa3234ba76ae3fbdf1424ccec96858dd6676",
+   "render_kline_slice_1h.parquet": "4b1727269d14176824604fb9d07e00dd93ff92e83837ac6adc62f3ec386b9078"
+  }
+ },
+ "kind": "tail_risk_p13_r3b_cluster_caps_lane1",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "afedfcc8414dc0ccfdd3dcc531f7ceae6ad98a68e92cbf9f0f897b1907493c44",
+ "params": {
+  "cells": [
+   {
+    "cap_k": 2,
+    "rho_min": 0.6
+   },
+   {
+    "cap_k": 3,
+    "rho_min": 0.6
+   },
+   {
+    "cap_k": 2,
+    "rho_min": 0.7
+   },
+   {
+    "cap_k": 3,
+    "rho_min": 0.7
+   }
+  ],
+  "cluster_method": "trailing 720h hourly log-return Pearson rho vs open positions at entry; >= 240 overlapping bars required",
+  "grading": "insurance metrics (item 27); era-split; tail-day interaction",
+  "registered_cell": {
+   "cap_k": 3,
+   "rho_min": 0.7
+  },
+  "surface": "V2 barebones CONTINUOUS ledger [LABELLED SUPPLEMENTARY: stacking surface]"
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

@@ -1,0 +1,65 @@
+{
+ "code_commit": "50cae3cdc85bcc9750f597a4f84418edb861f1d1",
+ "created_utc": "2026-07-20T17:41:07.100701+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory Lane-1 on a seen surface; no deployment implication",
+  "component rows share entry decisions; veto counterfactual removes whole rows",
+  "no capacity backfill: a vetoed slot is left empty, not refilled",
+  "young listings (insufficient overlap) cannot join a cluster and are counted separately"
+ ],
+ "files": {
+  "r3b_cluster_structure.json": {
+   "bytes": 271,
+   "sha256": "c58fa740462c3c1177e096330f6f4220e640961c716b40c94c1b973f217eadde"
+  },
+  "r3b_grid.csv": {
+   "bytes": 1184,
+   "sha256": "e47c33fd118f6fcea2c30647b05e7ed2439f8ff7d6d67555cb5469b87a569f64"
+  },
+  "r3b_vetoed_entries.json": {
+   "bytes": 6686,
+   "sha256": "9747cc06729c4c4edca55339122425564ef7072877cbc3806f2eb2348b648611"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "render_caches": {
+   "render_funding_events.parquet": "5f75b179e08917cc0885896c166930aae7840737b11117dfc61e8bc53c16595a",
+   "render_kline_slice_1h.parquet": "05c29b2e2511515cd2a1839f759f3e8afa941de6ec0075a5039c561319e7a57e"
+  }
+ },
+ "kind": "tail_risk_p13_r3b_cluster_caps_lane1",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "32550278bc56bf099ddc00bc8dccc5ed19680393d610375a1066629fdb19be07",
+ "params": {
+  "cells": [
+   {
+    "cap_k": 2,
+    "rho_min": 0.6
+   },
+   {
+    "cap_k": 3,
+    "rho_min": 0.6
+   },
+   {
+    "cap_k": 2,
+    "rho_min": 0.7
+   },
+   {
+    "cap_k": 3,
+    "rho_min": 0.7
+   }
+  ],
+  "cluster_method": "trailing 720h hourly log-return Pearson rho vs open positions at entry; >= 240 overlapping bars required",
+  "grading": "insurance metrics (item 27); era-split; tail-day interaction",
+  "registered_cell": {
+   "cap_k": 3,
+   "rho_min": 0.7
+  },
+  "surface": "T-A render gate_on book (deployed CONTINUOUS shape; shorts only)"
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

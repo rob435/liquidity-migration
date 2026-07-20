@@ -451,6 +451,30 @@ no return claim; realized-at-exit replay is an approximation of live
 venue-time cash flow (the shadow phase measures the live analogue); render
 surface lacks LONG.
 
+## R3b cluster cap: zero-premium tail-day insurance — but only where the book stacks (2026-07-20)
+
+Claim: the correlated-squeeze cap the 2026-06-20 study recommended is
+well-posed structural insurance, and its binding regime does not exist on
+today's deployed book — informing the P1.3 registration as a dormant guard.
+Data that shaped: T-A gate_on render book (declared surface) + V2 barebones
+ledger (labelled supplementary stacking surface; registered cell ρ≥0.7/K=3
+was fixed before either ran). Method: trailing-720h hourly log-return ρ vs
+open positions at entry (≥240 overlap; zero un-correlatable pairs on both
+surfaces). Effects (grids + per-veto detail in
+`reports/tail-risk-program/p13-r3b-cluster-caps-lane1-2026-07-20*/`): on the
+deployed-shape book the cluster state ~never occurs (mean 1.11 open at
+entry; 2/2,300 entries with ≥2 correlated opens; registered cap binds 0×) —
+free but dormant. On the stacked book (mean 15.35 open): 2.66% veto rate,
+forgone +0.1441 vs avoided −0.1440 (≈zero net premium over 3.6y), with
+vetoed-entry losses concentrated exactly on common-loss days (−0.036 native
+tail set / −0.021 registered set); era-stable tail concentration. Registered:
+frozen cell + per-entry hash-parity A/B (A=shadow-veto, B=veto) + kill rules
+Y1–Y3 including an explicit dormancy closure; decision layer staged. The
+value case activates precisely under the breadth expansion the T-K
+workstream wants. Non-conclusions: no deployment (wiring needs an operator
+go); pairwise-to-open ρ is a crude cluster proxy; no capacity backfill in
+counterfactuals; seen-data only.
+
 ## P0.2 slice provenance: D1's "untouched" claim corrected (2026-07-20)
 
 Claim: of the two "never-opened" pre-2021-05 slices, only **Binance
