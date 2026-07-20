@@ -36,6 +36,7 @@ from .continuous_demo import (
     format_continuous_demo_cycle_summary,
     run_continuous_demo_cycle,
 )
+from .event_demo_data import top_turnover_kline_universe
 from .execution_environment import execution_environment
 from .kline_follower import FollowerKlineStreamManager, build_kline_follower
 from .kline_stream_manager import KlineStreamManager
@@ -62,24 +63,7 @@ def _build_continuous_kline_universe(
     top_n: int = _CONTINUOUS_KLINE_UNIVERSE_SIZE,
 ) -> list[str]:
     """Top-N active linear USDT-perps by 24h turnover (the liquid cross-section the fade trades)."""
-    try:
-        tickers = market.get_tickers()
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("continuous kline universe fetch failed (tickers): %s", exc)
-        return []
-    candidates: list[tuple[float, str]] = []
-    for row in tickers:
-        symbol = str(row.get("symbol") or "")
-        if not symbol or not symbol.endswith("USDT"):
-            continue
-        try:
-            turnover = float(row.get("turnover24h") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if turnover > 0.0:
-            candidates.append((turnover, symbol))
-    candidates.sort(reverse=True)
-    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+    return top_turnover_kline_universe(market, top_n=top_n, label="continuous")
 
 
 def _follower_continuous_kline_stream_manager_factory(

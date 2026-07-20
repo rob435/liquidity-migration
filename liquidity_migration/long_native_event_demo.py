@@ -40,7 +40,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms, is_weekend_ms
+from ._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
 from .account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     AccountTargetPublisher,
@@ -73,7 +73,7 @@ from .event_demo_data import (
     _demo_instruments,
     _download_recent_1h_klines,
     _float,
-    _floor_hour_ms,
+    _kline_window,
     _max_int,
     _prune_cycle_reports,
     _price_lookup_from_tickers_and_klines,
@@ -103,7 +103,7 @@ from .strategy_funnel import (
     gate_state,
     observe_funnel_rows_safely,
 )
-from .strategy_targets import component_target_intent
+from .strategy_targets import component_target_intent, exit_target_intents
 from .strategy_target_replay import PublishedTargetCyclePayload
 from .universe import build_current_universe_table
 
@@ -674,12 +674,6 @@ def run_long_native_demo_cycle(
     )
 
 
-def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
-    end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-    start_ms = end_ms - exact_duration_ms(days=lookback_days)
-    return start_ms, end_ms
-
-
 def _apply_median_universe_selection(
     features: pl.DataFrame, *, universe_size: int, snapshot_ts_ms: int
 ) -> tuple[pl.DataFrame, int]:
@@ -1158,34 +1152,19 @@ def _long_exit_target_intents(
 ) -> list[RequestedIntent]:
     """Translate strategy exits to replacement zero targets without venue I/O."""
 
-    lookup = {str(row.get("trade_id") or ""): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
-    intents: list[RequestedIntent] = []
-    for plan in exits:
-        trade_id = str(plan.get("trade_id") or "")
-        trade = lookup.get(trade_id)
-        if not trade:
-            continue
-        symbol = str(plan.get("symbol") or trade.get("symbol") or "").upper()
-        intents.append(
-            component_target_intent(
-                adapter_kind=SleeveAdapterKind.LONG,
-                action="exit",
-                decision_ts_ms=now_ms,
-                strategy_id=strategy_id,
-                component_id=trade_id,
-                symbol=symbol,
-                signed_notional_usdt=0.0,
-                leverage=_float(trade.get("entry_leverage")) or default_leverage,
-                reason=str(plan.get("exit_reason") or "time_stop"),
-                metadata={
-                    "source": "long_native_target_adapter",
-                    "owner_sleeve": "long",
-                    "prior_trade_id": trade_id,
-                    "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
-                },
-            )
-        )
-    return intents
+    return exit_target_intents(
+        exits,
+        all_trades,
+        adapter_kind=SleeveAdapterKind.LONG,
+        strategy_id=strategy_id,
+        now_ms=now_ms,
+        default_leverage=default_leverage,
+        source="long_native_target_adapter",
+        default_reason="time_stop",
+        extra_metadata=lambda plan, trade: {
+            "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
+        },
+    )
 
 
 def _long_entry_target_intents(

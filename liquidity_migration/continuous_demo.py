@@ -100,7 +100,7 @@ from .execution_environment import (
     execution_environment,
 )
 from .storage import exclusive_file_lock, write_dataset
-from .strategy_targets import component_target_intent
+from .strategy_targets import component_target_intent, exit_target_intents
 from .strategy_funnel import DecisionFunnelObserver
 from .strategy_target_replay import PublishedTargetCyclePayload
 
@@ -1593,34 +1593,21 @@ def _continuous_exit_target_intents(
     now_ms: int,
     default_leverage: float,
 ) -> list[RequestedIntent]:
-    lookup = {str(row.get("trade_id") or ""): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
-    intents: list[RequestedIntent] = []
-    for plan in exits:
-        trade_id = str(plan.get("trade_id") or "")
-        trade = lookup.get(trade_id)
-        if not trade:
-            continue
-        symbol = str(plan.get("symbol") or trade.get("symbol") or "").upper()
-        intents.append(
-            component_target_intent(
-                adapter_kind=SleeveAdapterKind.CONTINUOUS,
-                action="exit",
-                decision_ts_ms=now_ms,
-                strategy_id=strategy_id,
-                component_id=trade_id,
-                symbol=symbol,
-                signed_notional_usdt=0.0,
-                leverage=_float(trade.get("entry_leverage")) or default_leverage,
-                reason=str(plan.get("exit_reason") or "continuous_exit"),
-                metadata={
-                    "source": "continuous_target_adapter",
-                    "owner_sleeve": "continuous",
-                    "prior_trade_id": trade_id,
-                    "exit_trigger_ts_ms": int(_float(plan.get("exit_trigger_ts_ms")) or now_ms),
-                },
-            )
-        )
-    return intents
+    """Translate strategy exits to replacement zero targets without venue I/O."""
+
+    return exit_target_intents(
+        exits,
+        all_trades,
+        adapter_kind=SleeveAdapterKind.CONTINUOUS,
+        strategy_id=strategy_id,
+        now_ms=now_ms,
+        default_leverage=default_leverage,
+        source="continuous_target_adapter",
+        default_reason="continuous_exit",
+        extra_metadata=lambda plan, trade: {
+            "exit_trigger_ts_ms": int(_float(plan.get("exit_trigger_ts_ms")) or now_ms),
+        },
+    )
 
 
 def _continuous_entry_target_intents(

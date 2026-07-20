@@ -19,6 +19,7 @@ from .account_owner_health import validate_systemd_invocation_id
 from .bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from .config import ResearchConfig
 from .deterministic_runtime import Clock, SystemClock
+from .event_demo_data import top_turnover_kline_universe
 from .kline_follower import FollowerKlineStreamManager, build_kline_follower
 from .kline_stream_manager import KlineStreamManager
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
@@ -761,25 +762,7 @@ def _build_long_kline_universe(
     so newly admitted symbols join the bootstrap+WS stream within the
     refresh interval. Anything not in the manager's universe falls back
     to per-cycle REST on demand."""
-    try:
-        tickers = market.get_tickers()
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("long kline universe fetch failed (tickers): %s", exc)
-        return []
-    candidates: list[tuple[float, str]] = []
-    for row in tickers:
-        symbol = str(row.get("symbol") or "")
-        if not symbol or not symbol.endswith("USDT"):
-            continue
-        try:
-            turnover = float(row.get("turnover24h") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if turnover <= 0.0:
-            continue
-        candidates.append((turnover, symbol))
-    candidates.sort(reverse=True)
-    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+    return top_turnover_kline_universe(market, top_n=top_n, label="long")
 
 
 def _default_long_kline_stream_manager_factory(

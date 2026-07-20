@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+import polars as pl
+
+from ._common import finite_float
 from .account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     component_target_key,
@@ -11,6 +14,10 @@ from .account_intent_client import (
     requested_target,
 )
 from .account_service import RequestedIntent, SleeveAdapterKind
+
+
+def _float(value: Any) -> float:
+    return finite_float(value, default=0.0) or 0.0
 
 
 def component_target_intent(
@@ -94,3 +101,53 @@ def component_target_intent(
         reason=reason,
         metadata=normalized_metadata,
     )
+
+
+def exit_target_intents(
+    exits: list[dict[str, Any]],
+    all_trades: pl.DataFrame,
+    *,
+    adapter_kind: SleeveAdapterKind,
+    strategy_id: str,
+    now_ms: int,
+    default_leverage: float,
+    source: str,
+    default_reason: str,
+    extra_metadata: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]],
+) -> list[RequestedIntent]:
+    """Translate strategy exits to replacement zero targets without venue I/O.
+
+    The exit grammar is sleeve-independent: every exit replaces the prior
+    component target with an explicit zero, keyed by the owning trade.  Profile
+    modules supply only their labels and any sleeve-specific metadata through
+    ``extra_metadata``.
+    """
+
+    lookup = {str(row.get("trade_id") or ""): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    intents: list[RequestedIntent] = []
+    for plan in exits:
+        trade_id = str(plan.get("trade_id") or "")
+        trade = lookup.get(trade_id)
+        if not trade:
+            continue
+        symbol = str(plan.get("symbol") or trade.get("symbol") or "").upper()
+        intents.append(
+            component_target_intent(
+                adapter_kind=adapter_kind,
+                action="exit",
+                decision_ts_ms=now_ms,
+                strategy_id=strategy_id,
+                component_id=trade_id,
+                symbol=symbol,
+                signed_notional_usdt=0.0,
+                leverage=_float(trade.get("entry_leverage")) or default_leverage,
+                reason=str(plan.get("exit_reason") or default_reason),
+                metadata={
+                    "source": source,
+                    "owner_sleeve": adapter_kind.value,
+                    "prior_trade_id": trade_id,
+                    **extra_metadata(plan, trade),
+                },
+            )
+        )
+    return intents
