@@ -1,128 +1,122 @@
-# Tail-Risk Program — active execution state
+# Research Program — single source of execution state
 
-**Main research focus by operator instruction, 2026-07-20.** Rationale and
-receipts: `docs/tail_risk_overhaul_proposal_2026-07-20.md`. Evidence policy:
-`docs/governance.md`. Selection accounting: `docs/hypothesis_ledger.md`.
+**Main research focus by operator instruction, 2026-07-20**, redirected the
+same day to offense-first: new-edge theses large enough to change the
+strategy and be verifiable. This file is the ONE mutable "what to do next"
+surface. The canonical mission prompt for an execution session is
+`docs/next_agent_prompt.md` — hand that file to any new agent verbatim.
 
-**Operator redirection, 2026-07-20 (same day, later):** the program's center
-of gravity is offense — new-edge theses large enough to change the strategy
-and be verifiable (Track O below, slate registered in
-`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`, admission
-bar ≥ +40 bp/trade net era-stable or ≥ 5 independent bets/day at deployable
-gross). The R-layers remain the risk chassis and continue in parallel.
+Provenance receipts (immutable, keep): rationale
+`docs/tail_risk_overhaul_proposal_2026-07-20.md`; offensive-slate
+registration `docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`;
+evidence policy `docs/governance.md`; selection accounting
+`docs/hypothesis_ledger.md`.
 
-This file is the one mutable "what to do next" surface for the program. Update
-the status tables in place as work completes (with dates); evidence notes go to
-`docs/research_summary.md`, provenance receipts to `docs/preregistration/`,
-operational facts to `STATE.md`. Everything here is research + demo/paper
-lane; real money remains a separate, unopened door.
+## How work is counted
+
+A status cell flips only together with its artifact: a commit hash, a hashed
+`reports/…` directory, or a receipt path written into the cell. A claim
+without an artifact did not happen (lesson of 2026-07-20: a session claimed
+a day's work and had produced zero commits). One completed unit = one local
+commit after `scripts/dev.sh check`; push at natural checkpoints (CI-only;
+deploys are always a separate operator action).
 
 ## Closed lines — do not restart
 
-Per-trade price-exit and stop research on the deployed sleeves is **closed on
-the spent surface under both grading styles** (alpha metrics and tail
-metrics). This includes fixed/wide/server stops, trailing and breakeven
-stops, MFE give-back ladders, funding drain-exits, and signal-invalidation
-exits. Receipts: `docs/research_summary.md` (mechanism table, T-F/T-B),
-`backtest-runs/continuous_exit_cause_ablation_2026-06-18/`, and the
-2026-06-20 disaster-stop study (commit `1fa7045`). The TP12/24h CONTINUOUS
-shape and LONG 1.5-ATR/4-ATR/3d shape are frozen. A revisit requires a new
-mechanism, new data, or new economics (e.g., a confirmed passive-execution
-cost regime), registered prospectively — not a new grid on 1h bars.
+Per-trade price-exit and stop research on the deployed sleeves is closed
+under both alpha and tail grading (fixed/wide/server stops, trailing and
+breakeven stops, MFE give-back ladders, funding drain-exits,
+signal-invalidation exits). Receipts: `docs/research_summary.md` mechanism
+table, `backtest-runs/continuous_exit_cause_ablation_2026-06-18/`, the
+2026-06-20 disaster-stop study (git `1fa7045`). TP12/24h and LONG
+1.5-ATR/4-ATR/3d shapes are frozen. Reopening requires new mechanism, new
+data, or new economics (e.g. a confirmed passive-execution cost regime),
+registered prospectively.
 
-## Status legend
+## Admission bar (operative for every thesis)
 
-`todo` → `active` → `done <date>` (or `blocked: <reason>`, `dropped: <reason>`).
-One owner rule: whoever flips a row to `active` finishes or reverts it.
+A thesis advances to a Lane-2 config commit only on era-stable Lane-1
+evidence of **net ≥ +40 bp/trade** after the frozen 45 bp round trip and
+funding, or **≥ 5 independent bets/day** at deployable gross (from T-K's
+measured power arithmetic: per-bet vol ≈ 1,000 bps, ρ̂ ≈ 0.21 — smaller
+edges are unverifiable here, not merely unprofitable). Below bar → drop and
+record in the hypothesis ledger. The 2024/2025 era boundary is the primary
+stability test (it is where T-L v1 broke).
 
-## P0 — Foundations (no evidence risk; start immediately)
-
-| ID | Task | Definition of done | Status |
-| --- | --- | --- | --- |
-| P0.1 | **1m re-simulation harness** on the already-local Bybit `tick_ohlc_1m` (2023-03→2026-05), extended by the `bybit_render_1m` fetch when it lands | Harness reproduces every recorded exit of the canonical CONTINUOUS ledger exactly (T-F standard) before any variant is expressible; focused tests; short doc note of scope/limits | todo |
-| P0.2 | **Untouched-slice verification** for Binance `[2020-01-01, 2021-05-01)` and Bybit `[2021-01-01, 2021-05-01)` | Provenance note in `docs/preregistration/` stating the exact *outcome-unread* boundary. Honest subtlety: V2 features had trailing lookbacks (168h, 90d, RMOM warm-up) that read spring-2021 bars as inputs, so the clean boundary is earlier than 2021-05; the task computes it from the actual feature specs, states feature-touched vs outcome-unread ranges, and freezes the grading window | todo |
-| P0.3 | **Forward recorders** for Bybit liquidation stream + live-L2 depth summaries | Recorder units deployed through the normal flow with a recorded change point (additive telemetry; no sizing/decision path). Fields land in a research-readable root with coverage receipts | todo |
-| P0.4 | **History backfill** — extend `binance_full_pit` toward venue origin via `scripts/build_full_pit_binance.sh` (earlier `BINANCE_START`), respecting upstream availability | Extended root + coverage/manifest receipt; no interpretation, acquisition only | active 2026-07-20 (backward slice `[2019-09-01, 2020-01-01)` running) |
-| P0.5 | **Re-anchor the pruned 2026-06-20 disaster-stop receipt** from git history (commit `1fa7045`; the receipt and the local `backtest-runs/` artifacts were both pruned — nothing remains on this host) | Reconstruction doc (labelled as such) so the sizing-is-the-disaster-control claim has a citable anchor | todo |
-
-## P1 — First registrations (commit = registration; forward clocks start)
-
-| ID | Task | Definition of done | Status |
-| --- | --- | --- | --- |
-| P1.1 | **R1 — continuous risk intensity.** One monotone gross multiplier replacing the binary BTC gate + discrete 0.35× overlay (T-I linear member revived under §Grading metrics) | Config + scoring recipe committed; hypothesis-ledger row (descends from T-I, sixth-generation prior stated); kill criteria registered before first forward day | todo |
-| P1.2 | **R3a — book-level daily loss budget.** Realized-day-loss trigger, entry-side only, daily reset; X from kill-criteria arithmetic (≈ −1.5%) | Lane-1 replay of trigger behavior on seen data (trigger correctness/false-trip rate, not return); config commit; paper-first implementation like the passive-exec pattern | todo |
-| P1.3 | **R3b — correlated-cluster caps** (the 2026-06-20 study's own unbuilt recommendation) | Lane-1 estimate of cluster structure on seen data; cap design + config commit; deploy-when-ready with recorded change point | todo |
-| P1.4 | **R3c — protection-layer accounting.** Native-stop realized cost as an explicit insurance-premium line in the forward record | Cost line present in the weekly kill-criteria/forward reporting path | todo |
-
-## P2 — R2 squeeze-state governor (flagship; the holdout spend)
-
-| ID | Task | Definition of done | Status |
-| --- | --- | --- | --- |
-| P2.1 | Causal squeeze/crash index features from fields unused by the 29 prior families: OI level/acceleration, positioning LSR, taker-flow imbalance, premium spikes, melt-up/crash breadth (+ forward liquidations from P0.3 as they accrue) | Feature build with PIT audit; Lane-1 exploration on the spent window only | todo |
-| P2.2 | Governor design: gross multiplier per side + hedge-intensity modulation + extreme-state entry veto; **no per-trade exit changes** | Design note + Lane-1 evidence card (all cells, era-split, §Grading metrics) | todo |
-| P2.3 | Config commit, then **single registered holdout read** on `[2025-01-01, 2026-07-06)` | Metrics frozen at commit; holdout opening recorded in `docs/preregistration/INDEX.md` + hypothesis ledger (non-descended family justification stated); one scripted read, no iteration; then rolling forward | todo |
-
-## Track O — Offense (operator priority as of 2026-07-20)
-
-Slate, mechanisms, admission bar, and reserve-safety note:
-`docs/preregistration/DRAFT_strategy_research_v7_2026-07-20.md`.
+## Track O — Offense (priority)
 
 | ID | Thesis | Status |
 | --- | --- | --- |
-| T-L | Young-listing lifecycle sleeve (<240d population, untraded today) | active 2026-07-20 — v1 unconditional arms closed: no era-stable cell clears the bar; 2025-26 inverts the 2021-24 listing bleed. v2 = conditional pass on the built panel (`reports/strategy-research-v3/t-l/2026-07-20/`) |
-| T-M | Funding-extreme carry harvest (hedged carry, not momentum) | todo |
-| T-N | Cascade-riding long (C-H1/C-H2 estimands; shares P2.1 features) | todo |
+| T-L | Young-listing lifecycle (<240d population; untraded by the deployed universe gate) | **v2 next (top priority)** — v1 closed 2026-07-20: no calendar-only arm is era-stable (2021-24 bleed +270–310 bp net inverts to −175…−830 bp in 2025-26; d0 chase negative). Panel with turnover/funding paths built. v2 = condition on pump size, turnover-decay slope, funding state, wave crowding, BTC trend; plus a listing-week execution-cost read from `tick_ohlc_1m`. Card: `reports/strategy-research-v3/t-l/2026-07-20/` |
+| T-M | Funding-extreme carry harvest (hedged carry, not momentum) | todo — episode inventory + carry-capture P&L from local funding roots (Bybit 2021→, Binance 2019-09→) |
+| T-N | Cascade-riding long (C-H1/C-H2 estimands; shares P2.1 features) | todo (after T-L v2 / T-M) |
 | T-O | Cross-venue listing lead-lag | blocked: needs incumbent-venue data (P3 acquisition) |
-| T-P | Young-listing long continuation (from the T-L panel) | dropped 2026-07-20 — naive d0→d2 negative/flat in every era (T-L card); revisit only in conditioned form |
+| T-P | Young-listing long continuation | dropped 2026-07-20 — naive d0→d2 negative/flat in every era (T-L card); revisit only conditioned |
 
-## P3 — Extensions (behind P1/P2)
+## Chassis — P0 foundations
 
 | ID | Task | Status |
 | --- | --- | --- |
-| P3.1 | S1 cross-venue migration signals (Binance↔Bybit OI/LSR/taker lead-lag as de-risk trigger and entry context) | todo |
-| P3.2 | R3d convexity overlay (options data root + carry model; premium budgeted next to gross) | todo |
-| P3.3 | D5 Hyperliquid acquisition (funding/OI/transparent liquidations, 2023→; robustness + new-field source, not independence) | todo |
-| P3.4 | S2 anti-book (long-cascade sleeve; starts from frozen C-H1/C-H2 estimands with their frozen multiplicity rule) | todo |
+| P0.1 | 1m re-simulation harness on local `tick_ohlc_1m` (T-F exact-reproduction standard; no-lookahead property test; intrabar ambiguity policy, item 14; warm-state honesty, item 15) | todo |
+| P0.2 | Untouched-slice provenance note: derive every trailing lookback from code; state feature-touched vs outcome-unread ranges for Binance `[2020-01-01, 2021-05-01)` / Bybit `[2021-01-01, 2021-05-01)`; freeze the grading window in `docs/preregistration/` | todo |
+| P0.3 | Forward recorders (Bybit liquidations, L2 depth summaries) — implement + test only; install is an operator deploy | todo |
+| P0.4 | History backfill toward venue origin | active 2026-07-20 — **narrow backward slice is REFUSED by the builder's staging-coverage check** (verified: `[2019-09-01, 2020-01-01)` refused, root unharmed, 812 persisted symbols protected). Correct invocation = full window (`BINANCE_START=2019-09-01`, default END); relaunched detached same day. Acceptance: coverage receipt, acquisition only. Expected backward yield is small (2019 archives are mostly 404) |
+| P0.5 | Re-anchor the pruned 2026-06-20 disaster-stop receipt from git `1fa7045` (labelled reconstruction) | todo |
 
-## Grading standards (operative for every arm above)
+## Chassis — P1 first registrations
 
-- **Metrics, frozen at each config commit:** ES95/ES99 of daily book P&L, max
-  drawdown, common-loss-tail-day count (definition frozen in the config),
-  net including costs and funding. Era-split, all grid cells, forgone upside
-  next to avoided cost. **MAR is banned at negative net.**
-- **Insurance layers (R3) are additionally graded as insurance:** trigger
-  correctness, false-trip rate, realized premium vs budget — not return
-  improvement (taxonomy item 27).
-- **Ordering discipline:** commit configs *before* opening any new surface
-  (P0.2 slices, P0.4 backfill, P2.3 holdout). A surface opened first is
-  Lane-1 only.
-- **Effective N:** unique decisions → simultaneous waves → 28-day blocks;
-  component rows are never independent (taxonomy item 29).
-- **Every commit records its hypothesis-ledger descent** and family count;
-  new-surface reads are recorded in `docs/preregistration/INDEX.md` when
-  opened.
-- **Kill criteria** per promoted arm in the `sleeve_kill_criteria` pattern,
-  registered before the first forward day, checked by the weekly
-  `scripts/ops.sh kill-criteria` cadence.
+| ID | Task | Status |
+| --- | --- | --- |
+| P1.1 | R1 continuous risk intensity: Lane-1 paired renders (binary gate vs monotone multiplier, T-I ancestor) under program metrics → config commit + ledger row + kill criteria + daily forward shadow comparison | todo |
+| P1.2 | R3a daily loss budget: Lane-1 trigger replay graded as insurance (trigger correctness, false-trip rate, premium); shadow governor paper-first; frozen UTC-day-parity A/B design; activation = operator decision | todo |
+| P1.3 | R3b correlated-cluster caps (the 2026-06-20 study's own unbuilt recommendation): Lane-1 cluster structure → cap design → config commit; per-entry hash-parity A/B in the passive-exec pattern | todo |
+| P1.4 | R3c protection-premium accounting line in the weekly kill-criteria path, with a test | todo |
 
-## Interaction with other active workstreams
+## Chassis — P2 squeeze-state governor (holdout spend)
 
-- **Breadth redesign** (`docs/breadth_redesign_2026-07-20.md`): statistical
-  power remains the binding constraint on grading everything here, but the
-  T-K funnel replay (2026-07-20) measured per-bet vol ≈ 1,000 bps and
-  ρ̂ ≈ 0.21 — admission knobs alone cut days-to-significance by only ~9%
-  and cannot deliver the original power-table promise. The operative power
-  levers are the ones this program owns: decorrelated sources (S2), per-bet
-  vol shape, and cost reduction (passive exec). Breadth stays a supporting
-  workstream, coordinated through the hypothesis ledger, not a substitute
-  for them.
-- **Passive-execution A/B** (`docs/preregistration/passive_execution_experiment_2026-07-20.md`):
-  arm-B's rolling record re-prices the cost hurdle; a confirmed ≥10 bps/side
-  improvement is the "new economics" that can reopen specific closed families
+| ID | Task | Status |
+| --- | --- | --- |
+| P2.1 | Causal squeeze/crash features from fields unused by the 29 families (OI accel, LSR, taker imbalance, premium spikes, breadth; forward liquidations as P0.3 accrues); PIT audit per feature | todo |
+| P2.2 | Governor design + Lane-1 card (gross multiplier per side, hedge modulation, extreme-state veto; **no per-trade exit changes**) | todo |
+| P2.3 | Config commit → **single registered holdout read** of the reserved V2 label tape `[2025-01-01, 2026-07-06)` → rolling forward. Metrics frozen at commit; opening recorded in INDEX + ledger | todo — the holdout stays closed until exactly this step |
+
+## P3 — Extensions
+
+| ID | Task | Status |
+| --- | --- | --- |
+| P3.1 | S1 cross-venue migration signals (Binance↔Bybit OI/LSR/taker lead-lag) | todo |
+| P3.2 | R3d convexity overlay (options data root + carry model) | todo |
+| P3.3 | D5 Hyperliquid acquisition (funding/OI/transparent liquidations; robustness + new-field source, not independence) | todo |
+| P3.4 | S2 anti-book formalization beyond T-N | todo |
+
+## Grading standards (every arm, frozen at each config commit)
+
+ES95/ES99 of daily book P&L, max drawdown, common-loss-tail-day count, net
+including costs and funding; era-split; all grid cells; forgone upside next
+to avoided cost. **MAR banned at negative net.** Insurance layers (R3)
+additionally graded on trigger correctness, false-trip rate, premium vs
+budget (item 27). Effective N = unique decisions → waves → 28-day blocks
+(item 29). Missing data excluded and counted, never zero-filled (item 30).
+Commit configs before opening any new surface; openings recorded in
+`docs/preregistration/INDEX.md`. Kill criteria per promoted arm in the
+`sleeve_kill_criteria` pattern before its first forward day.
+
+## Interactions with other active workstreams
+
+- **Breadth** (`docs/breadth_redesign_2026-07-20.md`): T-K measured per-bet
+  vol ≈ 1,000 bps and ρ̂ ≈ 0.21 — admission knobs alone cut
+  days-to-significance ~9% and cannot deliver the original promise. The
+  operative power levers are decorrelated sources (Track O), per-bet vol
+  shape, and cost reduction (passive exec).
+- **Passive-execution A/B**
+  (`docs/preregistration/passive_execution_experiment_2026-07-20.md`): its
+  rolling record re-prices the 45 bp hurdle; a confirmed ≥10 bps/side
+  improvement is "new economics" that can reopen specific closed families
   prospectively.
-- **Sleeve kill criteria** (`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`):
-  unchanged; they carry to successor configs unamended unless explicitly
-  replaced before a first forward day.
-- **Runtime boundary:** nothing in this program changes demo/paper behavior
-  without a five-line promotion note and a recorded change point; recorders
-  (P0.3) and paper-first implementations follow the normal deploy flow.
+- **Sleeve kill criteria**
+  (`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`): unchanged;
+  carry to successor configs unless explicitly replaced before a first
+  forward day.
+- **Runtime boundary**: nothing here changes demo/paper behavior without a
+  five-line promotion note and recorded change point; real money is a
+  separate, unopened door.

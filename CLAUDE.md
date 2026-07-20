@@ -8,7 +8,8 @@ Research and demo/paper execution for crypto-perpetual strategies.
 
 - Governance and evidence: `docs/governance.md`.
 - Active research program (main focus) and next actions:
-  `docs/tail_risk_program.md`.
+  `docs/tail_risk_program.md`; canonical mission prompt for a new research
+  session: `docs/next_agent_prompt.md`.
 - Current operations: `STATE.md`, then `deploy/sleeves.env` and systemd units.
 - Research interpretation: `docs/research_summary.md` and the relevant raw
   artifacts.
