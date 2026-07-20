@@ -298,6 +298,7 @@ def require_recent_account_owner_health(
     now_ns: int | None = None,
     expected_account_id: str | None = None,
     expected_invocation_id: str | None = None,
+    head_binding: str = "exact",
 ) -> AccountOwnerHealth:
     """Require fresh health bound to a current authoritative journal head.
 
@@ -306,10 +307,23 @@ def require_recent_account_owner_health(
     the latest immutable transaction segment without parsing and reducing every
     historical payload. Full journal audits remain separate and are not
     weakened by this metadata-only head read.
+
+    ``head_binding`` selects the consumer contract. ``"exact"`` (default)
+    requires the health snapshot to name the exact current head — a genuine
+    safety property for sizing consumers, whose capital evidence must not
+    predate a fill that already changed the balance. ``"allow_behind"`` is
+    for liveness consumers: the background execution consumer appends fills
+    independently of the owner loop, so during active trading the on-disk
+    health ordinarily lags the live head by one transaction until the next
+    republish. A fresh, healthy snapshot strictly behind an advancing journal
+    is that ordinary race, not corruption; staleness stays bounded by
+    ``max_age_ns`` and a health *ahead* of the journal still fails closed.
     """
 
     if environment not in {"demo", "paper"}:
         raise ValueError("expected owner environment must be 'demo' or 'paper'")
+    if head_binding not in {"exact", "allow_behind"}:
+        raise ValueError("head_binding must be 'exact' or 'allow_behind'")
     if max_age_ns <= 0:
         raise ValueError("max account-owner health age must be positive")
     if expected_account_id is not None and not expected_account_id:
@@ -382,11 +396,20 @@ def require_recent_account_owner_health(
             return health
         if matches_head(before, head):
             return before
-    if saw_churn:
-        raise RuntimeError("account-owner health changed while binding the journal head")
     assert health is not None
     journal_sequence = head.sequence if head is not None else 0
     journal_state_hash = head.state_hash if head is not None else GENESIS_HASH
+    if (
+        head_binding == "allow_behind"
+        and health.journal_sequence < journal_sequence
+        and (head is None or health.account_id == head.account_id)
+    ):
+        # Fresh, healthy, and strictly behind a live advancing journal: the
+        # ordinary fill-thread publish race. Equal-sequence hash disagreement
+        # still falls through to the corruption raises below.
+        return health
+    if saw_churn:
+        raise RuntimeError("account-owner health changed while binding the journal head")
     if health.journal_sequence != journal_sequence:
         raise RuntimeError(
             "account-owner health journal sequence mismatch: "

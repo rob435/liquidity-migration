@@ -897,6 +897,17 @@ def gather_account_capture_alerts(
     return []
 
 
+# The reconciler journals a venue snapshot on semantic change or its 30s
+# checkpoint heartbeat, and one busy single-threaded owner iteration (fill
+# burst, protection sync, capital REST, synchronous Telegram send) can defer
+# the next heartbeat past a 1-minute bound while the owner is perfectly
+# healthy (observed 2026-07-20 13:06 UTC: 1.4 min). This floor gives the
+# journaled-snapshot age four heartbeat intervals of headroom. A genuinely
+# wedged owner still pages within the tighter owner-health freshness bound,
+# which is enforced independently by gather_account_owner_health_alerts.
+VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 2.0
+
+
 def gather_account_health_alerts(
     *,
     account_root: Path,
@@ -934,14 +945,15 @@ def gather_account_health_alerts(
     observed_ns = int(latest.payload.get("local_receive_ts_ns") or latest.wall_ts_ns)
     observed_now_ms = _now_ms() if now_ms is None else now_ms
     age_minutes = (observed_now_ms - observed_ns / 1_000_000.0) / 60_000.0
-    if age_minutes < 0.0 or age_minutes > max_age_minutes:
+    bound_minutes = max(max_age_minutes, VENUE_SNAPSHOT_AGE_FLOOR_MINUTES)
+    if age_minutes < 0.0 or age_minutes > bound_minutes:
         return [
             Alert(
                 key="account_health_stale",
                 severity=CRITICAL,
                 message=(
                     f"canonical account reconciliation health is {age_minutes:.1f} min old "
-                    f"(allowed 0..{max_age_minutes:g} min); owner health is stale or future-dated."
+                    f"(allowed 0..{bound_minutes:g} min); owner health is stale or future-dated."
                 ),
             )
         ]
@@ -971,11 +983,17 @@ def gather_account_owner_health_alerts(
 
     try:
         max_age_ns = max(1, int(max_age_minutes * 60 * 1_000_000_000))
+        # Liveness needs freshness + healthy status, not the exact-head capital
+        # binding the sizing consumers require: the background execution
+        # consumer ordinarily advances the journal one transaction past the
+        # on-disk health during active trading (observed 2026-07-20 13:06 UTC,
+        # health=21961 vs journal=21962).
         if now_ms is None:
             require_recent_account_owner_health(
                 account_root,
                 environment=environment,
                 max_age_ns=max_age_ns,
+                head_binding="allow_behind",
             )
         else:
             require_recent_account_owner_health(
@@ -983,6 +1001,7 @@ def gather_account_owner_health_alerts(
                 environment=environment,
                 max_age_ns=max_age_ns,
                 now_ns=now_ms * 1_000_000,
+                head_binding="allow_behind",
             )
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, AccountOwnerMarketWarmupPending):

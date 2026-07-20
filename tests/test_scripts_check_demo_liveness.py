@@ -1763,3 +1763,27 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     assert M.main() == 0
     out2 = capsys.readouterr().out
     assert "[CRITICAL]" in out2
+
+
+def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
+    """A 1.4-min-old journaled snapshot (the 2026-07-20 13:06 page) must not page."""
+    from liquidity_migration.account_kernel import AccountExecutionKernel
+
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "busy"
+    AccountExecutionKernel(root, account_id="demo").record_venue_snapshot(
+        snapshot_key="healthy",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=(now_ms - 84_000) * 1_000_000,
+    )
+    assert (
+        M.gather_account_health_alerts(
+            account_root=root,
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )

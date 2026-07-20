@@ -865,3 +865,116 @@ def test_require_recent_health_rejects_wrong_expected_account_on_empty_journal(
             max_age_ns=2_000,
             now_ns=11_000,
         )
+
+
+def _behind_by_one_root(tmp_path: Path):
+    """Health published at journal seq 1, then a fill-thread append moves the head to 2."""
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo-account")
+    snapshot = AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 10_000)
+    kernel.record_venue_snapshot(
+        snapshot_key="first",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=10_000,
+    )
+    health = publish_demo_owner_health(
+        kernel=kernel,
+        account_root=tmp_path,
+        account_id="demo-account",
+        risk_snapshot=snapshot,
+        status=AccountOwnerHealthStatus.HEALTHY,
+        observed_ts_ns=11_000,
+        loop_sequence=1,
+        requested_symbols_ready=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+    )
+    kernel.record_venue_snapshot(
+        snapshot_key="second",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=12_000,
+    )
+    return kernel, health
+
+
+def test_allow_behind_accepts_fresh_health_lagging_a_live_journal(tmp_path: Path) -> None:
+    _kernel, health = _behind_by_one_root(tmp_path)
+    bound = require_recent_account_owner_health(
+        tmp_path,
+        environment="demo",
+        max_age_ns=10_000,
+        now_ns=12_500,
+        expected_account_id="demo-account",
+        head_binding="allow_behind",
+    )
+    assert bound == health
+
+
+def test_allow_behind_still_enforces_freshness(tmp_path: Path) -> None:
+    _behind_by_one_root(tmp_path)
+    with pytest.raises(RuntimeError, match="health is stale"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=10_000,
+            now_ns=1_000_000,
+            expected_account_id="demo-account",
+            head_binding="allow_behind",
+        )
+
+
+def test_allow_behind_rejects_health_ahead_of_the_journal(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    from liquidity_migration.account_owner_health import write_account_owner_health
+
+    _kernel, health = _behind_by_one_root(tmp_path)
+    write_account_owner_health(tmp_path, dc_replace(health, journal_sequence=99))
+    with pytest.raises(RuntimeError, match="journal sequence mismatch"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=10_000,
+            now_ns=12_500,
+            expected_account_id="demo-account",
+            head_binding="allow_behind",
+        )
+
+
+def test_allow_behind_rejects_equal_sequence_hash_disagreement(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    from liquidity_migration.account_owner_health import write_account_owner_health
+
+    kernel, health = _behind_by_one_root(tmp_path)
+    doctored = dc_replace(
+        health,
+        journal_sequence=kernel._state_ref().events_applied,
+        journal_state_hash="f" * 64,
+    )
+    write_account_owner_health(tmp_path, doctored)
+    with pytest.raises(RuntimeError, match="state hash mismatch"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=10_000,
+            now_ns=12_500,
+            expected_account_id="demo-account",
+            head_binding="allow_behind",
+        )
+
+
+def test_exact_binding_remains_the_default_for_sizing_consumers(tmp_path: Path) -> None:
+    _behind_by_one_root(tmp_path)
+    with pytest.raises(RuntimeError, match="journal sequence mismatch"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=10_000,
+            now_ns=12_500,
+            expected_account_id="demo-account",
+        )
