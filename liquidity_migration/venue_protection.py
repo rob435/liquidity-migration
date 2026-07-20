@@ -841,9 +841,17 @@ class BybitNativeProtectionManager:
         # queries for minutes after its protection record leaves the
         # {active, triggering} statuses (2026-07-20 BLUAIUSDT triggered-stop
         # false unowned_venue_order page). Within a bounded grace window,
-        # verify such rows against the latest native protection record under
-        # the identical identity contract; a row that lingers past the window
-        # pages as unowned again.
+        # verify such rows against the latest native protection record. The
+        # manager only creates Full-position stops, so partial-stop provenance
+        # can never be the lingering consumed row. When any identity evidence
+        # exists — a recorded venue id, recorded lineage, or the still-held
+        # in-memory observed id — the row must match it; the trigger-price
+        # fallback remains only for a stop consumed before its venue id was
+        # ever observable. The record's exchange time is bounded by the same
+        # window so an owner-downtime recovery cannot reopen a long-dead
+        # window. Rows lingering past the window page as unowned again.
+        if not _has_full_native_stop_provenance(row):
+            return False
         latest = self._latest_native_protection_from_state(
             self.kernel._state_ref(), symbol
         )
@@ -853,15 +861,22 @@ class BybitNativeProtectionManager:
         recorded_ns = int(payload.get("local_receive_ts_ns") or 0)
         if recorded_ns <= 0:
             return False
-        age_ns = self.clock.wall_time_ns() - recorded_ns
+        now_ns = self.clock.wall_time_ns()
+        age_ns = now_ns - recorded_ns
         if age_ns < 0 or age_ns > NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS:
+            return False
+        exchange_ns = int(payload.get("exchange_ts_ns") or 0)
+        if exchange_ns > 0 and (
+            now_ns - exchange_ns > NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS
+        ):
             return False
         return self._row_matches_native_protection(
             row,
             payload=payload,
-            observed="",
+            observed=self.observed_native_order_ids.get(symbol, ""),
             venue_order_id=venue_order_id,
             symbol=symbol,
+            require_identity_when_present=True,
         )
 
     def _row_matches_native_protection(
@@ -872,6 +887,7 @@ class BybitNativeProtectionManager:
         observed: str,
         venue_order_id: str,
         symbol: str,
+        require_identity_when_present: bool = False,
     ) -> bool:
         """Identity contract shared by the active and terminal-grace paths."""
 
@@ -906,6 +922,8 @@ class BybitNativeProtectionManager:
                 return False
             return trigger_matches
         if expected or observed:
+            return False
+        if require_identity_when_present and lineage:
             return False
         return trigger_matches
 
@@ -1059,6 +1077,18 @@ def _has_native_stop_provenance(row: Mapping[str, Any]) -> bool:
         "createbystoploss",
         "createbypartialstoploss",
     }
+
+
+def _has_full_native_stop_provenance(row: Mapping[str, Any]) -> bool:
+    """Full-position stop provenance only — the sole kind this manager creates."""
+
+    stop_type = str(
+        row.get("stopOrderType") or row.get("stop_order_type") or ""
+    ).lower().replace("_", "")
+    create_type = str(
+        row.get("createType") or row.get("create_type") or ""
+    ).lower().replace("_", "")
+    return stop_type == "stoploss" or create_type == "createbystoploss"
 
 
 def _external_execution_origin(row: Mapping[str, Any]) -> str:

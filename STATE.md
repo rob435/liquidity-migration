@@ -238,11 +238,23 @@ branch ahead.
   pass paged until the row drained (resolved 16:39). The fix (committed after
   `f2ad171`, not yet deployed at that commit) gives the ownership verifier a
   bounded 10-minute terminal-visibility grace: provenance-bearing rows are
-  verified against the latest native protection record under the identical
-  identity contract after it leaves the active statuses. Lingering rows past
-  the window fail closed again, the stream/observe path is byte-identical,
-  and foreign conditional orders still page inside the window; a
-  consumer-driven regression test replays the exact incident shape.
+  verified against the latest native protection record after it leaves the
+  active statuses. Pre-deploy adversarial review tightened the window's
+  contract: grace rows must carry Full-stop provenance (the only kind the
+  manager creates), must match recorded/live identity evidence (recorded
+  venue id, lineage, or the still-held in-memory observed id) whenever any
+  exists, and the record's exchange time is bounded by the same window so an
+  owner-downtime recovery cannot reopen a long-dead venue window. Lingering
+  rows past the window fail closed again and the stream/observe path is
+  byte-identical. Two residual page/acceptance classes are documented, not
+  hidden: (1) same-symbol re-entry while the old consumed row still lingers
+  re-pages under the unchanged active-path contract (pre-existing
+  strictness, errs safe); (2) after a restart following a first-install
+  fast trigger whose record carries no identity evidence, a same-price
+  Full-stop row is accepted on the price fallback alone for the bounded
+  window (pinned by test as a deliberate residual). Consumer-driven
+  regression tests replay the incident shape, same-price foreign rejection,
+  partial-stop rejection, restart identity, and the exchange-time bound.
 - The 2026-07-19 07:08 and 09:11 UTC `TLMUSDT unowned_venue_order` CRITICAL
   bursts were native-stop replacement identity gaps under the then-deployed
   `f1cdb91`, not foreign orders. Continued entry fills moved each position's
