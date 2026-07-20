@@ -1,0 +1,62 @@
+{
+ "code_commit": "34207e6ac1d7cf6f4c8adbec7a29354ded3ee593",
+ "created_utc": "2026-07-20T17:35:08.347621+00:00",
+ "data_root": "C:\\Users\\user\\SHARED_DATA\\bybit_full_pit",
+ "explicit_non_conclusions": [
+  "exploratory Lane-1 replay on seen surfaces; no activation decision",
+  "realized-at-exit accounting; no intraday unrealized trigger modeled (by design)",
+  "no capacity backfill for blocked entries; counterfactual removes their contributions",
+  "activation remains an operator decision under the frozen A/B design"
+ ],
+ "files": {
+  "r3a_grid.csv": {
+   "bytes": 6362,
+   "sha256": "3375b30e05e54585b36f28c90929134e910e990a9fdf330856aaa270f3643319"
+  },
+  "r3a_trigger_days.json": {
+   "bytes": 58412,
+   "sha256": "30d8306134d33501ff7355e7f189d250f36924f9ce8b5069635d71a68a8552df"
+  }
+ },
+ "git_dirty": true,
+ "holdout_touched": false,
+ "inputs": {
+  "render_caches": {
+   "render_funding_events.parquet": "5f75b179e08917cc0885896c166930aae7840737b11117dfc61e8bc53c16595a",
+   "render_kline_slice_1h.parquet": "05c29b2e2511515cd2a1839f759f3e8afa941de6ec0075a5039c561319e7a57e"
+  },
+  "shared_cache": {
+   "funding_events.parquet": "f27e49e737bf819a2d89f05f32acfa3234ba76ae3fbdf1424ccec96858dd6676",
+   "kline_slice_1h.parquet": "4b1727269d14176824604fb9d07e00dd93ff92e83837ac6adc62f3ec386b9078"
+  },
+  "v2": {
+   "barebones_ledger.parquet": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\barebones_ledger.parquet",
+    "sha256": "368a7c04640dd362179d4c00897948d036ce38dc6136da12eedd47b4b6c64ddd"
+   },
+   "manifest.json": {
+    "path": "C:\\Users\\user\\Desktop\\liquidity-migration\\reports\\strategy-overhaul-v2\\diagnostic-epoch-2026-07-17\\phase3-analysis\\manifest.json",
+    "payload_sha256": "0a14862522af6e37ea05facbb47f9f4564e6f298ccb4a2d3559f5a79b0f06d9d"
+   }
+  }
+ },
+ "kind": "tail_risk_p12_r3a_loss_budget_lane1",
+ "lane": "lane-1",
+ "manifest_payload_sha256": "b64e65f563bd75e9ae7fa344523a1d747c31f82d49d28a63765a1bb1fad984df",
+ "params": {
+  "grading": "insurance metrics (item 27): trigger correctness, false-trip rate, premium = forgone upside next to avoided loss; NOT return improvement",
+  "registered_threshold": -0.015,
+  "rule": "realized day P&L (books at exit_ts) breaches X of capital reference -> block entries strictly after breach time, same UTC day; reset at midnight; existing exposure untouched",
+  "surfaces": {
+   "barebones_book": "V2 barebones LONG+CONTINUOUS book",
+   "render_gate_on": "T-A deployed-shape CONTINUOUS render book (no LONG renders exist)"
+  },
+  "thresholds": [
+   -0.01,
+   -0.015,
+   -0.02
+  ]
+ },
+ "schema_version": 1,
+ "study_mode": "exploratory"
+}

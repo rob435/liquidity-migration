@@ -1,0 +1,1764 @@
+[
+ {
+  "surface": "barebones_book",
+  "thresholds": {
+   "-0.010": [
+    {
+     "day": "2022-03-30",
+     "trigger_ts_ms": 1648666800000,
+     "day_final_realized": -0.014579458162079019,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004579458162079018,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0016512987257622043
+    },
+    {
+     "day": "2022-05-13",
+     "trigger_ts_ms": 1652418000000,
+     "day_final_realized": -0.034102396670790305,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.024102396670790303,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.0008186648728006215
+    },
+    {
+     "day": "2022-05-30",
+     "trigger_ts_ms": 1653933600000,
+     "day_final_realized": -0.01078558442445726,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0007855844244572599,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0005079194218690664
+    },
+    {
+     "day": "2022-06-20",
+     "trigger_ts_ms": 1655726400000,
+     "day_final_realized": -0.011115029945627027,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0011150299456270264,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0010315188515625615
+    },
+    {
+     "day": "2022-11-03",
+     "trigger_ts_ms": 1667455200000,
+     "day_final_realized": -0.014101325792969334,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004101325792969334,
+     "n_blocked_entries": 14,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": 0.0037821208930363262
+    },
+    {
+     "day": "2022-11-10",
+     "trigger_ts_ms": 1668117600000,
+     "day_final_realized": -0.019081565924684206,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.009081565924684206,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2022-11-11",
+     "trigger_ts_ms": 1668124800000,
+     "day_final_realized": -0.018464964948055856,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008464964948055856,
+     "n_blocked_entries": 30,
+     "n_blocked_unique": 22,
+     "blocked_net_sum": -0.005499912438816893
+    },
+    {
+     "day": "2022-11-14",
+     "trigger_ts_ms": 1668391200000,
+     "day_final_realized": -0.004266278923268337,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.005733721076731663,
+     "n_blocked_entries": 11,
+     "n_blocked_unique": 11,
+     "blocked_net_sum": 0.001373424440239904
+    },
+    {
+     "day": "2022-11-15",
+     "trigger_ts_ms": 1668474000000,
+     "day_final_realized": -0.013069548295989416,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0030695482959894153,
+     "n_blocked_entries": 12,
+     "n_blocked_unique": 11,
+     "blocked_net_sum": 0.006084519037793203
+    },
+    {
+     "day": "2023-01-21",
+     "trigger_ts_ms": 1674320400000,
+     "day_final_realized": -0.016938919344672013,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006938919344672013,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.002433449581057303
+    },
+    {
+     "day": "2023-03-13",
+     "trigger_ts_ms": 1678730400000,
+     "day_final_realized": -0.022139943636328128,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.012139943636328128,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.005897050076115445
+    },
+    {
+     "day": "2023-03-14",
+     "trigger_ts_ms": 1678831200000,
+     "day_final_realized": -0.01266849658399871,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00266849658399871,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.001187628862920934
+    },
+    {
+     "day": "2023-03-16",
+     "trigger_ts_ms": 1678989600000,
+     "day_final_realized": -0.010128086931556923,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0001280869315569231,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.0004572584861744152
+    },
+    {
+     "day": "2023-03-29",
+     "trigger_ts_ms": 1680102000000,
+     "day_final_realized": -0.011908537842994905,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0019085378429949049,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.0003850487054192957
+    },
+    {
+     "day": "2023-04-05",
+     "trigger_ts_ms": 1680706800000,
+     "day_final_realized": -0.011268532908304884,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0012685329083048837,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 0.0028715430319632075
+    },
+    {
+     "day": "2023-04-26",
+     "trigger_ts_ms": 1682528400000,
+     "day_final_realized": -0.006796227928163805,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0032037720718361955,
+     "n_blocked_entries": 9,
+     "n_blocked_unique": 9,
+     "blocked_net_sum": -0.0036185105337596334
+    },
+    {
+     "day": "2023-06-16",
+     "trigger_ts_ms": 1686942000000,
+     "day_final_realized": -0.01055416906193408,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0005541690619340796,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.0015100716195319054
+    },
+    {
+     "day": "2023-07-14",
+     "trigger_ts_ms": 1689354000000,
+     "day_final_realized": -0.013675109397163938,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.003675109397163938,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 9.3527066303903e-05
+    },
+    {
+     "day": "2023-11-09",
+     "trigger_ts_ms": 1699549200000,
+     "day_final_realized": 0.004332322741226581,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.014332322741226582,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.00012256683552034695
+    },
+    {
+     "day": "2023-11-10",
+     "trigger_ts_ms": 1699635600000,
+     "day_final_realized": -0.012682178564529484,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0026821785645294843,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.0015421726897387035
+    },
+    {
+     "day": "2023-11-15",
+     "trigger_ts_ms": 1700074800000,
+     "day_final_realized": -0.015417489887112404,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005417489887112404,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": 0.001699729329896924
+    },
+    {
+     "day": "2023-11-25",
+     "trigger_ts_ms": 1700935200000,
+     "day_final_realized": -0.010830315572172037,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.000830315572172037,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": 0.0018477767784878787
+    },
+    {
+     "day": "2023-12-02",
+     "trigger_ts_ms": 1701543600000,
+     "day_final_realized": -0.01041952882326089,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0004195288232608906,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.0027029915826633365
+    },
+    {
+     "day": "2023-12-05",
+     "trigger_ts_ms": 1701802800000,
+     "day_final_realized": -0.01250562873298677,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0025056287329867696,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": 0.003546371550200164
+    },
+    {
+     "day": "2023-12-09",
+     "trigger_ts_ms": 1702141200000,
+     "day_final_realized": -0.011362852302950635,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0013628523029506345,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.001875376935618785
+    },
+    {
+     "day": "2023-12-14",
+     "trigger_ts_ms": 1702576800000,
+     "day_final_realized": -0.01317256316008957,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00317256316008957,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0006373184986946375
+    },
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.035130263686078175,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.025130263686078173,
+     "n_blocked_entries": 27,
+     "n_blocked_unique": 21,
+     "blocked_net_sum": -0.0052166539578512375
+    },
+    {
+     "day": "2024-01-04",
+     "trigger_ts_ms": 1704380400000,
+     "day_final_realized": -0.010862505413320843,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008625054133208424,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0017847864423255451
+    },
+    {
+     "day": "2024-01-09",
+     "trigger_ts_ms": 1704783600000,
+     "day_final_realized": -0.0026634018807434024,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.007336598119256597,
+     "n_blocked_entries": 17,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.001432489234227661
+    },
+    {
+     "day": "2024-01-11",
+     "trigger_ts_ms": 1704981600000,
+     "day_final_realized": -0.024063878381819316,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.014063878381819316,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": 0.0021112986046721892
+    },
+    {
+     "day": "2024-01-20",
+     "trigger_ts_ms": 1705708800000,
+     "day_final_realized": -0.008110980394827636,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.001889019605172364,
+     "n_blocked_entries": 21,
+     "n_blocked_unique": 17,
+     "blocked_net_sum": -0.002361057888210752
+    },
+    {
+     "day": "2024-02-10",
+     "trigger_ts_ms": 1707606000000,
+     "day_final_realized": -0.010436474813476922,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00043647481347692217,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-02-13",
+     "trigger_ts_ms": 1707818400000,
+     "day_final_realized": -0.015212230845326167,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005212230845326167,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 6,
+     "blocked_net_sum": -0.003192049378123604
+    },
+    {
+     "day": "2024-02-22",
+     "trigger_ts_ms": 1708614000000,
+     "day_final_realized": -0.02172221196760008,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.011722211967600081,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.0025915309663741143
+    },
+    {
+     "day": "2024-02-25",
+     "trigger_ts_ms": 1708848000000,
+     "day_final_realized": -0.017340998431583602,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007340998431583602,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 15,
+     "blocked_net_sum": -0.0073232645355632685
+    },
+    {
+     "day": "2024-02-28",
+     "trigger_ts_ms": 1709139600000,
+     "day_final_realized": -0.0005713194962419836,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.009428680503758016,
+     "n_blocked_entries": 20,
+     "n_blocked_unique": 20,
+     "blocked_net_sum": -0.013007672662064635
+    },
+    {
+     "day": "2024-02-29",
+     "trigger_ts_ms": 1709229600000,
+     "day_final_realized": -0.008677285102622029,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0013227148973779714,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.012255951042562321
+    },
+    {
+     "day": "2024-03-01",
+     "trigger_ts_ms": 1709316000000,
+     "day_final_realized": -0.023071519231738113,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.013071519231738113,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 6,
+     "blocked_net_sum": 0.0014785292863847056
+    },
+    {
+     "day": "2024-03-04",
+     "trigger_ts_ms": 1709539200000,
+     "day_final_realized": -0.0104808311147436,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0004808311147435993,
+     "n_blocked_entries": 21,
+     "n_blocked_unique": 19,
+     "blocked_net_sum": 0.005304412115767214
+    },
+    {
+     "day": "2024-03-06",
+     "trigger_ts_ms": 1709755200000,
+     "day_final_realized": -0.05400793106131751,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.04400793106131751,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.0013607908633902041
+    },
+    {
+     "day": "2024-03-08",
+     "trigger_ts_ms": 1709928000000,
+     "day_final_realized": -0.014130602047280123,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004130602047280123,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.0034111909270961235
+    },
+    {
+     "day": "2024-03-09",
+     "trigger_ts_ms": 1710025200000,
+     "day_final_realized": -0.010838462244558335,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008384622445583353,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-03-21",
+     "trigger_ts_ms": 1710997200000,
+     "day_final_realized": -0.022882920843659012,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.012882920843659012,
+     "n_blocked_entries": 24,
+     "n_blocked_unique": 23,
+     "blocked_net_sum": 0.004659199267636172
+    },
+    {
+     "day": "2024-03-25",
+     "trigger_ts_ms": 1711382400000,
+     "day_final_realized": -0.018749625403116744,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008749625403116744,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": 0.00126139560569404
+    },
+    {
+     "day": "2024-03-26",
+     "trigger_ts_ms": 1711465200000,
+     "day_final_realized": -0.015814004981470127,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005814004981470127,
+     "n_blocked_entries": 12,
+     "n_blocked_unique": 12,
+     "blocked_net_sum": 0.005794986721913986
+    },
+    {
+     "day": "2024-04-14",
+     "trigger_ts_ms": 1713128400000,
+     "day_final_realized": -0.02817191547071319,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.018171915470713187,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0015201259626537698
+    },
+    {
+     "day": "2024-04-21",
+     "trigger_ts_ms": 1713697200000,
+     "day_final_realized": -0.016762940509961476,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006762940509961476,
+     "n_blocked_entries": 13,
+     "n_blocked_unique": 13,
+     "blocked_net_sum": -0.0022750591055505417
+    },
+    {
+     "day": "2024-04-28",
+     "trigger_ts_ms": 1714320000000,
+     "day_final_realized": -0.011522998773318478,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.001522998773318478,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 0.005213991627189796
+    },
+    {
+     "day": "2024-05-02",
+     "trigger_ts_ms": 1714672800000,
+     "day_final_realized": -0.011033551129669085,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.001033551129669085,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.003071430371058945
+    },
+    {
+     "day": "2024-05-03",
+     "trigger_ts_ms": 1714748400000,
+     "day_final_realized": -0.016510817662749228,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006510817662749227,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.0035728682261656135
+    },
+    {
+     "day": "2024-05-10",
+     "trigger_ts_ms": 1715335200000,
+     "day_final_realized": -0.009934238096080723,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 6.576190391927722e-05,
+     "n_blocked_entries": 21,
+     "n_blocked_unique": 20,
+     "blocked_net_sum": 0.0029393338150967415
+    },
+    {
+     "day": "2024-05-21",
+     "trigger_ts_ms": 1716310800000,
+     "day_final_realized": -0.01786398734142911,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007863987341429108,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": -0.0015100709156576797
+    },
+    {
+     "day": "2024-05-22",
+     "trigger_ts_ms": 1716408000000,
+     "day_final_realized": -0.007426087182166882,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0025739128178331183,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.002986871109715905
+    },
+    {
+     "day": "2024-05-27",
+     "trigger_ts_ms": 1716829200000,
+     "day_final_realized": -0.012503235242429127,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0025032352424291266,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 6,
+     "blocked_net_sum": 0.0002495444524123698
+    },
+    {
+     "day": "2024-06-01",
+     "trigger_ts_ms": 1717264800000,
+     "day_final_realized": -0.011208073451646096,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.001208073451646096,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": 0.0015555185939740857
+    },
+    {
+     "day": "2024-06-19",
+     "trigger_ts_ms": 1718762400000,
+     "day_final_realized": -0.015137128479832337,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0051371284798323365,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.002204882937185947
+    },
+    {
+     "day": "2024-06-25",
+     "trigger_ts_ms": 1719320400000,
+     "day_final_realized": -0.019238328739822973,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.009238328739822972,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.001465365036383047
+    },
+    {
+     "day": "2024-07-06",
+     "trigger_ts_ms": 1720234800000,
+     "day_final_realized": -0.026111452892180965,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.016111452892180966,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.007484455491931661
+    },
+    {
+     "day": "2024-07-09",
+     "trigger_ts_ms": 1720537200000,
+     "day_final_realized": -0.011489845471416191,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0014898454714161909,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.001955031155947639
+    },
+    {
+     "day": "2024-07-10",
+     "trigger_ts_ms": 1720630800000,
+     "day_final_realized": -0.010422954126919884,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.000422954126919884,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.00015007506049063274
+    },
+    {
+     "day": "2024-07-15",
+     "trigger_ts_ms": 1721052000000,
+     "day_final_realized": -0.015170138102097035,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005170138102097035,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.011526739871924372
+    },
+    {
+     "day": "2024-07-16",
+     "trigger_ts_ms": 1721095200000,
+     "day_final_realized": -0.025566968722611674,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.015566968722611674,
+     "n_blocked_entries": 17,
+     "n_blocked_unique": 17,
+     "blocked_net_sum": -0.01968711520545346
+    },
+    {
+     "day": "2024-07-17",
+     "trigger_ts_ms": 1721253600000,
+     "day_final_realized": -0.015633822522105035,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005633822522105035,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-07-26",
+     "trigger_ts_ms": 1722006000000,
+     "day_final_realized": -0.011234841575940575,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0012348415759405752,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.0005981551026310589
+    },
+    {
+     "day": "2024-07-29",
+     "trigger_ts_ms": 1722236400000,
+     "day_final_realized": -0.009601397419441188,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.00039860258055881247,
+     "n_blocked_entries": 16,
+     "n_blocked_unique": 15,
+     "blocked_net_sum": 0.003979278601965402
+    },
+    {
+     "day": "2024-08-06",
+     "trigger_ts_ms": 1722913200000,
+     "day_final_realized": -0.07284027184413122,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.06284027184413123,
+     "n_blocked_entries": 24,
+     "n_blocked_unique": 21,
+     "blocked_net_sum": -0.005072812301282889
+    },
+    {
+     "day": "2024-08-07",
+     "trigger_ts_ms": 1723039200000,
+     "day_final_realized": 0.0003007393388726287,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.01030073933887263,
+     "n_blocked_entries": 12,
+     "n_blocked_unique": 12,
+     "blocked_net_sum": -0.013001279431638285
+    },
+    {
+     "day": "2024-08-08",
+     "trigger_ts_ms": 1723158000000,
+     "day_final_realized": -0.011849991315627362,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0018499913156273615,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-08-09",
+     "trigger_ts_ms": 1723190400000,
+     "day_final_realized": -0.007455332197530905,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.002544667802469095,
+     "n_blocked_entries": 9,
+     "n_blocked_unique": 9,
+     "blocked_net_sum": 0.000706853105633655
+    },
+    {
+     "day": "2024-08-17",
+     "trigger_ts_ms": 1723914000000,
+     "day_final_realized": -0.01066567324323859,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0006656732432385893,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -9.686583519821213e-05
+    },
+    {
+     "day": "2024-08-20",
+     "trigger_ts_ms": 1724166000000,
+     "day_final_realized": -0.010828816570254302,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008288165702543017,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": -0.0017553084591782153
+    },
+    {
+     "day": "2024-08-22",
+     "trigger_ts_ms": 1724349600000,
+     "day_final_realized": -0.012518266428259437,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0025182664282594365,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.005183139431609985
+    },
+    {
+     "day": "2024-08-23",
+     "trigger_ts_ms": 1724432400000,
+     "day_final_realized": -0.017652063835195804,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007652063835195804,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.003567099647362418
+    },
+    {
+     "day": "2024-08-24",
+     "trigger_ts_ms": 1724529600000,
+     "day_final_realized": -0.010930686247273644,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0009306862472736443,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-09-14",
+     "trigger_ts_ms": 1726329600000,
+     "day_final_realized": -0.007462458570421509,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0025375414295784916,
+     "n_blocked_entries": 11,
+     "n_blocked_unique": 11,
+     "blocked_net_sum": -0.0006788882250053462
+    },
+    {
+     "day": "2024-09-17",
+     "trigger_ts_ms": 1726610400000,
+     "day_final_realized": -0.012474579952280644,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0024745799522806443,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.00031074522538091263
+    },
+    {
+     "day": "2024-09-18",
+     "trigger_ts_ms": 1726664400000,
+     "day_final_realized": -0.011563993341748962,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.001563993341748962,
+     "n_blocked_entries": 9,
+     "n_blocked_unique": 9,
+     "blocked_net_sum": -0.008361128716800028
+    },
+    {
+     "day": "2024-09-19",
+     "trigger_ts_ms": 1726761600000,
+     "day_final_realized": -0.011318452427577135,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0013184524275771346,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 6,
+     "blocked_net_sum": 4.505995856485327e-05
+    },
+    {
+     "day": "2024-10-07",
+     "trigger_ts_ms": 1728316800000,
+     "day_final_realized": -0.018843428429019288,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008843428429019288,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 6,
+     "blocked_net_sum": -0.0028947985786816105
+    },
+    {
+     "day": "2024-10-14",
+     "trigger_ts_ms": 1728921600000,
+     "day_final_realized": -0.02052228511668699,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.010522285116686991,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 0.0037811992472375
+    },
+    {
+     "day": "2024-10-21",
+     "trigger_ts_ms": 1729476000000,
+     "day_final_realized": -0.00709111633647766,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0029088836635223405,
+     "n_blocked_entries": 24,
+     "n_blocked_unique": 23,
+     "blocked_net_sum": -0.0006348213390716559
+    },
+    {
+     "day": "2024-11-06",
+     "trigger_ts_ms": 1730908800000,
+     "day_final_realized": -0.018851773241879123,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008851773241879123,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": -0.006365459631543361
+    },
+    {
+     "day": "2024-11-07",
+     "trigger_ts_ms": 1730970000000,
+     "day_final_realized": -0.02492734293476272,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.01492734293476272,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 15,
+     "blocked_net_sum": 0.0028008717731234046
+    },
+    {
+     "day": "2024-11-09",
+     "trigger_ts_ms": 1731135600000,
+     "day_final_realized": -0.004565461386940245,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.005434538613059755,
+     "n_blocked_entries": 18,
+     "n_blocked_unique": 16,
+     "blocked_net_sum": -0.010204355991301628
+    },
+    {
+     "day": "2024-11-10",
+     "trigger_ts_ms": 1731261600000,
+     "day_final_realized": -0.0024916251882975606,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.00750837481170244,
+     "n_blocked_entries": 9,
+     "n_blocked_unique": 9,
+     "blocked_net_sum": -0.00610000420547162
+    },
+    {
+     "day": "2024-11-14",
+     "trigger_ts_ms": 1731582000000,
+     "day_final_realized": -0.009116876633956512,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0008831233660434885,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": 0.00028185722762572106
+    },
+    {
+     "day": "2024-11-16",
+     "trigger_ts_ms": 1731733200000,
+     "day_final_realized": -0.017727112687130855,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007727112687130855,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": 0.004060766135563989
+    },
+    {
+     "day": "2024-11-22",
+     "trigger_ts_ms": 1732298400000,
+     "day_final_realized": -0.011294980885004387,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0012949808850043869,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.00030114201497311765
+    },
+    {
+     "day": "2024-11-27",
+     "trigger_ts_ms": 1732748400000,
+     "day_final_realized": -0.010084211699533578,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -8.42116995335776e-05,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    }
+   ],
+   "-0.015": [
+    {
+     "day": "2022-05-13",
+     "trigger_ts_ms": 1652418000000,
+     "day_final_realized": -0.034102396670790305,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.019102396670790306,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.0008186648728006215
+    },
+    {
+     "day": "2022-11-03",
+     "trigger_ts_ms": 1667491200000,
+     "day_final_realized": -0.014101325792969334,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0008986742070306655,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": -0.0012189533047814748
+    },
+    {
+     "day": "2022-11-10",
+     "trigger_ts_ms": 1668121200000,
+     "day_final_realized": -0.019081565924684206,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0040815659246842065,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2022-11-11",
+     "trigger_ts_ms": 1668124800000,
+     "day_final_realized": -0.018464964948055856,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.003464964948055857,
+     "n_blocked_entries": 30,
+     "n_blocked_unique": 22,
+     "blocked_net_sum": -0.005499912438816893
+    },
+    {
+     "day": "2022-11-15",
+     "trigger_ts_ms": 1668524400000,
+     "day_final_realized": -0.013069548295989416,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.001930451704010584,
+     "n_blocked_entries": 6,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.0038467300265902903
+    },
+    {
+     "day": "2023-01-21",
+     "trigger_ts_ms": 1674327600000,
+     "day_final_realized": -0.016938919344672013,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.001938919344672014,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": 0.0023743525721110813
+    },
+    {
+     "day": "2023-03-13",
+     "trigger_ts_ms": 1678741200000,
+     "day_final_realized": -0.022139943636328128,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007139943636328128,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.004569251564019076
+    },
+    {
+     "day": "2023-11-15",
+     "trigger_ts_ms": 1700078400000,
+     "day_final_realized": -0.015417489887112404,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0004174898871124044,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0010124584749937038
+    },
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.035130263686078175,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.020130263686078176,
+     "n_blocked_entries": 27,
+     "n_blocked_unique": 21,
+     "blocked_net_sum": -0.0052166539578512375
+    },
+    {
+     "day": "2024-01-11",
+     "trigger_ts_ms": 1704981600000,
+     "day_final_realized": -0.024063878381819316,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.009063878381819317,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": 0.0021112986046721892
+    },
+    {
+     "day": "2024-02-13",
+     "trigger_ts_ms": 1707850800000,
+     "day_final_realized": -0.015212230845326167,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00021223084532616746,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-02-22",
+     "trigger_ts_ms": 1708617600000,
+     "day_final_realized": -0.02172221196760008,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006722211967600082,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": 0.0014123871152924078
+    },
+    {
+     "day": "2024-02-25",
+     "trigger_ts_ms": 1708866000000,
+     "day_final_realized": -0.017340998431583602,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0023409984315836026,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.006045900327715896
+    },
+    {
+     "day": "2024-03-01",
+     "trigger_ts_ms": 1709330400000,
+     "day_final_realized": -0.023071519231738113,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008071519231738114,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0006654249137919944
+    },
+    {
+     "day": "2024-03-04",
+     "trigger_ts_ms": 1709539200000,
+     "day_final_realized": -0.0104808311147436,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0045191688852564,
+     "n_blocked_entries": 21,
+     "n_blocked_unique": 19,
+     "blocked_net_sum": 0.005304412115767214
+    },
+    {
+     "day": "2024-03-06",
+     "trigger_ts_ms": 1709755200000,
+     "day_final_realized": -0.05400793106131751,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.03900793106131751,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.0013607908633902041
+    },
+    {
+     "day": "2024-03-21",
+     "trigger_ts_ms": 1711000800000,
+     "day_final_realized": -0.022882920843659012,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.007882920843659012,
+     "n_blocked_entries": 14,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.0001941585267797247
+    },
+    {
+     "day": "2024-03-25",
+     "trigger_ts_ms": 1711386000000,
+     "day_final_realized": -0.018749625403116744,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0037496254031167443,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 0.001715342847105415
+    },
+    {
+     "day": "2024-03-26",
+     "trigger_ts_ms": 1711468800000,
+     "day_final_realized": -0.015814004981470127,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008140049814701275,
+     "n_blocked_entries": 7,
+     "n_blocked_unique": 7,
+     "blocked_net_sum": 0.002804562798313288
+    },
+    {
+     "day": "2024-04-14",
+     "trigger_ts_ms": 1713128400000,
+     "day_final_realized": -0.02817191547071319,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.01317191547071319,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0015201259626537698
+    },
+    {
+     "day": "2024-04-21",
+     "trigger_ts_ms": 1713726000000,
+     "day_final_realized": -0.016762940509961476,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0017629405099614769,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.0006745040670758862
+    },
+    {
+     "day": "2024-05-03",
+     "trigger_ts_ms": 1714762800000,
+     "day_final_realized": -0.016510817662749228,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0015108176627492281,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-05-21",
+     "trigger_ts_ms": 1716318000000,
+     "day_final_realized": -0.01786398734142911,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.002863987341429109,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.0020798042431889345
+    },
+    {
+     "day": "2024-06-19",
+     "trigger_ts_ms": 1718766000000,
+     "day_final_realized": -0.015137128479832337,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0001371284798323373,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 9,
+     "blocked_net_sum": -0.003100343106895798
+    },
+    {
+     "day": "2024-06-25",
+     "trigger_ts_ms": 1719331200000,
+     "day_final_realized": -0.019238328739822973,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004238328739822973,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.0024570262784498467
+    },
+    {
+     "day": "2024-07-06",
+     "trigger_ts_ms": 1720234800000,
+     "day_final_realized": -0.026111452892180965,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.011111452892180965,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.007484455491931661
+    },
+    {
+     "day": "2024-07-15",
+     "trigger_ts_ms": 1721080800000,
+     "day_final_realized": -0.015170138102097035,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00017013810209703592,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-07-16",
+     "trigger_ts_ms": 1721149200000,
+     "day_final_realized": -0.025566968722611674,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.010566968722611675,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": -0.015045122638563274
+    },
+    {
+     "day": "2024-07-17",
+     "trigger_ts_ms": 1721253600000,
+     "day_final_realized": -0.015633822522105035,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0006338225221050355,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-08-06",
+     "trigger_ts_ms": 1722927600000,
+     "day_final_realized": -0.07284027184413122,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.05784027184413122,
+     "n_blocked_entries": 11,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.006763603881405046
+    },
+    {
+     "day": "2024-08-23",
+     "trigger_ts_ms": 1724443200000,
+     "day_final_realized": -0.017652063835195804,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0026520638351958045,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-10-07",
+     "trigger_ts_ms": 1728324000000,
+     "day_final_realized": -0.018843428429019288,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0038434284290192883,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.0010358400107111218
+    },
+    {
+     "day": "2024-10-14",
+     "trigger_ts_ms": 1728939600000,
+     "day_final_realized": -0.02052228511668699,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005522285116686992,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": 0.0021100426532472925
+    },
+    {
+     "day": "2024-11-06",
+     "trigger_ts_ms": 1730908800000,
+     "day_final_realized": -0.018851773241879123,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0038517732418791237,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": -0.006365459631543361
+    },
+    {
+     "day": "2024-11-07",
+     "trigger_ts_ms": 1730995200000,
+     "day_final_realized": -0.02492734293476272,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00992734293476272,
+     "n_blocked_entries": 8,
+     "n_blocked_unique": 8,
+     "blocked_net_sum": 0.003713514267523508
+    },
+    {
+     "day": "2024-11-16",
+     "trigger_ts_ms": 1731733200000,
+     "day_final_realized": -0.017727112687130855,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.002727112687130856,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": 0.004060766135563989
+    }
+   ],
+   "-0.020": [
+    {
+     "day": "2022-05-13",
+     "trigger_ts_ms": 1652421600000,
+     "day_final_realized": -0.034102396670790305,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.014102396670790305,
+     "n_blocked_entries": 5,
+     "n_blocked_unique": 5,
+     "blocked_net_sum": 0.0008186648728006215
+    },
+    {
+     "day": "2022-11-11",
+     "trigger_ts_ms": 1668132000000,
+     "day_final_realized": -0.018464964948055856,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.001535035051944144,
+     "n_blocked_entries": 17,
+     "n_blocked_unique": 13,
+     "blocked_net_sum": 0.006652650811453076
+    },
+    {
+     "day": "2023-03-13",
+     "trigger_ts_ms": 1678748400000,
+     "day_final_realized": -0.022139943636328128,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0021399436363281274,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.035130263686078175,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.015130263686078175,
+     "n_blocked_entries": 27,
+     "n_blocked_unique": 21,
+     "blocked_net_sum": -0.0052166539578512375
+    },
+    {
+     "day": "2024-01-11",
+     "trigger_ts_ms": 1705006800000,
+     "day_final_realized": -0.024063878381819316,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004063878381819316,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-02-22",
+     "trigger_ts_ms": 1708628400000,
+     "day_final_realized": -0.02172221196760008,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0017222119676000812,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-03-01",
+     "trigger_ts_ms": 1709330400000,
+     "day_final_realized": -0.023071519231738113,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.003071519231738113,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0006654249137919944
+    },
+    {
+     "day": "2024-03-04",
+     "trigger_ts_ms": 1709539200000,
+     "day_final_realized": -0.0104808311147436,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.009519168885256401,
+     "n_blocked_entries": 21,
+     "n_blocked_unique": 19,
+     "blocked_net_sum": 0.005304412115767214
+    },
+    {
+     "day": "2024-03-06",
+     "trigger_ts_ms": 1709755200000,
+     "day_final_realized": -0.05400793106131751,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.03400793106131751,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 3,
+     "blocked_net_sum": -0.0013607908633902041
+    },
+    {
+     "day": "2024-03-21",
+     "trigger_ts_ms": 1711051200000,
+     "day_final_realized": -0.022882920843659012,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0028829208436590113,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-04-14",
+     "trigger_ts_ms": 1713128400000,
+     "day_final_realized": -0.02817191547071319,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008171915470713189,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0015201259626537698
+    },
+    {
+     "day": "2024-07-06",
+     "trigger_ts_ms": 1720234800000,
+     "day_final_realized": -0.026111452892180965,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006111452892180964,
+     "n_blocked_entries": 15,
+     "n_blocked_unique": 14,
+     "blocked_net_sum": -0.007484455491931661
+    },
+    {
+     "day": "2024-07-16",
+     "trigger_ts_ms": 1721152800000,
+     "day_final_realized": -0.025566968722611674,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005566968722611674,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 4,
+     "blocked_net_sum": -0.014270339821982104
+    },
+    {
+     "day": "2024-08-06",
+     "trigger_ts_ms": 1722927600000,
+     "day_final_realized": -0.07284027184413122,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.05284027184413122,
+     "n_blocked_entries": 11,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.006763603881405046
+    },
+    {
+     "day": "2024-10-14",
+     "trigger_ts_ms": 1728946800000,
+     "day_final_realized": -0.02052228511668699,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0005222851166869907,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-11-07",
+     "trigger_ts_ms": 1731002400000,
+     "day_final_realized": -0.02492734293476272,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00492734293476272,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.00011639539981023223
+    },
+    {
+     "day": "2024-11-16",
+     "trigger_ts_ms": 1731740400000,
+     "day_final_realized": -0.017727112687130855,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.002272887312869145,
+     "n_blocked_entries": 10,
+     "n_blocked_unique": 10,
+     "blocked_net_sum": -0.00035781242821037286
+    }
+   ]
+  }
+ },
+ {
+  "surface": "render_gate_on",
+  "thresholds": {
+   "-0.010": [
+    {
+     "day": "2023-11-07",
+     "trigger_ts_ms": 1699390800000,
+     "day_final_realized": -0.010285901647884885,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0002859016478848845,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2023-12-13",
+     "trigger_ts_ms": 1702461600000,
+     "day_final_realized": -0.013509250704130994,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0035092507041309933,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.023315043097676156,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.013315043097676156,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-06-17",
+     "trigger_ts_ms": 1718614800000,
+     "day_final_realized": -0.01980899718119712,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.009808997181197121,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-07-29",
+     "trigger_ts_ms": 1722236400000,
+     "day_final_realized": -0.022394639494178182,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.012394639494178182,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-08-06",
+     "trigger_ts_ms": 1722938400000,
+     "day_final_realized": -0.010891430668802545,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008914306688025449,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-12-14",
+     "trigger_ts_ms": 1734206400000,
+     "day_final_realized": -0.010256187791111673,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.00025618779111167243,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.001063733925761767
+    },
+    {
+     "day": "2024-12-27",
+     "trigger_ts_ms": 1735318800000,
+     "day_final_realized": -0.012570757924804816,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.002570757924804816,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-04-26",
+     "trigger_ts_ms": 1745632800000,
+     "day_final_realized": -0.006491371267410794,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.003508628732589206,
+     "n_blocked_entries": 3,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": -0.006389622782192856
+    },
+    {
+     "day": "2025-06-03",
+     "trigger_ts_ms": 1748952000000,
+     "day_final_realized": -0.015411402865229863,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.005411402865229863,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0042627984320185745
+    },
+    {
+     "day": "2025-07-09",
+     "trigger_ts_ms": 1752073200000,
+     "day_final_realized": -0.013290260473980176,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.003290260473980176,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-08-09",
+     "trigger_ts_ms": 1754766000000,
+     "day_final_realized": -0.01082937592993388,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0008293759299338802,
+     "n_blocked_entries": 1,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0015113154528561467
+    },
+    {
+     "day": "2025-09-19",
+     "trigger_ts_ms": 1758268800000,
+     "day_final_realized": -0.029749175316734294,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.019749175316734292,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0034159209276518176
+    },
+    {
+     "day": "2026-01-14",
+     "trigger_ts_ms": 1768366800000,
+     "day_final_realized": -0.01403320251686965,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004033202516869649,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2026-04-02",
+     "trigger_ts_ms": 1775095200000,
+     "day_final_realized": -0.0147491077764549,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004749107776454899,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2026-05-01",
+     "trigger_ts_ms": 1777644000000,
+     "day_final_realized": -0.018006284225637197,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008006284225637197,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0023548507870834066
+    },
+    {
+     "day": "2026-07-09",
+     "trigger_ts_ms": 1783620000000,
+     "day_final_realized": -0.021857665064508047,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.011857665064508046,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    }
+   ],
+   "-0.015": [
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.023315043097676156,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.008315043097676156,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-06-17",
+     "trigger_ts_ms": 1718614800000,
+     "day_final_realized": -0.01980899718119712,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.004808997181197122,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-07-29",
+     "trigger_ts_ms": 1722236400000,
+     "day_final_realized": -0.022394639494178182,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0073946394941781825,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-06-03",
+     "trigger_ts_ms": 1748980800000,
+     "day_final_realized": -0.015411402865229863,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0004114028652298634,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-07-09",
+     "trigger_ts_ms": 1752073200000,
+     "day_final_realized": -0.013290260473980176,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0017097395260198232,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-09-19",
+     "trigger_ts_ms": 1758268800000,
+     "day_final_realized": -0.029749175316734294,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.014749175316734295,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0034159209276518176
+    },
+    {
+     "day": "2026-01-14",
+     "trigger_ts_ms": 1768370400000,
+     "day_final_realized": -0.01403320251686965,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.0009667974831303501,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2026-05-01",
+     "trigger_ts_ms": 1777644000000,
+     "day_final_realized": -0.018006284225637197,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.003006284225637198,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0023548507870834066
+    },
+    {
+     "day": "2026-07-09",
+     "trigger_ts_ms": 1783620000000,
+     "day_final_realized": -0.021857665064508047,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.006857665064508047,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    }
+   ],
+   "-0.020": [
+    {
+     "day": "2023-12-24",
+     "trigger_ts_ms": 1703383200000,
+     "day_final_realized": -0.023315043097676156,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0033150430976761555,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2024-07-29",
+     "trigger_ts_ms": 1722236400000,
+     "day_final_realized": -0.022394639494178182,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0023946394941781815,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-07-09",
+     "trigger_ts_ms": 1752073200000,
+     "day_final_realized": -0.013290260473980176,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.006709739526019824,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    },
+    {
+     "day": "2025-09-19",
+     "trigger_ts_ms": 1758268800000,
+     "day_final_realized": -0.029749175316734294,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.009749175316734294,
+     "n_blocked_entries": 4,
+     "n_blocked_unique": 2,
+     "blocked_net_sum": 0.0034159209276518176
+    },
+    {
+     "day": "2026-05-01",
+     "trigger_ts_ms": 1777644000000,
+     "day_final_realized": -0.018006284225637197,
+     "recovered_above_threshold": true,
+     "continuation_after_trigger": 0.001993715774362803,
+     "n_blocked_entries": 2,
+     "n_blocked_unique": 1,
+     "blocked_net_sum": 0.0023548507870834066
+    },
+    {
+     "day": "2026-07-09",
+     "trigger_ts_ms": 1783620000000,
+     "day_final_realized": -0.021857665064508047,
+     "recovered_above_threshold": false,
+     "continuation_after_trigger": -0.0018576650645080461,
+     "n_blocked_entries": 0,
+     "n_blocked_unique": 0,
+     "blocked_net_sum": 0.0
+    }
+   ]
+  }
+ }
+]

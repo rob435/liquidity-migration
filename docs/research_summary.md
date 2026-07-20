@@ -427,6 +427,30 @@ promotion claim; sixth-generation T-I descent priors apply; the linear
 member's true render-arm interaction (capacity/admission) is untested; the
 one-shot G1/G2/G3 slice grades remain unopened until after this commit.
 
+## R3a daily loss budget: insurance profile confirmed on seen data; frozen A/B registered (2026-07-20)
+
+Claim: a −1.5%-of-capital realized-day loss budget (entry-side block, UTC
+reset) behaves like well-priced insurance on both seen surfaces — informing
+the P1.2 registration, not an activation. Grading is item-27 insurance
+metrics, never return improvement. Data that shaped: V2 barebones book
+(LONG+CONT) + T-A gate_on render book. Effects (all 18 declared cells in
+`reports/tail-risk-program/p12-r3a-loss-budget-lane1-2026-07-20/`): on
+barebones-late — the bleeding regime — 30 triggers (16.7/yr), **3.3%
+false-trip**, blocked entries went on to lose 2.4× what they forfeited
+(−6.24% avoided vs +2.64% forgone); on the deployed-shape render book the
+layer is nearly dormant (2.8 trips/yr, 6 blocked entries in 3.26y, ~0.18%/yr
+pure premium, zero avoided in the bull window, ES essentially unchanged —
+including a small honest negative: two render-late trigger days got
+marginally redder). Sensitivity flankers (−1.0%/−2.0%) reported, not
+selected. Registered: frozen A/B activation design (UTC-date-ordinal parity,
+odd=A off / even=B on; experiment kill rules X1 premium-runaway / X2
+trigger-famine / X3 integrity) in
+`docs/preregistration/r3a_loss_budget_experiment_2026-07-20.md`; shadow
+governor implemented + tested + staged only. Non-conclusions: no activation,
+no return claim; realized-at-exit replay is an approximation of live
+venue-time cash flow (the shadow phase measures the live analogue); render
+surface lacks LONG.
+
 ## P0.2 slice provenance: D1's "untouched" claim corrected (2026-07-20)
 
 Claim: of the two "never-opened" pre-2021-05 slices, only **Binance
