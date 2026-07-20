@@ -33,28 +33,17 @@ from ._common import (
     exact_duration_ms,
     finite_float,
 )
-from .account_intent_client import (
-    ENTRY_ATTEMPT_METADATA_KEY,
-    AccountTargetPublisher,
-    publish_exit_first_target_requests,
-    unresolved_target_snapshot,
-)
+from .account_intent_client import publish_exit_first_target_requests
 from .account_candidate_universe import (
     load_candidate_universe,
     require_scheduled_retirements_flat,
-)
-from .account_owner_health import (
-    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    require_recent_account_owner_health,
 )
 from .account_route import require_account_route
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import (
     CanonicalReductionEvent,
     canonical_adverse_reduction_events,
-    canonical_strategy_trade_rows,
     target_reservation_rows,
-    terminal_entry_attempt_keys,
 )
 from .artifact_snapshot import read_stable_file
 from .bybit_market_data import BybitMarketData
@@ -100,6 +89,11 @@ from .execution_environment import (
     execution_environment,
 )
 from .storage import exclusive_file_lock, write_dataset
+from .strategy_planning import (
+    account_owner_equity_or_error,
+    sleeve_planning_snapshot,
+    suppress_target_intents,
+)
 from .strategy_targets import component_target_intent, exit_target_intents
 from .strategy_funnel import DecisionFunnelObserver
 from .strategy_target_replay import PublishedTargetCyclePayload
@@ -1923,19 +1917,10 @@ def run_continuous_demo_cycle(
                 context="CONT cycle",
             )
 
-        account_owner_health_error = ""
-        try:
-            owner_health = require_recent_account_owner_health(
-                account_route.account_path,
-                environment=environment,
-                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-                expected_account_id=account_route.account_id,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            account_owner_health_error = f"{type(exc).__name__}: {exc}"[:500]
-            equity_usdt = 0.0
-        else:
-            equity_usdt = float(owner_health.equity_usdt)
+        equity_usdt, account_owner_health_error = account_owner_equity_or_error(
+            account_route,
+            environment=environment,
+        )
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_stats = _download_recent_1h_klines(
@@ -2003,25 +1988,15 @@ def run_continuous_demo_cycle(
                 funnel_observer=funnel_observer,
             )
 
-        target_publisher = AccountTargetPublisher(account_route)
-        # The ordering is causal: unresolved durable work is snapshotted before
-        # the accepted journal is projected. A request completing in between is
-        # therefore visible in the later journal read.
-        unresolved_targets = unresolved_target_snapshot(
-            target_publisher.inbox,
+        planning = sleeve_planning_snapshot(
+            account_route,
             sleeve=SleeveAdapterKind.CONTINUOUS,
-        )
-        canonical_trades = canonical_strategy_trade_rows(
-            account_route.account_path,
-            sleeve=SleeveAdapterKind.CONTINUOUS.value,
             strategy_ids=managed_strategy_ids,
         )
-        terminal_entry_attempts = terminal_entry_attempt_keys(
-            account_route.account_path,
-            sleeve=SleeveAdapterKind.CONTINUOUS.value,
-            strategy_ids=managed_strategy_ids,
-            inbox=target_publisher.inbox,
-        )
+        target_publisher = planning.publisher
+        unresolved_targets = planning.unresolved_targets
+        canonical_trades = planning.canonical_trades
+        terminal_entry_attempts = planning.terminal_entry_attempts
 
         open_trades = _open_continuous_trades(canonical_trades, managed_strategy_ids)
         reservations = _continuous_target_reservations(
@@ -2171,46 +2146,26 @@ def run_continuous_demo_cycle(
                 if trade_id and trade_id not in raw_entry_component_ids:
                     qualified_block_reasons[candidate_opportunity] = "target_intent_validation"
 
-        unresolved_exit_suppressions = sum(
-            item.intent.target_key in unresolved_targets.target_keys for item in exit_target_intents
-        )
-        unresolved_entry_suppressions = sum(
-            item.intent.target_key in unresolved_targets.target_keys for item in entry_target_intents
-        )
-        exit_target_intents = [
-            item for item in exit_target_intents if item.intent.target_key not in unresolved_targets.target_keys
-        ]
-        exit_target_keys = {item.intent.target_key for item in exit_target_intents}
-        terminal_entry_attempt_suppressions = sum(
-            str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts
-            for item in entry_target_intents
-            if item.intent.target_key not in unresolved_targets.target_keys
-        )
-        simultaneous_exit_suppressions = sum(
-            item.intent.target_key in exit_target_keys
-            for item in entry_target_intents
-            if item.intent.target_key not in unresolved_targets.target_keys
-            and str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
-        )
-        for item in entry_target_intents:
+        def _attribute_entry_suppression(item: RequestedIntent, reason: str) -> None:
             suppressed_opportunity = candidate_opportunity_by_trade_id.get(
                 item.intent.component_id
             )
-            if suppressed_opportunity is None:
-                continue
-            if item.intent.target_key in unresolved_targets.target_keys:
-                qualified_block_reasons[suppressed_opportunity] = "unresolved_account_target"
-            elif str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts:
-                qualified_block_reasons[suppressed_opportunity] = "terminal_entry_attempt"
-            elif item.intent.target_key in exit_target_keys:
-                qualified_block_reasons[suppressed_opportunity] = "simultaneous_exit"
-        entry_target_intents = [
-            item
-            for item in entry_target_intents
-            if item.intent.target_key not in unresolved_targets.target_keys
-            and str(item.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") not in terminal_entry_attempts
-            and item.intent.target_key not in exit_target_keys
-        ]
+            if suppressed_opportunity is not None:
+                qualified_block_reasons[suppressed_opportunity] = reason
+
+        suppression = suppress_target_intents(
+            exit_intents=exit_target_intents,
+            entry_intents=entry_target_intents,
+            unresolved_target_keys=unresolved_targets.target_keys,
+            terminal_entry_attempts=terminal_entry_attempts,
+            on_entry_suppression=_attribute_entry_suppression,
+        )
+        exit_target_intents = suppression.exit_intents
+        entry_target_intents = suppression.entry_intents
+        unresolved_exit_suppressions = suppression.unresolved_exit_suppressions
+        unresolved_entry_suppressions = suppression.unresolved_entry_suppressions
+        terminal_entry_attempt_suppressions = suppression.terminal_entry_attempt_suppressions
+        simultaneous_exit_suppressions = suppression.simultaneous_exit_suppressions
 
         target_keys = [item.intent.target_key for item in [*exit_target_intents, *entry_target_intents]]
         if len(set(target_keys)) != len(target_keys):

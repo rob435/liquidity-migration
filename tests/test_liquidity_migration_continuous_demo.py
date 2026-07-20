@@ -840,6 +840,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import liquidity_migration.continuous_demo as module
+    import liquidity_migration.strategy_planning as planning_module
 
     route = _route(tmp_path / "route")
     candidate_path = (tmp_path / "candidate-universe.json").absolute()
@@ -965,14 +966,14 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         owner_health_call.update(kwargs)
         return SimpleNamespace(equity_usdt=10_000.0)
 
-    monkeypatch.setattr(module, "require_recent_account_owner_health", owner_health)
+    monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
     monkeypatch.setattr(
-        module,
+        planning_module,
         "canonical_strategy_trade_rows",
         lambda *_args, **_kwargs: canonical,
     )
     monkeypatch.setattr(
-        module,
+        planning_module,
         "terminal_entry_attempt_keys",
         lambda *_args, **_kwargs: frozenset(),
     )
