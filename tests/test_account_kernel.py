@@ -20,6 +20,7 @@ from liquidity_migration.account_kernel import (
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
     OrderCommand,
     account_journal_path,
     account_transactions_path,
@@ -31,6 +32,7 @@ from liquidity_migration.bybit_errors import BybitRequestRejected, BybitSubmissi
 from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import (
+    AmbiguousExposureSubmission,
     BookLevel,
     ExecutionObservation,
     ExecutionTwinConfig,
@@ -38,6 +40,7 @@ from liquidity_migration.execution_adapters import (
     L2BookSnapshot,
     LatencyProfile,
     MarketOrderExecutionTwin,
+    StaleUnsubmittedExposureCommand,
 )
 from liquidity_migration.strategy_runtime import (
     AccountKernelRuntime,
@@ -72,6 +75,7 @@ def _target(
     qty: float,
     price: float = 10.0,
     leverage: float = 10.0,
+    metadata: dict[str, object] | None = None,
 ) -> DesiredTarget:
     return DesiredTarget(
         decision_key=decision,
@@ -84,6 +88,7 @@ def _target(
         reference_price=price,
         leverage=leverage,
         reason="test target",
+        metadata=metadata or {},
     )
 
 
@@ -91,6 +96,7 @@ def _rules(
     *,
     min_notional: float = 1.0,
     max_order_qty: float = 100.0,
+    tick_size: float = 0.0,
 ) -> dict[str, InstrumentRules]:
     return {
         "BUSDT": InstrumentRules(
@@ -98,6 +104,7 @@ def _rules(
             qty_step=0.1,
             min_qty=0.1,
             min_notional=min_notional,
+            tick_size=tick_size,
             max_order_qty=max_order_qty,
             max_leverage=20.0,
         )
@@ -287,9 +294,7 @@ def test_sign_flip_guard_compares_each_quantity_to_tolerance_not_their_product(
     )
 
     assert not flipped.accepted
-    assert flipped.rejection_keys == (
-        "account-risk:tiny-direct-flip:sign_flip_requires_flat:BUSDT",
-    )
+    assert flipped.rejection_keys == ("account-risk:tiny-direct-flip:sign_flip_requires_flat:BUSDT",)
     assert flipped.commands == ()
 
 
@@ -777,14 +782,8 @@ def test_venue_delisting_fill_is_an_allowed_external_reduction_origin(
     state = kernel.state()
     assert state.positions["BUSDT"].signed_qty == 0.0
     assert state.aggregate_targets["BUSDT"] == 0.0
-    fill = next(
-        event
-        for event in adopted
-        if event.event_type == AccountEventType.FILL.value
-    )
-    assert fill.payload["metadata"]["external_execution_origin"] == (
-        "venue_delisting_settlement"
-    )
+    fill = next(event for event in adopted if event.event_type == AccountEventType.FILL.value)
+    assert fill.payload["metadata"]["external_execution_origin"] == ("venue_delisting_settlement")
     assert fill.payload["metadata"]["proxy_exactness"] == "structural"
 
 
@@ -1194,9 +1193,7 @@ def test_trusted_cached_append_does_not_deepcopy_historical_payloads(
     )
 
     assert len(appended) == 1
-    assert list(kernel._state_ref().venue_snapshots) == [
-        "second-shared-history-append"
-    ]
+    assert list(kernel._state_ref().venue_snapshots) == ["second-shared-history-append"]
 
 
 def test_snapshot_ref_resolves_one_event_head(
@@ -1244,9 +1241,7 @@ def test_materialized_state_keeps_only_latest_venue_snapshot(
         )
 
     snapshot_events = [
-        event
-        for event in kernel.journal.events()
-        if event.event_type == AccountEventType.VENUE_SNAPSHOT.value
+        event for event in kernel.journal.events() if event.event_type == AccountEventType.VENUE_SNAPSHOT.value
     ]
     assert [event.payload["snapshot_key"] for event in snapshot_events] == [
         "snapshot-1",
@@ -1873,10 +1868,7 @@ def test_reduce_batch_finalization_is_atomic_under_concurrent_redelivery(
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
-    workers = [
-        threading.Thread(target=finalize, args=(1_600_000_000 + offset,))
-        for offset in (0, 1)
-    ]
+    workers = [threading.Thread(target=finalize, args=(1_600_000_000 + offset,)) for offset in (0, 1)]
     for worker in workers:
         worker.start()
     for worker in workers:
@@ -1911,6 +1903,10 @@ def test_bybit_demo_adapter_refuses_mainnet_and_never_synthesizes_a_fill() -> No
 
         def place_order(self, **params: object) -> dict[str, str]:
             assert params["orderLinkId"]
+            assert params["stopLoss"] == "8"
+            assert params["slTriggerBy"] == "MarkPrice"
+            assert params["tpslMode"] == "Full"
+            assert params["slOrderType"] == "Market"
             return {"orderId": "venue-demo-1", "_response_time_ms": "2000"}
 
     adapter = BybitDemoExecutionAdapter(
@@ -1931,6 +1927,10 @@ def test_bybit_demo_adapter_refuses_mainnet_and_never_synthesizes_a_fill() -> No
                 target_signed_qty=0.1,
                 chunk_index=0,
                 chunk_count=1,
+                entry_stop_price=8.0,
+                entry_stop_fraction=0.2,
+                entry_stop_source="test_entry_attached_stop",
+                entry_stop_trigger_by="MarkPrice",
             ),
             _market(),
         )
@@ -1972,6 +1972,10 @@ def test_bybit_demo_adapter_times_create_after_leverage_negotiation() -> None:
         target_signed_qty=0.1,
         chunk_index=0,
         chunk_count=1,
+        entry_stop_price=8.0,
+        entry_stop_fraction=0.2,
+        entry_stop_source="test_entry_attached_stop",
+        entry_stop_trigger_by="MarkPrice",
     )
     observation = tuple(
         BybitDemoExecutionAdapter(DemoClient(), clock=clock).submit(
@@ -1983,6 +1987,47 @@ def test_bybit_demo_adapter_times_create_after_leverage_negotiation() -> None:
     assert observation.metadata["local_socket_send_ts_ns"] == 2_050_000_000
     assert observation.local_receive_ts_ns == 2_055_000_000
     assert observation.exchange_ts_ns == 2_052_000_000
+
+
+def test_bybit_demo_adapter_refuses_naked_entry_before_any_mutation() -> None:
+    class RecordingClient:
+        demo = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def set_leverage(self, **_params: object) -> dict[str, object]:
+            self.calls.append("set_leverage")
+            return {}
+
+        def place_order(self, **_params: object) -> dict[str, str]:
+            self.calls.append("place_order")
+            return {"orderId": "must-not-exist"}
+
+    client = RecordingClient()
+    with pytest.raises(
+        RuntimeError,
+        match="lacks durable entry-attached protection",
+    ):
+        tuple(
+            BybitDemoExecutionAdapter(client).submit(
+                OrderCommand(
+                    command_id="33333333-3333-5333-8333-333333333333",
+                    batch_id="legacy-naked-entry",
+                    symbol="BUSDT",
+                    side="Buy",
+                    qty=0.1,
+                    signed_qty=0.1,
+                    reduce_only=False,
+                    reference_price=10.0,
+                    target_signed_qty=0.1,
+                    chunk_index=0,
+                    chunk_count=1,
+                ),
+                _market(),
+            )
+        )
+    assert client.calls == []
 
 
 def test_bybit_demo_adapter_records_only_definite_rejections() -> None:
@@ -2003,7 +2048,8 @@ def test_bybit_demo_adapter_records_only_definite_rejections() -> None:
     class RejectedClient:
         demo = True
 
-        def place_order(self, **_params: object) -> dict[str, str]:
+        def place_order(self, **params: object) -> dict[str, str]:
+            assert "stopLoss" not in params
             raise BybitRequestRejected("minimum notional")
 
     rejected = tuple(BybitDemoExecutionAdapter(RejectedClient()).submit(command, _market()))
@@ -2019,6 +2065,398 @@ def test_bybit_demo_adapter_records_only_definite_rejections() -> None:
 
     with pytest.raises(BybitSubmissionUncertain, match="response lost"):
         tuple(BybitDemoExecutionAdapter(UncertainClient()).submit(command, _market()))
+
+
+def test_provider_submission_attempt_is_durable_and_ambiguous_entry_never_resends(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    market = _market()
+    target = _target(
+        decision="ambiguous-entry",
+        key="long/ambiguous/BUSDT",
+        sleeve="long",
+        qty=1.0,
+    )
+    result = kernel.submit_targets(
+        batch_id="ambiguous-entry",
+        market_inputs=[market],
+        targets=[target],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+
+    class UncertainProvider:
+        name = "uncertain_provider"
+        submission_outcome_can_be_ambiguous = True
+        max_unsubmitted_exposure_age_ns = 5_000_000_000
+
+        def __init__(self) -> None:
+            self.submit_calls = 0
+
+        def submit(self, command: OrderCommand, _market_input: MarketInputRef):
+            self.submit_calls += 1
+            durable = kernel.state().orders[command.command_id]
+            assert durable.submission_attempts == 1
+            assert durable.last_submission_started_ts_ns == kernel.clock.wall_time_ns()
+            raise BybitSubmissionUncertain("provider may own the entry")
+
+    adapter = UncertainProvider()
+    with pytest.raises(BybitSubmissionUncertain, match="may own"):
+        KernelExecutionDriver(kernel).execute_batch(
+            result,
+            market_inputs={"BUSDT": market},
+            adapter=adapter,
+        )
+    command_id = result.commands[0].command_id
+    attempted = kernel.state().orders[command_id]
+    assert attempted.status == "commanded"
+    assert attempted.submission_attempts == 1
+    assert read_account_journal(tmp_path)[-1].event_type == (
+        AccountEventType.SUBMISSION_ATTEMPT.value
+    )
+
+    restarted = _kernel(tmp_path)
+    replayed = restarted.submit_targets(
+        batch_id="ambiguous-entry",
+        market_inputs=[market],
+        targets=[target],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+    with pytest.raises(AmbiguousExposureSubmission, match="refusing to resend"):
+        KernelExecutionDriver(restarted).execute_batch(
+            replayed,
+            market_inputs={"BUSDT": market},
+            adapter=adapter,
+        )
+    assert adapter.submit_calls == 1
+    assert restarted.state().orders[command_id].submission_attempts == 1
+
+
+def test_concurrent_provider_entry_submission_has_one_atomic_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _kernel(tmp_path)
+    market = _market()
+    result = kernel.submit_targets(
+        batch_id="concurrent-provider-entry",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="concurrent-provider-entry",
+                key="long/concurrent/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+
+    class UncertainProvider:
+        name = "concurrent_uncertain_provider"
+        submission_outcome_can_be_ambiguous = True
+        max_unsubmitted_exposure_age_ns = 5_000_000_000
+
+        def __init__(self) -> None:
+            self.submit_calls = 0
+            self._lock = threading.Lock()
+
+        def submit(self, _command: OrderCommand, _market_input: MarketInputRef):
+            with self._lock:
+                self.submit_calls += 1
+            raise BybitSubmissionUncertain("provider result unknown")
+
+    original_record_attempt = kernel.record_submission_attempt
+    attempt_barrier = threading.Barrier(2)
+
+    def synchronized_record_attempt(
+        *,
+        command_id: str,
+        adapter_name: str,
+        allow_repeat: bool = False,
+    ) -> tuple[AccountEvent, ...]:
+        attempt_barrier.wait(timeout=5.0)
+        return original_record_attempt(
+            command_id=command_id,
+            adapter_name=adapter_name,
+            allow_repeat=allow_repeat,
+        )
+
+    monkeypatch.setattr(
+        kernel,
+        "record_submission_attempt",
+        synchronized_record_attempt,
+    )
+    adapter = UncertainProvider()
+    errors: list[BaseException] = []
+
+    def execute() -> None:
+        try:
+            KernelExecutionDriver(kernel).execute_batch(
+                result,
+                market_inputs={"BUSDT": market},
+                adapter=adapter,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=execute) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert adapter.submit_calls == 1
+    assert sum(isinstance(error, BybitSubmissionUncertain) for error in errors) == 1
+    assert sum(isinstance(error, AmbiguousExposureSubmission) for error in errors) == 1
+    command_id = result.commands[0].command_id
+    assert kernel.state().orders[command_id].submission_attempts == 1
+
+
+def test_provider_never_attempts_an_over_age_unsubmitted_entry(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    market = _market()
+    result = kernel.submit_targets(
+        batch_id="stale-unsubmitted-entry",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="stale-unsubmitted-entry",
+                key="long/stale/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+
+    class RecordingProvider:
+        name = "recording_provider"
+        submission_outcome_can_be_ambiguous = True
+        max_unsubmitted_exposure_age_ns = 5_000_000_000
+
+        def __init__(self) -> None:
+            self.submit_calls = 0
+
+        def submit(self, _command: OrderCommand, _market_input: MarketInputRef):
+            self.submit_calls += 1
+            raise AssertionError("stale entry reached provider")
+
+    adapter = RecordingProvider()
+    assert isinstance(kernel.clock, VirtualClock)
+    kernel.clock.advance_ns(adapter.max_unsubmitted_exposure_age_ns + 1)
+    with pytest.raises(StaleUnsubmittedExposureCommand, match="stale exposure"):
+        KernelExecutionDriver(kernel).execute_batch(
+            result,
+            market_inputs={"BUSDT": market},
+            adapter=adapter,
+        )
+    state = kernel.state()
+    assert adapter.submit_calls == 0
+    assert state.orders[result.commands[0].command_id].submission_attempts == 0
+    assert read_account_journal(tmp_path)[-1].event_type == AccountEventType.ORDER_COMMAND.value
+
+
+def test_provider_rechecks_entry_age_after_non_exposure_preparation(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    market = _market()
+    result = kernel.submit_targets(
+        batch_id="ages-during-provider-preparation",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="ages-during-provider-preparation",
+                key="long/preparation-age/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+    assert isinstance(kernel.clock, VirtualClock)
+
+    class SlowLeverageClient:
+        demo = True
+
+        def __init__(self) -> None:
+            self.order_calls = 0
+
+        def set_leverage(self, **_params: object) -> dict[str, object]:
+            kernel.clock.advance_ns(5_000_000_001)
+            return {}
+
+        def place_order(self, **_params: object) -> dict[str, str]:
+            self.order_calls += 1
+            raise AssertionError("stale entry reached order-create")
+
+    client = SlowLeverageClient()
+    adapter = BybitDemoExecutionAdapter(
+        client,
+        clock=kernel.clock,
+        max_unsubmitted_exposure_age_ns=5_000_000_000,
+    )
+    with pytest.raises(
+        StaleUnsubmittedExposureCommand,
+        match="after provider preparation",
+    ):
+        KernelExecutionDriver(kernel).execute_batch(
+            result,
+            market_inputs={"BUSDT": market},
+            adapter=adapter,
+        )
+    command_id = result.commands[0].command_id
+    assert kernel.state().orders[command_id].submission_attempts == 0
+    assert client.order_calls == 0
+
+
+def test_provider_submission_validation_precedes_attempt_and_definite_reject_is_terminal(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    market = _market()
+    result = kernel.submit_targets(
+        batch_id="definite-provider-reject",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="definite-provider-reject",
+                key="long/reject/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+
+    class RejectingProvider:
+        name = "rejecting_provider"
+        submission_outcome_can_be_ambiguous = True
+        max_unsubmitted_exposure_age_ns = 5_000_000_000
+
+        def __init__(self) -> None:
+            self.submit_calls = 0
+
+        def submit(self, command: OrderCommand, market_input: MarketInputRef):
+            self.submit_calls += 1
+            return (
+                ExecutionObservation(
+                    observation_type="ack",
+                    command_id=command.command_id,
+                    exchange_ts_ns=market_input.exchange_ts_ns,
+                    local_receive_ts_ns=market_input.local_receive_ts_ns,
+                    accepted=False,
+                    rejection_key="provider:definite-reject",
+                ),
+            )
+
+    adapter = RejectingProvider()
+    driver = KernelExecutionDriver(kernel)
+    with pytest.raises(ValueError, match="missing market input"):
+        driver.execute_batch(result, market_inputs={}, adapter=adapter)
+    command_id = result.commands[0].command_id
+    assert kernel.state().orders[command_id].submission_attempts == 0
+
+    driver.execute_batch(
+        result,
+        market_inputs={"BUSDT": market},
+        adapter=adapter,
+    )
+    rejected = kernel.state().orders[command_id]
+    assert rejected.submission_attempts == 1
+    assert rejected.status == "rejected"
+    driver.execute_batch(
+        result,
+        market_inputs={"BUSDT": market},
+        adapter=adapter,
+    )
+    assert adapter.submit_calls == 1
+
+
+def test_provider_may_retry_ambiguous_reduce_only_command(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    market = _book().market_ref(input_key="reduce-retry-book")
+    opened = kernel.submit_targets(
+        batch_id="reduce-retry-open",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="reduce-retry-open",
+                key="long/reduce-retry/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    KernelExecutionDriver(kernel).execute_batch(
+        opened,
+        market_inputs={"BUSDT": market},
+        adapter=_twin(name="paper"),
+    )
+    closing = kernel.submit_targets(
+        batch_id="reduce-retry-close",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="reduce-retry-close",
+                key="long/reduce-retry/BUSDT",
+                sleeve="long",
+                qty=0.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    assert closing.commands[0].reduce_only
+
+    class UncertainReductionProvider:
+        name = "uncertain_reduction_provider"
+        submission_outcome_can_be_ambiguous = True
+        max_unsubmitted_exposure_age_ns = 1
+
+        def __init__(self) -> None:
+            self.submit_calls = 0
+
+        def submit(self, _command: OrderCommand, _market_input: MarketInputRef):
+            self.submit_calls += 1
+            raise BybitSubmissionUncertain("reduction response lost")
+
+    adapter = UncertainReductionProvider()
+    driver = KernelExecutionDriver(kernel)
+    for expected_attempt in (1, 2):
+        with pytest.raises(BybitSubmissionUncertain, match="response lost"):
+            driver.execute_batch(
+                closing,
+                market_inputs={"BUSDT": market},
+                adapter=adapter,
+            )
+        order = kernel.state().orders[closing.commands[0].command_id]
+        assert order.submission_attempts == expected_attempt
+    assert adapter.submit_calls == 2
 
 
 def test_dropped_ack_reordered_duplicate_fills_recover_deterministically(tmp_path: Path) -> None:
@@ -2052,6 +2490,8 @@ def test_dropped_ack_reordered_duplicate_fills_recover_deterministically(tmp_pat
         return [event.to_dict() for event in read_account_journal(root)]
 
     assert run(tmp_path / "one") == run(tmp_path / "two")
+
+
 def test_sleeve_adapters_only_propose_targets_and_runtime_nets_them_once(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
     market = _market()
@@ -2234,6 +2674,433 @@ def test_chunked_commands_carry_exact_step_quantities(tmp_path: Path) -> None:
     from decimal import Decimal as _Decimal
 
     assert format(_Decimal(str(quantities[-1])), "f") == "0.7"
+
+
+def test_native_entry_stop_is_durable_on_every_chunk_and_crash_replay(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    rules = _rules(max_order_qty=1.0, tick_size=0.1)
+    market = _market(price=10.0)
+    target = _target(
+        decision="protected-entry",
+        key="long/protected/BUSDT",
+        sleeve="long",
+        qty=2.7,
+        metadata={"stop_loss_pct": 0.125},
+    )
+    result = kernel.submit_targets(
+        batch_id="protected-entry",
+        market_inputs=[market],
+        targets=[target],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+
+    assert result.accepted
+    assert len(result.commands) == 3
+    assert {command.entry_stop_price for command in result.commands} == {8.7}
+    assert {command.entry_stop_fraction for command in result.commands} == {0.125}
+    assert {command.entry_stop_source for command in result.commands} == {
+        "decision_reference_outermost_component_fraction"
+    }
+    assert {command.entry_stop_trigger_by for command in result.commands} == {"MarkPrice"}
+    reconstructed = kernel.state()
+    assert {reconstructed.orders[command.command_id].entry_stop_price for command in result.commands} == {8.7}
+    risk = reconstructed.risk_decisions["protected-entry"]
+    assert risk["native_disaster_protection_policy"] == {
+        "fallback_stop_fraction": 0.2,
+        "trigger_by": "MarkPrice",
+    }
+
+    # A crash retry recovers the originally journaled stop even if runtime
+    # configuration changed after the command boundary.
+    replayed = kernel.submit_targets(
+        batch_id="protected-entry",
+        market_inputs=[market],
+        targets=[target],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=NativeDisasterProtectionPolicy(0.3),
+    )
+    assert [command.entry_stop_price for command in replayed.commands] == [
+        8.7,
+        8.7,
+        8.7,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("protection_fields", "error"),
+    (
+        ({"entry_stop_fraction": 0.2}, "entry_stop_price is required"),
+        (
+            {
+                "entry_stop_price": 8.0,
+                "entry_stop_source": "test",
+                "entry_stop_trigger_by": "MarkPrice",
+            },
+            "entry_stop_fraction must be in",
+        ),
+        (
+            {
+                "entry_stop_price": 11.0,
+                "entry_stop_fraction": 0.2,
+                "entry_stop_source": "test",
+                "entry_stop_trigger_by": "MarkPrice",
+            },
+            "stop must be below",
+        ),
+    ),
+)
+def test_order_event_replay_rejects_partial_or_crossed_entry_protection(
+    protection_fields: dict[str, object],
+    error: str,
+) -> None:
+    payload = {
+        "command_id": "protected-replay-command",
+        "batch_id": "protected-replay-batch",
+        "signed_qty": 1.0,
+        "reduce_only": False,
+        "reference_price": 10.0,
+        "created_ts_ns": 100,
+        **protection_fields,
+    }
+    event = AccountEvent(
+        schema_version=1,
+        event_id="protected-replay-event",
+        sequence=1,
+        event_type=AccountEventType.ORDER_COMMAND.value,
+        correlation_id="protected-replay-batch",
+        causation_id="protected-replay-batch",
+        account_id="demo",
+        sleeve="account_execution",
+        symbol="BUSDT",
+        wall_ts_ns=100,
+        monotonic_ns=100,
+        payload=payload,
+        prev_event_hash="",
+        state_hash="",
+        event_hash="",
+    )
+
+    with pytest.raises(account_kernel_module.AccountTransitionError, match=error):
+        account_kernel_module.apply_account_event(
+            account_kernel_module.AccountState(),
+            event,
+        )
+
+
+def test_native_entry_stop_uses_outermost_component_or_account_fallback(
+    tmp_path: Path,
+) -> None:
+    rules = _rules(tick_size=0.1)
+    policy = NativeDisasterProtectionPolicy(0.3)
+    explicit = _kernel(tmp_path / "explicit").submit_targets(
+        batch_id="outermost",
+        market_inputs=[_market(price=10.0)],
+        targets=[
+            _target(
+                decision="inner",
+                key="long/inner/BUSDT",
+                sleeve="long",
+                qty=1.0,
+                metadata={"stop_loss_pct": 0.1},
+            ),
+            _target(
+                decision="outer",
+                key="long/outer/BUSDT",
+                sleeve="long",
+                qty=1.0,
+                metadata={"stop_loss_pct": 0.2},
+            ),
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    assert explicit.accepted
+    assert explicit.commands[0].entry_stop_price == 8.0
+    assert explicit.commands[0].entry_stop_fraction == 0.2
+
+    fallback = _kernel(tmp_path / "fallback").submit_targets(
+        batch_id="fallback",
+        market_inputs=[_market(price=10.0)],
+        targets=[
+            _target(
+                decision="fallback",
+                key="long/fallback/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    assert fallback.accepted
+    assert fallback.commands[0].entry_stop_price == 7.0
+    assert fallback.commands[0].entry_stop_source == ("decision_reference_account_fallback_fraction")
+
+
+@pytest.mark.parametrize(
+    ("signed_qty", "fill_price", "active_stop", "scale_price"),
+    (
+        (1.0, 9.0, 7.2, 20.0),
+        (-1.0, 11.0, 13.2, 5.0),
+    ),
+)
+def test_native_scale_in_preserves_outer_existing_fill_anchored_stop(
+    tmp_path: Path,
+    signed_qty: float,
+    fill_price: float,
+    active_stop: float,
+    scale_price: float,
+) -> None:
+    kernel = _kernel(tmp_path)
+    rules = _rules(tick_size=0.1)
+    policy = NativeDisasterProtectionPolicy(0.2)
+    owner_sleeve = "long" if signed_qty > 0.0 else "continuous"
+    owner_key = f"{owner_sleeve}/existing/BUSDT"
+    opened = kernel.submit_targets(
+        batch_id="protected-existing-open",
+        market_inputs=[_market(price=10.0)],
+        targets=[
+            _target(
+                decision="protected-existing-open",
+                key=owner_key,
+                sleeve=owner_sleeve,
+                qty=signed_qty,
+                metadata={"stop_loss_pct": 0.2},
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    command = opened.commands[0]
+    KernelExecutionDriver(kernel).ingest(
+        (
+            ExecutionObservation(
+                observation_type="ack",
+                command_id=command.command_id,
+                exchange_ts_ns=1_010_000_000,
+                local_receive_ts_ns=1_020_000_000,
+                accepted=True,
+                venue_order_id="existing-entry",
+            ),
+            ExecutionObservation(
+                observation_type="fill",
+                command_id=command.command_id,
+                exchange_ts_ns=1_030_000_000,
+                local_receive_ts_ns=1_040_000_000,
+                venue_order_id="existing-entry",
+                execution_id="existing-entry-fill",
+                signed_qty=signed_qty,
+                price=fill_price,
+                fee_usdt=0.01,
+            ),
+        )
+    )
+    kernel.record_protection(
+        protection_key="native-existing-exact",
+        symbol="BUSDT",
+        status="active",
+        stop_price=active_stop,
+        take_profit_price=None,
+        exchange_ts_ns=1_050_000_000,
+        local_receive_ts_ns=1_060_000_000,
+        metadata={
+            "native_exchange": True,
+            "symbol": "BUSDT",
+            "signed_qty": signed_qty,
+            "trigger_by": "MarkPrice",
+        },
+    )
+
+    scaled = kernel.submit_targets(
+        batch_id="protected-scale-in",
+        market_inputs=[_market(price=scale_price, key="scale-book")],
+        targets=[
+            _target(
+                decision="protected-scale-in",
+                key=f"{owner_sleeve}/new/BUSDT",
+                sleeve=owner_sleeve,
+                qty=signed_qty,
+                price=scale_price,
+                metadata={"stop_loss_pct": 0.1},
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+
+    assert scaled.accepted
+    assert scaled.commands[0].signed_qty == pytest.approx(signed_qty)
+    assert scaled.commands[0].entry_stop_price == pytest.approx(active_stop)
+    assert scaled.commands[0].entry_stop_source.endswith(
+        "_clamped_to_existing_native_stop"
+    )
+
+
+def test_native_scale_in_requires_existing_open_position_protection(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    rules = _rules(tick_size=0.1)
+    policy = NativeDisasterProtectionPolicy(0.2)
+    opened = kernel.submit_targets(
+        batch_id="unprotected-existing-open",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="unprotected-existing-open",
+                key="long/existing/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    command = opened.commands[0]
+    KernelExecutionDriver(kernel).ingest(
+        (
+            ExecutionObservation(
+                observation_type="ack",
+                command_id=command.command_id,
+                exchange_ts_ns=1_010_000_000,
+                local_receive_ts_ns=1_020_000_000,
+                accepted=True,
+                venue_order_id="unprotected-entry",
+            ),
+            ExecutionObservation(
+                observation_type="fill",
+                command_id=command.command_id,
+                exchange_ts_ns=1_030_000_000,
+                local_receive_ts_ns=1_040_000_000,
+                venue_order_id="unprotected-entry",
+                execution_id="unprotected-entry-fill",
+                signed_qty=1.0,
+                price=10.0,
+                fee_usdt=0.01,
+            ),
+        )
+    )
+
+    scale = kernel.submit_targets(
+        batch_id="unprotected-scale-in",
+        market_inputs=[_market(key="scale-book")],
+        targets=[
+            _target(
+                decision="unprotected-scale-in",
+                key="long/new/BUSDT",
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    assert not scale.accepted
+    assert scale.commands == ()
+    assert scale.rejection_keys == (
+        "account-risk:unprotected-scale-in:"
+        "native_entry_protection_missing_existing_native_protection:BUSDT",
+    )
+
+
+def test_reduce_only_command_never_carries_entry_attached_protection(
+    tmp_path: Path,
+) -> None:
+    kernel = _kernel(tmp_path)
+    rules = _rules(tick_size=0.1)
+    policy = NativeDisasterProtectionPolicy(0.2)
+    target_key = "long/reduction/BUSDT"
+    opened = kernel.submit_targets(
+        batch_id="protected-before-reduction",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="protected-before-reduction",
+                key=target_key,
+                sleeve="long",
+                qty=1.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    KernelExecutionDriver(kernel).execute_batch(
+        opened,
+        market_inputs={"BUSDT": _book().market_ref(input_key="reduction-open-book")},
+        adapter=_twin(name="paper"),
+    )
+    reduced = kernel.submit_targets(
+        batch_id="protected-reduction",
+        market_inputs=[_market(key="reduction-book")],
+        targets=[
+            _target(
+                decision="protected-reduction",
+                key=target_key,
+                sleeve="long",
+                qty=0.0,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+        native_protection_policy=policy,
+    )
+    command = reduced.commands[0]
+    assert command.reduce_only
+    assert command.entry_stop_price is None
+    assert command.entry_stop_fraction is None
+    assert command.entry_stop_source == ""
+    assert command.entry_stop_trigger_by == ""
+
+
+@pytest.mark.parametrize("invalid", [0.0, 1.0, -0.1, "bad", True])
+def test_invalid_component_stop_blocks_native_entry_before_command(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    result = _kernel(tmp_path).submit_targets(
+        batch_id=f"invalid-stop-{invalid!s}",
+        market_inputs=[_market(price=10.0)],
+        targets=[
+            _target(
+                decision="invalid-stop",
+                key="long/invalid/BUSDT",
+                sleeve="long",
+                qty=1.0,
+                metadata={"stop_loss_pct": invalid},
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(tick_size=0.1),
+        native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+    )
+    assert not result.accepted
+    assert result.commands == ()
+    assert result.rejection_keys == (
+        f"account-risk:invalid-stop-{invalid!s}:native_entry_protection_invalid_stop_fraction:BUSDT",
+    )
 
 
 def test_duplicate_terminal_status_from_second_consumer_is_idempotent(

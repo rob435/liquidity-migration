@@ -21,14 +21,8 @@ def require_registered_request_market_warmup_timeout(value: object) -> float:
         seconds = float(str(value))
     except (TypeError, ValueError) as exc:
         raise ValueError("request market warmup timeout must be numeric") from exc
-    if (
-        not math.isfinite(seconds)
-        or seconds <= 0.0
-        or seconds > REGISTERED_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS
-    ):
-        raise ValueError(
-            "request market warmup timeout cannot exceed the registered 30 seconds"
-        )
+    if not math.isfinite(seconds) or seconds <= 0.0 or seconds > REGISTERED_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:
+        raise ValueError("request market warmup timeout cannot exceed the registered 30 seconds")
     return seconds
 
 
@@ -58,9 +52,7 @@ class RequestedMarketWarmupGate:
     _terminal_detail: str = ""
 
     def __post_init__(self) -> None:
-        self.timeout_seconds = require_registered_request_market_warmup_timeout(
-            self.timeout_seconds
-        )
+        self.timeout_seconds = require_registered_request_market_warmup_timeout(self.timeout_seconds)
 
     def evaluate(
         self,
@@ -133,8 +125,7 @@ class RequestedMarketWarmupGate:
             self._timed_out = True
             self._terminal_detail = (
                 f"queue-head market warmup timed out after {self.timeout_seconds:g}s; "
-                "request remains pending and owner epoch is closed: "
-                + ", ".join(symbols)
+                "request remains pending and owner epoch is closed: " + ", ".join(symbols)
             )
         if self._timed_out:
             return RequestedMarketReadiness(
@@ -178,6 +169,9 @@ def run_ready_request_or_converge(
     one).
     """
 
+    safety_receipt = service.run_safety_flat_once(inbox)
+    if safety_receipt is not None:
+        return safety_receipt
     if readiness.request_id and readiness.ready:
         return service.run_once(
             inbox,

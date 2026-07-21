@@ -12,7 +12,13 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_service import AccountIntentInbox
+from liquidity_migration.account_service import (
+    AccountIntentInbox,
+    AccountTargetRequest,
+    RequestedIntent,
+    SleeveAdapterKind,
+    prepare_account_request_intents,
+)
 from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.account_strategy_state import (
     canonical_component_execution_anchors,
@@ -32,6 +38,10 @@ from liquidity_migration.strategy_runtime import (
     AdaptedIntent,
     LongTargetAdapter,
     SleeveTargetIntent,
+)
+from liquidity_migration.venue_protection import (
+    NativeProtectionBreach,
+    NativeProtectionPlan,
 )
 
 
@@ -56,12 +66,15 @@ def test_protection_trigger_direction(
     take_profit: float,
     expected: str,
 ) -> None:
-    assert _protection_trigger_reason(
-        signed_qty=qty,
-        mark_price=mark,
-        stop_price=stop,
-        take_profit_price=take_profit,
-    ) == expected
+    assert (
+        _protection_trigger_reason(
+            signed_qty=qty,
+            mark_price=mark,
+            stop_price=stop,
+            take_profit_price=take_profit,
+        )
+        == expected
+    )
 
 
 def _market(*, key: str, price: float, ts: int) -> MarketInputRef:
@@ -70,15 +83,17 @@ def _market(*, key: str, price: float, ts: int) -> MarketInputRef:
 
 def _twin(*, bid: float, ask: float, ts: int) -> MarketOrderExecutionTwin:
     return MarketOrderExecutionTwin(
-        books={"BUSDT": L2BookSnapshot(
-            symbol="BUSDT",
-            sequence=ts,
-            previous_sequence=ts - 1,
-            exchange_ts_ns=ts - 10,
-            local_receive_ts_ns=ts,
-            bids=(BookLevel(bid, 100.0),),
-            asks=(BookLevel(ask, 100.0),),
-        )},
+        books={
+            "BUSDT": L2BookSnapshot(
+                symbol="BUSDT",
+                sequence=ts,
+                previous_sequence=ts - 1,
+                exchange_ts_ns=ts - 10,
+                local_receive_ts_ns=ts,
+                bids=(BookLevel(bid, 100.0),),
+                asks=(BookLevel(ask, 100.0),),
+            )
+        },
         instrument_rules=RULES,
         config=ExecutionTwinConfig(5.5, LatencyProfile(1, 1, 1), 100),
     )
@@ -145,17 +160,22 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
     entry_market = _market(key="entry-book", price=10.0, ts=1_000)
     runtime.process_cycle(
         batch_id="entry",
-        intents=[AdaptedIntent(LongTargetAdapter(), SleeveTargetIntent(
-            decision_key="entry-d",
-            target_key="long/main/BUSDT",
-            strategy_id="long-v1",
-            component_id="main",
-            symbol="BUSDT",
-            signed_notional_usdt=20.0,
-            leverage=10.0,
-            reason="entry",
-            metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
-        ))],
+        intents=[
+            AdaptedIntent(
+                LongTargetAdapter(),
+                SleeveTargetIntent(
+                    decision_key="entry-d",
+                    target_key="long/main/BUSDT",
+                    strategy_id="long-v1",
+                    component_id="main",
+                    symbol="BUSDT",
+                    signed_notional_usdt=20.0,
+                    leverage=10.0,
+                    reason="entry",
+                    metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
+                ),
+            )
+        ],
         market_inputs={"BUSDT": entry_market},
         risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet-1", 990),
         risk_policy=POLICY,
@@ -209,10 +229,7 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
     assert intent.intent.metadata["entry_fill_vwap"] == 10.1
     assert intent.intent.metadata["take_profit_price"] == 12.2
     assert intent.intent.metadata["trigger_exchange_ts_ns"] == trigger_market.exchange_ts_ns
-    assert (
-        intent.intent.metadata["trigger_local_receive_ts_ns"]
-        == trigger_market.local_receive_ts_ns
-    )
+    assert intent.intent.metadata["trigger_local_receive_ts_ns"] == trigger_market.local_receive_ts_ns
     assert kernel.state().protections[request.request_id]["status"] == "triggered"
 
     # Restart/evaluate before processing does not enqueue or notify again.
@@ -252,13 +269,15 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
         "status",
         "exit_reason",
         "account_target_status",
-    ).to_dicts() == [{
-        "trade_id": "main",
-        "strategy_id": "long-v1",
-        "status": "closed",
-        "exit_reason": "take_profit",
-        "account_target_status": "converged",
-    }]
+    ).to_dicts() == [
+        {
+            "trade_id": "main",
+            "strategy_id": "long-v1",
+            "status": "closed",
+            "exit_reason": "take_profit",
+            "account_target_status": "converged",
+        }
+    ]
     accepted_target = kernel.state().component_target_desires["long/main/BUSDT"]
     assert accepted_target["strategy_id"] == "long-v1"
     assert accepted_target["metadata"]["requested_by_strategy_id"] == "account-protection"
@@ -282,17 +301,22 @@ def test_terminal_partial_entry_keeps_component_protection(tmp_path: Path) -> No
     entry_market = _market(key="entry-book", price=10.0, ts=1_000)
     result = runtime.process_cycle(
         batch_id="entry-partial-terminal",
-        intents=[AdaptedIntent(LongTargetAdapter(), SleeveTargetIntent(
-            decision_key="entry-d",
-            target_key="long/main/BUSDT",
-            strategy_id="long-v1",
-            component_id="main",
-            symbol="BUSDT",
-            signed_notional_usdt=20.0,
-            leverage=10.0,
-            reason="entry",
-            metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
-        ))],
+        intents=[
+            AdaptedIntent(
+                LongTargetAdapter(),
+                SleeveTargetIntent(
+                    decision_key="entry-d",
+                    target_key="long/main/BUSDT",
+                    strategy_id="long-v1",
+                    component_id="main",
+                    symbol="BUSDT",
+                    signed_notional_usdt=20.0,
+                    leverage=10.0,
+                    reason="entry",
+                    metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
+                ),
+            )
+        ],
         market_inputs={"BUSDT": entry_market},
         risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet-1", 990),
         risk_policy=POLICY,
@@ -343,3 +367,139 @@ def test_present_but_invalid_protection_fraction_fails_closed() -> None:
     for invalid in (8, 1.0, 0.0, -0.1, "8", float("nan"), True, object()):
         with pytest.raises(ValueError):
             _optional_fraction(invalid)
+
+
+def test_native_breach_flat_covers_current_and_pending_component_revisions(
+    tmp_path: Path,
+) -> None:
+    route = ensure_account_route(
+        account_id="protection",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    clock = VirtualClock(current_wall_ns=1_000, current_monotonic_ns=0)
+    kernel = AccountExecutionKernel(
+        route.account_path,
+        account_id=route.account_id,
+        clock=clock,
+    )
+    AccountKernelRuntime(kernel).process_cycle(
+        batch_id="entry",
+        intents=[
+            AdaptedIntent(
+                LongTargetAdapter(),
+                SleeveTargetIntent(
+                    decision_key="entry-current",
+                    target_key="long/current/BUSDT",
+                    strategy_id="long-v1",
+                    component_id="current",
+                    symbol="BUSDT",
+                    signed_notional_usdt=20.0,
+                    leverage=10.0,
+                    reason="entry",
+                ),
+            )
+        ],
+        market_inputs={"BUSDT": _market(key="entry", price=10.0, ts=1_000)},
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet", 990),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+        execution_adapter=_twin(bid=9.9, ask=10.1, ts=1_000),
+    )
+    inbox = AccountIntentInbox(route)
+
+    def pending(request_id: str, created_ts_ns: int) -> AccountTargetRequest:
+        return AccountTargetRequest(
+            request_id=request_id,
+            batch_id=request_id,
+            created_ts_ns=created_ts_ns,
+            route_id=route.route_id,
+            account_id=route.account_id,
+            environment=route.environment,
+            intents=(
+                RequestedIntent(
+                    adapter_kind=SleeveAdapterKind.LONG,
+                    intent=SleeveTargetIntent(
+                        decision_key=f"decision:{request_id}",
+                        target_key="long/future/BUSDT",
+                        strategy_id="long-v2",
+                        component_id="future",
+                        symbol="BUSDT",
+                        signed_notional_usdt=30.0,
+                        leverage=10.0,
+                        reason="entry",
+                    ),
+                ),
+            ),
+        )
+
+    inbox.submit(pending("future-entry-1", 3_000))
+    breach = NativeProtectionBreach(
+        plan=NativeProtectionPlan(
+            protection_key="native-disaster:BUSDT:test",
+            symbol="BUSDT",
+            signed_qty=2.0,
+            stop_price=9.0,
+            stop_source="test",
+            target_keys=("long/current/BUSDT",),
+        ),
+        observed_mark=8.9,
+        evidence_source="authenticated_position_snapshot",
+        detail="BUSDT native stop absent and crossed",
+        observed_ts_ns=2_500,
+    )
+    engine = AccountProtectionEngine(
+        kernel=kernel,
+        inbox=inbox,
+        instrument_rules=RULES,
+    )
+
+    first = engine.evaluate_native_breaches((breach,))
+    assert len(first) == 1
+    assert first[0].created_ts_ns == 3_000
+    assert {item.intent.target_key for item in first[0].intents} == {"long/current/BUSDT", "long/future/BUSDT"}
+    assert all(item.intent.signed_notional_usdt == 0.0 for item in first[0].intents)
+    assert engine.evaluate_native_breaches((breach,)) == ()
+
+    authorization = kernel.state().protections[first[0].request_id]
+    claimed = inbox.claim_next_safety_flat(
+        processed_batches=set(),
+        authorized_request_hashes={
+            first[0].request_id: str(
+                (authorization.get("metadata") or {}).get("request_hash") or ""
+            )
+        },
+    )
+    assert claimed is not None and claimed[1] == first[0]
+    clock.advance_ns(2_500)
+    AccountKernelRuntime(kernel).process_cycle(
+        batch_id=first[0].batch_id,
+        intents=[AdaptedIntent(item.adapter(), intent) for item, intent in prepare_account_request_intents(first[0])],
+        market_inputs={"BUSDT": _market(key="breach-flat", price=8.9, ts=3_500)},
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet-flat", 3_400),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+        execution_adapter=_twin(bid=8.8, ask=9.0, ts=3_500),
+        require_strict_risk_reduction=True,
+    )
+    flattened = kernel.state()
+    assert flattened.positions["BUSDT"].signed_qty == 0.0
+    safety_orders = [
+        order for order in flattened.orders.values() if order.batch_id == first[0].batch_id
+    ]
+    assert len(safety_orders) == 1
+    assert safety_orders[0].reduce_only is True
+    assert safety_orders[0].status == "filled"
+    # The accepted safety decision already zeroed the pending entry's exact
+    # source revision. It must not generate a new synthetic/duplicate flat while
+    # that stale entry remains in the queue.
+    assert engine.evaluate_native_breaches((breach,)) == ()
+
+    # A newer same-key entry gets a newer zero revision and a distinct immutable
+    # safety request, so the persistent breach cannot permit a later reopen.
+    inbox.submit(pending("future-entry-2", 4_000))
+    second = engine.evaluate_native_breaches((breach,))
+    assert len(second) == 1
+    assert second[0].request_id != first[0].request_id
+    assert second[0].created_ts_ns == 4_000

@@ -22,20 +22,20 @@ the end-exclusive boundary:
 scripts/ops.sh research-refresh run --end 2026-07-16
 ```
 
-Use the complete canonical builders when the registered claim requires a full
-root reconstruction:
+Use the complete canonical builders when a current claim-specific contract
+requires a full root reconstruction:
 
 ```bash
 scripts/ops.sh research-refresh run \
-  --end 2026-07-16 \
-  --start 2023-07-16 \
+  --end YYYY-MM-DD \
+  --start YYYY-MM-DD \
   --data-mode canonical \
-  --preregistration docs/preregistration/benchmark_refresh_2026-07-16.md \
-  --run-id benchmark-refresh-2026-07-16
+  --preregistration PATH/TO/CURRENT_CONTRACT.md \
+  --run-id CURRENT-RUN-ID
 ```
 
-The named end is always exclusive. `[2023-07-16, 2026-07-16)` uses data only
-through 2026-07-15 UTC.
+The named end is always exclusive. Do not reuse the retired 2026-07-16
+benchmark contract for a new claim.
 
 ## What is incremental
 

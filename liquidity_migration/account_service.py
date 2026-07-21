@@ -3,9 +3,10 @@
 Strategy processes write immutable intent requests.  Exactly one account
 service claims them, obtains fresh market/account/rule snapshots, runs the
 shared kernel, and owns the execution adapter.  A crash after kernel commit is
-safe: replaying the request returns the same commands, and the driver submits
-only commands still in ``commanded`` state using command id as venue idempotency
-key.
+safe: replaying the request returns the same commands. Provider-capable
+adapters durably claim the pre-effect boundary; exposure commands with an
+ambiguous prior attempt are reconciled but never blindly resent, while
+reduce-only work remains retryable.
 """
 
 from __future__ import annotations
@@ -23,9 +24,11 @@ from .account_contracts import (
     AccountEventType,
     AccountRiskPolicy,
     AccountRiskSnapshot,
+    AccountState,
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
     PositionState,
     TargetBatchResult,
 )
@@ -38,6 +41,7 @@ from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 from .entry_attempts import entry_signal_expiry_rejection
+from .market_capture import MarketCaptureError
 from .storage import exclusive_file_lock
 from .strategy_runtime import (
     AccountKernelRuntime,
@@ -53,16 +57,18 @@ from .strategy_runtime import (
 
 REQUEST_SCHEMA_VERSION = 2
 ARRIVAL_SCHEMA_VERSION = 1
-_REQUEST_FIELDS = frozenset({
-    "schema_version",
-    "request_id",
-    "batch_id",
-    "created_ts_ns",
-    "route_id",
-    "account_id",
-    "environment",
-    "intents",
-})
+_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "request_id",
+        "batch_id",
+        "created_ts_ns",
+        "route_id",
+        "account_id",
+        "environment",
+        "intents",
+    }
+)
 _REQUESTED_INTENT_FIELDS = frozenset({"adapter_kind", "intent"})
 _SLEEVE_TARGET_INTENT_FIELDS = frozenset(SleeveTargetIntent.__dataclass_fields__)
 
@@ -144,14 +150,9 @@ class AccountTargetRequest:
             raise ValueError("every target request intent requires target_key and symbol")
         if len(set(replacement_keys)) != len(replacement_keys):
             raise ValueError("target request cannot replace the same component twice")
-        flat_flags = [
-            float(item.intent.signed_notional_usdt) == 0.0
-            for item in self.intents
-        ]
+        flat_flags = [float(item.intent.signed_notional_usdt) == 0.0 for item in self.intents]
         if any(flat_flags) and not all(flat_flags):
-            raise ValueError(
-                "target request cannot mix flat exits with nonzero entries or resizes"
-            )
+            raise ValueError("target request cannot mix flat exits with nonzero entries or resizes")
 
     @property
     def replacement_intents(self) -> Mapping[tuple[str, str], RequestedIntent]:
@@ -221,19 +222,19 @@ class AccountTargetRequest:
             unknown_row = sorted(set(row) - _REQUESTED_INTENT_FIELDS)
             if missing_row or unknown_row:
                 raise ValueError("requested intent has invalid fields")
-            if type(row["adapter_kind"]) is not str or not isinstance(
-                row["intent"], Mapping
-            ):
+            if type(row["adapter_kind"]) is not str or not isinstance(row["intent"], Mapping):
                 raise ValueError("invalid requested intent")
             intent_payload = row["intent"]
             missing_intent = sorted(_SLEEVE_TARGET_INTENT_FIELDS - set(intent_payload))
             unknown_intent = sorted(set(intent_payload) - _SLEEVE_TARGET_INTENT_FIELDS)
             if missing_intent or unknown_intent:
                 raise ValueError("sleeve target intent has invalid fields")
-            intents.append(RequestedIntent(
-                adapter_kind=SleeveAdapterKind(row["adapter_kind"]),
-                intent=SleeveTargetIntent(**dict(intent_payload)),
-            ))
+            intents.append(
+                RequestedIntent(
+                    adapter_kind=SleeveAdapterKind(row["adapter_kind"]),
+                    intent=SleeveTargetIntent(**dict(intent_payload)),
+                )
+            )
         return cls(
             schema_version=payload["schema_version"],
             request_id=payload["request_id"],
@@ -251,10 +252,7 @@ class AccountTargetRequest:
             or self.account_id != route.account_id
             or self.environment != route.environment
         ):
-            raise ValueError(
-                f"target request {self.request_id!r} does not match account route "
-                f"{route.route_id}"
-            )
+            raise ValueError(f"target request {self.request_id!r} does not match account route {route.route_id}")
 
 
 def prepare_account_request_intents(
@@ -353,9 +351,7 @@ class AccountConvergenceReport:
     @property
     def healthy(self) -> bool:
         return all(
-            item.venue_minimum_dust
-            or (not item.exhausted and item.age_ns < self.grace_ns)
-            for item in self.items
+            item.venue_minimum_dust or (not item.exhausted and item.age_ns < self.grace_ns) for item in self.items
         )
 
     def require_healthy(self) -> None:
@@ -364,12 +360,10 @@ class AccountConvergenceReport:
         overdue = [
             item
             for item in self.items
-            if not item.venue_minimum_dust
-            and (item.exhausted or item.age_ns >= self.grace_ns)
+            if not item.venue_minimum_dust and (item.exhausted or item.age_ns >= self.grace_ns)
         ]
         detail = ", ".join(
-            f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
-            f"attempts={item.retry_attempts}/{item.retry_limit}"
+            f"{item.symbol}:{item.status}:age_ns={item.age_ns}:attempts={item.retry_attempts}/{item.retry_limit}"
             for item in overdue
         )
         raise RuntimeError(f"account target convergence unhealthy: {detail}")
@@ -444,9 +438,7 @@ class AccountIntentInbox:
     ) -> int:
         path = self._arrival_path(filename)
         if not path.exists():
-            raise RuntimeError(
-                f"queued request {request.request_id!r} lacks a durable arrival sequence"
-            )
+            raise RuntimeError(f"queued request {request.request_id!r} lacks a durable arrival sequence")
         try:
             snapshot = read_stable_file(
                 path,
@@ -455,9 +447,7 @@ class AccountIntentInbox:
             )
             payload = json.loads(snapshot.data)
         except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError(
-                f"queued request {request.request_id!r} has an unreadable arrival sequence"
-            ) from exc
+            raise RuntimeError(f"queued request {request.request_id!r} has an unreadable arrival sequence") from exc
         sequence = payload.get("arrival_sequence") if isinstance(payload, Mapping) else None
         if (
             not isinstance(payload, Mapping)
@@ -468,9 +458,7 @@ class AccountIntentInbox:
             or not isinstance(sequence, int)
             or sequence <= 0
         ):
-            raise RuntimeError(
-                f"queued request {request.request_id!r} has an invalid arrival sequence"
-            )
+            raise RuntimeError(f"queued request {request.request_id!r} has an invalid arrival sequence")
         return sequence
 
     def _read_arrival_counter_locked(self) -> int:
@@ -507,19 +495,25 @@ class AccountIntentInbox:
         sequence = self._read_arrival_counter_locked() + 1
         _atomic_replace(
             self._arrival_counter_path,
-            canonical_json({
-                "schema_version": ARRIVAL_SCHEMA_VERSION,
-                "last_arrival_sequence": sequence,
-            }) + b"\n",
+            canonical_json(
+                {
+                    "schema_version": ARRIVAL_SCHEMA_VERSION,
+                    "last_arrival_sequence": sequence,
+                }
+            )
+            + b"\n",
         )
         _atomic_replace(
             arrival_path,
-            canonical_json({
-                "schema_version": ARRIVAL_SCHEMA_VERSION,
-                "request_id": request.request_id,
-                "request_hash": request.content_hash(),
-                "arrival_sequence": sequence,
-            }) + b"\n",
+            canonical_json(
+                {
+                    "schema_version": ARRIVAL_SCHEMA_VERSION,
+                    "request_id": request.request_id,
+                    "request_hash": request.content_hash(),
+                    "arrival_sequence": sequence,
+                }
+            )
+            + b"\n",
         )
         return sequence
 
@@ -533,25 +527,19 @@ class AccountIntentInbox:
                 try:
                     payload = json.loads(path.read_bytes())
                     request_payload = (
-                        payload.get("request")
-                        if name == "completed" and isinstance(payload, Mapping)
-                        else payload
+                        payload.get("request") if name == "completed" and isinstance(payload, Mapping) else payload
                     )
                     if not isinstance(request_payload, Mapping):
                         raise ValueError("missing request")
                     request = self._request_from_payload(request_payload)
-                    if request.request_id != request_id or path.name != self._filename(
-                        request.request_id
-                    ):
+                    if request.request_id != request_id or path.name != self._filename(request.request_id):
                         raise ValueError("request filename does not match request_id")
                     self._read_arrival_sequence_locked(
                         filename=filename,
                         request=request,
                     )
                 except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise RuntimeError(
-                        f"unreadable account target request {path.name!r}"
-                    ) from exc
+                    raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
                 return True
             return False
 
@@ -578,9 +566,7 @@ class AccountIntentInbox:
                 if (self.root / state / filename).exists()
             ]
             if len(candidates) != 1:
-                raise RuntimeError(
-                    f"published request {request.request_id!r} has {len(candidates)} durable files"
-                )
+                raise RuntimeError(f"published request {request.request_id!r} has {len(candidates)} durable files")
             path = candidates[0]
             try:
                 snapshot = read_stable_file(
@@ -590,9 +576,7 @@ class AccountIntentInbox:
                 )
                 payload = json.loads(snapshot.data)
             except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"published request {request.request_id!r} is unreadable"
-                ) from exc
+                raise RuntimeError(f"published request {request.request_id!r} is unreadable") from exc
             queue_state = path.parent.name
             request_payload = (
                 payload.get("request")
@@ -600,19 +584,13 @@ class AccountIntentInbox:
                 else payload
             )
             if not isinstance(request_payload, Mapping):
-                raise RuntimeError(
-                    f"published request {request.request_id!r} lacks canonical request content"
-                )
+                raise RuntimeError(f"published request {request.request_id!r} lacks canonical request content")
             try:
                 observed = self._request_from_payload(request_payload)
             except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"published request {request.request_id!r} failed schema validation"
-                ) from exc
+                raise RuntimeError(f"published request {request.request_id!r} failed schema validation") from exc
             if observed.to_dict() != request.to_dict():
-                raise RuntimeError(
-                    f"published request {request.request_id!r} changed canonical content"
-                )
+                raise RuntimeError(f"published request {request.request_id!r} changed canonical content")
             sequence = self._read_arrival_sequence_locked(
                 filename=filename,
                 request=observed,
@@ -633,9 +611,7 @@ class AccountIntentInbox:
                     try:
                         request = self._request_from_payload(json.loads(path.read_bytes()))
                     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                        raise RuntimeError(
-                            f"unreadable account target request {path.name!r}"
-                        ) from exc
+                        raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
                     symbols.update(item.intent.symbol.upper() for item in request.intents)
             return symbols
 
@@ -672,9 +648,7 @@ class AccountIntentInbox:
                     payload = json.loads(path.read_bytes())
                     request_payload = payload.get("request")
                     receipt_payload = payload.get("receipt")
-                    if not isinstance(request_payload, Mapping) or not isinstance(
-                        receipt_payload, Mapping
-                    ):
+                    if not isinstance(request_payload, Mapping) or not isinstance(receipt_payload, Mapping):
                         raise ValueError("missing request or receipt")
                     request = self._request_from_payload(request_payload)
                     receipt = AccountServiceReceipt(
@@ -682,39 +656,20 @@ class AccountIntentInbox:
                         request_hash=str(receipt_payload.get("request_hash") or ""),
                         batch_id=str(receipt_payload.get("batch_id") or ""),
                         accepted=bool(receipt_payload.get("accepted")),
-                        rejection_keys=tuple(
-                            str(value)
-                            for value in receipt_payload.get("rejection_keys") or ()
-                        ),
-                        command_ids=tuple(
-                            str(value)
-                            for value in receipt_payload.get("command_ids") or ()
-                        ),
+                        rejection_keys=tuple(str(value) for value in receipt_payload.get("rejection_keys") or ()),
+                        command_ids=tuple(str(value) for value in receipt_payload.get("command_ids") or ()),
                         execution_event_ids=tuple(
-                            str(value)
-                            for value in receipt_payload.get("execution_event_ids") or ()
+                            str(value) for value in receipt_payload.get("execution_event_ids") or ()
                         ),
-                        final_state_hash=str(
-                            receipt_payload.get("final_state_hash") or ""
-                        ),
-                        disposition=str(
-                            receipt_payload.get("disposition") or "processed"
-                        ),
-                        superseded_by_request_id=str(
-                            receipt_payload.get("superseded_by_request_id") or ""
-                        ),
+                        final_state_hash=str(receipt_payload.get("final_state_hash") or ""),
+                        disposition=str(receipt_payload.get("disposition") or "processed"),
+                        superseded_by_request_id=str(receipt_payload.get("superseded_by_request_id") or ""),
                         superseded_by_request_ids=tuple(
-                            str(value)
-                            for value in receipt_payload.get(
-                                "superseded_by_request_ids"
-                            )
-                            or ()
+                            str(value) for value in receipt_payload.get("superseded_by_request_ids") or ()
                         ),
                     )
                 except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise RuntimeError(
-                        f"unreadable completed account target request {path.name!r}"
-                    ) from exc
+                    raise RuntimeError(f"unreadable completed account target request {path.name!r}") from exc
                 if (
                     path.name != self._filename(request.request_id)
                     or receipt.request_id != request.request_id
@@ -722,8 +677,7 @@ class AccountIntentInbox:
                     or receipt.request_hash != request.content_hash()
                 ):
                     raise RuntimeError(
-                        f"completed account target request {path.name!r} failed "
-                        "request/receipt identity validation"
+                        f"completed account target request {path.name!r} failed request/receipt identity validation"
                     )
                 self._read_arrival_sequence_locked(
                     filename=path.name,
@@ -748,24 +702,16 @@ class AccountIntentInbox:
                     payload = json.loads(existing.read_bytes())
                     stored_request = payload.get("request") if isinstance(payload, Mapping) else None
                     if not isinstance(stored_request, Mapping):
-                        raise ValueError(
-                            f"stored request_id {request.request_id!r} is unreadable"
-                        )
+                        raise ValueError(f"stored request_id {request.request_id!r} is unreadable")
                     parsed_request = self._request_from_payload(stored_request)
                     if parsed_request.to_dict() != request.to_dict():
-                        raise ValueError(
-                            f"immutable request_id {request.request_id!r} changed content"
-                        )
+                        raise ValueError(f"immutable request_id {request.request_id!r} changed content")
                     if existing.parent.name == "failed":
                         continue
                 else:
-                    parsed_request = self._request_from_payload(
-                        json.loads(existing.read_bytes())
-                    )
+                    parsed_request = self._request_from_payload(json.loads(existing.read_bytes()))
                     if parsed_request.to_dict() != request.to_dict():
-                        raise ValueError(
-                            f"immutable request_id {request.request_id!r} changed content"
-                        )
+                        raise ValueError(f"immutable request_id {request.request_id!r} changed content")
                 self._read_arrival_sequence_locked(filename=filename, request=request)
                 return existing
 
@@ -812,9 +758,7 @@ class AccountIntentInbox:
         replacements: dict[str, AccountTargetRequest] = {}
         for key in older_intents:
             replacement, request = latest[key]
-            replacement_nonzero = (
-                float(replacement.intent.signed_notional_usdt) != 0.0
-            )
+            replacement_nonzero = float(replacement.intent.signed_notional_usdt) != 0.0
             # A durable request to become flat is a safety transition, not a
             # disposable intermediate state. Process it before any subsequent
             # re-entry. Nonzero-to-nonzero changes also remain FIFO: arrival
@@ -826,11 +770,7 @@ class AccountIntentInbox:
             # Both nonzero-to-flat and duplicate flat-to-flat transitions are
             # safe to collapse; neither can introduce venue exposure.
             replacements[request.request_id] = request
-        return tuple(
-            request
-            for request in later
-            if request.request_id in replacements
-        )
+        return tuple(request for request in later if request.request_id in replacements)
 
     def claim_superseded(
         self,
@@ -847,7 +787,7 @@ class AccountIntentInbox:
             for index, (_, _, pending, request) in enumerate(queued):
                 replacements = self._superseding_requests(
                     request,
-                    [row[3] for row in queued[index + 1:]],
+                    [row[3] for row in queued[index + 1 :]],
                 )
                 if not replacements:
                     continue
@@ -912,6 +852,40 @@ class AccountIntentInbox:
                 return processing, request
             return None
 
+    def claim_next_safety_flat(
+        self,
+        *,
+        processed_batches: set[str],
+        authorized_request_hashes: Mapping[str, str],
+    ) -> tuple[Path, AccountTargetRequest] | None:
+        """Claim the earliest risk-authored all-flat request safely out of FIFO.
+
+        A prior batch already committed to the journal may own commands whose
+        venue submission was interrupted. Never jump over that crash-replay
+        boundary. Uncommitted entries, however, cannot delay a later durable
+        safety flat; the flat's newer component revision makes those stale
+        entries non-reopenable when normal FIFO processing resumes.
+        """
+
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            for _, _, pending, request in self._queued():
+                expected_hash = authorized_request_hashes.get(request.request_id, "")
+                safety_flat = (
+                    bool(expected_hash)
+                    and _is_priority_safety_flat(request)
+                    and request.content_hash() == expected_hash
+                )
+                if safety_flat:
+                    processing = self.root / "processing" / pending.name
+                    try:
+                        os.replace(pending, processing)
+                    except FileNotFoundError:
+                        continue
+                    return processing, request
+                if request.batch_id in processed_batches:
+                    return None
+            return None
+
     def recover_processing(self) -> int:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             recovered = 0
@@ -924,18 +898,12 @@ class AccountIntentInbox:
                 completed = self.root / "completed" / processing.name
                 if completed.exists():
                     payload = json.loads(completed.read_bytes())
-                    request_payload = (
-                        payload.get("request") if isinstance(payload, Mapping) else None
-                    )
+                    request_payload = payload.get("request") if isinstance(payload, Mapping) else None
                     if not isinstance(request_payload, Mapping):
-                        raise RuntimeError(
-                            f"completed request {completed.name!r} is unreadable"
-                        )
+                        raise RuntimeError(f"completed request {completed.name!r} is unreadable")
                     completed_request = self._request_from_payload(request_payload)
                     if completed_request.to_dict() != request.to_dict():
-                        raise RuntimeError(
-                            f"processing/completed request {request.request_id!r} changed content"
-                        )
+                        raise RuntimeError(f"processing/completed request {request.request_id!r} changed content")
                     processing.unlink()
                     continue
                 pending = self.root / "pending" / processing.name
@@ -993,6 +961,109 @@ class AccountIntentInbox:
         return request
 
 
+def _is_priority_safety_flat(request: AccountTargetRequest) -> bool:
+    """Validate the immutable shape of an owner-authored native-breach flat."""
+
+    symbols = {item.intent.symbol.upper() for item in request.intents}
+    if len(symbols) != 1 or request.batch_id != request.request_id:
+        return False
+    symbol = next(iter(symbols))
+    prefix = f"protection:native-breach:{symbol}:"
+    suffix = request.request_id.removeprefix(prefix)
+    if (
+        not request.request_id.startswith(prefix)
+        or len(suffix) != 20
+        or any(character not in "0123456789abcdef" for character in suffix)
+    ):
+        return False
+    proof_rows: set[tuple[str, float, float, float, int]] = set()
+    suffix_targets: list[dict[str, object]] = []
+    for item in request.intents:
+        metadata = item.intent.metadata
+        raw_breach_mark = metadata.get("authenticated_breach_mark")
+        raw_native_stop = metadata.get("native_stop_price")
+        raw_breached_signed_qty = metadata.get("breached_signed_qty")
+        if raw_breach_mark is None or raw_native_stop is None or raw_breached_signed_qty is None:
+            return False
+        try:
+            breach_mark = float(raw_breach_mark)
+            native_stop = float(raw_native_stop)
+            breached_signed_qty = float(raw_breached_signed_qty)
+            breach_observed_ts_ns = int(metadata.get("breach_observed_ts_ns") or 0)
+            source_revision_ns = int(metadata.get("source_revision_ns") or 0)
+        except (TypeError, ValueError):
+            return False
+        crossed = (breached_signed_qty > 0.0 and native_stop >= breach_mark) or (
+            breached_signed_qty < 0.0 and native_stop <= breach_mark
+        )
+        plan_key = str(metadata.get("native_protection_plan_key") or "")
+        if (
+            SleeveAdapterKind(item.adapter_kind) is not SleeveAdapterKind.RISK
+            or float(item.intent.signed_notional_usdt) != 0.0
+            or item.intent.reason != "native_disaster_stop_breached"
+            or not math.isfinite(breach_mark)
+            or breach_mark <= 0.0
+            or not math.isfinite(native_stop)
+            or native_stop <= 0.0
+            or not math.isfinite(breached_signed_qty)
+            or breached_signed_qty == 0.0
+            or not crossed
+            or not plan_key
+            or str(metadata.get("requested_by_strategy_id") or "") != "account-protection"
+            or breach_observed_ts_ns <= 0
+            or source_revision_ns <= 0
+            or request.created_ts_ns < max(source_revision_ns, breach_observed_ts_ns)
+        ):
+            return False
+        proof_rows.add(
+            (
+                plan_key,
+                breach_mark,
+                native_stop,
+                breached_signed_qty,
+                breach_observed_ts_ns,
+            )
+        )
+        suffix_targets.append(
+            {
+                "target_key": item.intent.target_key,
+                "source_request_id": str(metadata.get("source_request_id") or ""),
+                "source_revision_ns": source_revision_ns,
+            }
+        )
+    if len(proof_rows) != 1:
+        return False
+    plan_key = next(iter(proof_rows))[0]
+    material = {
+        "symbol": symbol,
+        "protection_plan_key": plan_key,
+        "targets": sorted(suffix_targets, key=lambda row: str(row["target_key"])),
+    }
+    expected_suffix = hashlib.sha256(canonical_json(material)).hexdigest()[:20]
+    return suffix == expected_suffix
+
+
+def _durably_authorized_priority_safety_flat(
+    request: AccountTargetRequest,
+    state: AccountState,
+) -> bool:
+    """Bind special execution authority to the canonical owner journal."""
+
+    if not _is_priority_safety_flat(request):
+        return False
+    authorization = state.protections.get(request.request_id)
+    if not isinstance(authorization, Mapping):
+        return False
+    metadata = authorization.get("metadata") or {}
+    return (
+        str(authorization.get("status") or "") == "software_flat_requested"
+        and isinstance(metadata, Mapping)
+        and metadata.get("native_exchange") is False
+        and str(metadata.get("reason") or "") == "native_disaster_stop_breached"
+        and str(metadata.get("request_hash") or "") == request.content_hash()
+    )
+
+
 class MarketInputProvider(Protocol):
     def current(self, symbols: Sequence[str], *, batch_id: str) -> Mapping[str, MarketInputRef]: ...
 
@@ -1039,6 +1110,7 @@ class AccountExecutionService:
         rules_provider: InstrumentRulesProvider,
         risk_policy: AccountRiskPolicy,
         execution_adapter: Any,
+        native_protection_policy: NativeDisasterProtectionPolicy | None = None,
         clock: Clock | None = None,
         max_market_age_ns: int = 5_000_000_000,
         max_snapshot_age_ns: int = 5_000_000_000,
@@ -1066,6 +1138,7 @@ class AccountExecutionService:
         self.rules_provider = rules_provider
         self.risk_policy = risk_policy
         self.execution_adapter = execution_adapter
+        self.native_protection_policy = native_protection_policy
         self.clock = clock or SystemClock()
         self.max_market_age_ns = max_market_age_ns
         self.max_snapshot_age_ns = max_snapshot_age_ns
@@ -1092,13 +1165,11 @@ class AccountExecutionService:
             or max_convergence_retries < 0
         ):
             raise ValueError("freshness and convergence limits cannot be negative")
-        if (
-            str(getattr(execution_adapter, "name", "")) == "bybit_demo"
-            and position_truth_provider is None
-        ):
-            raise ValueError(
-                "Bybit demo execution requires a fresh venue position-truth provider"
-            )
+        if str(getattr(execution_adapter, "name", "")) == "bybit_demo":
+            if position_truth_provider is None:
+                raise ValueError("Bybit demo execution requires a fresh venue position-truth provider")
+            if native_protection_policy is None:
+                raise ValueError("Bybit demo execution requires durable entry-attached native protection")
 
     def _require_reduction_position_truth(self, symbols: set[str]) -> None:
         """Do not turn an exit-health exemption into an invalid venue order.
@@ -1126,17 +1197,14 @@ class AccountExecutionService:
             str(target.get("symbol") or "").upper()
             for target in state.component_targets.values()
             if target.get("symbol")
-            and abs(float(target.get("signed_qty") or 0.0))
-            > self.risk_policy.quantity_tolerance
+            and abs(float(target.get("signed_qty") or 0.0)) > self.risk_policy.quantity_tolerance
         }
         active_symbols.update(
             symbol
             for symbol, position in state.positions.items()
             if abs(position.signed_qty) > self.risk_policy.quantity_tolerance
         )
-        active_symbols.update(state.working_symbols(
-            tolerance=self.risk_policy.quantity_tolerance
-        ))
+        active_symbols.update(state.working_symbols(tolerance=self.risk_policy.quantity_tolerance))
         return sorted(active_symbols | {symbol.upper() for symbol in requested_symbols})
 
     def _execution_inputs(
@@ -1148,6 +1216,7 @@ class AccountExecutionService:
         account_wide: bool = True,
         allow_stale_market_for_reduction_preview: bool = False,
         allow_unavailable_snapshot_for_reduction_preview: bool = False,
+        exit_market_fallbacks: Mapping[str, MarketInputRef] | None = None,
     ) -> tuple[dict[str, MarketInputRef], AccountRiskSnapshot, dict[str, InstrumentRules]]:
         if require_external_health and self.health_provider is not None:
             self.health_provider.require_recent_healthy(max_age_ns=self.max_health_age_ns)
@@ -1156,7 +1225,17 @@ class AccountExecutionService:
             if account_wide
             else sorted(symbol.upper() for symbol in requested_symbols)
         )
-        market_inputs = dict(self.market_provider.current(symbols, batch_id=batch_id))
+        try:
+            market_inputs = dict(self.market_provider.current(symbols, batch_id=batch_id))
+        except MarketCaptureError:
+            fallbacks = dict(exit_market_fallbacks or {})
+            if not allow_stale_market_for_reduction_preview or any(symbol not in fallbacks for symbol in symbols):
+                raise
+            market_inputs = {symbol: fallbacks[symbol] for symbol in symbols}
+        if exit_market_fallbacks:
+            for symbol in symbols:
+                if symbol not in market_inputs and symbol in exit_market_fallbacks:
+                    market_inputs[symbol] = exit_market_fallbacks[symbol]
         snapshot_error = ""
         try:
             snapshot = self.snapshot_provider.current(batch_id=batch_id)
@@ -1208,10 +1287,13 @@ class AccountExecutionService:
                 )
         snapshot_age_ns = now_ns - snapshot.snapshot_ts_ns
         try:
-            snapshot_values_finite = all(math.isfinite(value) for value in (
-                float(snapshot.equity_usdt),
-                float(snapshot.available_margin_usdt),
-            ))
+            snapshot_values_finite = all(
+                math.isfinite(value)
+                for value in (
+                    float(snapshot.equity_usdt),
+                    float(snapshot.available_margin_usdt),
+                )
+            )
         except (TypeError, ValueError):
             snapshot_values_finite = False
         if (
@@ -1222,25 +1304,18 @@ class AccountExecutionService:
         ):
             if allow_unavailable_snapshot_for_reduction_preview:
                 reason = snapshot_error or (
-                    "nonfinite_values"
-                    if not snapshot_values_finite
-                    else f"stale_or_future:age_ns={snapshot_age_ns}"
+                    "nonfinite_values" if not snapshot_values_finite else f"stale_or_future:age_ns={snapshot_age_ns}"
                 )
                 observed_key = str(snapshot.snapshot_key or "none")
                 snapshot = AccountRiskSnapshot(
                     equity_usdt=0.0,
                     available_margin_usdt=0.0,
-                    snapshot_key=(
-                        f"exit-only-capital-unavailable:{reason}:"
-                        f"observed={observed_key}:batch={batch_id}"
-                    ),
+                    snapshot_key=(f"exit-only-capital-unavailable:{reason}:observed={observed_key}:batch={batch_id}"),
                     snapshot_ts_ns=now_ns,
                 )
             else:
                 if snapshot_error:
-                    raise RuntimeError(
-                        f"account snapshot unavailable: {snapshot_error}"
-                    )
+                    raise RuntimeError(f"account snapshot unavailable: {snapshot_error}")
                 if not snapshot_values_finite:
                     raise RuntimeError("account snapshot contains non-finite capital values")
                 raise RuntimeError(f"stale account snapshot: age_ns={snapshot_age_ns}")
@@ -1262,11 +1337,13 @@ class AccountExecutionService:
         targets: list[DesiredTarget] = []
         for item, intent in AccountExecutionService._prepared_request_intents(request):
             symbol = intent.symbol.upper()
-            targets.append(item.adapter().desired_target(
-                intent,
-                market_inputs[symbol],
-                rules[symbol],
-            ))
+            targets.append(
+                item.adapter().desired_target(
+                    intent,
+                    market_inputs[symbol],
+                    rules[symbol],
+                )
+            )
         return targets
 
     def handle(self, request: AccountTargetRequest) -> AccountServiceReceipt:
@@ -1275,9 +1352,7 @@ class AccountExecutionService:
         # the exact batch is durable in the kernel, replay must resume its
         # commanded execution/convergence after a crash even if wall time has
         # since crossed the original signal deadline.
-        batch_already_committed = (
-            request.batch_id in self.kernel._state_ref().processed_batches
-        )
+        batch_already_committed = request.batch_id in self.kernel._state_ref().processed_batches
         expiry_rejections: tuple[str, ...] = ()
         if not batch_already_committed:
             keyed_rejections: set[str] = set()
@@ -1291,12 +1366,8 @@ class AccountExecutionService:
                 )
                 if not rejection:
                     continue
-                attempt_key = str(
-                    item.intent.metadata.get("entry_attempt_key") or ""
-                )
-                keyed_rejections.add(
-                    f"{rejection}:{attempt_key}" if attempt_key else rejection
-                )
+                attempt_key = str(item.intent.metadata.get("entry_attempt_key") or "")
+                keyed_rejections.add(f"{rejection}:{attempt_key}" if attempt_key else rejection)
             expiry_rejections = tuple(sorted(keyed_rejections))
         if expiry_rejections:
             state = self.kernel._state_ref()
@@ -1312,6 +1383,32 @@ class AccountExecutionService:
                 disposition="expired",
             )
         requested_symbols = {item.intent.symbol.upper() for item in request.intents}
+        exit_market_fallbacks: dict[str, MarketInputRef] = {}
+        if _durably_authorized_priority_safety_flat(request, self.kernel._state_ref()):
+            for item in request.intents:
+                metadata = item.intent.metadata
+                raw_mark = metadata.get("authenticated_breach_mark")
+                if raw_mark is None:
+                    continue
+                try:
+                    mark = float(raw_mark)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(mark) or mark <= 0.0:
+                    continue
+                symbol = item.intent.symbol.upper()
+                exit_market_fallbacks[symbol] = MarketInputRef(
+                    input_key=f"authenticated-native-breach:{request.request_id}:{symbol}",
+                    symbol=symbol,
+                    exchange_ts_ns=0,
+                    local_receive_ts_ns=max(request.created_ts_ns, 1),
+                    reference_price=mark,
+                    source="bybit_authenticated_position_or_rejection",
+                    metadata={
+                        "exit_only_authenticated_fallback": True,
+                        "breach_evidence_source": str(metadata.get("breach_evidence_source") or ""),
+                    },
+                )
         # First obtain only the books/rules named by this request. The kernel's
         # state-derived proof then decides whether this is an exit-only batch.
         # It repeats that proof inside the journal transaction, so this preview
@@ -1323,6 +1420,7 @@ class AccountExecutionService:
             account_wide=False,
             allow_stale_market_for_reduction_preview=True,
             allow_unavailable_snapshot_for_reduction_preview=True,
+            exit_market_fallbacks=exit_market_fallbacks,
         )
         preview_targets = self._adapt_request_targets(
             request,
@@ -1331,16 +1429,11 @@ class AccountExecutionService:
         )
         if batch_already_committed:
             prior_risk = self.kernel._state_ref().risk_decisions.get(request.batch_id)
-            if not isinstance(prior_risk, Mapping) or (
-                "strict_risk_reduction_required" not in prior_risk
-            ):
+            if not isinstance(prior_risk, Mapping) or ("strict_risk_reduction_required" not in prior_risk):
                 raise RuntimeError(
-                    f"committed batch {request.batch_id!r} lacks its original "
-                    "risk-reduction admission mode"
+                    f"committed batch {request.batch_id!r} lacks its original risk-reduction admission mode"
                 )
-            risk_reducing_only = bool(
-                prior_risk.get("strict_risk_reduction_required")
-            )
+            risk_reducing_only = bool(prior_risk.get("strict_risk_reduction_required"))
         else:
             risk_reducing_only = self.kernel.targets_are_strictly_risk_reducing(
                 preview_targets,
@@ -1355,10 +1448,7 @@ class AccountExecutionService:
                 require_external_health=True,
                 account_wide=True,
             )
-        adapted = [
-            AdaptedIntent(item.adapter(), intent)
-            for item, intent in self._prepared_request_intents(request)
-        ]
+        adapted = [AdaptedIntent(item.adapter(), intent) for item, intent in self._prepared_request_intents(request)]
         result = self.runtime.process_cycle(
             batch_id=request.batch_id,
             intents=adapted,
@@ -1367,6 +1457,7 @@ class AccountExecutionService:
             risk_policy=self.risk_policy,
             instrument_rules=rules,
             execution_adapter=self.execution_adapter,
+            native_protection_policy=self.native_protection_policy,
             command_symbols=requested_symbols,
             require_strict_risk_reduction=risk_reducing_only,
             request_content_hash=request.content_hash(),
@@ -1400,18 +1491,16 @@ class AccountExecutionService:
             symbol = str(payload.get("symbol") or "").upper()
             if not symbol:
                 continue
-            desires_by_symbol.setdefault(symbol, []).append((
-                target_key,
-                payload,
-                int(state.component_target_desire_sequences.get(target_key) or 0),
-            ))
+            desires_by_symbol.setdefault(symbol, []).append(
+                (
+                    target_key,
+                    payload,
+                    int(state.component_target_desire_sequences.get(target_key) or 0),
+                )
+            )
 
         symbols = set(state.aggregate_targets)
-        symbols.update(
-            symbol
-            for symbol, position in state.positions.items()
-            if abs(position.signed_qty) > tolerance
-        )
+        symbols.update(symbol for symbol, position in state.positions.items() if abs(position.signed_qty) > tolerance)
         symbols.update(state.working_symbols(tolerance=tolerance))
         plans: list[_ConvergencePlan] = []
         for symbol in sorted(symbols):
@@ -1426,11 +1515,7 @@ class AccountExecutionService:
             projected_qty = math.fsum((position_qty, working_qty))
             actual_gap = target_qty - position_qty
             residual = target_qty - projected_qty
-            if (
-                abs(actual_gap) <= tolerance
-                and abs(residual) <= tolerance
-                and working_order_count == 0
-            ):
+            if abs(actual_gap) <= tolerance and abs(residual) <= tolerance and working_order_count == 0:
                 continue
 
             symbol_desires = desires_by_symbol.get(symbol, [])
@@ -1452,30 +1537,30 @@ class AccountExecutionService:
                 selected = [
                     row
                     for row in symbol_desires
-                    if row[2] == revision_sequence
-                    and abs(float(row[1].get("signed_qty") or 0.0)) <= tolerance
+                    if row[2] == revision_sequence and abs(float(row[1].get("signed_qty") or 0.0)) <= tolerance
                 ]
             target_rows: tuple[Mapping[str, Any], ...] = tuple(
-                dict(payload)
-                for _, payload, _ in sorted(selected, key=lambda row: row[0])
+                dict(payload) for _, payload, _ in sorted(selected, key=lambda row: row[0])
             )
             if not target_rows and abs(target_qty) <= tolerance and abs(position_qty) > tolerance:
                 # Reconstructed exposure with no component owner is an orphan.
                 # Desired account state is flat; the only automatic action is a
                 # reducing target, never an inferred entry or sign flip.
-                target_rows = ({
-                    "decision_key": f"account-convergence:orphan:{symbol}",
-                    "target_key": f"account/convergence/orphan/{symbol}",
-                    "sleeve": "account_risk",
-                    "strategy_id": "account-convergence",
-                    "component_id": "orphan",
-                    "symbol": symbol,
-                    "signed_qty": 0.0,
-                    "reference_price": 0.0,
-                    "leverage": 1.0,
-                    "reason": "reconstructed_orphan_to_flat",
-                    "metadata": {"account_convergence_orphan": True},
-                },)
+                target_rows = (
+                    {
+                        "decision_key": f"account-convergence:orphan:{symbol}",
+                        "target_key": f"account/convergence/orphan/{symbol}",
+                        "sleeve": "account_risk",
+                        "strategy_id": "account-convergence",
+                        "component_id": "orphan",
+                        "symbol": symbol,
+                        "signed_qty": 0.0,
+                        "reference_price": 0.0,
+                        "leverage": 1.0,
+                        "reason": "reconstructed_orphan_to_flat",
+                        "metadata": {"account_convergence_orphan": True},
+                    },
+                )
 
             generation_material = {
                 "symbol": symbol,
@@ -1493,15 +1578,9 @@ class AccountExecutionService:
                     for row in target_rows
                 ],
             }
-            generation = hashlib.sha256(
-                canonical_json(generation_material)
-            ).hexdigest()[:20]
+            generation = hashlib.sha256(canonical_json(generation_material)).hexdigest()[:20]
             prefix = f"account-convergence/{symbol}/{generation}/"
-            retry_batches = sorted(
-                batch_id
-                for batch_id in state.processed_batches
-                if batch_id.startswith(prefix)
-            )
+            retry_batches = sorted(batch_id for batch_id in state.processed_batches if batch_id.startswith(prefix))
             attempts = len(retry_batches)
             desired_event = event_by_sequence.get(revision_sequence)
             desired_since_ns = (
@@ -1525,10 +1604,7 @@ class AccountExecutionService:
             no_working = working_order_count == 0
             residual_pending = abs(residual) > tolerance
             can_rebuild = bool(target_rows)
-            reduce_only = (
-                abs(target_qty) + tolerance < abs(position_qty)
-                and target_qty * position_qty >= -tolerance
-            )
+            reduce_only = abs(target_qty) + tolerance < abs(position_qty) and target_qty * position_qty >= -tolerance
             venue_minimum_dust = (
                 no_working
                 and residual_pending
@@ -1545,19 +1621,11 @@ class AccountExecutionService:
                 and not venue_minimum_dust
                 and (attempts >= self.max_convergence_retries or not can_rebuild)
             )
-            retryable = (
-                no_working
-                and residual_pending
-                and can_rebuild
-                and not exhausted
-                and not venue_minimum_dust
-            )
+            retryable = no_working and residual_pending and can_rebuild and not exhausted and not venue_minimum_dust
             next_retry_ts_ns: int | None = None
             if retryable:
                 exponent = min(attempts, 62)
-                next_retry_ts_ns = retry_anchor_ns + (
-                    self.convergence_retry_backoff_ns * (2**exponent)
-                )
+                next_retry_ts_ns = retry_anchor_ns + (self.convergence_retry_backoff_ns * (2**exponent))
             if not no_working:
                 status = "working"
             elif not can_rebuild and not venue_minimum_dust:
@@ -1587,13 +1655,8 @@ class AccountExecutionService:
                 # periodic republication of an unchanged desire cannot keep
                 # resetting the grace clock while a residual persists.
                 age_ns=max(
-                    (
-                        now_ns - desired_since_ns
-                        if now_ns >= desired_since_ns
-                        else self.convergence_health_grace_ns
-                    ),
-                    now_ns
-                    - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
+                    (now_ns - desired_since_ns if now_ns >= desired_since_ns else self.convergence_health_grace_ns),
+                    now_ns - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
                 ),
                 retry_attempts=attempts,
                 retry_limit=self.max_convergence_retries,
@@ -1662,7 +1725,8 @@ class AccountExecutionService:
             event.wall_ts_ns
             for event in events
             if event.symbol == symbol
-            and event.event_type in {
+            and event.event_type
+            in {
                 AccountEventType.FILL.value,
                 AccountEventType.VENUE_SNAPSHOT.value,
             }
@@ -1702,24 +1766,26 @@ class AccountExecutionService:
                 if not isinstance(metadata, Mapping):
                     metadata = {}
                 target_key = str(row.get("target_key") or "")
-                targets.append(DesiredTarget(
-                    decision_key=f"{batch_id}:decision:{target_key}",
-                    target_key=target_key,
-                    sleeve=str(row.get("sleeve") or "account_risk"),
-                    strategy_id=str(row.get("strategy_id") or "account-convergence"),
-                    component_id=str(row.get("component_id") or "account"),
-                    symbol=symbol,
-                    signed_qty=float(row.get("signed_qty") or 0.0),
-                    reference_price=market.reference_price,
-                    leverage=float(row.get("leverage") or 1.0),
-                    reason=str(row.get("reason") or "account_target_convergence"),
-                    metadata={
-                        **dict(metadata),
-                        "account_convergence_retry": True,
-                        "account_convergence_generation": plan.item.generation,
-                        "account_convergence_attempt": attempt,
-                    },
-                ))
+                targets.append(
+                    DesiredTarget(
+                        decision_key=f"{batch_id}:decision:{target_key}",
+                        target_key=target_key,
+                        sleeve=str(row.get("sleeve") or "account_risk"),
+                        strategy_id=str(row.get("strategy_id") or "account-convergence"),
+                        component_id=str(row.get("component_id") or "account"),
+                        symbol=symbol,
+                        signed_qty=float(row.get("signed_qty") or 0.0),
+                        reference_price=market.reference_price,
+                        leverage=float(row.get("leverage") or 1.0),
+                        reason=str(row.get("reason") or "account_target_convergence"),
+                        metadata={
+                            **dict(metadata),
+                            "account_convergence_retry": True,
+                            "account_convergence_generation": plan.item.generation,
+                            "account_convergence_attempt": attempt,
+                        },
+                    )
+                )
             return targets
 
         targets = build_targets()
@@ -1744,6 +1810,7 @@ class AccountExecutionService:
             risk_snapshot=snapshot,
             risk_policy=self.risk_policy,
             instrument_rules=rules,
+            native_protection_policy=self.native_protection_policy,
             command_symbols=requested_symbols,
             require_strict_risk_reduction=risk_reducing_only,
         )
@@ -1760,15 +1827,14 @@ class AccountExecutionService:
 
         plans = self._convergence_plans()
         # Crash after journal commit but before ACK: replay the exact batch and
-        # command id. Venue idempotency owns ambiguity; a new command would not.
+        # command id. The execution driver resubmits only work that is provably
+        # safe: reductions may retry, while a prior ambiguous entry attempt or
+        # an over-age never-attempted entry fails closed for reconciliation.
         for plan in plans:
             item = plan.item
             if item.retry_attempts <= 0:
                 continue
-            batch_id = (
-                f"account-convergence/{item.symbol}/{item.generation}/"
-                f"{item.retry_attempts:04d}"
-            )
+            batch_id = f"account-convergence/{item.symbol}/{item.generation}/{item.retry_attempts:04d}"
             commanded = any(
                 order.batch_id == batch_id and order.status == "commanded"
                 for order in self.kernel._state_ref().orders.values()
@@ -1784,25 +1850,22 @@ class AccountExecutionService:
         due = [
             plan
             for plan in plans
-            if plan.item.retryable
-            and plan.item.next_retry_ts_ns is not None
-            and plan.item.next_retry_ts_ns <= now_ns
+            if plan.item.retryable and plan.item.next_retry_ts_ns is not None and plan.item.next_retry_ts_ns <= now_ns
         ]
         if not due:
             return None
         # Close/reduce risk before any retry that adds exposure, then preserve a
         # stable age/symbol order for deterministic multi-symbol convergence.
-        due.sort(key=lambda plan: (
-            not plan.item.reduce_only,
-            plan.item.desired_since_ns,
-            plan.item.symbol,
-        ))
+        due.sort(
+            key=lambda plan: (
+                not plan.item.reduce_only,
+                plan.item.desired_since_ns,
+                plan.item.symbol,
+            )
+        )
         plan = due[0]
         attempt = plan.item.retry_attempts + 1
-        batch_id = (
-            f"account-convergence/{plan.item.symbol}/{plan.item.generation}/"
-            f"{attempt:04d}"
-        )
+        batch_id = f"account-convergence/{plan.item.symbol}/{plan.item.generation}/{attempt:04d}"
         return self._submit_convergence_plan(plan, batch_id=batch_id, attempt=attempt)
 
     def run_once(
@@ -1882,11 +1945,7 @@ class AccountExecutionService:
                 superseded_by_request_ids=replacement_ids,
             )
             inbox.complete(path, last_superseded)
-        claimed = (
-            strict_claimed
-            if strict_arrival
-            else (committed_claim or inbox.claim_next())
-        )
+        claimed = strict_claimed if strict_arrival else (committed_claim or inbox.claim_next())
         if claimed is None:
             self.converge_once()
             return last_superseded
@@ -1908,6 +1967,47 @@ class AccountExecutionService:
             try:
                 self.converge_once()
             except Exception:  # noqa: BLE001 - reported via the raised head failure
+                pass
+            raise
+        inbox.complete(path, receipt)
+        return receipt
+
+    def run_safety_flat_once(
+        self,
+        inbox: AccountIntentInbox,
+        *,
+        permanent_failure: bool = False,
+    ) -> AccountServiceReceipt | None:
+        """Execute one durable all-flat risk request ahead of uncommitted work."""
+
+        if inbox.route != self.route:
+            raise ValueError("account service and inbox routes do not match")
+        state = self.kernel._state_ref()
+        authorized_request_hashes = {
+            request_id: str((row.get("metadata") or {}).get("request_hash") or "")
+            for request_id, row in state.protections.items()
+            if str(row.get("status") or "") == "software_flat_requested"
+            and isinstance(row.get("metadata") or {}, Mapping)
+            and (row.get("metadata") or {}).get("native_exchange") is False
+            and str((row.get("metadata") or {}).get("reason") or "") == "native_disaster_stop_breached"
+        }
+        claimed = inbox.claim_next_safety_flat(
+            processed_batches=set(state.processed_batches),
+            authorized_request_hashes=authorized_request_hashes,
+        )
+        if claimed is None:
+            return None
+        path, request = claimed
+        try:
+            receipt = self.handle(request)
+        except Exception as exc:
+            if permanent_failure:
+                inbox.fail(path, error=exc)
+            else:
+                inbox.release(path)
+            try:
+                self.converge_once()
+            except Exception:  # noqa: BLE001 - preserve the safety failure
                 pass
             raise
         inbox.complete(path, receipt)

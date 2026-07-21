@@ -1,11 +1,54 @@
 # Operational State
 
 Updated from authenticated venue reads, exact-receipt verification, systemd,
-owner/journal checks, account-journal protection/P&L archaeology, and the full
-2026-07-18/19 Telegram alert history at 2026-07-19 16:40 UTC, with the
-2026-07-20 rollouts (11:04, 14:04, and 17:22 UTC) recorded below. These facts describe the deployed
-implementation commit below; a later documentation-only commit may leave the
-branch ahead.
+owner/journal checks, account-journal protection/P&L archaeology, the full
+2026-07-18/19 Telegram alert history, the 2026-07-20 rollouts, and the
+2026-07-21 account-kernel incident audit. Deployed facts and undeployed local
+remediation are separated explicitly below.
+
+## 2026-07-21 account-kernel incident and local remediation
+
+- The supplied 01:00--12:20 UTC Telegram transcript exposed one severe live
+  safety gap and three reporting/recovery defects. DEXEUSDT opened short
+  `2.6 @ 12.659` at 12:11:12 UTC. At 12:12:49 Bybit rejected its intended
+  Full-position MarkPrice stop `12.913` because the authenticated base/mark was
+  `13.0944`; the old owner blocked health and retried but had no deterministic
+  software-flat transition. The mark later receded and the old code installed
+  the stop at 12:20:14. The position subsequently closed through take profit at
+  13:02:22 (`+2.6 @ 11.127`, account-net `+3.94918602 USDT`). That contingent
+  recovery does not make the roughly eight-minute unprotected interval safe.
+- The local worktree at base commit
+  `a808c5877b201432798ae6e73aaa94338b7f1332` now implements the audited repair
+  in `docs/audit/2026-07-21-account-kernel-incident.md`: authenticated
+  venue-stop-first reconciliation; a durable crossed-stop breach latch across
+  price recovery and restarts; exact Bybit integer-price normalization; an
+  atomic revision-dominating strict reduce-only flat; journal-hash-bound FIFO
+  bypass and authenticated-mark fallback; committed-batch replay preservation;
+  structured breach-only startup recovery; all-symbol reconciliation; a
+  pre-open/first-frame public-L2 watchdog with generation fencing; durable
+  lifecycle confirmations; truthful accounting scope; and lossless Telegram
+  pagination. The deeper execution audit also persists an entry-attached
+  provisional Full MarkPrice stop on every demo exposure command, preserves the
+  outermost existing stop during scale-in, re-anchors from fills, handles
+  same-message entry/stop races, journals an atomic pre-provider attempt, never
+  blindly resends ambiguous entries, rechecks freshness after non-exposure
+  leverage setup, preserves child venue identity across partial-fill restart,
+  and marks unresolved ambiguity unhealthy while retaining reduce-only retries.
+  Public capture also keeps blocking recorder/subscription I/O outside the
+  watchdog state lock, and crossed-stop recovery now requires authenticated
+  venue flatness rather than reconstructed zero alone.
+- Local verification is green: focused account execution/protection 273 passed;
+  repository doctor, ruff, and mypy green; full gate 2,239 passed / 3 skipped.
+  Graphify's scoped architecture refresh produced 5,238 nodes, 18,862 edges,
+  and 334 communities.
+- These changes are uncommitted and **not deployed**. A read-only live audit at
+  2026-07-21 13:49 UTC still found exact deployed commit
+  `a7363070008266888b652104dfdd64f907507f3e`, profile `operational`, demo owner
+  active/running with zero restarts and healthy current state, requested-symbol
+  readiness true, no local or venue position, no aggregate target, working or
+  open venue order, and zero pending/processing/failed requests. The boundary
+  remained `DEMO=true`, `REAL_MONEY=false`. This is a point-in-time flatness
+  observation, not authorization to deploy or trade.
 
 ## Live authority and topology
 
@@ -25,10 +68,10 @@ branch ahead.
   matching including the live observed binding, exchange-time bound), each
   pinned by consumer-driven regression tests; see the incident entry below.
   No strategy decision path, sizing input, or registered estimator changed.
-  The delta also carries research-only artifacts (T-K breadth-funnel
-  receipts and scripts) and the tail-risk program adoption docs, none on a
-  deployed service path (audited pre-deploy; full local gate, remote
-  install gate, and two independent review passes all green). Recorded
+  The delta also carried research-only breadth and planning artifacts, none on
+  a deployed service path; those obsolete working-tree artifacts were retired
+  during the 2026-07-21 strategy reset. The pre-deploy audit, full local gate,
+  remote install gate, and two independent review passes were all green. Recorded
   mid-epoch change point; clock and comparator identity unchanged.
 - The prior change point remains on record: `f2ad171` (receipt
   `43ce6490c8b0dee4...`), activated 2026-07-20 14:04 UTC (fleet quiescent
@@ -448,6 +491,6 @@ P&L rows. No exact comparator or full-account retry ran within that closed V2
 repair. The optional repository
 historical state-copy optimization is default-off and is not a deployed runtime
 change.
-This changes no live/demo/paper authority or topology above. See
-`docs/strategy_overhaul_v2_completion_receipt_2026-07-18.md` and
-`docs/strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md`.
+This changes no live/demo/paper authority or topology above. The consolidated
+research conclusion and successor direction are in `docs/strategy_program.md`;
+detailed retired receipts remain available in Git history.

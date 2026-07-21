@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from liquidity_migration.account_reconcile import AccountReconciliationReport
 from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.account_service import (
     AccountIntentInbox,
@@ -17,6 +18,7 @@ from liquidity_migration.account_market_readiness import (
     RequestedMarketWarmupGate,
     run_ready_request_or_converge,
 )
+from liquidity_migration.account_service_runner import require_startup_reconciliation_safe
 from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
 from liquidity_migration.market_capture import operational_market_symbols
 from liquidity_migration.strategy_runtime import SleeveTargetIntent
@@ -328,7 +330,12 @@ def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
 class _CycleService:
     def __init__(self) -> None:
         self.run_request_ids: list[str | None] = []
+        self.safety_calls = 0
         self.convergence_calls = 0
+
+    def run_safety_flat_once(self, inbox: AccountIntentInbox) -> None:
+        del inbox
+        self.safety_calls += 1
 
     def run_once(
         self,
@@ -342,6 +349,13 @@ class _CycleService:
 
     def converge_once(self) -> None:
         self.convergence_calls += 1
+
+
+class _SafetyCycleService(_CycleService):
+    def run_safety_flat_once(self, inbox: AccountIntentInbox) -> str:
+        del inbox
+        self.safety_calls += 1
+        return "safety-receipt"
 
 
 def test_unready_head_stays_pending_without_starving_prior_convergence(
@@ -366,6 +380,7 @@ def test_unready_head_stays_pending_without_starving_prior_convergence(
 
     assert receipt is None
     assert service.convergence_calls == 1
+    assert service.safety_calls == 1
     assert service.run_request_ids == []
     assert inbox.peek_next() == request
 
@@ -391,6 +406,7 @@ def test_ready_head_is_claimed_by_exact_id_without_extra_convergence(
     assert receipt == "receipt"
     assert service.run_request_ids == ["ready-head"]
     assert service.convergence_calls == 0
+    assert service.safety_calls == 1
 
 
 def test_empty_inbox_preserves_prior_convergence_without_strict_claim(
@@ -414,6 +430,67 @@ def test_empty_inbox_preserves_prior_convergence_without_strict_claim(
     assert receipt is None
     assert service.run_request_ids == []
     assert service.convergence_calls == 1
+    assert service.safety_calls == 1
+
+
+def test_safety_flat_runs_even_when_ordinary_queue_head_is_unready(
+    tmp_path: Path,
+) -> None:
+    service = _SafetyCycleService()
+    inbox = _inbox(tmp_path)
+
+    receipt = run_ready_request_or_converge(
+        service=service,  # type: ignore[arg-type]
+        inbox=inbox,
+        readiness=RequestedMarketReadiness(
+            request_id="unready-entry",
+            symbols=("AUSDT",),
+            ready=False,
+            timed_out=True,
+            detail="owner epoch is closed",
+        ),
+    )
+
+    assert receipt == "safety-receipt"
+    assert service.run_request_ids == []
+    assert service.convergence_calls == 0
+
+
+def test_startup_allows_only_typed_native_breach_recovery() -> None:
+    def report(
+        *mismatches: str,
+        native_protection_breach_only: bool = False,
+    ) -> AccountReconciliationReport:
+        return AccountReconciliationReport(
+            snapshot_key="snapshot",
+            healthy=not mismatches,
+            pending_orders_checked=0,
+            execution_rows_observed=0,
+            order_rows_observed=0,
+            venue_positions={"BUSDT": -2.0},
+            reconstructed_positions={"BUSDT": -2.0},
+            mismatches=mismatches,
+            observed_ts_ns=1,
+            native_protection_breach_only=native_protection_breach_only,
+        )
+
+    require_startup_reconciliation_safe(report())
+    require_startup_reconciliation_safe(
+        report(
+            "native_protection:NativeProtectionReconciliationError:stop crossed",
+            native_protection_breach_only=True,
+        )
+    )
+    with pytest.raises(RuntimeError, match="NativeProtectionBreachError"):
+        require_startup_reconciliation_safe(
+            report(
+                "native_protection:RuntimeError:provider text mentions NativeProtectionBreachError"
+            )
+        )
+    with pytest.raises(RuntimeError, match="venue=-2"):
+        require_startup_reconciliation_safe(report("BUSDT:venue=-2:reconstructed=0:tol=0.05"))
+    with pytest.raises(RuntimeError, match="transport failed"):
+        require_startup_reconciliation_safe(report("native_protection:RuntimeError:transport failed"))
 
 
 def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
@@ -432,12 +509,10 @@ def test_demo_and_paper_validate_registered_startup_bounds_before_owner_identity
     for filename in ("account_service_runner.py", "account_paper_runner.py"):
         source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
         main = source[source.index("def main(") :]
-        assert main.index("require_registered_demo_rule_max_age_hours(") < main.index(
+        assert main.index("require_registered_demo_rule_max_age_hours(") < main.index("require_systemd_invocation_id()")
+        assert main.index("require_registered_request_market_warmup_timeout(") < main.index(
             "require_systemd_invocation_id()"
         )
-        assert main.index(
-            "require_registered_request_market_warmup_timeout("
-        ) < main.index("require_systemd_invocation_id()")
 
 
 def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> None:
@@ -454,9 +529,7 @@ def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> N
         ]
         assert len(recorder_calls) == 1
         invocation_keywords = [
-            keyword.value
-            for keyword in recorder_calls[0].keywords
-            if keyword.arg == "owner_invocation_id"
+            keyword.value for keyword in recorder_calls[0].keywords if keyword.arg == "owner_invocation_id"
         ]
         assert len(invocation_keywords) == 1
         assert isinstance(invocation_keywords[0], ast.Name)
@@ -466,9 +539,7 @@ def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> N
 
 def test_demo_owner_supervises_private_execution_stream_before_admission() -> None:
     repo = Path(__file__).resolve().parents[1]
-    source = (repo / "liquidity_migration" / "account_service_runner.py").read_text(
-        encoding="utf-8"
-    )
+    source = (repo / "liquidity_migration" / "account_service_runner.py").read_text(encoding="utf-8")
     loop = source[source.index("        while True:") :]
     health_chain = source[
         source.index("health_chain = AccountHealthChain(") : source.index(
@@ -478,15 +549,11 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
 
     assert "private_stream_supervisor = PrivateExecutionStreamSupervisor(" in source
     assert "private_stream_supervisor" in health_chain
-    assert loop.index("private_stream_supervisor.check(") < loop.index(
-        "run_ready_request_or_converge("
-    )
+    assert loop.index("private_stream_supervisor.check(") < loop.index("run_ready_request_or_converge(")
     assert "private_stream_status is True" in loop
     assert "private_stream_supervisor.health_detail" in loop
 
-    wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(
-        encoding="utf-8"
-    )
+    wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
     assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-$REPO_ROOT/data/bybit-continuous-demo-event}"' in wrapper

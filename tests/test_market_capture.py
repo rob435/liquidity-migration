@@ -74,19 +74,22 @@ def test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(tmp_path
     clock = VirtualClock(current_wall_ns=1_800_000_000_010_000_000, current_monotonic_ns=0)
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config(), clock=clock)
     snapshot = recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)[0]
-    delta = recorder.on_message({
-        "topic": "orderbook.50.BUSDT",
-        "type": "delta",
-        "ts": 1_800_000_000_001,
-        "cts": 1_800_000_000_000,
-        "data": {
-            "s": "BUSDT",
-            "b": [["10.0", "0"], ["9.95", "6"]],
-            "a": [["10.1", "7"]],
-            "u": 101,
-            "seq": 1_001,
+    delta = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_001,
+            "cts": 1_800_000_000_000,
+            "data": {
+                "s": "BUSDT",
+                "b": [["10.0", "0"], ["9.95", "6"]],
+                "a": [["10.1", "7"]],
+                "u": 101,
+                "seq": 1_001,
+            },
         },
-    }, local_receive_ts_ns=1_800_000_000_011_000_000)[0]
+        local_receive_ts_ns=1_800_000_000_011_000_000,
+    )[0]
 
     assert snapshot["kind"] == "orderbook_snapshot"
     assert snapshot["engine_clock_offset_ns"] == 11_000_000
@@ -111,11 +114,7 @@ def test_raw_snapshot_delta_capture_reconstructs_book_and_clock_offsets(tmp_path
     assert not book.sequence_gap
     recorder.close()
 
-    lines = [
-        json.loads(line)
-        for path in tmp_path.rglob("*.jsonl")
-        for line in path.read_text().splitlines()
-    ]
+    lines = [json.loads(line) for path in tmp_path.rglob("*.jsonl") for line in path.read_text().splitlines()]
     assert [row["kind"] for row in lines] == ["orderbook_snapshot", "orderbook_delta", "book_context"]
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in tmp_path.rglob("*.jsonl"))
 
@@ -137,18 +136,13 @@ def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segment
     assert recorder.current_book("BUSDT") is not None
     assert not list(tmp_path.rglob("segment-*.jsonl"))
 
-    market_sidecar = json.loads(
-        (tmp_path / OWNER_MARKET_READINESS_FILENAME).read_text(encoding="utf-8")
-    )
+    market_sidecar = json.loads((tmp_path / OWNER_MARKET_READINESS_FILENAME).read_text(encoding="utf-8"))
     assert market_sidecar["record_id"] == snapshot["record_id"]
     assert market_sidecar["book_healthy"] is True
     assert market_sidecar["required_symbol_count"] == 1
     assert market_sidecar["healthy_symbol_count"] == 1
     assert market_sidecar["all_required_books_healthy"] is True
-    assert (
-        market_sidecar["oldest_required_receive_ts_ns"]
-        == snapshot["local_receive_ts_ns"]
-    )
+    assert market_sidecar["oldest_required_receive_ts_ns"] == snapshot["local_receive_ts_ns"]
     assert market_sidecar["raw_market_persistence_enabled"] is False
 
     context, book = recorder.capture_context(
@@ -169,8 +163,7 @@ def test_operational_mode_keeps_live_l2_and_decision_context_without_raw_segment
     assert rows[0]["asks"] == [[level.price, level.qty] for level in book.asks]
     segment = tmp_path / context["capture_segment_path"]
     raw = segment.read_bytes()[
-        context["capture_byte_offset"] :
-        context["capture_byte_offset"] + context["capture_byte_length"]
+        context["capture_byte_offset"] : context["capture_byte_offset"] + context["capture_byte_length"]
     ]
     assert hashlib.sha256(raw).hexdigest() == context["capture_record_sha256"]
     assert json.loads(raw) == rows[0]
@@ -269,9 +262,7 @@ def test_post_fill_markouts_capture_healthy_and_bounded_missing_books(
     assert missing_mark["target_horizon_ns"] == 15_000_000_000
     assert missing_mark["markout_status"] == "missing"
     assert missing_mark["markout_midpoint"] is None
-    assert missing_mark["missing_reason"] == (
-        "healthy_book_not_observed_before_lateness_bound"
-    )
+    assert missing_mark["missing_reason"] == ("healthy_book_not_observed_before_lateness_bound")
     assert recorder.pending_post_fill_symbols() == set()
     assert len({schedule["record_id"], healthy_mark["record_id"], missing_mark["record_id"]}) == 3
     recorder.close()
@@ -310,13 +301,7 @@ def test_post_fill_markout_capacity_rejection_is_durable_and_non_pending(
         for path in tmp_path.rglob("segment-*.jsonl")
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
-    assert persisted == [
-        {
-            key: value
-            for key, value in schedule.items()
-            if not key.startswith("capture_")
-        }
-    ]
+    assert persisted == [{key: value for key, value in schedule.items() if not key.startswith("capture_")}]
     recorder.close()
 
 
@@ -463,13 +448,16 @@ def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_cha
 def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
     recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
-    gap = recorder.on_message({
-        "topic": "orderbook.50.BUSDT",
-        "type": "delta",
-        "ts": 1_800_000_000_002,
-        "cts": 1_800_000_000_001,
-        "data": {"s": "BUSDT", "b": [["10.0", "99"]], "a": [], "u": 99, "seq": 999},
-    }, local_receive_ts_ns=1_800_000_000_012_000_000)[0]
+    gap = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_002,
+            "cts": 1_800_000_000_001,
+            "data": {"s": "BUSDT", "b": [["10.0", "99"]], "a": [], "u": 99, "seq": 999},
+        },
+        local_receive_ts_ns=1_800_000_000_012_000_000,
+    )[0]
     assert gap["sequence_gap"]
     assert gap["sequence_gap_reason"] == "update_id_not_increasing"
     assert not recorder.books["BUSDT"].healthy
@@ -484,13 +472,16 @@ def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) ->
 def test_update_id_one_forces_documented_restart_snapshot(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
     recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
-    restart = recorder.on_message({
-        "topic": "orderbook.50.BUSDT",
-        "type": "delta",
-        "ts": 1_800_000_000_003,
-        "cts": 1_800_000_000_002,
-        "data": {"s": "BUSDT", "b": [["8.0", "1"]], "a": [["12.0", "1"]], "u": 1, "seq": 3_000},
-    }, local_receive_ts_ns=1_800_000_000_013_000_000)[0]
+    restart = recorder.on_message(
+        {
+            "topic": "orderbook.50.BUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_003,
+            "cts": 1_800_000_000_002,
+            "data": {"s": "BUSDT", "b": [["8.0", "1"]], "a": [["12.0", "1"]], "u": 1, "seq": 3_000},
+        },
+        local_receive_ts_ns=1_800_000_000_013_000_000,
+    )[0]
     assert restart["kind"] == "orderbook_snapshot"
     assert restart["restart_snapshot"]
     assert recorder.books["BUSDT"].bids == {8.0: 1.0}
@@ -500,15 +491,18 @@ def test_update_id_one_forces_documented_restart_snapshot(tmp_path: Path) -> Non
 
 def test_public_trade_capture_preserves_trade_and_receive_timestamps(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
-    records = recorder.on_message({
-        "topic": "publicTrade.BUSDT",
-        "type": "snapshot",
-        "ts": 1_800_000_000_010,
-        "data": [
-            {"T": 1_800_000_000_008, "s": "BUSDT", "S": "Buy", "v": "2", "p": "10.1", "i": "t1", "seq": 5},
-            {"T": 1_800_000_000_009, "s": "BUSDT", "S": "Sell", "v": "1", "p": "10.0", "i": "t2", "seq": 6},
-        ],
-    }, local_receive_ts_ns=1_800_000_000_015_000_000)
+    records = recorder.on_message(
+        {
+            "topic": "publicTrade.BUSDT",
+            "type": "snapshot",
+            "ts": 1_800_000_000_010,
+            "data": [
+                {"T": 1_800_000_000_008, "s": "BUSDT", "S": "Buy", "v": "2", "p": "10.1", "i": "t1", "seq": 5},
+                {"T": 1_800_000_000_009, "s": "BUSDT", "S": "Sell", "v": "1", "p": "10.0", "i": "t2", "seq": 6},
+            ],
+        },
+        local_receive_ts_ns=1_800_000_000_015_000_000,
+    )
     assert [row["trade_id"] for row in records] == ["t1", "t2"]
     assert records[0]["exchange_trade_ts_ns"] == 1_800_000_000_008_000_000
     assert records[0]["trade_clock_offset_ns"] == 7_000_000
@@ -657,10 +651,12 @@ def test_raw_stream_subscribes_orderbook_and_trade_topics_without_pybit_rewrite(
     socket = Socket()
     stream._on_open(socket)
     assert stream.url.endswith("/v5/public/linear")
-    assert socket.sent == [{
-        "op": "subscribe",
-        "args": ["orderbook.50.BUSDT", "publicTrade.BUSDT"],
-    }]
+    assert socket.sent == [
+        {
+            "op": "subscribe",
+            "args": ["orderbook.50.BUSDT", "publicTrade.BUSDT"],
+        }
+    ]
     stream._on_message(socket, json.dumps(_snapshot()))
     assert seen[0]["type"] == "snapshot"
     assert seen[0]["_local_receive_ts_ns"] > 0
@@ -713,6 +709,7 @@ def test_raw_stream_closed_socket_defers_desired_symbols_to_reconnect() -> None:
     )
     closed = ClosedSocket()
     stream._socket = closed
+    stream._socket_open = True
 
     stream.update_symbols({"BUSDT"})
 
@@ -720,8 +717,82 @@ def test_raw_stream_closed_socket_defers_desired_symbols_to_reconnect() -> None:
     assert stream._socket is None
     reconnected = ReconnectedSocket()
     stream._on_open(reconnected)
-    assert reconnected.sent == [
-        {"op": "subscribe", "args": ["orderbook.50.BUSDT"]}
+    assert reconnected.sent == [{"op": "subscribe", "args": ["orderbook.50.BUSDT"]}]
+
+
+def test_raw_stream_watchdog_reconnects_a_connection_that_never_opens() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [100.0]
+    observed_messages: list[dict[str, object]] = []
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda message: observed_messages.append(dict(message)),
+        websocket_factory=lambda *_args, **_kwargs: None,
+        first_frame_reconnect_seconds=30.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT", "ONDOUSDT"})
+    socket = Socket()
+    stream._socket = socket
+    stream._connection_started_monotonic = now[0]
+    stream._active_connection_generation = 1
+
+    now[0] = 129.9
+    assert stream.check_stale_subscriptions() == ()
+    assert socket.closed is False
+
+    now[0] = 130.0
+    assert stream.check_stale_subscriptions() == ("BTCUSDT", "ONDOUSDT")
+    assert socket.closed is True
+    assert stream._socket is None
+
+    # A late callback from the timed-out generation cannot resurrect the
+    # retired transport or publish subscriptions onto it.
+    stream._on_open(socket, generation=1)
+    stream._on_message(
+        socket,
+        json.dumps({"topic": "orderbook.50.BTCUSDT", "type": "snapshot", "data": {}}),
+        generation=1,
+    )
+    assert socket.closed is True
+    assert stream._socket is None
+    assert observed_messages == []
+
+
+def test_raw_stream_symbol_refresh_waits_for_transport_open() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(json.loads(value))
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+    )
+    connecting = Socket()
+    stream._socket = connecting
+    stream._connection_started_monotonic = 1.0
+
+    stream.update_symbols({"BUSDT", "ONDOUSDT"})
+    assert connecting.sent == []
+
+    stream._on_open(connecting)
+    assert connecting.sent == [
+        {
+            "op": "subscribe",
+            "args": ["orderbook.50.BUSDT", "orderbook.50.ONDOUSDT"],
+        }
     ]
 
 
@@ -766,11 +837,137 @@ def test_raw_stream_reconnects_when_one_required_orderbook_is_stale() -> None:
 
     reconnected = Socket()
     stream._on_open(reconnected)
-    assert reconnected.sent == [{
-        "op": "subscribe",
-        "args": ["orderbook.50.BTCUSDT", "orderbook.50.ONDOUSDT"],
-    }]
+    assert reconnected.sent == [
+        {
+            "op": "subscribe",
+            "args": ["orderbook.50.BTCUSDT", "orderbook.50.ONDOUSDT"],
+        }
+    ]
     assert seen[0]["data"]["s"] == "ONDOUSDT"
+
+
+def test_raw_stream_recorder_io_cannot_block_watchdog_retirement() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def send(self, _value: str) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [100.0]
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+
+    def blocking_callback(_message: Mapping[str, Any]) -> None:
+        callback_started.set()
+        assert release_callback.wait(timeout=2.0)
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=blocking_callback,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=10.0,
+        watchdog_interval_seconds=1.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BUSDT"})
+    socket = Socket()
+    stream._on_open(socket)
+    callback_thread = threading.Thread(
+        target=stream._on_message,
+        args=(socket, json.dumps(_snapshot(symbol="BUSDT"))),
+    )
+    callback_thread.start()
+    assert callback_started.wait(timeout=1.0)
+
+    now[0] = 111.0
+    try:
+        assert stream.check_stale_subscriptions() == ("BUSDT",)
+    finally:
+        release_callback.set()
+        callback_thread.join(timeout=2.0)
+
+    assert not callback_thread.is_alive()
+    assert socket.closed is True
+    assert stream._socket is None
+
+
+def test_raw_stream_subscription_send_cannot_block_watchdog_retirement() -> None:
+    class BlockingSocket:
+        def __init__(self) -> None:
+            self.send_started = threading.Event()
+            self.closed = threading.Event()
+
+        def send(self, _value: str) -> None:
+            self.send_started.set()
+            assert self.closed.wait(timeout=2.0)
+
+        def close(self) -> None:
+            self.closed.set()
+
+    now = [100.0]
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        first_frame_reconnect_seconds=30.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BUSDT"})
+    socket = BlockingSocket()
+    open_thread = threading.Thread(target=stream._on_open, args=(socket,))
+    open_thread.start()
+    assert socket.send_started.wait(timeout=1.0)
+
+    now[0] = 130.0
+    assert stream.check_stale_subscriptions() == ("BUSDT",)
+    open_thread.join(timeout=2.0)
+
+    assert not open_thread.is_alive()
+    assert socket.closed.is_set()
+    assert stream._socket is None
+
+
+def test_raw_stream_failed_recorder_callback_does_not_refresh_watchdog(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def send(self, _value: str) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [100.0]
+
+    def failing_callback(_message: Mapping[str, Any]) -> None:
+        raise RuntimeError("recorder unavailable")
+
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=failing_callback,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        first_frame_reconnect_seconds=30.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BUSDT"})
+    socket = Socket()
+    stream._on_open(socket)
+    stream._on_message(socket, json.dumps(_snapshot(symbol="BUSDT")))
+
+    assert "recorder unavailable" in caplog.text
+    now[0] = 130.0
+    assert stream.check_stale_subscriptions() == ("BUSDT",)
+    assert socket.closed is True
 
 
 def test_raw_stream_rebuilds_lost_new_subscription_at_first_frame_bound() -> None:
@@ -935,9 +1132,7 @@ def test_raw_stream_watchdog_reconnects_and_resubscribes() -> None:
 
     assert len(factory.built) >= 2
     assert factory.built[0].closed.is_set()
-    assert factory.built[1].sent == [
-        {"op": "subscribe", "args": ["orderbook.50.BUSDT"]}
-    ]
+    assert factory.built[1].sent == [{"op": "subscribe", "args": ["orderbook.50.BUSDT"]}]
 
 
 def test_capture_rotates_segments_before_size_limit(tmp_path: Path) -> None:

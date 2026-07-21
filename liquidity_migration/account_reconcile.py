@@ -63,6 +63,7 @@ class AccountReconciliationReport:
     reconstructed_positions: Mapping[str, float]
     mismatches: tuple[str, ...]
     observed_ts_ns: int
+    native_protection_breach_only: bool = False
 
     def require_healthy(self) -> None:
         if not self.healthy:
@@ -224,7 +225,21 @@ class BybitAccountReconciler:
             for symbol, position in self.kernel._state_ref().positions.items()
             if abs(position.signed_qty) > 1e-12
         }
-        mismatches: list[str] = []
+        post_recovery_state = self.kernel._state_ref()
+        mismatches: list[str] = [
+            (
+                f"{order.symbol}:ambiguous_submission_unresolved:"
+                f"command={order.command_id}:attempts={order.submission_attempts}"
+            )
+            for order in sorted(
+                post_recovery_state.orders.values(),
+                key=lambda item: item.command_id,
+            )
+            if order.status == "commanded"
+            and order.submission_attempts > 0
+            and not order.reduce_only
+        ]
+        native_protection_breach_only = False
         for symbol, sides in sorted(active_sides.items()):
             if len(sides) > 1:
                 mismatches.append(f"{symbol}:dual_side_position_not_supported")
@@ -244,6 +259,7 @@ class BybitAccountReconciler:
                 )
             except Exception as exc:  # noqa: BLE001 - protection failure makes the snapshot unhealthy
                 mismatches.append(f"native_protection:{type(exc).__name__}:{exc}")
+                native_protection_breach_only = bool(getattr(exc, "breaches_only", False))
         order_ownership = None
         try:
             order_ownership = inspect_bybit_demo_order_ownership(
@@ -338,6 +354,11 @@ class BybitAccountReconciler:
             reconstructed_positions=reconstructed,
             mismatches=tuple(mismatches),
             observed_ts_ns=observed_ns,
+            native_protection_breach_only=(
+                native_protection_breach_only
+                and len(mismatches) == 1
+                and mismatches[0].startswith("native_protection:")
+            ),
         )
         self.last_report = report
         return report

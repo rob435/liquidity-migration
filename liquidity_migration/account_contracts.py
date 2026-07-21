@@ -42,12 +42,20 @@ class AccountTransitionError(AccountKernelError):
     """A control-plane event is illegal for the reconstructed state."""
 
 
+class AmbiguousSubmissionAttemptError(AccountTransitionError):
+    """An exposure command already crossed the durable provider boundary."""
+
+
 class AccountEventType(StrEnum):
     MARKET_INPUT_REF = "market_input_ref"
     DECISION = "decision"
     TARGET = "target"
     RISK_DECISION = "risk_decision"
     ORDER_COMMAND = "order_command"
+    # Durable pre-effect boundary. A provider-capable adapter records this
+    # immediately before an exposure-capable submission so ``commanded`` never
+    # conflates unsent work with an ACK-lost, possibly-live venue order.
+    SUBMISSION_ATTEMPT = "submission_attempt"
     ACK = "ack"
     # Supplemental transport observation. A private fill can establish the
     # semantic ACK before the HTTP create response returns; retain that later
@@ -135,6 +143,31 @@ class AccountRiskPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeDisasterProtectionPolicy:
+    """Account-level contract for exchange-attached entry protection.
+
+    The policy is deliberately separate from strategy stop metadata.  It makes
+    the process-death seatbelt a required execution input while allowing the
+    exact post-fill stop to remain component/fill anchored.
+    """
+
+    fallback_stop_fraction: float
+    trigger_by: str = "MarkPrice"
+
+    def __post_init__(self) -> None:
+        fraction = self.fallback_stop_fraction
+        if (
+            isinstance(fraction, bool)
+            or not isinstance(fraction, (int, float))
+            or not math.isfinite(float(fraction))
+            or not 0.0 < float(fraction) < 1.0
+        ):
+            raise ValueError("native disaster fallback_stop_fraction must be a finite fraction in (0, 1)")
+        if self.trigger_by != "MarkPrice":
+            raise ValueError("native disaster protection requires MarkPrice triggering")
+
+
+@dataclass(frozen=True, slots=True)
 class AccountEventSpec:
     event_type: AccountEventType | str
     idempotency_key: str
@@ -206,6 +239,14 @@ class OrderState:
     symbol: str
     signed_qty: float
     reduce_only: bool
+    created_ts_ns: int = 0
+    command_sequence: int = 0
+    entry_stop_price: float | None = None
+    entry_stop_fraction: float | None = None
+    entry_stop_source: str = ""
+    entry_stop_trigger_by: str = ""
+    submission_attempts: int = 0
+    last_submission_started_ts_ns: int = 0
     status: str = "commanded"
     ack_accepted: bool | None = None
     ack_request_timing_observed: bool = False
@@ -304,9 +345,7 @@ def transaction_state_copy(state: AccountState) -> AccountState:
         decisions=dict(state.decisions),
         target_proposals=dict(state.target_proposals),
         component_target_desires=dict(state.component_target_desires),
-        component_target_desire_sequences=dict(
-            state.component_target_desire_sequences
-        ),
+        component_target_desire_sequences=dict(state.component_target_desire_sequences),
         component_targets=dict(state.component_targets),
         aggregate_targets=dict(state.aggregate_targets),
         risk_decisions=dict(state.risk_decisions),
@@ -339,6 +378,10 @@ class OrderCommand:
     chunk_count: int
     leverage: float = 1.0
     created_ts_ns: int = 0
+    entry_stop_price: float | None = None
+    entry_stop_fraction: float | None = None
+    entry_stop_source: str = ""
+    entry_stop_trigger_by: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,6 +20,7 @@ from .account_contracts import (
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
     TargetBatchResult,
 )
 from .account_kernel import AccountExecutionKernel
@@ -171,6 +172,7 @@ class AccountKernelRuntime:
         risk_policy: AccountRiskPolicy,
         instrument_rules: Mapping[str, InstrumentRules],
         execution_adapter: Any | None,
+        native_protection_policy: NativeDisasterProtectionPolicy | None = None,
         command_symbols: set[str] | frozenset[str] | None = None,
         require_strict_risk_reduction: bool = False,
         request_content_hash: str | None = None,
@@ -192,6 +194,7 @@ class AccountKernelRuntime:
             risk_snapshot=risk_snapshot,
             risk_policy=risk_policy,
             instrument_rules=instrument_rules,
+            native_protection_policy=native_protection_policy,
             command_symbols=command_symbols,
             require_strict_risk_reduction=require_strict_risk_reduction,
             request_content_hash=request_content_hash,

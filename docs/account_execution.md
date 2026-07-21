@@ -47,7 +47,8 @@ and route mismatch still fails closed after acquisition.
 
 ```text
 market data -> strategy target -> durable inbox -> account kernel
-             -> risk decision -> venue/paper command -> observations
+             -> risk decision -> OrderCommand -> SubmissionAttempt (provider only)
+             -> venue/paper observations
              -> canonical journal -> projections, health, notifications
 ```
 
@@ -61,6 +62,35 @@ Lifecycle clocks and strategy protection begin from attributable confirmed
 fills, not accepted targets or decision prices. The demo owner separately
 requires exchange-native disaster protection for reconstructed venue exposure.
 That protection is an account safety control, not a strategy stop or alpha claim.
+
+For Bybit demo, every exposure-increasing `OrderCommand` durably contains a
+provisional Full-position MarkPrice stop before any provider call. The kernel
+derives the outermost price from all same-direction component stop contracts
+using their durable decision references, falls back to the explicit account
+fraction only when no component declares a stop, rounds outward to the verified
+tick, and never moves an existing active native stop inward during scale-in. An
+open reconstructed position without a durable active native stop cannot be
+scaled up. Reduce-only commands carry no entry TP/SL fields.
+
+The adapter sends `stopLoss`, `slTriggerBy=MarkPrice`, `tpslMode=Full`, and
+`slOrderType=Market` in the same Bybit order-create request. This removes the
+old fill-then-install gap, but it is not treated as venue proof: Bybit order
+creation is asynchronous. Private execution/order events and REST position
+truth must still confirm the result. Confirmed fills immediately re-anchor the
+Full stop to exact component fill evidence; a coalesced entry fill and stop
+execution is processed entry-first even when Bybit sends the stop row first.
+An authenticated missing/crossed stop enters the durable breach-and-flat path.
+
+Provider submission has its own durable pre-effect event. Deterministic request
+construction and idempotent, non-exposure leverage negotiation run first; the
+five-second command-age bound is checked both before that setup and again at
+the actual order-create boundary. Exactly one thread may then claim the first
+exposure-increasing attempt. After an ACK-lost or otherwise ambiguous
+order-create, the same entry command is reconciled but never blindly resent.
+An ambiguous leverage response remains safely retryable because it cannot open
+a position. Reconciliation reports an attempted entry with no venue evidence
+as unhealthy. Reduce-only exits may retry because they cannot increase venue
+exposure.
 
 ## Operational profiles
 
@@ -260,6 +290,46 @@ handshake runs. An unavailable/ambiguous socket probe fails health closed but is
 not enough evidence to destroy and recreate a possibly live authenticated
 connection.
 Unsafe root/config changes and authorization drift also fail health closed.
+
+The public L2 stream distinguishes a connection attempt from an open transport
+and an open transport from a subscription's first frame. A generation that
+does not open or deliver its first orderbook frame within 30 seconds is retired;
+a previously active orderbook that is silent for 120 seconds is retired. Every
+callback carries its connection generation. Socket subscription writes and
+recorder I/O run outside the watchdog state lock, their deadlines begin before
+the potentially blocking operation, and a retired generation cannot send a new
+subscription or restore readiness. Public-stream failure blocks market
+readiness and new exposure but does not kill the account owner or disable
+REST/private reconciliation.
+
+Native-protection repair begins from authenticated venue position truth. An
+exact matching Full-position `stopLoss` is adopted without mutation. A missing
+or mismatched stop requires a positive authenticated MarkPrice; when the stop
+threshold is already crossed, the owner records a durable
+`breached_unprotected` latch instead of repeating an invalid mutation. The
+latch survives price recovery and owner restart. Only authenticated proof of
+the matching stop or a complete authenticated position snapshot proving flat
+terminalizes it; reconstructed flatness alone has no such authority. One
+symbol's failure cannot prevent reconciliation of sibling symbols.
+
+A latched breach produces one atomic, revision-dominating zero-target request
+for every accepted or unresolved component on the symbol. Priority FIFO bypass
+and the authenticated-mark market fallback require an exact
+`software_flat_requested` journal authorization whose request hash matches the
+immutable inbox request. The bypass may cross uncommitted work but never a
+prior journal-committed crash-replay boundary. Execution still requires fresh
+same-symbol venue/local quantity agreement and an in-kernel strict
+risk-reduction proof. Startup may remain alive only for a structured
+breach-only reconciliation result so that this recovery can run; every other
+startup mismatch still aborts.
+
+When lifecycle output is downgraded to “local journal ... awaiting venue
+reconciliation,” the notifier stores an exact pending confirmation and emits it
+once position truth becomes healthy. Notification state advances only after
+all lossless Telegram-sized pages are delivered. Account P&L text describes
+the implemented scope—fill reconstruction, separately journaled funding,
+offline venue closed-PnL cross-checking, and unallocated account-netted
+component reductions—rather than promising nonexistent online finalizers.
 
 Do not repair a failed activation by hand-starting units, editing the receipt,
 adding a systemd override, or deleting journal evidence. Preserve the exact

@@ -89,11 +89,14 @@ class MarketCaptureConfig:
     def __post_init__(self) -> None:
         if self.depth not in {1, 50, 200, 1000}:
             raise ValueError("linear orderbook depth must be one of 1, 50, 200, 1000")
-        if min(
-            self.segment_max_bytes,
-            self.fsync_every_records,
-            self.min_free_disk_bytes,
-        ) <= 0:
+        if (
+            min(
+                self.segment_max_bytes,
+                self.fsync_every_records,
+                self.min_free_disk_bytes,
+            )
+            <= 0
+        ):
             raise ValueError("capture storage limits must be positive")
         if type(self.persist_raw_market) is not bool:
             raise ValueError("persist_raw_market must be a boolean")
@@ -206,10 +209,7 @@ class OwnerCaptureReadinessSidecar:
         missing = sorted(expected - set(payload))
         unknown = sorted(set(payload) - expected)
         if missing or unknown:
-            raise ValueError(
-                "owner-capture readiness fields mismatch: "
-                f"missing={missing}, unknown={unknown}"
-            )
+            raise ValueError(f"owner-capture readiness fields mismatch: missing={missing}, unknown={unknown}")
         return cls(**{key: payload[key] for key in expected})
 
 
@@ -269,16 +269,10 @@ class OwnerMarketReadinessSidecar:
         if (
             type(self.required_symbols_sha256) is not str
             or len(self.required_symbols_sha256) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.required_symbols_sha256
-            )
+            or any(character not in "0123456789abcdef" for character in self.required_symbols_sha256)
         ):
             raise ValueError("owner-market required-symbol hash is invalid")
-        if (
-            type(self.required_symbol_count) is not int
-            or self.required_symbol_count <= 0
-        ):
+        if type(self.required_symbol_count) is not int or self.required_symbol_count <= 0:
             raise ValueError("owner-market required-symbol count must be positive")
         if (
             type(self.healthy_symbol_count) is not int
@@ -292,17 +286,10 @@ class OwnerMarketReadinessSidecar:
         if self.all_required_books_healthy != aggregate_healthy:
             raise ValueError("owner-market aggregate health fields disagree")
         if self.all_required_books_healthy:
-            if (
-                type(self.oldest_required_receive_ts_ns) is not int
-                or self.oldest_required_receive_ts_ns <= 0
-            ):
-                raise ValueError(
-                    "healthy owner-market aggregate requires a positive oldest timestamp"
-                )
+            if type(self.oldest_required_receive_ts_ns) is not int or self.oldest_required_receive_ts_ns <= 0:
+                raise ValueError("healthy owner-market aggregate requires a positive oldest timestamp")
         elif self.oldest_required_receive_ts_ns is not None:
-            raise ValueError(
-                "unhealthy owner-market aggregate cannot claim an oldest timestamp"
-            )
+            raise ValueError("unhealthy owner-market aggregate cannot claim an oldest timestamp")
         for label, value in (("bid", self.bid_price), ("ask", self.ask_price)):
             if value is not None and (
                 isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0.0
@@ -338,16 +325,8 @@ def _atomic_write_owner_capture_readiness(
 ) -> Path:
     path = owner_capture_readiness_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
-    )
-    flags = (
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(str(temporary), flags, 0o600)
         try:
@@ -479,11 +458,7 @@ class SegmentedCaptureStore:
         path = directory / f"segment-{index:06d}.jsonl"
         descriptor = os.open(
             str(path),
-            os.O_CREAT
-            | os.O_APPEND
-            | os.O_WRONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         try:
@@ -680,9 +655,7 @@ class SequenceAwareMarketRecorder:
         clock: Clock | None = None,
         owner_invocation_id: str | None = None,
     ) -> None:
-        if owner_invocation_id is not None and (
-            type(owner_invocation_id) is not str or not owner_invocation_id
-        ):
+        if owner_invocation_id is not None and (type(owner_invocation_id) is not str or not owner_invocation_id):
             raise ValueError("owner_invocation_id must be a non-empty string when provided")
         self.config = config or MarketCaptureConfig()
         self.clock = clock or SystemClock()
@@ -693,9 +666,7 @@ class SequenceAwareMarketRecorder:
         self._required_symbols: set[str] = set()
         self.books: dict[str, BookReconstruction] = {}
         self._post_fill_schedules: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._pending_post_fill_markouts: dict[
-            tuple[str, int], PendingPostFillMarkout
-        ] = {}
+        self._pending_post_fill_markouts: dict[tuple[str, int], PendingPostFillMarkout] = {}
         self._lock = threading.RLock()
 
     def register_post_fill_markouts(
@@ -756,14 +727,11 @@ class SequenceAwareMarketRecorder:
             prior = self._post_fill_schedules.get(execution_id)
             if prior is not None:
                 if prior["material"] != material:
-                    raise MarketCaptureError(
-                        f"post-fill execution {execution_id!r} changed schedule facts"
-                    )
+                    raise MarketCaptureError(f"post-fill execution {execution_id!r} changed schedule facts")
                 self._post_fill_schedules.move_to_end(execution_id)
                 return dict(prior["record"])
             accepted = (
-                len(self._pending_post_fill_markouts) + len(normalized_horizons)
-                <= MAX_PENDING_POST_FILL_MARKOUTS
+                len(self._pending_post_fill_markouts) + len(normalized_horizons) <= MAX_PENDING_POST_FILL_MARKOUTS
             )
             registered_ns = max(
                 self.clock.wall_time_ns(),
@@ -787,21 +755,17 @@ class SequenceAwareMarketRecorder:
             }
             if accepted:
                 for horizon_ns in normalized_horizons:
-                    self._pending_post_fill_markouts[(execution_id, horizon_ns)] = (
-                        PendingPostFillMarkout(
-                            execution_id=execution_id,
-                            command_id=command_id,
-                            symbol=symbol,
-                            signed_qty=signed_qty,
-                            fill_price=fill_price,
-                            fill_exchange_ts_ns=fill_exchange_ts_ns,
-                            fill_local_receive_ts_ns=fill_local_receive_ts_ns,
-                            target_horizon_ns=horizon_ns,
-                            target_local_receive_ts_ns=(
-                                fill_local_receive_ts_ns + horizon_ns
-                            ),
-                            max_lateness_ns=max_lateness_ns,
-                        )
+                    self._pending_post_fill_markouts[(execution_id, horizon_ns)] = PendingPostFillMarkout(
+                        execution_id=execution_id,
+                        command_id=command_id,
+                        symbol=symbol,
+                        signed_qty=signed_qty,
+                        fill_price=fill_price,
+                        fill_exchange_ts_ns=fill_exchange_ts_ns,
+                        fill_local_receive_ts_ns=fill_local_receive_ts_ns,
+                        target_horizon_ns=horizon_ns,
+                        target_local_receive_ts_ns=(fill_local_receive_ts_ns + horizon_ns),
+                        max_lateness_ns=max_lateness_ns,
                     )
             self._trim_post_fill_schedule_cache()
             return dict(schedule)
@@ -811,10 +775,7 @@ class SequenceAwareMarketRecorder:
 
         if len(self._post_fill_schedules) <= MAX_RECENT_POST_FILL_SCHEDULES:
             return
-        pending_execution_ids = {
-            execution_id
-            for execution_id, _horizon_ns in self._pending_post_fill_markouts
-        }
+        pending_execution_ids = {execution_id for execution_id, _horizon_ns in self._pending_post_fill_markouts}
         for execution_id in tuple(self._post_fill_schedules):
             if len(self._post_fill_schedules) <= MAX_RECENT_POST_FILL_SCHEDULES:
                 break
@@ -823,16 +784,10 @@ class SequenceAwareMarketRecorder:
 
     def pending_post_fill_symbols(self) -> set[str]:
         with self._lock:
-            return {
-                task.symbol for task in self._pending_post_fill_markouts.values()
-            }
+            return {task.symbol for task in self._pending_post_fill_markouts.values()}
 
     def set_required_symbols(self, symbols: Iterable[str]) -> None:
-        required = {
-            str(symbol).strip().upper()
-            for symbol in symbols
-            if str(symbol).strip()
-        }
+        required = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
         if not required:
             raise ValueError("owner-market required symbols must not be empty")
         with self._lock:
@@ -908,21 +863,12 @@ class SequenceAwareMarketRecorder:
                 continue
             required_bids = required_state.bids
             required_asks = required_state.asks
-            if (
-                not required_bids
-                or not required_asks
-                or max(required_bids) >= min(required_asks)
-            ):
+            if not required_bids or not required_asks or max(required_bids) >= min(required_asks):
                 continue
             healthy_states.append(required_state)
-        all_required_books_healthy = (
-            bool(required_symbols)
-            and len(healthy_states) == len(required_symbols)
-        )
+        all_required_books_healthy = bool(required_symbols) and len(healthy_states) == len(required_symbols)
         oldest_required_receive_ts_ns = (
-            min(item.local_receive_ts_ns for item in healthy_states)
-            if all_required_books_healthy
-            else None
+            min(item.local_receive_ts_ns for item in healthy_states) if all_required_books_healthy else None
         )
         sidecar = OwnerMarketReadinessSidecar(
             owner_invocation_id=invocation_id,
@@ -934,9 +880,7 @@ class SequenceAwareMarketRecorder:
             book_healthy=book_healthy,
             bid_price=bid_price,
             ask_price=ask_price,
-            required_symbols_sha256=hashlib.sha256(
-                canonical_json({"symbols": sorted(required_symbols)})
-            ).hexdigest(),
+            required_symbols_sha256=hashlib.sha256(canonical_json({"symbols": sorted(required_symbols)})).hexdigest(),
             required_symbol_count=len(required_symbols),
             healthy_symbol_count=len(healthy_states),
             all_required_books_healthy=all_required_books_healthy,
@@ -961,8 +905,7 @@ class SequenceAwareMarketRecorder:
         last_publish_ns = self._last_readiness_publish_monotonic_ns
         if (
             last_publish_ns is not None
-            and now_monotonic_ns - last_publish_ns
-            < OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS
+            and now_monotonic_ns - last_publish_ns < OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS
         ):
             return
         try:
@@ -1097,8 +1040,7 @@ class SequenceAwareMarketRecorder:
             (
                 task
                 for task in self._pending_post_fill_markouts.values()
-                if task.symbol == symbol
-                and task.target_local_receive_ts_ns <= local_ns
+                if task.symbol == symbol and task.target_local_receive_ts_ns <= local_ns
             ),
             key=lambda task: (
                 task.target_local_receive_ts_ns,
@@ -1268,9 +1210,7 @@ class SequenceAwareMarketRecorder:
         with self._lock:
             state = self.books.get(symbol.upper())
             book = (
-                state.snapshot(depth=depth or self.config.depth)
-                if state is not None and state.has_snapshot
-                else None
+                state.snapshot(depth=depth or self.config.depth) if state is not None and state.has_snapshot else None
             )
             return book, self.clock.wall_time_ns()
 
@@ -1314,9 +1254,7 @@ class BybitRawPublicMarketStream:
         if not math.isfinite(watchdog_interval_seconds) or watchdog_interval_seconds <= 0.0:
             raise ValueError("watchdog_interval_seconds must be positive")
         if watchdog_interval_seconds >= stale_reconnect_seconds:
-            raise ValueError(
-                "watchdog_interval_seconds must be less than stale_reconnect_seconds"
-            )
+            raise ValueError("watchdog_interval_seconds must be less than stale_reconnect_seconds")
         self.include_public_trades = include_public_trades
         self.on_market_message = on_message
         self.reconnect_seconds = reconnect_seconds
@@ -1331,10 +1269,22 @@ class BybitRawPublicMarketStream:
         self._monotonic = monotonic_clock or time.monotonic
         self._symbols: set[str] = set()
         self._socket: Any | None = None
+        # ``WebSocketApp.run_forever`` can block before invoking ``on_open``.
+        # Publishing the socket object alone is therefore not evidence that it
+        # is writable or that any subscription timer exists.  Track the
+        # transport-open boundary and the connection attempt independently so
+        # the watchdog can rebuild a hung pre-open connection.
+        self._socket_open = False
+        self._connection_started_monotonic: float | None = None
+        self._connection_generation = 0
+        self._active_connection_generation: int | None = None
         self._thread: threading.Thread | None = None
         self._watchdog_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.RLock()
+        # Preserve subscription send order without coupling potentially
+        # blocking socket I/O to the state lock used by the watchdog.
+        self._send_lock = threading.Lock()
         self._subscription_started_monotonic: dict[str, float] = {}
         self._last_orderbook_message_monotonic: dict[str, float] = {}
         if websocket_factory is None:
@@ -1348,6 +1298,9 @@ class BybitRawPublicMarketStream:
             return None
         detached = self._socket
         self._socket = None
+        self._socket_open = False
+        self._connection_started_monotonic = None
+        self._active_connection_generation = None
         self._subscription_started_monotonic.clear()
         self._last_orderbook_message_monotonic.clear()
         return detached
@@ -1360,24 +1313,40 @@ class BybitRawPublicMarketStream:
                 topics.append(f"publicTrade.{symbol}")
         return topics
 
-    def _send(self, operation: str, symbols: Iterable[str]) -> bool:
+    def _send(
+        self,
+        operation: str,
+        symbols: Iterable[str],
+        *,
+        expected_socket: Any,
+    ) -> bool:
         topics = self._topics(symbols)
-        socket = self._socket
-        if not topics or socket is None:
+        if not topics:
             return False
+        with self._lock:
+            if self._socket is not expected_socket or not self._socket_open:
+                return False
         try:
-            for index in range(0, len(topics), 10):
-                socket.send(
-                    json.dumps(
-                        {"op": operation, "args": topics[index : index + 10]}
+            with self._send_lock:
+                with self._lock:
+                    if self._socket is not expected_socket or not self._socket_open:
+                        return False
+                for index in range(0, len(topics), 10):
+                    expected_socket.send(
+                        json.dumps(
+                            {
+                                "op": operation,
+                                "args": topics[index : index + 10],
+                            }
+                        )
                     )
-                )
         except Exception:  # noqa: BLE001 - a closed socket must enter reconnect
             # ``run_forever`` can still be unwinding after its transport has
             # closed.  A concurrent symbol refresh must retain the desired set
             # for the next ``on_open`` instead of killing the account owner.
-            self._detach_socket_locked(socket)
-            close = getattr(socket, "close", None)
+            with self._lock:
+                self._detach_socket_locked(expected_socket)
+            close = getattr(expected_socket, "close", None)
             if callable(close):
                 try:
                     close()
@@ -1397,49 +1366,115 @@ class BybitRawPublicMarketStream:
         with self._lock:
             adds = desired - self._symbols
             removes = self._symbols - desired
-            self._send("unsubscribe", removes)
-            subscribed = self._send("subscribe", adds)
             for symbol in removes:
                 self._subscription_started_monotonic.pop(symbol, None)
                 self._last_orderbook_message_monotonic.pop(symbol, None)
-            if subscribed and self._socket is not None:
+            socket = self._socket if self._socket_open else None
+            if socket is not None:
+                # Start the bound before network I/O. A send that hangs or a
+                # subscribe that never yields a frame must both be reconnectable.
                 subscribed_at = self._monotonic()
                 for symbol in adds:
                     self._subscription_started_monotonic[symbol] = subscribed_at
                     self._last_orderbook_message_monotonic.pop(symbol, None)
             self._symbols = desired
+        if socket is None:
+            return
+        self._send("unsubscribe", removes, expected_socket=socket)
+        self._send("subscribe", adds, expected_socket=socket)
 
-    def _on_open(self, socket: Any) -> None:
+    def _on_open(
+        self,
+        socket: Any,
+        *,
+        generation: int | None = None,
+    ) -> None:
         close_immediately = False
         with self._lock:
-            if self._stop.is_set():
+            if self._stop.is_set() or (
+                generation is not None
+                and (self._active_connection_generation != generation or self._socket is not socket)
+            ):
                 close_immediately = True
             else:
                 self._socket = socket
+                self._socket_open = True
+                self._connection_started_monotonic = None
                 subscribed_at = self._monotonic()
-                self._subscription_started_monotonic = {
-                    symbol: subscribed_at for symbol in self._symbols
-                }
+                self._subscription_started_monotonic = {symbol: subscribed_at for symbol in self._symbols}
                 self._last_orderbook_message_monotonic.clear()
-                self._send("subscribe", self._symbols)
+                symbols = tuple(self._symbols)
         if close_immediately:
             close = getattr(socket, "close", None)
             if callable(close):
                 close()
+            return
+        self._send("subscribe", symbols, expected_socket=socket)
 
-    def _on_message(self, socket: Any, raw: str | bytes) -> None:
+    def _on_message(
+        self,
+        socket: Any,
+        raw: str | bytes,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        with self._lock:
+            if (
+                self._socket is not socket
+                or not self._socket_open
+                or (generation is not None and self._active_connection_generation != generation)
+            ):
+                return
         local_ns = time.time_ns()
         try:
             message = json.loads(raw)
             if isinstance(message, Mapping) and message.get("topic"):
-                # Capture receive time before parsing/storage work.
-                self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
                 topic = str(message.get("topic") or "")
-                if topic.startswith("orderbook."):
-                    symbol = topic.rsplit(".", 1)[-1].upper()
-                    with self._lock:
-                        if self._socket is socket and symbol in self._symbols:
-                            self._last_orderbook_message_monotonic[symbol] = self._monotonic()
+                symbol = ""
+                prior_frame_at: float | None = None
+                observed_at: float | None = None
+                with self._lock:
+                    # The watchdog may retire a generation while JSON parsing
+                    # is in flight. The lock orders frame acceptance against
+                    # socket retirement, but the external recorder callback
+                    # must run outside it: disk I/O must never prevent the
+                    # watchdog from detaching a hung generation.
+                    if (
+                        self._socket is not socket
+                        or not self._socket_open
+                        or (generation is not None and self._active_connection_generation != generation)
+                    ):
+                        return
+                    if topic.startswith("orderbook."):
+                        symbol = topic.rsplit(".", 1)[-1].upper()
+                        if symbol in self._symbols:
+                            prior_frame_at = self._last_orderbook_message_monotonic.get(symbol)
+                            observed_at = self._monotonic()
+                            self._last_orderbook_message_monotonic[symbol] = observed_at
+                try:
+                    # Capture receive time before parsing/storage work.
+                    self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
+                except Exception:
+                    # A callback failure did not produce usable market state.
+                    # Roll back only our own heartbeat; a later successful
+                    # frame (if callbacks ever become concurrent) wins.
+                    if symbol and observed_at is not None:
+                        with self._lock:
+                            if (
+                                self._socket is socket
+                                and self._socket_open
+                                and (
+                                    generation is None
+                                    or self._active_connection_generation == generation
+                                )
+                                and self._last_orderbook_message_monotonic.get(symbol)
+                                == observed_at
+                            ):
+                                if prior_frame_at is None:
+                                    self._last_orderbook_message_monotonic.pop(symbol, None)
+                                else:
+                                    self._last_orderbook_message_monotonic[symbol] = prior_frame_at
+                    raise
         except Exception:  # noqa: BLE001 - malformed public frames must not kill reconnect loop
             _logger.exception("raw Bybit public message handling failed")
 
@@ -1457,24 +1492,37 @@ class BybitRawPublicMarketStream:
             if self._stop.is_set() or self._socket is None:
                 return ()
             now = self._monotonic()
-            overdue: list[str] = []
-            for symbol in self._symbols:
-                started_at = self._subscription_started_monotonic.get(symbol)
-                if started_at is None:
-                    continue
-                last_frame_at = self._last_orderbook_message_monotonic.get(symbol)
-                if last_frame_at is None:
-                    if now - started_at >= self.first_frame_reconnect_seconds:
+            if not self._socket_open:
+                started_at = self._connection_started_monotonic
+                if started_at is None or now - started_at < self.first_frame_reconnect_seconds:
+                    return ()
+                stale = tuple(sorted(self._symbols))
+                if not stale:
+                    return ()
+                socket = self._detach_socket_locked()
+                stale_mode = "connection_open_timeout"
+            else:
+                stale_mode = "subscription_stale"
+                overdue: list[str] = []
+                for symbol in self._symbols:
+                    started_at = self._subscription_started_monotonic.get(symbol)
+                    if started_at is None:
+                        continue
+                    last_frame_at = self._last_orderbook_message_monotonic.get(symbol)
+                    if last_frame_at is None:
+                        if now - started_at >= self.first_frame_reconnect_seconds:
+                            overdue.append(symbol)
+                    elif now - last_frame_at >= self.stale_reconnect_seconds:
                         overdue.append(symbol)
-                elif now - last_frame_at >= self.stale_reconnect_seconds:
-                    overdue.append(symbol)
-            stale = tuple(sorted(overdue))
-            if not stale:
-                return ()
-            socket = self._detach_socket_locked()
+                stale = tuple(sorted(overdue))
+                if not stale:
+                    return ()
+                socket = self._detach_socket_locked()
         _logger.warning(
-            "Bybit public orderbook subscription stale; reconnecting socket: "
-            "symbols=%s first_frame_threshold_seconds=%.1f silent_threshold_seconds=%.1f",
+            "Bybit public orderbook connection unhealthy; reconnecting socket: "
+            "mode=%s symbols=%s first_frame_threshold_seconds=%.1f "
+            "silent_threshold_seconds=%.1f",
+            stale_mode,
             ",".join(stale),
             self.first_frame_reconnect_seconds,
             self.stale_reconnect_seconds,
@@ -1496,13 +1544,40 @@ class BybitRawPublicMarketStream:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            with self._lock:
+                self._connection_generation += 1
+                generation = self._connection_generation
+
+            def on_open(opened: Any, *, _generation: int = generation) -> None:
+                self._on_open(opened, generation=_generation)
+
+            def on_message(
+                opened: Any,
+                raw: str | bytes,
+                *,
+                _generation: int = generation,
+            ) -> None:
+                self._on_message(opened, raw, generation=_generation)
+
             socket = self._factory(
                 self.url,
-                on_open=self._on_open,
-                on_message=self._on_message,
+                on_open=on_open,
+                on_message=on_message,
             )
+            close_before_run = False
             with self._lock:
-                self._socket = socket
+                if self._stop.is_set():
+                    close_before_run = True
+                else:
+                    self._socket = socket
+                    self._socket_open = False
+                    self._connection_started_monotonic = self._monotonic()
+                    self._active_connection_generation = generation
+            if close_before_run:
+                close = getattr(socket, "close", None)
+                if callable(close):
+                    close()
+                break
             try:
                 socket.run_forever(ping_interval=20, ping_timeout=10)
             except Exception:  # noqa: BLE001
@@ -1583,12 +1658,7 @@ def symbols_from_file(
         if not isinstance(value, list):
             raise ValueError("symbol JSON must be a list or {'symbols': [...]} object")
         return {str(symbol).upper() for symbol in value if symbol}
-    return {
-        token.upper()
-        for line in text.splitlines()
-        for token in line.replace(",", " ").split()
-        if token
-    }
+    return {token.upper() for line in text.splitlines() for token in line.replace(",", " ").split() if token}
 
 
 def operational_market_symbols(
@@ -1609,11 +1679,7 @@ def operational_market_symbols(
     Symbols with actual account work remain subscribed until that work clears.
     """
 
-    allowed = {
-        str(symbol).strip().upper()
-        for symbol in allowlist
-        if str(symbol).strip()
-    }
+    allowed = {str(symbol).strip().upper() for symbol in allowlist if str(symbol).strip()}
     if not allowed:
         raise ValueError("operational market allowlist must not be empty")
     required = {"BTCUSDT" if "BTCUSDT" in allowed else min(allowed)}
@@ -1625,11 +1691,7 @@ def operational_market_symbols(
         convergence,
         markouts,
     ):
-        required.update(
-            str(symbol).strip().upper()
-            for symbol in symbols
-            if str(symbol).strip()
-        )
+        required.update(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
     return required
 
 

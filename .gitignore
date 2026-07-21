@@ -21,16 +21,6 @@ data/
 reports/*
 !reports/autonomous-improvement/
 !reports/autonomous-improvement/**
-# V3 research: summaries, tables, and manifests are committed; heavy parquet
-# and full render outputs stay local with hashes recorded in each manifest.json.
-!reports/strategy-research-v3/
-reports/strategy-research-v3/**/*.parquet
-reports/strategy-research-v3/*/*/render-*/
-# Tail-risk program: receipts, manifests, and small tables are committed;
-# heavy parquet/render outputs stay local with hashes in each manifest.
-!reports/tail-risk-program/
-reports/tail-risk-program/**/*.parquet
-reports/tail-risk-program/**/render-*/
 backtest-runs/
 graphify-out/cache/
 graphify-out/manifest.json

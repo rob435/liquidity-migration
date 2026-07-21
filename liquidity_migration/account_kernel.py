@@ -42,9 +42,11 @@ from .account_contracts import (
     AccountRiskSnapshot,
     AccountState,
     AccountTransitionError,
+    AmbiguousSubmissionAttemptError,
     DesiredTarget,
     InstrumentRules,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
     OrderCommand,
     OrderState,
     PositionState,
@@ -54,6 +56,7 @@ from .account_contracts import (
 from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, DeterministicIds, SystemClock
+from .native_protection_math import round_native_stop
 from .storage import exclusive_file_lock
 
 
@@ -62,9 +65,7 @@ ACCOUNT_JOURNAL_FILENAME = "events.jsonl"
 ACCOUNT_JOURNAL_LOCK_FILENAME = "journal.lock"
 ACCOUNT_TRANSACTIONS_DIRECTORY = "transactions"
 _EVENT_NAMESPACE = uuid.UUID("16cac165-fc18-4d5b-b0f7-44bdf47bbac9")
-_ACCOUNT_TRANSACTION_FILENAME = re.compile(
-    r"(?P<first>[0-9]{20})-(?P<last>[0-9]{20})-(?P<hash>[0-9a-f]{16})[.]json"
-)
+_ACCOUNT_TRANSACTION_FILENAME = re.compile(r"(?P<first>[0-9]{20})-(?P<last>[0-9]{20})-(?P<hash>[0-9a-f]{16})[.]json")
 
 
 def account_journal_path(root: str | Path) -> Path:
@@ -169,9 +170,7 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
             )
         )
         if modeled_terminal_qty <= tolerance or modeled_terminal_qty > abs(order.signed_qty) + tolerance:
-            raise AccountTransitionError(
-                f"invalid modeled terminal cumulative quantity for command {command_id}"
-            )
+            raise AccountTransitionError(f"invalid modeled terminal cumulative quantity for command {command_id}")
     if abs(next_filled - order.signed_qty) <= tolerance:
         order.status = "filled"
     elif modeled_terminal_qty and abs(next_filled) >= modeled_terminal_qty - tolerance:
@@ -277,14 +276,100 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             raise AccountTransitionError("order command requires command_id")
         if command_id in state.orders:
             raise AccountTransitionError(f"duplicate order command {command_id}")
+        reduce_only = bool(payload.get("reduce_only"))
+        raw_entry_stop = payload.get("entry_stop_price")
+        entry_stop_price = None if raw_entry_stop is None else _finite(raw_entry_stop, label="command entry_stop_price")
+        raw_entry_fraction = payload.get("entry_stop_fraction")
+        entry_stop_fraction = (
+            None if raw_entry_fraction is None else _finite(raw_entry_fraction, label="command entry_stop_fraction")
+        )
+        entry_stop_source = str(payload.get("entry_stop_source") or "")
+        entry_stop_trigger_by = str(payload.get("entry_stop_trigger_by") or "")
+        has_entry_protection = any(
+            value not in (None, "")
+            for value in (
+                entry_stop_price,
+                entry_stop_fraction,
+                entry_stop_source,
+                entry_stop_trigger_by,
+            )
+        )
+        if reduce_only and has_entry_protection:
+            raise AccountTransitionError("reduce-only command cannot carry entry protection")
+        signed_qty = _finite(payload.get("signed_qty"), label="command signed_qty")
+        reference_price = _finite(
+            payload.get("reference_price"),
+            label="command reference_price",
+        )
+        if has_entry_protection:
+            if entry_stop_price is None:
+                raise AccountTransitionError("protected command entry_stop_price is required")
+            if entry_stop_price <= 0.0:
+                raise AccountTransitionError("command entry_stop_price must be positive")
+            if entry_stop_fraction is None or not 0.0 < entry_stop_fraction < 1.0:
+                raise AccountTransitionError("protected command entry_stop_fraction must be in (0, 1)")
+            if not entry_stop_source:
+                raise AccountTransitionError("protected command entry_stop_source is required")
+            if entry_stop_trigger_by != "MarkPrice":
+                raise AccountTransitionError("protected command requires MarkPrice triggering")
+            if signed_qty > 0.0 and entry_stop_price >= reference_price:
+                raise AccountTransitionError(
+                    "long protected command stop must be below its reference price"
+                )
+            if signed_qty < 0.0 and entry_stop_price <= reference_price:
+                raise AccountTransitionError(
+                    "short protected command stop must be above its reference price"
+                )
+        raw_created_ts_ns = payload.get("created_ts_ns")
+        created_ts_ns = int(raw_created_ts_ns or event.wall_ts_ns)
+        if created_ts_ns <= 0:
+            raise AccountTransitionError("order command requires positive created_ts_ns")
+        if raw_created_ts_ns is not None and created_ts_ns != event.wall_ts_ns:
+            raise AccountTransitionError(
+                "order command created_ts_ns differs from its event boundary"
+            )
         state.orders[command_id] = OrderState(
             command_id=command_id,
             batch_id=str(payload.get("batch_id") or event.correlation_id),
             symbol=event.symbol,
-            signed_qty=_finite(payload.get("signed_qty"), label="command signed_qty"),
-            reduce_only=bool(payload.get("reduce_only")),
+            signed_qty=signed_qty,
+            reduce_only=reduce_only,
+            created_ts_ns=created_ts_ns,
+            command_sequence=event.sequence,
+            entry_stop_price=entry_stop_price,
+            entry_stop_fraction=entry_stop_fraction,
+            entry_stop_source=entry_stop_source,
+            entry_stop_trigger_by=entry_stop_trigger_by,
         )
         state.working_order_ids.add(command_id)
+    elif event_type is AccountEventType.SUBMISSION_ATTEMPT:
+        command_id = str(payload.get("command_id") or "")
+        if command_id not in state.orders:
+            raise AccountTransitionError(
+                f"submission attempt references unknown command {command_id!r}"
+            )
+        order = state.orders[command_id]
+        if order.status != "commanded":
+            raise AccountTransitionError(
+                f"submission attempt for non-commanded order {command_id}"
+            )
+        attempt = int(payload.get("attempt") or 0)
+        if attempt != order.submission_attempts + 1:
+            raise AccountTransitionError(
+                f"submission attempt sequence changed for command {command_id}"
+            )
+        started_ts_ns = int(payload.get("local_start_ts_ns") or 0)
+        if started_ts_ns <= 0:
+            raise AccountTransitionError("submission attempt requires positive start time")
+        if started_ts_ns != event.wall_ts_ns:
+            raise AccountTransitionError(
+                "submission attempt start time differs from its event boundary"
+            )
+        adapter_name = str(payload.get("adapter_name") or "")
+        if not adapter_name:
+            raise AccountTransitionError("submission attempt requires adapter_name")
+        order.submission_attempts = attempt
+        order.last_submission_started_ts_ns = started_ts_ns
     elif event_type is AccountEventType.ACK:
         command_id = str(payload.get("command_id") or "")
         if command_id not in state.orders:
@@ -469,9 +554,7 @@ def _read_transaction_event_bytes(
 def _read_transaction_events(root: str | Path) -> list[AccountEvent] | None:
     directory = account_transactions_path(root)
     paths = sorted(directory.glob("*.json")) if directory.is_dir() else []
-    return _read_transaction_event_bytes(
-        [(str(path), path.read_bytes()) for path in paths]
-    )
+    return _read_transaction_event_bytes([(str(path), path.read_bytes()) for path in paths])
 
 
 def _verify_account_events(events: Sequence[AccountEvent], *, verify: bool) -> list[AccountEvent]:
@@ -539,17 +622,11 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
     directory = account_transactions_path(root)
     try:
         with os.scandir(directory) as entries:
-            names = sorted(
-                entry.name
-                for entry in entries
-                if entry.name.endswith(".json")
-            )
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
     except FileNotFoundError:
         names = []
     except NotADirectoryError as exc:
-        raise AccountJournalIntegrityError(
-            f"account transaction path is not a directory: {directory}"
-        ) from exc
+        raise AccountJournalIntegrityError(f"account transaction path is not a directory: {directory}") from exc
 
     if not names:
         projection = account_journal_path(root)
@@ -565,20 +642,15 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
     for name in names:
         match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
         if match is None:
-            raise AccountJournalIntegrityError(
-                f"invalid account transaction filename: {name}"
-            )
+            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
         first_sequence = int(match.group("first"))
         last_sequence = int(match.group("last"))
         if first_sequence != expected_first:
             raise AccountJournalIntegrityError(
-                "account transaction filename sequence gap: "
-                f"got {first_sequence}, expected {expected_first}"
+                f"account transaction filename sequence gap: got {first_sequence}, expected {expected_first}"
             )
         if last_sequence < first_sequence:
-            raise AccountJournalIntegrityError(
-                f"account transaction filename has an inverted range: {name}"
-            )
+            raise AccountJournalIntegrityError(f"account transaction filename has an inverted range: {name}")
         expected_first = last_sequence + 1
         latest_match = match
 
@@ -593,32 +665,20 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
             require_single_link=True,
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        raise AccountJournalIntegrityError(
-            f"cannot read latest account transaction {latest_path}: {exc}"
-        ) from exc
-    transaction_events = _read_transaction_event_bytes(
-        [(str(snapshot.path), snapshot.data)]
-    )
+        raise AccountJournalIntegrityError(f"cannot read latest account transaction {latest_path}: {exc}") from exc
+    transaction_events = _read_transaction_event_bytes([(str(snapshot.path), snapshot.data)])
     assert transaction_events is not None
     try:
         payload = json.loads(snapshot.data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover - parsed above
-        raise AccountJournalIntegrityError(
-            f"invalid latest account transaction {latest_path}: {exc}"
-        ) from exc
+        raise AccountJournalIntegrityError(f"invalid latest account transaction {latest_path}: {exc}") from exc
     transaction_hash = str(payload.get("transaction_hash") or "")
     if transaction_hash[:16] != latest_match.group("hash"):
-        raise AccountJournalIntegrityError(
-            f"account transaction filename hash mismatch: {latest_name}"
-        )
+        raise AccountJournalIntegrityError(f"account transaction filename hash mismatch: {latest_name}")
     if transaction_events[0].sequence != int(latest_match.group("first")):
-        raise AccountJournalIntegrityError(
-            f"account transaction filename first sequence mismatch: {latest_name}"
-        )
+        raise AccountJournalIntegrityError(f"account transaction filename first sequence mismatch: {latest_name}")
     if transaction_events[-1].sequence != int(latest_match.group("last")):
-        raise AccountJournalIntegrityError(
-            f"account transaction filename last sequence mismatch: {latest_name}"
-        )
+        raise AccountJournalIntegrityError(f"account transaction filename last sequence mismatch: {latest_name}")
 
     account_id = transaction_events[0].account_id
     previous: AccountEvent | None = None
@@ -629,21 +689,16 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
         _validate_event_shape(event)
         if event.sequence != expected_sequence:
             raise AccountJournalIntegrityError(
-                "account sequence gap inside latest transaction: "
-                f"got {event.sequence}, expected {expected_sequence}"
+                f"account sequence gap inside latest transaction: got {event.sequence}, expected {expected_sequence}"
             )
         if event.account_id != account_id:
-            raise AccountJournalIntegrityError(
-                "latest account transaction contains multiple account ids"
-            )
+            raise AccountJournalIntegrityError("latest account transaction contains multiple account ids")
         if previous is not None and event.prev_event_hash != previous.event_hash:
             raise AccountJournalIntegrityError(
                 f"account hash-chain break inside latest transaction at sequence {event.sequence}"
             )
         if event.event_hash != _event_hash(event.to_dict()):
-            raise AccountJournalIntegrityError(
-                f"account event hash mismatch at sequence {event.sequence}"
-            )
+            raise AccountJournalIntegrityError(f"account event hash mismatch at sequence {event.sequence}")
         previous = event
     return transaction_events[-1]
 
@@ -829,9 +884,7 @@ class AccountJournal:
         # retains isolated prospective state and prior-state reader visibility.
         # The opt-in path is safe only with one process/thread and an infallible
         # in-memory transaction buffer; it carries no rollback/durability claim.
-        self._unsafe_single_process_inplace_research = bool(
-            unsafe_single_process_inplace_research
-        )
+        self._unsafe_single_process_inplace_research = bool(unsafe_single_process_inplace_research)
         if not account_id:
             raise ValueError("account_id is required")
 
@@ -943,17 +996,12 @@ class AccountJournal:
                 )
             transaction_count = 0
             if storage_signature is not None and storage_signature[0] == "transactions":
-                if (
-                    len(storage_signature) != 4
-                    or type(storage_signature[2]) is not int
-                    or storage_signature[2] <= 0
-                ):
+                if len(storage_signature) != 4 or type(storage_signature[2]) is not int or storage_signature[2] <= 0:
                     raise AccountJournalIntegrityError("invalid cached account transaction signature")
                 transaction_count = storage_signature[2]
             elif existing:
                 raise AccountJournalIntegrityError(
-                    "account events exist without authoritative transaction segments; "
-                    "reset the account root explicitly"
+                    "account events exist without authoritative transaction segments; reset the account root explicitly"
                 )
             if self._unsafe_single_process_inplace_research:
                 if not trusted_readonly_builder:
@@ -964,11 +1012,7 @@ class AccountJournal:
                 builder_state = prospective_state
             else:
                 prospective_state = transaction_state_copy(committed_state)
-                builder_state = (
-                    prospective_state
-                    if trusted_readonly_builder
-                    else copy.deepcopy(committed_state)
-                )
+                builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
             specs = list(builder(builder_state))
             normalized = [_normalized_spec(spec) for spec in specs]
             pending_by_id: dict[str, AccountEvent] = {}
@@ -1066,9 +1110,7 @@ class AccountJournal:
                 # transaction and published cache still agree on committed truth.
                 _append_jsonl_projection(
                     self.root,
-                    expected_previous_hash=(
-                        existing_last_event_hash if existing_count else ""
-                    ),
+                    expected_previous_hash=(existing_last_event_hash if existing_count else ""),
                     appended=appended,
                 )
             return appended
@@ -1173,6 +1215,151 @@ def _aggregate_target_quantities(
     return {symbol: math.fsum(quantities) for symbol, quantities in by_symbol.items()}
 
 
+def _native_entry_stop_spec(
+    *,
+    state: AccountState,
+    updates: Mapping[str, Mapping[str, Any]],
+    symbol: str,
+    target_signed_qty: float,
+    reference_price: float,
+    rules: InstrumentRules,
+    policy: NativeDisasterProtectionPolicy,
+) -> tuple[float, float, str]:
+    """Derive the durable provisional Full-position stop for an entry.
+
+    The exact native stop remains fill anchored.  Before a fill exists, every
+    exposure-increasing venue command instead carries an outward-rounded stop
+    from each component's durable decision reference.  The outermost explicit
+    component stop keeps this account-wide seatbelt outside each component's
+    software stop; an already-active native stop is an additional outward
+    bound during scale-in.  The account fallback is used only when no
+    same-direction component declares a stop.
+    """
+
+    if not math.isfinite(target_signed_qty) or target_signed_qty == 0.0:
+        raise ValueError("missing_target_side")
+    same_direction = [
+        (target_key, payload)
+        for target_key, payload in updates.items()
+        if str(payload.get("symbol") or "").upper() == symbol
+        and _finite(
+            payload.get("signed_qty"),
+            label=f"{target_key} native stop signed_qty",
+        )
+        * target_signed_qty
+        > 0.0
+    ]
+    if not same_direction:
+        raise ValueError("missing_component_owner")
+    explicit: list[tuple[float, float]] = []
+    for target_key, payload in same_direction:
+        metadata = payload.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("invalid_component_metadata")
+        raw_fraction = metadata.get("stop_loss_pct")
+        if raw_fraction is None or raw_fraction == "":
+            continue
+        if isinstance(raw_fraction, bool):
+            raise ValueError("invalid_stop_fraction")
+        try:
+            fraction = float(str(raw_fraction))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_stop_fraction") from exc
+        if not math.isfinite(fraction) or not 0.0 < fraction < 1.0:
+            raise ValueError("invalid_stop_fraction")
+        component_reference = _finite(
+            payload.get("reference_price"),
+            label=f"{target_key} native stop reference_price",
+        )
+        if component_reference <= 0.0:
+            raise ValueError("invalid_component_reference")
+        explicit.append((fraction, component_reference))
+    if explicit:
+        fraction = max(item[0] for item in explicit)
+        raw_component_stops = [
+            component_reference
+            * (
+                1.0 - component_fraction
+                if target_signed_qty > 0.0
+                else 1.0 + component_fraction
+            )
+            for component_fraction, component_reference in explicit
+        ]
+        raw_stop = (
+            min(raw_component_stops)
+            if target_signed_qty > 0.0
+            else max(raw_component_stops)
+        )
+        source = "decision_reference_outermost_component_fraction"
+    else:
+        fraction = float(policy.fallback_stop_fraction)
+        raw_stop = reference_price * (
+            1.0 - fraction if target_signed_qty > 0.0 else 1.0 + fraction
+        )
+        source = "decision_reference_account_fallback_fraction"
+    try:
+        stop = round_native_stop(
+            raw_stop,
+            rules.tick_size,
+            long_position=target_signed_qty > 0.0,
+        )
+    except ValueError as exc:
+        raise ValueError("invalid_stop_geometry") from exc
+
+    existing_position = state.positions.get(symbol, PositionState()).signed_qty
+    if existing_position * target_signed_qty > 0.0:
+        active_native = [
+            (key, protection)
+            for key, protection in state.protections.items()
+            if str(protection.get("status") or "") == "active"
+            and isinstance(protection.get("metadata") or {}, Mapping)
+            and bool((protection.get("metadata") or {}).get("native_exchange"))
+            and str(
+                (protection.get("metadata") or {}).get("symbol")
+                or protection.get("symbol")
+                or symbol
+            ).upper()
+            == symbol
+        ]
+        if not active_native:
+            raise ValueError("missing_existing_native_protection")
+        _active_key, active_payload = max(
+            active_native,
+            key=lambda item: (
+                int(item[1].get("local_receive_ts_ns") or 0),
+                item[0],
+            ),
+        )
+        active_metadata = active_payload.get("metadata") or {}
+        raw_active_signed_qty = active_metadata.get("signed_qty")
+        raw_active_stop = active_payload.get("stop_price")
+        if raw_active_signed_qty is None or raw_active_stop is None:
+            raise ValueError("invalid_existing_native_protection")
+        try:
+            active_signed_qty = float(raw_active_signed_qty)
+            active_stop = float(raw_active_stop)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_existing_native_protection") from exc
+        if (
+            not math.isfinite(active_signed_qty)
+            or not math.isfinite(active_stop)
+            or active_signed_qty * existing_position <= 0.0
+            or active_stop <= 0.0
+            or str(active_metadata.get("trigger_by") or "") != "MarkPrice"
+        ):
+            raise ValueError("invalid_existing_native_protection")
+        stop = min(stop, active_stop) if target_signed_qty > 0.0 else max(stop, active_stop)
+        source += "_clamped_to_existing_native_stop"
+
+    if (
+        stop <= 0.0
+        or (target_signed_qty > 0.0 and stop >= reference_price)
+        or (target_signed_qty < 0.0 and stop <= reference_price)
+    ):
+        raise ValueError("invalid_stop_geometry")
+    return stop, fraction, source
+
+
 def _opposite_nonzero_sides(
     left: float,
     right: float,
@@ -1181,9 +1368,7 @@ def _opposite_nonzero_sides(
 ) -> bool:
     """Compare signs only after both quantities independently clear tolerance."""
 
-    return (left > tolerance and right < -tolerance) or (
-        left < -tolerance and right > tolerance
-    )
+    return (left > tolerance and right < -tolerance) or (left < -tolerance and right > tolerance)
 
 
 def _exposure_clamped_component_flat_targets(
@@ -1375,6 +1560,14 @@ def _order_commands_from_events(events: Iterable[AccountEvent]) -> tuple[OrderCo
                 # source for that timestamp; new journals persist both and the
                 # drift verifier requires them to agree.
                 created_ts_ns=int(payload.get("created_ts_ns") or event.wall_ts_ns),
+                entry_stop_price=(
+                    None if payload.get("entry_stop_price") is None else float(payload["entry_stop_price"])
+                ),
+                entry_stop_fraction=(
+                    None if payload.get("entry_stop_fraction") is None else float(payload["entry_stop_fraction"])
+                ),
+                entry_stop_source=str(payload.get("entry_stop_source") or ""),
+                entry_stop_trigger_by=str(payload.get("entry_stop_trigger_by") or ""),
             )
         )
     return tuple(commands)
@@ -1446,6 +1639,7 @@ class AccountExecutionKernel:
         risk_snapshot: AccountRiskSnapshot,
         risk_policy: AccountRiskPolicy,
         instrument_rules: Mapping[str, InstrumentRules],
+        native_protection_policy: NativeDisasterProtectionPolicy | None = None,
         command_symbols: set[str] | frozenset[str] | None = None,
         require_strict_risk_reduction: bool = False,
         request_content_hash: str | None = None,
@@ -1479,17 +1673,13 @@ class AccountExecutionKernel:
                 prior = state.risk_decisions.get(batch_id) or {}
                 prior_request_hash = str(prior.get("request_hash") or "")
                 if len(prior_request_hash) != 64 or any(
-                    character not in "0123456789abcdef"
-                    for character in prior_request_hash
+                    character not in "0123456789abcdef" for character in prior_request_hash
                 ):
                     raise AccountJournalIntegrityError(
-                        f"batch id {batch_id!r} has no canonical request hash; "
-                        "reset the account root explicitly"
+                        f"batch id {batch_id!r} has no canonical request hash; reset the account root explicitly"
                     )
                 if prior_request_hash != request_hash:
-                    raise AccountJournalIntegrityError(
-                        f"batch id {batch_id!r} was reused but request content changed"
-                    )
+                    raise AccountJournalIntegrityError(f"batch id {batch_id!r} was reused but request content changed")
                 return []
             now_wall = self.clock.wall_time_ns()
             now_mono = self.clock.monotonic_ns()
@@ -1578,6 +1768,7 @@ class AccountExecutionKernel:
                 risk_snapshot=risk_snapshot,
                 risk_policy=risk_policy,
                 instrument_rules=rules_by_symbol,
+                native_protection_policy=native_protection_policy,
                 command_created_ts_ns=now_wall,
                 command_symbols=normalized_command_symbols,
                 require_strict_risk_reduction=require_strict_risk_reduction,
@@ -1628,11 +1819,7 @@ class AccountExecutionKernel:
         if appended:
             batch_events = tuple(appended)
         else:
-            batch_events = tuple(
-                event
-                for event in self.journal._events_ref()
-                if event.correlation_id == batch_id
-            )
+            batch_events = tuple(event for event in self.journal._events_ref() if event.correlation_id == batch_id)
         risk_events = [event for event in batch_events if event.event_type == AccountEventType.RISK_DECISION.value]
         if not risk_events:
             raise AccountJournalIntegrityError(f"batch {batch_id!r} has no risk decision")
@@ -1661,6 +1848,7 @@ class AccountExecutionKernel:
         risk_snapshot: AccountRiskSnapshot,
         risk_policy: AccountRiskPolicy,
         instrument_rules: Mapping[str, InstrumentRules],
+        native_protection_policy: NativeDisasterProtectionPolicy | None,
         command_created_ts_ns: int,
         command_symbols: set[str] | None = None,
         require_strict_risk_reduction: bool = False,
@@ -1843,10 +2031,7 @@ class AccountExecutionKernel:
         if component_flat_targets is not None:
             for symbol, immediate_target_qty in component_flat_targets.items():
                 aggregate_target_qty = float(aggregates.get(symbol, 0.0))
-                if (
-                    abs(immediate_target_qty - aggregate_target_qty)
-                    > risk_policy.quantity_tolerance
-                ):
+                if abs(immediate_target_qty - aggregate_target_qty) > risk_policy.quantity_tolerance:
                     staged_component_flat_symbols.add(symbol)
                     projected_qty = math.fsum(
                         (
@@ -1884,15 +2069,17 @@ class AccountExecutionKernel:
                     continue
                 execution_target_qty = (
                     component_flat_targets[symbol]
-                    if component_flat_targets is not None
-                    and symbol in component_flat_targets
+                    if component_flat_targets is not None and symbol in component_flat_targets
                     else target_qty
                 )
-                if _opposite_nonzero_sides(
-                    projected_qty,
-                    target_qty,
-                    tolerance=tolerance,
-                ) and symbol not in staged_sign_flip_symbols:
+                if (
+                    _opposite_nonzero_sides(
+                        projected_qty,
+                        target_qty,
+                        tolerance=tolerance,
+                    )
+                    and symbol not in staged_sign_flip_symbols
+                ):
                     rejections.append(
                         _risk_rejection_key(
                             batch_id,
@@ -1906,9 +2093,8 @@ class AccountExecutionKernel:
                     continue
                 rules = instrument_rules[symbol]
                 qty = abs(quantized_down(delta, rules.qty_step))
-                reduce_only = (
-                    symbol in staged_component_flat_symbols
-                    or abs(target_qty) + tolerance < abs(projected_qty)
+                reduce_only = symbol in staged_component_flat_symbols or abs(target_qty) + tolerance < abs(
+                    projected_qty
                 )
                 if qty + tolerance < rules.min_qty:
                     rejections.append(_risk_rejection_key(batch_id, "below_min_qty", symbol))
@@ -1916,6 +2102,35 @@ class AccountExecutionKernel:
                 if not reduce_only and qty * prices[symbol] + tolerance < rules.min_notional:
                     rejections.append(_risk_rejection_key(batch_id, "below_min_notional", symbol))
                     continue
+                entry_stop_price: float | None = None
+                entry_stop_fraction: float | None = None
+                entry_stop_source = ""
+                entry_stop_trigger_by = ""
+                if not reduce_only and native_protection_policy is not None:
+                    try:
+                        (
+                            entry_stop_price,
+                            entry_stop_fraction,
+                            entry_stop_source,
+                        ) = _native_entry_stop_spec(
+                            state=state,
+                            updates=updates,
+                            symbol=symbol,
+                            target_signed_qty=target_qty,
+                            reference_price=prices[symbol],
+                            rules=rules,
+                            policy=native_protection_policy,
+                        )
+                    except ValueError as exc:
+                        rejections.append(
+                            _risk_rejection_key(
+                                batch_id,
+                                f"native_entry_protection_{exc}",
+                                symbol,
+                            )
+                        )
+                        continue
+                    entry_stop_trigger_by = native_protection_policy.trigger_by
                 max_qty = rules.max_order_qty if rules.max_order_qty > 0.0 else qty
                 chunk_count = max(1, math.ceil(qty / max_qty - tolerance))
                 # Chunk in exact Decimal arithmetic: accumulating float
@@ -1947,6 +2162,10 @@ class AccountExecutionKernel:
                             chunk_count=chunk_count,
                             leverage=min(symbol_leverages[symbol]),
                             created_ts_ns=command_created_ts_ns,
+                            entry_stop_price=entry_stop_price,
+                            entry_stop_fraction=entry_stop_fraction,
+                            entry_stop_source=entry_stop_source,
+                            entry_stop_trigger_by=entry_stop_trigger_by,
                         )
                     )
 
@@ -1970,13 +2189,74 @@ class AccountExecutionKernel:
             "projected_order_count": len(commands),
             "strictly_risk_reducing": risk_reducing_only,
             "strict_risk_reduction_required": require_strict_risk_reduction,
-            "risk_evaluation_symbols": sorted(requested_symbols if risk_reducing_only else aggregates),
-            "staged_component_flat_symbols": sorted(
-                staged_component_flat_symbols
+            "native_disaster_protection_policy": (
+                None if native_protection_policy is None else asdict(native_protection_policy)
             ),
+            "risk_evaluation_symbols": sorted(requested_symbols if risk_reducing_only else aggregates),
+            "staged_component_flat_symbols": sorted(staged_component_flat_symbols),
             "staged_sign_flip_symbols": sorted(staged_sign_flip_symbols),
         }
         return accepted, sorted(set(rejections)), risk_payload, commands
+
+    def record_submission_attempt(
+        self,
+        *,
+        command_id: str,
+        adapter_name: str,
+        allow_repeat: bool = False,
+    ) -> tuple[AccountEvent, ...]:
+        """Commit the durable boundary before an exposure-capable provider call."""
+
+        if not command_id:
+            raise ValueError("submission attempt command_id is required")
+        normalized_adapter = str(adapter_name).strip()
+        if not normalized_adapter:
+            raise ValueError("submission attempt adapter_name is required")
+        now_wall = self.clock.wall_time_ns()
+        now_mono = self.clock.monotonic_ns()
+
+        def build(state: AccountState) -> list[AccountEventSpec]:
+            order = state.orders.get(command_id)
+            if order is None:
+                raise AccountTransitionError(
+                    f"unknown submission command {command_id!r}"
+                )
+            if order.status != "commanded":
+                raise AccountTransitionError(
+                    f"submission command {command_id} is {order.status}, not commanded"
+                )
+            if order.submission_attempts > 0 and not allow_repeat:
+                raise AmbiguousSubmissionAttemptError(
+                    "exposure-increasing submission command already has a durable "
+                    f"attempt: command={command_id} "
+                    f"attempts={order.submission_attempts}"
+                )
+            attempt = order.submission_attempts + 1
+            return [
+                AccountEventSpec(
+                    event_type=AccountEventType.SUBMISSION_ATTEMPT,
+                    idempotency_key=(
+                        f"submission-attempt:{command_id}:{attempt:04d}"
+                    ),
+                    correlation_id=order.batch_id,
+                    causation_id=command_id,
+                    account_id=self.account_id,
+                    sleeve="account_execution",
+                    symbol=order.symbol,
+                    wall_ts_ns=now_wall,
+                    monotonic_ns=now_mono,
+                    payload={
+                        "command_id": command_id,
+                        "attempt": attempt,
+                        "adapter_name": normalized_adapter,
+                        "local_start_ts_ns": now_wall,
+                    },
+                )
+            ]
+
+        return tuple(
+            self.journal.transact(build, trusted_readonly_builder=True)
+        )
 
     def record_ack(
         self,
@@ -2352,11 +2632,7 @@ class AccountExecutionKernel:
                 key=lambda target: str(target.get("target_key") or ""),
             )
             target_reasons = sorted(
-                {
-                    str(target.get("reason") or "")
-                    for target in target_rows
-                    if str(target.get("reason") or "")
-                }
+                {str(target.get("reason") or "") for target in target_rows if str(target.get("reason") or "")}
             )
             component_ids = sorted(
                 {
@@ -2366,20 +2642,13 @@ class AccountExecutionKernel:
                 }
             )
             component_target_keys = [
-                str(target.get("target_key") or "")
-                for target in target_rows
-                if str(target.get("target_key") or "")
+                str(target.get("target_key") or "") for target in target_rows if str(target.get("target_key") or "")
             ]
             close_reason = reason or ",".join(target_reasons) or "target_reduction"
             attribution_status = (
-                "pending_account_netting"
-                if component_target_keys
-                else "pending_unidentified_component"
+                "pending_account_netting" if component_target_keys else "pending_unidentified_component"
             )
-            venue_flat_confirmed = (
-                bool(caller_metadata.get("venue_position_confirmed_flat"))
-                and reconstructed_flat
-            )
+            venue_flat_confirmed = bool(caller_metadata.get("venue_position_confirmed_flat")) and reconstructed_flat
             component_metadata = {
                 "accounting_scope": "symbol_reduce_batch",
                 "component_attribution_status": attribution_status,
@@ -2409,18 +2678,18 @@ class AccountExecutionKernel:
                             "venue_flat": venue_flat_confirmed,
                             "exchange_ts_ns": int(exchange_ts_ns),
                             "local_receive_ts_ns": int(local_receive_ts_ns),
-                            "metadata": json_safe({
-                                **caller_metadata,
-                                "source": "fill_reconstruction",
-                                "batch_id": order.batch_id,
-                                "reconstructed_flat": reconstructed_flat,
-                                "venue_position_status": (
-                                    "confirmed_flat"
-                                    if venue_flat_confirmed
-                                    else "pending_reconciliation"
-                                ),
-                                **component_metadata,
-                            }),
+                            "metadata": json_safe(
+                                {
+                                    **caller_metadata,
+                                    "source": "fill_reconstruction",
+                                    "batch_id": order.batch_id,
+                                    "reconstructed_flat": reconstructed_flat,
+                                    "venue_position_status": (
+                                        "confirmed_flat" if venue_flat_confirmed else "pending_reconciliation"
+                                    ),
+                                    **component_metadata,
+                                }
+                            ),
                         },
                     )
                 )
@@ -2434,9 +2703,7 @@ class AccountExecutionKernel:
                     continue
                 prior_ids = prior_metadata.get("accounted_execution_ids") or ()
                 if isinstance(prior_ids, Sequence) and not isinstance(prior_ids, (str, bytes)):
-                    accounted_execution_ids.update(
-                        str(value) for value in prior_ids if str(value)
-                    )
+                    accounted_execution_ids.update(str(value) for value in prior_ids if str(value))
             unaccounted: dict[str, dict[str, Any]] = {}
             for execution_id, execution in state.executions.items():
                 execution_order = state.orders.get(str(execution.get("command_id") or ""))
@@ -2469,18 +2736,10 @@ class AccountExecutionKernel:
                 fee_status = "observed_execution_fee"
             else:
                 fee_status = "observed_or_modeled_execution_fee"
-            execution_twin_model = (
-                bool(fee_statuses) and fee_statuses == {"modeled_execution_fee"}
-            )
-            funding_status = (
-                "modeled_separately"
-                if execution_twin_model
-                else "pending_venue_reconciliation"
-            )
+            execution_twin_model = bool(fee_statuses) and fee_statuses == {"modeled_execution_fee"}
+            funding_status = "modeled_separately" if execution_twin_model else "pending_venue_reconciliation"
             venue_pnl_status = (
-                "not_applicable_execution_twin"
-                if execution_twin_model
-                else "pending_venue_reconciliation"
+                "not_applicable_execution_twin" if execution_twin_model else "pending_venue_reconciliation"
             )
             specs.append(
                 AccountEventSpec(
@@ -2503,22 +2762,24 @@ class AccountExecutionKernel:
                         "exchange_ts_ns": int(exchange_ts_ns),
                         "local_receive_ts_ns": int(local_receive_ts_ns),
                         "source": "fill_reconstructed_provisional_funding",
-                        "metadata": json_safe({
-                            **caller_metadata,
-                            **component_metadata,
-                            "batch_id": order.batch_id,
-                            "fill_accounting_checkpoint": True,
-                            "accounted_execution_ids": sorted(unaccounted),
-                            "fee_status": fee_status,
-                            "fee_provenance_by_execution": fee_provenance,
-                            "funding_status": funding_status,
-                            "venue_closed_pnl_status": venue_pnl_status,
-                            "pnl_finalization_status": (
-                                "modeled_execution_twin"
-                                if execution_twin_model
-                                else "provisional_venue_reconciliation"
-                            ),
-                        }),
+                        "metadata": json_safe(
+                            {
+                                **caller_metadata,
+                                **component_metadata,
+                                "batch_id": order.batch_id,
+                                "fill_accounting_checkpoint": True,
+                                "accounted_execution_ids": sorted(unaccounted),
+                                "fee_status": fee_status,
+                                "fee_provenance_by_execution": fee_provenance,
+                                "funding_status": funding_status,
+                                "venue_closed_pnl_status": venue_pnl_status,
+                                "pnl_finalization_status": (
+                                    "modeled_execution_twin"
+                                    if execution_twin_model
+                                    else "provisional_venue_reconciliation"
+                                ),
+                            }
+                        ),
                     },
                 )
             )

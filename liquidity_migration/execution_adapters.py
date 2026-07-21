@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 
 from .account_contracts import (
     AccountEvent,
+    AmbiguousSubmissionAttemptError,
     InstrumentRules,
     MarketInputRef,
     OrderCommand,
@@ -31,6 +32,14 @@ from .deterministic_runtime import DeterministicIds
 
 
 INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE = "integration_only_uncalibrated"
+
+
+class AmbiguousExposureSubmission(RuntimeError):
+    """A prior provider attempt may be live and cannot be resent as entry."""
+
+
+class StaleUnsubmittedExposureCommand(RuntimeError):
+    """A never-attempted entry command is too old to submit safely."""
 
 
 def _is_finite_number(value: object) -> bool:
@@ -669,13 +678,108 @@ class KernelExecutionDriver:
                 raise ValueError(f"unknown kernel command {command.command_id}")
             if order.status != "commanded":
                 # Crash replay: an already acknowledged/filled/rejected command
-                # must not be submitted again. A commanded order is safe to retry
-                # because the venue adapter uses command_id as its idempotency key.
+                # must not be submitted again.
                 continue
             market = market_inputs.get(command.symbol)
             if market is None:
                 raise ValueError(f"missing market input for command symbol {command.symbol}")
-            normalized = self._normalize_observations(adapter.submit(command, market))
+            ambiguous_provider = bool(
+                getattr(
+                    adapter,
+                    "submission_outcome_can_be_ambiguous",
+                    False,
+                )
+            )
+            prepared_observations: tuple[ExecutionObservation, ...] = ()
+            submit_effect = adapter.submit
+            if ambiguous_provider:
+                if order.submission_attempts > 0 and not order.reduce_only:
+                    raise AmbiguousExposureSubmission(
+                        "refusing to resend an exposure-increasing command after "
+                        "a durable ambiguous submission attempt: "
+                        f"command={command.command_id} "
+                        f"attempts={order.submission_attempts} "
+                        f"last_started_ts_ns={order.last_submission_started_ts_ns}"
+                    )
+                max_unsubmitted_age_ns = getattr(
+                    adapter,
+                    "max_unsubmitted_exposure_age_ns",
+                    None,
+                )
+                if not order.reduce_only and order.submission_attempts == 0:
+                    if type(max_unsubmitted_age_ns) is not int or max_unsubmitted_age_ns <= 0:
+                        raise ValueError(
+                            "ambiguous provider adapter requires a positive integer "
+                            "max_unsubmitted_exposure_age_ns"
+                        )
+                    now_ns = self.kernel.clock.wall_time_ns()
+                    if (
+                        command.created_ts_ns <= 0
+                        or now_ns < command.created_ts_ns
+                        or now_ns - command.created_ts_ns > max_unsubmitted_age_ns
+                    ):
+                        raise StaleUnsubmittedExposureCommand(
+                            "refusing to submit a stale exposure-increasing command: "
+                            f"command={command.command_id} "
+                            f"created_ts_ns={command.created_ts_ns} "
+                            f"now_ts_ns={now_ns} "
+                            f"max_age_ns={max_unsubmitted_age_ns}"
+                        )
+                prepare_submission = getattr(
+                    adapter,
+                    "prepare_submission",
+                    None,
+                )
+                submit_prepared = getattr(adapter, "submit_prepared", None)
+                if callable(prepare_submission) != callable(submit_prepared):
+                    raise ValueError(
+                        "ambiguous provider adapter must define both "
+                        "prepare_submission and submit_prepared"
+                    )
+                if callable(prepare_submission) and callable(submit_prepared):
+                    prepared_observations = self._normalize_observations(
+                        prepare_submission(command, market)
+                    )
+                    submit_effect = submit_prepared
+                if prepared_observations:
+                    normalized = prepared_observations
+                else:
+                    # Preparation may itself be a bounded provider round trip
+                    # (Bybit leverage negotiation). Recheck at the actual
+                    # exposure boundary so a once-fresh command cannot age out
+                    # while setup is in flight.
+                    if not order.reduce_only and order.submission_attempts == 0:
+                        now_ns = self.kernel.clock.wall_time_ns()
+                        assert type(max_unsubmitted_age_ns) is int
+                        if (
+                            now_ns < command.created_ts_ns
+                            or now_ns - command.created_ts_ns > max_unsubmitted_age_ns
+                        ):
+                            raise StaleUnsubmittedExposureCommand(
+                                "refusing to submit a stale exposure-increasing command "
+                                "after provider preparation: "
+                                f"command={command.command_id} "
+                                f"created_ts_ns={command.created_ts_ns} "
+                                f"now_ts_ns={now_ns} "
+                                f"max_age_ns={max_unsubmitted_age_ns}"
+                            )
+                    try:
+                        self.kernel.record_submission_attempt(
+                            command_id=command.command_id,
+                            adapter_name=str(getattr(adapter, "name", "provider")),
+                            allow_repeat=order.reduce_only,
+                        )
+                    except AmbiguousSubmissionAttemptError as exc:
+                        # The journal transaction, not the stale preflight read,
+                        # owns the single-winner guarantee under concurrency.
+                        raise AmbiguousExposureSubmission(str(exc)) from exc
+                    normalized = self._normalize_observations(
+                        submit_effect(command, market)
+                    )
+            else:
+                normalized = self._normalize_observations(
+                    submit_effect(command, market)
+                )
             if self._is_complete_synchronous(command, normalized):
                 synchronous.append((command_index, command, normalized))
                 continue

@@ -363,8 +363,10 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
     closed = notifier.prepare(midpoint_by_symbol={}, health="healthy")
     assert "✅ Closed BUSDT · time stop" in closed.message
     assert "P&L -$1.63" in closed.message
-    assert "provisional (funding, venue closed-PnL, fees pending)" in closed.message
-    assert "component P&L attribution pending" in closed.message
+    assert "funding journaled separately" in closed.message
+    assert "venue closed-PnL not cross-checked online" in closed.message
+    assert "fees unresolved" in closed.message
+    assert "component P&L not allocated (account-netted)" in closed.message
     assert "awaiting" not in closed.message.lower()
     notifier.commit(closed)
 
@@ -372,7 +374,8 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
     flat = notifier.prepare(midpoint_by_symbol={}, health="healthy")
     assert "Flat · no open positions" in flat.message
     assert "realized -$1.63" in flat.message
-    assert "provisional (funding, venue closed-PnL, fees pending)" in flat.message
+    assert "funding journaled separately" in flat.message
+    assert "venue closed-PnL not cross-checked online" in flat.message
 
 
 def test_fill_pnl_without_reconciliation_status_stays_conservatively_provisional(
@@ -415,7 +418,9 @@ def test_fill_pnl_without_reconciliation_status_stays_conservatively_provisional
     update = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
 
     assert "✅ Reduced BUSDT · take profit" in update.message
-    assert "provisional (funding, venue closed-PnL, fees pending)" in update.message
+    assert "funding journaled separately" in update.message
+    assert "venue closed-PnL not cross-checked online" in update.message
+    assert "fees unresolved" in update.message
     assert "component b, a, d" not in update.message
 
 
@@ -514,7 +519,7 @@ def test_same_symbol_component_exit_reports_reduction_before_later_close(
     )
     first_exit = notifier.prepare(midpoint_by_symbol={"BUSDT": 12.0}, health="healthy")
     assert "✅ Reduced BUSDT · take profit · component trade" in first_exit.message
-    assert "component P&L attribution pending" in first_exit.message
+    assert "component P&L not allocated (account-netted)" in first_exit.message
     notifier.commit(first_exit)
 
     target_and_fill(
@@ -627,6 +632,154 @@ def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> No
     assert "awaiting venue reconciliation" in update.message
     assert "✅ Closed BUSDT" not in update.message
     assert "✅ Reduced BUSDT" not in update.message
+    assert len(update.next_state.pending_lifecycle_confirmations) == 1
+    notifier.commit(update)
+
+    confirmed = notifier.prepare(
+        midpoint_by_symbol={},
+        health="healthy",
+        venue_positions={},
+        position_truth_healthy=True,
+    )
+    assert "✅ Venue reconciliation confirmed prior update" in confirmed.message
+    assert "Closed BUSDT · take profit" in confirmed.message
+    assert confirmed.next_state.pending_lifecycle_confirmations == {}
+    # Delivery state remains transactional: no commit means the confirmation is
+    # prepared again, while a successful commit retires it exactly once.
+    assert (
+        notifier.prepare(
+            midpoint_by_symbol={},
+            health="healthy",
+            venue_positions={},
+            position_truth_healthy=True,
+        ).message
+        == confirmed.message
+    )
+    notifier.commit(confirmed)
+    assert (
+        notifier.prepare(
+            midpoint_by_symbol={},
+            health="healthy",
+            venue_positions={},
+            position_truth_healthy=True,
+        ).message
+        == ""
+    )
+
+
+def test_schema_two_notification_state_migrates_without_replaying_history(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    state_path = tmp_path / "notify-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "last_sequence": kernel.state().events_applied,
+                "last_hour_bucket": 10,
+                "positions": {
+                    "BUSDT": {"signed_qty": 2.0, "average_price": 10.0},
+                },
+                "loss_level_by_symbol": {},
+                "entry_rejections": {},
+                "recent_entry_rejection_count": 0,
+                "recent_entry_rejection_attempts": {},
+                "recent_entry_rejection_reasons": {},
+            }
+        )
+    )
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=state_path,
+        clock=clock,
+    )
+
+    migrated = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health="healthy",
+    )
+
+    assert migrated.message == ""
+    assert migrated.next_state.schema_version == 3
+    assert migrated.next_state.last_sequence == kernel.state().events_applied
+
+
+def test_native_stop_breach_and_software_recovery_are_immediately_visible(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+    notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
+    kernel.record_protection(
+        protection_key="native:BUSDT",
+        symbol="BUSDT",
+        status="breached_unprotected",
+        stop_price=9.0,
+        take_profit_price=None,
+        exchange_ts_ns=0,
+        local_receive_ts_ns=clock.wall_time_ns(),
+        metadata={
+            "native_exchange": True,
+            "symbol": "BUSDT",
+            "breach_mark": 8.9,
+        },
+    )
+    kernel.record_protection(
+        protection_key="protection:native-breach:BUSDT:test",
+        symbol="BUSDT",
+        status="software_flat_requested",
+        stop_price=9.0,
+        take_profit_price=None,
+        exchange_ts_ns=0,
+        local_receive_ts_ns=clock.wall_time_ns(),
+        metadata={"native_exchange": False},
+    )
+
+    update = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 8.9},
+        health="BLOCKED · native protection breach",
+    )
+
+    assert "🚨 BUSDT native disaster stop absent after threshold breach" in update.message
+    assert "new exposure blocked; software flat recovery required" in update.message
+    assert "🛡️ BUSDT durable reduce-only recovery queued" in update.message
+
+
+def test_fresh_notifier_surfaces_existing_unresolved_native_breach(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    kernel.record_protection(
+        protection_key="native:BUSDT",
+        symbol="BUSDT",
+        status="breached_unprotected",
+        stop_price=9.0,
+        take_profit_price=None,
+        exchange_ts_ns=0,
+        local_receive_ts_ns=clock.wall_time_ns(),
+        metadata={
+            "native_exchange": True,
+            "symbol": "BUSDT",
+            "breach_mark": 8.9,
+        },
+    )
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "new-notify-state.json",
+        clock=clock,
+    )
+
+    update = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 8.9},
+        health="BLOCKED · native protection breach",
+    )
+
+    assert "🚨 BUSDT native disaster stop absent after threshold breach" in update.message
 
 
 def test_hourly_open_position_without_fresh_midpoint_reports_unknown_valuation(
@@ -759,9 +912,7 @@ def test_identical_entry_risk_rejections_increment_durably_without_spam(
 def test_expired_entry_signal_does_not_remain_an_unresolved_risk_block(
     tmp_path: Path,
 ) -> None:
-    kernel, clock, notifier, snapshot, policy = _setup_risk_notifications(
-        tmp_path / "account"
-    )
+    kernel, clock, notifier, snapshot, policy = _setup_risk_notifications(tmp_path / "account")
     valid_until_ms = clock.wall_time_ns() // 1_000_000 + 1_000
     _submit_entry_risk_decision(
         kernel,
@@ -771,9 +922,7 @@ def test_expired_entry_signal_does_not_remain_an_unresolved_risk_block(
         signal_valid_until_ms=valid_until_ms,
     )
     first = notifier.prepare(midpoint_by_symbol={}, health="healthy")
-    assert first.next_state.entry_rejections["attempt:trade-a"][
-        "signal_valid_until_ns"
-    ] == valid_until_ms * 1_000_000
+    assert first.next_state.entry_rejections["attempt:trade-a"]["signal_valid_until_ns"] == valid_until_ms * 1_000_000
     notifier.commit(first)
 
     clock.advance_ns(2_000_000_000)
@@ -874,6 +1023,19 @@ def test_failed_entry_risk_alert_delivery_leaves_state_unchanged(tmp_path: Path)
     retry = notifier.prepare(midpoint_by_symbol={}, health="healthy")
     assert retry.message == unsent.message
     assert retry.next_state.entry_rejections["attempt:trade-a"]["count"] == 1
+
+
+def test_notification_pagination_preserves_every_section_without_oversize_pages() -> None:
+    sections = tuple(f"event-{index}:" + (str(index) * 700) for index in range(10))
+
+    pages = account_notifications_module._paginate_sections(sections)
+
+    assert len(pages) > 1
+    assert all(0 < len(page) <= 3900 for page in pages)
+    rendered = "\n\n".join(pages)
+    assert "additional account updates omitted" not in rendered
+    for section in sections:
+        assert section in rendered
 
 
 def test_hourly_summary_aggregates_entry_risk_repeats(tmp_path: Path) -> None:

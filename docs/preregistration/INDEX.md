@@ -1,61 +1,28 @@
-# Provenance Records Index
+# Active evidence contracts
 
-These files are the provenance record: what was declared, seen, and concluded,
-and when. They are receipts, not waiting rooms — historical entries are never
-rewritten, and nothing here blocks new work.
+This index lists only contracts that still govern an active evidence stream or
+are required inputs to a surviving replay. Current strategy evidence and work
+live in `docs/strategy_program.md`; evidence policy lives in
+`docs/governance.md`.
 
-Current model: `docs/governance.md` (Progressive Evidence Model). New work
-explores freely on seen data, commits configs into the rolling forward record
-(the commit is the registration, per `docs/parameter_pre_registration.md`),
-and promotes with a five-line note plus a recorded change point. The
-runtime-parity forward stream registered on 2026-07-18 continues as a rolling
-evidence surface with recorded change points; its declared 45/45 window read
-remains available on file. The V2 cycle and its repair closed without a
-qualifying thesis; their untouched holdout remains an optional reserve for a
-genuinely new idea, recorded here when opened.
-
-## Exploratory records
-
-| Area | Record | Status |
+| Surface | Contract | Status |
 | --- | --- | --- |
-| Prospective runtime parity and execution | `prospective_runtime_parity_execution_epoch_2026-07-18.md` | Active: immutable snapshot, PIT rebuild, full-ledger replay, and exact final comparator passed; create-only start receipt fixes 2026-07-19 14:00 UTC through 2026-10-17 14:00 UTC, with the first 45 days calibration-only |
-| Prospective runtime parity amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md` | Active append-only amendments pinned separately from the immutable base-contract hash |
-| Prospective runtime parity post-22 amendments | `prospective_runtime_parity_execution_epoch_2026-07-18_post22_amendments.md` | Registered before forward capture/outcome exposure: final comparator/start gates, shared capture plane, and exact TCA estimator |
-| Current LONG/CONTINUOUS benchmarks | `benchmark_refresh_2026-07-16.md` | Registered before fresh-tail download/outcome inspection; descriptive only |
-| Sleeve kill criteria | `sleeve_kill_criteria_2026-07-20.md` | Active: pre-committed demotion/retirement rules for both deployed sleeves, registered before any epoch outcome read; checked weekly |
-| Passive-execution experiment | `passive_execution_experiment_2026-07-20.md` | Registered design with the first measured cost report (23 fills: +19/+26 bps realized spread at 15s/1m); paper-first, frozen parameters, no runtime change yet |
-| R3b cluster-cap experiment (P1.3) | `r3b_cluster_cap_experiment_2026-07-20.md` | Registered 2026-07-20: frozen ρ≥0.70/K=3 trailing-720h cluster cap, per-entry trade-id hash-parity A/B (A=shadow-veto, B=veto), insurance metrics, kill rules Y1–Y3 incl. explicit dormancy closure; staged decision layer `liquidity_migration/cluster_cap.py`; wiring = separate operator go |
-| R3a loss-budget experiment (P1.2) | `r3a_loss_budget_experiment_2026-07-20.md` | Registered 2026-07-20 before any forward outcome: frozen −1.5%/day entry-side budget, UTC-date-ordinal-parity A/B (odd=A off, even=B on), insurance metrics, pre-committed experiment kill rules X1–X3; SHADOW only (`liquidity_migration/loss_budget_shadow.py`, staged); activation is a separate operator decision |
-| R1 continuous risk intensity (P1.1) | `../../reports/tail-risk-program/r1/r1_intensity_v1.json` | Registered 2026-07-20 (the commit adding the config is the registration): linear10×ramp monotone gross multiplier as a SHADOW A/B vs the deployed binary gate + 0.35 band; scorer `scripts/research_v3/r1_forward_scorer.py` (hash-chained daily rows); kill criteria R1-K1/K2/K3 pre-committed before the first forward day; Lane-1 card `../../reports/tail-risk-program/p11-r1-intensity-lane1-2026-07-20/evidence_card.md`; no runtime change |
-| Untouched-slice provenance (P0.2) | `untouched_slice_provenance_2026-07-20.md` | Registered 2026-07-20 before any grading read: Binance 2020 was outcome-read by the dead momentum-factor family (2026-05-24, receipts in git history); Bybit slice outcome-unread but fully feature-touched; Binance [2021-01-01, 2021-05-01) pristine. Frozen grading windows G1/G2/G3 gate all later reads |
-| Tail-risk program (main focus) | `../tail_risk_overhaul_proposal_2026-07-20.md`, `../tail_risk_program.md` | Adopted 2026-07-20 by operator instruction as the main research focus: per-trade exit research closed on the spent surface; book-level R1/R2/R3 layers + data program; the reserved V2 holdout is earmarked for the first non-descended family (R2 squeeze-state governor) and its opening will be recorded here |
-| Strategy Overhaul V2 diagnostic epoch | `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md` | Initial gates frozen before implementation; provenance/warm-up correction frozen before real candidate-label generation; first bounded partition only |
-| Strategy Overhaul V2 Phase-3 checkpoint | `../strategy_overhaul_v2_phase3_checkpoint_2026-07-17.md` | First bounded partition structurally valid; outcome values not inspected and no expansion authorized |
-| Strategy Overhaul V2 completion cycle | `strategy_overhaul_v2_completion_cycle_2026-07-17.md` | Closed with no qualifying thesis; the registered holdout remains untouched |
-| Strategy Overhaul V2 Phase-3 replay recovery | `strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md` | Completed historical control record for the preserved flush-bound failure |
-| Strategy Overhaul V2 Phase-3 bounded account recovery | `strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md` | Completed: exact 100-key samples verify; full portfolio values remain explicitly not account-reconciled |
-| Strategy Overhaul V2 comparator/accounting repair | `strategy_overhaul_v2_comparator_accounting_repair_2026-07-18.md` | Closed invalid: RMOM key/value reconciliation failed; no comparator, attribution, treatment, or holdout run |
-| Strategy Overhaul V2 account-state replay recovery | `strategy_overhaul_v2_account_state_replay_recovery_2026-07-18.md` | Closed invalid: exact 100-key parity passed, but two 200-key USD P&L rows exceeded the frozen tolerance; full retry not run |
+| Runtime-parity forward stream | `prospective_runtime_parity_execution_epoch_2026-07-18.md`, `prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md`, and `prospective_runtime_parity_execution_epoch_2026-07-18_post17_amendments.md` through `post22_amendments.md` | Active rolling evidence contract; historical 45/45 read remains on file, but rolling post-commit evidence is authoritative. |
+| Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG and CONTINUOUS. |
+| Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B; target is 100 fills per arm before an economics conclusion. |
 
-## Archived outcomes
+## Compatibility inputs, not active research
 
-| Area | Record | Status |
-| --- | --- | --- |
-| Continuous and LONG decisions | `../research_summary.md` | Compact evidence/decision log |
-| Strategy Overhaul V2 completion | `../strategy_overhaul_v2_completion_receipt_2026-07-18.md` | Four-payload exploratory evidence card; no thesis, no holdout read, no implementation |
-| Strategy Overhaul V2 comparator/accounting repair | `../strategy_overhaul_v2_comparator_accounting_repair_receipt_2026-07-18.md` | Closed invalid evidence card; diagnostic leads remain exploratory only |
-| Prospective runtime-parity forward start | `../prospective_runtime_parity_forward_start_receipt_2026-07-19.md` | Exact final comparator and create-only 90-day boundary; no forward result, alpha claim, promotion, or real-money authority |
-| 1000TAGUSDT incident | `../incidents/2026-07-10-1000tag.md` | Contained; demo venue flat at incident close |
-| 2026-06-20 disaster-stop TAIL study | `../disaster_stop_tail_reconstruction_2026-07-20.md` | Reconstruction (labelled as such) of the pruned receipt from commit `1fa7045`; numbers survive only in the receipt text; anchors the sizing-is-the-disaster-control claim and the unbuilt correlated-squeeze-cap recommendation (R3b) |
-| Strategy Research V3 (Lane-1 draft) | `DRAFT_strategy_research_v3_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface; all four theses closed (evidence cards in `reports/strategy-research-v3/`); holdout untouched; no prototype advanced |
-| Strategy Research V4 (Lane-1 draft) | `DRAFT_strategy_research_v4_2026-07-19.md` | Executed exploratorily 2026-07-19 on the spent V2 surface + T-A render books; all five theses closed (evidence cards in `reports/strategy-research-v3/t-e`…`t-i/`); holdout untouched; no prototype advanced; Bybit funding-timing question closed (next-rate not registrable post-2022-07) |
+The following immutable V2 contracts remain only because
+`scripts/build_candidate_tape.py`, `scripts/analyze_strategy_overhaul_v2.py`,
+and the prospective full-ledger replay verify their exact hashes:
 
-## Cancelled without result
+- `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md`
+- `strategy_overhaul_v2_completion_cycle_2026-07-17.md`
+- `strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md`
+- `strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md`
 
-The canonical cancellation list and retired Phase-0 receipt identity live in
-`docs/research_summary.md`. No executable workflow remains, and deletion is not
-an empirical result.
-
-Do not rebuild deleted research plumbing to restore an old roadmap. Reopen only
-a precise, decision-useful claim with new data, a corrected defect, or a
-genuinely different mechanism, and register it prospectively.
+They do not define a current roadmap and must not be reopened merely because
+the files remain. Historical drafts, queues, receipts, and raw report trees
+were removed from the working tree on 2026-07-21 after their useful conclusions
+were consolidated. Git history remains the audit trail.

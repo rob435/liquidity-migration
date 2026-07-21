@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from liquidity_migration.account_kernel import (
     AccountRiskSnapshot,
     InstrumentRules,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
 )
 from liquidity_migration.account_reconcile import BybitAccountReconciler
 from liquidity_migration.account_route import AccountRoute, ensure_account_route
@@ -27,7 +29,9 @@ from liquidity_migration.account_intent_client import completed_expired_entry_at
 from liquidity_migration.bybit_errors import BybitSubmissionUncertain
 from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.deterministic_serialization import canonical_json
 from liquidity_migration.execution_adapters import (
+    AmbiguousExposureSubmission,
     BookLevel,
     ExecutionObservation,
     ExecutionObservationType,
@@ -36,7 +40,13 @@ from liquidity_migration.execution_adapters import (
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
+from liquidity_migration.market_capture import MarketCaptureError
+from liquidity_migration.protection_engine import AccountProtectionEngine
 from liquidity_migration.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.venue_protection import (
+    NativeProtectionBreach,
+    NativeProtectionPlan,
+)
 
 
 NOW_NS = 1_100_000_000
@@ -62,6 +72,7 @@ def _rules() -> dict[str, InstrumentRules]:
             qty_step=0.1,
             min_qty=0.1,
             min_notional=1.0,
+            tick_size=0.1,
             max_order_qty=100.0,
             max_leverage=20.0,
         )
@@ -89,6 +100,12 @@ class MarketProvider:
     def current(self, symbols: list[str], *, batch_id: str) -> dict[str, MarketInputRef]:
         assert batch_id
         return {symbol: self.market for symbol in symbols}
+
+
+class MissingCapturedMarketProvider:
+    def current(self, symbols: list[str], *, batch_id: str) -> dict[str, MarketInputRef]:
+        assert symbols and batch_id
+        raise MarketCaptureError("no reconstructed book for BUSDT")
 
 
 class SnapshotProvider:
@@ -172,14 +189,16 @@ class ScriptedExecutionAdapter:
         exchange_ns = market_input.exchange_ts_ns + ordinal * 100
         local_ns = market_input.local_receive_ts_ns + ordinal * 100
         if outcome == "reject":
-            return (ExecutionObservation(
-                observation_type=ExecutionObservationType.ACK,
-                command_id=command.command_id,
-                exchange_ts_ns=exchange_ns,
-                local_receive_ts_ns=local_ns,
-                accepted=False,
-                rejection_key=f"execution:{command.command_id}:definite_reject",
-            ),)
+            return (
+                ExecutionObservation(
+                    observation_type=ExecutionObservationType.ACK,
+                    command_id=command.command_id,
+                    exchange_ts_ns=exchange_ns,
+                    local_receive_ts_ns=local_ns,
+                    accepted=False,
+                    rejection_key=f"execution:{command.command_id}:definite_reject",
+                ),
+            )
 
         ack = ExecutionObservation(
             observation_type=ExecutionObservationType.ACK,
@@ -254,6 +273,7 @@ def _request(
     target_key: str | None = None,
     decision_key: str | None = None,
     metadata: dict[str, object] | None = None,
+    reason: str = "test",
 ) -> AccountTargetRequest:
     return AccountTargetRequest(
         request_id=request_id,
@@ -262,20 +282,65 @@ def _request(
         route_id=route.route_id,
         account_id=route.account_id,
         environment=route.environment,
-        intents=(RequestedIntent(
-            adapter_kind=kind,
-            intent=SleeveTargetIntent(
-                decision_key=decision_key or f"decision:{batch_id}",
-                target_key=target_key or f"{kind.value}/main/BUSDT",
-                strategy_id=f"{kind.value}-v1",
-                component_id="main",
-                symbol="BUSDT",
-                signed_notional_usdt=notional,
-                leverage=10.0,
-                reason="test",
-                metadata=dict(metadata or {}),
+        intents=(
+            RequestedIntent(
+                adapter_kind=kind,
+                intent=SleeveTargetIntent(
+                    decision_key=decision_key or f"decision:{batch_id}",
+                    target_key=target_key or f"{kind.value}/main/BUSDT",
+                    strategy_id=f"{kind.value}-v1",
+                    component_id="main",
+                    symbol="BUSDT",
+                    signed_notional_usdt=notional,
+                    leverage=10.0,
+                    reason=reason,
+                    metadata=dict(metadata or {}),
+                ),
             ),
-        ),),
+        ),
+    )
+
+
+def _native_breach_safety_request(
+    route: AccountRoute,
+    *,
+    target_key: str = "risk/main/BUSDT",
+    plan_key: str = "native:BUSDT:test",
+    breached_signed_qty: float = -2.0,
+    native_stop_price: float = 10.7,
+    authenticated_breach_mark: float = 11.2,
+) -> AccountTargetRequest:
+    material = {
+        "symbol": "BUSDT",
+        "protection_plan_key": plan_key,
+        "targets": [
+            {
+                "target_key": target_key,
+                "source_request_id": "",
+                "source_revision_ns": NOW_NS,
+            }
+        ],
+    }
+    suffix = hashlib.sha256(canonical_json(material)).hexdigest()[:20]
+    request_id = f"protection:native-breach:BUSDT:{suffix}"
+    return _request(
+        route,
+        request_id=request_id,
+        batch_id=request_id,
+        kind=SleeveAdapterKind.RISK,
+        notional=0.0,
+        target_key=target_key,
+        reason="native_disaster_stop_breached",
+        metadata={
+            "authenticated_breach_mark": authenticated_breach_mark,
+            "breach_observed_ts_ns": NOW_NS,
+            "breached_signed_qty": breached_signed_qty,
+            "native_stop_price": native_stop_price,
+            "native_protection_plan_key": plan_key,
+            "requested_by_strategy_id": "account-protection",
+            "source_request_id": "",
+            "source_revision_ns": NOW_NS,
+        },
     )
 
 
@@ -292,7 +357,9 @@ def _service(
 ) -> AccountExecutionService:
     route = _route(root.parent)
     clock = clock or VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
-    kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id, clock=clock, id_seed="service-test")
+    kernel = AccountExecutionKernel(
+        route.account_path, account_id=route.account_id, clock=clock, id_seed="service-test"
+    )
     return AccountExecutionService(
         route=route,
         kernel=kernel,
@@ -301,6 +368,9 @@ def _service(
         rules_provider=RulesProvider(),
         risk_policy=_policy(),
         execution_adapter=adapter,
+        native_protection_policy=(
+            NativeDisasterProtectionPolicy(0.2) if str(getattr(adapter, "name", "")) == "bybit_demo" else None
+        ),
         position_truth_provider=ConsistentPositionTruthProvider(),
         clock=clock,
         max_market_age_ns=max_market_age_ns,
@@ -314,22 +384,28 @@ def test_durable_service_is_single_venue_owner_across_sequential_sleeve_requests
     adapter = CountingTwin()
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="continuous-1",
-        batch_id="continuous-1",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="continuous-1",
+            batch_id="continuous-1",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
     first = service.run_once(inbox)
     assert first is not None and first.accepted
     assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-2.0)
 
-    inbox.submit(_request(_route(tmp_path),
-        request_id="long-1",
-        batch_id="long-1",
-        kind=SleeveAdapterKind.LONG,
-        notional=10.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="long-1",
+            batch_id="long-1",
+            kind=SleeveAdapterKind.LONG,
+            notional=10.0,
+        )
+    )
     second = service.run_once(inbox)
     assert second is not None and second.accepted
     # Existing -2 continuous plus +1 long = one net -1 venue position.
@@ -351,20 +427,24 @@ def test_component_exit_stages_opposing_aggregate_to_flat_before_convergence(
     )
     route = _route(tmp_path)
 
-    short = service.handle(_request(
-        route,
-        request_id="short-open",
-        batch_id="short-open",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-50.0,
-    ))
-    long = service.handle(_request(
-        route,
-        request_id="long-open",
-        batch_id="long-open",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    short = service.handle(
+        _request(
+            route,
+            request_id="short-open",
+            batch_id="short-open",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-50.0,
+        )
+    )
+    long = service.handle(
+        _request(
+            route,
+            request_id="long-open",
+            batch_id="long-open",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert short.accepted and long.accepted
     assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-3.0)
 
@@ -408,7 +488,8 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
     adapter = CountingTwin()
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
-    request = _request(_route(tmp_path),
+    request = _request(
+        _route(tmp_path),
         request_id="crash-1",
         batch_id="crash-1",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -438,7 +519,8 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
 def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -> None:
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
-    request = _request(_route(tmp_path),
+    request = _request(
+        _route(tmp_path),
         request_id="lost-response-1",
         batch_id="lost-response-1",
         kind=SleeveAdapterKind.LONG,
@@ -452,6 +534,7 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
         def __init__(self) -> None:
             self.command_id = ""
             self.submit_calls = 0
+            self.last_place_params: dict[str, object] = {}
 
         def set_leverage(self, **_params: object) -> dict[str, object]:
             return {}
@@ -459,29 +542,34 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
         def place_order(self, **params: object) -> dict[str, str]:
             self.submit_calls += 1
             self.command_id = str(params["orderLinkId"])
+            self.last_place_params = dict(params)
             raise BybitSubmissionUncertain("venue accepted; HTTP response lost")
 
         def get_trade_history(self, **params: object) -> list[dict[str, str]]:
             assert params["order_link_id"] == self.command_id
-            return [{
-                "orderLinkId": self.command_id,
-                "orderId": "venue-lost-1",
-                "execId": "fill-lost-1",
-                "execQty": "2",
-                "execPrice": "10",
-                "execFee": "0.01",
-                "execTime": "2",
-                "side": "Buy",
-            }]
+            return [
+                {
+                    "orderLinkId": self.command_id,
+                    "orderId": "venue-lost-1",
+                    "execId": "fill-lost-1",
+                    "execQty": "2",
+                    "execPrice": "10",
+                    "execFee": "0.01",
+                    "execTime": "2",
+                    "side": "Buy",
+                }
+            ]
 
         def get_order_history(self, **params: object) -> list[dict[str, str]]:
             assert params["order_link_id"] == self.command_id
-            return [{
-                "orderLinkId": self.command_id,
-                "orderStatus": "Filled",
-                "cumExecQty": "2",
-                "updatedTime": "3",
-            }]
+            return [
+                {
+                    "orderLinkId": self.command_id,
+                    "orderStatus": "Filled",
+                    "cumExecQty": "2",
+                    "updatedTime": "3",
+                }
+            ]
 
         def get_positions(self, **params: object) -> list[dict[str, str]]:
             assert params == {"settle_coin": "USDT"}
@@ -501,7 +589,17 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
     state_after_loss = first_service.kernel.state()
     command_id = next(iter(state_after_loss.orders))
     assert state_after_loss.orders[command_id].status == "commanded"
+    assert state_after_loss.orders[command_id].submission_attempts == 1
     assert state_after_loss.working_signed_qty("BUSDT") == pytest.approx(2.0)
+    assert client.submit_calls == 1
+    assert client.last_place_params["stopLoss"] == "8"
+    assert client.last_place_params["slTriggerBy"] == "MarkPrice"
+    assert client.last_place_params["tpslMode"] == "Full"
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+
+    unreconciled = _service(root, BybitDemoExecutionAdapter(client))
+    with pytest.raises(AmbiguousExposureSubmission, match="refusing to resend"):
+        unreconciled.run_once(inbox)
     assert client.submit_calls == 1
     assert len(list((inbox.root / "pending").glob("*.json"))) == 1
 
@@ -524,11 +622,70 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
     assert len(list((inbox.root / "completed").glob("*.json"))) == 1
 
 
+def test_uncertain_leverage_response_retries_before_single_order_attempt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "account"
+    inbox = _inbox(tmp_path)
+    request = _request(
+        _route(tmp_path),
+        request_id="lost-leverage-response-1",
+        batch_id="lost-leverage-response-1",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    inbox.submit(request)
+
+    class LostLeverageResponseClient:
+        demo = True
+
+        def __init__(self) -> None:
+            self.leverage_calls = 0
+            self.order_calls = 0
+
+        def set_leverage(self, **_params: object) -> dict[str, object]:
+            self.leverage_calls += 1
+            if self.leverage_calls == 1:
+                raise BybitSubmissionUncertain("leverage response lost")
+            return {}
+
+        def place_order(self, **params: object) -> dict[str, str]:
+            self.order_calls += 1
+            assert params["stopLoss"] == "8"
+            return {
+                "orderId": "venue-after-leverage-retry-1",
+                "_response_time_ms": "1100",
+            }
+
+    client = LostLeverageResponseClient()
+    service = _service(root, BybitDemoExecutionAdapter(client))
+
+    with pytest.raises(BybitSubmissionUncertain, match="leverage response lost"):
+        service.run_once(inbox)
+    command_id = next(iter(service.kernel.state().orders))
+    after_leverage_loss = service.kernel.state().orders[command_id]
+    assert after_leverage_loss.status == "commanded"
+    assert after_leverage_loss.submission_attempts == 0
+    assert client.leverage_calls == 1
+    assert client.order_calls == 0
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+
+    receipt = service.run_once(inbox)
+    assert receipt is not None and receipt.accepted
+    submitted = service.kernel.state().orders[command_id]
+    assert submitted.status == "acknowledged"
+    assert submitted.submission_attempts == 1
+    assert client.leverage_calls == 2
+    assert client.order_calls == 1
+    assert len(list((inbox.root / "completed").glob("*.json"))) == 1
+
+
 def test_completed_request_id_cannot_be_reused_with_different_content(tmp_path: Path) -> None:
     adapter = CountingTwin()
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
-    original = _request(_route(tmp_path),
+    original = _request(
+        _route(tmp_path),
         request_id="immutable-1",
         batch_id="immutable-1",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -541,7 +698,8 @@ def test_completed_request_id_cannot_be_reused_with_different_content(tmp_path: 
     stored = json.loads(completed.read_text())
     assert stored["receipt"]["request_hash"] == original.content_hash()
 
-    changed = _request(_route(tmp_path),
+    changed = _request(
+        _route(tmp_path),
         request_id="immutable-1",
         batch_id="immutable-1",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -665,12 +823,15 @@ def test_target_request_parser_rejects_missing_and_unknown_route_schema_fields(
 
 def test_inbox_exposes_pending_symbols_for_dynamic_capture(tmp_path: Path) -> None:
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="symbols-1",
-        batch_id="symbols-1",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="symbols-1",
+            batch_id="symbols-1",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
     assert inbox.requested_symbols() == {"BUSDT"}
     claimed = inbox.claim_next()
     assert claimed is not None
@@ -684,19 +845,22 @@ def test_stale_market_input_releases_request_for_retry_without_kernel_mutation(t
     service = _service(tmp_path / "account", adapter, market=_market(local_ns=1), max_market_age_ns=10)
     inbox = _inbox(tmp_path)
     target_key = "continuous/main/BUSDT"
-    inbox.submit(_request(_route(tmp_path),
-        request_id="stale-1",
-        batch_id="stale-1",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-        target_key=target_key,
-        decision_key="continuous-target/strategy/1000/entry/main",
-        metadata={
-            "entry_attempt_key": f"entry-attempt/{target_key}",
-            "signal_ts_ms": 1_000,
-            "signal_valid_until_ms": 2_000,
-        },
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="stale-1",
+            batch_id="stale-1",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+            target_key=target_key,
+            decision_key="continuous-target/strategy/1000/entry/main",
+            metadata={
+                "entry_attempt_key": f"entry-attempt/{target_key}",
+                "signal_ts_ms": 1_000,
+                "signal_valid_until_ms": 2_000,
+            },
+        )
+    )
     with pytest.raises(RuntimeError, match="stale market input"):
         service.run_once(inbox)
     assert len(list((inbox.root / "pending").glob("*.json"))) == 1
@@ -710,7 +874,8 @@ def test_expired_entry_is_completed_before_inputs_or_kernel_and_survives_restart
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
     target_key = "long/long-v1/signal-1/BUSDT"
-    request = _request(_route(tmp_path),
+    request = _request(
+        _route(tmp_path),
         request_id="expired-entry-1",
         batch_id="expired-entry-1",
         kind=SleeveAdapterKind.LONG,
@@ -732,9 +897,7 @@ def test_expired_entry_is_completed_before_inputs_or_kernel_and_survives_restart
     receipt = service.run_once(inbox)
     assert receipt is not None
     assert receipt.disposition == "expired"
-    assert receipt.rejection_keys == (
-        f"account-service:entry-signal-expired:entry-attempt/{target_key}",
-    )
+    assert receipt.rejection_keys == (f"account-service:entry-signal-expired:entry-attempt/{target_key}",)
     assert not receipt.accepted
     assert service.kernel.state().events_applied == 0
     assert adapter.submit_calls == 0
@@ -766,7 +929,8 @@ def test_committed_entry_resumes_after_crash_even_if_signal_expires(tmp_path: Pa
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
     target_key = "long/long-v1/signal-crash/BUSDT"
-    request = _request(_route(tmp_path),
+    request = _request(
+        _route(tmp_path),
         request_id="crash-before-expiry",
         batch_id="crash-before-expiry",
         kind=SleeveAdapterKind.LONG,
@@ -839,7 +1003,8 @@ def test_committed_batch_replays_instead_of_superseding_under_later_flat(tmp_pat
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
     target_key = "long/long-v1/replay-vs-supersede/BUSDT"
-    entry = _request(_route(tmp_path),
+    entry = _request(
+        _route(tmp_path),
         request_id="entry-committed-crash",
         batch_id="entry-committed-crash",
         kind=SleeveAdapterKind.LONG,
@@ -862,7 +1027,8 @@ def test_committed_batch_replays_instead_of_superseding_under_later_flat(tmp_pat
     assert entry.batch_id in service.kernel.state().processed_batches
 
     clock.advance_ns(200_000_000)
-    flat = _request(_route(tmp_path),
+    flat = _request(
+        _route(tmp_path),
         request_id="flat-after-crash",
         batch_id="flat-after-crash",
         kind=SleeveAdapterKind.LONG,
@@ -888,19 +1054,22 @@ def test_failing_queue_head_does_not_starve_convergence(tmp_path: Path) -> None:
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
     target_key = "long/long-v1/starved-head/BUSDT"
-    inbox.submit(_request(_route(tmp_path),
-        request_id="head-that-always-fails",
-        batch_id="head-that-always-fails",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-        target_key=target_key,
-        decision_key="long-target/long-v1/1100/entry/starved-head",
-        metadata={
-            "entry_attempt_key": f"entry-attempt/{target_key}",
-            "signal_ts_ms": 1_000,
-            "signal_valid_until_ms": 1_200,
-        },
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="head-that-always-fails",
+            batch_id="head-that-always-fails",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1100/entry/starved-head",
+            metadata={
+                "entry_attempt_key": f"entry-attempt/{target_key}",
+                "signal_ts_ms": 1_000,
+                "signal_valid_until_ms": 1_200,
+            },
+        )
+    )
     adapter = ScriptedExecutionAdapter("crash")
     clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
     service = _service(root, adapter, clock=clock)
@@ -926,19 +1095,22 @@ def test_flat_exit_does_not_expire_even_with_stale_entry_metadata(tmp_path: Path
     root = tmp_path / "account"
     inbox = _inbox(tmp_path)
     target_key = "long/long-v1/signal-1/BUSDT"
-    inbox.submit(_request(_route(tmp_path),
-        request_id="stale-metadata-flat",
-        batch_id="stale-metadata-flat",
-        kind=SleeveAdapterKind.LONG,
-        notional=0.0,
-        target_key=target_key,
-        decision_key="long-target/long-v1/2000/exit/signal-1",
-        metadata={
-            "entry_attempt_key": f"entry-attempt/{target_key}",
-            "signal_ts_ms": 500,
-            "signal_valid_until_ms": 1_000,
-        },
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="stale-metadata-flat",
+            batch_id="stale-metadata-flat",
+            kind=SleeveAdapterKind.LONG,
+            notional=0.0,
+            target_key=target_key,
+            decision_key="long-target/long-v1/2000/exit/signal-1",
+            metadata={
+                "entry_attempt_key": f"entry-attempt/{target_key}",
+                "signal_ts_ms": 500,
+                "signal_valid_until_ms": 1_000,
+            },
+        )
+    )
     service = _service(
         root,
         CountingTwin(),
@@ -956,7 +1128,8 @@ def test_expired_batch_receipt_terminalizes_only_the_expired_entry_attempt(
     expired_key = "long/long-v1/expired/BUSDT"
     valid_key = "long/long-v1/valid/BUSDT"
     resize_key = "long/long-v1/resize/BUSDT"
-    expired = _request(_route(tmp_path),
+    expired = _request(
+        _route(tmp_path),
         request_id="expired-part",
         batch_id="expired-part",
         kind=SleeveAdapterKind.LONG,
@@ -969,7 +1142,8 @@ def test_expired_batch_receipt_terminalizes_only_the_expired_entry_attempt(
             "signal_valid_until_ms": 1_000,
         },
     ).intents[0]
-    valid = _request(_route(tmp_path),
+    valid = _request(
+        _route(tmp_path),
         request_id="valid-part",
         batch_id="valid-part",
         kind=SleeveAdapterKind.LONG,
@@ -982,7 +1156,8 @@ def test_expired_batch_receipt_terminalizes_only_the_expired_entry_attempt(
             "signal_valid_until_ms": 3_000,
         },
     ).intents[0]
-    resize = _request(_route(tmp_path),
+    resize = _request(
+        _route(tmp_path),
         request_id="resize-part",
         batch_id="resize-part",
         kind=SleeveAdapterKind.LONG,
@@ -1017,13 +1192,15 @@ def test_expired_batch_receipt_terminalizes_only_the_expired_entry_attempt(
 
 
 def test_target_request_forbids_mixing_exit_and_entry(tmp_path: Path) -> None:
-    entry = _request(_route(tmp_path),
+    entry = _request(
+        _route(tmp_path),
         request_id="entry",
         batch_id="entry",
         kind=SleeveAdapterKind.LONG,
         notional=10.0,
     ).intents[0]
-    exit_intent = _request(_route(tmp_path),
+    exit_intent = _request(
+        _route(tmp_path),
         request_id="exit",
         batch_id="exit",
         kind=SleeveAdapterKind.LONG,
@@ -1053,12 +1230,15 @@ def test_definite_reject_is_retried_deterministically_until_fill(tmp_path: Path)
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="reject-then-fill",
-        batch_id="reject-then-fill",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="reject-then-fill",
+            batch_id="reject-then-fill",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
 
     receipt = service.run_once(inbox)
     assert receipt is not None and receipt.accepted
@@ -1088,21 +1268,27 @@ def test_rejected_zero_close_is_retained_and_retry_remains_reduce_only(tmp_path:
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="open-before-close",
-        batch_id="open-before-close",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="open-before-close",
+            batch_id="open-before-close",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-2.0)
 
-    inbox.submit(_request(_route(tmp_path),
-        request_id="rejected-flat-target",
-        batch_id="rejected-flat-target",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=0.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="rejected-flat-target",
+            batch_id="rejected-flat-target",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=0.0,
+        )
+    )
     close_receipt = service.run_once(inbox)
     assert close_receipt is not None and close_receipt.accepted
     rejected_close = adapter.submissions[1]
@@ -1133,12 +1319,15 @@ def test_terminal_cancel_is_retried_after_backoff(tmp_path: Path) -> None:
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="cancelled-entry",
-        batch_id="cancelled-entry",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="cancelled-entry",
+            batch_id="cancelled-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     cancelled = adapter.submissions[0]
     assert service.kernel.state().orders[cancelled.command_id].status == "cancelled"
@@ -1161,12 +1350,15 @@ def test_partial_fill_cancel_retries_only_the_residual(tmp_path: Path) -> None:
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="partial-entry",
-        batch_id="partial-entry",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="partial-entry",
+            batch_id="partial-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     partial = adapter.submissions[0]
     state = service.kernel.state()
@@ -1196,12 +1388,15 @@ def test_restart_after_terminal_retry_derives_next_ordinal_without_duplicate_com
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="restart-terminal",
-        batch_id="restart-terminal",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="restart-terminal",
+            batch_id="restart-terminal",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     clock.advance_ns(100)
     assert service.run_once(inbox) is None
@@ -1246,12 +1441,15 @@ def test_crash_after_convergence_commit_replays_the_same_command_id(tmp_path: Pa
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="crash-convergence",
-        batch_id="crash-convergence",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="crash-convergence",
+            batch_id="crash-convergence",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     clock.advance_ns(100)
     with pytest.raises(RuntimeError, match="after command commit"):
@@ -1275,9 +1473,7 @@ def test_crash_after_convergence_commit_replays_the_same_command_id(tmp_path: Pa
     assert adapter.submissions[2].command_id == crashed_command.command_id
     assert adapter.submissions[2].batch_id == crashed_command.batch_id
     convergence_orders = [
-        order
-        for order in restarted.kernel.state().orders.values()
-        if order.batch_id.startswith("account-convergence/")
+        order for order in restarted.kernel.state().orders.values() if order.batch_id.startswith("account-convergence/")
     ]
     assert len(convergence_orders) == 1
     assert restarted.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
@@ -1296,12 +1492,15 @@ def test_retry_limit_exhaustion_blocks_health_immediately_and_stays_bounded(tmp_
         max_convergence_retries=1,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="bounded-retries",
-        batch_id="bounded-retries",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="bounded-retries",
+            batch_id="bounded-retries",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     assert service.convergence_report().healthy
 
@@ -1334,16 +1533,20 @@ def test_pending_replacements_coalesce_before_old_residual_can_trade(tmp_path: P
         convergence_retry_backoff_ns=100,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="initial-residual",
-        batch_id="initial-residual",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="initial-residual",
+            batch_id="initial-residual",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
     clock.advance_ns(100)  # the old -2 target is now retry-due
 
-    older = _request(_route(tmp_path),
+    older = _request(
+        _route(tmp_path),
         request_id="fifo-older",
         batch_id="fifo-older",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -1352,7 +1555,8 @@ def test_pending_replacements_coalesce_before_old_residual_can_trade(tmp_path: P
         # after it. Only the inbox's durable local arrival sequence is causal.
         created_ts_ns=NOW_NS + 20,
     )
-    newest = _request(_route(tmp_path),
+    newest = _request(
+        _route(tmp_path),
         request_id="fifo-newest",
         batch_id="fifo-newest",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -1382,20 +1586,26 @@ def test_backlogged_entry_is_never_opened_when_a_later_target_is_flat(tmp_path: 
     adapter = ScriptedExecutionAdapter()
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="stale-entry",
-        batch_id="stale-entry",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-        created_ts_ns=NOW_NS,
-    ))
-    inbox.submit(_request(_route(tmp_path),
-        request_id="latest-flat",
-        batch_id="latest-flat",
-        kind=SleeveAdapterKind.LONG,
-        notional=0.0,
-        created_ts_ns=NOW_NS + 1,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="stale-entry",
+            batch_id="stale-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            created_ts_ns=NOW_NS,
+        )
+    )
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="latest-flat",
+            batch_id="latest-flat",
+            kind=SleeveAdapterKind.LONG,
+            notional=0.0,
+            created_ts_ns=NOW_NS + 1,
+        )
+    )
 
     receipt = service.run_once(inbox)
 
@@ -1498,14 +1708,16 @@ def test_empty_readiness_observation_cannot_claim_a_new_raced_request(
 
 def test_flat_safety_transition_is_not_superseded_by_later_reentry(tmp_path: Path) -> None:
     inbox = _inbox(tmp_path)
-    flat = _request(_route(tmp_path),
+    flat = _request(
+        _route(tmp_path),
         request_id="flat-first",
         batch_id="flat-first",
         kind=SleeveAdapterKind.CONTINUOUS,
         notional=0.0,
         created_ts_ns=NOW_NS,
     )
-    reentry = _request(_route(tmp_path),
+    reentry = _request(
+        _route(tmp_path),
         request_id="reentry-later",
         batch_id="reentry-later",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -1520,18 +1732,253 @@ def test_flat_safety_transition_is_not_superseded_by_later_reentry(tmp_path: Pat
     assert claimed is not None and claimed[1].request_id == "flat-first"
 
 
+def test_safety_flat_claim_bypasses_uncommitted_unrelated_entry(tmp_path: Path) -> None:
+    inbox = _inbox(tmp_path)
+    entry = _request(
+        _route(tmp_path),
+        request_id="unrelated-entry",
+        batch_id="unrelated-entry",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+        target_key="long/unrelated/BUSDT",
+    )
+    safety = _native_breach_safety_request(
+        _route(tmp_path),
+        target_key="continuous/open/BUSDT",
+    )
+    inbox.submit(entry)
+    inbox.submit(safety)
+
+    claimed = inbox.claim_next_safety_flat(
+        processed_batches=set(),
+        authorized_request_hashes={safety.request_id: safety.content_hash()},
+    )
+
+    assert claimed is not None and claimed[1] == safety
+    assert inbox.peek_next() == entry
+
+
+def test_safety_flat_claim_requires_exact_journal_authorization_hash(
+    tmp_path: Path,
+) -> None:
+    inbox = _inbox(tmp_path)
+    entry = _request(
+        _route(tmp_path),
+        request_id="entry-first",
+        batch_id="entry-first",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    safety = _native_breach_safety_request(_route(tmp_path))
+    inbox.submit(entry)
+    inbox.submit(safety)
+
+    assert (
+        inbox.claim_next_safety_flat(
+            processed_batches=set(),
+            authorized_request_hashes={safety.request_id: "0" * 64},
+        )
+        is None
+    )
+    assert inbox.peek_next() == entry
+
+
+def test_safety_flat_claim_never_bypasses_prior_committed_batch(tmp_path: Path) -> None:
+    inbox = _inbox(tmp_path)
+    committed = _request(
+        _route(tmp_path),
+        request_id="committed-entry",
+        batch_id="committed-entry",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    safety = _native_breach_safety_request(_route(tmp_path))
+    inbox.submit(committed)
+    inbox.submit(safety)
+
+    assert (
+        inbox.claim_next_safety_flat(
+            processed_batches={committed.batch_id},
+            authorized_request_hashes={safety.request_id: safety.content_hash()},
+        )
+        is None
+    )
+    assert inbox.peek_next() == committed
+
+
+def test_ordinary_risk_flat_without_native_breach_proof_stays_fifo(
+    tmp_path: Path,
+) -> None:
+    inbox = _inbox(tmp_path)
+    entry = _request(
+        _route(tmp_path),
+        request_id="entry-first",
+        batch_id="entry-first",
+        kind=SleeveAdapterKind.LONG,
+        notional=20.0,
+    )
+    ordinary_flat = _request(
+        _route(tmp_path),
+        request_id="ordinary-risk-flat",
+        batch_id="ordinary-risk-flat",
+        kind=SleeveAdapterKind.RISK,
+        notional=0.0,
+    )
+    inbox.submit(entry)
+    inbox.submit(ordinary_flat)
+
+    assert (
+        inbox.claim_next_safety_flat(
+            processed_batches=set(),
+            authorized_request_hashes={},
+        )
+        is None
+    )
+    assert inbox.peek_next() == entry
+
+
+def test_exit_preview_can_use_authenticated_breach_mark_when_l2_is_absent(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path / "account", CountingTwin())
+    service.market_provider = MissingCapturedMarketProvider()
+    fallback = MarketInputRef(
+        input_key="authenticated-breach",
+        symbol="BUSDT",
+        exchange_ts_ns=0,
+        local_receive_ts_ns=NOW_NS,
+        reference_price=11.2,
+        source="bybit_authenticated_position_or_rejection",
+        metadata={"exit_only_authenticated_fallback": True},
+    )
+
+    markets, _snapshot, _rules_by_symbol = service._execution_inputs(
+        requested_symbols={"BUSDT"},
+        batch_id="native-breach-flat",
+        require_external_health=False,
+        account_wide=False,
+        allow_stale_market_for_reduction_preview=True,
+        allow_unavailable_snapshot_for_reduction_preview=True,
+        exit_market_fallbacks={"BUSDT": fallback},
+    )
+
+    assert markets["BUSDT"] == fallback
+
+
+def test_native_breach_shaped_request_without_journal_authority_cannot_use_l2_fallback(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path / "account", ScriptedExecutionAdapter("fill"))
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    inbox.submit(
+        _request(
+            route,
+            request_id="open-current",
+            batch_id="open-current",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    opened = service.run_once(inbox)
+    assert opened is not None and opened.accepted
+    forged = _native_breach_safety_request(route, target_key="long/main/BUSDT")
+    inbox.submit(forged)
+    service.market_provider = MissingCapturedMarketProvider()
+
+    with pytest.raises(MarketCaptureError, match="no reconstructed book"):
+        service.run_once(inbox)
+
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+    assert inbox.peek_next() == forged
+
+
+def test_native_breach_priority_path_flattens_without_l2_and_leaves_older_entry_pending(
+    tmp_path: Path,
+) -> None:
+    adapter = ScriptedExecutionAdapter("fill", "fill")
+    service = _service(tmp_path / "account", adapter)
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    current_key = "long/main/BUSDT"
+    inbox.submit(
+        _request(
+            route,
+            request_id="open-current",
+            batch_id="open-current",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=current_key,
+        )
+    )
+    opened = service.run_once(inbox)
+    assert opened is not None and opened.accepted
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+
+    older_unrelated = _request(
+        route,
+        request_id="older-unrelated-entry",
+        batch_id="older-unrelated-entry",
+        kind=SleeveAdapterKind.CONTINUOUS,
+        notional=-10.0,
+        target_key="continuous/unrelated/BUSDT",
+    )
+    inbox.submit(older_unrelated)
+    protection_engine = AccountProtectionEngine(
+        kernel=service.kernel,
+        inbox=inbox,
+        instrument_rules={
+            "BUSDT": replace(_rules()["BUSDT"], tick_size=0.1),
+        },
+    )
+    published = protection_engine.evaluate_native_breaches(
+        (
+            NativeProtectionBreach(
+                plan=NativeProtectionPlan(
+                    protection_key="native-disaster:BUSDT:test",
+                    symbol="BUSDT",
+                    signed_qty=2.0,
+                    stop_price=9.0,
+                    stop_source="test",
+                    target_keys=(current_key,),
+                ),
+                observed_mark=8.9,
+                evidence_source="authenticated_position_snapshot",
+                detail="BUSDT native stop absent and crossed",
+                observed_ts_ns=NOW_NS,
+            ),
+        )
+    )
+    assert len(published) == 1
+    safety_id = published[0].request_id
+    service.market_provider = MissingCapturedMarketProvider()
+
+    receipt = service.run_safety_flat_once(inbox)
+
+    assert receipt is not None and receipt.request_id == safety_id and receipt.accepted
+    state = service.kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    command = state.orders[receipt.command_ids[0]]
+    assert command.reduce_only is True
+    assert command.status == "filled"
+    assert inbox.peek_next() == older_unrelated
+    assert adapter.submit_calls == 2
+
+
 def test_inbox_fifo_uses_durable_arrival_order_across_mixed_producer_timestamps(
     tmp_path: Path,
 ) -> None:
     inbox = _inbox(tmp_path)
-    arrived_first = _request(_route(tmp_path),
+    arrived_first = _request(
+        _route(tmp_path),
         request_id="arrived-first",
         batch_id="arrived-first",
         kind=SleeveAdapterKind.LONG,
         notional=20.0,
         created_ts_ns=NOW_NS + 10_000,
     )
-    arrived_second = _request(_route(tmp_path),
+    arrived_second = _request(
+        _route(tmp_path),
         request_id="arrived-second",
         batch_id="arrived-second",
         kind=SleeveAdapterKind.CONTINUOUS,
@@ -1544,14 +1991,11 @@ def test_inbox_fifo_uses_durable_arrival_order_across_mixed_producer_timestamps(
     claimed = inbox.claim_next()
 
     assert claimed is not None and claimed[1].request_id == "arrived-first"
-    arrival_rows = [
-        json.loads(path.read_bytes())
-        for path in (inbox.root / "arrival").glob("*.json")
-    ]
-    assert {
-        row["request_id"]: row["arrival_sequence"]
-        for row in arrival_rows
-    } == {"arrived-first": 1, "arrived-second": 2}
+    arrival_rows = [json.loads(path.read_bytes()) for path in (inbox.root / "arrival").glob("*.json")]
+    assert {row["request_id"]: row["arrival_sequence"] for row in arrival_rows} == {
+        "arrived-first": 1,
+        "arrived-second": 2,
+    }
 
 
 @pytest.mark.parametrize("entry_kind", [SleeveAdapterKind.LONG, SleeveAdapterKind.CONTINUOUS])
@@ -1563,7 +2007,8 @@ def test_risk_flat_supersedes_older_strategy_entry_for_same_component(
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
     target_key = f"{entry_kind.value}/main/BUSDT"
-    entry = _request(_route(tmp_path),
+    entry = _request(
+        _route(tmp_path),
         request_id=f"{entry_kind.value}-entry",
         batch_id=f"{entry_kind.value}-entry",
         kind=entry_kind,
@@ -1571,7 +2016,8 @@ def test_risk_flat_supersedes_older_strategy_entry_for_same_component(
         created_ts_ns=NOW_NS + 1_000,
         target_key=target_key,
     )
-    risk_flat = _request(_route(tmp_path),
+    risk_flat = _request(
+        _route(tmp_path),
         request_id=f"{entry_kind.value}-risk-flat",
         batch_id=f"{entry_kind.value}-risk-flat",
         kind=SleeveAdapterKind.RISK,
@@ -1588,10 +2034,7 @@ def test_risk_flat_supersedes_older_strategy_entry_for_same_component(
     assert receipt.accepted
     assert receipt.command_ids == ()
     assert adapter.submit_calls == 0
-    completed = [
-        json.loads(path.read_bytes())
-        for path in (inbox.root / "completed").glob("*.json")
-    ]
+    completed = [json.loads(path.read_bytes()) for path in (inbox.root / "completed").glob("*.json")]
     old = next(row for row in completed if row["request"]["request_id"] == entry.request_id)
     assert old["receipt"]["disposition"] == "superseded"
     assert old["receipt"]["superseded_by_request_id"] == risk_flat.request_id
@@ -1605,14 +2048,16 @@ def test_separate_safety_flats_collectively_supersede_atomic_multi_component_ent
     inbox = _inbox(tmp_path)
     first_key = "long/strategy/component-a/BUSDT"
     second_key = "long/strategy/component-b/BUSDT"
-    first_entry = _request(_route(tmp_path),
+    first_entry = _request(
+        _route(tmp_path),
         request_id="entry-a-source",
         batch_id="entry-a-source",
         kind=SleeveAdapterKind.LONG,
         notional=10.0,
         target_key=first_key,
     ).intents[0]
-    second_entry = _request(_route(tmp_path),
+    second_entry = _request(
+        _route(tmp_path),
         request_id="entry-b-source",
         batch_id="entry-b-source",
         kind=SleeveAdapterKind.LONG,
@@ -1628,7 +2073,8 @@ def test_separate_safety_flats_collectively_supersede_atomic_multi_component_ent
         environment=_route(tmp_path).environment,
         intents=(first_entry, second_entry),
     )
-    flat_a = _request(_route(tmp_path),
+    flat_a = _request(
+        _route(tmp_path),
         request_id="risk-flat-a",
         batch_id="risk-flat-a",
         kind=SleeveAdapterKind.RISK,
@@ -1636,7 +2082,8 @@ def test_separate_safety_flats_collectively_supersede_atomic_multi_component_ent
         created_ts_ns=NOW_NS + 1,
         target_key=first_key,
     )
-    flat_b = _request(_route(tmp_path),
+    flat_b = _request(
+        _route(tmp_path),
         request_id="risk-flat-b",
         batch_id="risk-flat-b",
         kind=SleeveAdapterKind.RISK,
@@ -1652,15 +2099,8 @@ def test_separate_safety_flats_collectively_supersede_atomic_multi_component_ent
 
     assert first is not None and first.request_id == flat_a.request_id
     assert adapter.submit_calls == 0
-    completed = [
-        json.loads(path.read_bytes())
-        for path in (inbox.root / "completed").glob("*.json")
-    ]
-    stale = next(
-        row
-        for row in completed
-        if row["request"]["request_id"] == stale_atomic_entry.request_id
-    )
+    completed = [json.loads(path.read_bytes()) for path in (inbox.root / "completed").glob("*.json")]
+    stale = next(row for row in completed if row["request"]["request_id"] == stale_atomic_entry.request_id)
     assert stale["receipt"]["disposition"] == "superseded"
     assert stale["receipt"]["superseded_by_request_ids"] == [
         flat_a.request_id,
@@ -1680,7 +2120,8 @@ def test_delayed_stale_reentry_cannot_reopen_after_newer_flat_revision(
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
     target_key = "long/strategy/component-a/BUSDT"
-    opened = _request(_route(tmp_path),
+    opened = _request(
+        _route(tmp_path),
         request_id="open-current",
         batch_id="open-current",
         kind=SleeveAdapterKind.LONG,
@@ -1688,7 +2129,8 @@ def test_delayed_stale_reentry_cannot_reopen_after_newer_flat_revision(
         created_ts_ns=NOW_NS + 100,
         target_key=target_key,
     )
-    flattened = _request(_route(tmp_path),
+    flattened = _request(
+        _route(tmp_path),
         request_id="flat-newer",
         batch_id="flat-newer",
         kind=SleeveAdapterKind.RISK,
@@ -1701,7 +2143,8 @@ def test_delayed_stale_reentry_cannot_reopen_after_newer_flat_revision(
     assert service.kernel.state().positions["BUSDT"].signed_qty == 0.0
     assert adapter.submit_calls == 2
 
-    delayed_stale = _request(_route(tmp_path),
+    delayed_stale = _request(
+        _route(tmp_path),
         request_id="entry-generated-before-flat-but-delayed",
         batch_id="entry-generated-before-flat-but-delayed",
         kind=SleeveAdapterKind.LONG,
@@ -1729,7 +2172,8 @@ def test_nonzero_revisions_stay_fifo_so_delayed_stale_resize_is_rejected(
     service = _service(tmp_path / "account", adapter)
     inbox = _inbox(tmp_path)
     target_key = "long/strategy/component-a/BUSDT"
-    newer_small = _request(_route(tmp_path),
+    newer_small = _request(
+        _route(tmp_path),
         request_id="newer-small-arrived-first",
         batch_id="newer-small-arrived-first",
         kind=SleeveAdapterKind.LONG,
@@ -1737,7 +2181,8 @@ def test_nonzero_revisions_stay_fifo_so_delayed_stale_resize_is_rejected(
         created_ts_ns=NOW_NS + 200,
         target_key=target_key,
     )
-    delayed_stale_large = _request(_route(tmp_path),
+    delayed_stale_large = _request(
+        _route(tmp_path),
         request_id="stale-large-arrived-second",
         batch_id="stale-large-arrived-second",
         kind=SleeveAdapterKind.LONG,
@@ -1764,14 +2209,16 @@ def test_nonzero_revisions_stay_fifo_so_delayed_stale_resize_is_rejected(
 
 def test_atomic_request_rejects_duplicate_component_across_adapter_kinds(tmp_path: Path) -> None:
     target_key = "long/main/BUSDT"
-    long_entry = _request(_route(tmp_path),
+    long_entry = _request(
+        _route(tmp_path),
         request_id="long-source",
         batch_id="long-source",
         kind=SleeveAdapterKind.LONG,
         notional=20.0,
         target_key=target_key,
     ).intents[0]
-    risk_flat = _request(_route(tmp_path),
+    risk_flat = _request(
+        _route(tmp_path),
         request_id="risk-source",
         batch_id="risk-source",
         kind=SleeveAdapterKind.RISK,
@@ -1796,7 +2243,8 @@ def test_risk_flat_is_not_superseded_by_genuinely_later_strategy_reentry(
 ) -> None:
     inbox = _inbox(tmp_path)
     target_key = "long/main/BUSDT"
-    risk_flat = _request(_route(tmp_path),
+    risk_flat = _request(
+        _route(tmp_path),
         request_id="risk-flat-first",
         batch_id="risk-flat-first",
         kind=SleeveAdapterKind.RISK,
@@ -1804,7 +2252,8 @@ def test_risk_flat_is_not_superseded_by_genuinely_later_strategy_reentry(
         created_ts_ns=NOW_NS + 10_000,
         target_key=target_key,
     )
-    reentry = _request(_route(tmp_path),
+    reentry = _request(
+        _route(tmp_path),
         request_id="long-reentry-second",
         batch_id="long-reentry-second",
         kind=SleeveAdapterKind.LONG,
@@ -1824,7 +2273,8 @@ def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
     tmp_path: Path,
 ) -> None:
     inbox = _inbox(tmp_path)
-    request = _request(_route(tmp_path),
+    request = _request(
+        _route(tmp_path),
         request_id="missing-arrival",
         batch_id="missing-arrival",
         kind=SleeveAdapterKind.LONG,
@@ -1869,25 +2319,31 @@ def test_queued_replacement_does_not_cross_an_outstanding_working_order(tmp_path
     adapter = ScriptedExecutionAdapter("working")
     service = _service(tmp_path / "account", adapter, convergence_retry_backoff_ns=100)
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="working-entry",
-        batch_id="working-entry",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=-20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="working-entry",
+            batch_id="working-entry",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
     opened = service.run_once(inbox)
     assert opened is not None and opened.accepted
     working = adapter.submissions[0]
     assert service.kernel.state().orders[working.command_id].status == "acknowledged"
     assert service.kernel.state().working_signed_qty("BUSDT") == pytest.approx(-2.0)
 
-    inbox.submit(_request(_route(tmp_path),
-        request_id="replace-working-with-flat",
-        batch_id="replace-working-with-flat",
-        kind=SleeveAdapterKind.CONTINUOUS,
-        notional=0.0,
-        created_ts_ns=NOW_NS + 1,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="replace-working-with-flat",
+            batch_id="replace-working-with-flat",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=0.0,
+            created_ts_ns=NOW_NS + 1,
+        )
+    )
     replaced = service.run_once(inbox)
     assert replaced is not None and replaced.accepted
     assert replaced.command_ids == ()
@@ -1897,14 +2353,18 @@ def test_queued_replacement_does_not_cross_an_outstanding_working_order(tmp_path
     assert service.kernel.state().aggregate_targets["BUSDT"] == 0.0
     assert service.kernel.state().working_signed_qty("BUSDT") == pytest.approx(-2.0)
 
-    service.runtime.driver.ingest((ExecutionObservation(
-        observation_type=ExecutionObservationType.ORDER_STATUS,
-        command_id=working.command_id,
-        exchange_ts_ns=900_001_000,
-        local_receive_ts_ns=1_000_001_000,
-        status="cancelled",
-        cumulative_filled_qty=0.0,
-    ),))
+    service.runtime.driver.ingest(
+        (
+            ExecutionObservation(
+                observation_type=ExecutionObservationType.ORDER_STATUS,
+                command_id=working.command_id,
+                exchange_ts_ns=900_001_000,
+                local_receive_ts_ns=1_000_001_000,
+                status="cancelled",
+                cumulative_filled_qty=0.0,
+            ),
+        )
+    )
     assert service.kernel.state().working_signed_qty("BUSDT") == 0.0
     assert service.convergence_report().converged
     assert service.run_once(inbox) is None
@@ -1928,12 +2388,15 @@ def test_sub_minimum_residual_is_converged_within_venue_granularity(tmp_path: Pa
         max_convergence_retries=1,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="dust-entry",
-        batch_id="dust-entry",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="dust-entry",
+            batch_id="dust-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
 
     report = service.convergence_report()
@@ -1968,12 +2431,15 @@ def test_expressible_residual_still_retries_and_can_exhaust(tmp_path: Path) -> N
         max_convergence_retries=1,
     )
     inbox = _inbox(tmp_path)
-    inbox.submit(_request(_route(tmp_path),
-        request_id="expressible-entry",
-        batch_id="expressible-entry",
-        kind=SleeveAdapterKind.LONG,
-        notional=20.0,
-    ))
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="expressible-entry",
+            batch_id="expressible-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
     assert service.run_once(inbox) is not None
 
     report = service.convergence_report()

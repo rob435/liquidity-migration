@@ -37,17 +37,12 @@ Facts from the live demo book and canonical journal, read 2026-07-20:
   the kill-criteria evidence samples (K2/K3) or any promotion claim.
 - Days before 2026-07-20 are annotated wholesale: the demo record to date
   is **mechanics-and-accounting evidence**, not sized economics. This is
-  consistent with how `docs/research_summary.md` already labels the live
-  curves ("does not prove live-runtime parity"; "tiny skewed forward
-  sample").
+  consistent with the claim boundary in `docs/strategy_program.md`.
 
 ## The fix direction (registered forward, not applied retroactively)
 
-The corrective is a **per-component notional floor in strategy sizing**:
-components whose intended notional falls below the floor are either dropped
-with their weight re-normalized across surviving components, or lifted to
-the floor, keeping gross unchanged. This is a deliberate strategy-config
-change — it belongs to the breadth redesign
-(`docs/breadth_redesign_2026-07-20.md`), lands as one registered config with
-its own commit-dated forward record, and does not retroactively edit any
-existing record.
+A future corrective may drop sub-floor components with weight re-normalized
+across survivors or lift them while keeping gross unchanged. Either choice is
+a deliberate strategy-config change and must land as one committed config with
+its own forward record. The retired breadth plan authorizes neither choice;
+current routing is through `docs/strategy_program.md`.

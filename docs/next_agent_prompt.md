@@ -1,104 +1,101 @@
-# Canonical research-agent mission prompt
+# Next research agent prompt
 
-Maintained in-repo so it stays current with the program. Hand everything
-between the markers to a new execution session verbatim. It supersedes all
-previous mission prompts. Update it in the same commit whenever the program
-doc's priorities change.
+You are taking over strategy research in
+`/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration`.
 
----- PROMPT START ----
+Your mission is to discover interesting, causally real market anomalies that
+could justify a strategy overhaul. Do not optimize toward a hardcoded Sharpe,
+return, trade-count, cost, era-sign, or promotion gate. Do not assume the
+current Crowding Transfer hypothesis is correct. Follow surprising evidence,
+including negative results, sign inversions, regime-specific behavior, and
+data/execution anomalies, and change direction when a better mechanism appears.
 
-You are executing the liquidity-migration research program. Work is counted
-ONLY in commits and hashed artifacts — a claim without an artifact path did
-not happen. A previous session claimed a full day of work with zero commits;
-do not be that session. If you cannot do the work, say so plainly.
+## Start correctly
 
-STARTUP PROTOCOL (before anything else):
-1. Run `git fetch origin`, then `git log --oneline -5` and
-   `git status --short --branch`; print them in your first status message.
-   Parallel sessions run on other boxes — reconcile with `origin/main`
-   BEFORE claiming any prior work is missing (lesson of 2026-07-20: a
-   session called T-L v1 phantom after checking only local history).
-2. Read `docs/tail_risk_program.md` — the single source for the task queue
-   and current statuses — then `STATE.md`, `docs/governance.md`,
-   `docs/hypothesis_ledger.md`.
-3. Invoke the research-phase-runner and backtest-integrity skills before any
-   decision-influencing run. `docs/backtesting_errors_we_never_repeat.md`
-   items 14, 15, 21, 27, 29, 30 are load-bearing.
+1. Read `AGENTS.md`, `STATE.md`, `docs/strategy_program.md`,
+   `docs/governance.md`, `docs/backtesting_errors_we_never_repeat.md`,
+   `docs/data_roots.md`, `docs/pit_gate.md`, and
+   `docs/repository_map.md`.
+2. Read the project `research-phase-runner`, `backtest-integrity`, and relevant
+   run/report skills before running or interpreting research.
+3. Run `scripts/dev.sh doctor --json`.
+4. Preserve the dirty account-kernel remediation and the existing research
+   reset. Do not deploy, contact private venue APIs, mutate demo/paper account
+   state, enable `REAL_MONEY`, or use mainnet credentials.
 
-OPERATING RULES:
-- One completed unit = one local commit (focused message) after
-  `scripts/dev.sh check` passes. Flip the matching status cell in
-  `docs/tail_risk_program.md` IN THE SAME COMMIT, writing the artifact path
-  into the cell. Push at natural checkpoints (push triggers CI only; deploys
-  are a separate operator action you never take).
-- Hours-long jobs: launch detached (`nohup … > <scratchpad>/<name>.log &`),
-  record the log path, keep working other items, and check back by reading
-  the log — never state a background job's result you have not read.
-- Evidence rules: all grid cells reported; era-split with the 2024/2025
-  boundary as the primary stability test; costs next to gross (frozen 45 bp
-  hurdle, plus a stated listing-week caveat where relevant); uncertainty on
-  listing-wave/calendar blocks; MAR banned at negative net; missing data
-  excluded and counted, never zero-filled.
-- Admission bar to Lane-2: era-stable net ≥ +40 bp/trade after costs and
-  funding, or ≥ 5 independent bets/day at deployable gross. Below bar →
-  drop and record in the hypothesis ledger.
+`docs/strategy_program.md` is the only status and research-queue authority.
+This file is a launcher, not a second roadmap.
 
-HARD RAILS — no exceptions:
-- NEVER read the reserved V2 label tape (the `[2025-01-01, 2026-07-06)`
-  holdout object). It is spent only at program step P2.3.
-- No per-trade exit/stop/trailing variants — closed lines.
-- No deploys, no systemd/VPS mutation, no `REAL_MONEY`, no mainnet, no
-  credential changes. VPS access is read-only if needed at all.
-- Receipts under `docs/preregistration/` and dated receipt docs are
-  immutable — annotate, never rewrite.
-- Commit configs BEFORE opening any new grading surface; record every
-  opening in `docs/preregistration/INDEX.md`.
+## Research posture
 
-MISSION QUEUE — work top-down; live statuses in `docs/tail_risk_program.md`
-(T-L v1+v2, T-M, T-N, P0.1, P0.2, P0.5, P1.1–P1.4, P2.1 are DONE as of
-2026-07-20 — do not redo them; read their status cells for artifacts):
+- Lane 1 is open exploration on already-seen data. Search broadly, inspect
+  outcomes, prototype, visualize, and pursue several leads when useful.
+- There are no universal performance gates. Treat effect size, uncertainty,
+  costs, funding, sample size, concentration, capacity, drawdown, and regime
+  behavior as evidence to understand—not boxes to tick.
+- The non-negotiable constraints are causal availability, honest PIT/population
+  scope, missingness, executable economics for performance claims,
+  reconstructable accounting, and provenance. A miss makes a number diagnostic,
+  not worthless.
+- Keep a complete tested-set/search log. Do not hide variants, failed runs,
+  unstable eras, or a lead that became less attractive.
+- Prefer a minimal reusable panel and a quick claim-bearing read over elaborate
+  verification machinery that never reaches research.
 
-1. **P2.2 — R2 squeeze-state governor design (top priority).** Gross
-   multiplier per side, hedge modulation, extreme-state veto; NO per-trade
-   exit changes. Lane-1 card on the spent window only, from the P2.1
-   feature build
-   (`reports/tail-risk-program/p21-squeeze-features-2026-07-20/`). This
-   also owns the squeeze-CONDITIONED long that T-N left open (T-N closed
-   the unconditioned inversion on both venues). T-M's episode tape
-   (`reports/strategy-research-v3/t-m/2026-07-20/`) is available state
-   context. All cells × eras; cross-venue check before any Lane-2 talk
-   (the T-L v2 lesson: a Bybit-only survivor died on Binance). P2.3 (the
-   holdout spend) needs its own registered opening — NOT part of P2.2.
-2. **G1 one-time grade of the committed R1/R3 configs.** A registered
-   unit: record the opening in `docs/preregistration/INDEX.md` BEFORE the
-   first outcome read; Binance CONTINUOUS-shape render over G1
-   (`[2021-01-01, 2021-04-30)` entries) incl. an RMOM rebuild into a
-   separate labelled root — never mutate `binance_full_pit` in place; then
-   the frozen §Grading metrics via the committed replay scripts. G1 is
-   pristine and spends once — do not start it casually at the tail of a
-   long session.
-3. **R1 forward rows** — run `scripts/research_v3/r1_forward_scorer.py`
-   with each T-A render-root refresh past 2026-07-21; weekly R1-K1/K2/K3
-   check.
-4. **P0.4 — verify only.** Assigned to the big PC; when its coverage
-   receipt lands, verify it. Launch nothing locally.
+## Where to look first
 
-Operator-gated (not agent work): P0.3 recorder install, R3a/R3b
-activation, any deploy.
+Use Crowding Transfer as an initial probe, not a boundary:
 
-REPORTING:
-- An evidence note in `docs/research_summary.md` per completed study:
-  claim; data that shaped vs graded; scope; effect size + uncertainty +
-  costs; artifact/commit ids; explicit non-conclusions.
-- Raw outputs under `reports/strategy-research-v3/<id>/<date>/` with a
-  `manifest.json` carrying file hashes, code commit, data root, and
-  limitations.
-- Final message: a per-task table (done/blocked and why), THE COMMIT HASH
-  for every claim, background-job log paths with their last-read status,
-  and exact next actions for the following session.
+- Bybit-versus-Binance premium, settled funding, mark/index basis, and their
+  lead/lag or disagreement states;
+- changes and accelerations rather than only extreme levels;
+- price/open-interest/taker-flow/turnover divergences;
+- capital moving between symbols, clusters, or venues;
+- funding-clock, time-of-week, volatility, liquidity, and regime asymmetries;
+- anomalies in what LONG and CONTINUOUS admit, reject, miss, or lose money on;
+- post-fill reversion, spread capture, and other execution effects that may be
+  larger than signal changes;
+- contract lifecycle, mapping, coverage, or timestamp anomalies that could
+  create either a real mechanism or a fake backtest.
 
-Do not end the session while any queue item is neither done nor genuinely
-blocked, and never end it merely because time has passed or the context is
-long.
+Be creative. If a different signal family, portfolio construction, horizon,
+venue relationship, or even a non-price feature is more interesting, pursue it
+and update the program. Do not force a long/short symmetry, a BTC hedge, a fixed
+holding period, or a fixed cost stress unless the claim makes that choice
+appropriate.
 
----- PROMPT END ----
+## Working loop
+
+1. Map the exact data fields, time coverage, availability semantics,
+   population, and missingness needed for the next question.
+2. Build only the reusable substrate needed to answer it, with focused tests
+   for timing, mapping, and missing-data behavior.
+3. Produce an anomaly atlas rather than one winning curve. For each observation
+   record: what happened, why it is interesting, plausible mechanism, data
+   touched, economic magnitude/shape, uncertainty and concentration, strongest
+   artifact explanation, and the next discriminating test.
+4. Try to kill the best explanations with venue-local, time-shift, sign,
+   universe, common-factor, and execution controls. Choose controls because
+   they distinguish mechanisms, not because a template demands them.
+5. Put costs and funding beside gross when making a performance claim. Keep
+   diagnostic gross effects when execution data is unavailable, clearly
+   labelled.
+6. Update `docs/strategy_program.md` with concise conclusions and the next
+   highest-information questions. Remove superseded scratch and avoid creating
+   competing plans.
+7. Only when a formulation is worth learning about prospectively, commit its
+   exact config/scorer so post-commit days form its Lane-2 record.
+
+## Required handoff
+
+Leave the next operator:
+
+- a ranked anomaly catalog with the reasoning behind the ranking;
+- the full explored surface, including negative and unstable results;
+- reproducible commands, code/config/data identities, and compact artifacts;
+- a clean statement of what is causal/executable evidence versus diagnostic;
+- the highest-information next experiment, without inventing a hardcoded
+  promotion gate;
+- focused tests plus proportionate repository validation.
+
+No research result authorizes demo deployment or real money.

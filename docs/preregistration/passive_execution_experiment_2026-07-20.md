@@ -23,9 +23,8 @@ mid reverts through our fill price within seconds. Every entry paid the
 spread plus taker fees (5.5 bps) to demand liquidity the market would have
 given back moments later. The measurable upper bound for a maker-first
 policy on this flow is roughly **25–30 bps per side** (spread + fee delta +
-captured reversion) — an order of magnitude larger than any plausible
-signal-side improvement still available on the spent research surface (see
-`docs/hypothesis_ledger.md`).
+captured reversion). This is an execution-cost observation, not a signal claim;
+the current strategy evidence boundary is in `docs/strategy_program.md`.
 
 ## Hypothesis
 

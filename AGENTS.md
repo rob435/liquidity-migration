@@ -21,7 +21,8 @@ Use the most direct source for the question:
 
 1. Code, tests, deploy files, and generated artifacts define implemented behavior.
 2. `STATE.md` records the current operational snapshot.
-3. `docs/research_summary.md` records the current interpretation of evidence.
+3. `docs/strategy_program.md` records the current interpretation of evidence
+   and the only active strategy-research queue.
 4. An active preregistration governs only its named experiment.
 5. Skills and runbooks are procedural aids, never factual or epistemic authority.
 

@@ -20,7 +20,10 @@ deployment and risk boundary.
 - [docs/active_trading_logic.md](docs/active_trading_logic.md) — active
   strategy profiles and reconstruction limits.
 - [docs/governance.md](docs/governance.md) — evidence and authorization policy.
-- [docs/research_summary.md](docs/research_summary.md) — compact decision log.
+- [docs/strategy_program.md](docs/strategy_program.md) — consolidated evidence,
+  current direction, and the only active strategy-research queue.
+- [docs/next_agent_prompt.md](docs/next_agent_prompt.md) — concise transferable
+  launcher for open-ended anomaly research; not a second roadmap.
 - [docs/data_roots.md](docs/data_roots.md) and
   [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
 - [docs/research_refresh.md](docs/research_refresh.md) — append-first data,

@@ -237,6 +237,83 @@ def test_canonical_zero_venue_position_row_is_valid_flat_truth(tmp_path: Path) -
     assert report.mismatches == ()
 
 
+def test_reconciliation_marks_ack_lost_entry_without_venue_evidence_unhealthy(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(
+        tmp_path,
+        account_id="ambiguous-entry",
+        clock=clock,
+    )
+    result = kernel.submit_targets(
+        batch_id="ambiguous-entry",
+        market_inputs=[MarketInputRef("book-1", "BUSDT", 900, 1_000, 10.0)],
+        targets=[
+            DesiredTarget(
+                decision_key="ambiguous-entry",
+                target_key="long/ambiguous/BUSDT",
+                sleeve="long",
+                strategy_id="long-v1",
+                component_id="ambiguous",
+                symbol="BUSDT",
+                signed_qty=2.0,
+                reference_price=10.0,
+                leverage=10.0,
+            )
+        ],
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet", 950),
+        risk_policy=AccountRiskPolicy(
+            100.0,
+            100.0,
+            100.0,
+            20.0,
+            10.0,
+        ),
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0),
+        },
+    )
+    command_id = result.commands[0].command_id
+    kernel.record_submission_attempt(
+        command_id=command_id,
+        adapter_name="bybit_demo",
+    )
+
+    class NoEvidenceClient(_NoOpenOrdersClient):
+        demo = True
+
+        def get_trade_history(self, **params: object):
+            assert params["order_link_id"] == command_id
+            return []
+
+        def get_order_history(self, **params: object):
+            assert params["order_link_id"] == command_id
+            return []
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=NoEvidenceClient(),
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0),
+        },
+        clock=clock,
+    )
+    report = reconciler.reconcile_once()
+
+    assert not report.healthy
+    assert report.mismatches == (
+        "BUSDT:ambiguous_submission_unresolved:"
+        f"command={command_id}:attempts=1",
+    )
+    with pytest.raises(RuntimeError, match="ambiguous_submission_unresolved"):
+        reconciler.require_recent_healthy(max_age_ns=1)
+
+
 @pytest.mark.parametrize("conditional", [False, True])
 def test_reconciliation_detects_unowned_order_appearing_after_clean_start(
     tmp_path: Path,
@@ -472,6 +549,53 @@ def test_reconciliation_accepts_journal_verified_native_open_order(tmp_path: Pat
 
     assert report.healthy
     assert report.mismatches == ()
+
+
+@pytest.mark.parametrize(
+    ("breaches_only", "expected_recovery_authority"),
+    [(True, True), (False, False)],
+)
+def test_reconciliation_propagates_only_structured_native_breach_authority(
+    tmp_path: Path,
+    breaches_only: bool,
+    expected_recovery_authority: bool,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(
+        tmp_path,
+        account_id="structured-native-breach",
+        clock=clock,
+    )
+
+    class FlatClient(_NoOpenOrdersClient):
+        demo = True
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return []
+
+    class NativeManager:
+        def reconcile_venue_positions(self, rows: object) -> None:
+            assert rows == []
+            error = RuntimeError("provider text may mention NativeProtectionBreachError")
+            error.breaches_only = breaches_only  # type: ignore[attr-defined]
+            raise error
+
+        def is_verified_native_order(self, _candidate: object) -> bool:
+            return False
+
+    report = BybitAccountReconciler(
+        kernel=kernel,
+        client=FlatClient(),
+        instrument_rules={},
+        native_protection_manager=NativeManager(),
+        clock=clock,
+    ).reconcile_once()
+
+    assert report.healthy is False
+    assert len(report.mismatches) == 1
+    assert report.mismatches[0].startswith("native_protection:RuntimeError:")
+    assert report.native_protection_breach_only is expected_recovery_authority
 
 
 def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -> None:

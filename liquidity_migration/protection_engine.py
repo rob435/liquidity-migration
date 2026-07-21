@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .account_contracts import (
     AccountEvent,
@@ -26,7 +27,11 @@ from .account_strategy_state import (
     CanonicalComponentExecutionAnchor,
     component_execution_anchors_from_snapshot,
 )
+from .deterministic_serialization import canonical_json
 from .strategy_runtime import SleeveTargetIntent
+
+if TYPE_CHECKING:
+    from .venue_protection import NativeProtectionBreach
 
 
 class AccountProtectionEngine:
@@ -49,9 +54,7 @@ class AccountProtectionEngine:
             raise ValueError("protection engine requires verified instrument rules")
         for symbol, rule in rules.items():
             if symbol != rule.symbol.upper() or rule.tick_size <= 0.0:
-                raise ValueError(
-                    f"{symbol} protection rule must match its symbol and have a positive tick_size"
-                )
+                raise ValueError(f"{symbol} protection rule must match its symbol and have a positive tick_size")
         self.kernel = kernel
         self.inbox = inbox
         self.instrument_rules = rules
@@ -61,29 +64,19 @@ class AccountProtectionEngine:
         market_inputs: Mapping[str, MarketInputRef],
         *,
         account_events: Sequence[AccountEvent] | None = None,
-        verified_execution_anchors: (
-            Mapping[str, CanonicalComponentExecutionAnchor] | None
-        ) = None,
+        verified_execution_anchors: (Mapping[str, CanonicalComponentExecutionAnchor] | None) = None,
         trusted_account_state: AccountState | None = None,
     ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
         if account_events is None:
             if trusted_account_state is not None:
-                raise ValueError(
-                    "trusted protection state requires its account event snapshot"
-                )
+                raise ValueError("trusted protection state requires its account event snapshot")
             if verified_execution_anchors is not None:
-                raise ValueError(
-                    "verified protection anchors require their account event snapshot"
-                )
+                raise ValueError("verified protection anchors require their account event snapshot")
             events, state = self.kernel._snapshot_ref()
         else:
             events = tuple(account_events)
-            expected_state_hash = (
-                events[-1].state_hash
-                if events
-                else AccountState().rolling_state_hash
-            )
+            expected_state_hash = events[-1].state_hash if events else AccountState().rolling_state_hash
             if trusted_account_state is None:
                 state = reduce_account_events(events)
             else:
@@ -91,9 +84,7 @@ class AccountProtectionEngine:
                     trusted_account_state.events_applied != len(events)
                     or trusted_account_state.rolling_state_hash != expected_state_hash
                 ):
-                    raise RuntimeError(
-                        "trusted protection state does not match its account event snapshot"
-                    )
+                    raise RuntimeError("trusted protection state does not match its account event snapshot")
                 state = trusted_account_state
         if verified_execution_anchors is None:
             anchors = {
@@ -107,9 +98,7 @@ class AccountProtectionEngine:
             anchors = dict(verified_execution_anchors)
             for target_key, projected_anchor in anchors.items():
                 if target_key != projected_anchor.target_key:
-                    raise ValueError(
-                        "verified protection anchor key does not match its projection"
-                    )
+                    raise ValueError("verified protection anchor key does not match its projection")
         for target_key, target in sorted(state.component_targets.items()):
             signed_qty = float(target.get("signed_qty") or 0.0)
             symbol = str(target.get("symbol") or "").upper()
@@ -132,10 +121,7 @@ class AccountProtectionEngine:
                 anchor is None
                 or not (
                     anchor.entry_fill_complete
-                    or (
-                        anchor.entry_commands_terminal
-                        and abs(anchor.entry_observed_signed_qty) > 0.0
-                    )
+                    or (anchor.entry_commands_terminal and abs(anchor.entry_observed_signed_qty) > 0.0)
                 )
                 or anchor.entry_fill_vwap is None
                 or anchor.entry_fill_vwap <= 0.0
@@ -174,9 +160,7 @@ class AccountProtectionEngine:
             if not owner_strategy_id:
                 target_key_parts = target_key.split("/")
                 owner_strategy_id = (
-                    target_key_parts[1]
-                    if len(target_key_parts) == 4 and target_key_parts[1]
-                    else "account-protection"
+                    target_key_parts[1] if len(target_key_parts) == 4 and target_key_parts[1] else "account-protection"
                 )
             source_decision = str(target.get("decision_key") or target_key)
             request_id = f"protection:{source_decision}:{reason}"
@@ -197,41 +181,43 @@ class AccountProtectionEngine:
                 route_id=self.inbox.route.route_id,
                 account_id=self.inbox.route.account_id,
                 environment=self.inbox.route.environment,
-                intents=(RequestedIntent(
-                    adapter_kind=SleeveAdapterKind.RISK,
-                    intent=SleeveTargetIntent(
-                        decision_key=f"risk:{source_decision}:{reason}",
-                        target_key=target_key,
-                        # The zero target is a risk-authored decision, but it is
-                        # still a lifecycle replacement for the original
-                        # strategy component. Keeping the owner's strategy id
-                        # lets canonical sleeve projections apply the close to
-                        # the row they opened instead of manufacturing a second
-                        # account-protection lifecycle.
-                        strategy_id=owner_strategy_id,
-                        component_id=str(target.get("component_id") or "risk"),
-                        symbol=symbol,
-                        signed_notional_usdt=0.0,
-                        leverage=float(target.get("leverage") or 1.0),
-                        reason=reason,
-                        metadata={
-                            "owner_sleeve": owner,
-                            "requested_by_strategy_id": "account-protection",
-                            "trigger_market_input_key": market.input_key,
-                            "trigger_exchange_ts_ns": market.exchange_ts_ns,
-                            "trigger_local_receive_ts_ns": market.local_receive_ts_ns,
-                            "trigger_price": market.reference_price,
-                            "entry_fill_execution_id": anchor.entry_fill_execution_id,
-                            "entry_fill_vwap": anchor.entry_fill_vwap,
-                            "entry_attribution_scope": anchor.entry_attribution_scope,
-                            "entry_attribution_basis": anchor.entry_attribution_basis,
-                            "stop_loss_pct": stop_pct,
-                            "take_profit_pct": take_profit_pct,
-                            "stop_price": stop,
-                            "take_profit_price": take_profit,
-                        },
+                intents=(
+                    RequestedIntent(
+                        adapter_kind=SleeveAdapterKind.RISK,
+                        intent=SleeveTargetIntent(
+                            decision_key=f"risk:{source_decision}:{reason}",
+                            target_key=target_key,
+                            # The zero target is a risk-authored decision, but it is
+                            # still a lifecycle replacement for the original
+                            # strategy component. Keeping the owner's strategy id
+                            # lets canonical sleeve projections apply the close to
+                            # the row they opened instead of manufacturing a second
+                            # account-protection lifecycle.
+                            strategy_id=owner_strategy_id,
+                            component_id=str(target.get("component_id") or "risk"),
+                            symbol=symbol,
+                            signed_notional_usdt=0.0,
+                            leverage=float(target.get("leverage") or 1.0),
+                            reason=reason,
+                            metadata={
+                                "owner_sleeve": owner,
+                                "requested_by_strategy_id": "account-protection",
+                                "trigger_market_input_key": market.input_key,
+                                "trigger_exchange_ts_ns": market.exchange_ts_ns,
+                                "trigger_local_receive_ts_ns": market.local_receive_ts_ns,
+                                "trigger_price": market.reference_price,
+                                "entry_fill_execution_id": anchor.entry_fill_execution_id,
+                                "entry_fill_vwap": anchor.entry_fill_vwap,
+                                "entry_attribution_scope": anchor.entry_attribution_scope,
+                                "entry_attribution_basis": anchor.entry_attribution_basis,
+                                "stop_loss_pct": stop_pct,
+                                "take_profit_pct": take_profit_pct,
+                                "stop_price": stop,
+                                "take_profit_price": take_profit,
+                            },
+                        ),
                     ),
-                ),),
+                ),
             )
             self.inbox.submit(request)
             self.kernel.record_protection(
@@ -260,6 +246,202 @@ class AccountProtectionEngine:
             requests.append(request)
         return tuple(requests)
 
+    def evaluate_native_breaches(
+        self,
+        breaches: Sequence[NativeProtectionBreach],
+    ) -> tuple[AccountTargetRequest, ...]:
+        """Publish atomic software flats for authenticated native-stop breaches.
+
+        Include both accepted components and not-yet-processed nonzero intents
+        for the breached symbol. The latter is essential: a queued newer
+        component entry must receive a still-newer zero revision or it could
+        reopen the symbol after the emergency close.
+        """
+
+        published: list[AccountTargetRequest] = []
+        state = self.kernel._state_ref()
+        unresolved = self.inbox.unresolved_requests()
+        for breach in sorted(breaches, key=lambda item: item.plan.symbol):
+            symbol = breach.plan.symbol.upper()
+            candidates: dict[str, dict[str, Any]] = {}
+            covered_revisions: dict[str, int] = {}
+
+            for target_key, target in state.component_target_desires.items():
+                if str(target.get("symbol") or "").upper() != symbol:
+                    continue
+                metadata = target.get("metadata") or {}
+                revision = max(
+                    int(metadata.get("account_request_created_ts_ns") or 0),
+                    breach.observed_ts_ns,
+                    1,
+                )
+                if float(target.get("signed_qty") or 0.0) == 0.0:
+                    if str(metadata.get("native_protection_plan_key") or "") == breach.plan.protection_key:
+                        covered_revisions[target_key] = max(
+                            int(metadata.get("source_revision_ns") or revision),
+                            covered_revisions.get(target_key, 0),
+                        )
+                    continue
+                candidates[target_key] = {
+                    "target_key": target_key,
+                    "strategy_id": str(target.get("strategy_id") or "account-protection"),
+                    "component_id": str(target.get("component_id") or "native-disaster"),
+                    "owner_sleeve": str(target.get("sleeve") or target_key.split("/", 1)[0]),
+                    "leverage": float(target.get("leverage") or 1.0),
+                    "source_decision_key": str(target.get("decision_key") or target_key),
+                    "source_request_id": str(metadata.get("account_request_id") or ""),
+                    "source_revision_ns": revision,
+                }
+
+            for pending in unresolved:
+                for item in pending.intents:
+                    intent = item.intent
+                    if (
+                        intent.symbol.upper() != symbol
+                        or float(intent.signed_notional_usdt) == 0.0
+                        or pending.created_ts_ns <= covered_revisions.get(intent.target_key, 0)
+                    ):
+                        continue
+                    prior = candidates.get(intent.target_key)
+                    prior_revision = int(prior.get("source_revision_ns") or 0) if prior else -1
+                    identity = (pending.created_ts_ns, pending.request_id)
+                    prior_identity = (
+                        prior_revision,
+                        str(prior.get("source_request_id") or "") if prior else "",
+                    )
+                    if prior is not None and identity <= prior_identity:
+                        continue
+                    candidates[intent.target_key] = {
+                        "target_key": intent.target_key,
+                        "strategy_id": intent.strategy_id,
+                        "component_id": intent.component_id,
+                        "owner_sleeve": str(intent.metadata.get("owner_sleeve") or intent.target_key.split("/", 1)[0]),
+                        "leverage": float(intent.leverage),
+                        "source_decision_key": intent.decision_key,
+                        "source_request_id": pending.request_id,
+                        "source_revision_ns": pending.created_ts_ns,
+                    }
+
+            canonical_flat_in_flight = abs(float(state.aggregate_targets.get(symbol, 0.0))) <= 1e-12 and any(
+                state.orders[command_id].symbol == symbol and state.orders[command_id].reduce_only
+                for command_id in state.working_order_ids
+            )
+            if not candidates and (covered_revisions or canonical_flat_in_flight):
+                continue
+            if not candidates:
+                synthetic_key = f"account_risk/native-disaster/{symbol}"
+                candidates[synthetic_key] = {
+                    "target_key": synthetic_key,
+                    "strategy_id": "account-protection",
+                    "component_id": "native-disaster",
+                    "owner_sleeve": "account_risk",
+                    "leverage": 1.0,
+                    "source_decision_key": breach.plan.protection_key,
+                    "source_request_id": "",
+                    "source_revision_ns": breach.observed_ts_ns,
+                }
+
+            ordered = [candidates[key] for key in sorted(candidates)]
+            material = {
+                "symbol": symbol,
+                "protection_plan_key": breach.plan.protection_key,
+                "targets": [
+                    {
+                        "target_key": row["target_key"],
+                        "source_request_id": row["source_request_id"],
+                        "source_revision_ns": row["source_revision_ns"],
+                    }
+                    for row in ordered
+                ],
+            }
+            suffix = hashlib.sha256(canonical_json(material)).hexdigest()[:20]
+            request_id = f"protection:native-breach:{symbol}:{suffix}"
+            created_ts_ns = max(
+                breach.observed_ts_ns,
+                *(int(row["source_revision_ns"]) for row in ordered),
+                1,
+            )
+            request = AccountTargetRequest(
+                request_id=request_id,
+                batch_id=request_id,
+                created_ts_ns=created_ts_ns,
+                route_id=self.inbox.route.route_id,
+                account_id=self.inbox.route.account_id,
+                environment=self.inbox.route.environment,
+                intents=tuple(
+                    RequestedIntent(
+                        adapter_kind=SleeveAdapterKind.RISK,
+                        intent=SleeveTargetIntent(
+                            decision_key=f"risk:{request_id}:{row['target_key']}",
+                            target_key=str(row["target_key"]),
+                            strategy_id=str(row["strategy_id"]),
+                            component_id=str(row["component_id"]),
+                            symbol=symbol,
+                            signed_notional_usdt=0.0,
+                            leverage=float(row["leverage"]),
+                            reason="native_disaster_stop_breached",
+                            metadata={
+                                "owner_sleeve": str(row["owner_sleeve"]),
+                                "requested_by_strategy_id": "account-protection",
+                                "native_protection_plan_key": breach.plan.protection_key,
+                                "native_stop_price": breach.plan.stop_price,
+                                "breached_signed_qty": breach.plan.signed_qty,
+                                "authenticated_breach_mark": breach.observed_mark,
+                                "breach_evidence_source": breach.evidence_source,
+                                "breach_observed_ts_ns": breach.observed_ts_ns,
+                                "source_request_id": str(row["source_request_id"]),
+                                "source_revision_ns": int(row["source_revision_ns"]),
+                            },
+                        ),
+                    )
+                    for row in ordered
+                ),
+            )
+            existed = self.inbox.contains(request_id)
+            if not existed:
+                self.inbox.submit(request)
+                published.append(request)
+            if request_id not in self.kernel._state_ref().protections:
+                request_hash = request.content_hash()
+                self.kernel.record_protection(
+                    protection_key=request_id,
+                    symbol=symbol,
+                    status="software_flat_requested",
+                    stop_price=breach.plan.stop_price,
+                    take_profit_price=None,
+                    exchange_ts_ns=0,
+                    local_receive_ts_ns=breach.observed_ts_ns,
+                    metadata={
+                        "native_exchange": False,
+                        "native_protection_plan_key": breach.plan.protection_key,
+                        "reason": "native_disaster_stop_breached",
+                        "request_hash": request_hash,
+                        "authenticated_breach_mark": breach.observed_mark,
+                        "breach_evidence_source": breach.evidence_source,
+                        "breach_observed_ts_ns": breach.observed_ts_ns,
+                        "breached_signed_qty": breach.plan.signed_qty,
+                        "native_stop_price": breach.plan.stop_price,
+                        "target_keys": [str(row["target_key"]) for row in ordered],
+                        "source_revision_by_target": {
+                            str(row["target_key"]): int(row["source_revision_ns"])
+                            for row in ordered
+                        },
+                    },
+                )
+            else:
+                authorization = self.kernel._state_ref().protections[request_id]
+                authorization_metadata = authorization.get("metadata") or {}
+                if (
+                    str(authorization.get("status") or "") != "software_flat_requested"
+                    or not isinstance(authorization_metadata, Mapping)
+                    or str(authorization_metadata.get("request_hash") or "")
+                    != request.content_hash()
+                ):
+                    raise RuntimeError(
+                        f"native breach recovery authorization {request_id!r} changed content"
+                    )
+        return tuple(published)
+
 
 def _protection_trigger_reason(
     *,
@@ -270,14 +452,19 @@ def _protection_trigger_reason(
 ) -> str:
     if signed_qty == 0.0:
         return ""
-    if stop_price is not None and stop_price > 0.0 and (
-        (signed_qty > 0.0 and mark_price <= stop_price)
-        or (signed_qty < 0.0 and mark_price >= stop_price)
+    if (
+        stop_price is not None
+        and stop_price > 0.0
+        and ((signed_qty > 0.0 and mark_price <= stop_price) or (signed_qty < 0.0 and mark_price >= stop_price))
     ):
         return "stop_loss"
-    if take_profit_price is not None and take_profit_price > 0.0 and (
-        (signed_qty > 0.0 and mark_price >= take_profit_price)
-        or (signed_qty < 0.0 and mark_price <= take_profit_price)
+    if (
+        take_profit_price is not None
+        and take_profit_price > 0.0
+        and (
+            (signed_qty > 0.0 and mark_price >= take_profit_price)
+            or (signed_qty < 0.0 and mark_price <= take_profit_price)
+        )
     ):
         return "take_profit"
     return ""
@@ -303,9 +490,7 @@ def _optional_fraction(value: object) -> float | None:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"protection fraction is not numeric: {value!r}") from exc
     if not math.isfinite(output) or not 0.0 < output < 1.0:
-        raise ValueError(
-            f"protection fraction must be a fraction in (0, 1), got {value!r}"
-        )
+        raise ValueError(f"protection fraction must be a fraction in (0, 1), got {value!r}")
     return output
 
 

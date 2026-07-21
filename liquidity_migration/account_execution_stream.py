@@ -14,6 +14,7 @@ from .account_contracts import (
     AccountEventType,
     AccountState,
     AccountTransitionError,
+    PositionState,
 )
 from .account_kernel import AccountExecutionKernel
 from .bybit_execution_adapter import bybit_private_execution_metadata
@@ -69,18 +70,17 @@ def _command_id_for_row(row: Mapping[str, Any], state: AccountState) -> str:
     external order.
     """
 
-    command_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-    if command_id in state.orders:
-        return command_id
     venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
-    if not venue_order_id:
-        return command_id
-    matches = [
-        order.command_id
-        for order in state.orders.values()
-        if order.venue_order_id == venue_order_id
-    ]
-    return matches[0] if len(matches) == 1 else command_id
+    if venue_order_id:
+        matches = [
+            order.command_id
+            for order in state.orders.values()
+            if order.venue_order_id == venue_order_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    command_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
+    return command_id if command_id in state.orders else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,9 +140,7 @@ class BybitAccountExecutionConsumer:
         self.events.put((kind, message, self.clock.wall_time_ns()))
 
     def _subscribe(self, private_stream: Any) -> None:
-        private_stream.subscribe_executions(
-            lambda message: self._enqueue("execution", message)
-        )
+        private_stream.subscribe_executions(lambda message: self._enqueue("execution", message))
         private_stream.subscribe_orders(lambda message: self._enqueue("order", message))
 
     def start(self) -> None:
@@ -220,53 +218,37 @@ class BybitAccountExecutionConsumer:
 
     def on_execution(self, message: Mapping[str, Any], *, local_receive_ts_ns: int) -> None:
         observations: list[ExecutionObservation] = []
-        message_creation_ts_ns = _timestamp_ns(
-            message.get("creationTime") or message.get("creation_time")
-        )
+        external_rows: list[Mapping[str, Any]] = []
+        message_creation_ts_ns = _timestamp_ns(message.get("creationTime") or message.get("creation_time"))
         for row in _rows(message):
-            # External/native adoption mutates the kernel immediately. Refresh
-            # per row so multiple fills for the same venue order in one Bybit
-            # message join the synthetic command created by the first fill.
             state = self.kernel._state_ref()
             command_id = _command_id_for_row(row, state)
+            venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+            venue_identity_bound = bool(
+                command_id in state.orders
+                and venue_order_id
+                and state.orders[command_id].venue_order_id == venue_order_id
+            )
+            if (
+                self.native_protection_manager is not None
+                and self.native_protection_manager.is_position_execution(row)
+                and not venue_identity_bound
+                and (
+                    self.native_protection_manager.has_native_stop_provenance(row)
+                    or self.native_protection_manager.native_execution_identity_evidence(row)
+                )
+            ):
+                # Exchange-created stop children normally have an empty client
+                # id, but a provider payload may echo its parent orderLinkId.
+                # Native provenance must win before ordinary command lookup or
+                # the reduction could be misapplied as another entry fill.
+                external_rows.append(row)
+                continue
             if command_id not in state.orders:
-                if self.native_protection_manager is not None:
-                    if not self.native_protection_manager.is_position_execution(row):
-                        continue
-                    adopted_events: tuple[Any, ...] = ()
-                    try:
-                        adopted_events = self.native_protection_manager.adopt_execution(
-                            row,
-                            local_receive_ts_ns=local_receive_ts_ns,
-                            message_creation_ts_ns=message_creation_ts_ns,
-                        )
-                    except AccountTransitionError as exc:
-                        # Unknown/manual reductions must remain visible as a
-                        # reconciliation failure; never relabel them as the
-                        # account-owned stop just because one is also active.
-                        _logger.error("unadopted external execution: %s", exc)
-                        self.native_protection_manager.note_adoption_failure(row, exc)
-                    for event in adopted_events:
-                        if event.event_type == AccountEventType.FILL.value:
-                            self._notify_committed_fill(
-                                str(event.payload.get("execution_id") or "")
-                            )
-                    venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
-                    adopted_state = self.kernel._state_ref()
-                    adopted_command_id = _command_id_for_row(row, adopted_state)
-                    pending = self.pending_native_terminal.get(venue_order_id)
-                    if pending is not None and adopted_command_id in adopted_state.orders:
-                        self.pending_native_terminal.pop(venue_order_id, None)
-                        self.pending_terminal[adopted_command_id] = PendingTerminalStatus(
-                            command_id=adopted_command_id,
-                            status=pending.status,
-                            cumulative_filled_qty=pending.cumulative_filled_qty,
-                            exchange_ts_ns=pending.exchange_ts_ns,
-                            local_receive_ts_ns=pending.local_receive_ts_ns,
-                            rejection_key=pending.rejection_key,
-                            metadata=pending.metadata,
-                        )
-                        self._flush_terminal(adopted_command_id)
+                if self.native_protection_manager is not None and self.native_protection_manager.is_position_execution(
+                    row
+                ):
+                    external_rows.append(row)
                 continue
             side = str(row.get("side") or "").lower()
             qty = _float(row.get("execQty") or row.get("exec_qty"))
@@ -287,29 +269,70 @@ class BybitAccountExecutionConsumer:
                     _logger.error("dropped malformed execution row: %s", malformed)
                     self.native_protection_manager.note_adoption_failure(row, malformed)
                 continue
-            observations.append(ExecutionObservation(
-                observation_type=ExecutionObservationType.FILL,
-                command_id=command_id,
-                exchange_ts_ns=_timestamp_ns(row.get("execTime") or row.get("exec_time")),
-                local_receive_ts_ns=local_receive_ts_ns,
-                venue_order_id=str(row.get("orderId") or row.get("order_id") or ""),
-                execution_id=execution_id,
-                signed_qty=signed_qty,
-                price=price,
-                fee_usdt=_float(row.get("execFee") or row.get("exec_fee")),
-                metadata=bybit_private_execution_metadata(
-                    row,
-                    message_creation_ts_ns=message_creation_ts_ns,
-                ),
-            ))
+            observations.append(
+                ExecutionObservation(
+                    observation_type=ExecutionObservationType.FILL,
+                    command_id=command_id,
+                    exchange_ts_ns=_timestamp_ns(row.get("execTime") or row.get("exec_time")),
+                    local_receive_ts_ns=local_receive_ts_ns,
+                    venue_order_id=str(row.get("orderId") or row.get("order_id") or ""),
+                    execution_id=execution_id,
+                    signed_qty=signed_qty,
+                    price=price,
+                    fee_usdt=_float(row.get("execFee") or row.get("exec_fee")),
+                    metadata=bybit_private_execution_metadata(
+                        row,
+                        message_creation_ts_ns=message_creation_ts_ns,
+                    ),
+                )
+            )
         if observations:
             committed_events = self.driver.ingest(observations)
             for event in committed_events:
                 if event.event_type == AccountEventType.FILL.value:
-                    self._notify_committed_fill(
-                        str(event.payload.get("execution_id") or "")
+                    self._notify_committed_fill(str(event.payload.get("execution_id") or ""))
+        # Bybit may coalesce an entry fill and its immediately-triggered
+        # attached stop into one message, in either row order. Commit every
+        # known entry fill first so the stop is evaluated against the real
+        # reconstructed position instead of being rejected as a reduction of
+        # local flat. External rows remain sequential so partial fills join the
+        # synthetic command created by the first row.
+        if self.native_protection_manager is not None:
+            for row in external_rows:
+                adopted_events: tuple[Any, ...] = ()
+                try:
+                    adopted_events = self.native_protection_manager.adopt_execution(
+                        row,
+                        local_receive_ts_ns=local_receive_ts_ns,
+                        message_creation_ts_ns=message_creation_ts_ns,
                     )
-            if self.native_protection_manager is not None:
+                except AccountTransitionError as exc:
+                    # Unknown/manual reductions must remain visible as a
+                    # reconciliation failure; never relabel them as the
+                    # account-owned stop just because one is also active.
+                    _logger.error("unadopted external execution: %s", exc)
+                    self.native_protection_manager.note_adoption_failure(row, exc)
+                for event in adopted_events:
+                    if event.event_type == AccountEventType.FILL.value:
+                        self._notify_committed_fill(str(event.payload.get("execution_id") or ""))
+                venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+                adopted_state = self.kernel._state_ref()
+                adopted_command_id = _command_id_for_row(row, adopted_state)
+                pending = self.pending_native_terminal.get(venue_order_id)
+                if pending is not None and adopted_command_id in adopted_state.orders:
+                    self.pending_native_terminal.pop(venue_order_id, None)
+                    self.pending_terminal[adopted_command_id] = PendingTerminalStatus(
+                        command_id=adopted_command_id,
+                        status=pending.status,
+                        cumulative_filled_qty=pending.cumulative_filled_qty,
+                        exchange_ts_ns=pending.exchange_ts_ns,
+                        local_receive_ts_ns=pending.local_receive_ts_ns,
+                        rejection_key=pending.rejection_key,
+                        metadata=pending.metadata,
+                    )
+                    self._flush_terminal(adopted_command_id)
+
+            if observations:
                 completion_observations: dict[str, ExecutionObservation] = {}
                 for observation in observations:
                     prior = completion_observations.get(observation.command_id)
@@ -336,11 +359,21 @@ class BybitAccountExecutionConsumer:
                             local_receive_ts_ns=observation.local_receive_ts_ns,
                         )
                 updated = self.kernel._state_ref()
-                self.native_protection_manager.sync_symbols([
-                    updated.orders[observation.command_id].symbol
-                    for observation in observations
-                    if observation.command_id in updated.orders
-                ])
+                self.native_protection_manager.sync_symbols(
+                    [
+                        updated.orders[observation.command_id].symbol
+                        for observation in observations
+                        if observation.command_id in updated.orders
+                        and abs(
+                            updated.positions.get(
+                                updated.orders[observation.command_id].symbol,
+                                PositionState(),
+                            ).signed_qty
+                        )
+                        > 1e-12
+                    ]
+                )
+        if observations:
             for command_id in {observation.command_id for observation in observations}:
                 self._flush_terminal(command_id)
 
@@ -348,23 +381,32 @@ class BybitAccountExecutionConsumer:
         for row in _rows(message):
             state = self.kernel._state_ref()
             command_id = _command_id_for_row(row, state)
+            venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+            venue_identity_bound = bool(
+                command_id in state.orders
+                and venue_order_id
+                and state.orders[command_id].venue_order_id == venue_order_id
+            )
+            native_observed = bool(
+                not venue_identity_bound
+                and self.native_protection_manager is not None
+                and self.native_protection_manager.observe_order(row)
+            )
+            if native_observed:
+                status = _terminal_status(row)
+                venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+                cumulative = _float(row.get("cumExecQty") or row.get("cum_exec_qty"))
+                if status and venue_order_id and cumulative > 0.0:
+                    self.pending_native_terminal[venue_order_id] = self._terminal(
+                        row,
+                        command_id="",
+                        status=status,
+                        local_receive_ts_ns=local_receive_ts_ns,
+                        message=message,
+                    )
+                continue
             order = state.orders.get(command_id)
             if order is None:
-                if (
-                    self.native_protection_manager is not None
-                    and self.native_protection_manager.observe_order(row)
-                ):
-                    status = _terminal_status(row)
-                    venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
-                    cumulative = _float(row.get("cumExecQty") or row.get("cum_exec_qty"))
-                    if status and venue_order_id and cumulative > 0.0:
-                        self.pending_native_terminal[venue_order_id] = self._terminal(
-                            row,
-                            command_id="",
-                            status=status,
-                            local_receive_ts_ns=local_receive_ts_ns,
-                            message=message,
-                        )
                 continue
             status = _terminal_status(row)
             if not status:
@@ -396,20 +438,14 @@ class BybitAccountExecutionConsumer:
                 row.get("updatedTime") or row.get("updated_time") or message.get("creationTime")
             ),
             local_receive_ts_ns=local_receive_ts_ns,
-            rejection_key=(
-                f"bybit-order:{command_id}:{row.get('rejectReason')}"
-                if status == "rejected"
-                else ""
-            ),
+            rejection_key=(f"bybit-order:{command_id}:{row.get('rejectReason')}" if status == "rejected" else ""),
             metadata={
                 "order_status": str(row.get("orderStatus") or ""),
                 "cancel_type": str(row.get("cancelType") or ""),
                 "reject_reason": str(row.get("rejectReason") or ""),
                 "venue_order_id": str(row.get("orderId") or row.get("order_id") or ""),
                 "create_type": str(row.get("createType") or row.get("create_type") or ""),
-                "stop_order_type": str(
-                    row.get("stopOrderType") or row.get("stop_order_type") or ""
-                ),
+                "stop_order_type": str(row.get("stopOrderType") or row.get("stop_order_type") or ""),
                 "source": "bybit_private_order_ws",
             },
         )
@@ -527,10 +563,7 @@ class PrivateExecutionStreamSupervisor:
             raise ValueError("private stream reconnect bound must be positive and finite")
         if not math.isfinite(reconnect_cooldown) or reconnect_cooldown <= 0.0:
             raise ValueError("private stream reconnect cooldown must be positive and finite")
-        if (
-            not math.isfinite(candidate_ready_timeout)
-            or candidate_ready_timeout <= 0.0
-        ):
+        if not math.isfinite(candidate_ready_timeout) or candidate_ready_timeout <= 0.0:
             raise ValueError("private stream candidate-ready timeout must be positive and finite")
         if not math.isfinite(candidate_ready_poll) or candidate_ready_poll <= 0.0:
             raise ValueError("private stream candidate-ready poll must be positive and finite")
@@ -595,9 +628,7 @@ class PrivateExecutionStreamSupervisor:
         # Admission can follow reconciliation/protection work after the loop's
         # supervisory check. Probe again here so a disconnect in that interval
         # cannot inherit the earlier healthy observation.
-        self.connection_status = self._connected(
-            self.consumer.current_private_stream()
-        )
+        self.connection_status = self._connected(self.consumer.current_private_stream())
         if self.connection_status is not True:
             raise RuntimeError(self.health_detail)
 
@@ -622,8 +653,7 @@ class PrivateExecutionStreamSupervisor:
                 if time.monotonic() >= deadline:
                     detail = getattr(replacement, "readiness_detail", "")
                     raise RuntimeError(
-                        "replacement private stream did not become ready"
-                        + (f": {detail}" if detail else "")
+                        "replacement private stream did not become ready" + (f": {detail}" if detail else "")
                     )
                 time.sleep(self.candidate_ready_poll_seconds)
             self.consumer.publish_private_stream(

@@ -549,6 +549,14 @@ def test_malformed_known_command_execution_latches_health_failure(tmp_path: Path
         def is_position_execution(self, row) -> bool:
             return True
 
+        @staticmethod
+        def has_native_stop_provenance(row) -> bool:
+            return False
+
+        @staticmethod
+        def native_execution_identity_evidence(row) -> str:
+            return ""
+
         def note_adoption_failure(self, row, exc) -> None:
             self.failures.append((dict(row), exc))
 

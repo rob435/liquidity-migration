@@ -15,7 +15,8 @@ Start from the source that owns the question:
 - Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
   environment/config.
 - Evidence policy: `docs/governance.md`.
-- Research decisions: `docs/research_summary.md` and raw run artifacts.
+- Research decisions and queue: `docs/strategy_program.md` and raw run
+  artifacts.
 - Active profile contract: `docs/active_trading_logic.md`, then the strategy
   modules, target producers, account owner, and deploy overrides it cites.
 - CLI ownership: `liquidity_migration/cli.py`, parser modules, and current

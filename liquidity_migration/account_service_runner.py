@@ -22,6 +22,7 @@ from .account_execution_config import (
 from .account_contracts import (
     AccountRiskSnapshot,
     MarketInputRef,
+    NativeDisasterProtectionPolicy,
 )
 from .account_kernel import AccountExecutionKernel
 from .account_market_readiness import (
@@ -105,6 +106,24 @@ def _run_reconciliation_cycle(
     return position_report, funding_report
 
 
+def require_startup_reconciliation_safe(
+    report: AccountReconciliationReport,
+) -> None:
+    """Allow only the native-breach condition the owner can safely reduce.
+
+    Position drift, unknown orders, malformed venue facts, and ordinary native
+    sync failures still abort startup. A definite crossed-stop breach is
+    different: refusing to start would disable the only owner authorized to
+    publish and execute the strict reduce-only recovery request.
+    """
+
+    if report.healthy:
+        return
+    recoverable = report.native_protection_breach_only
+    if not recoverable:
+        report.require_healthy()
+
+
 def protection_market_refs(
     recorder: Any,
     symbols: Iterable[str],
@@ -180,6 +199,10 @@ def append_unique_notification_health_error(
     if any(existing.partition(": age_ns=")[0] == identity for existing in errors):
         return
     errors.append(rendered)
+
+
+def _append_health_error(existing: str, added: str, *, limit: int = 1000) -> str:
+    return "; ".join(part for part in (existing.strip(), added.strip()) if part)[:limit]
 
 
 def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
@@ -399,11 +422,14 @@ def main(argv: list[str] | None = None) -> int:
         mutation_lease=owner_lease,
     )
     kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id)
+    native_protection_policy = NativeDisasterProtectionPolicy(
+        fallback_stop_fraction=args.disaster_stop_fraction,
+    )
     native_protection = BybitNativeProtectionManager(
         kernel=kernel,
         client=private_client,
         instrument_rules=rules,
-        fallback_stop_fraction=args.disaster_stop_fraction,
+        fallback_stop_fraction=native_protection_policy.fallback_stop_fraction,
     )
     # Prove the venue has no unowned regular or conditional order before any
     # stream starts or any strategy request can be claimed. An empty/new journal
@@ -467,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap venue truth before the service can claim any request. Existing
     # venue exposure with an empty kernel is a hard mismatch, never auto-adopted.
     bootstrap_reconciliation = reconciler.reconcile_once()
-    bootstrap_reconciliation.require_healthy()
+    require_startup_reconciliation_safe(bootstrap_reconciliation)
     funding_reconciler = BybitAccountFundingReconciler(
         kernel=kernel,
         client=private_client,
@@ -476,11 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         reconciler=reconciler,
         funding_reconciler=funding_reconciler,
     )
-    startup_reconciliation.require_healthy()
+    require_startup_reconciliation_safe(startup_reconciliation)
     startup_funding_reconciliation.require_healthy()
-    native_protection.sync_symbols(
-        [symbol for symbol, position in kernel._state_ref().positions.items() if position.signed_qty != 0.0]
-    )
+    if not native_protection.breaches():
+        native_protection.sync_symbols(
+            [symbol for symbol, position in kernel._state_ref().positions.items() if position.signed_qty != 0.0]
+        )
     health_chain = AccountHealthChain(
         (
             private_stream_supervisor,
@@ -498,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         rules_provider=VerifiedBybitDemoRulesProvider(rules),
         risk_policy=policy,
         execution_adapter=BybitDemoExecutionAdapter(private_client),
+        native_protection_policy=native_protection_policy,
         required_rules_environment="demo",
         health_provider=health_chain,
         position_truth_provider=reconciler,
@@ -616,14 +644,23 @@ def main(argv: list[str] | None = None) -> int:
                     "; ".join(f"{symbol}={reason}" for symbol, reason in sorted(protection_skipped.items())),
                 )
             protection_evaluation_error = ""
+            try:
+                protection_engine.evaluate_native_breaches(native_protection.breaches())
+            except Exception as exc:  # noqa: BLE001 - safety publication blocks health
+                _logger.exception("native-breach software-flat publication failed")
+                protection_evaluation_error = _append_health_error(
+                    protection_evaluation_error,
+                    f"native-breach software-flat publication failed: {type(exc).__name__}: {exc}",
+                )
             if protection_markets:
                 try:
                     protection_engine.evaluate(protection_markets)
                 except Exception as exc:  # noqa: BLE001 - protection failure blocks health, never the owner
                     _logger.exception("component protection evaluation failed")
-                    protection_evaluation_error = (
-                        f"component protection evaluation failed: {type(exc).__name__}: {exc}"
-                    )[:240]
+                    protection_evaluation_error = _append_health_error(
+                        protection_evaluation_error,
+                        f"component protection evaluation failed: {type(exc).__name__}: {exc}",
+                    )
             reconcile_healthy = bool(latest_reconcile_report is not None and latest_reconcile_report.healthy)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY
@@ -656,13 +693,28 @@ def main(argv: list[str] | None = None) -> int:
                 if receipt is not None:
                     last_batch_id = receipt.batch_id
                     last_request_failure_signature = ""
-                    native_protection.sync_symbols(
-                        [
-                            symbol
-                            for symbol, position in kernel._state_ref().positions.items()
-                            if position.signed_qty != 0.0
+                    try:
+                        native_protection.sync_symbols(
+                            [
+                                symbol
+                                for symbol, position in kernel._state_ref().positions.items()
+                                if position.signed_qty != 0.0
+                            ]
+                        )
+                    except Exception as exc:  # noqa: BLE001 - receipt is already durable
+                        # Never misreport a completed request as returned to
+                        # pending merely because post-request native protection
+                        # is still converging (notably while a breach-flat fill
+                        # is in flight). Reconciliation owns the next proof.
+                        _logger.error(
+                            "account request completed but native protection remains unhealthy: %s: %s",
+                            type(exc).__name__,
+                            exc,
+                        )
+                        health_status = AccountOwnerHealthStatus.BLOCKED
+                        health_detail = (f"post-request native protection unhealthy: {type(exc).__name__}: {exc}")[
+                            :1000
                         ]
-                    )
                     _logger.info(
                         "account request complete batch=%s accepted=%s commands=%d state=%s",
                         receipt.batch_id,
@@ -833,20 +885,36 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     now_ns=notification_now_ns,
                 )
-                if not notification.message:
+                if not notification.messages:
                     notifier.commit(notification)
                 else:
-                    try:
-                        from .telegram import send_telegram_message
+                    all_sent = True
+                    for page_number, page in enumerate(notification.messages, start=1):
+                        try:
+                            from .telegram import send_telegram_message
 
-                        sent = send_telegram_message(notification.message, enabled=True)
-                    except Exception:  # noqa: BLE001 - do not advance dedupe state on failure
-                        _logger.exception("account Telegram delivery failed")
-                    else:
-                        if sent:
-                            notifier.commit(notification)
-                        else:
-                            _logger.error("account Telegram delivery returned false")
+                            sent = send_telegram_message(page, enabled=True)
+                        except Exception:  # noqa: BLE001 - do not advance dedupe state on failure
+                            _logger.exception(
+                                "account Telegram delivery failed page=%d/%d",
+                                page_number,
+                                len(notification.messages),
+                            )
+                            all_sent = False
+                            break
+                        if not sent:
+                            _logger.error(
+                                "account Telegram delivery returned false page=%d/%d",
+                                page_number,
+                                len(notification.messages),
+                            )
+                            all_sent = False
+                            break
+                    # Commit only after every page succeeds. A partial transport
+                    # failure can duplicate an earlier page on retry, but can
+                    # never acknowledge and permanently omit unsent facts.
+                    if all_sent:
+                        notifier.commit(notification)
                 last_notification_poll = now
             time.sleep(max(args.idle_seconds, 0.01))
     except KeyboardInterrupt:

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN
+from decimal import Decimal
 from functools import wraps
 from threading import RLock
 from typing import Any, Concatenate, Mapping, ParamSpec, Sequence, TypeVar
@@ -22,6 +23,7 @@ from .account_strategy_state import component_execution_anchors_from_snapshot
 from .bybit_execution_adapter import bybit_private_execution_metadata
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
+from .native_protection_math import round_native_stop
 
 
 _LockOwner = TypeVar("_LockOwner")
@@ -63,6 +65,48 @@ class NativeProtectionPlan:
     stop_price: float
     stop_source: str
     target_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeProtectionBreach:
+    """Authenticated evidence that an absent desired stop is already crossed."""
+
+    plan: NativeProtectionPlan
+    observed_mark: float
+    evidence_source: str
+    detail: str
+    observed_ts_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryAttachedStopCandidate:
+    command_id: str
+    symbol: str
+    signed_qty: float
+    stop_price: float
+    stop_fraction: float
+    stop_source: str
+    trigger_by: str
+    created_ts_ns: int
+    command_sequence: int
+
+
+class NativeProtectionBreachError(RuntimeError):
+    def __init__(self, breach: NativeProtectionBreach) -> None:
+        self.breach = breach
+        super().__init__(breach.detail)
+
+
+class NativeProtectionReconciliationError(RuntimeError):
+    """Aggregate every symbol result while preserving breach-only authority."""
+
+    def __init__(self, failures: Sequence[tuple[str, BaseException]], *, operation: str) -> None:
+        self.failures = tuple(failures)
+        self.breaches_only = bool(self.failures) and all(
+            isinstance(error, NativeProtectionBreachError) for _symbol, error in self.failures
+        )
+        detail = "; ".join(f"{symbol}:{type(error).__name__}:{error}" for symbol, error in self.failures)
+        super().__init__(f"native protection {operation} failed: {detail}"[:1000])
 
 
 class AccountHealthChain:
@@ -120,6 +164,78 @@ class BybitNativeProtectionManager:
         self.last_sync_ns_by_symbol: dict[str, int] = {}
         self.last_error = ""
         self.observed_native_order_ids: dict[str, str] = {}
+        # Venue child order id -> durable parent entry command.  A set is not
+        # sufficient when Bybit replaces a Full-position stop during scale-in:
+        # the same symbol can expose multiple recent child identities.
+        self.observed_entry_stop_order_ids: dict[str, dict[str, str]] = {}
+        self._breaches: dict[str, NativeProtectionBreach] = {}
+        self._restore_persisted_breaches()
+
+    def _restore_persisted_breaches(self) -> None:
+        """Rebuild the durable breach latch before any repair can mutate Bybit.
+
+        A process restart is not evidence that a crossed, absent stop became
+        safe.  In particular, the mark may have moved back through the stop
+        while the owner was down.  Restore every latest unresolved breach from
+        the journal so only authenticated proof of the same installed stop or
+        an authenticated flat position can clear it.
+        """
+
+        latest_by_symbol: dict[str, tuple[int, NativeProtectionBreach]] = {}
+        for protection_key, protection in self.kernel._state_ref().protections.items():
+            if str(protection.get("status") or "") != "breached_unprotected":
+                continue
+            metadata = protection.get("metadata") or {}
+            if not isinstance(metadata, Mapping) or not bool(metadata.get("native_exchange")):
+                continue
+            symbol = str(metadata.get("symbol") or protection.get("symbol") or "").upper()
+            stop_price = _optional_float(protection.get("stop_price"))
+            signed_qty = _finite_or_zero(metadata.get("signed_qty"))
+            breach_mark = _optional_float(metadata.get("breach_mark"))
+            observed_ts_ns = int(protection.get("local_receive_ts_ns") or 0)
+            if (
+                not symbol
+                or stop_price is None
+                or signed_qty is None
+                or signed_qty == 0.0
+                or breach_mark is None
+                or observed_ts_ns <= 0
+            ):
+                self.last_error = (f"persisted native protection breach {protection_key!r} is incomplete")[:1000]
+                continue
+            crossed = (signed_qty > 0.0 and stop_price >= breach_mark) or (
+                signed_qty < 0.0 and stop_price <= breach_mark
+            )
+            if not crossed:
+                self.last_error = (f"persisted native protection breach {protection_key!r} has contradictory prices")[
+                    :1000
+                ]
+                continue
+            plan = NativeProtectionPlan(
+                protection_key=str(metadata.get("protection_plan_key") or protection_key),
+                symbol=symbol,
+                signed_qty=signed_qty,
+                stop_price=stop_price,
+                stop_source=str(metadata.get("stop_source") or "persisted_native_protection_breach"),
+                target_keys=tuple(sorted(str(key) for key in (metadata.get("target_keys") or ()) if str(key))),
+            )
+            detail = str(metadata.get("breach_detail") or "").strip() or (
+                f"{symbol} native stop {stop_price:g} was previously absent and crossed "
+                f"at authenticated mark {breach_mark:g}"
+            )
+            breach = NativeProtectionBreach(
+                plan=plan,
+                observed_mark=breach_mark,
+                evidence_source=str(metadata.get("breach_evidence_source") or "persisted_native_protection_breach"),
+                detail=detail[:1000],
+                observed_ts_ns=observed_ts_ns,
+            )
+            prior = latest_by_symbol.get(symbol)
+            if prior is None or observed_ts_ns > prior[0]:
+                latest_by_symbol[symbol] = (observed_ts_ns, breach)
+        self._breaches.update((symbol, row[1]) for symbol, row in latest_by_symbol.items())
+        if self._breaches:
+            self.last_error = "; ".join(self._breaches[symbol].detail for symbol in sorted(self._breaches))[:1000]
 
     @_serialized_manager_method
     def plan(self, symbol: str) -> NativeProtectionPlan | None:
@@ -172,26 +288,14 @@ class BybitNativeProtectionManager:
             try:
                 stop_fraction = float(str(raw_stop_fraction))
             except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"{symbol} stop_loss_pct is not numeric: {raw_stop_fraction!r}"
-                ) from exc
+                raise RuntimeError(f"{symbol} stop_loss_pct is not numeric: {raw_stop_fraction!r}") from exc
             if not math.isfinite(stop_fraction) or not 0.0 < stop_fraction < 1.0:
                 # Present-but-invalid must fail closed: silently ignoring it
                 # replaced the intended component-anchored stop with the much
                 # wider account fallback fraction and no operator signal.
-                raise RuntimeError(
-                    f"{symbol} stop_loss_pct must be a fraction in (0, 1), "
-                    f"got {raw_stop_fraction!r}"
-                )
+                raise RuntimeError(f"{symbol} stop_loss_pct must be a fraction in (0, 1), got {raw_stop_fraction!r}")
             fill_price = float(anchor.entry_fill_vwap)
-            explicit.append(
-                fill_price
-                * (
-                    1.0 - stop_fraction
-                    if position.signed_qty > 0.0
-                    else 1.0 + stop_fraction
-                )
-            )
+            explicit.append(fill_price * (1.0 - stop_fraction if position.signed_qty > 0.0 else 1.0 + stop_fraction))
         if explicit:
             # This is a Full-position process-death seatbelt, not a component
             # exit. It must sit outside every software component stop or the
@@ -208,22 +312,14 @@ class BybitNativeProtectionManager:
             if reference <= 0.0:
                 raise RuntimeError(f"{symbol} cannot derive disaster stop without a reference price")
             raw_stop = reference * (
-                1.0 - self.fallback_stop_fraction
-                if position.signed_qty > 0.0
-                else 1.0 + self.fallback_stop_fraction
+                1.0 - self.fallback_stop_fraction if position.signed_qty > 0.0 else 1.0 + self.fallback_stop_fraction
             )
             source = "explicit_account_fallback_fraction"
-        stop = _round_stop(raw_stop, rule.tick_size, long_position=position.signed_qty > 0.0)
-        market = state.latest_market_inputs.get(symbol) or {}
-        mark = float(market.get("reference_price") or position.average_price or 0.0)
-        if mark <= 0.0:
-            raise RuntimeError(f"{symbol} cannot validate native stop without a mark")
-        if (position.signed_qty > 0.0 and stop >= mark) or (
-            position.signed_qty < 0.0 and stop <= mark
-        ):
-            raise RuntimeError(
-                f"{symbol} native stop {stop:g} is already crossed at mark {mark:g}"
-            )
+        stop = round_native_stop(
+            raw_stop,
+            rule.tick_size,
+            long_position=position.signed_qty > 0.0,
+        )
         target_keys = tuple(sorted(key for key, _target in targets))
         material = {
             "symbol": symbol,
@@ -232,10 +328,7 @@ class BybitNativeProtectionManager:
             "stop_source": source,
             "target_keys": target_keys,
         }
-        protection_key = (
-            f"native-disaster:{symbol}:"
-            + hashlib.sha256(canonical_json(material)).hexdigest()[:20]
-        )
+        protection_key = f"native-disaster:{symbol}:" + hashlib.sha256(canonical_json(material)).hexdigest()[:20]
         return NativeProtectionPlan(
             protection_key=protection_key,
             symbol=symbol,
@@ -274,8 +367,7 @@ class BybitNativeProtectionManager:
             if str(target.get("symbol") or "").upper() == symbol
         ]
         if not symbol_desires or any(
-            abs(float(target.get("signed_qty") or 0.0)) > tolerance
-            for target in symbol_desires
+            abs(float(target.get("signed_qty") or 0.0)) > tolerance for target in symbol_desires
         ):
             return None
         if any(
@@ -294,15 +386,10 @@ class BybitNativeProtectionManager:
         if not working_orders:
             return None
         if any(
-            not order.reduce_only
-            or order.remaining_signed_qty * position.signed_qty >= 0.0
-            for order in working_orders
+            not order.reduce_only or order.remaining_signed_qty * position.signed_qty >= 0.0 for order in working_orders
         ):
             return None
-        projected_qty = math.fsum(
-            [position.signed_qty]
-            + [order.remaining_signed_qty for order in working_orders]
-        )
+        projected_qty = math.fsum([position.signed_qty] + [order.remaining_signed_qty for order in working_orders])
         if abs(projected_qty) > tolerance:
             return None
 
@@ -318,14 +405,6 @@ class BybitNativeProtectionManager:
         stop = _optional_float(active[1].get("stop_price"))
         if stop is None:
             return None
-        market = state.latest_market_inputs.get(symbol) or {}
-        mark = float(market.get("reference_price") or position.average_price or 0.0)
-        if mark <= 0.0:
-            return None
-        if (position.signed_qty > 0.0 and stop >= mark) or (
-            position.signed_qty < 0.0 and stop <= mark
-        ):
-            return None
         protection_key = self._plan_key(active)
         if not protection_key:
             return None
@@ -335,9 +414,7 @@ class BybitNativeProtectionManager:
             signed_qty=position.signed_qty,
             stop_price=stop,
             stop_source=str(metadata.get("stop_source") or "retained_canonical_close"),
-            target_keys=tuple(
-                sorted(str(key) for key in (metadata.get("target_keys") or ()) if str(key))
-            ),
+            target_keys=tuple(sorted(str(key) for key in (metadata.get("target_keys") or ()) if str(key))),
         )
 
     @_serialized_manager_method
@@ -361,10 +438,7 @@ class BybitNativeProtectionManager:
 
     @staticmethod
     def _plan_key(active: tuple[str, Mapping[str, Any]]) -> str:
-        return str(
-            (active[1].get("metadata") or {}).get("protection_plan_key")
-            or active[0]
-        )
+        return str((active[1].get("metadata") or {}).get("protection_plan_key") or active[0])
 
     @_serialized_manager_method
     def _next_activation(self, plan: NativeProtectionPlan) -> tuple[str, int]:
@@ -372,22 +446,242 @@ class BybitNativeProtectionManager:
             int((protection.get("metadata") or {}).get("activation_revision") or 1)
             for key, protection in self.kernel._state_ref().protections.items()
             if key == plan.protection_key
-            or str((protection.get("metadata") or {}).get("protection_plan_key") or "")
-            == plan.protection_key
+            or str((protection.get("metadata") or {}).get("protection_plan_key") or "") == plan.protection_key
         ]
         revision = max(revisions, default=0) + 1
-        key = (
-            plan.protection_key
-            if revision == 1
-            else f"{plan.protection_key}:activation:{revision:04d}"
-        )
+        key = plan.protection_key if revision == 1 else f"{plan.protection_key}:activation:{revision:04d}"
         return key, revision
 
+    def _record_breach(
+        self,
+        plan: NativeProtectionPlan,
+        *,
+        observed_mark: float,
+        evidence_source: str,
+        detail: str = "",
+    ) -> NativeProtectionBreachError:
+        prior_breach = self._breaches.get(plan.symbol)
+        if prior_breach is None:
+            matches = [
+                protection
+                for protection in self.kernel._state_ref().protections.values()
+                if str(protection.get("status") or "") == "breached_unprotected"
+                and str(
+                    (protection.get("metadata") or {}).get("protection_plan_key")
+                    or protection.get("protection_key")
+                    or ""
+                )
+                == plan.protection_key
+            ]
+            if matches:
+                persisted = max(
+                    matches,
+                    key=lambda row: int(row.get("local_receive_ts_ns") or 0),
+                )
+                metadata = persisted.get("metadata") or {}
+                persisted_mark = _optional_float(metadata.get("breach_mark"))
+                if persisted_mark is not None:
+                    prior_breach = NativeProtectionBreach(
+                        plan=plan,
+                        observed_mark=persisted_mark,
+                        evidence_source=str(
+                            metadata.get("breach_evidence_source") or "persisted_native_protection_breach"
+                        ),
+                        detail=str(metadata.get("breach_detail") or detail)[:1000],
+                        observed_ts_ns=max(
+                            int(persisted.get("local_receive_ts_ns") or 0),
+                            1,
+                        ),
+                    )
+                    self._breaches[plan.symbol] = prior_breach
+        if prior_breach is not None and prior_breach.plan.protection_key == plan.protection_key:
+            self.last_error = prior_breach.detail[:1000]
+            return NativeProtectionBreachError(prior_breach)
+        observed_ns = self.clock.wall_time_ns()
+        rendered = detail or (
+            f"{plan.symbol} native stop {plan.stop_price:g} is absent and already "
+            f"crossed at authenticated mark {observed_mark:g}"
+        )
+        breach = NativeProtectionBreach(
+            plan=plan,
+            observed_mark=observed_mark,
+            evidence_source=evidence_source,
+            detail=rendered[:1000],
+            observed_ts_ns=observed_ns,
+        )
+        active = self.active(plan.symbol)
+        protection_key = active[0] if active is not None else plan.protection_key
+        current = self.kernel._state_ref().protections.get(protection_key) or {}
+        current_metadata = current.get("metadata") or {}
+        already_recorded = (
+            str(current.get("status") or "") == "breached_unprotected"
+            and str(current_metadata.get("protection_plan_key") or protection_key) == plan.protection_key
+        )
+        if not already_recorded:
+            prior_metadata = dict(active[1].get("metadata") or {}) if active else {}
+            self.kernel.record_protection(
+                protection_key=protection_key,
+                symbol=plan.symbol,
+                status="breached_unprotected",
+                stop_price=plan.stop_price,
+                take_profit_price=None,
+                exchange_ts_ns=0,
+                local_receive_ts_ns=observed_ns,
+                metadata={
+                    **prior_metadata,
+                    "native_exchange": True,
+                    "protection_plan_key": plan.protection_key,
+                    "symbol": plan.symbol,
+                    "signed_qty": plan.signed_qty,
+                    "stop_source": plan.stop_source,
+                    "target_keys": list(plan.target_keys),
+                    "trigger_by": "MarkPrice",
+                    "breach_mark": observed_mark,
+                    "breach_evidence_source": evidence_source,
+                    "breach_detail": rendered[:1000],
+                },
+            )
+        self._breaches[plan.symbol] = breach
+        self.last_error = breach.detail
+        return NativeProtectionBreachError(breach)
+
+    def _require_repair_not_crossed(
+        self,
+        plan: NativeProtectionPlan,
+        *,
+        observed_mark: float,
+        evidence_source: str,
+    ) -> None:
+        if not math.isfinite(observed_mark) or observed_mark <= 0.0:
+            raise RuntimeError(
+                f"{plan.symbol} cannot repair native protection without a positive "
+                f"authenticated mark from {evidence_source}"
+            )
+        crossed = (plan.signed_qty > 0.0 and plan.stop_price >= observed_mark) or (
+            plan.signed_qty < 0.0 and plan.stop_price <= observed_mark
+        )
+        if crossed:
+            raise self._record_breach(
+                plan,
+                observed_mark=observed_mark,
+                evidence_source=evidence_source,
+            )
+
+    def _adopt_verified_venue_stop(
+        self,
+        plan: NativeProtectionPlan,
+        *,
+        venue_mark: float | None,
+    ) -> None:
+        """Journal an authenticated matching Full stop without mutating Bybit."""
+
+        active = self.active(plan.symbol)
+        observed_ns = self.clock.wall_time_ns()
+        activation_key, activation_revision = self._next_activation(plan)
+        prior_venue_order_ids: set[str] = set()
+        breach_records = [
+            (key, row)
+            for key, row in self.kernel._state_ref().protections.items()
+            if str(row.get("status") or "") == "breached_unprotected"
+            and str((row.get("metadata") or {}).get("protection_plan_key") or key) == plan.protection_key
+        ]
+        if breach_records:
+            breach_key, breach_row = max(
+                breach_records,
+                key=lambda item: int(item[1].get("local_receive_ts_ns") or 0),
+            )
+            self.kernel.record_protection(
+                protection_key=breach_key,
+                symbol=plan.symbol,
+                status="protection_restored",
+                stop_price=_optional_float(breach_row.get("stop_price")),
+                take_profit_price=_optional_float(breach_row.get("take_profit_price")),
+                exchange_ts_ns=0,
+                local_receive_ts_ns=observed_ns,
+                metadata={
+                    **dict(breach_row.get("metadata") or {}),
+                    "breach_recovery": "authenticated_matching_stop",
+                },
+            )
+        if active is not None:
+            prior = active[1]
+            metadata = prior.get("metadata") or {}
+            prior_venue_order_ids.update(
+                str(value) for value in metadata.get("native_venue_order_id_lineage") or () if str(value)
+            )
+            prior_venue_order_ids.update(
+                str(value) for value in metadata.get("superseded_venue_order_ids") or () if str(value)
+            )
+            venue_order_id = str(metadata.get("venue_order_id") or "")
+            if venue_order_id:
+                prior_venue_order_ids.add(venue_order_id)
+            self.kernel.record_protection(
+                protection_key=active[0],
+                symbol=plan.symbol,
+                status="replaced",
+                stop_price=_optional_float(prior.get("stop_price")),
+                take_profit_price=_optional_float(prior.get("take_profit_price")),
+                exchange_ts_ns=0,
+                local_receive_ts_ns=observed_ns,
+                metadata={**dict(metadata), "replaced_by": activation_key},
+            )
+        observed_order_id = self.observed_native_order_ids.get(plan.symbol, "")
+        if observed_order_id:
+            prior_venue_order_ids.add(observed_order_id)
+        self.kernel.record_protection(
+            protection_key=activation_key,
+            symbol=plan.symbol,
+            status="active",
+            stop_price=plan.stop_price,
+            take_profit_price=None,
+            exchange_ts_ns=0,
+            local_receive_ts_ns=observed_ns,
+            metadata={
+                "native_exchange": True,
+                "protection_plan_key": plan.protection_key,
+                "activation_revision": activation_revision,
+                "superseded_venue_order_ids": sorted(prior_venue_order_ids),
+                "native_venue_order_id_lineage": sorted(prior_venue_order_ids),
+                "symbol": plan.symbol,
+                "signed_qty": plan.signed_qty,
+                "stop_source": plan.stop_source,
+                "target_keys": list(plan.target_keys),
+                "trigger_by": "MarkPrice",
+                "recovered_from_authenticated_position_snapshot": True,
+                "authenticated_mark": venue_mark,
+            },
+        )
+        self._breaches.pop(plan.symbol, None)
+        self.last_sync_ns = observed_ns
+        self.last_sync_ns_by_symbol[plan.symbol] = observed_ns
+        self.last_error = ""
+
     @_serialized_manager_method
-    def sync(self, symbol: str, *, force: bool = False) -> NativeProtectionPlan | None:
+    def breaches(self) -> tuple[NativeProtectionBreach, ...]:
+        return tuple(self._breaches[symbol] for symbol in sorted(self._breaches))
+
+    @_serialized_manager_method
+    def sync(
+        self,
+        symbol: str,
+        *,
+        force: bool = False,
+        observed_mark: float | None = None,
+        mark_source: str = "",
+        authenticated_position_flat: bool = False,
+        flat_evidence_source: str = "",
+    ) -> NativeProtectionPlan | None:
         symbol = symbol.upper()
         plan = self.plan(symbol)
         if plan is None:
+            unresolved_breach = self._breaches.get(symbol)
+            if unresolved_breach is not None and not authenticated_position_flat:
+                # A reconstructed zero can precede or contradict REST truth.
+                # Keep the safety-flat latch until a complete authenticated
+                # position snapshot independently proves that the venue is
+                # flat; ordinary local sync calls have no authority to clear it.
+                self.last_error = unresolved_breach.detail
+                raise NativeProtectionBreachError(unresolved_breach)
             active = self.active(symbol)
             observed_ns = self.clock.wall_time_ns()
             if active is not None:
@@ -402,17 +696,59 @@ class BybitNativeProtectionManager:
                     local_receive_ts_ns=observed_ns,
                     metadata=dict(prior.get("metadata") or {}),
                 )
+            else:
+                latest = self._latest_native_protection_from_state(
+                    self.kernel._state_ref(),
+                    symbol,
+                )
+                if latest is not None and str(latest[1].get("status") or "") == "breached_unprotected":
+                    prior = latest[1]
+                    self.kernel.record_protection(
+                        protection_key=latest[0],
+                        symbol=symbol,
+                        status="position_flat_recovered",
+                        stop_price=_optional_float(prior.get("stop_price")),
+                        take_profit_price=_optional_float(prior.get("take_profit_price")),
+                        exchange_ts_ns=0,
+                        local_receive_ts_ns=observed_ns,
+                        metadata={
+                            **dict(prior.get("metadata") or {}),
+                            "breach_recovery": "authenticated_position_flat",
+                            "breach_recovery_evidence_source": (
+                                flat_evidence_source
+                                or "authenticated_position_snapshot"
+                            ),
+                        },
+                    )
             self.observed_native_order_ids.pop(symbol, None)
+            self.observed_entry_stop_order_ids.pop(symbol, None)
+            self._breaches.pop(symbol, None)
             self.last_sync_ns = observed_ns
             self.last_sync_ns_by_symbol[symbol] = observed_ns
             self.last_error = ""
             return None
+        unresolved_breach = self._breaches.get(symbol)
+        if unresolved_breach is not None:
+            # A definite threshold breach is a latch, not a transient price
+            # validation error. A later price recovery or target revision must
+            # never silently widen/re-arm protection instead of flattening.
+            # Only an authenticated snapshot proving the SAME stop was in fact
+            # present, or a flat venue position, may clear it.
+            self.last_error = unresolved_breach.detail
+            raise NativeProtectionBreachError(unresolved_breach)
         active = self.active(symbol)
         if active is not None and self._plan_key(active) == plan.protection_key and not force:
+            self._breaches.pop(symbol, None)
             self.last_sync_ns = self.clock.wall_time_ns()
             self.last_sync_ns_by_symbol[symbol] = self.last_sync_ns
             self.last_error = ""
             return plan
+        if observed_mark is not None:
+            self._require_repair_not_crossed(
+                plan,
+                observed_mark=float(observed_mark),
+                evidence_source=mark_source or "authenticated_observation",
+            )
         try:
             self.client.set_trading_stop(
                 symbol=symbol,
@@ -426,10 +762,7 @@ class BybitNativeProtectionManager:
             prior_venue_order_ids = {
                 str(value)
                 for value in (
-                    (
-                        (active[1].get("metadata") or {}).get("native_venue_order_id_lineage")
-                        or ()
-                    )
+                    ((active[1].get("metadata") or {}).get("native_venue_order_id_lineage") or ())
                     if active is not None
                     else ()
                 )
@@ -438,15 +771,9 @@ class BybitNativeProtectionManager:
             if active is not None:
                 active_metadata = active[1].get("metadata") or {}
                 prior_venue_order_ids.update(
-                    str(value)
-                    for value in (
-                        active_metadata.get("superseded_venue_order_ids") or ()
-                    )
-                    if str(value)
+                    str(value) for value in (active_metadata.get("superseded_venue_order_ids") or ()) if str(value)
                 )
-                installed_venue_order_id = str(
-                    active_metadata.get("venue_order_id") or ""
-                )
+                installed_venue_order_id = str(active_metadata.get("venue_order_id") or "")
                 if installed_venue_order_id:
                     prior_venue_order_ids.add(installed_venue_order_id)
             prior_observed_order_id = self.observed_native_order_ids.get(symbol, "")
@@ -502,9 +829,28 @@ class BybitNativeProtectionManager:
                 )
             self.last_sync_ns = observed_ns
             self.last_sync_ns_by_symbol[symbol] = observed_ns
+            self._breaches.pop(symbol, None)
             self.last_error = ""
             return plan
         except Exception as exc:
+            rejection_mark = _crossed_stop_rejection_mark(
+                exc,
+                requested_stop=plan.stop_price,
+            )
+            rejection_crossed = rejection_mark is not None and (
+                (plan.signed_qty > 0.0 and plan.stop_price >= rejection_mark)
+                or (plan.signed_qty < 0.0 and plan.stop_price <= rejection_mark)
+            )
+            if rejection_crossed and rejection_mark is not None:
+                raise self._record_breach(
+                    plan,
+                    observed_mark=rejection_mark,
+                    evidence_source="bybit_set_trading_stop_rejection",
+                    detail=(
+                        f"{symbol} native stop {plan.stop_price:g} was rejected as already "
+                        f"crossed at Bybit base price {rejection_mark:g}"
+                    ),
+                ) from exc
             self.last_error = f"native protection sync failed for {symbol}: {exc}"[:1000]
             raise
 
@@ -526,43 +872,85 @@ class BybitNativeProtectionManager:
                 venue_rows[symbol] = row
 
         state = self.kernel._state_ref()
+        failures: list[tuple[str, BaseException]] = []
         for symbol, position in sorted(state.positions.items()):
-            if position.signed_qty == 0.0:
-                self.sync(symbol)
-                continue
-            plan = self.plan(symbol)
-            if plan is None:  # pragma: no cover - guarded by signed_qty above
-                raise RuntimeError(f"{symbol} cannot derive native protection plan")
-            venue_row = venue_rows.get(symbol)
-            if venue_row is None:
-                raise RuntimeError(f"{symbol} open reconstructed position is absent from venue snapshot")
-            venue_stop = _optional_float(venue_row.get("stopLoss") or venue_row.get("stop_loss"))
-            rule = self.rules[symbol]
-            tolerance = max(rule.tick_size / 2.0, 1e-12)
-            active = self.active(symbol)
-            local_matches = (
-                active is not None
-                and self._plan_key(active) == plan.protection_key
-            )
-            if (
-                venue_stop is None
-                or abs(venue_stop - plan.stop_price) > tolerance
-                or not local_matches
-            ):
-                self.sync(symbol, force=True)
-                continue
-            observed_ns = self.clock.wall_time_ns()
-            self.last_sync_ns = observed_ns
-            self.last_sync_ns_by_symbol[symbol] = observed_ns
-            self.last_error = ""
+            try:
+                if position.signed_qty == 0.0:
+                    venue_row = venue_rows.get(symbol)
+                    venue_size = (
+                        None
+                        if venue_row is None
+                        else _optional_float(venue_row.get("size"))
+                    )
+                    if venue_size is not None and venue_size > 1e-12:
+                        raise RuntimeError(
+                            f"{symbol} reconstructed flat contradicts authenticated "
+                            f"venue size {venue_size:g}"
+                        )
+                    self.sync(
+                        symbol,
+                        authenticated_position_flat=True,
+                        flat_evidence_source="bybit_authenticated_position_snapshot",
+                    )
+                    continue
+                plan = self.plan(symbol)
+                if plan is None:  # pragma: no cover - guarded by signed_qty above
+                    raise RuntimeError(f"{symbol} cannot derive native protection plan")
+                venue_row = venue_rows.get(symbol)
+                if venue_row is None:
+                    raise RuntimeError(f"{symbol} open reconstructed position is absent from venue snapshot")
+                venue_stop = _optional_float(venue_row.get("stopLoss") or venue_row.get("stop_loss"))
+                venue_mark = _optional_float(venue_row.get("markPrice") or venue_row.get("mark_price"))
+                rule = self.rules[symbol]
+                tolerance = max(rule.tick_size / 2.0, 1e-12)
+                active = self.active(symbol)
+                local_matches = active is not None and self._plan_key(active) == plan.protection_key
+                venue_matches = venue_stop is not None and abs(venue_stop - plan.stop_price) <= tolerance
+                if venue_matches:
+                    unresolved_breach = self._breaches.get(symbol)
+                    if unresolved_breach is not None and unresolved_breach.plan.protection_key != plan.protection_key:
+                        raise NativeProtectionBreachError(unresolved_breach)
+                    if not local_matches:
+                        self._adopt_verified_venue_stop(plan, venue_mark=venue_mark)
+                    else:
+                        observed_ns = self.clock.wall_time_ns()
+                        self._breaches.pop(symbol, None)
+                        self.last_sync_ns = observed_ns
+                        self.last_sync_ns_by_symbol[symbol] = observed_ns
+                        self.last_error = ""
+                    continue
+                if venue_mark is None:
+                    raise RuntimeError(
+                        f"{symbol} venue snapshot cannot repair missing or mismatched native stop without markPrice"
+                    )
+                self.sync(
+                    symbol,
+                    force=True,
+                    observed_mark=venue_mark,
+                    mark_source="authenticated_position_snapshot",
+                )
+            except Exception as exc:  # noqa: BLE001 - attempt every open symbol
+                failures.append((symbol, exc))
+        if failures:
+            error = NativeProtectionReconciliationError(failures, operation="reconciliation")
+            self.last_error = str(error)
+            raise error
 
     @_serialized_manager_method
     def sync_symbols(self, symbols: Sequence[str]) -> tuple[NativeProtectionPlan, ...]:
         plans = []
+        failures: list[tuple[str, BaseException]] = []
         for symbol in sorted(set(symbols)):
-            plan = self.sync(symbol)
-            if plan is not None:
-                plans.append(plan)
+            try:
+                plan = self.sync(symbol)
+                if plan is not None:
+                    plans.append(plan)
+            except Exception as exc:  # noqa: BLE001 - one symbol must not starve siblings
+                failures.append((symbol, exc))
+        if failures:
+            error = NativeProtectionReconciliationError(failures, operation="sync")
+            self.last_error = str(error)
+            raise error
         return tuple(plans)
 
     @_serialized_manager_method
@@ -578,6 +966,15 @@ class BybitNativeProtectionManager:
             raise AccountTransitionError("external execution lacks a symbol")
         active = self.active(symbol)
         identity_evidence = self.native_execution_identity_evidence(row)
+        if identity_evidence == "matched_entry_attached_native_stop":
+            candidate = self._entry_attached_stop_candidate(symbol, row=row)
+            if candidate is None:  # pragma: no cover - identity helper proved it
+                raise AccountTransitionError("entry-attached native execution lost its durable command")
+            active = self._activate_entry_attached_stop(
+                candidate,
+                venue_order_id=str(row.get("orderId") or row.get("order_id") or ""),
+                observed_ts_ns=local_receive_ts_ns,
+            )
         side = str(row.get("side") or "").lower()
         qty = _required_float(row.get("execQty") or row.get("exec_qty"), "execQty")
         signed_qty = qty if side == "buy" else -qty if side == "sell" else 0.0
@@ -601,11 +998,7 @@ class BybitNativeProtectionManager:
             "venue_adl": "venue_adl_reduction",
             "unattributed_external_reduction": "external_unattributed_reduction",
         }[execution_origin]
-        protection_key = (
-            active[0]
-            if active is not None
-            else f"external-reduction:{symbol}:{venue_order_id}"
-        )
+        protection_key = active[0] if active is not None else f"external-reduction:{symbol}:{venue_order_id}"
         try:
             return self.kernel.adopt_external_protection_fill(
                 protection_key=protection_key,
@@ -628,31 +1021,29 @@ class BybitNativeProtectionManager:
                         message_creation_ts_ns=message_creation_ts_ns,
                     ),
                     "source": "bybit_private_execution_ws",
-                    "external_order_link_id": str(
-                        row.get("orderLinkId") or row.get("order_link_id") or ""
-                    ),
+                    "external_order_link_id": str(row.get("orderLinkId") or row.get("order_link_id") or ""),
                     "exec_type": str(row.get("execType") or row.get("exec_type") or ""),
                     "create_type": str(row.get("createType") or row.get("create_type") or ""),
-                    "stop_order_type": str(
-                        row.get("stopOrderType") or row.get("stop_order_type") or ""
-                    ),
+                    "stop_order_type": str(row.get("stopOrderType") or row.get("stop_order_type") or ""),
                     "native_identity": identity_evidence,
                 },
             )
         except AccountTransitionError as exc:
-            self.last_error = (
-                f"external execution could not be adopted for {symbol}: {exc}"
-            )[:1000]
+            self.last_error = (f"external execution could not be adopted for {symbol}: {exc}")[:1000]
             raise
 
     @staticmethod
     def is_position_execution(row: Mapping[str, Any]) -> bool:
         """Exclude cash-flow-only private execution rows from position adoption."""
 
-        exec_type = str(
-            row.get("execType") or row.get("exec_type") or ""
-        ).lower().replace("_", "")
+        exec_type = str(row.get("execType") or row.get("exec_type") or "").lower().replace("_", "")
         return exec_type != "funding"
+
+    @staticmethod
+    def has_native_stop_provenance(row: Mapping[str, Any]) -> bool:
+        """Identify provider-authored stop rows before client-id resolution."""
+
+        return _has_native_stop_provenance(row)
 
     @_serialized_manager_method
     def note_adoption_failure(
@@ -662,35 +1053,296 @@ class BybitNativeProtectionManager:
     ) -> None:
         symbol = str(row.get("symbol") or "missing-symbol").upper()
         execution_id = str(row.get("execId") or row.get("exec_id") or "missing-exec-id")
-        self.last_error = (
-            f"unaccounted position execution for {symbol} execId={execution_id}: {exc}"
-        )[:1000]
+        self.last_error = (f"unaccounted position execution for {symbol} execId={execution_id}: {exc}")[:1000]
+
+    def _entry_attached_stop_candidates(
+        self,
+        symbol: str,
+    ) -> tuple[_EntryAttachedStopCandidate, ...]:
+        """Return durable filled-entry stop candidates, newest command first."""
+
+        symbol = symbol.upper()
+        state = self.kernel._state_ref()
+        position = state.positions.get(symbol)
+        if position is None or abs(position.signed_qty) <= 1e-12:
+            return ()
+        candidates: list[_EntryAttachedStopCandidate] = []
+        for order in state.orders.values():
+            if (
+                order.symbol.upper() != symbol
+                or order.reduce_only
+                or order.entry_stop_price is None
+                or order.entry_stop_fraction is None
+                or not order.entry_stop_source
+                or order.entry_stop_trigger_by != "MarkPrice"
+                or order.filled_signed_qty * position.signed_qty <= 0.0
+                or order.status in {"rejected", "cancelled"}
+            ):
+                continue
+            candidates.append(
+                _EntryAttachedStopCandidate(
+                    command_id=order.command_id,
+                    symbol=symbol,
+                    signed_qty=position.signed_qty,
+                    stop_price=float(order.entry_stop_price),
+                    stop_fraction=float(order.entry_stop_fraction),
+                    stop_source=order.entry_stop_source,
+                    trigger_by=order.entry_stop_trigger_by,
+                    created_ts_ns=int(order.created_ts_ns),
+                    command_sequence=int(order.command_sequence),
+                )
+            )
+        return tuple(sorted(
+            candidates,
+            key=lambda item: (
+                item.command_sequence,
+                item.created_ts_ns,
+                item.command_id,
+            ),
+            reverse=True,
+        ))
+
+    def _entry_attached_stop_candidate(
+        self,
+        symbol: str,
+        *,
+        row: Mapping[str, Any] | None = None,
+    ) -> _EntryAttachedStopCandidate | None:
+        """Return the newest candidate, or the exact candidate matching a row."""
+
+        candidates = self._entry_attached_stop_candidates(symbol)
+        if row is None:
+            return candidates[0] if candidates else None
+        return next(
+            (
+                candidate
+                for candidate in candidates
+                if self._row_matches_entry_attached_stop(
+                    row,
+                    candidate=candidate,
+                )
+            ),
+            None,
+        )
+
+    def _row_matches_entry_attached_stop(
+        self,
+        row: Mapping[str, Any],
+        *,
+        candidate: _EntryAttachedStopCandidate,
+    ) -> bool:
+        if not _has_full_native_stop_provenance(row):
+            return False
+        order_link_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
+        if order_link_id and order_link_id != candidate.command_id:
+            return False
+        side = str(row.get("side") or "").lower()
+        expected_side = "sell" if candidate.signed_qty > 0.0 else "buy"
+        if side in {"buy", "sell"} and side != expected_side:
+            return False
+        raw_position_idx = row.get("positionIdx")
+        if raw_position_idx is None:
+            raw_position_idx = row.get("position_idx")
+        if raw_position_idx not in (None, ""):
+            assert raw_position_idx is not None
+            try:
+                if int(raw_position_idx) != 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+        if venue_order_id:
+            observed_command = self.observed_entry_stop_order_ids.get(
+                candidate.symbol,
+                {},
+            ).get(venue_order_id)
+            if observed_command:
+                return observed_command == candidate.command_id
+        trigger = _optional_float(
+            row.get("triggerPrice") or row.get("trigger_price") or row.get("stopLoss") or row.get("stop_loss")
+        )
+        rule = self.rules.get(candidate.symbol)
+        return bool(
+            trigger is not None
+            and rule is not None
+            and abs(trigger - candidate.stop_price) <= max(rule.tick_size / 2.0, 1e-12)
+        )
+
+    def _activate_entry_attached_stop(
+        self,
+        candidate: _EntryAttachedStopCandidate,
+        *,
+        venue_order_id: str,
+        observed_ts_ns: int,
+    ) -> tuple[str, Mapping[str, Any]]:
+        """Journal authenticated proof of the stop attached to an entry."""
+
+        active = self.active(candidate.symbol)
+        base_key = f"native-entry-attached:{candidate.symbol}:{candidate.command_id}"
+        active_metadata = active[1].get("metadata") or {} if active is not None else {}
+        same_candidate = bool(
+            active is not None
+            and str(active_metadata.get("entry_command_id") or "")
+            == candidate.command_id
+            and _optional_float(active[1].get("stop_price"))
+            == candidate.stop_price
+        )
+        recorded_venue_order_id = str(active_metadata.get("venue_order_id") or "")
+        if same_candidate and (
+            not venue_order_id or recorded_venue_order_id == venue_order_id
+        ):
+            assert active is not None
+            if venue_order_id:
+                self.observed_entry_stop_order_ids.setdefault(
+                    candidate.symbol,
+                    {},
+                )[venue_order_id] = candidate.command_id
+                self.observed_native_order_ids[candidate.symbol] = venue_order_id
+            return active
+        state = self.kernel._state_ref()
+        target_keys = sorted(
+            key
+            for key, target in state.component_targets.items()
+            if str(target.get("symbol") or "").upper() == candidate.symbol
+            and float(target.get("signed_qty") or 0.0) * candidate.signed_qty > 0.0
+        )
+        revisions = [
+            int((protection.get("metadata") or {}).get("activation_revision") or 1)
+            for key, protection in state.protections.items()
+            if key == base_key
+            or str((protection.get("metadata") or {}).get("protection_plan_key") or "")
+            == base_key
+        ]
+        activation_revision = max(revisions, default=0) + 1
+        protection_key = (
+            base_key
+            if activation_revision == 1
+            else f"{base_key}:activation:{activation_revision:04d}"
+        )
+        prior_venue_order_ids: set[str] = set()
+        if active is not None:
+            prior_metadata = active[1].get("metadata") or {}
+            prior_venue_order_ids.update(
+                str(value)
+                for value in (
+                    prior_metadata.get("native_venue_order_id_lineage") or ()
+                )
+                if str(value)
+            )
+            prior_venue_order_ids.update(
+                str(value)
+                for value in (prior_metadata.get("superseded_venue_order_ids") or ())
+                if str(value)
+            )
+            prior_bound = str(prior_metadata.get("venue_order_id") or "")
+            if prior_bound:
+                prior_venue_order_ids.add(prior_bound)
+            prior_observed = self.observed_native_order_ids.get(
+                candidate.symbol,
+                "",
+            )
+            if prior_observed:
+                prior_venue_order_ids.add(prior_observed)
+            self.kernel.record_protection(
+                protection_key=active[0],
+                symbol=candidate.symbol,
+                status="replaced",
+                stop_price=_optional_float(active[1].get("stop_price")),
+                take_profit_price=_optional_float(
+                    active[1].get("take_profit_price")
+                ),
+                exchange_ts_ns=0,
+                local_receive_ts_ns=max(int(observed_ts_ns), 1),
+                command_id=str(active[1].get("command_id") or ""),
+                metadata={
+                    **dict(prior_metadata),
+                    "replaced_by": protection_key,
+                },
+            )
+        self.kernel.record_protection(
+            protection_key=protection_key,
+            symbol=candidate.symbol,
+            status="active",
+            stop_price=candidate.stop_price,
+            take_profit_price=None,
+            exchange_ts_ns=0,
+            local_receive_ts_ns=max(int(observed_ts_ns), 1),
+            command_id=candidate.command_id,
+            metadata={
+                "native_exchange": True,
+                "protection_plan_key": base_key,
+                "activation_revision": activation_revision,
+                "superseded_venue_order_ids": sorted(prior_venue_order_ids),
+                "native_venue_order_id_lineage": sorted(prior_venue_order_ids),
+                "symbol": candidate.symbol,
+                "signed_qty": candidate.signed_qty,
+                "stop_source": candidate.stop_source,
+                "stop_fraction": candidate.stop_fraction,
+                "target_keys": target_keys,
+                "trigger_by": candidate.trigger_by,
+                "venue_order_id": venue_order_id,
+                "entry_attached_provisional": True,
+                "entry_command_id": candidate.command_id,
+                "authenticated_entry_stop_order": True,
+            },
+        )
+        if venue_order_id:
+            self.observed_entry_stop_order_ids.setdefault(
+                candidate.symbol,
+                {},
+            )[venue_order_id] = candidate.command_id
+            self.observed_native_order_ids[candidate.symbol] = venue_order_id
+        self.last_sync_ns = max(int(observed_ts_ns), 1)
+        self.last_sync_ns_by_symbol[candidate.symbol] = self.last_sync_ns
+        self.last_error = ""
+        activated = self.active(candidate.symbol)
+        if activated is None:  # pragma: no cover - journal/reducer invariant
+            raise RuntimeError("entry-attached native protection did not activate")
+        return activated
 
     @_serialized_manager_method
     def observe_order(self, row: Mapping[str, Any]) -> bool:
         """Remember a verified native order id before its first execution arrives."""
 
-        # Stream-path behavior is deliberately unchanged by the terminal-
-        # visibility grace in is_verified_native_order: without an active
-        # protection there is no binding to remember, so a row verified only
-        # through the grace window is not observed or recorded here.
-        if self.active(str(row.get("symbol") or "").upper()) is None:
-            return False
-        if not self.is_verified_native_order(row):
-            return False
         symbol = str(row.get("symbol") or "").upper()
         venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
+        if not symbol or not venue_order_id:
+            return False
+        active_before = self.active(symbol)
+        matches_active = bool(
+            active_before is not None
+            and self._row_matches_native_protection(
+                row,
+                payload=active_before[1],
+                observed=self.observed_native_order_ids.get(symbol, ""),
+                venue_order_id=venue_order_id,
+                symbol=symbol,
+            )
+        )
+        candidate = self._entry_attached_stop_candidate(symbol, row=row)
+        matches_entry = candidate is not None
+        if not matches_active and not matches_entry:
+            return False
+        if matches_entry:
+            assert candidate is not None
+            self.observed_entry_stop_order_ids.setdefault(symbol, {})[
+                venue_order_id
+            ] = candidate.command_id
+            if not matches_active and candidate is not None:
+                active_before = self._activate_entry_attached_stop(
+                    candidate,
+                    venue_order_id=venue_order_id,
+                    observed_ts_ns=self.clock.wall_time_ns(),
+                )
+                matches_active = True
         if symbol and venue_order_id:
-            self.observed_native_order_ids[symbol] = venue_order_id
-            raw_status = str(
-                row.get("orderStatus") or row.get("order_status") or ""
-            ).lower().replace("_", "")
+            if matches_active:
+                self.observed_native_order_ids[symbol] = venue_order_id
+            raw_status = str(row.get("orderStatus") or row.get("order_status") or "").lower().replace("_", "")
             cumulative = _finite_or_zero(row.get("cumExecQty") or row.get("cum_exec_qty"))
-            if raw_status in {"cancelled", "canceled", "deactivated", "rejected"} and (
-                cumulative <= 0.0
-            ):
+            if raw_status in {"cancelled", "canceled", "deactivated", "rejected"} and (cumulative <= 0.0):
                 active = self.active(symbol)
-                if active is not None:
+                if active is not None and matches_active:
                     prior = active[1]
                     status = "rejected_unfilled" if raw_status == "rejected" else "cancelled_unfilled"
                     self.kernel.record_protection(
@@ -699,9 +1351,7 @@ class BybitNativeProtectionManager:
                         status=status,
                         stop_price=_optional_float(prior.get("stop_price")),
                         take_profit_price=_optional_float(prior.get("take_profit_price")),
-                        exchange_ts_ns=_timestamp_ns(
-                            row.get("updatedTime") or row.get("updated_time")
-                        ),
+                        exchange_ts_ns=_timestamp_ns(row.get("updatedTime") or row.get("updated_time")),
                         local_receive_ts_ns=self.clock.wall_time_ns(),
                         metadata={
                             **dict(prior.get("metadata") or {}),
@@ -710,12 +1360,9 @@ class BybitNativeProtectionManager:
                         },
                     )
                     self.last_error = (
-                        f"native protection {status.replace('_', ' ')} for {symbol}: "
-                        f"orderId={venue_order_id}"
+                        f"native protection {status.replace('_', ' ')} for {symbol}: orderId={venue_order_id}"
                     )[:1000]
-            elif raw_status in {"cancelled", "canceled", "deactivated", "filled"} and (
-                cumulative > 0.0
-            ):
+            elif raw_status in {"cancelled", "canceled", "deactivated", "filled"} and (cumulative > 0.0):
                 self.last_error = (
                     f"native protection terminal execution recovery pending for {symbol}: "
                     f"orderId={venue_order_id} cumulative_qty={cumulative:g}"
@@ -797,8 +1444,7 @@ class BybitNativeProtectionManager:
             (key, protection)
             for key, protection in state.protections.items()
             if str(protection.get("command_id") or "") == command_id
-            and str(protection.get("status") or "")
-            in {"triggering", "external_reduction_partial"}
+            and str(protection.get("status") or "") in {"triggering", "external_reduction_partial"}
         ]
         if not matches:
             return
@@ -830,13 +1476,17 @@ class BybitNativeProtectionManager:
             return False
         active = self.active(symbol)
         if active is not None:
-            return self._row_matches_native_protection(
+            if self._row_matches_native_protection(
                 row,
                 payload=active[1],
                 observed=self.observed_native_order_ids.get(symbol, ""),
                 venue_order_id=venue_order_id,
                 symbol=symbol,
-            )
+            ):
+                return True
+        candidate = self._entry_attached_stop_candidate(symbol, row=row)
+        if candidate is not None:
+            return True
         # A consumed Full-position stop can stay visible in Bybit's open-order
         # queries for minutes after its protection record leaves the
         # {active, triggering} statuses (2026-07-20 BLUAIUSDT triggered-stop
@@ -852,9 +1502,7 @@ class BybitNativeProtectionManager:
         # window. Rows lingering past the window page as unowned again.
         if not _has_full_native_stop_provenance(row):
             return False
-        latest = self._latest_native_protection_from_state(
-            self.kernel._state_ref(), symbol
-        )
+        latest = self._latest_native_protection_from_state(self.kernel._state_ref(), symbol)
         if latest is None:
             return False
         payload = latest[1]
@@ -866,9 +1514,7 @@ class BybitNativeProtectionManager:
         if age_ns < 0 or age_ns > NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS:
             return False
         exchange_ns = int(payload.get("exchange_ts_ns") or 0)
-        if exchange_ns > 0 and (
-            now_ns - exchange_ns > NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS
-        ):
+        if exchange_ns > 0 and (now_ns - exchange_ns > NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS):
             return False
         return self._row_matches_native_protection(
             row,
@@ -893,18 +1539,8 @@ class BybitNativeProtectionManager:
 
         metadata = payload.get("metadata") or {}
         expected = str(metadata.get("venue_order_id") or "")
-        lineage = {
-            str(value)
-            for value in (
-                metadata.get("native_venue_order_id_lineage") or ()
-            )
-            if str(value)
-        }
-        lineage.update(
-            str(value)
-            for value in (metadata.get("superseded_venue_order_ids") or ())
-            if str(value)
-        )
+        lineage = {str(value) for value in (metadata.get("native_venue_order_id_lineage") or ()) if str(value)}
+        lineage.update(str(value) for value in (metadata.get("superseded_venue_order_ids") or ()) if str(value))
         if venue_order_id == expected and expected:
             return True
         if venue_order_id == observed and observed:
@@ -916,9 +1552,7 @@ class BybitNativeProtectionManager:
             return False
         trigger_matches = abs(trigger - stop_price) <= max(rule.tick_size / 2.0, 1e-12)
         if venue_order_id in lineage:
-            if (expected and venue_order_id != expected) or (
-                observed and venue_order_id != observed
-            ):
+            if (expected and venue_order_id != expected) or (observed and venue_order_id != observed):
                 return False
             return trigger_matches
         if expected or observed:
@@ -936,9 +1570,7 @@ class BybitNativeProtectionManager:
             (key, protection)
             for key, protection in state.protections.items()
             if bool((protection.get("metadata") or {}).get("native_exchange"))
-            and str(
-                (protection.get("metadata") or {}).get("symbol") or symbol
-            ).upper() == symbol
+            and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
         ]
         if not matches:
             return None
@@ -951,60 +1583,56 @@ class BybitNativeProtectionManager:
     def native_execution_identity_evidence(self, row: Mapping[str, Any]) -> str:
         symbol = str(row.get("symbol") or "").upper()
         active = self.active(symbol)
-        if not symbol or active is None:
+        if not symbol:
             return ""
         venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
         if not venue_order_id:
             return ""
-        metadata = active[1].get("metadata") or {}
-        expected = str(metadata.get("venue_order_id") or "")
-        observed = self.observed_native_order_ids.get(symbol, "")
-        if venue_order_id == expected and expected:
-            return "matched_installed_venue_order_id"
-        if venue_order_id == observed and observed:
-            return "matched_verified_native_order_event"
-        lineage = {
-            str(value)
-            for value in (metadata.get("native_venue_order_id_lineage") or ())
-            if str(value)
-        }
-        lineage.update(
-            str(value)
-            for value in (metadata.get("superseded_venue_order_ids") or ())
-            if str(value)
-        )
-        if venue_order_id in lineage and _has_native_stop_provenance(row):
-            return "matched_known_native_order_lineage"
+        expected = ""
+        observed = ""
+        if active is not None:
+            metadata = active[1].get("metadata") or {}
+            expected = str(metadata.get("venue_order_id") or "")
+            observed = self.observed_native_order_ids.get(symbol, "")
+            if venue_order_id == expected and expected:
+                return "matched_installed_venue_order_id"
+            if venue_order_id == observed and observed:
+                return "matched_verified_native_order_event"
+            lineage = {str(value) for value in (metadata.get("native_venue_order_id_lineage") or ()) if str(value)}
+            lineage.update(str(value) for value in (metadata.get("superseded_venue_order_ids") or ()) if str(value))
+            if venue_order_id in lineage and _has_native_stop_provenance(row):
+                return "matched_known_native_order_lineage"
+        candidate = self._entry_attached_stop_candidate(symbol, row=row)
+        if candidate is not None:
+            return "matched_entry_attached_native_stop"
         if expected or observed:
             return ""
         return "bybit_stop_provenance_unbound" if _has_native_stop_provenance(row) else ""
 
     @_serialized_manager_method
     def require_recent_healthy(self, *, max_age_ns: int) -> None:
+        if self._breaches:
+            raise RuntimeError(
+                "native disaster stop breached without venue protection: "
+                + "; ".join(self._breaches[symbol].detail for symbol in sorted(self._breaches))
+            )
         if self.last_error:
             raise RuntimeError(self.last_error)
         state = self.kernel._state_ref()
-        open_symbols = [
-            symbol for symbol, position in state.positions.items() if position.signed_qty != 0.0
-        ]
+        open_symbols = [symbol for symbol, position in state.positions.items() if position.signed_qty != 0.0]
         active_by_symbol = {symbol: self.active(symbol) for symbol in open_symbols}
         missing = [symbol for symbol, active in active_by_symbol.items() if active is None]
         if missing:
             raise RuntimeError(
-                "open reconstructed positions lack active native disaster protection: "
-                + ", ".join(sorted(missing))
+                "open reconstructed positions lack active native disaster protection: " + ", ".join(sorted(missing))
             )
         triggering = [
             symbol
             for symbol, active in active_by_symbol.items()
-            if active is not None
-            and str(active[1].get("status") or "") == "triggering"
+            if active is not None and str(active[1].get("status") or "") == "triggering"
         ]
         if triggering:
-            raise RuntimeError(
-                "native protection trigger is unresolved for "
-                + ", ".join(sorted(triggering))
-            )
+            raise RuntimeError("native protection trigger is unresolved for " + ", ".join(sorted(triggering)))
         now = self.clock.wall_time_ns()
         stale = [
             symbol
@@ -1013,19 +1641,7 @@ class BybitNativeProtectionManager:
             or now - self.last_sync_ns_by_symbol.get(symbol, 0) > max(int(max_age_ns), 1)
         ]
         if stale:
-            raise RuntimeError(
-                "native protection health is stale for " + ", ".join(sorted(stale))
-            )
-
-
-def _round_stop(value: float, tick_size: float, *, long_position: bool) -> float:
-    tick = Decimal(str(tick_size))
-    units = Decimal(str(value)) / tick
-    nearest = units.to_integral_value(rounding=ROUND_HALF_EVEN)
-    if abs(units - nearest) <= Decimal("1e-12"):
-        units = nearest
-    rounding = ROUND_FLOOR if long_position else ROUND_CEILING
-    return float(units.to_integral_value(rounding=rounding) * tick)
+            raise RuntimeError("native protection health is stale for " + ", ".join(sorted(stale)))
 
 
 def _decimal_text(value: float) -> str:
@@ -1038,6 +1654,57 @@ def _optional_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return output if math.isfinite(output) and output > 0.0 else None
+
+
+def _crossed_stop_rejection_mark(
+    error: BaseException,
+    *,
+    requested_stop: float,
+) -> float | None:
+    """Parse only Bybit's definite crossed-StopLoss rejection shape."""
+
+    message = str(error)
+    lowered = message.lower()
+    if (
+        "10001" not in lowered
+        or "stoploss" not in lowered
+        or "base_price" not in lowered
+        or not (
+            "must be greater than" in lowered
+            or "must be less than" in lowered
+            or "should greater" in lowered
+            or "should less" in lowered
+            or "should be greater" in lowered
+            or "should be less" in lowered
+        )
+    ):
+        return None
+    base_match = re.search(
+        r"base_price(?:\[|:)([0-9eE+.-]+)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if base_match is None:
+        return None
+    base = _optional_float(base_match.group(1))
+    stop_match = re.search(
+        r"stoploss(?:\[|:)([0-9eE+.-]+)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    encoded_stop = _optional_float(stop_match.group(1)) if stop_match is not None else None
+    if base is None:
+        return None
+    # Pybit's InvalidRequestError string can expose Bybit's internal integer
+    # price units (for DEXE: 1291300000 / 1309440000) instead of decimals.
+    # Normalize with the requested stop echoed in the same error; the ratio is
+    # scale-independent and avoids guessing instrument precision.
+    if encoded_stop is not None:
+        return base * float(requested_stop) / encoded_stop
+    scale = base / float(requested_stop)
+    if scale > 1_000_000.0 or scale < 0.000001:
+        return None
+    return base
 
 
 def _required_float(value: object, label: str) -> float:
@@ -1067,12 +1734,8 @@ def _timestamp_ns(value: object) -> int:
 
 
 def _has_native_stop_provenance(row: Mapping[str, Any]) -> bool:
-    stop_type = str(
-        row.get("stopOrderType") or row.get("stop_order_type") or ""
-    ).lower().replace("_", "")
-    create_type = str(
-        row.get("createType") or row.get("create_type") or ""
-    ).lower().replace("_", "")
+    stop_type = str(row.get("stopOrderType") or row.get("stop_order_type") or "").lower().replace("_", "")
+    create_type = str(row.get("createType") or row.get("create_type") or "").lower().replace("_", "")
     return stop_type in {"stoploss", "partialstoploss"} or create_type in {
         "createbystoploss",
         "createbypartialstoploss",
@@ -1082,22 +1745,14 @@ def _has_native_stop_provenance(row: Mapping[str, Any]) -> bool:
 def _has_full_native_stop_provenance(row: Mapping[str, Any]) -> bool:
     """Full-position stop provenance only — the sole kind this manager creates."""
 
-    stop_type = str(
-        row.get("stopOrderType") or row.get("stop_order_type") or ""
-    ).lower().replace("_", "")
-    create_type = str(
-        row.get("createType") or row.get("create_type") or ""
-    ).lower().replace("_", "")
+    stop_type = str(row.get("stopOrderType") or row.get("stop_order_type") or "").lower().replace("_", "")
+    create_type = str(row.get("createType") or row.get("create_type") or "").lower().replace("_", "")
     return stop_type == "stoploss" or create_type == "createbystoploss"
 
 
 def _external_execution_origin(row: Mapping[str, Any]) -> str:
-    create_type = str(
-        row.get("createType") or row.get("create_type") or ""
-    ).lower().replace("_", "")
-    exec_type = str(
-        row.get("execType") or row.get("exec_type") or ""
-    ).lower().replace("_", "")
+    create_type = str(row.get("createType") or row.get("create_type") or "").lower().replace("_", "")
+    exec_type = str(row.get("execType") or row.get("exec_type") or "").lower().replace("_", "")
     if exec_type == "adltrade":
         return "venue_adl"
     if create_type == "createbyliq" or exec_type == "busttrade":

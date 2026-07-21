@@ -19,7 +19,7 @@ from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 
 
-NOTIFICATION_SCHEMA_VERSION = 2
+NOTIFICATION_SCHEMA_VERSION = 3
 HOUR_NS = 3_600_000_000_000
 POSITION_TRUTH_STATUSES = frozenset({"healthy", "mismatch", "stale", "unavailable"})
 
@@ -43,14 +43,21 @@ class AccountNotificationState:
     recent_entry_rejection_count: int = 0
     recent_entry_rejection_attempts: dict[str, int] = field(default_factory=dict)
     recent_entry_rejection_reasons: dict[str, int] = field(default_factory=dict)
+    pending_lifecycle_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class AccountNotificationBatch:
-    message: str
+    messages: tuple[str, ...]
     next_state: AccountNotificationState
     event_messages: tuple[str, ...]
     hourly_included: bool
+
+    @property
+    def message(self) -> str:
+        """Complete logical payload, retained for diagnostics and compatibility."""
+
+        return "\n\n".join(self.messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +128,11 @@ class AccountNotificationEngine:
             recent_entry_rejection_count=persisted.recent_entry_rejection_count,
             recent_entry_rejection_attempts=dict(persisted.recent_entry_rejection_attempts),
             recent_entry_rejection_reasons=dict(persisted.recent_entry_rejection_reasons),
+            pending_lifecycle_confirmations={
+                key: dict(row) for key, row in persisted.pending_lifecycle_confirmations.items()
+            },
         )
+        bootstrap_messages: list[str] = []
         if first_run_with_history:
             # Lifecycle alerts are not replayed, but unresolved risk blocks are
             # current control state rather than historical chatter. Rebuild
@@ -135,16 +146,22 @@ class AccountNotificationEngine:
                         kernel_state=kernel_state,
                     )
             _clear_recent_entry_rejection_counters(next_state)
+            bootstrap_messages.extend(_current_protection_hazard_messages(kernel_state))
         _prune_expired_entry_rejections(
             next_state,
             kernel_state=kernel_state,
             now_ns=now,
         )
-        event_messages = self._event_messages(
-            new_events,
-            next_state,
-            kernel_state,
-            position_truth_healthy=position_truth_healthy,
+        event_messages = list(bootstrap_messages)
+        if position_truth_healthy:
+            event_messages.extend(_release_pending_lifecycle_confirmations(next_state))
+        event_messages.extend(
+            self._event_messages(
+                new_events,
+                next_state,
+                kernel_state,
+                position_truth_healthy=position_truth_healthy,
+            )
         )
         # A venue/local mismatch makes local unrealized P&L non-authoritative.
         # Keep lifecycle facts, but never emit a scary loss alert for exposure
@@ -172,11 +189,8 @@ class AccountNotificationEngine:
             )
             next_state.last_hour_bucket = hour_bucket
             _clear_recent_entry_rejection_counters(next_state)
-        message = "\n\n".join(section for section in sections if section).strip()
-        if len(message) > 3900:
-            message = message[:3860].rstrip() + "\n…additional account updates omitted"
         return AccountNotificationBatch(
-            message=message,
+            messages=_paginate_sections(sections),
             next_state=next_state,
             event_messages=tuple(event_messages),
             hourly_included=hourly,
@@ -211,7 +225,10 @@ class AccountNotificationEngine:
             payload = json.loads(self.state_path.read_bytes())
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return AccountNotificationState()
-        if not isinstance(payload, Mapping) or int(payload.get("schema_version") or 0) != NOTIFICATION_SCHEMA_VERSION:
+        if not isinstance(payload, Mapping) or int(payload.get("schema_version") or 0) not in {
+            2,
+            NOTIFICATION_SCHEMA_VERSION,
+        }:
             return AccountNotificationState()
         return AccountNotificationState(
             last_sequence=int(payload.get("last_sequence") or 0),
@@ -244,6 +261,11 @@ class AccountNotificationEngine:
                 str(reason): max(int(count), 0)
                 for reason, count in (payload.get("recent_entry_rejection_reasons") or {}).items()
             },
+            pending_lifecycle_confirmations={
+                str(event_id): _loaded_lifecycle_confirmation(row)
+                for event_id, row in (payload.get("pending_lifecycle_confirmations") or {}).items()
+                if isinstance(row, Mapping)
+            },
         )
 
     def _event_messages(
@@ -274,15 +296,19 @@ class AccountNotificationEngine:
                 next_qty = prior_qty + fill_qty
                 if prior_qty == 0.0 and next_qty != 0.0:
                     row["average_price"] = fill_price
+                    confirmed = f"🟢 Opened {symbol} {_side(next_qty)} · {abs(next_qty):g} @ ${fill_price:,.8g}"
                     if position_truth_healthy:
-                        messages.append(
-                            f"🟢 Opened {symbol} {_side(next_qty)} · {abs(next_qty):g} @ ${fill_price:,.8g}"
-                        )
+                        messages.append(confirmed)
                     else:
                         messages.append(
                             f"⚠️ Local journal shows {symbol} {_side(next_qty)} "
                             f"{abs(next_qty):g} @ ${fill_price:,.8g} · "
                             "awaiting venue reconciliation"
+                        )
+                        _queue_lifecycle_confirmation(
+                            state,
+                            event,
+                            "✅ Venue reconciliation confirmed prior update · " + confirmed.removeprefix("🟢 "),
                         )
                     state.loss_level_by_symbol.pop(symbol, None)
                 elif next_qty == 0.0:
@@ -295,6 +321,19 @@ class AccountNotificationEngine:
                     metadata = event.payload.get("metadata") or {}
                     reason = str(metadata.get("reason") or "native protection")
                     messages.append(f"🛡️ {event.symbol} protection triggered · {_human_reason(reason)}")
+                elif status == "breached_unprotected":
+                    metadata = event.payload.get("metadata") or {}
+                    stop = float(event.payload.get("stop_price") or 0.0)
+                    mark = float(metadata.get("breach_mark") or 0.0)
+                    messages.append(
+                        f"🚨 {event.symbol} native disaster stop absent after threshold breach · "
+                        f"SL ${stop:,.8g} · authenticated mark ${mark:,.8g} · "
+                        "new exposure blocked; software flat recovery required"
+                    )
+                elif status == "software_flat_requested":
+                    messages.append(
+                        f"🛡️ {event.symbol} durable reduce-only recovery queued · native disaster stop breach"
+                    )
             elif event.event_type == AccountEventType.PNL.value:
                 close_key = str(event.payload.get("close_key") or "")
                 if not close_key:
@@ -315,7 +354,7 @@ class AccountNotificationEngine:
                 reconstructed_flat = bool(close_metadata.get("reconstructed_flat", close.get("venue_flat")))
                 action = "Closed" if reconstructed_flat else "Reduced"
                 pending = _pnl_pending_labels(event.payload)
-                provisional = " · provisional (" + ", ".join(pending) + " pending)" if pending else ""
+                accounting_scope = _accounting_scope_text(pending)
                 raw_component_ids = metadata.get("component_ids", ()) if isinstance(metadata, Mapping) else ()
                 component_ids = (
                     tuple(str(value) for value in raw_component_ids if str(value))
@@ -324,19 +363,27 @@ class AccountNotificationEngine:
                 )
                 component = " · component " + ", ".join(component_ids) if component_ids else ""
                 attribution = (
-                    " · component P&L attribution pending" if _component_attribution_pending(event.payload) else ""
+                    " · component P&L not allocated (account-netted)"
+                    if _component_attribution_pending(event.payload)
+                    else ""
+                )
+                confirmed = (
+                    f"✅ {action} {event.symbol} · {reason}{component} · "
+                    f"account P&L {_usd(net, signed=True)}{accounting_scope}{attribution}"
                 )
                 if position_truth_healthy:
-                    messages.append(
-                        f"✅ {action} {event.symbol} · {reason}{component} · "
-                        f"account P&L {_usd(net, signed=True)}{provisional}{attribution}"
-                    )
+                    messages.append(confirmed)
                 else:
                     messages.append(
                         f"⚠️ Local journal reduction {event.symbol} · "
                         f"{reason}{component} · account P&L "
-                        f"{_usd(net, signed=True)}{provisional}{attribution} · "
+                        f"{_usd(net, signed=True)}{accounting_scope}{attribution} · "
                         "awaiting venue reconciliation"
+                    )
+                    _queue_lifecycle_confirmation(
+                        state,
+                        event,
+                        "✅ Venue reconciliation confirmed prior update · " + confirmed.removeprefix("✅ "),
                     )
         # Journal fills are authoritative; snap to reconstructed state after
         # applying messages to eliminate accumulated float noise.
@@ -411,8 +458,7 @@ def _hourly_summary(
         lines.append(f"Local journal {_realized_text(realized)} · exposure/estimated uPnL suppressed until reconciled")
         if realized.component_attribution_pending:
             lines.append(
-                "Component P&L attribution pending for "
-                f"{realized.component_attribution_pending} account-netted reduction(s)"
+                f"Component P&L not allocated for {realized.component_attribution_pending} account-netted reduction(s)"
             )
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
@@ -463,8 +509,7 @@ def _hourly_summary(
         lines.append("⚠️ L2 midpoint valuation unavailable: " + ", ".join(unpriced_symbols))
     if realized.component_attribution_pending:
         lines.append(
-            "Component P&L attribution pending for "
-            f"{realized.component_attribution_pending} account-netted reduction(s)"
+            f"Component P&L not allocated for {realized.component_attribution_pending} account-netted reduction(s)"
         )
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
@@ -757,6 +802,75 @@ def _loaded_entry_rejection(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _queue_lifecycle_confirmation(
+    state: AccountNotificationState,
+    event: AccountEvent,
+    message: str,
+) -> None:
+    state.pending_lifecycle_confirmations.setdefault(
+        event.event_id,
+        {
+            "event_id": event.event_id,
+            "sequence": event.sequence,
+            "event_type": event.event_type,
+            "symbol": event.symbol,
+            "message": message[:1000],
+        },
+    )
+
+
+def _release_pending_lifecycle_confirmations(
+    state: AccountNotificationState,
+) -> list[str]:
+    rows = sorted(
+        state.pending_lifecycle_confirmations.values(),
+        key=lambda row: (int(row.get("sequence") or 0), str(row.get("event_id") or "")),
+    )
+    messages = [str(row.get("message") or "") for row in rows if str(row.get("message") or "")]
+    state.pending_lifecycle_confirmations.clear()
+    return messages
+
+
+def _loaded_lifecycle_confirmation(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": str(row.get("event_id") or ""),
+        "sequence": max(_safe_int(row.get("sequence"), default=0), 0),
+        "event_type": str(row.get("event_type") or ""),
+        "symbol": str(row.get("symbol") or "").upper(),
+        "message": str(row.get("message") or "")[:1000],
+    }
+
+
+def _current_protection_hazard_messages(state: AccountState) -> list[str]:
+    """Surface unresolved safety state even when a notifier adopts old history."""
+
+    messages: list[str] = []
+    open_symbols = {
+        symbol for symbol, position in state.positions.items() if position.signed_qty != 0.0
+    }
+    for row in state.protections.values():
+        status = str(row.get("status") or "")
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        symbol = str(row.get("symbol") or metadata.get("symbol") or "").upper()
+        if not symbol or symbol not in open_symbols:
+            continue
+        if status == "breached_unprotected":
+            stop = float(row.get("stop_price") or 0.0)
+            mark = float(metadata.get("breach_mark") or 0.0)
+            messages.append(
+                f"🚨 {symbol} native disaster stop absent after threshold breach · "
+                f"SL ${stop:,.8g} · authenticated mark ${mark:,.8g} · "
+                "new exposure blocked; software flat recovery required"
+            )
+        elif status == "software_flat_requested":
+            messages.append(
+                f"🛡️ {symbol} durable reduce-only recovery queued · native disaster stop breach"
+            )
+    return messages
+
+
 def _safe_int(value: object, *, default: int) -> int:
     if not isinstance(value, (str, bytes, bytearray, int, float)):
         return default
@@ -787,8 +901,51 @@ def _realized_pnl_truth(state: AccountState) -> _RealizedPnlTruth:
 
 
 def _realized_text(truth: _RealizedPnlTruth) -> str:
-    suffix = " provisional (" + ", ".join(truth.pending_labels) + " pending)" if truth.pending_labels else ""
-    return f"realized {_usd(truth.amount_usdt, signed=True)}{suffix}"
+    return f"realized {_usd(truth.amount_usdt, signed=True)}{_accounting_scope_text(truth.pending_labels)}"
+
+
+def _accounting_scope_text(labels: Sequence[str]) -> str:
+    """Render immutable journal limitations without promising a nonexistent finalizer."""
+
+    if not labels:
+        return ""
+    descriptions = {
+        "funding": "funding journaled separately",
+        "venue closed-PnL": "venue closed-PnL not cross-checked online",
+        "fees": "fees unresolved",
+        "accounting provenance": "accounting provenance unknown",
+    }
+    rendered = [descriptions.get(label, label) for label in labels]
+    return " · accounting scope: fill reconstruction; " + "; ".join(rendered)
+
+
+def _paginate_sections(
+    sections: Sequence[str],
+    *,
+    max_chars: int = 3900,
+) -> tuple[str, ...]:
+    """Create lossless Telegram-sized pages from independently useful sections."""
+
+    if max_chars <= 0:
+        raise ValueError("notification page size must be positive")
+    pages: list[str] = []
+    current = ""
+    for raw_section in sections:
+        section = str(raw_section).strip()
+        if not section:
+            continue
+        chunks = [section[index : index + max_chars] for index in range(0, len(section), max_chars)]
+        for chunk in chunks:
+            candidate = f"{current}\n\n{chunk}" if current else chunk
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                pages.append(current)
+            current = chunk
+    if current:
+        pages.append(current)
+    return tuple(pages)
 
 
 def _pnl_pending_labels(row: Mapping[str, object]) -> tuple[str, ...]:
