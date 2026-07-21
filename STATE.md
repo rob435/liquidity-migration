@@ -3,8 +3,9 @@
 Updated from authenticated venue reads, exact-receipt verification, systemd,
 owner/journal checks, account-journal protection/P&L archaeology, the full
 2026-07-18/19 Telegram alert history, the 2026-07-20 rollouts, and the
-2026-07-21 account-kernel incident audit. Deployed facts and undeployed local
-remediation are separated explicitly below.
+2026-07-21 account-kernel incident audit. Point-in-time deployment facts and the
+current remediation are separated explicitly below; exact live truth comes
+from the authenticated deployment receipt and read-only status command.
 
 ## 2026-07-21 account-kernel incident and local remediation
 
@@ -17,8 +18,9 @@ remediation are separated explicitly below.
   the stop at 12:20:14. The position subsequently closed through take profit at
   13:02:22 (`+2.6 @ 11.127`, account-net `+3.94918602 USDT`). That contingent
   recovery does not make the roughly eight-minute unprotected interval safe.
-- The local worktree at base commit
-  `a808c5877b201432798ae6e73aaa94338b7f1332` now implements the audited repair
+- The remediation was developed from base commit
+  `a808c5877b201432798ae6e73aaa94338b7f1332` and is incorporated into the
+  current `main` candidate. It implements the audited repair
   in `docs/audit/2026-07-21-account-kernel-incident.md`: authenticated
   venue-stop-first reconciliation; a durable crossed-stop breach latch across
   price recovery and restarts; exact Bybit integer-price normalization; an
@@ -38,19 +40,26 @@ remediation are separated explicitly below.
   watchdog state lock, and crossed-stop recovery now requires authenticated
   venue flatness rather than reconstructed zero alone.
 - Local verification is green: focused account execution/protection 273 passed;
-  repository doctor, ruff, and mypy green; full gate 2,239 passed / 3 skipped.
+  repository doctor, ruff, and mypy green; final consolidated full gate 2,222
+  passed / 1 skipped.
   Graphify's scoped architecture refresh produced 5,238 nodes, 18,862 edges,
   and 334 communities.
-- These changes are uncommitted and **not deployed**. A read-only live audit at
-  2026-07-21 13:49 UTC still found exact deployed commit
+- Before the owner-authorized demo/paper rollout later on 2026-07-21, a
+  read-only live audit at 13:49 UTC found exact deployed commit
   `a7363070008266888b652104dfdd64f907507f3e`, profile `operational`, demo owner
   active/running with zero restarts and healthy current state, requested-symbol
   readiness true, no local or venue position, no aggregate target, working or
   open venue order, and zero pending/processing/failed requests. The boundary
-  remained `DEMO=true`, `REAL_MONEY=false`. This is a point-in-time flatness
-  observation, not authorization to deploy or trade.
+  remained `DEMO=true`, `REAL_MONEY=false`. This is a historical point-in-time
+  flatness observation, not current account truth or authorization to trade.
+  The authorized rollout remains demo/paper-only; it does not authorize
+  `REAL_MONEY` or mainnet.
 
-## Live authority and topology
+## Recorded live authority and topology history
+
+The newest entry below is the last authenticated snapshot before the
+2026-07-21 rollout. After that change point, use the exact deployment receipt
+and `scripts/ops.sh status` for current authority rather than this prose.
 
 - Installed and authorized implementation commit:
   `a7363070008266888b652104dfdd64f907507f3e`, deployed from canonical `main`,

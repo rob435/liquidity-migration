@@ -1,8 +1,0 @@
-reason,count,detail
-pre_floor,8,ADAUSDT;BCHUSDT;BTCUSDT;DOTUSDT;ETHUSDT;LINKUSDT;LTCUSDT;XTZUSDT
-right_censored,12,BSPUSDT;CATSTOCKUSDT;COSTUSDT;CRWDUSDT;FLEXUSDT;HIMSUSDT;NFLXUSDT;SHAZUSDT;SONYUSDT;TERUSDT;TTWOUSDT;TXNUSDT
-membership_gap_relist,1,DATAUSDT
-kline_gap_d0,0,""
-manifest_vs_kline_d0_mismatch,1,PUMPBTCUSDT:2025-06-03!=2025-04-11
-entry_bar_missing,2,""
-exit_bar_missing,2,""

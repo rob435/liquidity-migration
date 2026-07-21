@@ -39,9 +39,9 @@ K3_MIN_ROUND_TRIPS_AT_DAY90 = {"continuous": 30, "long": 15}
 # this share of the tightest drawdown limit.
 UNATTRIBUTED_PROVISIONAL_FRACTION = 0.10
 
-# R3c protection-premium accounting (tail-risk program P1.4): a PNL row is
-# attributed to a native-stop close when its symbol matches and its exchange
-# timestamp lies within this window of a verified_native_stop fill.
+# Protection-premium accounting: a PNL row is attributed to a native-stop
+# close when its symbol matches and its exchange timestamp lies within this
+# window of a verified_native_stop fill.
 NATIVE_STOP_MATCH_WINDOW_NS = 180 * 1_000_000_000
 
 
@@ -69,7 +69,7 @@ def protection_premium_section(
     *,
     epoch_start_ns: int,
 ) -> dict[str, Any]:
-    """R3c: native-stop realized cost as an explicit insurance-premium line.
+    """Report native-stop realized cost as an explicit insurance-premium line.
 
     The venue's native stops are an operational seatbelt research never owned;
     this section attributes their realized P&L so the safety/alpha boundary
@@ -121,7 +121,7 @@ def protection_premium_section(
         "unmatched_fills": unmatched_fills,
         "provisional": unmatched_fills > 0,
         "note": (
-            "R3c insurance-premium line: realized P&L of venue-native protection"
+            "Insurance-premium line: realized P&L of venue-native protection"
             " closes (matched by symbol within ±3 min); negative = premium paid"
             " for the operational seatbelt"
         ),
