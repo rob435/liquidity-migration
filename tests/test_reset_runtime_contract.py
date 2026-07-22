@@ -307,7 +307,9 @@ def test_reset_restores_paper_ownership_and_only_shares_public_demo_inputs() -> 
 def test_reset_strictly_preflights_runtime_paths_before_owner_leases_and_clear() -> None:
     text = _text()
     stopped = text.index('"$SYSTEMCTL_BIN" stop "$unit"')
-    reset_failed = text.index('"$SYSTEMCTL_BIN" reset-failed "$unit"', stopped)
+    load_state = text.index("unit_load_state=", stopped)
+    failed_only = text.index('if [[ "$unit_active_state" == failed ]]', load_state)
+    reset_failed = text.index('"$SYSTEMCTL_BIN" reset-failed "$unit"', failed_only)
     literal_inactive = text.index("unit is not literally inactive", reset_failed)
     quiescence = text.index(
         'echo "  quiescence verified (all managed units loaded and inactive)"',
@@ -321,7 +323,7 @@ def test_reset_strictly_preflights_runtime_paths_before_owner_leases_and_clear()
     paper_lease = text.index("\nacquire_paper_account_lease\n", demo_lease)
     destructive = text.index("FAILURE_RECOVERY_ALLOWED=0", paper_lease)
 
-    assert stopped < reset_failed < literal_inactive < quiescence
+    assert stopped < load_state < failed_only < reset_failed < literal_inactive < quiescence
     assert quiescence < identity < strict < paper < demo < demo_lease < paper_lease < destructive
     assert "--reject-symlinks" in text[strict:paper]
     assert "PAPER_RUNTIME_UID=" in text[identity:strict]

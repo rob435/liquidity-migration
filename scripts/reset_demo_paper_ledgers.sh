@@ -1248,14 +1248,31 @@ done
 # A stopped service may retain ActiveState=failed from an earlier timeout or
 # expired-authority pre-exec refusal. Both the source-reopening reset receipt
 # and subsequent create-only operational authority require literal inactive,
-# not merely "not active". Clear only this stopped failure metadata, then bind
-# the exact state before the first archive/removal mutation.
+# not merely "not active". Reset only units that are actually failed: systemd
+# may garbage-collect an inactive unit object between stop and reset-failed,
+# making an unconditional reset-failed race with an otherwise healthy unit.
+# Re-read the exact loaded/inactive state before the first archive mutation.
 for unit in "${STOP_UNITS[@]}"; do
-  "$SYSTEMCTL_BIN" reset-failed "$unit" \
-    || die "could not clear stopped failure state: $unit"
+  unit_load_state="$(
+    "$SYSTEMCTL_BIN" show "$unit" --property=LoadState --value
+  )" || die "could not read stopped unit load state: $unit"
   unit_active_state="$(
     "$SYSTEMCTL_BIN" show "$unit" --property=ActiveState --value
   )" || die "could not read stopped unit state: $unit"
+  [[ "$unit_load_state" == loaded ]] \
+    || die "managed unit is not loaded after stop: $unit ($unit_load_state)"
+  if [[ "$unit_active_state" == failed ]]; then
+    "$SYSTEMCTL_BIN" reset-failed "$unit" \
+      || die "could not clear stopped failure state: $unit"
+    unit_load_state="$(
+      "$SYSTEMCTL_BIN" show "$unit" --property=LoadState --value
+    )" || die "could not re-read stopped unit load state: $unit"
+    unit_active_state="$(
+      "$SYSTEMCTL_BIN" show "$unit" --property=ActiveState --value
+    )" || die "could not re-read stopped unit state: $unit"
+  fi
+  [[ "$unit_load_state" == loaded ]] \
+    || die "managed unit is not loaded after failure-state normalization: $unit ($unit_load_state)"
   [[ "$unit_active_state" == inactive ]] \
     || die "unit is not literally inactive after stop/reset-failed: $unit ($unit_active_state)"
 done
