@@ -7,7 +7,7 @@ owner/journal checks, account-journal protection/P&L archaeology, the full
 current remediation are separated explicitly below; exact live truth comes
 from the authenticated deployment receipt and read-only status command.
 
-## 2026-07-22 demo journal-publication stall and local remediation
+## 2026-07-22 demo journal-publication stall and deployed remediation
 
 - The supplied 12:11 UTC CRITICAL page was a real freshness failure in the
   canonical demo journal, not expected-commit drift and not a position
@@ -32,20 +32,32 @@ from the authenticated deployment receipt and read-only status command.
   isolated copy of the 32,681-event journal reproduced the exact DEXE adoption
   in `9ms` with a coherent projection, excluding the business transaction as
   the slow path.
-- The local remediation keeps readers on the prior coherent cache during only
+- The remediation keeps readers on the prior coherent cache during only
   the local atomic-replace/cache-publish window, publishes every cache field
   together after durability, and clears the guard on failure so a durable but
   unpublished segment is reconstructed normally. A deterministic concurrency
   regression enters the exact post-segment/pre-cache window and forbids any
   history replay. The full incident evidence and safety boundary are in
   `docs/audit/2026-07-22-demo-journal-publication-race.md`.
-- Read-only follow-up found the deployed commit and `operational` receipt exact,
-  both owners active with zero restarts, no failed systemd units, and 413 demo
-  checkpoints since activation with only this one interval over 60 seconds.
-  At 15:25 UTC the authenticated journal reported MIRAUSDT `-2079.5` in exact
-  venue/local agreement, fresh healthy owner state, and no DEXE position. That
-  non-flat demo book is a deployment gate: the local fix is not deployed, no
-  position was flattened, and no live authority is inferred here.
+- Before deployment, MIRAUSDT remained `-2079.5` in exact venue/local agreement
+  with an active exchange-native MarkPrice stop and no regular working orders.
+  Producers were stopped before owners; the final authenticated checkpoint was
+  flat with no venue position, reconstructed position, conditional order, or
+  mismatch. No position was forcibly flattened.
+- Commit `6dad49ca4ab099c83cb5e954533f71d9cee6929a` passed GitHub CI, was installed
+  while the complete fleet was quiescent, and invalidated the prior receipt. A
+  new create-only `operational` receipt (artifact SHA-256
+  `fdc5b4cb2b84e710cbc81d9efe7086c3533181319f86d86ab6c7bf677822754e`)
+  binds that exact commit and the demo/paper-only environment; activation and
+  the independent read-only status check both returned `verify-ok`.
+- Post-activation, both owners and all four producers were active with zero
+  restarts, no project unit was failed, and the owner-health artifacts were
+  fresh and healthy. Eight authenticated venue checkpoints remained flat and
+  mismatch-free; their maximum interval was `32.889s` and immutable-transaction
+  publication delay was `0.370--0.432s`. A real watchdog run at 16:03 UTC
+  reported zero active alerts across all ten monitored units. These early
+  observations verify rollout health, not proof that a rare race can never
+  recur.
 - Local validation is green: the complete account-kernel file and 255 focused
   account/reconciliation/protection/liveness tests passed; repository doctor,
   Ruff, mypy, and `git diff --check` passed; the full gate completed with 2,225
