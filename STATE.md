@@ -128,6 +128,12 @@ from the authenticated deployment receipt and read-only status command.
   after cleanup. Readiness also resamples time after the full journal read so a
   concurrent newer health publication is not falsely future-dated. Non-flat,
   stale, blocked, unhealthy, or contradictory state still refuses before stop.
+- Interrupted expired-rule recovery may leave an expected downstream unit
+  enabled but inactive. The old-topology verifier now accepts that degraded
+  shape only for downstream producers/timers under proven rule expiry; both
+  account owners remain mandatory and the next action is still the read-only
+  local/direct-venue flatness gate. Fresh verification and activation retain
+  the exact active topology requirement.
 - Full local validation is green at `2250 passed / 1 skipped`, plus repository
   doctor, Ruff, mypy, shell parsing, and `git diff --check`. The detailed
   evidence is in

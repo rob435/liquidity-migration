@@ -391,6 +391,8 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert "demo-rule refresh refuses mainnet credentials" in refresh
     assert "expired-authority-pre-exec" in text
     assert "ExecMainStatus" in text
+    assert "expected_downstream_on()" in text
+    assert "enabled-not-active cause=expired-authority-recovery" in text
 
     authority = text[
         text.index("issue_rollout_authorization()") : text.index("rollout_mode()")

@@ -85,6 +85,13 @@ unavailable before its first stop. Any later pre-install failure therefore
 forces the managed fleet stopped rather than claiming it restored an authority
 that can no longer start.
 
+The same recovery verifier may observe an enabled downstream producer or timer
+already inactive after an interrupted maintenance attempt. It accepts that
+degraded state only while expired rules are independently proven and only for
+downstream units that remain enabled; both account owners must still be active
+and exact. The next step is still the read-only local/direct-venue flatness
+gate, so this exception cannot itself stop another unit or authorize startup.
+
 On a ready account, rollout stops producers, timer-driven readers, and
 watchdogs before owners; binds owner health to the exact post-producer journal
 head; stops owners; then repeats the local and authenticated flat-account

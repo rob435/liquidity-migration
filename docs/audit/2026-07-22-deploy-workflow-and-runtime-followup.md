@@ -168,6 +168,13 @@ an explicit fixed clock. Neither change converts a failed or non-flat check
 into a pass. The account's non-flat MIRA position remains a hard refusal before
 any future stop.
 
+Because the interrupted attempt left LONG demo failed and three enabled timers
+inactive, recovery topology verification also permits an enabled-but-inactive
+downstream unit only under the independently proven expired-rule condition.
+Both owners remain mandatory and exact, and the next operation remains the
+read-only local/direct-venue flatness proof. Strict post-activation topology
+verification has no degraded-state exception.
+
 ## Verification and current status
 
 - rollout readiness unit/adversarial tests: passed;

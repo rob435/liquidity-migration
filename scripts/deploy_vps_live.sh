@@ -948,6 +948,21 @@ unit_off() {
 timer_on() { unit_on "$1"; }
 timer_off() { unit_off "$1"; }
 
+expected_downstream_on() {
+    local unit="$1"
+    if unit_on "$unit"; then
+        return 0
+    fi
+    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ] \
+        && systemctl is-enabled --quiet "$unit" \
+        && ! systemctl is-active --quiet "$unit"; then
+        printf 'topology-warning unit=%s state=enabled-not-active cause=expired-authority-recovery\n' \
+            "$unit"
+        return 0
+    fi
+    return 1
+}
+
 validate_hedge_model_prior() {
     "$PYTHON" scripts/run_continuous_hedge.py \
         --execution-environment demo \
@@ -1004,39 +1019,46 @@ verify_topology() {
     fi
 
     if sleeve_on "$LONG_SLEEVE"; then
-        unit_on liquidity-migration-bybit-long-demo.service || fail "LONG demo producer is not active"
+        expected_downstream_on liquidity-migration-bybit-long-demo.service \
+            || fail "LONG demo producer is not active"
     else
         unit_off liquidity-migration-bybit-long-demo.service || fail "LONG demo producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$LONG_SLEEVE"; then
-        unit_on liquidity-migration-bybit-long-paper.service || fail "LONG paper producer is not active"
+        expected_downstream_on liquidity-migration-bybit-long-paper.service \
+            || fail "LONG paper producer is not active"
     else
         unit_off liquidity-migration-bybit-long-paper.service || fail "LONG paper producer is not off"
     fi
     if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        unit_on liquidity-migration-bybit-continuous-demo.service || fail "continuous demo producer is not active"
+        expected_downstream_on liquidity-migration-bybit-continuous-demo.service \
+            || fail "continuous demo producer is not active"
     else
         unit_off liquidity-migration-bybit-continuous-demo.service || fail "continuous demo producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-        unit_on liquidity-migration-bybit-continuous-paper.service || fail "continuous paper producer is not active"
+        expected_downstream_on liquidity-migration-bybit-continuous-paper.service \
+            || fail "continuous paper producer is not active"
     else
         unit_off liquidity-migration-bybit-continuous-paper.service || fail "continuous paper producer is not off"
     fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
-        timer_on liquidity-migration-continuous-rmom-refresh.timer || fail "RMOM timer is not active"
+        expected_downstream_on liquidity-migration-continuous-rmom-refresh.timer \
+            || fail "RMOM timer is not active"
     else
         timer_off liquidity-migration-continuous-rmom-refresh.timer || fail "RMOM timer is not off"
     fi
     if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
         validate_hedge_model_prior
-        timer_on liquidity-migration-continuous-hedge.timer || fail "hedge timer is not active"
+        expected_downstream_on liquidity-migration-continuous-hedge.timer \
+            || fail "hedge timer is not active"
     else
         timer_off liquidity-migration-continuous-hedge.timer || fail "hedge timer is not off"
     fi
-    timer_on liquidity-migration-demo-liveness.timer || fail "liveness timer is not active"
+    expected_downstream_on liquidity-migration-demo-liveness.timer \
+        || fail "liveness timer is not active"
     for oneshot in \
         liquidity-migration-continuous-rmom-refresh.service \
         liquidity-migration-continuous-hedge.service \
