@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,15 @@ def test_convergence_health_is_stable_and_decision_useful() -> None:
         "residual=-1.4:attempts=2/3"
     )
     assert format_convergence_health(AccountConvergenceReport(1, 1, ())) == ""
+
+    persistent_reduction = replace(
+        item,
+        retry_limit=None,
+        reduce_only=True,
+    )
+    assert "attempts=2/persistent" in format_convergence_health(
+        AccountConvergenceReport(32_000_000_000, 30_000_000_000, (persistent_reduction,))
+    )
     assert fold_convergence_health(
         report,
         status=AccountOwnerHealthStatus.HEALTHY,

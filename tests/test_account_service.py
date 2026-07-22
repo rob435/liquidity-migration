@@ -352,6 +352,7 @@ def _service(
     max_market_age_ns: int = 5_000_000_000,
     clock: VirtualClock | None = None,
     convergence_retry_backoff_ns: int = 1_000_000_000,
+    convergence_retry_backoff_cap_ns: int = 30_000_000_000,
     convergence_health_grace_ns: int = 30_000_000_000,
     max_convergence_retries: int = 3,
 ) -> AccountExecutionService:
@@ -375,6 +376,7 @@ def _service(
         clock=clock,
         max_market_age_ns=max_market_age_ns,
         convergence_retry_backoff_ns=convergence_retry_backoff_ns,
+        convergence_retry_backoff_cap_ns=convergence_retry_backoff_cap_ns,
         convergence_health_grace_ns=convergence_health_grace_ns,
         max_convergence_retries=max_convergence_retries,
     )
@@ -1306,6 +1308,68 @@ def test_rejected_zero_close_is_retained_and_retry_remains_reduce_only(tmp_path:
     assert retried_close.signed_qty == pytest.approx(2.0)
     assert retried_close.reduce_only
     assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(0.0)
+    assert service.convergence_report().converged
+
+
+def test_reduce_only_convergence_persists_past_entry_retry_limit_with_capped_backoff(
+    tmp_path: Path,
+) -> None:
+    adapter = ScriptedExecutionAdapter("fill", "reject", "reject", "fill")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        convergence_retry_backoff_cap_ns=150,
+        convergence_health_grace_ns=50,
+        max_convergence_retries=1,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="open-for-persistent-close",
+            batch_id="open-for-persistent-close",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="persistent-close",
+            batch_id="persistent-close",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=0.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    assert adapter.submissions[-1].reduce_only
+
+    clock.advance_ns(100)
+    assert service.run_once(inbox) is None
+    first_retry = adapter.submissions[-1]
+    assert first_retry.batch_id.endswith("/0001")
+    persistent = service.convergence_report()
+    assert persistent.items[0].retry_attempts == 1
+    assert persistent.items[0].retry_limit is None
+    assert persistent.items[0].retry_budget_label == "persistent"
+    assert persistent.items[0].retryable
+    assert not persistent.items[0].exhausted
+    assert not persistent.healthy
+
+    clock.advance_ns(149)
+    assert service.run_once(inbox) is None
+    assert adapter.submit_calls == 3
+    clock.advance_ns(1)
+    assert service.run_once(inbox) is None
+    second_retry = adapter.submissions[-1]
+    assert second_retry.batch_id.endswith("/0002")
+    assert second_retry.reduce_only
+    assert adapter.submit_calls == 4
     assert service.convergence_report().converged
 
 

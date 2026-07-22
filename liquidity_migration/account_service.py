@@ -57,6 +57,8 @@ from .strategy_runtime import (
 
 REQUEST_SCHEMA_VERSION = 2
 ARRIVAL_SCHEMA_VERSION = 1
+DEFAULT_MAX_MARKET_AGE_NS = 5_000_000_000
+DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS = 30_000_000_000
 _REQUEST_FIELDS = frozenset(
     {
         "schema_version",
@@ -323,7 +325,10 @@ class AccountConvergenceItem:
     desired_since_ns: int
     age_ns: int
     retry_attempts: int
-    retry_limit: int
+    # ``None`` is deliberate for strict reductions: capital-preservation work
+    # remains durable and retryable, with a capped backoff, rather than being
+    # abandoned after an arbitrary number of definite non-fills.
+    retry_limit: int | None
     next_retry_ts_ns: int | None
     retryable: bool
     exhausted: bool
@@ -334,6 +339,10 @@ class AccountConvergenceItem:
     # position is as converged as venue granularity allows; retrying an
     # inexpressible order could only exhaust and page.
     venue_minimum_dust: bool = False
+
+    @property
+    def retry_budget_label(self) -> str:
+        return "persistent" if self.retry_limit is None else str(self.retry_limit)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +372,8 @@ class AccountConvergenceReport:
             if not item.venue_minimum_dust and (item.exhausted or item.age_ns >= self.grace_ns)
         ]
         detail = ", ".join(
-            f"{item.symbol}:{item.status}:age_ns={item.age_ns}:attempts={item.retry_attempts}/{item.retry_limit}"
+            f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
+            f"attempts={item.retry_attempts}/{item.retry_budget_label}"
             for item in overdue
         )
         raise RuntimeError(f"account target convergence unhealthy: {detail}")
@@ -1112,7 +1122,7 @@ class AccountExecutionService:
         execution_adapter: Any,
         native_protection_policy: NativeDisasterProtectionPolicy | None = None,
         clock: Clock | None = None,
-        max_market_age_ns: int = 5_000_000_000,
+        max_market_age_ns: int = DEFAULT_MAX_MARKET_AGE_NS,
         max_snapshot_age_ns: int = 5_000_000_000,
         required_rules_environment: str = "",
         health_provider: AccountHealthProvider | None = None,
@@ -1120,6 +1130,7 @@ class AccountExecutionService:
         max_health_age_ns: int = 10_000_000_000,
         convergence_health_grace_ns: int = 30_000_000_000,
         convergence_retry_backoff_ns: int = 1_000_000_000,
+        convergence_retry_backoff_cap_ns: int = DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS,
         max_convergence_retries: int = 3,
     ) -> None:
         self.route = _require_verified_account_route(route)
@@ -1148,6 +1159,7 @@ class AccountExecutionService:
         self.max_health_age_ns = max_health_age_ns
         self.convergence_health_grace_ns = convergence_health_grace_ns
         self.convergence_retry_backoff_ns = convergence_retry_backoff_ns
+        self.convergence_retry_backoff_cap_ns = convergence_retry_backoff_cap_ns
         self.max_convergence_retries = max_convergence_retries
         # First wall time each symbol was observed unconverged, cleared when it
         # converges. Revision-based ages re-arm on every accepted desire
@@ -1162,9 +1174,12 @@ class AccountExecutionService:
             or max_health_age_ns < 0
             or convergence_health_grace_ns < 0
             or convergence_retry_backoff_ns < 0
+            or convergence_retry_backoff_cap_ns < 0
             or max_convergence_retries < 0
         ):
             raise ValueError("freshness and convergence limits cannot be negative")
+        if convergence_retry_backoff_cap_ns < convergence_retry_backoff_ns:
+            raise ValueError("convergence retry backoff cap cannot be below its base")
         if str(getattr(execution_adapter, "name", "")) == "bybit_demo":
             if position_truth_provider is None:
                 raise ValueError("Bybit demo execution requires a fresh venue position-truth provider")
@@ -1605,6 +1620,7 @@ class AccountExecutionService:
             residual_pending = abs(residual) > tolerance
             can_rebuild = bool(target_rows)
             reduce_only = abs(target_qty) + tolerance < abs(position_qty) and target_qty * position_qty >= -tolerance
+            retry_limit = None if reduce_only else self.max_convergence_retries
             venue_minimum_dust = (
                 no_working
                 and residual_pending
@@ -1619,13 +1635,20 @@ class AccountExecutionService:
                 no_working
                 and residual_pending
                 and not venue_minimum_dust
-                and (attempts >= self.max_convergence_retries or not can_rebuild)
+                and (
+                    (retry_limit is not None and attempts >= retry_limit)
+                    or not can_rebuild
+                )
             )
             retryable = no_working and residual_pending and can_rebuild and not exhausted and not venue_minimum_dust
             next_retry_ts_ns: int | None = None
             if retryable:
                 exponent = min(attempts, 62)
-                next_retry_ts_ns = retry_anchor_ns + (self.convergence_retry_backoff_ns * (2**exponent))
+                retry_delay_ns = min(
+                    self.convergence_retry_backoff_ns * (2**exponent),
+                    self.convergence_retry_backoff_cap_ns,
+                )
+                next_retry_ts_ns = retry_anchor_ns + retry_delay_ns
             if not no_working:
                 status = "working"
             elif not can_rebuild and not venue_minimum_dust:
@@ -1659,7 +1682,7 @@ class AccountExecutionService:
                     now_ns - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
                 ),
                 retry_attempts=attempts,
-                retry_limit=self.max_convergence_retries,
+                retry_limit=retry_limit,
                 next_retry_ts_ns=next_retry_ts_ns,
                 retryable=retryable,
                 exhausted=exhausted,

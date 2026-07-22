@@ -36,7 +36,11 @@ from .account_owner_health import (
 )
 from .account_owner_lease import AccountOwnerLease
 from .account_route import derive_account_route, ensure_account_route
-from .account_service import AccountExecutionService, AccountIntentInbox
+from .account_service import (
+    DEFAULT_MAX_MARKET_AGE_NS,
+    AccountExecutionService,
+    AccountIntentInbox,
+)
 from .account_service_bybit import (
     CapturedBybitMarketProvider,
     VerifiedBybitDemoRulesProvider,
@@ -291,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         twin=twin,
         component_resolver=_component_for_command,
         clock=runtime_clock,
+        reduce_only_max_decision_age_ns=DEFAULT_MAX_MARKET_AGE_NS,
     )
     service = AccountExecutionService(
         route=route,
@@ -302,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
         execution_adapter=execution_adapter,
         required_rules_environment="demo",
         clock=runtime_clock,
+        max_market_age_ns=DEFAULT_MAX_MARKET_AGE_NS,
     )
     # Passive pending state is in-memory: after a restart, terminal-cancel any
     # working order left by a prior process so nothing stays phantom-working;

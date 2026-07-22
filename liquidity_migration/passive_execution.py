@@ -102,6 +102,7 @@ class PassivePaperExecutionAdapter:
         timeout_ns: int = PASSIVE_TIMEOUT_NS,
         chase_threshold_bps: float = PASSIVE_CHASE_THRESHOLD_BPS,
         maker_fee_bps: float = PASSIVE_MAKER_FEE_BPS,
+        reduce_only_max_decision_age_ns: int | None = None,
     ) -> None:
         self.name = twin.name
         self.market_provider = market_provider
@@ -111,6 +112,22 @@ class PassivePaperExecutionAdapter:
         self.timeout_ns = int(timeout_ns)
         self.chase_threshold_bps = float(chase_threshold_bps)
         self.maker_fee_bps = float(maker_fee_bps)
+        if (
+            reduce_only_max_decision_age_ns is not None
+            and (
+                isinstance(reduce_only_max_decision_age_ns, bool)
+                or not isinstance(reduce_only_max_decision_age_ns, int)
+            )
+        ):
+            raise TypeError("reduce-only decision-age limit must be integer nanoseconds")
+        if (
+            reduce_only_max_decision_age_ns is not None
+            and reduce_only_max_decision_age_ns < twin.config.max_decision_age_ns
+        ):
+            raise ValueError(
+                "reduce-only decision-age limit cannot be below the entry decision-age limit"
+            )
+        self.reduce_only_max_decision_age_ns = reduce_only_max_decision_age_ns
         self.ids = DeterministicIds(f"{twin.name}:passive-arm-b")
         self._pending: dict[str, _PendingPassiveOrder] = {}
 
@@ -132,7 +149,13 @@ class PassivePaperExecutionAdapter:
         arm = execution_arm_for_component(component_id) if eligible else "A"
         if arm == "A":
             tagged: list[ExecutionObservation] = []
-            for observation in self.twin.submit(command, market_input):
+            submit_kwargs: dict[str, Any] = {}
+            if command.reduce_only and self.reduce_only_max_decision_age_ns is not None:
+                submit_kwargs = {
+                    "decision_age_limit_ns": self.reduce_only_max_decision_age_ns,
+                    "decision_age_limit_source": "paper_owner_market_freshness",
+                }
+            for observation in self.twin.submit(command, market_input, **submit_kwargs):
                 if not isinstance(observation, ExecutionObservation):
                     raise TypeError("paper twin must yield ExecutionObservation values")
                 tagged.append(_with_arm_metadata(observation, arm="A", eligible=eligible))

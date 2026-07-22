@@ -334,6 +334,7 @@ class MarketOrderExecutionTwin:
         exchange_ts_ns: int,
         local_receive_ts_ns: int,
         send_ts_ns: int,
+        metadata: Mapping[str, Any] | None = None,
     ) -> tuple[ExecutionObservation, ...]:
         return (ExecutionObservation(
             observation_type=ExecutionObservationType.ACK,
@@ -348,6 +349,7 @@ class MarketOrderExecutionTwin:
                 "fill_partition_policy": self.config.fill_partition_policy,
                 "visible_book_depth": self.config.visible_book_depth,
                 "execution_model_scope": self.config.model_scope,
+                **dict(metadata or {}),
             },
         ),)
 
@@ -355,12 +357,32 @@ class MarketOrderExecutionTwin:
         self,
         command: OrderCommand,
         market_input: MarketInputRef,
+        *,
+        decision_age_limit_ns: int | None = None,
+        decision_age_limit_source: str = "",
     ) -> Iterable[Mapping[str, Any] | ExecutionObservation]:
         symbol = command.symbol.upper()
         book = self.books.get(symbol)
         rules = self.instrument_rules.get(symbol)
         if command.created_ts_ns <= 0:
             raise ValueError("execution-twin command requires an explicit positive created_ts_ns")
+        effective_decision_age_limit_ns = self.config.max_decision_age_ns
+        effective_decision_age_limit_source = "execution_twin_config"
+        decision_age_limit_overridden = False
+        if decision_age_limit_ns is not None:
+            if isinstance(decision_age_limit_ns, bool) or not isinstance(
+                decision_age_limit_ns, int
+            ):
+                raise TypeError("decision-age limit must be an integer nanosecond value")
+            if not command.reduce_only:
+                raise ValueError("decision-age relaxation is permitted only for reduce-only commands")
+            if decision_age_limit_ns < self.config.max_decision_age_ns:
+                raise ValueError("reduce-only decision-age limit cannot tighten the twin limit")
+            if not decision_age_limit_source or decision_age_limit_source.strip() != decision_age_limit_source:
+                raise ValueError("decision-age limit source must be a non-empty canonical value")
+            effective_decision_age_limit_ns = decision_age_limit_ns
+            effective_decision_age_limit_source = decision_age_limit_source
+            decision_age_limit_overridden = True
         send_ts_ns = command.created_ts_ns + self.config.latency.decision_to_socket_ns
         exchange_ack_ts_ns = send_ts_ns + self.config.latency.order_entry_ns
         local_ack_ts_ns = exchange_ack_ts_ns + self.config.latency.order_response_ns
@@ -394,6 +416,12 @@ class MarketOrderExecutionTwin:
                 send_ts_ns=send_ts_ns,
             )
         decision_age_ns = send_ts_ns - market_input.local_receive_ts_ns
+        decision_age_metadata = {
+            "decision_book_age_ns": decision_age_ns,
+            "decision_book_age_limit_ns": effective_decision_age_limit_ns,
+            "decision_book_age_limit_source": effective_decision_age_limit_source,
+            "decision_book_age_limit_overridden": decision_age_limit_overridden,
+        }
         if command.created_ts_ns < market_input.local_receive_ts_ns:
             return self._rejection(
                 command,
@@ -401,14 +429,16 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
-        if decision_age_ns > self.config.max_decision_age_ns:
+        if decision_age_ns > effective_decision_age_limit_ns:
             return self._rejection(
                 command,
                 reason="stale_decision",
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if command.qty < rules.min_qty or not _aligned(command.qty, rules.qty_step):
             return self._rejection(
@@ -417,6 +447,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if not command.reduce_only and command.qty * command.reference_price < rules.min_notional:
             return self._rejection(
@@ -425,6 +456,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if rules.max_order_qty > 0.0 and command.qty > rules.max_order_qty:
             return self._rejection(
@@ -433,6 +465,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if self.config.rate_limit_orders > 0:
             cutoff = send_ts_ns - self.config.rate_limit_window_ns
@@ -444,6 +477,7 @@ class MarketOrderExecutionTwin:
                     exchange_ts_ns=exchange_ack_ts_ns,
                     local_receive_ts_ns=local_ack_ts_ns,
                     send_ts_ns=send_ts_ns,
+                    metadata=decision_age_metadata,
                 )
             self._send_times_ns.append(send_ts_ns)
 
@@ -460,6 +494,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if available < command.qty and not self.config.allow_partial_fills:
             return self._rejection(
@@ -468,6 +503,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
         if (
             self.config.fill_partition_policy == "single_level_full_fill_or_reject"
@@ -479,6 +515,7 @@ class MarketOrderExecutionTwin:
                 exchange_ts_ns=exchange_ack_ts_ns,
                 local_receive_ts_ns=local_ack_ts_ns,
                 send_ts_ns=send_ts_ns,
+                metadata=decision_age_metadata,
             )
 
         venue_order_id = self.ids.make("venue-order", command.command_id)
@@ -497,6 +534,9 @@ class MarketOrderExecutionTwin:
                 "feed_latency_ns": book.local_receive_ts_ns - book.exchange_ts_ns,
                 "command_created_ts_ns": command.created_ts_ns,
                 "decision_book_age_ns": decision_age_ns,
+                "decision_book_age_limit_ns": effective_decision_age_limit_ns,
+                "decision_book_age_limit_source": effective_decision_age_limit_source,
+                "decision_book_age_limit_overridden": decision_age_limit_overridden,
                 "order_entry_latency_ns": self.config.latency.order_entry_ns,
                 "order_response_latency_ns": self.config.latency.order_response_ns,
                 "submit_to_first_fill_latency_ns": self.config.latency.submit_to_first_fill_ns,
@@ -562,6 +602,7 @@ class MarketOrderExecutionTwin:
                     "fill_partition_policy": self.config.fill_partition_policy,
                     "visible_book_depth": self.config.visible_book_depth,
                     "execution_model_scope": self.config.model_scope,
+                    **decision_age_metadata,
                     "fee_observed": True,
                     "fee_status": "modeled_execution_fee",
                     "fee_source": "execution_twin_config.fee_bps",
@@ -589,6 +630,7 @@ class MarketOrderExecutionTwin:
                 "fill_partition_policy": self.config.fill_partition_policy,
                 "visible_book_depth": self.config.visible_book_depth,
                 "execution_model_scope": self.config.model_scope,
+                **decision_age_metadata,
             },
         ))
         return tuple(observations)

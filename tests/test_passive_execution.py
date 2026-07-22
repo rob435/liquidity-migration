@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from liquidity_migration.account_contracts import InstrumentRules, MarketInputRef, OrderCommand
@@ -63,7 +65,12 @@ class _FakeProvider:
         return self.contexts[input_key]
 
 
-def _world(component_id: str, *, signed_qty: float = -10.0):
+def _world(
+    component_id: str,
+    *,
+    signed_qty: float = -10.0,
+    reduce_only_max_decision_age_ns: int | None = None,
+):
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=10_000)
     provider = _FakeProvider()
     decision_book = _book(bid=99.0, ask=101.0, ts_ns=900)
@@ -85,6 +92,7 @@ def _world(component_id: str, *, signed_qty: float = -10.0):
         twin=twin,
         component_resolver=lambda command: (component_id, "continuous"),
         clock=clock,
+        reduce_only_max_decision_age_ns=reduce_only_max_decision_age_ns,
     )
     command = OrderCommand(
         command_id="c1",
@@ -147,6 +155,73 @@ def test_ineligible_reduce_only_takes_arm_a_even_with_b_hash() -> None:
     assert adapter.pending_count() == 0
     assert all(o.metadata[EXECUTION_ARM_METADATA_KEY] == "A" for o in observations)
     assert all(o.metadata["execution_arm_eligible"] is False for o in observations)
+
+
+def test_reduce_only_uses_owner_freshness_without_relaxing_entry_limit() -> None:
+    _clock, _provider, adapter, command, market_input = _world(
+        _arm_component("A"),
+        reduce_only_max_decision_age_ns=5_000_000_000,
+    )
+    over_entry_limit_ts_ns = market_input.local_receive_ts_ns + 300_000_000
+    stale_entry = replace(
+        command,
+        command_id="stale-entry",
+        created_ts_ns=over_entry_limit_ts_ns,
+    )
+    entry_observations = tuple(adapter.submit(stale_entry, market_input))
+    assert len(entry_observations) == 1
+    assert entry_observations[0].accepted is False
+    assert entry_observations[0].metadata["reason"] == "stale_decision"
+    assert entry_observations[0].metadata["decision_book_age_limit_ns"] == 250_000_000
+    assert entry_observations[0].metadata["decision_book_age_limit_overridden"] is False
+    with pytest.raises(ValueError, match="only for reduce-only"):
+        tuple(
+            adapter.twin.submit(
+                stale_entry,
+                market_input,
+                decision_age_limit_ns=5_000_000_000,
+                decision_age_limit_source="invalid_entry_relaxation",
+            )
+        )
+
+    reduction = replace(
+        command,
+        command_id="fresh-enough-reduction",
+        side="buy",
+        signed_qty=10.0,
+        reduce_only=True,
+        target_signed_qty=0.0,
+        created_ts_ns=over_entry_limit_ts_ns,
+    )
+    reduction_observations = tuple(adapter.submit(reduction, market_input))
+    reduction_ack = reduction_observations[0]
+    assert reduction_ack.accepted is True
+    assert any(
+        observation.observation_type == ExecutionObservationType.FILL
+        for observation in reduction_observations
+    )
+    assert reduction_ack.metadata["decision_book_age_ns"] == 300_000_000
+    assert reduction_ack.metadata["decision_book_age_limit_ns"] == 5_000_000_000
+    assert (
+        reduction_ack.metadata["decision_book_age_limit_source"]
+        == "paper_owner_market_freshness"
+    )
+    assert reduction_ack.metadata["decision_book_age_limit_overridden"] is True
+    assert all(
+        observation.metadata["decision_book_age_limit_ns"] == 5_000_000_000
+        for observation in reduction_observations
+    )
+
+    too_old_reduction = replace(
+        reduction,
+        command_id="too-old-reduction",
+        created_ts_ns=market_input.local_receive_ts_ns + 5_000_000_001,
+    )
+    too_old_observations = tuple(adapter.submit(too_old_reduction, market_input))
+    assert len(too_old_observations) == 1
+    assert too_old_observations[0].accepted is False
+    assert too_old_observations[0].metadata["reason"] == "stale_decision"
+    assert too_old_observations[0].metadata["decision_book_age_limit_ns"] == 5_000_000_000
 
 
 def test_arm_b_sell_rests_at_ask_with_ack_only() -> None:

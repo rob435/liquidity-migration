@@ -115,8 +115,13 @@ mainnet readiness.
 The paper model is commit-owned rather than runtime-calibrated: it walks the
 visible depth-50 decision book, applies 5.5 bps taker fees and 2.0 bps residual
 adverse slippage, allows partial fills by book level, models zero latency, and
-rejects decisions older than 250 ms. Every modeled ACK, fill, status, runner
-name, and owner-health record carries
+rejects exposure-increasing decisions older than 250 ms. Strict reduce-only
+commands bypass the passive experiment and may use the exact captured decision
+book while it remains inside the owner's five-second market-freshness contract;
+older or future books still reject. The modeled ACK records the effective age,
+limit, and policy source, so this safety-liveness allowance cannot be mistaken
+for entry-model calibration. Every modeled ACK, fill, status, runner name, and
+owner-health record carries
 `integration_only_uncalibrated`. This is an integration simulator, not
 performance or executable-price evidence. Changing it requires a new commit
 and operational authorization.
@@ -290,6 +295,15 @@ handshake runs. An unavailable/ambiguous socket probe fails health closed but is
 not enough evidence to destroy and recreate a possibly live authenticated
 connection.
 Unsafe root/config changes and authorization drift also fail health closed.
+
+Target convergence treats exposure and capital preservation differently.
+Exposure-increasing or sign-flipping work has a finite configured retry budget
+and becomes `retry_exhausted` after definite non-fills. A strict reduce-only
+residual is never abandoned because that budget elapsed: it remains durable,
+uses exponential retry delay capped at 30 seconds, and stays visibly unhealthy
+after the convergence grace period until it fills or the desired/position state
+changes. A residual below verified venue quantity granularity is classified as
+healthy venue-minimum dust rather than retried forever.
 
 The public L2 stream distinguishes a connection attempt from an open transport
 and an open transport from a subscription's first frame. A generation that
