@@ -527,6 +527,7 @@ def probe_demo_instrument_rule(
     terminal_confirmation_polls: int = 2,
     attempt_sink: list[DemoRuleProbeAttempt] | None = None,
     prior_bracket_qty: tuple[float, float] | None = None,
+    prior_bracket_notional_usdt: tuple[float, float] | None = None,
 ) -> tuple[InstrumentRules, DemoRuleProbeEvidence]:
     """Find the smallest demo-accepted PostOnly notional for one symbol.
 
@@ -997,7 +998,88 @@ def probe_demo_instrument_rule(
         )
         raise AssertionError("unreachable")
 
-    prior_steps: tuple[int, int] | None = None
+    # Search hints only choose which fresh orders to try first. The current
+    # structural minNotionalValue is the cheapest adjacent guess, while a prior
+    # source-bound receipt supplies a wider price-rescaled fallback bracket.
+    # Neither source becomes evidence until its current endpoints are submitted
+    # and the remaining interval is bisected to one quantity step.
+    step_candidates: list[tuple[int, int]] = []
+    unit_notional = step * probe_price
+    structural_notional = Decimal(0)
+    try:
+        structural_notional = Decimal(str(structural.min_notional))
+        structural_accepted_steps = int(
+            (structural_notional / unit_notional).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        structural_accepted_steps = 0
+    if (
+        structural_notional.is_finite()
+        and structural_notional > 0
+        and structural_accepted_steps >= min_steps
+        and structural_accepted_steps <= max_steps
+    ):
+        step_candidates.append((
+            max(structural_accepted_steps - 1, min_steps - 1),
+            structural_accepted_steps,
+        ))
+
+    if prior_bracket_notional_usdt is not None:
+        try:
+            prior_rejected_notional = Decimal(
+                str(prior_bracket_notional_usdt[0])
+            )
+            prior_accepted_notional = Decimal(
+                str(prior_bracket_notional_usdt[1])
+            )
+            prior_rejected_steps = int(
+                (prior_rejected_notional / unit_notional).to_integral_value(
+                    rounding=ROUND_FLOOR
+                )
+            )
+            prior_accepted_steps = int(
+                (prior_accepted_notional / unit_notional).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            )
+        except (ArithmeticError, IndexError, TypeError, ValueError):
+            pass
+        else:
+            if (
+                prior_rejected_notional.is_finite()
+                and prior_accepted_notional.is_finite()
+                and prior_rejected_notional >= 0
+                and prior_accepted_notional > prior_rejected_notional
+            ):
+                # ``min_steps - 1`` is a non-submittable lower sentinel when
+                # the rescaled rejected notional sits below structural minQty.
+                # Binary search then starts at minQty without pretending that
+                # the sentinel is fresh venue evidence.
+                prior_rejected_steps = max(
+                    prior_rejected_steps,
+                    min_steps - 1,
+                )
+                prior_accepted_steps = max(
+                    prior_accepted_steps,
+                    min_steps,
+                )
+                if (
+                    prior_rejected_steps < prior_accepted_steps
+                    and prior_rejected_steps <= max_steps
+                    and prior_accepted_steps <= max_steps
+                ):
+                    candidate_steps = (
+                        prior_rejected_steps,
+                        prior_accepted_steps,
+                    )
+                    if candidate_steps not in step_candidates:
+                        step_candidates.append(candidate_steps)
+
+    # Retain quantity-only hints for callers and receipts predating notional
+    # hint propagation.  They must be exactly adjacent because otherwise they
+    # do not safely bound the current minimum after a price move.
     if prior_bracket_qty is not None:
         try:
             prior_rejected_qty = Decimal(str(prior_bracket_qty[0]))
@@ -1005,7 +1087,7 @@ def probe_demo_instrument_rule(
             prior_rejected_steps = int(prior_rejected_qty / step)
             prior_accepted_steps = int(prior_accepted_qty / step)
         except (ArithmeticError, IndexError, TypeError, ValueError):
-            prior_steps = None
+            pass
         else:
             aligned_rejected = prior_rejected_qty == step * prior_rejected_steps
             aligned_accepted = prior_accepted_qty == step * prior_accepted_steps
@@ -1026,37 +1108,65 @@ def probe_demo_instrument_rule(
                     or prior_rejected_steps >= min_steps
                 )
             ):
-                prior_steps = (prior_rejected_steps, prior_accepted_steps)
+                candidate_steps = (
+                    prior_rejected_steps,
+                    prior_accepted_steps,
+                )
+                if candidate_steps not in step_candidates:
+                    step_candidates.append(candidate_steps)
+
+    acceptance_by_step: dict[int, bool] = {}
+
+    def observed_acceptance(step_count: int) -> bool:
+        if step_count not in acceptance_by_step:
+            acceptance_by_step[step_count] = accepted(step_count)
+        return acceptance_by_step[step_count]
 
     resolved_prior = False
-    if prior_steps is not None:
-        prior_rejected_steps, prior_accepted_steps = prior_steps
+    for prior_rejected_steps, prior_accepted_steps in step_candidates:
         rejected_still_rejected = (
-            prior_rejected_steps == 0 or not accepted(prior_rejected_steps)
+            prior_rejected_steps < min_steps
+            or not observed_acceptance(prior_rejected_steps)
         )
-        accepted_still_accepted = accepted(prior_accepted_steps)
+        accepted_still_accepted = observed_acceptance(prior_accepted_steps)
         if rejected_still_rejected and accepted_still_accepted:
-            highest_rejected = prior_rejected_steps
-            lowest_accepted = prior_accepted_steps
+            highest_rejected = (
+                prior_rejected_steps
+                if prior_rejected_steps >= min_steps
+                else 0
+            )
+            low = max(prior_rejected_steps + 1, min_steps)
+            high = prior_accepted_steps
+            while low < high:
+                mid = (low + high) // 2
+                if observed_acceptance(mid):
+                    high = mid
+                else:
+                    highest_rejected = mid
+                    low = mid + 1
+            lowest_accepted = low
             resolved_prior = True
+            break
 
     if not resolved_prior:
-        if accepted(min_steps):
+        if observed_acceptance(min_steps):
             lowest_accepted = min_steps
             highest_rejected = 0
         else:
             highest_rejected = min_steps
             candidate = min_steps
+            candidate_accepted = False
             while candidate < max_steps:
                 candidate = min(candidate * 2, max_steps)
-                if accepted(candidate):
+                candidate_accepted = observed_acceptance(candidate)
+                if candidate_accepted:
                     break
                 highest_rejected = candidate
             else:
                 raise RuntimeError(
                     f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
                 )
-            if not attempts[-1].accepted:
+            if not candidate_accepted:
                 raise RuntimeError(
                     f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
                 )
@@ -1064,7 +1174,7 @@ def probe_demo_instrument_rule(
             low, high = highest_rejected + 1, lowest_accepted
             while low < high:
                 mid = (low + high) // 2
-                if accepted(mid):
+                if observed_acceptance(mid):
                     high = mid
                 else:
                     highest_rejected = mid

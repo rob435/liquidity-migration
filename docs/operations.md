@@ -26,6 +26,7 @@ and require explicit task scope. Unknown safety-critical state fails closed.
 | `deploy --execute install` | Install an exact commit while every project unit is stopped. |
 | `deploy --execute activate` | Start the fleet allowed by the current receipt and sleeve toggles. |
 | `deploy --execute rollout ...` | Guarded flat-account preflight, stopped install, authority creation, activation, and verification in one locked operation. |
+| `deploy --execute recover ...` | Reopen one exact full reset receipt, rebuild the stopped epoch's population/rule evidence, authorize, activate, and verify. |
 
 Environment overrides are `SSH_TARGET`, `REPO_DIR`, `PYTHON`, `BRANCH`,
 `EXPECTED_COMMIT`, and the deploy script's documented SSH/repository settings.
@@ -100,9 +101,11 @@ The stopped install archives the old receipt, a new create-only receipt is
 issued under the same three maintenance-lock descriptors, and activation
 starts owners before producers and verifies the resulting topology. If the
 rules are stale, the stopped install first creates a fresh receipt. It uses the
-old receipt only as a search hint: the previously adjacent rejected/accepted
-quantity steps are freshly tested for each symbol, and any changed boundary
-falls back to the complete search. The fresh probe still requires exact
+current structural notional and old receipt only as search hints: it first
+tests the current structural boundary's adjacent steps, then (when needed)
+rescales the prior rejected/accepted notional bracket to the current probe
+price, freshly tests both endpoints, and bisects any remaining quantity-step
+gap. A changed boundary falls back to the complete search. The fresh probe still requires exact
 order/link identity, terminal cancellation on official order surfaces, zero
 fills, empty trade history, cleanup, and final direct-venue flatness. The old
 receipt is preserved, the new path is atomically installed, and rollout repeats
@@ -114,6 +117,31 @@ authority; any failure forces every managed unit stopped for explicit recovery.
 Each material phase prints start, success/failure, and elapsed seconds. The
 residual-momentum bootstrap retries every 10 seconds and defaults to a bounded
 300-second deadline; both values remain positive-integer environment overrides.
+
+### Reset-epoch recovery
+
+An interrupted irreversible rollout, or an intentional full ledger reset, must
+not fabricate prior authority merely to restart. Run the guarded reset for both
+sleeves with `--leave-stopped` and a new absolute `--receipt` path, then recover
+the same exact commit:
+
+```bash
+EXPECTED_COMMIT="$COMMIT" BRANCH="$(git branch --show-current)" \
+  scripts/ops.sh deploy --execute recover \
+  --profile operational \
+  --authorization-reference "owner task: full reset epoch recovery" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION \
+  --reset-receipt /absolute/path/to/new-reset-receipt.json
+```
+
+Recovery refuses active managed units, a partial or single-sleeve reset, a
+receipt for another commit or root set, changed fresh roots, and non-flat
+journal or authenticated venue state. A valid full reset begins a new
+operational epoch, so recovery freezes the current public demo candidate
+population, freshly probes exact rules for it, uses only overlapping prior
+symbols as search hints, updates demo and paper inputs together, creates new
+authority, and starts owners before producers. It remains demo/paper-only and
+never enables `REAL_MONEY`.
 
 ### 1. Install stopped
 

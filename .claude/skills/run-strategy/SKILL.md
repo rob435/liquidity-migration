@@ -31,6 +31,9 @@ Do not maintain a static package-subcommand list.
 - Deployment/account state: `scripts/ops.sh status`.
 - Stopped install and authorized activation:
   `scripts/ops.sh deploy --execute install|activate`.
+- Full reset-epoch recovery: use `scripts/ops.sh deploy --execute recover`
+  only with the exact full-scope, leave-stopped reset receipt and explicit
+  demo/paper authority inputs from current help.
 - Operational receipt: `scripts/ops.sh operational-authority`; creation
   requires `--execute issue`.
 - Account evidence: `scripts/ops.sh venue-accounting`; apply

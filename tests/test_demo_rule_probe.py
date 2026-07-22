@@ -251,15 +251,44 @@ def test_probe_finds_smallest_accepted_demo_qty_step() -> None:
     assert all(attempt.trade_history_row_count == 0 for attempt in accepted)
 
 
-def test_prior_adjacent_bracket_revalidates_same_boundary_in_two_attempts() -> None:
+def test_prior_adjacent_bracket_revalidates_after_structural_hint_mismatch() -> None:
     rule, evidence = _probe(
         _ProbeClient(threshold=5.0),
         prior_bracket_qty=(0.5, 0.6),
     )
 
     assert rule.min_notional == pytest.approx(5.94)
-    assert [attempt.step_count for attempt in evidence.attempts] == [5, 6]
+    assert [attempt.step_count for attempt in evidence.attempts] == [1, 2, 5, 6]
+    assert [attempt.accepted for attempt in evidence.attempts] == [False, False, False, True]
+
+
+def test_current_structural_notional_hint_resolves_in_two_fresh_attempts() -> None:
+    rule, evidence = _probe(_ProbeClient(threshold=1.0))
+
+    assert rule.min_notional == pytest.approx(1.98)
+    assert [attempt.step_count for attempt in evidence.attempts] == [1, 2]
     assert [attempt.accepted for attempt in evidence.attempts] == [False, True]
+
+
+def test_prior_notional_bracket_is_rescaled_before_fresh_boundary_search() -> None:
+    rule, evidence = _probe(
+        _ProbeClient(threshold=5.0),
+        # These quantities bracketed the same threshold at a lower historical
+        # probe price. Reusing them directly would test two accepted orders and
+        # fall back to a complete search at the current 9.9 probe price.
+        prior_bracket_qty=(0.6, 0.7),
+        prior_bracket_notional_usdt=(4.8, 5.6),
+    )
+
+    assert rule.min_notional == pytest.approx(5.94)
+    assert [attempt.step_count for attempt in evidence.attempts] == [1, 2, 4, 6, 5]
+    assert [attempt.accepted for attempt in evidence.attempts] == [
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -314,8 +343,48 @@ def test_prior_receipt_loader_treats_old_evidence_only_as_search_hints(
         expected_symbols=["BUSDT"],
     )
 
-    assert brackets["BUSDT"] == pytest.approx((0.5, 0.6))
+    assert brackets["BUSDT"] == pytest.approx((0.5, 0.6, 4.95, 5.94))
+    assert identity["requested_symbol_count"] == 1
+    assert identity["prior_symbol_count"] == 1
+    assert identity["overlap_symbol_count"] == 1
+    assert identity["missing_requested_symbols"] == []
+    assert identity["retired_prior_symbols"] == []
     assert identity["role"] == "search_hints_only_revalidated_by_fresh_orders"
+
+
+def test_prior_receipt_loader_uses_only_population_overlap_as_hints(
+    tmp_path: Path,
+) -> None:
+    module = _probe_script_module()
+    rule, evidence = _probe(_ProbeClient(threshold=5.0))
+    payload = {
+        "schema_version": module.DEMO_RULES_SCHEMA_VERSION,
+        "kind": module.DEMO_RULES_KIND,
+        "status": "passed",
+        "environment": "demo",
+        "verified_ts_ns": 123456789,
+        "max_probe_notional_usdt": 20.0,
+        "probe_distance_bps": 100.0,
+        "max_private_requests_per_second": 5,
+        "symbol_source": {"kind": "test"},
+        "rules": {"BUSDT": asdict(rule)},
+        "evidence": {"BUSDT": evidence.to_dict()},
+        "artifact_sha256": "",
+    }
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    prior = tmp_path / "prior-rules.json"
+    prior.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    prior.chmod(0o600)
+
+    brackets, identity = module._prior_probe_brackets(
+        prior,
+        expected_symbols=["BUSDT", "NEWUSDT"],
+    )
+
+    assert set(brackets) == {"BUSDT"}
+    assert identity["overlap_symbol_count"] == 1
+    assert identity["missing_requested_symbols"] == ["NEWUSDT"]
+    assert identity["retired_prior_symbols"] == []
 
 
 def test_probe_does_not_misclassify_transport_or_rate_failure_as_minimum() -> None:

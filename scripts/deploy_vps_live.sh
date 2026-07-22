@@ -7,7 +7,8 @@ if [ "$#" -gt 0 ]; then shift; fi
 DEPLOY_PROFILE=""
 DEPLOY_AUTHORIZATION_REFERENCE=""
 DEPLOY_OWNER_ACKNOWLEDGEMENT=""
-if [ "$MODE" = rollout ]; then
+DEPLOY_RESET_RECEIPT=""
+if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --profile)
@@ -25,25 +26,37 @@ if [ "$MODE" = rollout ]; then
                 DEPLOY_OWNER_ACKNOWLEDGEMENT="$2"
                 shift 2
                 ;;
-            *) echo "unknown rollout argument: $1" >&2; exit 2 ;;
+            --reset-receipt)
+                [ "$#" -ge 2 ] || { echo "--reset-receipt requires a value" >&2; exit 2; }
+                DEPLOY_RESET_RECEIPT="$2"
+                shift 2
+                ;;
+            *) echo "unknown $MODE argument: $1" >&2; exit 2 ;;
         esac
     done
     case "$DEPLOY_PROFILE" in
         demo-operational|operational) ;;
-        *) echo "rollout requires --profile demo-operational|operational" >&2; exit 2 ;;
+        *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
     esac
     [ -n "$DEPLOY_AUTHORIZATION_REFERENCE" ] \
         && [ "${#DEPLOY_AUTHORIZATION_REFERENCE}" -le 500 ] \
-        || { echo "rollout requires a 1..500 character --authorization-reference" >&2; exit 2; }
+        || { echo "$MODE requires a 1..500 character --authorization-reference" >&2; exit 2; }
     [ "$DEPLOY_OWNER_ACKNOWLEDGEMENT" = \
         AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION ] \
-        || { echo "rollout requires the exact demo/paper-only owner acknowledgement" >&2; exit 2; }
+        || { echo "$MODE requires the exact demo/paper-only owner acknowledgement" >&2; exit 2; }
+    if [ "$MODE" = recover ]; then
+        [ -n "$DEPLOY_RESET_RECEIPT" ] && [ "${DEPLOY_RESET_RECEIPT#/}" != "$DEPLOY_RESET_RECEIPT" ] \
+            || { echo "recover requires an absolute --reset-receipt" >&2; exit 2; }
+    elif [ -n "$DEPLOY_RESET_RECEIPT" ]; then
+        echo "--reset-receipt is valid only with recover" >&2
+        exit 2
+    fi
 elif [ "$#" -ne 0 ]; then
-    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout}" >&2
+    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout|recover}" >&2
     exit 2
 fi
 case "$MODE" in
-    install|activate|verify|rollout) ;;
+    install|activate|verify|rollout|recover) ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
 esac
 
@@ -70,7 +83,7 @@ for value in "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" "$RMOM_BOOTSTRAP_RETRY_SECONDS"; 
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "RMOM durations must be positive integers" >&2; exit 2; }
 done
 
-if [[ "$MODE" = install || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
+if [[ "$MODE" = install || "$MODE" = rollout || "$MODE" = recover ]] && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
@@ -106,7 +119,7 @@ fi
 }
 ROLLOUT_READINESS_HELPER_B64=""
 ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=""
-if [ "$MODE" = rollout ]; then
+if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
     if ! ROLLOUT_READINESS_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
             "$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py" \
@@ -119,6 +132,8 @@ if [ "$MODE" = rollout ]; then
         echo "expected commit returned an empty rollout readiness helper" >&2
         exit 1
     }
+fi
+if [ "$MODE" = rollout ]; then
     if ! ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
             "$EXPECTED_COMMIT:scripts/verify_rollout_shutdown_authority.py" \
@@ -147,6 +162,7 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'DEPLOY_AUTHORIZATION_REFERENCE=%q\n' "$DEPLOY_AUTHORIZATION_REFERENCE"
     printf 'DEPLOY_OWNER_ACKNOWLEDGEMENT=%q\n' "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
+    printf 'DEPLOY_RESET_RECEIPT=%q\n' "$DEPLOY_RESET_RECEIPT"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
     printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
     printf 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=%q\n' \
@@ -711,9 +727,58 @@ invalidate_operational_authorization() {
 ROLLOUT_REFRESH_STALE_DEMO_RULES=0
 ROLLOUT_DEMO_RULES_REFRESHED=0
 
+validate_recovery_reset_receipt() {
+    [ -n "$DEPLOY_RESET_RECEIPT" ] \
+        || fail "recovery requires a reset receipt"
+    "$PYTHON" - \
+        "$DEPLOY_RESET_RECEIPT" \
+        "$EXPECTED_COMMIT" \
+        /etc/liquidity-migration/account-execution.env \
+        /etc/liquidity-migration/account-paper-execution.env <<'PY'
+import json
+import sys
+
+from liquidity_migration.account_reset_receipt import load_account_reset_receipt
+from liquidity_migration.systemd_environment import load_private_systemd_environment
+
+receipt_path, expected_commit, demo_env_path, paper_env_path = sys.argv[1:]
+demo = load_private_systemd_environment(demo_env_path)
+paper = load_private_systemd_environment(paper_env_path)
+expected_roots = {
+    "demo": {
+        "account": demo["ACCOUNT_EXECUTION_ROOT"],
+        "inbox": demo["ACCOUNT_INTENT_INBOX_ROOT"],
+        "capture": demo["ACCOUNT_CAPTURE_ROOT"],
+    },
+    "paper": {
+        "account": paper["ACCOUNT_EXECUTION_ROOT"],
+        "inbox": paper["ACCOUNT_INTENT_INBOX_ROOT"],
+        "capture": paper["ACCOUNT_PAPER_CAPTURE_ROOT"],
+    },
+}
+receipt = load_account_reset_receipt(
+    receipt_path,
+    expected_candidate_commit=expected_commit,
+    expected_roots=expected_roots,
+    require_leave_stopped=True,
+    require_fresh_roots=True,
+)
+sleeves = receipt["reset"]["sleeves"]
+if len(sleeves) != 2 or set(sleeves) != {"long", "continuous"}:
+    raise SystemExit("recovery receipt must cover all managed strategy ledgers")
+print(json.dumps({
+    "status": "recovery_reset_receipt_valid",
+    "artifact_sha256": receipt["artifact_sha256"],
+    "candidate_commit": receipt["repository"]["candidate_commit"],
+    "sleeves": sleeves,
+}, sort_keys=True))
+PY
+}
+
 refresh_stale_demo_rules_if_requested() {
     [ "$ROLLOUT_REFRESH_STALE_DEMO_RULES" -eq 1 ] || return 0
     local demo_symbols demo_rules receipt_dir refreshed_rules freshness_status
+    local candidate_dir refreshed_candidate=""
     unset ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
         BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
         BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
@@ -738,12 +803,16 @@ except ValueError as exc:
     raise
 PY
     then
-        echo "demo-rule-refresh-skipped reason=fresh"
-        return 0
+        if [ -z "$DEPLOY_RESET_RECEIPT" ]; then
+            echo "demo-rule-refresh-skipped reason=fresh"
+            return 0
+        fi
+        echo "demo-rule-refresh-forced reason=fresh-account-epoch"
+        freshness_status=0
     else
         freshness_status=$?
     fi
-    [ "$freshness_status" -eq 3 ] \
+    [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] \
         || fail "configured demo-rule receipt failed validation for a reason other than age"
 
     lm_load_private_systemd_environment "$PYTHON" \
@@ -758,6 +827,15 @@ PY
     esac
     receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
     install -d -o root -g root -m 0700 "$receipt_dir"
+    if [ -n "$DEPLOY_RESET_RECEIPT" ]; then
+        candidate_dir=/var/lib/liquidity-migration/candidate-universe-receipts
+        install -d -o root -g root -m 0700 "$candidate_dir"
+        refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+        "$PYTHON" scripts/freeze_account_candidate_universe.py \
+            --output "$refreshed_candidate"
+        demo_symbols="$refreshed_candidate"
+        printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
+    fi
     refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
     DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
         --symbols-file "$demo_symbols" \
@@ -766,7 +844,7 @@ PY
         --confirm-demo-probe
 
     "$PYTHON" - /etc/liquidity-migration/account-execution.env \
-        "$refreshed_rules" <<'PY'
+        "$refreshed_rules" "$refreshed_candidate" <<'PY'
 import os
 import shlex
 import sys
@@ -774,14 +852,23 @@ import tempfile
 from pathlib import Path
 
 from liquidity_migration.account_execution_config import load_demo_rules
+from liquidity_migration.account_candidate_universe import load_candidate_universe
+from liquidity_migration.candidate_rule_coverage import build_candidate_rule_coverage
 from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
 from liquidity_migration.systemd_environment import load_private_systemd_environment
 
 path = Path(sys.argv[1])
 rules = Path(sys.argv[2]).resolve(strict=True)
+candidate_raw = sys.argv[3]
 load_demo_rules(rules, max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS)
 values = load_private_systemd_environment(path)
 values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
+if candidate_raw:
+    candidate = Path(candidate_raw).resolve(strict=True)
+    load_candidate_universe(candidate)
+    build_candidate_rule_coverage(candidate, rules)
+    values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
+    values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
 descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
 try:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -802,7 +889,8 @@ except BaseException:
 PY
     unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
     ROLLOUT_DEMO_RULES_REFRESHED=1
-    printf 'demo-rule-refresh-ok path=%s\n' "$refreshed_rules"
+    printf 'demo-rule-refresh-ok path=%s candidate=%s\n' \
+        "$refreshed_rules" "${refreshed_candidate:-unchanged}"
 }
 
 install_mode() {
@@ -1322,12 +1410,50 @@ rollout_mode() {
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
+recover_mode() {
+    # Recovery is narrower than rollout: it cannot stop a running fleet or
+    # rely on expired prior authority. It reopens one full, leave-stopped reset
+    # receipt for this exact commit, independently proves account flatness,
+    # installs, refreshes the new epoch's candidate/rule evidence, creates
+    # fresh authority, and activates under the same explicit owner handshake.
+    require_checkout
+    require_quiescent
+    PYTHON=.venv/bin/python
+    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
+
+    ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
+    ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
+        || fail "cannot read installed checkout HEAD"
+    ROLLOUT_STOPPED=1
+    ROLLOUT_IRREVERSIBLE=1
+    trap rollout_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    run_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
+    run_phase recovery-flat-account-proof \
+        rollout_flat_check stopped-maintenance
+    ROLLOUT_REFRESH_STALE_DEMO_RULES=1
+    run_phase stopped-install install_mode
+    [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ] \
+        || fail "recovery did not refresh the reset epoch's demo-rule evidence"
+    run_phase post-rule-refresh-flat-account-proof \
+        rollout_flat_check stopped-maintenance
+    run_phase create-operational-authority issue_rollout_authorization
+    run_phase activate-and-verify activate_mode
+    ROLLOUT_COMPLETE=1
+    ROLLOUT_STOPPED=0
+    printf 'recover-ok commit=%s profile=%s reset_receipt=%s\n' \
+        "$EXPECTED_COMMIT" "$DEPLOY_PROFILE" "$DEPLOY_RESET_RECEIPT"
+}
+
 acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;
+    recover) recover_mode ;;
 esac
 REMOTE_SCRIPT
 } | ssh "${SSH_ARGS[@]}" -- "$SSH_TARGET" bash -s

@@ -388,6 +388,8 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     ]
     assert '--prior-rules-file "$demo_rules"' in refresh
     assert "probe_bybit_demo_rules.py" in refresh
+    assert "freeze_account_candidate_universe.py" in refresh
+    assert "build_candidate_rule_coverage" in refresh
     assert "demo-rule refresh refuses mainnet credentials" in refresh
     assert "expired-authority-pre-exec" in text
     assert "ExecMainStatus" in text
@@ -402,6 +404,32 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert '--profile "$DEPLOY_PROFILE"' in authority
     assert '--authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE"' in authority
     assert '--owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"' in authority
+
+
+def test_reset_recovery_reopens_exact_fresh_roots_before_population_refresh() -> None:
+    text = _read(DEPLOY)
+    validate = text[
+        text.index("validate_recovery_reset_receipt()") :
+        text.index("refresh_stale_demo_rules_if_requested()")
+    ]
+    assert "load_account_reset_receipt" in validate
+    assert "expected_candidate_commit=expected_commit" in validate
+    assert "expected_roots=expected_roots" in validate
+    assert "require_leave_stopped=True" in validate
+    assert "require_fresh_roots=True" in validate
+    assert '{"long", "continuous"}' in validate
+
+    recover = text[text.index("recover_mode()") : text.index("acquire_maintenance_locks\n")]
+    assert recover.index("require_quiescent") < recover.index("recovery-reset-receipt-proof")
+    assert recover.index("recovery-reset-receipt-proof") < recover.index("recovery-flat-account-proof")
+    assert recover.index("recovery-flat-account-proof") < recover.index("stopped-install")
+    assert recover.index("stopped-install") < recover.index("post-rule-refresh-flat-account-proof")
+    assert recover.index("post-rule-refresh-flat-account-proof") < recover.index(
+        "create-operational-authority"
+    )
+    assert recover.index("create-operational-authority") < recover.index("activate-and-verify")
+    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in recover
+    assert "recovery did not refresh" in recover
 
 
 def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> None:

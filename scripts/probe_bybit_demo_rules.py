@@ -331,7 +331,7 @@ def _prior_probe_brackets(
     path: str | Path,
     *,
     expected_symbols: list[str],
-) -> tuple[dict[str, tuple[float, float]], dict[str, Any]]:
+) -> tuple[dict[str, tuple[float, float, float, float]], dict[str, Any]]:
     """Load an old valid receipt as search hints, never as fresh evidence."""
 
     snapshot = read_stable_file(
@@ -349,21 +349,22 @@ def _prior_probe_brackets(
         raise ValueError("prior demo-rule receipt must contain an object")
     rules = load_demo_rules_bytes(snapshot.data, max_age_seconds=None)
     observed_symbols = sorted(rules)
-    if observed_symbols != expected_symbols:
-        raise ValueError(
-            "prior demo-rule receipt does not exactly cover the requested symbols"
-        )
+    expected_set = set(expected_symbols)
+    observed_set = set(observed_symbols)
+    overlap = sorted(expected_set & observed_set)
     evidence = payload.get("evidence")
     if not isinstance(evidence, Mapping):
         raise ValueError("prior demo-rule receipt lacks probe evidence")
-    brackets: dict[str, tuple[float, float]] = {}
-    for symbol in expected_symbols:
+    brackets: dict[str, tuple[float, float, float, float]] = {}
+    for symbol in overlap:
         row = evidence.get(symbol)
         if not isinstance(row, Mapping):
             raise ValueError(f"prior demo-rule receipt lacks {symbol} evidence")
         brackets[symbol] = (
             float(row.get("highest_rejected_qty") or 0.0),
             float(row.get("lowest_accepted_qty") or 0.0),
+            float(row.get("highest_rejected_notional_usdt") or 0.0),
+            float(row.get("lowest_accepted_notional_usdt") or 0.0),
         )
     return brackets, {
         "path": str(snapshot.path),
@@ -371,6 +372,11 @@ def _prior_probe_brackets(
         "sha256": snapshot.sha256,
         "artifact_sha256": str(payload.get("artifact_sha256") or ""),
         "verified_ts_ns": int(payload.get("verified_ts_ns") or 0),
+        "requested_symbol_count": len(expected_symbols),
+        "prior_symbol_count": len(observed_symbols),
+        "overlap_symbol_count": len(overlap),
+        "missing_requested_symbols": sorted(expected_set - observed_set),
+        "retired_prior_symbols": sorted(observed_set - expected_set),
         "role": "search_hints_only_revalidated_by_fresh_orders",
     }
 
@@ -387,8 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--prior-rules-file",
         help=(
-            "old valid demo-rule receipt used only to seed adjacent-boundary probes; "
-            "every resulting rule is freshly re-probed"
+            "old valid demo-rule receipt used only to seed price-rescaled notional "
+            "boundary probes for overlapping symbols; every resulting rule is freshly re-probed"
         ),
     )
     parser.add_argument(
@@ -438,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     rules: dict[str, dict[str, Any]] = {}
     evidence: dict[str, dict[str, Any]] = {}
     partial_attempts: dict[str, list[DemoRuleProbeAttempt]] = {}
-    prior_brackets: dict[str, tuple[float, float]] = {}
+    prior_brackets: dict[str, tuple[float, float, float, float]] = {}
     prior_rule_source: dict[str, Any] = {"status": "not_supplied"}
     try:
         if os.path.lexists(output):
@@ -520,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError(f"{symbol}: api-demo ticker is unavailable")
             symbol_attempts: list[DemoRuleProbeAttempt] = []
             partial_attempts[symbol] = symbol_attempts
+            prior_bracket = prior_brackets.get(symbol)
             rule, receipt = probe_demo_instrument_rule(
                 client,
                 instrument_row=instrument,
@@ -529,7 +536,16 @@ def main(argv: list[str] | None = None) -> int:
                 leverage=args.leverage,
                 probe_distance_bps=args.probe_distance_bps,
                 attempt_sink=symbol_attempts,
-                prior_bracket_qty=prior_brackets.get(symbol),
+                prior_bracket_qty=(
+                    (prior_bracket[0], prior_bracket[1])
+                    if prior_bracket is not None
+                    else None
+                ),
+                prior_bracket_notional_usdt=(
+                    (prior_bracket[2], prior_bracket[3])
+                    if prior_bracket is not None
+                    else None
+                ),
             )
             rules[symbol] = asdict(rule)
             evidence[symbol] = receipt.to_dict()
@@ -566,9 +582,11 @@ def main(argv: list[str] | None = None) -> int:
             "method": (
                 "api-demo instruments-info plus exact-identity terminal Cancelled/"
                 "zero-fill/empty-trade-history PostOnly binary search using order-history "
-                "and recent real-time order evidence; when a prior receipt is supplied, "
-                "its adjacent quantity bracket is tested first and any changed boundary "
-                "falls back to a complete search"
+                "and recent real-time order evidence; the current structural notional "
+                "boundary is tried first as an adjacent fresh-order hint; when a prior "
+                "receipt is supplied, its verified notional bracket is also rescaled to "
+                "the current probe price, freshly tested, and bisected to the exact current "
+                "quantity-step boundary; a changed boundary falls back to a complete search"
             ),
             "minimum_semantics": (
                 "min_notional is the smallest exact-identity, terminally Cancelled, "
