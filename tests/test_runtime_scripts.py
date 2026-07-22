@@ -53,6 +53,9 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     for path in scripts[:6] + scripts[8:]:
         assert path.stat().st_mode & stat.S_IXUSR
     assert (ROOT / "scripts" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
+    assert (
+        ROOT / "scripts" / "verify_rollout_shutdown_authority.py"
+    ).stat().st_mode & stat.S_IXUSR
     paper_runner = _read("scripts/run_account_paper_execution_service.sh")
     assert "CALIBRATION" not in paper_runner
     assert "--latency-quantile" not in paper_runner
@@ -345,7 +348,11 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert rollout.index("stop-account-owners") < rollout.index("final-stopped-flat-account-proof")
     assert rollout.index("final-stopped-flat-account-proof") < rollout.index("ROLLOUT_IRREVERSIBLE=1")
     assert rollout.index("stopped-install") < rollout.index("create-operational-authority")
+    assert rollout.index("stopped-install") < rollout.index("post-rule-refresh-flat-account-proof")
+    assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("create-operational-authority")
     assert rollout.index("create-operational-authority") < rollout.index("activate-and-verify")
+    assert "load_authorization rollout-shutdown" in rollout
+    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
 
     readiness = _read("scripts/check_deploy_rollout_readiness.py")
     assert "read_account_journal(root, verify=True)" in readiness
@@ -362,6 +369,18 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert "rollout_readiness_helper" in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
     assert '"$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py"' in text
+    assert 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64' in text
+    assert (
+        '"$EXPECTED_COMMIT:scripts/verify_rollout_shutdown_authority.py"'
+        in text
+    )
+    refresh = text[
+        text.index("refresh_stale_demo_rules_if_requested()") :
+        text.index("install_mode()")
+    ]
+    assert '--prior-rules-file "$demo_rules"' in refresh
+    assert "probe_bybit_demo_rules.py" in refresh
+    assert "demo-rule refresh refuses mainnet credentials" in refresh
 
     authority = text[
         text.index("issue_rollout_authorization()") : text.index("rollout_mode()")

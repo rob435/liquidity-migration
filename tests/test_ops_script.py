@@ -33,6 +33,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
         Path("scripts/check_deploy_rollout_readiness.py"),
+        Path("scripts/verify_rollout_shutdown_authority.py"),
         Path("liquidity_migration/maintenance_lock.py"),
     ):
         target = checkout / relative

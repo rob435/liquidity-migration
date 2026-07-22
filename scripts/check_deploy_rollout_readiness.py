@@ -70,8 +70,15 @@ def require_rollout_readiness(
 ) -> RolloutReadiness:
     """Require one flat local/direct-venue snapshot or raise fail-closed."""
 
-    if head_binding not in {"exact", "allow_behind", "none"}:
-        raise ValueError("head binding must be exact, allow_behind, or none")
+    if head_binding not in {
+        "exact",
+        "allow_behind",
+        "none",
+        "stopped-maintenance",
+    }:
+        raise ValueError(
+            "head binding must be exact, allow_behind, none, or stopped-maintenance"
+        )
     if not bool(getattr(client, "demo", False)):
         raise ValueError("rollout readiness refuses a non-demo venue client")
     root = Path(account_root).expanduser()
@@ -116,7 +123,9 @@ def require_rollout_readiness(
             latest.payload.get("local_receive_ts_ns") or latest.wall_ts_ns
         )
         age_ns = observed_now_ns - observed_ns
-        if age_ns < 0 or age_ns > MAX_EVIDENCE_AGE_NS:
+        if head_binding != "stopped-maintenance" and (
+            age_ns < 0 or age_ns > MAX_EVIDENCE_AGE_NS
+        ):
             problems.append(
                 f"latest venue reconciliation snapshot is not fresh: age_ns={age_ns}"
             )
@@ -153,7 +162,7 @@ def require_rollout_readiness(
                 f"{ownership}"
             )
 
-    if head_binding != "none":
+    if head_binding in {"exact", "allow_behind"}:
         require_recent_account_owner_health(
             root,
             environment="demo",
@@ -204,7 +213,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-root", type=Path, required=True)
     parser.add_argument(
         "--head-binding",
-        choices=("exact", "allow_behind", "none"),
+        choices=("exact", "allow_behind", "none", "stopped-maintenance"),
         required=True,
     )
     return parser

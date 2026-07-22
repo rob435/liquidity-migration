@@ -105,6 +105,7 @@ fi
     exit 1
 }
 ROLLOUT_READINESS_HELPER_B64=""
+ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=""
 if [ "$MODE" = rollout ]; then
     if ! ROLLOUT_READINESS_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
@@ -116,6 +117,18 @@ if [ "$MODE" = rollout ]; then
     fi
     [[ -n "$ROLLOUT_READINESS_HELPER_B64" ]] || {
         echo "expected commit returned an empty rollout readiness helper" >&2
+        exit 1
+    }
+    if ! ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64="$(
+        "${LOCAL_GIT[@]}" show \
+            "$EXPECTED_COMMIT:scripts/verify_rollout_shutdown_authority.py" \
+        | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
+    )"; then
+        echo "expected commit does not contain the rollout shutdown authority helper: $EXPECTED_COMMIT" >&2
+        exit 1
+    fi
+    [[ -n "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64" ]] || {
+        echo "expected commit returned an empty rollout shutdown authority helper" >&2
         exit 1
     }
 fi
@@ -136,6 +149,8 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'DEPLOY_OWNER_ACKNOWLEDGEMENT=%q\n' "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
     printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
+    printf 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=%q\n' \
+        "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -241,6 +256,23 @@ sys.argv = ["check_deploy_rollout_readiness.py", *arguments]
 namespace = {"__file__": "scripts/check_deploy_rollout_readiness.py", "__name__": "__main__"}
 exec(compile(source, namespace["__file__"], "exec"), namespace)
 ' "$ROLLOUT_READINESS_HELPER_B64" "$@"
+}
+
+rollout_shutdown_authority_helper() {
+    "$PYTHON" -c '
+import base64
+import sys
+
+encoded = sys.argv[1]
+arguments = sys.argv[2:]
+source = base64.b64decode(encoded, validate=True)
+sys.argv = ["verify_rollout_shutdown_authority.py", *arguments]
+namespace = {
+    "__file__": "scripts/verify_rollout_shutdown_authority.py",
+    "__name__": "__main__",
+}
+exec(compile(source, namespace["__file__"], "exec"), namespace)
+' "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64" "$@"
 }
 
 PAPER_RUNTIME_USER=liquidity-migration-paper
@@ -676,6 +708,103 @@ invalidate_operational_authorization() {
     echo "invalidated prior operational authorization: $archive"
 }
 
+ROLLOUT_REFRESH_STALE_DEMO_RULES=0
+ROLLOUT_DEMO_RULES_REFRESHED=0
+
+refresh_stale_demo_rules_if_requested() {
+    [ "$ROLLOUT_REFRESH_STALE_DEMO_RULES" -eq 1 ] || return 0
+    local demo_symbols demo_rules receipt_dir refreshed_rules freshness_status
+    unset ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
+        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
+    lm_load_private_systemd_environment "$PYTHON" \
+        /etc/liquidity-migration/account-execution.env \
+        ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE
+    demo_symbols="$ACCOUNT_SYMBOLS_FILE"
+    demo_rules="$ACCOUNT_DEMO_RULES_FILE"
+    if "$PYTHON" - "$demo_rules" <<'PY'
+import sys
+from liquidity_migration.account_execution_config import load_demo_rules
+from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
+
+try:
+    load_demo_rules(
+        sys.argv[1],
+        max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
+    )
+except ValueError as exc:
+    if str(exc) == "demo rules receipt is stale or future-dated":
+        raise SystemExit(3) from exc
+    raise
+PY
+    then
+        echo "demo-rule-refresh-skipped reason=fresh"
+        return 0
+    else
+        freshness_status=$?
+    fi
+    [ "$freshness_status" -eq 3 ] \
+        || fail "configured demo-rule receipt failed validation for a reason other than age"
+
+    lm_load_private_systemd_environment "$PYTHON" \
+        /etc/liquidity-migration/bybit-demo.env \
+        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+    [ -z "${BYBIT_REAL_API_KEY:-}" ] && [ -z "${BYBIT_REAL_API_SECRET:-}" ] \
+        || fail "demo-rule refresh refuses mainnet credentials"
+    case "${REAL_MONEY:-false}" in
+        0|false|FALSE|no|NO|off|OFF|'') ;;
+        *) fail "demo-rule refresh refuses REAL_MONEY" ;;
+    esac
+    receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
+    install -d -o root -g root -m 0700 "$receipt_dir"
+    refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+    DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
+        --symbols-file "$demo_symbols" \
+        --prior-rules-file "$demo_rules" \
+        --output "$refreshed_rules" \
+        --confirm-demo-probe
+
+    "$PYTHON" - /etc/liquidity-migration/account-execution.env \
+        "$refreshed_rules" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+
+from liquidity_migration.account_execution_config import load_demo_rules
+from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
+from liquidity_migration.systemd_environment import load_private_systemd_environment
+
+path = Path(sys.argv[1])
+rules = Path(sys.argv[2]).resolve(strict=True)
+load_demo_rules(rules, max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS)
+values = load_private_systemd_environment(path)
+values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
+descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        for key, value in sorted(values.items()):
+            handle.write(f"{key}={shlex.quote(value)}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+    unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
+    ROLLOUT_DEMO_RULES_REFRESHED=1
+    printf 'demo-rule-refresh-ok path=%s\n' "$refreshed_rules"
+}
+
 install_mode() {
     local installed_head
     require_checkout
@@ -722,6 +851,7 @@ install_mode() {
     done
     require_quiescent
     invalidate_operational_authorization
+    run_phase refresh-stale-demo-rules refresh_stale_demo_rules_if_requested
 
     lm_load_sleeve_toggles
     if sleeve_on "$CONTINUOUS_SLEEVE"; then
@@ -757,13 +887,26 @@ PY
 }
 
 load_authorization() {
+    local verification_mode="${1:-strict}"
+    case "$verification_mode" in
+        strict|rollout-shutdown) ;;
+        *) fail "invalid authorization verification mode" ;;
+    esac
     require_checkout
     require_clean_head
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-    AUTH_JSON="$("$PYTHON" -m liquidity_migration.operational_runtime_authority verify \
-        --receipt /etc/liquidity-migration/account-execution-operational-ready \
-        --repo-root "$REPO_DIR")" || fail "operational authorization verification failed"
+    if [ "$verification_mode" = rollout-shutdown ]; then
+        AUTH_JSON="$(rollout_shutdown_authority_helper \
+            --receipt /etc/liquidity-migration/account-execution-operational-ready \
+            --repo-root "$REPO_DIR")" \
+            || fail "rollout shutdown authorization verification failed"
+    else
+        AUTH_JSON="$("$PYTHON" -m liquidity_migration.operational_runtime_authority verify \
+            --receipt /etc/liquidity-migration/account-execution-operational-ready \
+            --repo-root "$REPO_DIR")" \
+            || fail "operational authorization verification failed"
+    fi
     AUTH_PROFILE="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["profile"])')"
     AUTH_COMMIT="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["authorized_commit"])')"
     [ "$AUTH_COMMIT" = "$EXPECTED_COMMIT" ] || fail "authorization is for another commit"
@@ -819,7 +962,10 @@ check_demo_order_permissions() {
 
 rollout_flat_check() {
     local head_binding="$1"
-    case "$head_binding" in exact|allow_behind|none) ;; *) fail "invalid rollout head binding" ;; esac
+    case "$head_binding" in
+        exact|allow_behind|none|stopped-maintenance) ;;
+        *) fail "invalid rollout head binding" ;;
+    esac
     require_checkout
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
@@ -1093,7 +1239,7 @@ rollout_mode() {
     # Prove the current receipt/topology before changing any unit, using the
     # commit it actually authorizes rather than the incoming target commit.
     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
-    load_authorization
+    load_authorization rollout-shutdown
     run_phase current-topology-verification verify_topology
     run_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
@@ -1118,7 +1264,12 @@ rollout_mode() {
     # as rollback authority. Any failure therefore leaves every managed unit
     # stopped instead of guessing across commits.
     ROLLOUT_IRREVERSIBLE=1
+    ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_phase stopped-install install_mode
+    if [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ]; then
+        run_phase post-rule-refresh-flat-account-proof \
+            rollout_flat_check stopped-maintenance
+    fi
     run_phase create-operational-authority issue_rollout_authorization
     run_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1

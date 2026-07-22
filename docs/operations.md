@@ -51,8 +51,12 @@ EXPECTED_COMMIT="$COMMIT" BRANCH="$(git branch --show-current)" \
 Use `--profile demo-operational` when paper integration is not intended. The
 profile, reference, and exact acknowledgement remain explicit inputs; rollout
 does not infer authority from the target commit or from an existing receipt.
-It never enables mainnet, flattens a position, cancels an order, or widens a
-risk boundary.
+It never enables mainnet, flattens a position, cancels a pre-existing order, or
+widens a risk boundary. If the exact bound demo-rule evidence has expired,
+rollout may place and cancel its own bounded PostOnly demo probes only after the
+account has passed every stopped flatness gate. The explicit rollout
+acknowledgement authorizes that demo-only maintenance action; standalone
+`install` never probes.
 
 Before stopping anything, rollout fetches and proves the exact target is on the
 selected remote branch, verifies the currently authorized commit and topology,
@@ -63,13 +67,29 @@ orders, and a directly authenticated empty regular/conditional Bybit order
 inventory. A non-flat or uncertain account fails immediately with the current
 fleet untouched.
 
+Rule age alone cannot deadlock safe maintenance. Normal runtime and status
+verification stay strict. During rollout preflight, a target-commit helper may
+accept the old receipt solely for topology verification and shutdown when a
+second complete verification proves that the only failure is a genuinely
+expired, byte-exact bound demo-rule artifact. Future-dated rules, changed
+inputs, dirty code, wrong machine/commit, invalid receipts, and every other
+failure remain fatal. This exception never authorizes activation.
+
 On a ready account, rollout stops producers, timer-driven readers, and
 watchdogs before owners; binds owner health to the exact post-producer journal
 head; stops owners; then repeats the local and authenticated flat-account
 proof. Only after that final stopped proof may checkout installation begin.
 The stopped install archives the old receipt, a new create-only receipt is
 issued under the same three maintenance-lock descriptors, and activation
-starts owners before producers and verifies the resulting topology.
+starts owners before producers and verifies the resulting topology. If the
+rules are stale, the stopped install first creates a fresh receipt. It uses the
+old receipt only as a search hint: the previously adjacent rejected/accepted
+quantity steps are freshly tested for each symbol, and any changed boundary
+falls back to the complete search. The fresh probe still requires exact
+order/link identity, terminal cancellation on official order surfaces, zero
+fills, empty trade history, cleanup, and final direct-venue flatness. The old
+receipt is preserved, the new path is atomically installed, and rollout repeats
+its direct local/venue flat proof before issuing authority.
 
 A failure before checkout installation restores the previously verified
 topology. Once installation begins, the old receipt is no longer rollback

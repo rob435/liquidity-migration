@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -248,6 +249,73 @@ def test_probe_finds_smallest_accepted_demo_qty_step() -> None:
     assert all(attempt.outcome == "verified_cancelled_no_fill" for attempt in accepted)
     assert all(attempt.terminal_status == "Cancelled" for attempt in accepted)
     assert all(attempt.trade_history_row_count == 0 for attempt in accepted)
+
+
+def test_prior_adjacent_bracket_revalidates_same_boundary_in_two_attempts() -> None:
+    rule, evidence = _probe(
+        _ProbeClient(threshold=5.0),
+        prior_bracket_qty=(0.5, 0.6),
+    )
+
+    assert rule.min_notional == pytest.approx(5.94)
+    assert [attempt.step_count for attempt in evidence.attempts] == [5, 6]
+    assert [attempt.accepted for attempt in evidence.attempts] == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_qty", "expected_rejected_qty"),
+    [
+        (4.0, 0.5, 0.4),
+        (6.5, 0.7, 0.6),
+    ],
+)
+def test_changed_prior_boundary_falls_back_to_complete_search(
+    threshold: float,
+    expected_qty: float,
+    expected_rejected_qty: float,
+) -> None:
+    rule, evidence = _probe(
+        _ProbeClient(threshold=threshold),
+        prior_bracket_qty=(0.5, 0.6),
+    )
+
+    assert evidence.lowest_accepted_qty == pytest.approx(expected_qty)
+    assert evidence.highest_rejected_qty == pytest.approx(expected_rejected_qty)
+    assert rule.min_notional == pytest.approx(expected_qty * 9.9)
+    assert len(evidence.attempts) > 2
+
+
+def test_prior_receipt_loader_treats_old_evidence_only_as_search_hints(
+    tmp_path: Path,
+) -> None:
+    module = _probe_script_module()
+    rule, evidence = _probe(_ProbeClient(threshold=5.0))
+    payload = {
+        "schema_version": module.DEMO_RULES_SCHEMA_VERSION,
+        "kind": module.DEMO_RULES_KIND,
+        "status": "passed",
+        "environment": "demo",
+        "verified_ts_ns": 123456789,
+        "max_probe_notional_usdt": 20.0,
+        "probe_distance_bps": 100.0,
+        "max_private_requests_per_second": 5,
+        "symbol_source": {"kind": "test"},
+        "rules": {"BUSDT": asdict(rule)},
+        "evidence": {"BUSDT": evidence.to_dict()},
+        "artifact_sha256": "",
+    }
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    prior = tmp_path / "prior-rules.json"
+    prior.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    prior.chmod(0o600)
+
+    brackets, identity = module._prior_probe_brackets(
+        prior,
+        expected_symbols=["BUSDT"],
+    )
+
+    assert brackets["BUSDT"] == pytest.approx((0.5, 0.6))
+    assert identity["role"] == "search_hints_only_revalidated_by_fresh_orders"
 
 
 def test_probe_does_not_misclassify_transport_or_rate_failure_as_minimum() -> None:

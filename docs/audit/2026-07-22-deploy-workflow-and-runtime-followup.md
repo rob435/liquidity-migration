@@ -6,7 +6,8 @@ This follow-up profiles the stopped deployment path, adds a guarded one-command
 rollout, and checks the deployed demo/paper runtime after the journal-publication
 remediation. It does not change strategy signals, sizing, execution economics,
 accounting, or native-protection levels. It does not enable `REAL_MONEY`, flatten
-or cancel anything, push a commit, or deploy the local candidate.
+a position, or cancel a pre-existing venue order. Push and deployment state are
+reported separately from this implementation record.
 
 At the final live sample the account was deliberately left running because it
 was non-flat. Authenticated Bybit demo truth and canonical reconstruction both
@@ -98,14 +99,51 @@ to four exact reads separated by one second. Stale, blocked, future-dated,
 wrong-account, health-ahead, and equal-sequence hash contradictions still fail
 immediately. Exhaustion remains fail-closed and visible.
 
+## Release-attempt finding: expired demo-rule evidence
+
+The first fresh pre-deploy status sample at approximately 19:33 UTC found a
+new, distinct maintenance issue: the current operational receipt remained
+byte-exact, all six persistent services were active with zero restarts, and the
+VPS clock was coherent, but the bound empirical demo-rule receipt had crossed
+its registered 168-hour age limit. Normal verification therefore failed with
+`demo rules receipt is stale or future-dated`. The rollout had not stopped or
+changed any unit. Direct authenticated truth still showed MIRAUSDT short
+`1896.2`, the same canonical aggregate target, and one reduce-only,
+close-on-trigger stop, so the account also remained correctly ineligible for
+deployment.
+
+The follow-up fixes the maintenance deadlock without weakening activation:
+
+- a target-commit helper reruns the old authorization verification and may
+  ignore freshness only when the bound rules are genuinely expired; a
+  future-dated timestamp or any other verification error remains fatal;
+- that narrow result is used only to prove the current topology and reach the
+  existing flat-account shutdown gates; all new authority and runtime startup
+  continue to use strict freshness;
+- after a stopped flat proof, stale rules are re-probed automatically. The old
+  516-symbol receipt required 7,383 order-threshold attempts (median 14 per
+  symbol). An unchanged prior boundary now needs at most the adjacent rejected
+  and accepted attempts, while a changed boundary falls back to the full
+  search. This removes about 86% of threshold attempts in the unchanged case
+  without copying old observations into fresh evidence;
+- the probe keeps exact terminal cancellation/no-fill/trade-history evidence,
+  preserves old and failed receipts, atomically updates the demo input only
+  after success, and is followed by another direct local/venue flat proof.
+
+The optimization materially reduces the exceptional weekly refresh path but
+does not promise a fixed duration: provider rate limits and terminal-order
+visibility remain external latency. Routine fresh-rule deployments skip the
+probe entirely.
+
 ## Verification and current status
 
 - rollout readiness unit/adversarial tests: passed;
+- stale-authority shutdown and prior-bracket reprobe tests: passed;
 - paper normalizer safety and no-op fast-path tests: passed;
 - owner-health, LONG, and CONTINUOUS focused tests: passed;
 - Linux before/after timing benchmark: passed;
 - repository doctor, Ruff, and mypy: passed;
-- full local gate: `2242 passed / 1 skipped`.
+- full local gate: `2249 passed / 1 skipped`.
 
 This report records implementation and local validation, not operational
 activation. Deployment status must be established independently from the exact

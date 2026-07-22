@@ -526,6 +526,7 @@ def probe_demo_instrument_rule(
     terminal_history_max_polls: int = TERMINAL_HISTORY_MAX_POLLS,
     terminal_confirmation_polls: int = 2,
     attempt_sink: list[DemoRuleProbeAttempt] | None = None,
+    prior_bracket_qty: tuple[float, float] | None = None,
 ) -> tuple[InstrumentRules, DemoRuleProbeEvidence]:
     """Find the smallest demo-accepted PostOnly notional for one symbol.
 
@@ -996,35 +997,79 @@ def probe_demo_instrument_rule(
         )
         raise AssertionError("unreachable")
 
-    if accepted(min_steps):
-        lowest_accepted = min_steps
-        highest_rejected = 0
-    else:
-        highest_rejected = min_steps
-        candidate = min_steps
-        while candidate < max_steps:
-            candidate = min(candidate * 2, max_steps)
-            if accepted(candidate):
-                break
-            highest_rejected = candidate
+    prior_steps: tuple[int, int] | None = None
+    if prior_bracket_qty is not None:
+        try:
+            prior_rejected_qty = Decimal(str(prior_bracket_qty[0]))
+            prior_accepted_qty = Decimal(str(prior_bracket_qty[1]))
+            prior_rejected_steps = int(prior_rejected_qty / step)
+            prior_accepted_steps = int(prior_accepted_qty / step)
+        except (ArithmeticError, IndexError, TypeError, ValueError):
+            prior_steps = None
         else:
-            raise RuntimeError(
-                f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
-            )
-        if not attempts[-1].accepted:
-            raise RuntimeError(
-                f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
-            )
-        lowest_accepted = candidate
-        low, high = highest_rejected + 1, lowest_accepted
-        while low < high:
-            mid = (low + high) // 2
-            if accepted(mid):
-                high = mid
+            aligned_rejected = prior_rejected_qty == step * prior_rejected_steps
+            aligned_accepted = prior_accepted_qty == step * prior_accepted_steps
+            adjacent = (
+                prior_accepted_steps == min_steps
+                and prior_rejected_steps == 0
+            ) or prior_accepted_steps == prior_rejected_steps + 1
+            if (
+                prior_rejected_qty >= 0
+                and prior_accepted_qty > 0
+                and aligned_rejected
+                and aligned_accepted
+                and adjacent
+                and prior_accepted_steps >= min_steps
+                and prior_accepted_steps <= max_steps
+                and (
+                    prior_rejected_steps == 0
+                    or prior_rejected_steps >= min_steps
+                )
+            ):
+                prior_steps = (prior_rejected_steps, prior_accepted_steps)
+
+    resolved_prior = False
+    if prior_steps is not None:
+        prior_rejected_steps, prior_accepted_steps = prior_steps
+        rejected_still_rejected = (
+            prior_rejected_steps == 0 or not accepted(prior_rejected_steps)
+        )
+        accepted_still_accepted = accepted(prior_accepted_steps)
+        if rejected_still_rejected and accepted_still_accepted:
+            highest_rejected = prior_rejected_steps
+            lowest_accepted = prior_accepted_steps
+            resolved_prior = True
+
+    if not resolved_prior:
+        if accepted(min_steps):
+            lowest_accepted = min_steps
+            highest_rejected = 0
+        else:
+            highest_rejected = min_steps
+            candidate = min_steps
+            while candidate < max_steps:
+                candidate = min(candidate * 2, max_steps)
+                if accepted(candidate):
+                    break
+                highest_rejected = candidate
             else:
-                highest_rejected = mid
-                low = mid + 1
-        lowest_accepted = low
+                raise RuntimeError(
+                    f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
+                )
+            if not attempts[-1].accepted:
+                raise RuntimeError(
+                    f"{symbol}: no accepted order at or below ${max_probe_notional_usdt:g}"
+                )
+            lowest_accepted = candidate
+            low, high = highest_rejected + 1, lowest_accepted
+            while low < high:
+                mid = (low + high) // 2
+                if accepted(mid):
+                    high = mid
+                else:
+                    highest_rejected = mid
+                    low = mid + 1
+            lowest_accepted = low
 
     accepted_qty = step * lowest_accepted
     accepted_notional = accepted_qty * probe_price

@@ -21,6 +21,9 @@ from liquidity_migration.account_owner_lease import (  # noqa: E402
     DemoAccountIdentity,
     DemoAccountMutationLease,
 )
+from liquidity_migration.account_execution_config import (  # noqa: E402
+    load_demo_rules_bytes,
+)
 from liquidity_migration.account_candidate_universe import (  # noqa: E402
     CANDIDATE_UNIVERSE_KIND,
     load_candidate_universe,
@@ -324,6 +327,54 @@ def _symbols_from_file(path: str | Path) -> tuple[list[str], dict[str, Any]]:
     }
 
 
+def _prior_probe_brackets(
+    path: str | Path,
+    *,
+    expected_symbols: list[str],
+) -> tuple[dict[str, tuple[float, float]], dict[str, Any]]:
+    """Load an old valid receipt as search hints, never as fresh evidence."""
+
+    snapshot = read_stable_file(
+        Path(path).expanduser(),
+        label="prior demo-rule receipt",
+        reject_empty=True,
+        require_mode=0o600,
+        require_owner=True,
+    )
+    try:
+        payload = json.loads(snapshot.data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("prior demo-rule receipt is not valid UTF-8 JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("prior demo-rule receipt must contain an object")
+    rules = load_demo_rules_bytes(snapshot.data, max_age_seconds=None)
+    observed_symbols = sorted(rules)
+    if observed_symbols != expected_symbols:
+        raise ValueError(
+            "prior demo-rule receipt does not exactly cover the requested symbols"
+        )
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError("prior demo-rule receipt lacks probe evidence")
+    brackets: dict[str, tuple[float, float]] = {}
+    for symbol in expected_symbols:
+        row = evidence.get(symbol)
+        if not isinstance(row, Mapping):
+            raise ValueError(f"prior demo-rule receipt lacks {symbol} evidence")
+        brackets[symbol] = (
+            float(row.get("highest_rejected_qty") or 0.0),
+            float(row.get("lowest_accepted_qty") or 0.0),
+        )
+    return brackets, {
+        "path": str(snapshot.path),
+        "size_bytes": len(snapshot.data),
+        "sha256": snapshot.sha256,
+        "artifact_sha256": str(payload.get("artifact_sha256") or ""),
+        "verified_ts_ns": int(payload.get("verified_ts_ns") or 0),
+        "role": "search_hints_only_revalidated_by_fresh_orders",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     symbol_group = parser.add_mutually_exclusive_group(required=True)
@@ -333,6 +384,13 @@ def main(argv: list[str] | None = None) -> int:
         help="immutable JSON/newline candidate-universe source; JSON objects use the 'symbols' field",
     )
     parser.add_argument("--output", required=True, help="demo-rules.json artifact path")
+    parser.add_argument(
+        "--prior-rules-file",
+        help=(
+            "old valid demo-rule receipt used only to seed adjacent-boundary probes; "
+            "every resulting rule is freshly re-probed"
+        ),
+    )
     parser.add_argument(
         "--max-probe-notional-usdt",
         type=float,
@@ -380,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
     rules: dict[str, dict[str, Any]] = {}
     evidence: dict[str, dict[str, Any]] = {}
     partial_attempts: dict[str, list[DemoRuleProbeAttempt]] = {}
+    prior_brackets: dict[str, tuple[float, float]] = {}
+    prior_rule_source: dict[str, Any] = {"status": "not_supplied"}
     try:
         if os.path.lexists(output):
             raise FileExistsError(
@@ -392,6 +452,11 @@ def main(argv: list[str] | None = None) -> int:
             symbol_source = {"kind": "inline", "symbols": symbols}
         if not symbols:
             raise ValueError("at least one symbol is required")
+        if args.prior_rules_file:
+            prior_brackets, prior_rule_source = _prior_probe_brackets(
+                args.prior_rules_file,
+                expected_symbols=symbols,
+            )
         validate_demo_order_permission(confirm_demo_orders=True)
         api_key, api_secret = resolve_demo_credentials()
         if not api_key or not api_secret:
@@ -446,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
             str(row.get("symbol") or "").upper(): row
             for row in client.get_instruments_info()
         }
-        for symbol in symbols:
+        for symbol_index, symbol in enumerate(symbols, start=1):
             instrument = instrument_rows.get(symbol)
             if instrument is None:
                 raise RuntimeError(f"{symbol}: absent from api-demo instruments-info")
@@ -464,9 +529,17 @@ def main(argv: list[str] | None = None) -> int:
                 leverage=args.leverage,
                 probe_distance_bps=args.probe_distance_bps,
                 attempt_sink=symbol_attempts,
+                prior_bracket_qty=prior_brackets.get(symbol),
             )
             rules[symbol] = asdict(rule)
             evidence[symbol] = receipt.to_dict()
+            print(
+                "demo-rule-probe-progress "
+                f"completed={symbol_index}/{len(symbols)} "
+                f"symbol={symbol} attempts={len(symbol_attempts)}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         cleanup = _cleanup_probe_state(client)
         final_flatness = _flatness_snapshot(client)
@@ -493,7 +566,9 @@ def main(argv: list[str] | None = None) -> int:
             "method": (
                 "api-demo instruments-info plus exact-identity terminal Cancelled/"
                 "zero-fill/empty-trade-history PostOnly binary search using order-history "
-                "and recent real-time order evidence"
+                "and recent real-time order evidence; when a prior receipt is supplied, "
+                "its adjacent quantity bracket is tested first and any changed boundary "
+                "falls back to a complete search"
             ),
             "minimum_semantics": (
                 "min_notional is the smallest exact-identity, terminally Cancelled, "
@@ -506,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
             "probe_distance_bps": args.probe_distance_bps,
             "max_private_requests_per_second": args.max_private_requests_per_second,
             "symbol_source": symbol_source,
+            "prior_rule_source": prior_rule_source,
             "official_references": [
                 "https://bybit-exchange.github.io/docs/v5/demo",
                 "https://bybit-exchange.github.io/docs/v5/order/create-order",
@@ -561,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             "requested_output_path": str(output.resolve()),
             "symbols": symbols,
             "symbol_source": symbol_source,
+            "prior_rule_source": prior_rule_source,
             "account_identity": account_identity,
             "error": {
                 "type": type(exc).__name__,

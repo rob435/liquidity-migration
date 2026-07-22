@@ -209,6 +209,14 @@ def test_readiness_rejects_stale_evidence_and_non_demo_client(
             now_ns=now_ns,
         )
 
+    stopped = readiness.require_rollout_readiness(
+        account_root=tmp_path,
+        head_binding="stopped-maintenance",
+        client=_Client(),
+        now_ns=now_ns,
+    )
+    assert stopped.journal_sequence == 1
+
     non_demo = _Client()
     non_demo.demo = False
     with pytest.raises(ValueError, match="non-demo"):

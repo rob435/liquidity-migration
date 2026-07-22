@@ -95,7 +95,20 @@ from the authenticated deployment receipt and read-only status command.
   venue/local agreement with one verified reduce-only close-on-trigger native
   MarkPrice stop. The account was not flattened or stopped; the new rollout
   gate would refuse this non-flat state before service mutation.
-- Full local validation is green at `2242 passed / 1 skipped`, plus repository
+- The first authorized release attempt later exposed an independent
+  maintenance deadlock before any unit changed: the byte-bound 516-symbol demo
+  rule receipt had crossed its registered 168-hour limit. The VPS clock was
+  coherent and all six persistent services remained active with zero restarts;
+  MIRAUSDT was still `-1896.2` locally and at Bybit with the same protected
+  stop. A follow-up keeps activation strict but permits genuinely expired (not
+  future-dated) bound rules only for old-topology shutdown verification. Once
+  stopped and flat, rollout automatically re-probes stale rules. The prior
+  receipt's adjacent quantity boundary is used only as a search hint and each
+  result is freshly revalidated; changed boundaries fall back to full search.
+  The old receipt contained 7,383 attempts (median 14 per symbol), versus at
+  most two boundary attempts per unchanged symbol before terminal-evidence
+  overhead. A post-probe direct local/venue flat proof remains mandatory.
+- Full local validation is green at `2249 passed / 1 skipped`, plus repository
   doctor, Ruff, mypy, shell parsing, and `git diff --check`. The detailed
   evidence is in
   `docs/audit/2026-07-22-deploy-workflow-and-runtime-followup.md`. Deployment
