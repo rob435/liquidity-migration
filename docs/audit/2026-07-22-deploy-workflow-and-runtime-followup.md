@@ -175,6 +175,16 @@ Both owners remain mandatory and exact, and the next operation remains the
 read-only local/direct-venue flatness proof. Strict post-activation topology
 verification has no degraded-state exception.
 
+The corrected path was then exercised at 20:16 UTC against pushed and
+CI-green commit `dd860073c2f09024a8e124696c4f8a151a0c849e`. Old-topology
+verification reported only the expected degraded-unit warnings, and the next
+flatness phase returned status 1 with mutually consistent canonical position,
+aggregate target, journal venue/reconstruction, direct authenticated Bybit
+position, and protected-order evidence for MIRAUSDT `-1896.2`. The phase was
+reported as failed, the stop boundary was never entered, no remote deploy shell
+remained, and the installed checkout stayed at `6dad49c`. This confirms the
+exit-status fix on the live refusal path; it does not claim deployment.
+
 ## Verification and current status
 
 - rollout readiness unit/adversarial tests: passed;

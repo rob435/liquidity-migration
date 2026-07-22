@@ -134,6 +134,17 @@ from the authenticated deployment receipt and read-only status command.
   account owners remain mandatory and the next action is still the read-only
   local/direct-venue flatness gate. Fresh verification and activation retain
   the exact active topology requirement.
+- The corrected rollout was exercised against pushed/CI-green commit
+  `dd860073c2f09024a8e124696c4f8a151a0c849e` at 20:16 UTC. It accepted only the
+  declared degraded old topology, then returned status 1 at
+  `pre-stop-flat-account-proof` with exact canonical, reconstructed, and direct
+  Bybit evidence for MIRAUSDT `-1896.2` plus its one protected order. No stop
+  boundary was entered and no unit changed. The installed executable remains
+  `6dad49ca4ab099c83cb5e954533f71d9cee6929a`: both owners, LONG paper, and both
+  continuous producers are active; LONG demo is failed after the contained
+  stop timeout and the three timers are inactive/enabled. Deployment remains
+  blocked until the account becomes locally and directly venue-flat; no
+  flatten/cancel bypass is authorized.
 - Full local validation is green at `2250 passed / 1 skipped`, plus repository
   doctor, Ruff, mypy, shell parsing, and `git diff --check`. The detailed
   evidence is in
