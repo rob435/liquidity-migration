@@ -75,6 +75,16 @@ expired, byte-exact bound demo-rule artifact. Future-dated rules, changed
 inputs, dirty code, wrong machine/commit, invalid receipts, and every other
 failure remain fatal. This exception never authorizes activation.
 
+An expired receipt can also leave timer-driven one-shot units in systemd's
+`failed` state because the strict wrapper exits with status 2 before executing
+their workload. During this same narrow shutdown verification, rollout accepts
+only that exact `exit-code`/status-2 shape and reports it as a topology warning;
+fresh-rule verification still rejects every failed unit. Because strict runtime
+verification cannot restart the expired old topology, rollout declares rollback
+unavailable before its first stop. Any later pre-install failure therefore
+forces the managed fleet stopped rather than claiming it restored an authority
+that can no longer start.
+
 On a ready account, rollout stops producers, timer-driven readers, and
 watchdogs before owners; binds owner health to the exact post-producer journal
 head; stops owners; then repeats the local and authenticated flat-account

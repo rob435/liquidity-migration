@@ -108,6 +108,15 @@ from the authenticated deployment receipt and read-only status command.
   The old receipt contained 7,383 attempts (median 14 per symbol), versus at
   most two boundary attempts per unchanged symbol before terminal-evidence
   overhead. A post-probe direct local/venue flat proof remains mandatory.
+- The next rollout attempt again changed no service: its old-topology check
+  found the hedge one-shot failed. Journald proved hedge and liveness timers
+  were exiting status 2 in strict authorization before workload execution,
+  exactly because of the expired demo rules. Recovery verification now accepts
+  only that failed-unit shape under the already-proven expiry condition. It
+  also declares rollback unavailable before stopping: an expired receipt
+  cannot truthfully restart the old topology, so any subsequent failure leaves
+  the managed fleet stopped. Fresh-rule activation still rejects all failed
+  units.
 - Full local validation is green at `2249 passed / 1 skipped`, plus repository
   doctor, Ruff, mypy, shell parsing, and `git diff --check`. The detailed
   evidence is in

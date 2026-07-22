@@ -346,13 +346,19 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert rollout.index("stop-downstream-units") < rollout.index("post-producer-flat-account-proof")
     assert rollout.index("post-producer-flat-account-proof") < rollout.index("stop-account-owners")
     assert rollout.index("stop-account-owners") < rollout.index("final-stopped-flat-account-proof")
-    assert rollout.index("final-stopped-flat-account-proof") < rollout.index("ROLLOUT_IRREVERSIBLE=1")
+    assert rollout.index("rollout-recovery-boundary rollback=unavailable") < rollout.index(
+        "ROLLOUT_STOPPED=1"
+    )
+    assert rollout.index("final-stopped-flat-account-proof") < rollout.rindex(
+        "ROLLOUT_IRREVERSIBLE=1"
+    )
     assert rollout.index("stopped-install") < rollout.index("create-operational-authority")
     assert rollout.index("stopped-install") < rollout.index("post-rule-refresh-flat-account-proof")
     assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("create-operational-authority")
     assert rollout.index("create-operational-authority") < rollout.index("activate-and-verify")
     assert "load_authorization rollout-shutdown" in rollout
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
+    assert "rollout-recovery-boundary rollback=unavailable" in rollout
 
     readiness = _read("scripts/check_deploy_rollout_readiness.py")
     assert "read_account_journal(root, verify=True)" in readiness
@@ -381,6 +387,8 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert '--prior-rules-file "$demo_rules"' in refresh
     assert "probe_bybit_demo_rules.py" in refresh
     assert "demo-rule refresh refuses mainnet credentials" in refresh
+    assert "expired-authority-pre-exec" in text
+    assert "ExecMainStatus" in text
 
     authority = text[
         text.index("issue_rollout_authorization()") : text.index("rollout_mode()")

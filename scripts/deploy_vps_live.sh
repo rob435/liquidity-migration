@@ -901,11 +901,16 @@ load_authorization() {
             --receipt /etc/liquidity-migration/account-execution-operational-ready \
             --repo-root "$REPO_DIR")" \
             || fail "rollout shutdown authorization verification failed"
+        AUTH_SHUTDOWN_EXPIRED_DEMO_RULES="$(
+            printf '%s' "$AUTH_JSON" | "$PYTHON" -c \
+                'import json,sys; print(int(json.load(sys.stdin).get("_rollout_shutdown_expired_demo_rules") is True))'
+        )"
     else
         AUTH_JSON="$("$PYTHON" -m liquidity_migration.operational_runtime_authority verify \
             --receipt /etc/liquidity-migration/account-execution-operational-ready \
             --repo-root "$REPO_DIR")" \
             || fail "operational authorization verification failed"
+        AUTH_SHUTDOWN_EXPIRED_DEMO_RULES=0
     fi
     AUTH_PROFILE="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["profile"])')"
     AUTH_COMMIT="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["authorized_commit"])')"
@@ -1035,7 +1040,17 @@ verify_topology() {
         liquidity-migration-continuous-rmom-refresh.service \
         liquidity-migration-continuous-hedge.service \
         liquidity-migration-demo-liveness.service; do
-        ! systemctl is-failed --quiet "$oneshot" || fail "$oneshot is failed"
+        if systemctl is-failed --quiet "$oneshot"; then
+            if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ] \
+                && [ "$(systemctl show "$oneshot" --property=Result --value)" = exit-code ] \
+                && [ "$(systemctl show "$oneshot" --property=ExecMainCode --value)" = 1 ] \
+                && [ "$(systemctl show "$oneshot" --property=ExecMainStatus --value)" = 2 ]; then
+                printf 'topology-warning unit=%s state=failed cause=expired-authority-pre-exec\n' \
+                    "$oneshot"
+            else
+                fail "$oneshot is failed"
+            fi
+        fi
     done
     check_demo_order_permissions verify
     echo "verify-ok commit=$EXPECTED_COMMIT profile=$AUTH_PROFILE"
@@ -1244,6 +1259,13 @@ rollout_mode() {
     run_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
 
+    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
+        # Strict runtime verification cannot restart the old topology once its
+        # demo-rule evidence has expired.  Make that loss of rollback explicit
+        # before stopping anything; all failure paths from here force stopped.
+        ROLLOUT_IRREVERSIBLE=1
+        echo "rollout-recovery-boundary rollback=unavailable reason=expired-demo-rules"
+    fi
     ROLLOUT_STOPPED=1
     trap rollout_cleanup EXIT
     trap 'exit 130' INT

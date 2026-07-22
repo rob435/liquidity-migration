@@ -37,6 +37,7 @@ def verify_rollout_shutdown_authority(
     machine_id_path: str | Path = Path("/etc/machine-id"),
     now_ns: int | None = None,
     authority_module: Any = authority,
+    include_rollout_status: bool = False,
 ) -> dict[str, Any]:
     """Run strict verification, relaxing only proven rule expiry for shutdown."""
 
@@ -47,10 +48,17 @@ def verify_rollout_shutdown_authority(
         "unit": None,
     }
     try:
-        return authority_module.verify_operational_authorization(**arguments)
+        strict_payload = authority_module.verify_operational_authorization(**arguments)
     except ValueError as exc:
         if str(exc) != _STALE_RULE_ERROR:
             raise
+    else:
+        if not include_rollout_status:
+            return strict_payload
+        return {
+            **strict_payload,
+            "_rollout_shutdown_expired_demo_rules": False,
+        }
 
     _receipt_snapshot, payload = authority_module._load_receipt(receipt_path)
     profile = str(payload.get("profile") or "")
@@ -92,9 +100,15 @@ def verify_rollout_shutdown_authority(
 
     authority_module.build_candidate_rule_coverage = verify_expired_coverage
     try:
-        return authority_module.verify_operational_authorization(**arguments)
+        expired_payload = authority_module.verify_operational_authorization(**arguments)
     finally:
         authority_module.build_candidate_rule_coverage = original_coverage
+    if not include_rollout_status:
+        return expired_payload
+    return {
+        **expired_payload,
+        "_rollout_shutdown_expired_demo_rules": True,
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -116,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             receipt_path=args.receipt,
             repo_root=args.repo_root,
             machine_id_path=args.machine_id_path,
+            include_rollout_status=True,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"rollout shutdown authority failed: {exc}", file=sys.stderr)

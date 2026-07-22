@@ -82,9 +82,11 @@ def test_shutdown_verifier_relaxes_only_genuine_rule_expiry() -> None:
         repo_root=Path("/repo"),
         now_ns=now_ns,
         authority_module=authority,
+        include_rollout_status=True,
     )
 
     assert payload["authorized_commit"] == "a" * 40
+    assert payload["_rollout_shutdown_expired_demo_rules"] is True
     assert authority.verify_calls == 2
     assert authority.coverage_now_ns == verified_ts_ns
 

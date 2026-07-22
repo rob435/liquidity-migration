@@ -117,6 +117,14 @@ The follow-up fixes the maintenance deadlock without weakening activation:
 - a target-commit helper reruns the old authorization verification and may
   ignore freshness only when the bound rules are genuinely expired; a
   future-dated timestamp or any other verification error remains fatal;
+- the hedge and liveness one-shots were independently confirmed to be failing
+  in their strict authorization wrapper with status 2 before workload
+  execution. Shutdown verification tolerates only that exact failed-unit shape
+  while rules are proven expired; post-activation verification remains strict;
+- expiry means the old topology cannot be restarted under its former receipt.
+  Rollout now marks the stop boundary irreversible up front in this case, so a
+  later failure forces all managed units stopped instead of attempting a false
+  rollback;
 - that narrow result is used only to prove the current topology and reach the
   existing flat-account shutdown gates; all new authority and runtime startup
   continue to use strict freshness;
