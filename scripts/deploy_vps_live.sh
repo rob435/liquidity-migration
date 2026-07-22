@@ -739,11 +739,17 @@ import json
 import sys
 
 from liquidity_migration.account_reset_receipt import load_account_reset_receipt
-from liquidity_migration.systemd_environment import load_private_systemd_environment
+from liquidity_migration.systemd_environment import (
+    load_group_systemd_environment,
+    load_private_systemd_environment,
+)
 
 receipt_path, expected_commit, demo_env_path, paper_env_path = sys.argv[1:]
 demo = load_private_systemd_environment(demo_env_path)
-paper = load_private_systemd_environment(paper_env_path)
+paper = load_group_systemd_environment(
+    paper_env_path,
+    group_name="liquidity-migration-paper",
+)
 expected_roots = {
     "demo": {
         "account": demo["ACCOUNT_EXECUTION_ROOT"],

@@ -418,6 +418,9 @@ def test_reset_recovery_reopens_exact_fresh_roots_before_population_refresh() ->
     assert "require_leave_stopped=True" in validate
     assert "require_fresh_roots=True" in validate
     assert '{"long", "continuous"}' in validate
+    assert "load_private_systemd_environment(demo_env_path)" in validate
+    assert "load_group_systemd_environment(" in validate
+    assert 'group_name="liquidity-migration-paper"' in validate
 
     recover = text[text.index("recover_mode()") : text.index("acquire_maintenance_locks\n")]
     assert recover.index("require_quiescent") < recover.index("recovery-reset-receipt-proof")
