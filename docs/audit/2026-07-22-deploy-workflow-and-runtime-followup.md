@@ -143,6 +143,31 @@ does not promise a fixed duration: provider rate limits and terminal-order
 visibility remain external latency. Routine fresh-rule deployments skip the
 probe entirely.
 
+## Live rollout defect and containment
+
+The 19:59 UTC recovery attempt exposed a shell status-propagation defect. The
+readiness helper correctly printed a failure, but `rollout_flat_check` then ran
+credential cleanup and implicitly returned the cleanup command's zero status.
+`run_phase` therefore printed `phase-ok` and began the stop sequence. The SSH
+session was interrupted immediately and its orphaned remote shell was killed
+before either account owner or the continuous producers stopped. Three timers
+had stopped and LONG demo had entered its configured stop path; canceling the
+systemd job could not undo the already-delivered SIGTERM, and LONG demo later
+ended failed by stop timeout. Both owners, LONG paper, and both continuous
+producers remained active. Authenticated venue truth and the canonical journal
+still agreed on MIRAUSDT `-1896.2`, with the original reduce-only,
+close-on-trigger stop intact.
+
+The fix captures the helper exit code before cleanup and returns it explicitly;
+a regression assertion now binds that shell contract. The emitted health error
+also revealed a second read-order race: readiness captured `now` before a full
+journal verification that took long enough for the owner to publish a newer
+health file. Runtime checks now resample the clock after the journal read and
+let the health loader sample its own current time; deterministic tests retain
+an explicit fixed clock. Neither change converts a failed or non-flat check
+into a pass. The account's non-flat MIRA position remains a hard refusal before
+any future stop.
+
 ## Verification and current status
 
 - rollout readiness unit/adversarial tests: passed;
@@ -151,7 +176,7 @@ probe entirely.
 - owner-health, LONG, and CONTINUOUS focused tests: passed;
 - Linux before/after timing benchmark: passed;
 - repository doctor, Ruff, and mypy: passed;
-- full local gate: `2249 passed / 1 skipped`.
+- full local gate: `2250 passed / 1 skipped`.
 
 This report records implementation and local validation, not operational
 activation. Deployment status must be established independently from the exact

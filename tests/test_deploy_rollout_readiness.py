@@ -104,6 +104,38 @@ def test_readiness_proves_local_health_and_both_bybit_order_surfaces(
     ]
 
 
+def test_runtime_clock_is_resampled_after_full_journal_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    times = iter((10_000_000_000, 30_000_000_000))
+    health_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(readiness.time, "time_ns", lambda: next(times))
+    monkeypatch.setattr(
+        readiness,
+        "read_account_journal",
+        lambda *_args, **_kwargs: [_snapshot(30_000_000_000)],
+    )
+    monkeypatch.setattr(
+        readiness,
+        "reduce_account_events",
+        lambda _events: AccountState(events_applied=1),
+    )
+    monkeypatch.setattr(
+        readiness,
+        "require_recent_account_owner_health",
+        lambda *_args, **kwargs: health_calls.append(kwargs),
+    )
+
+    readiness.require_rollout_readiness(
+        account_root=tmp_path,
+        head_binding="allow_behind",
+        client=_Client(),
+    )
+
+    assert health_calls[0]["now_ns"] is None
+
+
 def test_readiness_reports_every_nonflat_or_unverified_surface(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

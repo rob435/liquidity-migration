@@ -966,7 +966,7 @@ check_demo_order_permissions() {
 }
 
 rollout_flat_check() {
-    local head_binding="$1"
+    local head_binding="$1" status=0
     case "$head_binding" in
         exact|allow_behind|none|stopped-maintenance) ;;
         *) fail "invalid rollout head binding" ;;
@@ -990,8 +990,9 @@ rollout_flat_check() {
         REAL_MONEY="${REAL_MONEY:-false}" \
         rollout_readiness_helper \
         --account-root "$ACCOUNT_EXECUTION_ROOT" \
-        --head-binding "$head_binding"
+        --head-binding "$head_binding" || status=$?
     unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
+    return "$status"
 }
 
 verify_topology() {
@@ -1195,7 +1196,7 @@ rollout_cleanup() {
             fi
         else
             printf '%s\n' \
-                'rollout failed after install began; forcing the managed fleet stopped for explicit recovery' >&2
+                'rollout cannot safely restore prior authority; forcing the managed fleet stopped for explicit recovery' >&2
             stop_all_rollout_units_best_effort || true
         fi
     fi

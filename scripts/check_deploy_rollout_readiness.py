@@ -85,6 +85,12 @@ def require_rollout_readiness(
     observed_now_ns = time.time_ns() if now_ns is None else int(now_ns)
     events = read_account_journal(root, verify=True)
     state = reduce_account_events(events)
+    if now_ns is None:
+        # The full verified journal read can take seconds while the owner keeps
+        # publishing. Re-sample after that read; otherwise a genuinely newer
+        # health/snapshot is misclassified as future-dated against a timestamp
+        # captured before the I/O began.
+        observed_now_ns = time.time_ns()
     problems: list[str] = []
 
     local_positions = {
@@ -167,7 +173,7 @@ def require_rollout_readiness(
             root,
             environment="demo",
             max_age_ns=MAX_EVIDENCE_AGE_NS,
-            now_ns=observed_now_ns,
+            now_ns=observed_now_ns if now_ns is not None else None,
             head_binding=head_binding,
         )
 

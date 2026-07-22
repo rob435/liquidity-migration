@@ -117,7 +117,18 @@ from the authenticated deployment receipt and read-only status command.
   cannot truthfully restart the old topology, so any subsequent failure leaves
   the managed fleet stopped. Fresh-rule activation still rejects all failed
   units.
-- Full local validation is green at `2249 passed / 1 skipped`, plus repository
+- A later 19:59 UTC retry exposed a shell status bug: the readiness helper
+  failed, credential cleanup returned zero, and the enclosing phase proceeded.
+  The operator interrupted it before either owner or either continuous
+  producer stopped. Three timers stopped and LONG demo entered shutdown; the
+  canceled systemd stop could not retract SIGTERM and the unit later failed by
+  stop timeout. Both owners, LONG paper, and both continuous producers stayed
+  active, while canonical and authenticated venue state still agreed on
+  protected MIRAUSDT `-1896.2`. The helper status is now captured and returned
+  after cleanup. Readiness also resamples time after the full journal read so a
+  concurrent newer health publication is not falsely future-dated. Non-flat,
+  stale, blocked, unhealthy, or contradictory state still refuses before stop.
+- Full local validation is green at `2250 passed / 1 skipped`, plus repository
   doctor, Ruff, mypy, shell parsing, and `git diff --check`. The detailed
   evidence is in
   `docs/audit/2026-07-22-deploy-workflow-and-runtime-followup.md`. Deployment

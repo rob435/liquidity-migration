@@ -373,6 +373,8 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     rollout_check = text[text.index("rollout_flat_check()") : text.index("verify_topology()")]
     assert "BYBIT_REAL_API_KEY" in rollout_check
     assert "rollout_readiness_helper" in rollout_check
+    assert '|| status=$?' in rollout_check
+    assert 'return "$status"' in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
     assert '"$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py"' in text
     assert 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64' in text
