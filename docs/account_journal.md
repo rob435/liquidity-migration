@@ -60,6 +60,15 @@ mutable projection.
 builder an isolated committed state, validates and reduces every proposed event,
 writes one immutable transaction, then publishes the new in-process cache. A
 projection-write failure cannot roll back or replace the committed transaction.
+While a local transaction is between atomic segment replacement and cache
+publication, concurrent in-process readers deliberately continue to see the
+prior coherent cache. They must not interpret the newly visible segment as an
+external commit and replay the whole immutable history under the cache lock:
+that would make the writer wait behind an O(history) read while it still owns
+the cross-process writer lock. Once the writer publishes all cache fields
+together, later readers see the new state. A failed publication clears the
+local guard so the next reader reconstructs the already-authoritative segment
+set rather than hiding a durable commit.
 
 Cold/stateful readers use `read_account_journal(..., verify=True)` or
 `verify_account_journal(...)`. Strategy state, reconciliation, venue accounting,

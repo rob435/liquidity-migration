@@ -880,6 +880,16 @@ class AccountJournal:
         self._cached_events_by_id: dict[str, AccountEvent] | None = None
         self._cached_signature: tuple[object, ...] | None = None
         self._cached_state: AccountState | None = None
+        # A transaction segment becomes authoritative at atomic replace, just
+        # before this object can publish the matching in-process cache.  Hot
+        # readers must keep observing the prior coherent cache during that
+        # narrow window.  If they instead stat the now-changed directory, they
+        # can replay the entire immutable journal while holding ``_cache_lock``;
+        # the writer then waits behind that replay while still owning the
+        # cross-process journal lock.  On long-lived accounts that turned a
+        # millisecond publication window into minute-scale execution and
+        # reconciliation stalls.
+        self._local_transaction_publish_in_progress = False
         # Outcome-blind historical recovery only. The default production path
         # retains isolated prospective state and prior-state reader visibility.
         # The opt-in path is safe only with one process/thread and an infallible
@@ -890,6 +900,17 @@ class AccountJournal:
 
     def _storage_signature(self) -> tuple[object, ...]:
         with self._cache_lock:
+            if (
+                self._local_transaction_publish_in_progress
+                and self._cached_signature is not None
+            ):
+                # The only cooperative writer that can change this directory
+                # while our process holds the account-journal file lock is the
+                # transaction currently being published below.  Serve the
+                # prior immutable cache until all cache fields advance
+                # together; cross-process writers remain serialized by that
+                # same file lock and are still discovered outside this window.
+                return self._cached_signature
             transaction_dir = account_transactions_path(self.root)
             if transaction_dir.is_dir():
                 try:
@@ -1056,56 +1077,61 @@ class AccountJournal:
                 next_sequence += 1
                 prev_hash = event.event_hash
             if appended:
-                transaction_path = _write_transaction(self.root, appended)
-                appended_by_id = {event.event_id: event for event in appended}
-                try:
-                    transaction_mtime = transaction_path.parent.stat().st_mtime_ns
-                except OSError:
-                    transaction_mtime = -1
-                committed_signature: tuple[object, ...] = (
-                    "transactions",
-                    transaction_mtime,
-                    transaction_count + 1,
-                    transaction_path.name,
-                )
-                # The atomic segment is the commit point. Publish all cache
-                # fields together only after it succeeds; failed writes leave
-                # the prior cache untouched.
                 with self._cache_lock:
-                    if self._cached_events is existing:
-                        # The usual single-writer path extends the committed
-                        # cache in place. Rebuilding two history-sized lists
-                        # and a history-sized ID map for every target made long
-                        # historical sessions quadratic in prior events.
-                        existing.extend(appended)
-                        self._cached_events = existing
-                    else:
-                        # A reader may have refreshed from the newly committed
-                        # segment between the durable write and this cache
-                        # publication. Keep that authoritative snapshot when
-                        # it already contains this exact transaction; the
-                        # fallback copy is concurrency-only, never the replay
-                        # hot path.
-                        refreshed = self._cached_events or []
-                        expected_count = existing_count + len(appended)
-                        if (
-                            len(refreshed) != expected_count
-                            or not refreshed
-                            or refreshed[-1].event_hash != appended[-1].event_hash
-                        ):
-                            refreshed = [*existing, *appended]
-                        self._cached_events = refreshed
-                    if self._cached_events_by_id is existing_by_id:
-                        existing_by_id.update(appended_by_id)
-                        self._cached_events_by_id = existing_by_id
-                    else:
-                        refreshed_by_id = self._cached_events_by_id or {
-                            event.event_id: event for event in self._cached_events
-                        }
-                        refreshed_by_id.update(appended_by_id)
-                        self._cached_events_by_id = refreshed_by_id
-                    self._cached_signature = committed_signature
-                    self._cached_state = prospective_state
+                    self._local_transaction_publish_in_progress = True
+                try:
+                    transaction_path = _write_transaction(self.root, appended)
+                    appended_by_id = {event.event_id: event for event in appended}
+                    try:
+                        transaction_mtime = transaction_path.parent.stat().st_mtime_ns
+                    except OSError:
+                        transaction_mtime = -1
+                    committed_signature: tuple[object, ...] = (
+                        "transactions",
+                        transaction_mtime,
+                        transaction_count + 1,
+                        transaction_path.name,
+                    )
+                    # The atomic segment is the commit point. Publish all cache
+                    # fields together only after it succeeds; failed writes
+                    # leave the prior cache untouched. Readers deliberately
+                    # retain that prior cache until this publication completes.
+                    with self._cache_lock:
+                        if self._cached_events is existing:
+                            # The usual single-writer path extends the committed
+                            # cache in place. Rebuilding two history-sized lists
+                            # and a history-sized ID map for every target made long
+                            # historical sessions quadratic in prior events.
+                            existing.extend(appended)
+                            self._cached_events = existing
+                        else:
+                            # A non-cooperating in-process mutation or an
+                            # unexpected cache replacement can still force this
+                            # concurrency-only fallback. Cooperative readers are
+                            # held on the prior cache by the publication flag.
+                            refreshed = self._cached_events or []
+                            expected_count = existing_count + len(appended)
+                            if (
+                                len(refreshed) != expected_count
+                                or not refreshed
+                                or refreshed[-1].event_hash != appended[-1].event_hash
+                            ):
+                                refreshed = [*existing, *appended]
+                            self._cached_events = refreshed
+                        if self._cached_events_by_id is existing_by_id:
+                            existing_by_id.update(appended_by_id)
+                            self._cached_events_by_id = existing_by_id
+                        else:
+                            refreshed_by_id = self._cached_events_by_id or {
+                                event.event_id: event for event in self._cached_events
+                            }
+                            refreshed_by_id.update(appended_by_id)
+                            self._cached_events_by_id = refreshed_by_id
+                        self._cached_signature = committed_signature
+                        self._cached_state = prospective_state
+                finally:
+                    with self._cache_lock:
+                        self._local_transaction_publish_in_progress = False
                 # Rebuildable operator/tooling projection. If this fails, the
                 # transaction and published cache still agree on committed truth.
                 _append_jsonl_projection(

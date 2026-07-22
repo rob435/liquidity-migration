@@ -1119,6 +1119,104 @@ def test_account_journal_reader_sees_only_committed_state_while_write_is_blocked
     assert "prospective" in kernel.state().venue_snapshots
 
 
+def test_account_journal_reader_does_not_replay_history_between_segment_commit_and_cache_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hot reader must not turn the atomic-replace/cache-publish gap into
+    an O(history) critical section that stalls every journal writer."""
+
+    kernel = _kernel(tmp_path)
+    kernel.record_venue_snapshot(
+        snapshot_key="committed-before-publication-race",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+    committed_events = kernel.journal.events()
+    committed_hash = kernel.state().state_hash()
+    segment_committed = threading.Event()
+    release_cache_publication = threading.Event()
+    reader_done = threading.Event()
+    writer_errors: list[BaseException] = []
+    reader_errors: list[BaseException] = []
+    reader_result: dict[str, object] = {}
+    real_write_transaction = account_kernel_module._write_transaction
+
+    def committed_then_blocked_write(
+        root: str | Path,
+        events: list[account_kernel_module.AccountEvent],
+    ) -> Path:
+        path = real_write_transaction(root, events)
+        if any(event.correlation_id == "prospective-after-segment" for event in events):
+            segment_committed.set()
+            if not release_cache_publication.wait(timeout=5.0):
+                raise TimeoutError("test did not release account cache publication")
+        return path
+
+    def forbid_history_replay(_root: str | Path) -> list[AccountEvent] | None:
+        raise AssertionError("reader replayed immutable history during local cache publication")
+
+    monkeypatch.setattr(
+        account_kernel_module,
+        "_write_transaction",
+        committed_then_blocked_write,
+    )
+    monkeypatch.setattr(
+        account_kernel_module,
+        "_read_transaction_events",
+        forbid_history_replay,
+    )
+
+    def write_prospective_snapshot() -> None:
+        try:
+            kernel.record_venue_snapshot(
+                snapshot_key="prospective-after-segment",
+                venue_positions={"BUSDT": 1.0},
+                reconstructed_positions={},
+                mismatches=["BUSDT"],
+                exchange_ts_ns=3,
+                local_receive_ts_ns=4,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            writer_errors.append(exc)
+
+    def read_after_segment_commit() -> None:
+        try:
+            reader_result["events"] = kernel.journal.events()
+            reader_result["state"] = kernel.state()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            reader_errors.append(exc)
+        finally:
+            reader_done.set()
+
+    writer = threading.Thread(target=write_prospective_snapshot)
+    writer.start()
+    assert segment_committed.wait(timeout=2.0)
+    reader = threading.Thread(target=read_after_segment_commit)
+    reader.start()
+    assert reader_done.wait(timeout=2.0)
+
+    assert reader_errors == []
+    observed_events = reader_result["events"]
+    observed_state = reader_result["state"]
+    assert isinstance(observed_events, list)
+    assert isinstance(observed_state, account_kernel_module.AccountState)
+    assert observed_events == committed_events
+    assert observed_state.state_hash() == committed_hash
+    assert "prospective-after-segment" not in observed_state.venue_snapshots
+
+    release_cache_publication.set()
+    writer.join(timeout=5.0)
+    reader.join(timeout=5.0)
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert writer_errors == []
+    assert "prospective-after-segment" in kernel.state().venue_snapshots
+
+
 def test_cached_transaction_append_does_not_rescan_immutable_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1294,6 +1392,7 @@ def test_account_journal_failed_write_does_not_publish_prospective_state(
     assert read_account_journal(tmp_path) == committed_events
     assert observed_state.state_hash() == committed_hash
     assert "prospective" not in observed_state.venue_snapshots
+    assert not kernel.journal._local_transaction_publish_in_progress
 
 
 def test_account_journal_extends_committed_cache_without_history_sized_recopy(
