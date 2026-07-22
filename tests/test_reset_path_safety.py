@@ -305,6 +305,87 @@ def test_paper_normalization_sets_exact_private_permissions_and_creates_locks(
     assert stat.S_IMODE((strategy / "cycle.parquet").stat().st_mode) == 0o600
 
 
+def test_paper_normalization_noop_tree_skips_permission_writes_and_syncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = tmp_path / "data"
+    root = anchor / "paper"
+    nested = root / "journal"
+    locks = root / ".locks"
+    nested.mkdir(parents=True)
+    locks.mkdir()
+    root.chmod(0o700)
+    nested.chmod(0o700)
+    locks.chmod(0o700)
+    _file(nested / "event.json", mode=0o600)
+    final_rescan_called = False
+    original_verify = safety._verify_normalized_paper_tree
+
+    def observe_final_rescan(
+        original: safety._InspectionPlan,
+        *,
+        created_entries: dict[tuple[str, ...], safety._Entry],
+        uid: int,
+        gid: int,
+    ) -> None:
+        nonlocal final_rescan_called
+        final_rescan_called = True
+        original_verify(
+            original,
+            created_entries=created_entries,
+            uid=uid,
+            gid=gid,
+        )
+
+    def unexpected_mutation(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("an already-normalized paper tree must not be rewritten")
+
+    monkeypatch.setattr(safety, "_normalize_planned_regular", unexpected_mutation)
+    monkeypatch.setattr(safety, "_normalize_planned_directory", unexpected_mutation)
+    monkeypatch.setattr(safety.os, "fchmod", unexpected_mutation)
+    monkeypatch.setattr(safety.os, "fsync", unexpected_mutation)
+    monkeypatch.setattr(safety, "_verify_normalized_paper_tree", observe_final_rescan)
+
+    normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+
+    assert final_rescan_called is True
+
+
+def test_paper_normalization_noop_tree_final_rescan_rejects_late_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = tmp_path / "data"
+    root = anchor / "paper"
+    locks = root / ".locks"
+    locks.mkdir(parents=True)
+    root.chmod(0o700)
+    locks.chmod(0o700)
+    _file(root / "event.json", mode=0o600)
+    original_verify = safety._verify_normalized_paper_tree
+
+    def add_late_entry(
+        original: safety._InspectionPlan,
+        *,
+        created_entries: dict[tuple[str, ...], safety._Entry],
+        uid: int,
+        gid: int,
+    ) -> None:
+        _file(root / "late.json", mode=0o600)
+        original_verify(
+            original,
+            created_entries=created_entries,
+            uid=uid,
+            gid=gid,
+        )
+
+    monkeypatch.setattr(safety, "_verify_normalized_paper_tree", add_late_entry)
+
+    with pytest.raises(RuntimeError, match="tree entries changed during normalization"):
+        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+
+
 def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -505,12 +586,13 @@ def test_paper_normalization_detects_post_chmod_hardlink_and_restores_mode(
         gid: int,
         mode: int,
         path: Path,
-    ) -> None:
+    ) -> bool:
         nonlocal injected
-        original_set(descriptor, uid=uid, gid=gid, mode=mode, path=path)
+        changed = original_set(descriptor, uid=uid, gid=gid, mode=mode, path=path)
         if path == payload and not injected:
             injected = True
             os.link(payload, alias)
+        return changed
 
     monkeypatch.setattr(safety, "_set_descriptor_permissions", add_hardlink_after_chmod)
     owner = payload.stat().st_uid, payload.stat().st_gid

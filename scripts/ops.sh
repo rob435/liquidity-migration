@@ -36,7 +36,7 @@ Safe operator commands:
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
   test [PYTEST_ARGS...]        run pytest
-  deploy --execute MODE        run stopped install or authorized activation
+  deploy --execute MODE        run install, activation, or guarded rollout
   help                         show this help and do nothing else
 
 Environment overrides:
@@ -48,7 +48,9 @@ Safety contract:
   * This interface never enables REAL_MONEY or mainnet trading.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
   * clock-offset requires --execute and runs on the VPS clock.
-  * deploy requires --execute and MODE=install|activate.
+  * deploy requires --execute and MODE=install|activate|rollout.
+  * rollout additionally requires an explicit profile, authorization reference,
+    and the exact demo/paper-only owner acknowledgement; it refuses non-flat state.
   * Research runs remain research artifacts and are never auto-promoted.
 
 Details: docs/operations.md
@@ -268,8 +270,8 @@ case "$command" in
     [[ "${1:-}" == "--execute" ]] \
       || die_usage "deploy is mutating; its first argument must be --execute"
     shift
-    [[ "${1:-}" == "install" || "${1:-}" == "activate" ]] \
-      || die_usage "deploy mode must be install or activate"
+    [[ "${1:-}" == "install" || "${1:-}" == "activate" || "${1:-}" == "rollout" ]] \
+      || die_usage "deploy mode must be install, activate, or rollout"
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "$@"
     ;;
   *)

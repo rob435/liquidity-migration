@@ -19,6 +19,7 @@ from liquidity_migration.account_owner_health import (
     ACCOUNT_OWNER_HEALTH_FILENAME,
     ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION,
     TEST_ACCOUNT_OWNER_INVOCATION_ID,
+    AccountOwnerHealthHeadPending,
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
     AccountOwnerMarketWarmupPending,
@@ -363,7 +364,7 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         exchange_ts_ns=0,
         local_receive_ts_ns=12_000,
     )
-    with pytest.raises(RuntimeError, match="journal sequence mismatch"):
+    with pytest.raises(AccountOwnerHealthHeadPending, match="journal sequence mismatch"):
         require_recent_account_owner_health(
             tmp_path,
             environment="demo",

@@ -48,6 +48,10 @@ class AccountOwnerMarketWarmupPending(RuntimeError):
     """Fresh owner health is fail-closed during bounded queue-head L2 warmup."""
 
 
+class AccountOwnerHealthHeadPending(RuntimeError):
+    """Fresh healthy owner evidence is briefly behind an advancing journal."""
+
+
 def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
     """Return one canonical non-zero systemd invocation identifier."""
 
@@ -408,6 +412,19 @@ def require_recent_account_owner_health(
         # ordinary fill-thread publish race. Equal-sequence hash disagreement
         # still falls through to the corruption raises below.
         return health
+    if (
+        health.journal_sequence < journal_sequence
+        and head is not None
+        and health.account_id == head.account_id
+    ):
+        # Exact-head sizing consumers must not use the older capital snapshot,
+        # but this ordinary publication race is retryable. Keep it distinct
+        # from a health snapshot ahead of the journal or an equal-sequence hash
+        # contradiction, which remain terminal integrity failures.
+        raise AccountOwnerHealthHeadPending(
+            "account-owner health journal sequence mismatch: "
+            f"health={health.journal_sequence}, journal={journal_sequence}"
+        )
     if saw_churn:
         raise RuntimeError("account-owner health changed while binding the journal head")
     if health.journal_sequence != journal_sequence:

@@ -32,6 +32,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
+        Path("scripts/check_deploy_rollout_readiness.py"),
         Path("liquidity_migration/maintenance_lock.py"),
     ):
         target = checkout / relative
@@ -126,6 +127,7 @@ def test_mutating_remote_routes_require_explicit_handshake() -> None:
     assert _run("operational-authority", "issue").returncode == 2
     assert _run("deploy", "install").returncode == 2
     assert _run("deploy", "--execute", "verify").returncode == 2
+    assert _run("deploy", "--execute", "rollout").returncode == 2
 
 
 def test_operational_authority_defaults_to_remote_verification(tmp_path: Path) -> None:
@@ -211,6 +213,71 @@ def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Pa
         )
         assert result.returncode == 0, result.stderr
         assert f"MODE={mode}" in capture.read_text(encoding="utf-8")
+
+
+def test_rollout_requires_and_serializes_explicit_operational_authority(
+    tmp_path: Path,
+) -> None:
+    checkout, commit = _isolated_deploy_checkout(tmp_path)
+    capture = tmp_path / "capture"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ssh = bin_dir / "ssh"
+    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
+    ssh.chmod(0o700)
+    base = [
+        "bash",
+        str(checkout / "scripts/ops.sh"),
+        "deploy",
+        "--execute",
+        "rollout",
+    ]
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "CAPTURE": str(capture),
+        "EXPECTED_COMMIT": commit,
+        "GITHUB_TOKEN": "test-token",
+    }
+
+    incomplete = subprocess.run(
+        [*base, "--profile", "operational"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert incomplete.returncode == 2
+    assert "authorization-reference" in incomplete.stderr
+    assert not capture.exists()
+
+    complete = subprocess.run(
+        [
+            *base,
+            "--profile",
+            "operational",
+            "--authorization-reference",
+            "owner task: bounded rollout",
+            "--owner-acknowledgement",
+            "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION",
+        ],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert complete.returncode == 0, complete.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "MODE=rollout" in payload
+    assert "DEPLOY_PROFILE=operational" in payload
+    assert "DEPLOY_AUTHORIZATION_REFERENCE=owner\\ task:\\ bounded\\ rollout" in payload
+    assert (
+        "DEPLOY_OWNER_ACKNOWLEDGEMENT="
+        "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION"
+    ) in payload
 
 
 def test_deploy_rejects_tree_object_before_ssh(tmp_path: Path) -> None:

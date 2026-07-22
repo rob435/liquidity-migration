@@ -52,6 +52,7 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
     for path in scripts[:6] + scripts[8:]:
         assert path.stat().st_mode & stat.S_IXUSR
+    assert (ROOT / "scripts" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
     paper_runner = _read("scripts/run_account_paper_execution_service.sh")
     assert "CALIBRATION" not in paper_runner
     assert "--latency-quantile" not in paper_runner
@@ -331,6 +332,61 @@ def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it(
         assert forbidden not in activate
     assert 'if [ "$AUTH_PROFILE" = operational ]' in activate
     assert "liquidity-migration-account-paper-execution.service" in activate
+
+
+def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_authority() -> None:
+    text = _read(DEPLOY)
+    rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
+    assert rollout.index("rollout-target-prefetch") < rollout.index("current-topology-verification")
+    assert rollout.index("current-topology-verification") < rollout.index("pre-stop-flat-account-proof")
+    assert rollout.index("pre-stop-flat-account-proof") < rollout.index("stop-downstream-units")
+    assert rollout.index("stop-downstream-units") < rollout.index("post-producer-flat-account-proof")
+    assert rollout.index("post-producer-flat-account-proof") < rollout.index("stop-account-owners")
+    assert rollout.index("stop-account-owners") < rollout.index("final-stopped-flat-account-proof")
+    assert rollout.index("final-stopped-flat-account-proof") < rollout.index("ROLLOUT_IRREVERSIBLE=1")
+    assert rollout.index("stopped-install") < rollout.index("create-operational-authority")
+    assert rollout.index("create-operational-authority") < rollout.index("activate-and-verify")
+
+    readiness = _read("scripts/check_deploy_rollout_readiness.py")
+    assert "read_account_journal(root, verify=True)" in readiness
+    assert "canonical aggregate targets are non-flat" in readiness
+    assert "canonical working orders remain" in readiness
+    assert "require_recent_account_owner_health" in readiness
+    assert "head_binding=head_binding" in readiness
+    assert "BybitPrivateClient(" in readiness
+    assert "demo=True" in readiness
+    assert 'client.get_positions(settle_coin="USDT")' in readiness
+    assert 'order_filter="StopOrder"' in readiness
+    rollout_check = text[text.index("rollout_flat_check()") : text.index("verify_topology()")]
+    assert "BYBIT_REAL_API_KEY" in rollout_check
+    assert "rollout_readiness_helper" in rollout_check
+    assert 'ROLLOUT_READINESS_HELPER_B64' in text
+    assert '"$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py"' in text
+
+    authority = text[
+        text.index("issue_rollout_authorization()") : text.index("rollout_mode()")
+    ]
+    assert "LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7" in authority
+    assert "operational_runtime_authority issue" in authority
+    assert '--profile "$DEPLOY_PROFILE"' in authority
+    assert '--authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE"' in authority
+    assert '--owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"' in authority
+
+
+def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> None:
+    text = _read(DEPLOY)
+    assert 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-300}"' in text
+    assert 'RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"' in text
+    assert "phase-start name=%s" in text
+    assert "phase-ok name=%s elapsed_seconds=%s" in text
+    for phase in (
+        "install-locked-dependencies",
+        "focused-runtime-tests",
+        "paper-tree-preflight",
+        "paper-tree-normalize",
+        "seed-residual-momentum",
+    ):
+        assert phase in text
 
 
 def test_deploy_permission_probe_uses_only_bound_demo_credentials() -> None:

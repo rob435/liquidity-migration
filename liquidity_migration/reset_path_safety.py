@@ -724,17 +724,26 @@ def _set_descriptor_permissions(
     gid: int,
     mode: int,
     path: Path,
-) -> None:
+) -> bool:
+    """Set exact descriptor metadata and report whether a write was required."""
+    changed = False
     try:
         current = os.fstat(descriptor)
         if (current.st_uid, current.st_gid) != (uid, gid):
             os.fchown(descriptor, uid, gid)
-        os.fchmod(descriptor, mode)
+            changed = True
+            # chown may clear special mode bits, so make the chmod decision
+            # from metadata observed after the ownership mutation.
+            current = os.fstat(descriptor)
+        if stat.S_IMODE(current.st_mode) != mode:
+            os.fchmod(descriptor, mode)
+            changed = True
         current = os.fstat(descriptor)
     except OSError as exc:
         raise RuntimeError(f"cannot normalize reset path permissions: {path}") from exc
     if current.st_uid != uid or current.st_gid != gid or stat.S_IMODE(current.st_mode) != mode:
         raise RuntimeError(f"reset path permissions did not normalize exactly: {path}")
+    return changed
 
 
 def _restore_descriptor_permissions(descriptor: int, planned: _Entry) -> None:
@@ -765,8 +774,15 @@ def _normalize_planned_regular(
         ):
             raise RuntimeError(f"paper runtime file metadata changed before normalization: {planned.path}")
         changed = True
-        _set_descriptor_permissions(descriptor, uid=uid, gid=gid, mode=mode, path=planned.path)
-        os.fsync(descriptor)
+        permissions_changed = _set_descriptor_permissions(
+            descriptor,
+            uid=uid,
+            gid=gid,
+            mode=mode,
+            path=planned.path,
+        )
+        if permissions_changed:
+            os.fsync(descriptor)
         after = os.fstat(descriptor)
         _parent_fd, _name, current = context.validate_entry(planned)
         if (
@@ -814,8 +830,15 @@ def _normalize_planned_directory(
     changed = False
     try:
         changed = True
-        _set_descriptor_permissions(descriptor, uid=uid, gid=gid, mode=mode, path=planned.path)
-        os.fsync(descriptor)
+        permissions_changed = _set_descriptor_permissions(
+            descriptor,
+            uid=uid,
+            gid=gid,
+            mode=mode,
+            path=planned.path,
+        )
+        if permissions_changed:
+            os.fsync(descriptor)
         rebound = context.directory_fd(planned.relative_parts)
         current = os.fstat(rebound)
         if current.st_uid != uid or current.st_gid != gid or stat.S_IMODE(current.st_mode) != mode:
@@ -939,14 +962,30 @@ def normalize_paper_runtime_roots(
             finally:
                 context.release_transient_directories()
 
-        regular_entries = [entry for entry in plan.entries if entry.file_type == stat.S_IFREG]
+        # The inspection plan already binds every entry by descriptor, inode,
+        # mount, ownership, and mode. Only open and sync objects whose metadata
+        # actually needs repair; the complete final descriptor-rooted rescan
+        # below still proves that skipped entries and the tree shape did not
+        # change. This makes an already-normalized large paper tree a read-only
+        # verification pass instead of tens of thousands of fsync calls.
+        regular_entries = [
+            entry
+            for entry in plan.entries
+            if entry.file_type == stat.S_IFREG
+            and (entry.uid, entry.gid, entry.mode) != (uid, gid, 0o600)
+        ]
         for entry in regular_entries:
             try:
                 _normalize_planned_regular(context, entry, uid=uid, gid=gid, mode=0o600)
             finally:
                 context.release_transient_directories()
 
-        directory_entries = [entry for entry in plan.entries if entry.file_type == stat.S_IFDIR]
+        directory_entries = [
+            entry
+            for entry in plan.entries
+            if entry.file_type == stat.S_IFDIR
+            and (entry.uid, entry.gid, entry.mode) != (uid, gid, 0o700)
+        ]
         for entry in sorted(directory_entries, key=lambda item: len(item.relative_parts), reverse=True):
             try:
                 _normalize_planned_directory(context, entry, uid=uid, gid=gid, mode=0o700)
@@ -965,27 +1004,6 @@ def normalize_paper_runtime_roots(
                 gid=gid,
                 mode=0o700,
             )
-        for entry in plan.entries:
-            try:
-                if entry.file_type == stat.S_IFREG:
-                    _parent_fd, _name, current = context.validate_entry(entry)
-                    if (
-                        current.st_uid != uid
-                        or current.st_gid != gid
-                        or stat.S_IMODE(current.st_mode) != 0o600
-                    ):
-                        raise RuntimeError(f"paper runtime file changed after normalization: {entry.path}")
-                elif entry.file_type == stat.S_IFDIR:
-                    descriptor = context.directory_fd(entry.relative_parts)
-                    current = os.fstat(descriptor)
-                    if (
-                        current.st_uid != uid
-                        or current.st_gid != gid
-                        or stat.S_IMODE(current.st_mode) != 0o700
-                    ):
-                        raise RuntimeError(f"paper runtime directory changed after normalization: {entry.path}")
-            finally:
-                context.release_transient_directories()
         context._validate_anchor()
         _verify_normalized_paper_tree(
             plan,

@@ -1,25 +1,62 @@
 #!/usr/bin/env bash
-# Staged VPS lifecycle: stopped install -> separate authorization -> activate.
+# Staged VPS lifecycle plus a guarded, flat-account one-command rollout.
 set -euo pipefail
 
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
-if [ "$#" -ne 0 ]; then
-    echo "usage: deploy_vps_live.sh {install|activate|verify}" >&2
+DEPLOY_PROFILE=""
+DEPLOY_AUTHORIZATION_REFERENCE=""
+DEPLOY_OWNER_ACKNOWLEDGEMENT=""
+if [ "$MODE" = rollout ]; then
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --profile)
+                [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
+                DEPLOY_PROFILE="$2"
+                shift 2
+                ;;
+            --authorization-reference)
+                [ "$#" -ge 2 ] || { echo "--authorization-reference requires a value" >&2; exit 2; }
+                DEPLOY_AUTHORIZATION_REFERENCE="$2"
+                shift 2
+                ;;
+            --owner-acknowledgement)
+                [ "$#" -ge 2 ] || { echo "--owner-acknowledgement requires a value" >&2; exit 2; }
+                DEPLOY_OWNER_ACKNOWLEDGEMENT="$2"
+                shift 2
+                ;;
+            *) echo "unknown rollout argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    case "$DEPLOY_PROFILE" in
+        demo-operational|operational) ;;
+        *) echo "rollout requires --profile demo-operational|operational" >&2; exit 2 ;;
+    esac
+    [ -n "$DEPLOY_AUTHORIZATION_REFERENCE" ] \
+        && [ "${#DEPLOY_AUTHORIZATION_REFERENCE}" -le 500 ] \
+        || { echo "rollout requires a 1..500 character --authorization-reference" >&2; exit 2; }
+    [ "$DEPLOY_OWNER_ACKNOWLEDGEMENT" = \
+        AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION ] \
+        || { echo "rollout requires the exact demo/paper-only owner acknowledgement" >&2; exit 2; }
+elif [ "$#" -ne 0 ]; then
+    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout}" >&2
     exit 2
 fi
-case "$MODE" in install|activate|verify) ;; *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;; esac
+case "$MODE" in
+    install|activate|verify|rollout) ;;
+    *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
+esac
 
 SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
-SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
+SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3}"
 REPO_URL="${REPO_URL:-https://github.com/rob435/liquidity-migration.git}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-1800}"
-RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-30}"
+RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
+RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"
 
 if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
     echo "EXPECTED_COMMIT must be a full lowercase 40-character commit" >&2
@@ -33,7 +70,7 @@ for value in "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" "$RMOM_BOOTSTRAP_RETRY_SECONDS"; 
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "RMOM durations must be positive integers" >&2; exit 2; }
 done
 
-if [ "$MODE" = install ] && [ -z "$GITHUB_TOKEN" ] \
+if [[ "$MODE" = install || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
@@ -67,6 +104,21 @@ fi
     echo "expected commit returned an empty maintenance lock helper" >&2
     exit 1
 }
+ROLLOUT_READINESS_HELPER_B64=""
+if [ "$MODE" = rollout ]; then
+    if ! ROLLOUT_READINESS_HELPER_B64="$(
+        "${LOCAL_GIT[@]}" show \
+            "$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py" \
+        | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
+    )"; then
+        echo "expected commit does not contain the rollout readiness helper: $EXPECTED_COMMIT" >&2
+        exit 1
+    fi
+    [[ -n "$ROLLOUT_READINESS_HELPER_B64" ]] || {
+        echo "expected commit returned an empty rollout readiness helper" >&2
+        exit 1
+    }
+fi
 
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
@@ -79,13 +131,37 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
     printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
+    printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
+    printf 'DEPLOY_AUTHORIZATION_REFERENCE=%q\n' "$DEPLOY_AUTHORIZATION_REFERENCE"
+    printf 'DEPLOY_OWNER_ACKNOWLEDGEMENT=%q\n' "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
+    printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 fail() { echo "deploy failed: $*" >&2; exit 1; }
+
+run_phase() {
+    local label="$1" started finished status
+    shift
+    started="$(date +%s)"
+    printf 'phase-start name=%s utc=%s\n' "$label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if "$@"; then
+        status=0
+    else
+        status=$?
+    fi
+    finished="$(date +%s)"
+    if [ "$status" -eq 0 ]; then
+        printf 'phase-ok name=%s elapsed_seconds=%s\n' "$label" "$((finished - started))"
+    else
+        printf 'phase-failed name=%s elapsed_seconds=%s status=%s\n' \
+            "$label" "$((finished - started))" "$status" >&2
+    fi
+    return "$status"
+}
 
 GIT_ENV=(
     /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C LC_ALL=C
@@ -151,6 +227,20 @@ sys.argv = ["maintenance_lock.py", *arguments]
 namespace = {"__file__": "<transmitted-maintenance-lock-helper>", "__name__": "__main__"}
 exec(compile(source, namespace["__file__"], "exec"), namespace)
 ' "$MAINTENANCE_LOCK_HELPER_B64" "$@"
+}
+
+rollout_readiness_helper() {
+    "$PYTHON" -c '
+import base64
+import sys
+
+encoded = sys.argv[1]
+arguments = sys.argv[2:]
+source = base64.b64decode(encoded, validate=True)
+sys.argv = ["check_deploy_rollout_readiness.py", *arguments]
+namespace = {"__file__": "scripts/check_deploy_rollout_readiness.py", "__name__": "__main__"}
+exec(compile(source, namespace["__file__"], "exec"), namespace)
+' "$ROLLOUT_READINESS_HELPER_B64" "$@"
 }
 
 PAPER_RUNTIME_USER=liquidity-migration-paper
@@ -402,20 +492,24 @@ PY
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
         paper_path_args+=(--root "$root")
     done
-    "$PYTHON" -m liquidity_migration.reset_path_safety preflight-paper \
+    run_phase paper-tree-preflight \
+        "$PYTHON" -m liquidity_migration.reset_path_safety preflight-paper \
         --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
         || fail "paper runtime descriptor/mount preflight failed"
-    "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
+    run_phase demo-tree-preflight \
+        "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
         --anchor "$REPO_DIR/data" \
         --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
         --continuous-root "$CONTINUOUS_DEMO_ROOT" \
         || fail "demo runtime descriptor/mount preflight failed"
 
-    "$PYTHON" -m liquidity_migration.reset_path_safety normalize-paper \
+    run_phase paper-tree-normalize \
+        "$PYTHON" -m liquidity_migration.reset_path_safety normalize-paper \
         --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
         --uid "$paper_uid" --gid "$paper_gid" --create-missing \
         || fail "descriptor-rooted paper runtime normalization failed"
-    "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
+    run_phase demo-tree-normalize \
+        "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
         --anchor "$REPO_DIR/data" \
         --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
         --continuous-root "$CONTINUOUS_DEMO_ROOT" \
@@ -594,7 +688,8 @@ install_mode() {
     else
         safe_git remote add "$REMOTE" "$REPO_URL"
     fi
-    git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
+    run_phase fetch-exact-commit \
+        git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
     safe_git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
         || fail "expected commit is unavailable"
     safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
@@ -605,20 +700,23 @@ install_mode() {
 
     [ -x .venv/bin/python ] || python3 -m venv .venv
     PYTHON=.venv/bin/python
-    "$PYTHON" -m pip install --disable-pip-version-check --no-deps \
+    run_phase install-locked-dependencies \
+        "$PYTHON" -m pip install --disable-pip-version-check --no-deps \
         --only-binary=:all: -r requirements.lock
-    "$PYTHON" -m ruff check liquidity_migration scripts tests
-    "$PYTHON" -m mypy liquidity_migration
-    "$PYTHON" -m pytest -q \
+    run_phase ruff "$PYTHON" -m ruff check liquidity_migration scripts tests
+    run_phase mypy "$PYTHON" -m mypy liquidity_migration
+    run_phase focused-runtime-tests "$PYTHON" -m pytest -q \
         tests/test_forward_epoch_start.py \
+        tests/test_deploy_rollout_readiness.py \
         tests/test_operational_profile.py \
         tests/test_operational_runtime_authority.py \
+        tests/test_strategy_planning.py \
         tests/test_runtime_scripts.py
 
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
     ensure_paper_runtime_identity
-    lm_install_current_systemd_units
+    run_phase install-systemd-manifest lm_install_current_systemd_units
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
     done
@@ -652,7 +750,7 @@ PY
     lm_write_resolved_sleeve_toggles
     prepare_paper_runtime_boundary
     lm_verify_resolved_sleeve_toggles
-    verify_paper_runtime_boundary
+    run_phase verify-paper-runtime-boundary verify_paper_runtime_boundary
     require_clean_head
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
     echo "next: issue a new operational authorization for this stopped exact checkout, then run activate"
@@ -717,6 +815,32 @@ check_demo_order_permissions() {
     "$PYTHON" scripts/check_bybit_order_permissions.py --context "$context" || status=$?
     unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
     return "$status"
+}
+
+rollout_flat_check() {
+    local head_binding="$1"
+    case "$head_binding" in exact|allow_behind|none) ;; *) fail "invalid rollout head binding" ;; esac
+    require_checkout
+    PYTHON=.venv/bin/python
+    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
+    . deploy/lib_systemd_environment.sh
+    unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
+    lm_load_private_systemd_environment "$PYTHON" \
+        /etc/liquidity-migration/account-execution.env ACCOUNT_EXECUTION_ROOT
+    lm_load_private_systemd_environment "$PYTHON" \
+        /etc/liquidity-migration/bybit-demo.env \
+        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
+    [ -n "$ACCOUNT_EXECUTION_ROOT" ] || fail "demo account root is unavailable"
+    ROLLOUT_HEAD_BINDING="$head_binding" DEMO=true \
+        ACCOUNT_EXECUTION_ROOT="$ACCOUNT_EXECUTION_ROOT" \
+        BYBIT_DEMO_API_KEY="$BYBIT_DEMO_API_KEY" \
+        BYBIT_DEMO_API_SECRET="$BYBIT_DEMO_API_SECRET" \
+        REAL_MONEY="${REAL_MONEY:-false}" \
+        rollout_readiness_helper \
+        --account-root "$ACCOUNT_EXECUTION_ROOT" \
+        --head-binding "$head_binding"
+    unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
 }
 
 verify_topology() {
@@ -828,7 +952,7 @@ activate_mode() {
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
-        seed_rmom
+        run_phase seed-residual-momentum seed_rmom
         systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
     fi
     if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
@@ -838,11 +962,176 @@ activate_mode() {
     verify_topology
 }
 
+ROLLOUT_DOWNSTREAM_UNITS=(
+    liquidity-migration-demo-liveness.timer
+    liquidity-migration-continuous-hedge.timer
+    liquidity-migration-continuous-rmom-refresh.timer
+    liquidity-migration-bybit-long-demo.service
+    liquidity-migration-bybit-long-paper.service
+    liquidity-migration-bybit-continuous-demo.service
+    liquidity-migration-bybit-continuous-paper.service
+    liquidity-migration-continuous-hedge.service
+    liquidity-migration-continuous-rmom-refresh.service
+    liquidity-migration-demo-liveness.service
+)
+ROLLOUT_OWNER_UNITS=(
+    liquidity-migration-account-execution.service
+    liquidity-migration-account-paper-execution.service
+)
+ROLLOUT_STOPPED=0
+ROLLOUT_IRREVERSIBLE=0
+ROLLOUT_COMPLETE=0
+ROLLOUT_CURRENT_COMMIT=""
+ROLLOUT_TARGET_COMMIT=""
+
+stop_rollout_units() {
+    local unit
+    for unit in "$@"; do
+        systemctl stop "$unit"
+        printf 'stopped unit=%s\n' "$unit"
+    done
+    for unit in "$@"; do
+        ! systemctl is-active --quiet "$unit" \
+            || fail "unit remained active after rollout stop: $unit"
+    done
+}
+
+stop_all_rollout_units_best_effort() {
+    local unit failed=0
+    for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
+        if ! systemctl stop "$unit"; then
+            printf 'failed-to-stop unit=%s\n' "$unit" >&2
+            failed=1
+        fi
+    done
+    for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
+        if systemctl is-active --quiet "$unit"; then
+            printf 'still-active unit=%s\n' "$unit" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+rollout_cleanup() {
+    local status="$?"
+    trap - EXIT INT TERM
+    if [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
+        && [ "$ROLLOUT_COMPLETE" -eq 0 ]; then
+        if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]; then
+            printf '%s\n' \
+                'rollout failed before install; restoring the verified prior topology' >&2
+            if stop_all_rollout_units_best_effort \
+                && (
+                    EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
+                    activate_mode
+                ); then
+                printf 'rollout-restore-ok commit=%s\n' "$ROLLOUT_CURRENT_COMMIT" >&2
+            else
+                printf '%s\n' \
+                    'CRITICAL: prior topology restore failed; forcing the managed fleet stopped' >&2
+                stop_all_rollout_units_best_effort || true
+            fi
+        else
+            printf '%s\n' \
+                'rollout failed after install began; forcing the managed fleet stopped for explicit recovery' >&2
+            stop_all_rollout_units_best_effort || true
+        fi
+    fi
+    exit "$status"
+}
+
+prefetch_rollout_target() {
+    require_checkout
+    local installed_head
+    installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
+    require_clean_checkout_at "$installed_head" "rollout prefetch"
+    if safe_git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        safe_git remote set-url "$REMOTE" "$REPO_URL"
+    else
+        safe_git remote add "$REMOTE" "$REPO_URL"
+    fi
+    git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
+    safe_git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
+        || fail "expected commit is unavailable"
+    safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
+        || fail "expected commit is not on $REMOTE/$BRANCH"
+    require_clean_checkout_at "$installed_head" "rollout prefetch completion"
+}
+
+retry_exact_rollout_flat_check() {
+    local attempt
+    for attempt in 1 2 3; do
+        if rollout_flat_check exact; then
+            return 0
+        fi
+        [ "$attempt" -eq 3 ] || sleep 2
+    done
+    return 1
+}
+
+issue_rollout_authorization() {
+    PYTHON=.venv/bin/python
+    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
+    export LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7
+    "$PYTHON" -m liquidity_migration.operational_runtime_authority issue \
+        --expected-commit "$EXPECTED_COMMIT" \
+        --repo-root "$REPO_DIR" \
+        --profile "$DEPLOY_PROFILE" \
+        --authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE" \
+        --owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
+}
+
+rollout_mode() {
+    require_checkout
+    ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
+    ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
+        || fail "cannot read installed checkout HEAD"
+
+    run_phase rollout-target-prefetch prefetch_rollout_target
+
+    # Prove the current receipt/topology before changing any unit, using the
+    # commit it actually authorizes rather than the incoming target commit.
+    EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
+    load_authorization
+    run_phase current-topology-verification verify_topology
+    run_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
+    EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
+
+    ROLLOUT_STOPPED=1
+    trap rollout_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    # Stop every producer/timer before either owner. A bounded exact-head
+    # recheck closes the target/journal race while the owner is still alive;
+    # only then are owners stopped and venue truth sampled once more.
+    run_phase stop-downstream-units \
+        stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
+    run_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
+    run_phase stop-account-owners \
+        stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
+    run_phase final-stopped-flat-account-proof rollout_flat_check none
+    require_quiescent
+
+    # From checkout mutation onward the old create-only receipt cannot be used
+    # as rollback authority. Any failure therefore leaves every managed unit
+    # stopped instead of guessing across commits.
+    ROLLOUT_IRREVERSIBLE=1
+    run_phase stopped-install install_mode
+    run_phase create-operational-authority issue_rollout_authorization
+    run_phase activate-and-verify activate_mode
+    ROLLOUT_COMPLETE=1
+    ROLLOUT_STOPPED=0
+    printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
+}
+
 acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
     verify) load_authorization; verify_topology ;;
+    rollout) rollout_mode ;;
 esac
 REMOTE_SCRIPT
 } | ssh "${SSH_ARGS[@]}" -- "$SSH_TARGET" bash -s

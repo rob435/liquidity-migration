@@ -25,6 +25,7 @@ and require explicit task scope. Unknown safety-critical state fails closed.
 | `test` | Run pytest with forwarded arguments. |
 | `deploy --execute install` | Install an exact commit while every project unit is stopped. |
 | `deploy --execute activate` | Start the fleet allowed by the current receipt and sleeve toggles. |
+| `deploy --execute rollout ...` | Guarded flat-account preflight, stopped install, authority creation, activation, and verification in one locked operation. |
 
 Environment overrides are `SSH_TARGET`, `REPO_DIR`, `PYTHON`, `BRANCH`,
 `EXPECTED_COMMIT`, and the deploy script's documented SSH/repository settings.
@@ -34,6 +35,48 @@ Environment overrides are `SSH_TARGET`, `REPO_DIR`, `PYTHON`, `BRANCH`,
 
 Deployment is deliberately split. Installation cannot authorize startup, and
 authorization cannot install different code.
+
+For routine maintenance, the guarded rollout mode automates those same
+boundaries without weakening them:
+
+```bash
+COMMIT="$(git rev-parse HEAD)"
+EXPECTED_COMMIT="$COMMIT" BRANCH="$(git branch --show-current)" \
+  scripts/ops.sh deploy --execute rollout \
+  --profile operational \
+  --authorization-reference "owner task: bounded demo/paper rollout" \
+  --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
+```
+
+Use `--profile demo-operational` when paper integration is not intended. The
+profile, reference, and exact acknowledgement remain explicit inputs; rollout
+does not infer authority from the target commit or from an existing receipt.
+It never enables mainnet, flattens a position, cancels an order, or widens a
+risk boundary.
+
+Before stopping anything, rollout fetches and proves the exact target is on the
+selected remote branch, verifies the currently authorized commit and topology,
+and requires all of the following at once: a verified canonical journal, fresh
+healthy owner and reconciliation evidence, zero reconstructed and
+authenticated venue positions, zero aggregate target, zero canonical working
+orders, and a directly authenticated empty regular/conditional Bybit order
+inventory. A non-flat or uncertain account fails immediately with the current
+fleet untouched.
+
+On a ready account, rollout stops producers, timer-driven readers, and
+watchdogs before owners; binds owner health to the exact post-producer journal
+head; stops owners; then repeats the local and authenticated flat-account
+proof. Only after that final stopped proof may checkout installation begin.
+The stopped install archives the old receipt, a new create-only receipt is
+issued under the same three maintenance-lock descriptors, and activation
+starts owners before producers and verifies the resulting topology.
+
+A failure before checkout installation restores the previously verified
+topology. Once installation begins, the old receipt is no longer rollback
+authority; any failure forces every managed unit stopped for explicit recovery.
+Each material phase prints start, success/failure, and elapsed seconds. The
+residual-momentum bootstrap retries every 10 seconds and defaults to a bounded
+300-second deadline; both values remain positive-integer environment overrides.
 
 ### 1. Install stopped
 
@@ -101,6 +144,13 @@ regular-file mount boundaries, including same-device Linux bind mounts. Missing
 direct-child roots and cache/lock directories are then created relative to the
 held data-root descriptor; owner and mode changes never use recursive pathname
 `chown` or `find` traversal.
+
+An already-normalized paper tree is a read-only fast path: the initial complete
+inspection identifies only entries whose exact owner/group/mode needs repair,
+so compliant entries are not reopened for `fchmod` or `fsync`. A separate final
+complete descriptor-rooted rescan still compares the entire path set, inode,
+type, mount identity, owner, group, and mode, including entries skipped by the
+mutation pass. The optimization removes redundant writes, not validation.
 
 Install also validates `configs/operational.demo.json`, installs its exact bytes
 at the demo `ACCOUNT_RISK_POLICY_FILE`, and creates the isolated byte-exact

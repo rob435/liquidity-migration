@@ -12,6 +12,7 @@ and telemetry shapes remain profile-owned.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -25,6 +26,7 @@ from .account_intent_client import (
     unresolved_target_snapshot,
 )
 from .account_owner_health import (
+    AccountOwnerHealthHeadPending,
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
 )
@@ -41,6 +43,9 @@ def account_owner_equity_or_error(
     *,
     environment: str,
     max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+    head_retry_attempts: int = 4,
+    head_retry_seconds: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[float, str]:
     """Return (equity_usdt, "") from fresh owner health, or (0.0, error).
 
@@ -48,16 +53,30 @@ def account_owner_equity_or_error(
     records the error and plans entries as blocked.
     """
 
-    try:
-        owner_health = require_recent_account_owner_health(
-            route.account_path,
-            environment=environment,
-            max_age_ns=max_age_ns,
-            expected_account_id=route.account_id,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        return 0.0, f"{type(exc).__name__}: {exc}"[:500]
-    return float(owner_health.equity_usdt), ""
+    if head_retry_attempts <= 0:
+        raise ValueError("owner-health head retry attempts must be positive")
+    if head_retry_seconds < 0.0:
+        raise ValueError("owner-health head retry delay cannot be negative")
+    last_pending: AccountOwnerHealthHeadPending | None = None
+    for attempt in range(head_retry_attempts):
+        try:
+            owner_health = require_recent_account_owner_health(
+                route.account_path,
+                environment=environment,
+                max_age_ns=max_age_ns,
+                expected_account_id=route.account_id,
+            )
+        except AccountOwnerHealthHeadPending as exc:
+            last_pending = exc
+            if attempt + 1 < head_retry_attempts:
+                sleep(head_retry_seconds)
+                continue
+            break
+        except (OSError, RuntimeError, ValueError) as exc:
+            return 0.0, f"{type(exc).__name__}: {exc}"[:500]
+        return float(owner_health.equity_usdt), ""
+    assert last_pending is not None
+    return 0.0, f"{type(last_pending).__name__}: {last_pending}"[:500]
 
 
 @dataclass(frozen=True, slots=True)
