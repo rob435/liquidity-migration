@@ -439,6 +439,9 @@ The reset refuses live positions/orders, real-money configuration, mismatched
 credential ownership, concurrent mutation, or unsafe writers. It archives and
 fsyncs the old epoch before clearing account/inbox/capture payload in place and
 rebuilding projections. After quiescence and before either account-owner lease,
+it clears only stopped systemd failure metadata and requires every managed unit
+to report literal `inactive`; this makes the later reset receipt and fresh
+authority satisfiable without weakening either state check. Then
 descriptor-rooted preflight validates the complete account, paper, demo, and
 selected reset trees; Linux mount identities additionally reject same-device
 bind aliases. Lease inodes are prepared without truncation and are revalidated

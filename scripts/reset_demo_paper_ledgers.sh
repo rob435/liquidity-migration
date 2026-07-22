@@ -1245,7 +1245,21 @@ for unit in "${STOP_UNITS[@]}"; do
     die "unit remained active after stop: $unit"
   fi
 done
-echo "  quiescence verified"
+# A stopped service may retain ActiveState=failed from an earlier timeout or
+# expired-authority pre-exec refusal. Both the source-reopening reset receipt
+# and subsequent create-only operational authority require literal inactive,
+# not merely "not active". Clear only this stopped failure metadata, then bind
+# the exact state before the first archive/removal mutation.
+for unit in "${STOP_UNITS[@]}"; do
+  "$SYSTEMCTL_BIN" reset-failed "$unit" \
+    || die "could not clear stopped failure state: $unit"
+  unit_active_state="$(
+    "$SYSTEMCTL_BIN" show "$unit" --property=ActiveState --value
+  )" || die "could not read stopped unit state: $unit"
+  [[ "$unit_active_state" == inactive ]] \
+    || die "unit is not literally inactive after stop/reset-failed: $unit ($unit_active_state)"
+done
+echo "  quiescence verified (all managed units loaded and inactive)"
 
 # Bind every filesystem tree before either account lease can create, chown,
 # truncate, or write a lock leaf. Paper/demo-specific policies additionally
