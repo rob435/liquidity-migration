@@ -373,6 +373,8 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     rollout_check = text[text.index("rollout_flat_check()") : text.index("verify_topology()")]
     assert "BYBIT_REAL_API_KEY" in rollout_check
     assert "rollout_readiness_helper" in rollout_check
+    assert '--reset-receipt "$reset_receipt"' in rollout_check
+    assert '--expected-commit "$EXPECTED_COMMIT"' in rollout_check
     assert '|| status=$?' in rollout_check
     assert 'return "$status"' in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
@@ -433,6 +435,9 @@ def test_reset_recovery_reopens_exact_fresh_roots_before_population_refresh() ->
     assert recover.index("create-operational-authority") < recover.index("activate-and-verify")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in recover
     assert "recovery did not refresh" in recover
+    assert recover.count(
+        'rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"'
+    ) == 2
 
 
 def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> None:

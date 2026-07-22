@@ -1075,7 +1075,8 @@ check_demo_order_permissions() {
 }
 
 rollout_flat_check() {
-    local head_binding="$1" status=0
+    local head_binding="$1" reset_receipt="${2:-}" status=0
+    local -a readiness_args
     case "$head_binding" in
         exact|allow_behind|none|stopped-maintenance) ;;
         *) fail "invalid rollout head binding" ;;
@@ -1092,14 +1093,25 @@ rollout_flat_check() {
         /etc/liquidity-migration/bybit-demo.env \
         BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
     [ -n "$ACCOUNT_EXECUTION_ROOT" ] || fail "demo account root is unavailable"
+    readiness_args=(
+        --account-root "$ACCOUNT_EXECUTION_ROOT"
+        --head-binding "$head_binding"
+    )
+    if [ -n "$reset_receipt" ]; then
+        [ "$head_binding" = stopped-maintenance ] \
+            || fail "reset receipt can be used only for stopped-maintenance readiness"
+        readiness_args+=(
+            --reset-receipt "$reset_receipt"
+            --expected-commit "$EXPECTED_COMMIT"
+        )
+    fi
     ROLLOUT_HEAD_BINDING="$head_binding" DEMO=true \
         ACCOUNT_EXECUTION_ROOT="$ACCOUNT_EXECUTION_ROOT" \
         BYBIT_DEMO_API_KEY="$BYBIT_DEMO_API_KEY" \
         BYBIT_DEMO_API_SECRET="$BYBIT_DEMO_API_SECRET" \
         REAL_MONEY="${REAL_MONEY:-false}" \
         rollout_readiness_helper \
-        --account-root "$ACCOUNT_EXECUTION_ROOT" \
-        --head-binding "$head_binding" || status=$?
+        "${readiness_args[@]}" || status=$?
     unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
     return "$status"
 }
@@ -1438,13 +1450,13 @@ recover_mode() {
 
     run_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
     run_phase recovery-flat-account-proof \
-        rollout_flat_check stopped-maintenance
+        rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_phase stopped-install install_mode
     [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ] \
         || fail "recovery did not refresh the reset epoch's demo-rule evidence"
     run_phase post-rule-refresh-flat-account-proof \
-        rollout_flat_check stopped-maintenance
+        rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
     run_phase create-operational-authority issue_rollout_authorization
     run_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
