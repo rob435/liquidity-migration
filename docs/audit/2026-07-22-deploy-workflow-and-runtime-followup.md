@@ -195,6 +195,66 @@ exit-status fix on the live refusal path; it does not claim deployment.
 - repository doctor, Ruff, and mypy: passed;
 - full local gate: `2250 passed / 1 skipped`.
 
-This report records implementation and local validation, not operational
-activation. Deployment status must be established independently from the exact
-pushed commit, authenticated rollout receipt, and fresh read-only status output.
+The preceding sections recorded implementation and local validation before
+operational activation. The subsequent terminal-recovery section establishes
+deployment separately from an exact pushed commit, authenticated receipts, and
+fresh read-only status output.
+
+## Owner-authorized terminal recovery and measured deployment
+
+The owner subsequently authorized demo flatten/cancel, a full managed
+demo/paper ledger reset, push, and deployment. The canonical owner accepted one
+atomic zero-target batch and flattened MIRAUSDT; its command ID was
+`7a9d9882-e2ae-5bf5-99ff-39ad0ace3697`. Canonical reconstruction and a separate
+authenticated Bybit snapshot then agreed on zero positions and zero regular or
+conditional orders. No mainnet credential or `REAL_MONEY` path was enabled.
+
+The destructive reset did not begin until a second authenticated flatness check
+passed and a durable archive had been written, hashed, and reopened. It archived
+all 22 selected ledger/epoch targets to
+`/opt/liquidity-migration/data/_archive/ledger-reset-20260722T213413Z-owner-authorized-full-reset-20260722.tar.gz`
+(31,490,855 bytes; SHA-256
+`e629df3efb8c0a3e5101479298589e23d65b7b95c9daa9859531a6da3f91c6d2`).
+Persistent lock inodes, config, reports, caches, residual momentum, and root-level
+market data were retained. The reset created fresh demo and paper boundaries and
+left every managed unit loaded and inactive before receipt publication.
+
+Three additional workflow defects were found by the real stopped recovery and
+fixed without weakening ordinary rollout:
+
+1. `reset-failed` is now called only for units actually in `ActiveState=failed`;
+   healthy inactive units are still independently required to resolve as
+   `LoadState=loaded` and `ActiveState=inactive`.
+2. Recovery validates the root-owned `0600` demo route with the private loader
+   and the intentional root-owned, paper-group `0640` route with the group-aware
+   loader.
+3. A fresh reset epoch may lack a journaled venue snapshot. Only during
+   stopped-maintenance recovery, an exact-commit, full-scope, leave-stopped,
+   fresh-root reset receipt whose archive and self-hash reopen successfully may
+   stand in for that historical snapshot. The helper still reduces the fresh
+   journal and directly queries authenticated Bybit positions plus regular and
+   conditional orders. Running/ordinary rollout cannot use the exception.
+
+Final recovery used receipt
+`/opt/liquidity-migration/data/_archive/20260722-full-reset-receipt-230e9d1.json`
+(artifact SHA-256
+`db12d38848a4edd5230aaf8ff2d9a8c6b159c68c80ab95770b8c79ee4d3f0bcc`)
+for runtime implementation commit
+`230e9d1f51afe36fdfb8595e1c3ba7a41a26259a`. It froze 513 current symbols,
+down from the stale receipt's 516, and freshly validated every symbol in one or
+two threshold attempts. The rule phase took 1,385 seconds (`23m05s`) and the
+complete stopped install took 1,531 seconds (`25m31s`); routine fresh-rule
+deployments skip this exceptional probe. Activation took 81 seconds including a
+54-second residual-momentum seed.
+
+Post-activation evidence was independently re-read rather than inferred from
+the automation result: both owners and all four producers were active/running,
+all three timers were active/waiting, exact-head status returned `verify-ok`,
+and rollout readiness at journal sequence 12 reported zero local positions,
+aggregate targets, working orders, authenticated venue positions, and venue
+orders. Local pre-push validation passed 2,257 tests with one skipped. Manual
+GitHub Actions run
+`https://github.com/rob435/liquidity-migration/actions/runs/29962789028`
+then passed full CI plus the pinned-SSH VPS verify. These are point-in-time
+demo/paper deployment facts; they grant no real-money authority and do not
+promise that activated strategies remain flat.
