@@ -799,3 +799,82 @@ support the narrower claim that **a BTC-regime gate converts a dead short book
 into a live one**, which is a conditioner testable on the books that already
 exist — including the CONTINUOUS short leg the §11 experiment is about. That is
 the cheap version of this idea, and it does not require resurrecting anything.
+
+---
+
+## 15. Force-chase and the stop question (2026-07-25)
+
+Two proposals, measured rather than argued.
+
+### 15.1 Forcing every entry passive destroys the book
+
+A resting post-only order fills **at your limit**, so switching to passive
+changes two things and only two: which intended entries you actually get, and
+the fee. (A first pass booked the passive entry at the *next* close, which hands
+the strategy a price it could never obtain and produced a nonsense Sharpe of
+5.60. Corrected below.)
+
+| variant | bp/day | t | Sharpe |
+| --- | ---: | ---: | ---: |
+| IMMEDIATE — every entry, taker 11.00 bp | 28.42 | 1.96 | 0.86 |
+| **FORCED — passive-only, maker 5.40 bp** | **−90.57** | **−7.20** | **−3.19** |
+| **HYBRID — chase-then-cross, 8.12 bp** | **31.30** | **2.16** | **0.95** |
+| TODAY — measured demo cost 15.56 bp | 23.86 | 1.65 | 0.73 |
+
+**Forcing passive entry is the most damaging change tested in this document.**
+It discards 49% of intended entries, and in a momentum book the entries that
+come back to you are precisely the ones that were about to go wrong. You save
+5.6 bp of fee and lose roughly 119 bp/day of alpha.
+
+**Chase-then-cross is the right answer and it already exists.** The hybrid beats
+both immediate execution (31.30 vs 28.42) and today's cost basis (vs 23.86). The
+lever is the passive **fill rate**, not removing the fallback — which is exactly
+what arm B of `passive_execution_experiment_2026-07-20.md` already implements at
+a 25% fill rate. Raise the rate; keep the cross.
+
+### 15.2 Entries are only half the bill
+
+Fee decomposition of the archived demo journal:
+
+| fill class | fills | notional | fee | bp/side | share of fee bill |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| entry / increase | 55 | 2,222.78 | 1.7239 | 7.76 | **50%** |
+| reduce-only exit | 30 | 2,183.84 | 1.7051 | 7.81 | **50%** |
+
+Entry-side execution work therefore addresses at most half the cost. Every fill
+in this sample matched an owner-issued `order_command`, so these exits went
+through the owner's order path rather than arriving purely as venue triggers —
+but the sample is 85 fills and the metadata does not label stop-triggered fills
+distinctly, so **the split between native-stop triggers and owner reduce-only
+orders is not resolved here**. That split decides whether exits are chaseable at
+all, and it should be measured before any exit-side execution work.
+
+### 15.3 On removing native stops
+
+The system does have stops: the journal carries 135 `protection` events with
+`stop_price` and `take_profit_price`, and they demonstrably fire — the 2026-07-22
+DEXEUSDT close and the eight native-stop closes on 2026-07-19 are all in the
+record.
+
+What it does **not** have is a *strategy-level* stop-loss: the native stop is an
+operational seatbelt, not an exit rule with an alpha thesis. That is a real gap
+and worth reworking. But the two are different objects and should not be traded
+against each other:
+
+- A **venue-native stop** is the only protection that survives owner-process
+  death, a VPS outage, or a network partition. The 2026-07-21 incident was an
+  ~8-minute unprotected interval, and the entire account-kernel remediation
+  exists to close it. Removing native stops reopens exactly that failure.
+- A **software stop** protects nothing when the software is the thing that failed.
+
+The design that gets both, and does not require giving up either:
+
+1. Keep the venue-native stop, set **wide**, as a disaster backstop only.
+2. Add a strategy-level exit at a **tighter** level, executed chase-then-cross
+   like arm B.
+3. The native stop then rarely triggers, so its taker cost mostly disappears
+   while the seatbelt stays installed.
+
+`AGENTS.md` is explicit that capital-preservation controls are not traded for
+alpha metrics. This design does not trade them; it demotes the native stop from
+primary exit to backstop, which is what it should have been.
