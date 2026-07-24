@@ -258,3 +258,73 @@ GitHub Actions run
 then passed full CI plus the pinned-SSH VPS verify. These are point-in-time
 demo/paper deployment facts; they grant no real-money authority and do not
 promise that activated strategies remain flat.
+
+## 2026-07-23 automation and bounded-latency follow-up
+
+The 23-minute rule phase was exceptional, but the same deployment transcript
+also exposed avoidable routine serialization: paper/demo preflights took 58 and
+55 seconds, followed by paper/demo normalization at 43 and 44 seconds. The four
+phases therefore occupied about 200 seconds sequentially even though the two
+trees are disjoint. Activation then rebuilt a residual-momentum table that
+already passed its runtime gate, adding another measured 54 seconds.
+
+The local candidate changes those critical paths without deleting a safety
+check. Paper and demo preflights execute concurrently, but a strict barrier
+requires both read-only plans to succeed before either mutation begins. The two
+normalizers then execute concurrently; each still constructs its complete
+descriptor-rooted plan and performs its independent final path/inode/type/mount/
+owner/group/mode rescan. A dynamic shell test proves that both child phases are
+waited and a nonzero child status is returned. Under the prior observed phase
+durations, the tree critical path is `max(58,55) + max(43,44) = 102` seconds,
+98 seconds below the old 200-second sequence. This is a timing model until the
+candidate is deployed on the real trees.
+
+Residual-momentum activation now checks the preserved artifact first. Reuse
+requires the existing complete schema, daily keys, uniqueness, finite values,
+at least 20 stable current-day symbols, bounded age, and a non-failed prior
+refresh unit. Missing, stale, malformed, small-cross-section, or failed-unit
+state uses the existing refresh/retry path and its 300-second deadline. Under
+the prior activation sample, successful reuse would remove the measured
+54-second rebuild; it is not claimed as a new live measurement.
+
+Reset recovery now has three explicit rule-maintenance outcomes:
+
+1. Fresh evidence plus an equal/safe-subset candidate set is projected
+   create-only. Retained per-symbol rules and empirical attempts remain exact,
+   removed symbols are dropped, the new candidate source is rebound, and the
+   original `verified_ts_ns` is preserved. Projection therefore cannot prolong
+   evidence life.
+2. Candidate additions or unsafe drift in quantity step, tick size, minimum
+   quantity/notional, maximum market quantity, or maximum leverage select a
+   complete authenticated probe.
+3. Expired evidence selects the same complete probe; invalid or future-dated
+   evidence is fatal. The prior string-based classifier incorrectly conflated
+   future dating with expiry and was fixed during this audit.
+
+Only the complete-probe fallback loads demo credentials or submits orders. Its
+shared limiter moved from five to the official default UTA linear create/cancel
+ceiling of ten requests per second, while retaining a fresh per-symbol ticker,
+exact terminal no-fill evidence, cleanup, and post-maintenance direct flatness.
+See Bybit's [rate-limit table](https://bybit-exchange.github.io/docs/v5/rate-limit)
+and [demo-trading contract](https://bybit-exchange.github.io/docs/v5/demo).
+Provider latency and terminal visibility remain external, so no fixed full-probe
+duration is promised; per-symbol progress now includes elapsed time and ETA.
+
+The operator surface is also shorter. GitHub's manual workflow now supports the
+same guarded `rollout` and `recover` modes as the CLI, converting an explicit
+demo/paper checkbox, profile, reference, and recovery receipt into the exact
+arguments only inside the job. Push continues to run CI only. The liveness
+watchdog reopens the bound rules and warns during their final 24 hours, providing
+advance maintenance visibility without automatically placing orders or changing
+authority.
+
+Local validation for this candidate passed repository doctor, Ruff, mypy,
+shell parsing, YAML parsing, focused dynamic shell/receipt tests, and the full
+repository gate (`2,274 passed / 1 skipped` in 47.93 seconds). No commit, push,
+VPS mutation, demo order, ledger change, authority issuance, or deployment was
+performed by this follow-up. The installed runtime remains a separate fact to
+be established by an exact-commit read-only status check. That separate check
+subsequently returned `verify-ok` for installed commit
+`a9ac75d1fbcdac7e3e595ce2426c8b3db3999c4c`, profile `operational`, and the
+bound demo key's order permission. It did not inspect account flatness and did
+not deploy the local candidate.

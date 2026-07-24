@@ -457,7 +457,7 @@ clears t = 2.
 The committed configuration is
 `configs/lane2_premium_momentum_blend_v1.json`, executable as
 `liquidity_migration/lane2_blend.py`: daily, top-100 Bybit, 50/50
-premium + momentum-reversal, settlement-exact funding, 15% volatility target,
+premium + momentum-continuation, settlement-exact funding, 15% volatility target,
 **no dispersion gate**, **no Binance leg**, **no maturity filter**. Under
 `docs/governance.md` the commit is the registration; from that commit forward it
 grades itself on days it never saw.
@@ -534,3 +534,94 @@ rather than confidence:
 The honest next step is to resolve `funding=partial` before treating either
 sleeve's Sharpe as real, and to run `scripts/check_kill_criteria.py` against the
 live journal, which needs VPS access.
+
+---
+
+## 11. The tail is structural, and it is fixable (2026-07-25)
+
+Operator report: **demo reconciliation shows realised fees materially above the
+modelled cost, and forward testing produced large losses.** That is ground truth
+and it outranks every backtest in this document, including §10's.
+
+### 11.1 Cost error alone does not explain a losing book
+
+Decomposing the CONTINUOUS reconstruction (646 days, 1×):
+
+| component | contribution |
+| --- | ---: |
+| gross | +25.07% |
+| funding | −4.08% |
+| hedge, net | +2.33% |
+| **modelled trading cost** | **−2.19%** |
+| net | +21.13% |
+
+Modelled trading cost is **8.7% of gross** — implausibly cheap for a book that
+turns over ~3.7 trades/day. But the sensitivity says something important:
+
+| cost multiple vs model | 2× | 3× | 5× | 8× | **10.6×** | 15× |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| net | +18.9% | +16.8% | +12.4% | +5.8% | **+0.1%** | −9.5% |
+
+Costs would have to be **10.6× the model** merely to reach break-even. So if
+forward testing is *losing*, cost error is not a sufficient explanation on its
+own. Either the signal does not survive out of sample, or the tail events do the
+damage — and the operator's report of "massive losses" points at the tail.
+
+### 11.2 Replacing the idiosyncratic short with a basket short halves the tail for free
+
+Same signal throughout, **only the short leg's construction changes**. Top-100,
+24h disjoint holds, settlement-exact funding, 4 bp maker, 1,952 days:
+
+| variant | bp/day | Sharpe | worst day | worst 1% | loss conc. | max DD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A baseline — short the decile | 39.55 | 1.20 | −35.37% | −20.99% | 10.8% | 83.6% |
+| **B — short an equal-notional basket** | 38.62 | **1.55** | **−17.50%** | **−12.12%** | **8.6%** | **64.4%** |
+| C — short the decile minus "crowded" names | 37.82 | 1.13 | −43.63% | −23.91% | 12.0% | 86.5% |
+| D — half decile, half basket | 39.09 | 1.40 | −25.82% | −15.26% | 9.4% | 73.2% |
+
+**Variant B gives up 0.93 bp/day of mean — 2.4% of the return — and removes half
+the tail.** Worst day −35.4% → −17.5%, worst 1% −21.0% → −12.1%, max drawdown
+83.6% → 64.4%, Sharpe 1.20 → 1.55. D is the dial between them.
+
+This is exactly what the audit's mechanism predicts. The tail is ~95%
+idiosyncratic, so a short leg with **no idiosyncratic exposure** cannot carry it.
+It also explains why the deployed LONG sleeve, being long-only, has a −4.11%
+drawdown while a symmetric book does not.
+
+**The intuitive fix fails.** Screening "crowded" names (top-quintile funding) out
+of the short leg made the tail *worse* on every measure — worst day −43.6% and
+the highest loss concentration in the table. Funding percentile is not a squeeze
+predictor; removing those names removes diversification without removing hazard.
+
+The generator is visible directly: the worst single name in the short leg on a
+given day averages **−7.65%** and reaches **−90.13%**, with 94 days below −25%
+and 13 below −50%. An equal-weight leg of ~10 names passes a tenth of that
+straight through. A basket short has no such name.
+
+### 11.3 Correction: the momentum leg is continuation, not reversal
+
+`cross_section.long_short` defines `sign=+1` as "long the LOW end", so the
+committed `sign=-1` on `momentum_1w` means **long recent winners, short recent
+losers** — momentum *continuation*. Earlier drafts and the config comment called
+it reversal, which is backwards. Verified directly: the reversal direction earns
+−40.73 bp/day (Sharpe −1.23); continuation earns +39.55 (Sharpe 1.20).
+
+This also softens the tail question for that leg specifically: it shorts recent
+*losers*, which squeeze less violently than recent winners. Config, module, and
+the strategy program are corrected.
+
+### 11.4 What to do about CONTINUOUS
+
+1. **Re-cost the book from the demo reconciliation**, not from a multiplier. The
+   measured `execution_cost_model` decomposition (effective spread, impact,
+   realised spread) already exists; the 2.19% figure should be replaced by
+   realised fills before any further judgement of the sleeve.
+2. **Convert the short leg to a basket/index short**, or move part-way with
+   variant D. This is the highest-value structural change available: it targets
+   the mechanism the audit identified, costs almost nothing in mean return, and
+   is testable on the deployed component book before any deployment.
+3. **Do not add a crowding screen** on funding percentile. Measured, it makes the
+   tail worse.
+4. These are Lane-1 structural results on a cross-sectional proxy, not on the
+   CONTINUOUS component book itself. The same comparison should be run on the
+   deployed components before anything changes.

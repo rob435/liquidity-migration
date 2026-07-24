@@ -296,7 +296,7 @@ authorized.
       at 24h.
 - [x] **Lane-2 registration**: `configs/lane2_premium_momentum_blend_v1.json`,
       executable as `liquidity_migration/lane2_blend.py`. Daily, top-100 Bybit,
-      50/50 premium + 1-week momentum reversal, settlement-exact funding, 15% vol
+      50/50 premium + 1-week momentum continuation, settlement-exact funding, 15% vol
       target; no dispersion gate, no Binance leg, no maturity filter. Per
       `docs/governance.md` the commit is the registration; it grades forward from
       that commit on days it never saw.

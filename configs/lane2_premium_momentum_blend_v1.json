@@ -5,7 +5,7 @@
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
 
-  "claim": "A daily, market-neutral, top-100 Bybit book that is 50/50 cross-venue premium divergence and 1-week cross-sectional momentum reversal earns a positive risk-adjusted return net of settlement-exact funding and a 4 bp maker round trip.",
+  "claim": "A daily, market-neutral, top-100 Bybit book that is 50/50 cross-venue premium divergence and 1-week cross-sectional momentum continuation earns a positive risk-adjusted return net of settlement-exact funding and a 4 bp maker round trip.",
 
   "rule": {
     "venue": "bybit",
@@ -32,7 +32,7 @@
         "definition": "close / close[-168h] - 1",
         "sign": -1,
         "weight": 0.5,
-        "comment": "reversal: long recent losers, short recent winners"
+        "comment": "continuation: sign -1 means LONG the high-momentum decile (recent winners) and SHORT the low decile (recent losers). An earlier draft labelled this reversal, which was backwards."
       }
     ],
     "book": {

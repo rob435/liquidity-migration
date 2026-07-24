@@ -20,7 +20,10 @@ DEMO_RULE_PROBE_FAILURE_SCHEMA_VERSION = 1
 DEMO_RULE_PROBE_FAILURE_KIND = "bybit_demo_instrument_rule_probe_attempt"
 REGISTERED_MAX_PROBE_NOTIONAL_USDT = 200.0
 REGISTERED_PROBE_DISTANCE_BPS = 100.0
-REGISTERED_MAX_PRIVATE_REQUESTS_PER_SECOND = 5
+# Bybit's default UTA linear create/cancel/set-leverage ceiling is 10 requests
+# per second. The probe uses one shared limiter across every private/public call,
+# so this remains more conservative than the venue's endpoint-specific budgets.
+REGISTERED_MAX_PRIVATE_REQUESTS_PER_SECOND = 10
 REGISTERED_MAX_TESTED_LEVERAGE = 10.0
 TERMINAL_HISTORY_TIMEOUT_SECONDS = 30.0
 TERMINAL_HISTORY_MAX_POLLS = 100
@@ -57,7 +60,7 @@ def require_registered_demo_rule_probe_parameters(
     if not math.isfinite(distance) or distance != REGISTERED_PROBE_DISTANCE_BPS:
         raise ValueError("demo-rule probe distance is fixed prospectively at 100 bps")
     if rate <= 0 or rate > REGISTERED_MAX_PRIVATE_REQUESTS_PER_SECOND:
-        raise ValueError("demo-rule private request ceiling cannot exceed registered 5/s")
+        raise ValueError("demo-rule private request ceiling cannot exceed registered 10/s")
     return max_notional, distance, rate
 
 

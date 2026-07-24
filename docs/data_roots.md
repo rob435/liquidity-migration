@@ -97,6 +97,22 @@ only if that window has not influenced design. Once inspected or used to adapt
 the system, it is spent. Cross-venue agreement is robustness evidence when the
 claim needs it, not automatic independence.
 
+### Measured coverage tiers (2026-07-24)
+
+A dataset directory existing does not mean it is a research panel. Verified by
+partition census; see `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
+
+| Tier | Datasets | Reality |
+| --- | --- | --- |
+| A — deep, wide, both venues | `klines_1h`, `funding`, `premium_index_1h`, `mark_price_1h`, `index_price_1h` | 2021-01 → 2026-07; 579 common kline, 566 premium, 466 funding symbols |
+| B — deep, wide, Bybit only | `bybit/open_interest` | 2021-01 → 2026-07, 6 → 636 symbols. Best unused asset. |
+| C — wide, shallow, Binance only | `binance_usdm_open_interest`, `binance_usdm_taker_flow_1h` | ~637/658 symbols but only 70/67 days, from 2026-04-27 |
+| D — **not a panel** | `bybit/taker_flow_5m`, `bybit/tick_ohlc_1m` | 401 symbols, **median 11 days each** (min 1, max 78). Event windows only. |
+| — empty | `bybit/positioning_lsr`, `binance_usdm_metrics_5m` | zero partitions |
+
+Do not plan cross-sectional microstructure or flow research on Tier D. Confirm
+the census for any dataset before designing a claim around it.
+
 ## Operational roots
 
 Exact VPS paths come from the strict files:
