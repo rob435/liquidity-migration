@@ -15,8 +15,10 @@ deployment, or opens the separate real-money boundary.
   `LongV11aDivWeekendVol`. They are demo/paper runtime configurations, not
   validated alpha claims.
 - No researched replacement currently qualifies for implementation.
-- The prospective runtime-parity stream, sleeve kill criteria, and paper
-  passive-execution experiment remain active operational evidence surfaces.
+- Sleeve kill criteria and the paper passive-execution experiment remain active
+  operational evidence surfaces. The prospective runtime-parity epoch and all its
+  machinery were deleted on 2026-07-24; the forward stream is now just the
+  rolling record under `docs/governance.md`.
 - The account-kernel remediation in the local worktree is independent of this
   research reset and remains undeployed.
 
@@ -111,15 +113,24 @@ direction.
 
 ### Feasibility already checked
 
+Re-measured 2026-07-24; the earlier taker-flow line was materially wrong and is
+corrected here. Full detail in `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
+
 - Bybit hourly premium, funding, index, mark, and open-interest partitions span
-  `2021-01-01` through `2026-07-17`.
+  `2021-01-01` through `2026-07-17`. **Bybit open interest is the deepest
+  unused asset: 2,024 daily partitions growing 6 → 636 symbols.**
 - Binance hourly premium and funding span late 2019 through `2026-07-17`.
-- On `2026-07-16`, exact symbol names yielded 566 common premium/funding
-  symbols and 579 common kline symbols.
-- Bybit taker flow is available from `2023-03-29` but has gaps; Binance OI and
-  taker flow are only recent (roughly late April 2026 onward). A long-history
-  read can currently use premium/funding/basis, while flow/OI supports a shorter
-  diagnostic unless coverage is extended.
+- Common-symbol counts on the latest partition: 579 klines, 566 premium, 466
+  funding; 466 symbols carry both-venue kline + funding + premium together.
+- **Bybit `taker_flow_5m` and `tick_ohlc_1m` are not panels.** They hold 401
+  distinct symbols but a *median of 11 days each* (min 1, max 78), scattered
+  `2023-03-29` through `2026-05-24` — event windows, not cross-sectional
+  coverage. `positioning_lsr` and `binance_usdm_metrics_5m` are empty.
+- Binance OI and taker flow are wide but shallow: ~637/658 symbols over only
+  70/67 days from `2026-04-27`.
+- **Consequence:** cross-venue microstructure research is not currently
+  possible. Long-history work must use price, premium, funding, basis, and
+  Bybit OI. Design for that surface rather than assuming flow data exists.
 
 ## Proper work plan
 
@@ -240,10 +251,61 @@ authorized.
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
-- [ ] Build the minimal P0 causal substrate and publish its coverage map.
-- [ ] Produce the first P1 anomaly atlas with the full search log.
-- [ ] Deepen the highest-information anomalies and update this queue.
-- [ ] Commit Lane-2 scorers only when a formulation is worth prospective
-  learning; retain all resulting records.
+- [x] Build the minimal P0 causal substrate and publish its coverage map.
+      `liquidity_migration/cross_venue_panel.py` +
+      `scripts/build_cross_venue_panel.py`, built 2026-07-24 over the
+      both-venue population from `2021-01-01`. Coverage lives in each shard's
+      `manifest.json`; two source defects it exposed are recorded in
+      `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
+- [x] Produce the P1 anomaly search with the full log, and consolidate it.
+      `docs/anomaly_research_2026-07-24.md` — 37 mechanisms tested identically.
+      Survivors are cross-venue premium divergence and 1-week cross-sectional
+      momentum, both concentrated in the *most* liquid names and effectively
+      uncorrelated (+0.009). Funding carry broke in 2025-26 exactly when funding
+      inverted. The 24h-display rollover is a confirmed mechanism that does not
+      pay. The edge is non-monotone — essentially all of it is the short leg. Venue
+      volume-share migration — the most direct test of the Crowding Transfer
+      starting hypothesis below — is dead; the price dislocation pays, the flow
+      migration does not. Scoring primitives are
+      `liquidity_migration/cross_section.py`.
+- [x] Withdraw the delisting-decay lead. The 220.8 bp/day figure used a
+      look-ahead label (contract stops appearing). No point-in-time trigger
+      reaches it: turnover collapse identifies dying contracts at **0.96× lift**,
+      and the same trigger pays *more* on contracts that never died (+38.0 bp,
+      t 4.26), so the residual is generic "short low-turnover", not delisting.
+      No announcement-lead-time check can rescue it.
+- [x] Withdraw the weekly-horizon recommendation. The rising t-stat was an
+      overlap artifact; under disjoint sampling t peaks at 24h (3.48) and falls
+      to 1.18 at 168h. Hold 24h.
+- [x] Settlement-exact funding replay. Charging funding only at settlements
+      inside the hold (not `rate × hours/8`) **reverses the leg attribution**:
+      premium 33.63→16.55 bp, momentum 16.98→35.42 bp, blend unchanged at ~26.
+      The blend is robust to the funding treatment; the legs are not.
+- [x] Withdraw the dispersion gate. Under settlement-exact funding it gives
+      Sharpe 1.30 vs 1.29 ungated and a *worse* compounded drawdown (51.6% vs
+      46.1%). It was an artifact of the funding approximation.
+- [x] Compounded accounting and volatility target. The blend was never near
+      liquidation — worst day −29.17%, no day below −50%; the >100% drawdowns in
+      the earlier caveat were single legs, not the blend. A 15% annual vol target
+      (cap 3×) lifts Sharpe 1.24→1.59 and cuts compounded drawdown 46%→13.6%.
+- [x] Decompose `premium_diff` by venue. Net of each venue's own settlement-exact
+      funding, **Bybit carries the return** (23.81 bp, t 2.06 at 24h) and Binance
+      does not (11.42 bp, t 1.01); adding a Binance leg dilutes to 17.62. The
+      effect is Bybit-local, so **true cross-venue execution is not worth building
+      for this signal**. Caveat: the premium leg is marginal and clears t = 2 only
+      at 24h.
+- [x] **Lane-2 registration**: `configs/lane2_premium_momentum_blend_v1.json`,
+      executable as `liquidity_migration/lane2_blend.py`. Daily, top-100 Bybit,
+      50/50 premium + 1-week momentum reversal, settlement-exact funding, 15% vol
+      target; no dispersion gate, no Binance leg, no maturity filter. Per
+      `docs/governance.md` the commit is the registration; it grades forward from
+      that commit on days it never saw.
+- [ ] Read the paper passive-execution A/B for realised maker-fill probability
+      (target was 100 fills per arm). This is the last unmeasured cost input and
+      needs VPS data.
+- [ ] Run `scripts/check_kill_criteria.py` against the deployed sleeves. Needs
+      the canonical account journal, which is VPS-only.
+- [ ] Orthogonalise `basis` against `premium_diff` — they are one family and
+      should not be double-counted.
 
 No other strategy task list is active.
