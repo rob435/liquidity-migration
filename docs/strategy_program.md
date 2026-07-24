@@ -248,6 +248,14 @@ authorized.
 
 ## Live task queue
 
+**Sequenced plan: `docs/roadmap_2026-07-25.md`.** That document supersedes the
+ordering of this list. The measured position it starts from: ~44 mechanisms
+tested means the corrected significance threshold is t = 3.25, and our best
+signals are t 1.30-2.06 at the measured 15.56 bp round trip. There is no
+validated edge yet, and execution work cannot create one (its ceiling is
+Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
+
+
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
