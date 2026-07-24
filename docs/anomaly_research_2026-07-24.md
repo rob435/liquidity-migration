@@ -76,12 +76,20 @@ disappointment; nothing here distinguishes those.
 
 ### Why this matters for the tail problem
 
-The audit's core finding was that the deployed book takes 22.4% of its losses in
-1% of trades, worst case −249,169 bp, and that the tail is ~95% idiosyncratic
+The audit found that **a short book in this universe** takes 22.4% of its losses
+in 1% of trades, worst case −249,169 bp, and that the tail is ~95% idiosyncratic
 and un-hedgeable at book level. The blend is a **different risk object**: market
-neutral, daily, top-100 only, both legs liquid, 12.4% loss concentration. That
-is not a hedge of the old tail — it is a book that does not take it. See caveat
-§7.6: its own drawdowns are large.
+neutral, daily, top-100 only, both legs liquid, 12.4% loss concentration.
+
+> **Correction, 2026-07-24.** An earlier version of this paragraph described that
+> statistic as a property of *the deployed book*. It is not. It is the payoff
+> geometry of hypothetical short positions across the research universe. Measured
+> directly (`scripts/equity_curves.sh`, full PIT), the deployed sleeves carry no
+> such tail: LONG is **long-only** with max drawdown −4.11% and worst month
+> −3.06%; CONTINUOUS has max drawdown −1.29% and **zero days worse than −1%**.
+> Neither is decaying — both are stronger in the second half of their samples.
+> The premise that this research was replacing a broken deployed book was wrong;
+> see §10.
 
 ## 3. How the surviving book should be built
 
@@ -453,3 +461,76 @@ premium + momentum-reversal, settlement-exact funding, 15% volatility target,
 **no dispersion gate**, **no Binance leg**, **no maturity filter**. Under
 `docs/governance.md` the commit is the registration; from that commit forward it
 grades itself on days it never saw.
+
+---
+
+## 10. The deployed sleeves are not spent (2026-07-24, third pass)
+
+Prompted by a direct challenge — *is the current signal fully spent?* — the two
+deployed profiles were measured with the repository-standard tooling
+(`scripts/equity_curves.sh`, `~/SHARED_DATA/bybit_full_pit`, full PIT) rather
+than assumed dead. They are not spent. Both are **improving**.
+
+### LONG (`LongV11aDivWeekendVol`), long-only, 3× cost multiplier
+
+2021-01-02 → 2026-07-17: **+40.73%**, Sharpe-like **1.60**, max drawdown
+**−4.11%**, worst month −3.06%, 292 trades, win rate 51.4%, profit factor 1.83.
+Gross +42.35%, cost −6.69%, funding −1.04%.
+
+| 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| +4.16% | −0.76% | +11.50% | +12.80% | +4.30% | +3.83% |
+| Sh 1.57 | −0.25 | 1.01 | 1.57 | 0.92 | **2.60** |
+
+First half +15.64%, second half **+21.75%**.
+
+### CONTINUOUS (`continuous_ensemble_v2`), 1× modeled
+
+2023-03-13 → 2026-07-16: **+23.42%** (6.49%/yr), Sharpe **2.74**, max drawdown
+**−1.29%**, MAR 5.41, worst day −0.93%, **zero days below −1%**.
+
+| 2023 | 2024 | 2025 | 2026 |
+| ---: | ---: | ---: | ---: |
+| +3.58% | +4.91% | +7.22% | +5.93% |
+| Sh 2.99 | 2.68 | 4.92 | **5.15** |
+
+First half +6.97%, second half **+15.38%**.
+
+### What this changes
+
+**The replacement premise was wrong.** Against the Lane-2 blend registered in §9:
+
+| | Sharpe | max DD | return |
+| --- | ---: | ---: | ---: |
+| Deployed LONG | 1.60 | 4.11% | ~6.4%/yr |
+| Deployed CONTINUOUS | 2.74 | 1.29% | 6.49%/yr |
+| Lane-2 blend, vol-targeted | 1.59 | 13.6% | 29%/yr |
+
+The new blend is **not better risk-adjusted than either deployed sleeve**, and
+CONTINUOUS beats it substantially. The blend's higher return is bought entirely
+with risk, not edge.
+
+The binding constraint is therefore **risk utilisation, not signal quality**.
+Both sleeves run at 1–4% drawdown against an account that could tolerate far
+more. Closing that gap is a cheaper source of return than any new book.
+
+### Do not take these numbers at face value
+
+Sharpe 2.74–5.15 with sub-1% drawdowns is *too good*, and should raise suspicion
+rather than confidence:
+
+- **`funding=partial` on all three CONTINUOUS components.** §9.1 established that
+  funding treatment alone can halve or double a leg. A partially-modelled funding
+  input is the single most likely source of flattery here, and it is the first
+  thing to check.
+- CONTINUOUS covers only 646 days from 2023-03-13, not the requested 2021 start.
+- Both are **Lane-1**: these profiles were selected on this history and cannot
+  grade themselves. The run labels are `exploratory` and `historical_equity`.
+- Neither reconstruction is a literal daemon replay; capacity, netting, order
+  lifecycle, and live state can differ (`docs/active_trading_logic.md`).
+- The 4× CONTINUOUS chart is **presentation leverage only** — it models no margin
+  or liquidation and must never be quoted as a modelled result.
+
+The honest next step is to resolve `funding=partial` before treating either
+sleeve's Sharpe as real, and to run `scripts/check_kill_criteria.py` against the
+live journal, which needs VPS access.
