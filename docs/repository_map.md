@@ -40,13 +40,13 @@ deploy references, and tests.
 | LONG target production | `long_native.py`, `long_native_event_demo.py`, `long_native_event_demo_daemon.py`, `strategy_targets.py` | LONG profile, event-cycle, daemon, and target tests; `docs/active_trading_logic.md` |
 | CONTINUOUS target production | `continuous_demo.py`, `continuous_demo_daemon.py`, `continuous_events.py`, `continuous_profile.py`, `continuous_rebalance.py`, `continuous_cycle_status.py` | CONTINUOUS profile, cycle, daemon, event, rebalance, and receipt-bound status tests; `docs/active_trading_logic.md` |
 | Shared strategy-to-account boundary | `strategy_runtime.py`, `strategy_planning.py`, `strategy_targets.py`, `account_intent_client.py`, `account_service.py`, `account_route.py` | Strategy runtime/target, intent client, account service, and route tests; `docs/account_execution.md` |
-| Account state and accounting | `account_contracts.py`, `account_kernel.py`, `account_strategy_state.py`, `account_reconcile.py`, `account_venue_accounting.py`, `historical_account_replay.py` | Kernel, journal, strategy-state, reconciliation, accounting, and replay tests; `docs/account_journal.md` |
+| Account state and accounting | `account_contracts.py`, `account_kernel.py`, `account_strategy_state.py`, `account_reconcile.py`, `account_venue_accounting.py`, `historical_account_replay.py` | Kernel, journal, strategy-state, reconciliation, accounting, and replay tests; `docs/account_journal.md`, `docs/timestamp_glossary.md` |
 | Venue execution boundary | `account_service_bybit.py`, `account_execution_stream.py`, `bybit_execution_adapter.py`, `bybit_market_data.py`, `execution_adapters.py` | Account-service Bybit, execution-stream, market-data-boundary, and adapter-facing tests |
 | Market capture and liveness | `market_capture.py`, `ws_state_cache.py`, `account_owner_health.py`, `account_owner_readiness.py`, `strategy_cycle_health.py`, `run_diagnostics.py` | Capture, cache, owner health/readiness, strategy-completion, diagnostics, and liveness-script tests |
 | Operations and deployment | `scripts/ops.sh`, guarded runtime/deploy scripts, `deploy/systemd/`, `.github/workflows/vps-deploy.yml` | Runtime-script and ops tests; `docs/operations.md`, `deploy/systemd/README.md`, `STATE.md` |
 | Research integrity and reporting | Research modules, `scripts/equity_curves.*`, `scripts/research_refresh.*`, `three_way_reconciliation.py`, active contracts, and raw run artifacts | `docs/governance.md`, `docs/strategy_program.md` (single current program), `docs/research_refresh.md`, `docs/preregistration/INDEX.md`, applicable research skills and report tests |
 | Trade diagnostics | Verified account journal, exact decision/markout books, and the read-only command projection | `trade_diagnostics.py`, `post_fill_markouts.py`, bounded capture hooks, `scripts/build_trade_diagnostics.py`, `docs/trade_diagnostics.md`, and focused diagnostic tests |
-| Strategy-source diagnostics | Observer-only LONG/CONTINUOUS source gates, separated future-path labels, and registered exploratory analysis | `strategy_funnel.py`, hooks at the existing strategy owners, `scripts/build_candidate_tape.py`, `scripts/analyze_strategy_overhaul_v2.py`, the V2 contracts/receipt, and focused tests |
+| Strategy-source diagnostics | Observer-only LONG/CONTINUOUS source gates, separated future-path labels, and registered exploratory analysis | `strategy_funnel.py`, hooks at the existing strategy owners, `scripts/build_candidate_tape.py`, the V2 contracts/receipt, and focused tests |
 
 Prefixes are a discovery aid, not proof of ownership. Open the definition,
 callers, persistence format, runtime configuration, and focused tests before a
@@ -69,9 +69,29 @@ cross-domain edit.
 - Registered candidate-tape partitions: `scripts/build_candidate_tape.py --help`;
   this entry point reads only the preregistered PIT root and writes one run-scoped
   diagnostic partition.
-- Registered V2 aggregate analysis: `scripts/analyze_strategy_overhaul_v2.py --help`;
-  its preflight is outcome-blind, while build mode is contract-bound
-  exploratory research and carries no operational authority.
+- Cross-venue anomaly research: `liquidity_migration/cross_venue_panel.py` builds
+  the causal panel via `scripts/build_cross_venue_panel.py`;
+  `liquidity_migration/cross_section.py` holds the scoring primitives. Findings
+  are consolidated in `docs/anomaly_research_2026-07-24.md`.
+- Deleted on 2026-07-24, recoverable from Git history: the V2 aggregate analyser,
+  the prospective full-ledger replay runner, the `research_data_snapshot`
+  script/module/tests (zero references), and `unit_numeric_comparison`. All
+  Strategy Overhaul V2 contracts and baselines, the
+  `reports/autonomous-improvement/` cycle reports, and `docs/incidents/` went in
+  the same pass. `scripts/build_candidate_tape.py` no longer hashes a contract;
+  its `--contract` / `--base-contract` arguments were removed with the file they
+  defaulted to.
+- **The whole prospective runtime-parity epoch was deleted on 2026-07-24 by owner
+  instruction**: `run_active_runtime_comparator.py`,
+  `verify_integrated_runtime_comparator.py`, `active_runtime_comparator.py`,
+  `freeze_forward_epoch_start.py`, `forward_epoch_start.py`, `venue_lifecycle.py`,
+  their tests, and all eight registered contracts. Published receipts still exist
+  on disk but nothing here reads or reproduces them. The forward stream is now
+  just the rolling record under `docs/governance.md`.
+- `docs/preregistration/` now holds only contracts with a live executable form
+  (sleeve kill criteria, passive execution). A contract with no verifier is
+  history, and history lives in Git.
+- Context for the whole pass: `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
 
 ## Validation ladder
 

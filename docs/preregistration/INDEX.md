@@ -1,28 +1,34 @@
 # Active evidence contracts
 
-This index lists only contracts that still govern an active evidence stream or
-are required inputs to a surviving replay. Current strategy evidence and work
-live in `docs/strategy_program.md`; evidence policy lives in
-`docs/governance.md`.
+This index lists only contracts that still govern an active evidence stream.
+Current strategy evidence and work live in `docs/strategy_program.md`; evidence
+policy lives in `docs/governance.md`.
 
 | Surface | Contract | Status |
 | --- | --- | --- |
-| Runtime-parity forward stream | `prospective_runtime_parity_execution_epoch_2026-07-18.md`, `prospective_runtime_parity_execution_epoch_2026-07-18_amendments.md`, and `prospective_runtime_parity_execution_epoch_2026-07-18_post17_amendments.md` through `post22_amendments.md` | Active rolling evidence contract; historical 45/45 read remains on file, but rolling post-commit evidence is authoritative. |
-| Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG and CONTINUOUS. |
-| Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B; target is 100 fills per arm before an economics conclusion. |
+| Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG and CONTINUOUS, executable as `liquidity_migration/sleeve_kill_criteria.py` and checkable via `scripts/check_kill_criteria.py`. |
+| Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B, implemented in `liquidity_migration/passive_execution.py`; target is 100 fills per arm before an economics conclusion. |
 
-## Compatibility inputs, not active research
+Both remaining contracts have a live executable form. A contract with no verifier
+does not belong here — it is history, and history lives in Git.
 
-The following immutable V2 contracts remain only because
-`scripts/build_candidate_tape.py`, `scripts/analyze_strategy_overhaul_v2.py`,
-and the prospective full-ledger replay verify their exact hashes:
+## Removed on 2026-07-24
 
-- `strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md`
-- `strategy_overhaul_v2_completion_cycle_2026-07-17.md`
-- `strategy_overhaul_v2_phase3_replay_recovery_2026-07-18.md`
-- `strategy_overhaul_v2_phase3_buffered_replay_recovery_2026-07-18.md`
+**The prospective runtime-parity execution epoch is fully retired**: the
+comparator, the `forward_epoch_start` collector, `venue_lifecycle`, and all eight
+`prospective_runtime_parity_execution_epoch_2026-07-18*` contracts. Published
+start and verification receipts still exist on disk and on the VPS, but nothing
+in this checkout reads or validates them, and the parity comparison cannot be
+reproduced without recovering the tooling from Git history.
 
-They do not define a current roadmap and must not be reopened merely because
-the files remain. Historical drafts, queues, receipts, and raw report trees
-were removed from the working tree on 2026-07-21 after their useful conclusions
-were consolidated. Git history remains the audit trail.
+The epoch's calibration/validation window survives only as a plain date range —
+2026-07-19 14:00 UTC through 2026-10-17 14:00 UTC — because
+`sleeve_kill_criteria_2026-07-20.md` measures against it.
+
+**Strategy Overhaul V2 is fully retired**: the aggregate analyser, the
+prospective full-ledger replay runner, and every V2 contract, baseline, and
+diagnostic epoch. `scripts/build_candidate_tape.py` no longer hashes a contract;
+its `--contract` / `--base-contract` arguments were removed with the file they
+defaulted to.
+
+Git history remains the audit trail for every removed file.

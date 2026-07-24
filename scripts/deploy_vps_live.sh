@@ -194,6 +194,31 @@ run_phase() {
     return "$status"
 }
 
+run_phase_pair() {
+    local group="$1" left_label="$2" left_function="$3"
+    local right_label="$4" right_function="$5"
+    local started finished left_pid right_pid left_status=0 right_status=0
+    started="$(date +%s)"
+    printf 'phase-group-start name=%s members=%s,%s utc=%s\n' \
+        "$group" "$left_label" "$right_label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    run_phase "$left_label" "$left_function" &
+    left_pid=$!
+    run_phase "$right_label" "$right_function" &
+    right_pid=$!
+    if wait "$left_pid"; then left_status=0; else left_status=$?; fi
+    if wait "$right_pid"; then right_status=0; else right_status=$?; fi
+    finished="$(date +%s)"
+    if [ "$left_status" -eq 0 ] && [ "$right_status" -eq 0 ]; then
+        printf 'phase-group-ok name=%s elapsed_seconds=%s\n' \
+            "$group" "$((finished - started))"
+        return 0
+    fi
+    printf 'phase-group-failed name=%s elapsed_seconds=%s left_status=%s right_status=%s\n' \
+        "$group" "$((finished - started))" "$left_status" "$right_status" >&2
+    [ "$left_status" -ne 0 ] && return "$left_status"
+    return "$right_status"
+}
+
 GIT_ENV=(
     /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C LC_ALL=C
     GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1
@@ -540,29 +565,40 @@ PY
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
         paper_path_args+=(--root "$root")
     done
-    run_phase paper-tree-preflight \
+    paper_tree_preflight_phase() {
         "$PYTHON" -m liquidity_migration.reset_path_safety preflight-paper \
-        --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
-        || fail "paper runtime descriptor/mount preflight failed"
-    run_phase demo-tree-preflight \
+            --anchor "$REPO_DIR/data" "${paper_path_args[@]}"
+    }
+    demo_tree_preflight_phase() {
         "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
-        --anchor "$REPO_DIR/data" \
-        --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
-        --continuous-root "$CONTINUOUS_DEMO_ROOT" \
-        || fail "demo runtime descriptor/mount preflight failed"
-
-    run_phase paper-tree-normalize \
+            --anchor "$REPO_DIR/data" \
+            --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+            --continuous-root "$CONTINUOUS_DEMO_ROOT"
+    }
+    paper_tree_normalize_phase() {
         "$PYTHON" -m liquidity_migration.reset_path_safety normalize-paper \
-        --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
-        --uid "$paper_uid" --gid "$paper_gid" --create-missing \
-        || fail "descriptor-rooted paper runtime normalization failed"
-    run_phase demo-tree-normalize \
+            --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
+            --uid "$paper_uid" --gid "$paper_gid" --create-missing
+    }
+    demo_tree_normalize_phase() {
         "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
-        --anchor "$REPO_DIR/data" \
-        --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
-        --continuous-root "$CONTINUOUS_DEMO_ROOT" \
-        --uid "$root_uid" --gid "$paper_gid" --create-missing \
-        || fail "descriptor-rooted shared demo cache normalization failed"
+            --anchor "$REPO_DIR/data" \
+            --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+            --continuous-root "$CONTINUOUS_DEMO_ROOT" \
+            --uid "$root_uid" --gid "$paper_gid" --create-missing
+    }
+
+    # The batches are disjoint. Complete both read-only plans before either
+    # mutation starts, then normalize them concurrently. Each normalizer still
+    # performs its own full descriptor-rooted plan and independent final rescan.
+    run_phase_pair runtime-tree-preflight \
+        paper-tree-preflight paper_tree_preflight_phase \
+        demo-tree-preflight demo_tree_preflight_phase \
+        || fail "paper/demo runtime descriptor/mount preflight failed"
+    run_phase_pair runtime-tree-normalize \
+        paper-tree-normalize paper_tree_normalize_phase \
+        demo-tree-normalize demo_tree_normalize_phase \
+        || fail "descriptor-rooted paper/demo runtime normalization failed"
     chown root:root \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env
@@ -726,6 +762,7 @@ invalidate_operational_authorization() {
 
 ROLLOUT_REFRESH_STALE_DEMO_RULES=0
 ROLLOUT_DEMO_RULES_REFRESHED=0
+ROLLOUT_DEMO_RULES_PROJECTED=0
 
 validate_recovery_reset_receipt() {
     [ -n "$DEPLOY_RESET_RECEIPT" ] \
@@ -783,37 +820,31 @@ PY
 
 refresh_stale_demo_rules_if_requested() {
     [ "$ROLLOUT_REFRESH_STALE_DEMO_RULES" -eq 1 ] || return 0
-    local demo_symbols demo_rules receipt_dir refreshed_rules freshness_status
-    local candidate_dir refreshed_candidate=""
-    unset ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
+    local demo_rules receipt_dir refreshed_rules="" freshness_status
+    local candidate_dir refreshed_candidate projected_rules projection_status=0
+    local refresh_reason=""
+    unset ACCOUNT_DEMO_RULES_FILE \
         BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
         BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE
-    demo_symbols="$ACCOUNT_SYMBOLS_FILE"
+        ACCOUNT_DEMO_RULES_FILE
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     if "$PYTHON" - "$demo_rules" <<'PY'
 import sys
-from liquidity_migration.account_execution_config import load_demo_rules
-from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
+from liquidity_migration.candidate_rule_coverage import (
+    REGISTERED_MAX_RULE_AGE_SECONDS,
+    classify_demo_rule_receipt_freshness,
+)
 
-try:
-    load_demo_rules(
-        sys.argv[1],
-        max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
-    )
-except ValueError as exc:
-    if str(exc) == "demo rules receipt is stale or future-dated":
-        raise SystemExit(3) from exc
-    raise
+status = classify_demo_rule_receipt_freshness(
+    sys.argv[1],
+    max_rule_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
+)
+if status == "expired":
+    raise SystemExit(3)
 PY
     then
-        if [ -z "$DEPLOY_RESET_RECEIPT" ]; then
-            echo "demo-rule-refresh-skipped reason=fresh"
-            return 0
-        fi
-        echo "demo-rule-refresh-forced reason=fresh-account-epoch"
         freshness_status=0
     else
         freshness_status=$?
@@ -821,33 +852,68 @@ PY
     [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] \
         || fail "configured demo-rule receipt failed validation for a reason other than age"
 
-    lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/bybit-demo.env \
-        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
-        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
-    [ -z "${BYBIT_REAL_API_KEY:-}" ] && [ -z "${BYBIT_REAL_API_SECRET:-}" ] \
-        || fail "demo-rule refresh refuses mainnet credentials"
-    case "${REAL_MONEY:-false}" in
-        0|false|FALSE|no|NO|off|OFF|'') ;;
-        *) fail "demo-rule refresh refuses REAL_MONEY" ;;
-    esac
-    receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
-    install -d -o root -g root -m 0700 "$receipt_dir"
-    if [ -n "$DEPLOY_RESET_RECEIPT" ]; then
-        candidate_dir=/var/lib/liquidity-migration/candidate-universe-receipts
-        install -d -o root -g root -m 0700 "$candidate_dir"
-        refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-        "$PYTHON" scripts/freeze_account_candidate_universe.py \
-            --output "$refreshed_candidate"
-        demo_symbols="$refreshed_candidate"
-        printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
+    if [ "$freshness_status" -eq 0 ] && [ -z "$DEPLOY_RESET_RECEIPT" ]; then
+        echo "demo-rule-maintenance-plan path=reuse reason=fresh"
+        return 0
     fi
-    refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-    DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
-        --symbols-file "$demo_symbols" \
-        --prior-rules-file "$demo_rules" \
-        --output "$refreshed_rules" \
-        --confirm-demo-probe
+
+    candidate_dir=/var/lib/liquidity-migration/candidate-universe-receipts
+    receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
+    install -d -o root -g root -m 0700 "$candidate_dir" "$receipt_dir"
+    refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+    "$PYTHON" scripts/freeze_account_candidate_universe.py \
+        --output "$refreshed_candidate"
+    printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
+
+    if [ "$freshness_status" -eq 0 ]; then
+        # A reset changes only local journals. Retained symbols keep their exact
+        # still-fresh venue evidence and timestamp; a candidate addition exits 3
+        # and falls through to a complete fresh probe.
+        projected_rules="$receipt_dir/demo-rules-projected-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+        if "$PYTHON" scripts/project_demo_rules_to_candidate.py \
+            --candidate-file "$refreshed_candidate" \
+            --prior-rules-file "$demo_rules" \
+            --output "$projected_rules"; then
+            projection_status=0
+        else
+            projection_status=$?
+        fi
+        case "$projection_status" in
+            0)
+                refreshed_rules="$projected_rules"
+                ROLLOUT_DEMO_RULES_PROJECTED=1
+                echo "demo-rule-maintenance-plan path=projection reason=fresh-candidate-subset"
+                ;;
+            3)
+                refresh_reason=candidate-addition-or-structural-drift
+                echo "demo-rule-maintenance-plan path=probe reason=candidate-addition-or-structural-drift"
+                ;;
+            *) fail "fresh demo-rule candidate projection failed" ;;
+        esac
+    else
+        refresh_reason=expired
+        echo "demo-rule-maintenance-plan path=probe reason=expired"
+    fi
+
+    if [ -z "$refreshed_rules" ]; then
+        lm_load_private_systemd_environment "$PYTHON" \
+            /etc/liquidity-migration/bybit-demo.env \
+            BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+        [ -z "${BYBIT_REAL_API_KEY:-}" ] && [ -z "${BYBIT_REAL_API_SECRET:-}" ] \
+            || fail "demo-rule refresh refuses mainnet credentials"
+        case "${REAL_MONEY:-false}" in
+            0|false|FALSE|no|NO|off|OFF|'') ;;
+            *) fail "demo-rule refresh refuses REAL_MONEY" ;;
+        esac
+        refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+        DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
+            --symbols-file "$refreshed_candidate" \
+            --prior-rules-file "$demo_rules" \
+            --output "$refreshed_rules" \
+            --confirm-demo-probe
+        ROLLOUT_DEMO_RULES_REFRESHED=1
+    fi
 
     "$PYTHON" - /etc/liquidity-migration/account-execution.env \
         "$refreshed_rules" "$refreshed_candidate" <<'PY'
@@ -865,16 +931,14 @@ from liquidity_migration.systemd_environment import load_private_systemd_environ
 
 path = Path(sys.argv[1])
 rules = Path(sys.argv[2]).resolve(strict=True)
-candidate_raw = sys.argv[3]
+candidate = Path(sys.argv[3]).resolve(strict=True)
 load_demo_rules(rules, max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS)
 values = load_private_systemd_environment(path)
 values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
-if candidate_raw:
-    candidate = Path(candidate_raw).resolve(strict=True)
-    load_candidate_universe(candidate)
-    build_candidate_rule_coverage(candidate, rules)
-    values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
-    values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
+load_candidate_universe(candidate)
+build_candidate_rule_coverage(candidate, rules)
+values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
+values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
 descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
 try:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -894,9 +958,13 @@ except BaseException:
     raise
 PY
     unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
-    ROLLOUT_DEMO_RULES_REFRESHED=1
-    printf 'demo-rule-refresh-ok path=%s candidate=%s\n' \
-        "$refreshed_rules" "${refreshed_candidate:-unchanged}"
+    if [ "$ROLLOUT_DEMO_RULES_PROJECTED" -eq 1 ]; then
+        printf 'demo-rule-projection-ok path=%s candidate=%s\n' \
+            "$refreshed_rules" "$refreshed_candidate"
+    else
+        printf 'demo-rule-refresh-ok path=%s candidate=%s reason=%s\n' \
+            "$refreshed_rules" "$refreshed_candidate" "$refresh_reason"
+    fi
 }
 
 install_mode() {
@@ -929,7 +997,8 @@ install_mode() {
     run_phase ruff "$PYTHON" -m ruff check liquidity_migration scripts tests
     run_phase mypy "$PYTHON" -m mypy liquidity_migration
     run_phase focused-runtime-tests "$PYTHON" -m pytest -q \
-        tests/test_forward_epoch_start.py \
+        tests/test_candidate_rule_coverage.py \
+        tests/test_demo_rule_probe.py \
         tests/test_deploy_rollout_readiness.py \
         tests/test_operational_profile.py \
         tests/test_operational_runtime_authority.py \
@@ -1196,7 +1265,21 @@ start_if() {
 }
 
 seed_rmom() {
-    local deadline ok
+    local deadline gate_path ok
+    gate_path=data/bybit-continuous-demo-event/residual_momentum.parquet
+
+    # The reset contract deliberately preserves this signal artifact.  A full
+    # schema/freshness/cross-section check is sufficient for activation; the
+    # daily timer owns normal recomputation.  Do not spend roughly a minute
+    # rebuilding an already-valid gate on every unrelated code deployment.
+    # A failed prior refresh remains actionable and therefore forces the repair
+    # path even if the last successfully written artifact is still usable.
+    if ! systemctl is-failed --quiet liquidity-migration-continuous-rmom-refresh.service \
+        && "$PYTHON" scripts/check_residual_momentum_gate.py --path "$gate_path"; then
+        echo "rmom-bootstrap path=reuse reason=current-valid-gate"
+        return 0
+    fi
+    echo "rmom-bootstrap path=refresh reason=missing-stale-invalid-or-failed-unit"
     deadline=$(( $(date +%s) + RMOM_BOOTSTRAP_TIMEOUT_SECONDS ))
     while true; do
         ok=1
@@ -1205,7 +1288,7 @@ seed_rmom() {
         if sleeve_on "$CONTINUOUS_SLEEVE" \
             || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
             "$PYTHON" scripts/check_residual_momentum_gate.py \
-                --path data/bybit-continuous-demo-event/residual_momentum.parquet || ok=0
+                --path "$gate_path" || ok=0
         fi
         [ "$ok" -eq 0 ] || return 0
         [ "$(date +%s)" -lt "$deadline" ] || fail "RMOM bootstrap timed out"
@@ -1386,6 +1469,11 @@ rollout_mode() {
     load_authorization rollout-shutdown
     run_phase current-topology-verification verify_topology
     run_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
+    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
+        echo "deployment-plan class=exceptional rule_maintenance=full-probe reason=expired"
+    else
+        echo "deployment-plan class=routine rule_maintenance=reuse reason=fresh"
+    fi
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
 
     if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
@@ -1432,8 +1520,9 @@ recover_mode() {
     # Recovery is narrower than rollout: it cannot stop a running fleet or
     # rely on expired prior authority. It reopens one full, leave-stopped reset
     # receipt for this exact commit, independently proves account flatness,
-    # installs, refreshes the new epoch's candidate/rule evidence, creates
-    # fresh authority, and activates under the same explicit owner handshake.
+    # installs, rebinds still-fresh subset evidence or probes only when expiry,
+    # candidate additions, or unsafe rule drift require it, creates fresh
+    # authority, and activates under the same explicit owner handshake.
     require_checkout
     require_quiescent
     PYTHON=.venv/bin/python
@@ -1451,11 +1540,10 @@ recover_mode() {
     run_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
     run_phase recovery-flat-account-proof \
         rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
+    echo "deployment-plan class=recovery rule_maintenance=auto candidate_refresh=required"
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_phase stopped-install install_mode
-    [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ] \
-        || fail "recovery did not refresh the reset epoch's demo-rule evidence"
-    run_phase post-rule-refresh-flat-account-proof \
+    run_phase post-rule-maintenance-flat-account-proof \
         rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
     run_phase create-operational-authority issue_rollout_authorization
     run_phase activate-and-verify activate_mode

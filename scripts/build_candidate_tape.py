@@ -758,17 +758,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", type=dt.date.fromisoformat, required=True)
     parser.add_argument("--end", type=dt.date.fromisoformat, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument(
-        "--contract",
-        type=Path,
-        default=REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md",
-    )
-    parser.add_argument(
-        "--base-contract",
-        type=Path,
-        default=REPO / "docs/preregistration/strategy_overhaul_v2_diagnostic_epoch_2026-07-17.md",
-        help="source/gate contract retained by a prospective continuation",
-    )
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
     return parser
@@ -778,8 +767,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = args.root.expanduser().resolve(strict=True)
     out = args.out.expanduser().resolve()
-    contract = args.contract.expanduser().resolve(strict=True)
-    base_contract = args.base_contract.expanduser().resolve(strict=True)
     if args.end <= args.start:
         raise ValueError("candidate partition end must be after start")
     read_start = args.start - dt.timedelta(days=LONG_WARMUP_DAYS)
@@ -799,10 +786,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "venue": args.venue,
         "source_window": {"start": args.start.isoformat(), "end_exclusive": args.end.isoformat()},
         "read_window": {"start": read_start.isoformat(), "end_exclusive": read_end.isoformat()},
-        "contract": str(contract),
-        "contract_sha256": _sha256(contract),
-        "base_contract": str(base_contract),
-        "base_contract_sha256": _sha256(base_contract),
         "kline_file_count": len(kline_files),
         "manifest_file_count": len(manifest_files),
         "residual_momentum_present": rmom_path.is_file(),
@@ -932,7 +915,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels.write_parquet(labels_path, compression="zstd", statistics=True)
         manifest_payload: dict[str, Any] = {
             "schema_version": 1,
-            "kind": "strategy_overhaul_v2_candidate_tape_partition",
+            "kind": "candidate_tape_partition",
             "study_mode": "exploratory",
             "run_identity": run_identity,
             "run_identity_sha256": run_identity_sha256,

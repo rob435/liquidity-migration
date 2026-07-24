@@ -275,7 +275,8 @@ def test_install_is_stopped_exact_commit_preparation_only() -> None:
     assert install.index("git_fetch fetch") < install.index("git checkout -B")
     assert "requirements.lock" in install
     assert "--no-deps" in install and "--only-binary=:all:" in install
-    assert "tests/test_forward_epoch_start.py" in install
+    assert "tests/test_candidate_rule_coverage.py" in install
+    assert "tests/test_demo_rule_probe.py" in install
     assert "lm_install_current_systemd_units" in install
     assert "systemctl disable --now" in install
     assert "systemctl start" not in install
@@ -301,6 +302,11 @@ def test_install_provisions_a_credential_fenced_paper_runtime_boundary() -> None
     assert "reset_path_safety preflight-demo" in boundary
     assert "reset_path_safety normalize-paper" in boundary
     assert "reset_path_safety normalize-demo" in boundary
+    assert "run_phase_pair runtime-tree-preflight" in boundary
+    assert "run_phase_pair runtime-tree-normalize" in boundary
+    assert boundary.index("runtime-tree-preflight") < boundary.index(
+        "runtime-tree-normalize"
+    )
     assert boundary.count("--create-missing") >= 2
     assert "chown -R" not in boundary
     assert 'test -w "$root/.locks"' in boundary
@@ -390,6 +396,12 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     ]
     assert '--prior-rules-file "$demo_rules"' in refresh
     assert "probe_bybit_demo_rules.py" in refresh
+    assert "project_demo_rules_to_candidate.py" in refresh
+    assert "classify_demo_rule_receipt_freshness" in refresh
+    assert 'status == "expired"' in refresh
+    assert 'stale or future-dated' not in refresh
+    assert "fresh-candidate-subset" in refresh
+    assert "candidate-addition-or-structural-drift" in refresh
     assert "freeze_account_candidate_universe.py" in refresh
     assert "build_candidate_rule_coverage" in refresh
     assert "demo-rule refresh refuses mainnet credentials" in refresh
@@ -408,7 +420,7 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert '--owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"' in authority
 
 
-def test_reset_recovery_reopens_exact_fresh_roots_before_population_refresh() -> None:
+def test_reset_recovery_reopens_exact_fresh_roots_before_rule_maintenance() -> None:
     text = _read(DEPLOY)
     validate = text[
         text.index("validate_recovery_reset_receipt()") :
@@ -428,13 +440,14 @@ def test_reset_recovery_reopens_exact_fresh_roots_before_population_refresh() ->
     assert recover.index("require_quiescent") < recover.index("recovery-reset-receipt-proof")
     assert recover.index("recovery-reset-receipt-proof") < recover.index("recovery-flat-account-proof")
     assert recover.index("recovery-flat-account-proof") < recover.index("stopped-install")
-    assert recover.index("stopped-install") < recover.index("post-rule-refresh-flat-account-proof")
-    assert recover.index("post-rule-refresh-flat-account-proof") < recover.index(
+    assert recover.index("stopped-install") < recover.index("post-rule-maintenance-flat-account-proof")
+    assert recover.index("post-rule-maintenance-flat-account-proof") < recover.index(
         "create-operational-authority"
     )
     assert recover.index("create-operational-authority") < recover.index("activate-and-verify")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in recover
-    assert "recovery did not refresh" in recover
+    assert "recovery did not refresh" not in recover
+    assert "candidate_refresh=required" in recover
     assert recover.count(
         'rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"'
     ) == 2
@@ -446,6 +459,9 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
     assert 'RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"' in text
     assert "phase-start name=%s" in text
     assert "phase-ok name=%s elapsed_seconds=%s" in text
+    assert "phase-group-start name=%s" in text
+    assert "phase-group-ok name=%s elapsed_seconds=%s" in text
+    assert 'if wait "$left_pid"; then left_status=0; else left_status=$?; fi' in text
     for phase in (
         "install-locked-dependencies",
         "focused-runtime-tests",
@@ -454,6 +470,112 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
         "seed-residual-momentum",
     ):
         assert phase in text
+
+    seed = text[text.index("seed_rmom()") : text.index("activate_mode()")]
+    gate_check = 'scripts/check_residual_momentum_gate.py --path "$gate_path"'
+    assert seed.index(gate_check) < seed.index("while true")
+    assert seed.index("systemctl is-failed --quiet") < seed.index(gate_check)
+    assert 'rmom-bootstrap path=reuse reason=current-valid-gate' in seed
+    assert 'rmom-bootstrap path=refresh reason=missing-stale-invalid-or-failed-unit' in seed
+    assert seed.count("systemctl start liquidity-migration-continuous-rmom-refresh.service") == 1
+
+
+def test_parallel_phase_group_waits_for_both_and_returns_the_failed_member() -> None:
+    text = _read(DEPLOY)
+    helpers = text[text.index("run_phase()") : text.index("GIT_ENV=(")]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            helpers
+            + r'''
+left_phase() { sleep 0.05; echo left-finished; return 7; }
+right_phase() { sleep 0.10; echo right-finished; return 0; }
+if run_phase_pair test-group left left_phase right right_phase; then
+    status=0
+else
+    status=$?
+fi
+printf 'captured-status=%s\n' "$status"
+''',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    combined = result.stdout + result.stderr
+    assert "left-finished" in combined
+    assert "right-finished" in combined
+    assert "phase-group-failed name=test-group" in combined
+    assert "left_status=7 right_status=0" in combined
+    assert "captured-status=7" in combined
+
+
+def test_rmom_seed_reuses_valid_gate_but_repairs_a_failed_refresh_unit() -> None:
+    text = _read(DEPLOY)
+    seed = text[text.index("seed_rmom()") : text.index("activate_mode()")]
+    harness = r'''
+set -u
+PYTHON=fake_python
+RMOM_BOOTSTRAP_TIMEOUT_SECONDS=5
+RMOM_BOOTSTRAP_RETRY_SECONDS=1
+CONTINUOUS_SLEEVE=on
+CONTINUOUS_PAPER_SLEEVE=on
+AUTH_PROFILE=operational
+fail() { echo "fail:$*"; return 99; }
+sleeve_on() { [ "$1" = on ]; }
+fake_python() { echo gate-checked; return 0; }
+'''
+
+    reuse = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness
+            + r'''
+systemctl() {
+    if [ "$1" = is-failed ]; then return 1; fi
+    echo "unexpected-systemctl:$*"
+    return 0
+}
+'''
+            + seed
+            + "\nseed_rmom\n",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "rmom-bootstrap path=reuse" in reuse.stdout
+    assert "unexpected-systemctl" not in reuse.stdout
+
+    repair = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness
+            + r'''
+systemctl() {
+    case "$1" in
+        is-failed) return 0 ;;
+        reset-failed) echo reset-failed ;;
+        start) echo refresh-started ;;
+    esac
+    return 0
+}
+'''
+            + seed
+            + "\nseed_rmom\n",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "rmom-bootstrap path=refresh" in repair.stdout
+    assert "reset-failed" in repair.stdout
+    assert "refresh-started" in repair.stdout
+    assert "gate-checked" in repair.stdout
 
 
 def test_deploy_permission_probe_uses_only_bound_demo_credentials() -> None:
@@ -506,15 +628,22 @@ def test_resolved_sleeves_are_atomically_generated_then_group_bound() -> None:
     assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in rmom_unit
 
 
-def test_workflow_runs_ci_on_push_and_only_manual_staged_vps_modes() -> None:
+def test_workflow_runs_ci_on_push_and_only_manual_guarded_vps_modes() -> None:
     workflow = _read(".github/workflows/vps-deploy.yml")
     assert "pull_request:" in workflow and "push:" in workflow
     assert "python -m pytest -q" in workflow
     assert "python -m ruff check" in workflow
     assert "--only-binary=:all: -r requirements.lock" in workflow
     assert "if: github.event_name == 'workflow_dispatch'" in workflow
-    assert "options: [install, activate, verify]" in workflow
-    assert 'scripts/deploy_vps_live.sh "${{ inputs.mode }}"' in workflow
+    assert "options: [rollout, recover, install, activate, verify]" in workflow
+    assert "authorize_demo_paper_operation:" in workflow
+    assert "authorization_reference:" in workflow
+    assert "reset_receipt:" in workflow
+    assert 'deploy_args=("$DEPLOY_MODE_INPUT")' in workflow
+    assert 'scripts/deploy_vps_live.sh "${deploy_args[@]}"' in workflow
+    assert "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION" in workflow
+    assert 'test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true' in workflow
+    assert '--reset-receipt "$DEPLOY_RESET_RECEIPT_INPUT"' in workflow
 
 
 def test_workflow_serializes_vps_operations_across_refs() -> None:

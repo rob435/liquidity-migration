@@ -26,7 +26,7 @@ and require explicit task scope. Unknown safety-critical state fails closed.
 | `deploy --execute install` | Install an exact commit while every project unit is stopped. |
 | `deploy --execute activate` | Start the fleet allowed by the current receipt and sleeve toggles. |
 | `deploy --execute rollout ...` | Guarded flat-account preflight, stopped install, authority creation, activation, and verification in one locked operation. |
-| `deploy --execute recover ...` | Reopen one exact full reset receipt, rebuild the stopped epoch's population/rule evidence, authorize, activate, and verify. |
+| `deploy --execute recover ...` | Reopen one exact full reset receipt, safely reuse or refresh population/rule evidence, authorize, activate, and verify. |
 
 Environment overrides are `SSH_TARGET`, `REPO_DIR`, `PYTHON`, `BRANCH`,
 `EXPECTED_COMMIT`, and the deploy script's documented SSH/repository settings.
@@ -58,6 +58,13 @@ rollout may place and cancel its own bounded PostOnly demo probes only after the
 account has passed every stopped flatness gate. The explicit rollout
 acknowledgement authorizes that demo-only maintenance action; standalone
 `install` never probes.
+
+The manual GitHub Actions workflow exposes the same five modes. `rollout` and
+`recover` require a profile, a non-empty authorization reference, and the
+explicit demo/paper authorization checkbox; recovery additionally requires an
+absolute reset-receipt path. Those inputs are converted to the same exact CLI
+acknowledgement only inside the job. A push still runs CI only and never infers
+deployment or account authority.
 
 Before stopping anything, rollout fetches and proves the exact target is on the
 selected remote branch, verifies the currently authorized commit and topology,
@@ -105,18 +112,27 @@ current structural notional and old receipt only as search hints: it first
 tests the current structural boundary's adjacent steps, then (when needed)
 rescales the prior rejected/accepted notional bracket to the current probe
 price, freshly tests both endpoints, and bisects any remaining quantity-step
-gap. A changed boundary falls back to the complete search. The fresh probe still requires exact
-order/link identity, terminal cancellation on official order surfaces, zero
-fills, empty trade history, cleanup, and final direct-venue flatness. The old
-receipt is preserved, the new path is atomically installed, and rollout repeats
-its direct local/venue flat proof before issuing authority.
+gap. A changed boundary falls back to the complete search. The fresh probe
+keeps a current per-symbol ticker rather than reusing a potentially old bulk
+price snapshot, and reports completed symbols, elapsed time, and ETA. It still
+requires exact order/link identity, terminal cancellation on official order
+surfaces, zero fills, empty trade history, cleanup, and final direct-venue
+flatness. Its shared request limiter is capped at the registered 10 requests
+per second. The old receipt is preserved, the new path is atomically installed,
+and rollout repeats its direct local/venue flat proof before issuing authority.
 
 A failure before checkout installation restores the previously verified
 topology. Once installation begins, the old receipt is no longer rollback
 authority; any failure forces every managed unit stopped for explicit recovery.
-Each material phase prints start, success/failure, and elapsed seconds. The
-residual-momentum bootstrap retries every 10 seconds and defaults to a bounded
-300-second deadline; both values remain positive-integer environment overrides.
+Each material phase prints start, success/failure, and elapsed seconds. Paper
+and demo tree preflights run concurrently; neither normalizer starts until both
+read-only plans pass, then the disjoint paper/demo normalizers run concurrently
+and retain their independent final full rescans. Activation reuses a preserved
+residual-momentum artifact only when its complete gate passes and the prior
+refresh unit is not failed. Missing, stale, malformed, small-cross-section, or
+failed-unit state takes the existing refresh path, which retries every 10
+seconds and has a bounded 300-second deadline; both durations remain
+positive-integer environment overrides.
 
 ### Reset-epoch recovery
 
@@ -138,10 +154,16 @@ Recovery refuses active managed units, a partial or single-sleeve reset, a
 receipt for another commit or root set, changed fresh roots, and non-flat
 journal or authenticated venue state. A valid full reset begins a new
 operational epoch, so recovery freezes the current public demo candidate
-population, freshly probes exact rules for it, uses only overlapping prior
-symbols as search hints, updates demo and paper inputs together, creates new
-authority, and starts owners before producers. It remains demo/paper-only and
-never enables `REAL_MONEY`.
+population. When the prior empirical rules are still fresh and the new
+population is equal or a safe subset, recovery creates a source-bound
+projection: it retains each selected symbol's exact rule, evidence, and
+original `verified_ts_ns`, drops only retired symbols, and never extends the
+freshness clock. Candidate additions or unsafe quantity, tick, minimum,
+maximum-order, or leverage drift force the full authenticated probe; expired
+evidence always forces it. Only that fallback loads demo credentials or places
+demo orders. Success validates exact candidate/rule coverage, updates demo and
+paper inputs together, creates new authority, and starts owners before
+producers. It remains demo/paper-only and never enables `REAL_MONEY`.
 
 ### 1. Install stopped
 
@@ -203,7 +225,9 @@ those clients. Never mix the retired create/unlink lock implementation with the
 persistent-flock implementation against the same root.
 
 While the fleet is stopped, install validates complete paper and shared-demo
-runtime trees through directory descriptors before changing either batch. It
+runtime trees through directory descriptors before changing either batch. The
+two disjoint read-only plans run concurrently, but both must pass before either
+mutation batch begins; the disjoint normalizers then run concurrently. It
 rejects symlinks, multiply linked files, special files, and root, nested, or
 regular-file mount boundaries, including same-device Linux bind mounts. Missing
 direct-child roots and cache/lock directories are then created relative to the
@@ -338,59 +362,17 @@ quiescent, probes demo-key order permission, and validates the commit-owned
 hedge model prior before starting anything when the hedge timer is enabled. The
 check covers schema, provenance, causal boundary, and estimator sufficiency;
 the prior is intentionally not subject to a wall-clock freshness limit. It then
-starts account owners before enabled producers, seeds residual momentum when
-required, enables the allowed timers, and verifies the resulting topology.
-Every guarded workload also runs `verify-runtime` immediately before `exec`.
+starts account owners before enabled producers, reuses an already-valid current
+residual-momentum gate or rebuilds it when required, enables the allowed timers,
+and verifies the resulting topology. Every guarded workload also runs
+`verify-runtime` immediately before `exec`. The liveness watchdog warns during
+the final 24 hours of the bound 168-hour demo-rule lifetime so exceptional
+maintenance is visible before expiry; it does not refresh rules or mutate the
+venue by itself.
 
 `status` is read-only but still fails if the checkout, machine, receipt, inputs,
 roots, effective unit surface, profile, or enabled topology differs. A failed
 verification is not permission to hand-start a partial fleet.
-
-### 4. Freeze a prospective execution epoch
-
-This is research evidence only. It does not authorize activation, mainnet,
-capital, alpha, or profile promotion. First run the complete registered
-comparator from the final clean commit and independently verify every listed
-artifact:
-
-```bash
-.venv/bin/python scripts/run_active_runtime_comparator.py \
-  --out reports/prospective-runtime-parity-execution-epoch-2026-07-18/runtime-parity/integrated-production-comparator
-.venv/bin/python scripts/verify_integrated_runtime_comparator.py
-```
-
-The verifier publishes one create-only mode-`0600` compact receipt. Preserve
-the comparator output, then copy the comparator `receipt.json` and compact
-verification receipt to the root-owned mode-`0700` VPS directory
-`/var/lib/liquidity-migration/research-evidence`, with the two destination
-files root-owned mode `0600`. Refuse an existing destination rather than
-overwriting it.
-
-Only after stopped install, a new `operational` authorization, activation,
-and successful `status` verification may root freeze the boundary:
-
-```bash
-cd /opt/liquidity-migration
-.venv/bin/python scripts/freeze_forward_epoch_start.py
-```
-
-The collector requires the exact authorized clean commit, both current owner
-health/readiness records, four fresh producer-cycle records, six clean service
-generations, verified demo and paper journals, all scheduling tapes, stable
-queue inventories, and absence of any pre-start forward analysis. It records
-inherited positions, targets, requests, and tape prefixes without flattening,
-cancelling, resetting, copying, or deleting them. Publication is create-only
-and must finish at least five minutes before the next whole UTC hour; that hour
-is the immutable start, followed by 45 days of calibration and 45 days of
-validation. A failed attempt never backdates—preserve it and use a new reviewed
-attempt path only after diagnosis, for example
-`forward/start/attempts/retry-yyyymmddthhmmz/receipt.json` supplied with
-`--receipt`.
-
-Do not open forward outcome aggregates during the epoch. Every later code,
-configuration, authorization, input, capture-path, or service-generation
-change is an incident/change point; preserve its exact receipts and journals
-without resetting or extending the clock.
 
 ## Profiles and sleeve toggles
 

@@ -3,6 +3,11 @@
 Point-in-time membership controls which symbols a historical-universe claim may
 trade. It is a research-data validity gate, not an execution reconciler.
 
+For the timestamp semantics this gate depends on — which clock means decision
+time, eligibility, fill, or projection write — see `docs/timestamp_glossary.md`.
+Substituting one for another is the most common way a causal claim silently
+becomes a look-ahead one.
+
 ## Manifest contract
 
 The archive trade manifest stores:
