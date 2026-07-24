@@ -714,3 +714,88 @@ maker fills are achievable at scale, because that alone moves the round trip fro
 15.56 bp back toward 4 bp and restores everything above. That is precisely what
 `passive_execution_experiment_2026-07-20.md` was built to answer, and reading it
 is now the top priority.
+
+---
+
+## 13. The passive-execution A/B, read at last (2026-07-25)
+
+Read from the archived pre-reset **paper** journal (231 files, 73 arm-tagged
+fills), the instrument built to answer whether maker-first execution is
+achievable. It has never been read until now.
+
+| arm | fills | notional | fee/side |
+| --- | ---: | ---: | ---: |
+| A — market IOC (control) | 35 | 1,192.51 | **5.50 bp** |
+| B — post-only chase | 8 | 265.25 | **4.80 bp** |
+
+**Arm B's passive fill rate is 2 of 8 — 25%.** Fallbacks: 4 `chase`, 2
+`timeout`. Repeg counts were `[0,0,0,9,9,0,0,0]`, i.e. two orders hit the repeg
+ceiling and still missed.
+
+Chase limits **work directionally** — 5.50 → 4.80 bp/side — but the arithmetic
+says the fill rate, not the concept, is the binding constraint. Solving
+`0.25·m + 0.75·5.50 = 4.80` gives an implied passive fill price of **2.70
+bp/side**, close to Bybit's ~2 bp maker reference, which confirms the mechanism
+is sound when it fills.
+
+Projecting the blend of §12.1 (gross 29.99 bp/day) across fill rates:
+
+| passive fill rate | bp/side | round trip | blend bp/day | ≈ Sharpe |
+| ---: | ---: | ---: | ---: | ---: |
+| 25% (observed) | 4.80 | 9.60 | 20.39 | 0.97 |
+| 60% | 3.82 | 7.64 | 22.35 | 1.07 |
+| **80%** | 3.26 | **6.52** | **23.47** | **1.12** |
+| 100% (ceiling) | 2.70 | 5.40 | 24.59 | 1.17 |
+
+Even a perfect passive book lands at **5.40 bp round trip, not 4.00** — the
+research assumption was never reachable. But raising the fill rate from 25% to
+80% recovers most of what §12 destroyed: the blend goes 14.43 → 23.47 bp/day and
+Sharpe 0.69 → ~1.12.
+
+**Two caveats that matter more than the numbers.** The sample is 8 arm-B fills
+against a 100-per-arm target — this is a direction, not a result. And the demo
+book pays 7.78 bp/side against paper arm A's uniform 5.50, because **native stop
+triggers are market orders**. Chase limits can only ever improve *entries*; every
+stop-driven exit is taker by construction. A book whose exits are native stops
+has a hard floor that passive entry logic cannot reach.
+
+## 14. Should the erased daily SHORT sleeve be restored?
+
+The sleeve was purged on 2026-06-11 by operator order (`e03e9ab`), engine and
+all. Its promoted profile was `drop_all_4 + age300 + ff6 +
+btc_trend_gate=uptrend`. Reconstructed **approximately** on the cross-venue panel
+— the original engine is deleted, so this is a proxy, not a replay — and judged
+against the two things unavailable when it was promoted: measured cost, and tail
+statistics.
+
+| variant | days | bp/day @4bp | bp/day @15.56bp | t | Sharpe | worst day | loss conc. | maxDD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| short 4d drop < −10% | 1,675 | 1.29 | −10.27 | −0.65 | −0.30 | −78.5% | 11.6% | 99.7% |
+| + age ≥ 300d | 1,300 | −3.34 | −14.90 | −0.81 | −0.43 | −84.5% | 14.4% | 99.8% |
+| **+ BTC 30d uptrend (promoted shape)** | 651 | 41.09 | **29.53** | **1.30** | **0.98** | **−17.8%** | **7.7%** | 70.5% |
+| + deeper drop < −20% | 327 | 66.93 | 55.37 | 1.17 | 1.24 | −43.5% | 11.6% | 79.8% |
+
+Three things stand out.
+
+**The BTC uptrend gate is the entire strategy.** Ungated, the book is dead
+(+1.29 bp) and the age filter makes it *worse* (−3.34). Gated, it is +41.09. In
+this reconstruction the age-300 filter is harmful, which contradicts the
+historical "age gate is robust" finding — though the panel's first-appearance
+date is a weaker proxy than true listing age, so that specific contradiction is
+soft.
+
+**Its tail is better than the symmetric books', not worse.** Worst day −17.8% and
+loss concentration 7.7% beat the long/short momentum baseline of §11.2 (−35.4%,
+10.8%). The gate keeps it out of the crashes, and it is only in the market 39% of
+the time. That is the opposite of what I expected from a short book.
+
+**But it does not clear significance at honest cost.** At 15.56 bp it is t 1.30
+— not significant — and the 651-day sample is a conditional subsample of a
+profile that was itself selected on this history.
+
+**Recommendation: do not restore the sleeve; extract the gate.** The evidence
+does not support rebuilding a deleted engine on a t 1.30 reconstruction. It does
+support the narrower claim that **a BTC-regime gate converts a dead short book
+into a live one**, which is a conditioner testable on the books that already
+exist — including the CONTINUOUS short leg the §11 experiment is about. That is
+the cheap version of this idea, and it does not require resurrecting anything.
