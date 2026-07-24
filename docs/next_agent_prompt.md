@@ -1,101 +1,75 @@
 # Next research agent prompt
 
-You are taking over strategy research in
-`/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration`.
+Copy everything below the line into a fresh session in this repository.
 
-Your mission is to discover interesting, causally real market anomalies that
-could justify a strategy overhaul. Do not optimize toward a hardcoded Sharpe,
-return, trade-count, cost, era-sign, or promotion gate. Do not assume the
-current Crowding Transfer hypothesis is correct. Follow surprising evidence,
-including negative results, sign inversions, regime-specific behavior, and
-data/execution anomalies, and change direction when a better mechanism appears.
+---
 
-## Start correctly
+You are taking over strategy research here. Your job is to **execute
+`docs/roadmap_2026-07-25.md` end to end**, in phase order, stopping at each gate
+to report before proceeding.
 
-1. Read `AGENTS.md`, `STATE.md`, `docs/strategy_program.md`,
-   `docs/governance.md`, `docs/backtesting_errors_we_never_repeat.md`,
-   `docs/data_roots.md`, `docs/pit_gate.md`, and
-   `docs/repository_map.md`.
-2. Read the project `research-phase-runner`, `backtest-integrity`, and relevant
-   run/report skills before running or interpreting research.
-3. Run `scripts/dev.sh doctor --json`.
-4. Preserve the dirty account-kernel remediation and the existing research
-   reset. Do not deploy, contact private venue APIs, mutate demo/paper account
-   state, enable `REAL_MONEY`, or use mainnet credentials.
+## Read first
 
-`docs/strategy_program.md` is the only status and research-queue authority.
-This file is a launcher, not a second roadmap.
+`AGENTS.md`, `docs/roadmap_2026-07-25.md`, `docs/governance.md`,
+`docs/anomaly_research_2026-07-24.md` (§9–§15 is the current evidence), and
+`STATE.md`. Use `docs/repository_map.md` to navigate. Run
+`scripts/dev.sh doctor --json` before broad work.
 
-## Research posture
+## The position you are inheriting
 
-- Lane 1 is open exploration on already-seen data. Search broadly, inspect
-  outcomes, prototype, visualize, and pursue several leads when useful.
-- There are no universal performance gates. Treat effect size, uncertainty,
-  costs, funding, sample size, concentration, capacity, drawdown, and regime
-  behavior as evidence to understand—not boxes to tick.
-- The non-negotiable constraints are causal availability, honest PIT/population
-  scope, missingness, executable economics for performance claims,
-  reconstructable accounting, and provenance. A miss makes a number diagnostic,
-  not worthless.
-- Keep a complete tested-set/search log. Do not hide variants, failed runs,
-  unstable eras, or a lead that became less attractive.
-- Prefer a minimal reusable panel and a quick claim-bearing read over elaborate
-  verification machinery that never reaches research.
+There is **no validated edge**. About 44 mechanisms have been tested, so the
+corrected significance threshold is **t = 3.25**; the best signals sit at
+t 1.30–2.06 when priced at the **measured 15.56 bp round trip** (7.78 bp/side,
+from 85 real forward fills — not the 4 bp maker figure older documents assume).
+Execution work cannot rescue this: its ceiling is Sharpe 0.69 → ~1.17. And since
+`t = Sharpe × √years`, a Sharpe-1.0 signal needs four years of forward data.
 
-## Where to look first
+The binding constraint is **statistical, not computational**.
 
-Use Crowding Transfer as an initial probe, not a boundary:
+## Rules that are not negotiable
 
-- Bybit-versus-Binance premium, settled funding, mark/index basis, and their
-  lead/lag or disagreement states;
-- changes and accelerations rather than only extreme levels;
-- price/open-interest/taker-flow/turnover divergences;
-- capital moving between symbols, clusters, or venues;
-- funding-clock, time-of-week, volatility, liquidity, and regime asymmetries;
-- anomalies in what LONG and CONTINUOUS admit, reject, miss, or lose money on;
-- post-fill reversion, spread capture, and other execution effects that may be
-  larger than signal changes;
-- contract lifecycle, mapping, coverage, or timestamp anomalies that could
-  create either a real mechanism or a fake backtest.
+1. **Price everything at 15.56 bp round trip**, or at realised journal fees. A
+   result that only works at 4 bp is not a result.
+2. **Do not run wide sweeps.** Each new mechanism raises the correction
+   threshold and buys a meaningless t≈2. Few hypotheses, tested deeply.
+3. **Every experiment is an A/B**: paired arms differing in one variable,
+   deterministic hash allocation, pre-declared metric and powered sample size,
+   no peeking, written kill criteria. Roadmap §1 specifies this.
+4. **Report negative results as results.** Phases 0 and 1 are expected to be
+   mostly negative — that is the plan working, not failing.
+5. **Correct the record when you find an error**, including in your own earlier
+   work. Four published claims have already been withdrawn this way: the
+   dispersion gate, the weekly hold, delisting decay, and the momentum direction
+   label.
+6. **Demo/paper only.** Never enable `REAL_MONEY` or use mainnet credentials.
+   VPS access is read-only through `scripts/ops.sh`; remove anything you extract.
 
-Be creative. If a different signal family, portfolio construction, horizon,
-venue relationship, or even a non-price feature is more interesting, pursue it
-and update the program. Do not force a long/short symmetry, a BTC hedge, a fixed
-holding period, or a fixed cost stress unless the claim makes that choice
-appropriate.
+## Sequence
 
-## Working loop
+- **Phase 0 — repair the instruments.** The gate that matters: reconcile the
+  CONTINUOUS backtest (Sharpe 2.74, max DD 1.29%) against forward reality, which
+  lost money. If you cannot explain that gap, **say so** — it means every
+  historical reconstruction here is suspect, and that is a legitimate and
+  valuable finding.
+- **Phase 1 — re-screen once at t ≥ 3.25.** If nothing survives, do not run more
+  sweeps. Go to Phase 2.
+- **Phase 2 — three parallel A/Bs.** Cross-venue replication (2A); regime
+  conditioning (2B — a BTC 30-day uptrend gate took a short book from +1.29 to
+  +41.09 bp/day *while improving* its tail, the most promising single lead in the
+  program); and the registered basket-short structure experiment (2C, see
+  `docs/preregistration/basket_short_tail_experiment_2026-07-25.md`).
+- **Phase 3 — procure a liquidation feed.** The only genuinely new input.
+- **Phase 4 — commit and grade forward.** The commit is the registration.
 
-1. Map the exact data fields, time coverage, availability semantics,
-   population, and missingness needed for the next question.
-2. Build only the reusable substrate needed to answer it, with focused tests
-   for timing, mapping, and missing-data behavior.
-3. Produce an anomaly atlas rather than one winning curve. For each observation
-   record: what happened, why it is interesting, plausible mechanism, data
-   touched, economic magnitude/shape, uncertainty and concentration, strongest
-   artifact explanation, and the next discriminating test.
-4. Try to kill the best explanations with venue-local, time-shift, sign,
-   universe, common-factor, and execution controls. Choose controls because
-   they distinguish mechanisms, not because a template demands them.
-5. Put costs and funding beside gross when making a performance claim. Keep
-   diagnostic gross effects when execution data is unavailable, clearly
-   labelled.
-6. Update `docs/strategy_program.md` with concise conclusions and the next
-   highest-information questions. Remove superseded scratch and avoid creating
-   competing plans.
-7. Only when a formulation is worth learning about prospectively, commit its
-   exact config/scorer so post-commit days form its Lane-2 record.
+## Working state
 
-## Required handoff
+`main` is current. The user keeps in-flight deploy work uncommitted in the tree —
+**preserve it and commit only your own files.** Cross-venue panel:
+`~/SHARED_DATA/cross_venue_panel_v1`. Full PIT root:
+`~/SHARED_DATA/bybit_full_pit`. Scoring primitives:
+`liquidity_migration/cross_section.py`. Before any commit, run
+`.venv/bin/python -m pytest -q` and
+`.venv/bin/python -m ruff check liquidity_migration tests scripts`.
 
-Leave the next operator:
-
-- a ranked anomaly catalog with the reasoning behind the ranking;
-- the full explored surface, including negative and unstable results;
-- reproducible commands, code/config/data identities, and compact artifacts;
-- a clean statement of what is causal/executable evidence versus diagnostic;
-- the highest-information next experiment, without inventing a hardcoded
-  promotion gate;
-- focused tests plus proportionate repository validation.
-
-No research result authorizes demo deployment or real money.
+Report at each gate. Do not proceed past a failed gate without saying so. No
+research result authorizes demo deployment or real money.
