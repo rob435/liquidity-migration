@@ -625,3 +625,92 @@ the strategy program are corrected.
 4. These are Lane-1 structural results on a cross-sectional proxy, not on the
    CONTINUOUS component book itself. The same comparison should be run on the
    deployed components before anything changes.
+
+---
+
+## 12. Realised cost, measured from the forward journal (2026-07-25)
+
+The operator's report — realised fees materially above model — is now measured
+rather than assumed. Source: the archived pre-reset demo journal
+(`ledger-reset-20260722T213413Z-owner-authorized-full-reset-20260722.tar.gz`),
+33,666 events, **85 fills**, 4,406.62 USDT notional, read through
+`liquidity_migration.account_kernel` on the VPS and analysed read-only.
+
+| | |
+| --- | ---: |
+| Notional-weighted fee | **7.78 bp/side** |
+| Median fill | **11.00 bp/side** |
+| Range | 5.50 – 11.00 bp/side |
+| **Implied round trip** | **15.56 bp** |
+| Research assumption | 4.00 bp (maker) |
+| **Ratio** | **3.89×** |
+
+The distribution is not noise: it sits exactly on Bybit's taker tiers (5.50 and
+11.00 bp). **Fills are being priced as taker, not maker.** The research books
+assume maker-first execution that is not happening.
+
+### 12.1 What this does to the registered Lane-2 config
+
+| cost basis | bp/day | Sharpe | vol-targeted Sharpe | compounded DD |
+| --- | ---: | ---: | ---: | ---: |
+| 4.00 bp (as registered) | 25.99 | 1.24 | 1.59 | 13.6% |
+| 11.00 bp | 18.99 | 0.91 | 1.17 | 16.4% |
+| **15.56 bp (measured)** | **14.43** | **0.69** | **0.89** | **19.1%** |
+
+The config loses **44% of its mean and roughly half its Sharpe**, and its
+drawdown gets *worse*. Break-even is 29.99 bp/day of round-trip cost. The config
+is retained and its registration stands — but at the honest cost basis it is
+marginal, not good. The measured basis is recorded in the config itself.
+
+### 12.2 What it does to CONTINUOUS
+
+Applying the same 3.89× to the modelled 2.19%: net over 646 days falls from
++21.13% to **+14.80%**, or 8.36%/yr. Still positive. **Fee error alone does not
+explain forward losses** — consistent with §11.1, where break-even needed 10.6×.
+The tail remains the better explanation, which is what the §11 experiment tests.
+
+### 12.3 Kill criteria: no trip, but no sample either
+
+`ops.sh kill-criteria` against the live journal returns **NO TRIP** — and that
+verdict is empty. The 2026-07-22 reset restarted the record, so at 5.39 forward
+days CONTINUOUS has **0 attributed round trips** and LONG has **1** (net −0.53
+USDT). K2 and K3 do not evaluate until 2026-10-17. This is not evidence of
+health; it is evidence of no data.
+
+### 12.4 Attention/salience alphas: all dead at realistic cost
+
+Seven salience features in the family of the 24h-display rollover, same harness,
+top-100, disjoint 24h holds, settlement-exact funding, 2,021 days:
+
+| feature | bp @ 4 bp | t | bp @ 15.56 bp | t |
+| --- | ---: | ---: | ---: | ---: |
+| displayed 24h gainers rank | 6.57 | 0.47 | −4.99 | −0.35 |
+| most-traded (volume) rank | 14.14 | 1.62 | 2.58 | 0.30 |
+| proximity to round price anchor | −0.88 | −0.12 | −12.44 | −1.70 |
+| closeness to trailing 30d high | −13.06 | −1.04 | −24.62 | −1.95 |
+| consecutive-move streak | −20.33 | −2.13 | −31.89 | −3.33 |
+| 24h-display rollover (control) | 12.06 | 0.91 | 0.50 | 0.04 |
+| crossed the ±10% UI highlight | −16.05 | −1.29 | −27.61 | −2.22 |
+
+Two looked alive in their inverted direction (streak, ±10% threshold). Both
+**collapse on a controlled sample**: restricted to contracts with a full 168h of
+history — the same universe the registered momentum leg uses — streak falls to
+−2.41 bp (t −0.26) and the threshold to −1.62 (t −0.13). The apparent effect
+lived entirely in young, short-history contracts, which is the listing mean/median
+trap of §5.3 in another costume. Their book returns correlate 0.33–0.44 with the
+registered momentum leg, so they were never independent anyway.
+
+**No salience feature survives.** The 24h-display rollover remains what it was: a
+confirmed mechanism that does not pay. Even the registered 1-week momentum leg is
+only t 1.65 (Sharpe 0.73) at the measured cost on this sample.
+
+### 12.5 The honest summary
+
+The measured cost basis is the most consequential number found in this document.
+It does not merely trim results — it removes most of the research pipeline,
+including a large part of the config registered a day earlier. The single
+highest-value open question is therefore **not another signal**: it is whether
+maker fills are achievable at scale, because that alone moves the round trip from
+15.56 bp back toward 4 bp and restores everything above. That is precisely what
+`passive_execution_experiment_2026-07-20.md` was built to answer, and reading it
+is now the top priority.
