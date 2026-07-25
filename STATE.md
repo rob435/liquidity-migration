@@ -11,29 +11,38 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `bf3b6b6f0572e8bc34e7d0c1834130402778f933`**,
-  deployed from canonical `main`, profile `operational`, on 2026-07-25 via the
-  guarded `rollout` dispatch (Actions run 30159709018) after an earlier
-  `verify`-mode dispatch correctly refused the stale `a9ac75d1` checkout. The
-  rollout proved pre-stop and stopped venue flatness, installed, issued fresh
-  authority, and activated; an independent read-only check the same hour
-  returned `verify-ok commit=bf3b6b6… profile=operational` with demo order
-  permission intact. **Change point: this deploy makes the declared CONTINUOUS
-  35% component stop live** (profile revision `active_tp12_sl35_v1`; anomaly
-  research §20.1) — the 2% account fallback is no longer CONTINUOUS's de facto
-  exit rule.
+- **Installed implementation commit: `b2ea0bbd85b52bdff44c6f059e24b9e1717c50c9`**
+  ("Retire account-epoch BTC-risk sizing state at the ledger-reset boundary"),
+  verified read-only against the VPS checkout on 2026-07-25 ~16:35 UTC after
+  the same-day `bf3b6b6` rollout (guarded `rollout` dispatch, Actions run
+  30159709018, which had followed an earlier `verify`-mode dispatch correctly
+  refusing the stale `a9ac75d1` checkout). **Change point retained from
+  `bf3b6b6`: the declared CONTINUOUS 35% component stop is live** (profile
+  revision `active_tp12_sl35_v1`; anomaly research §20.1) — the 2% account
+  fallback is no longer CONTINUOUS's de facto exit rule.
+- **Deployment gap (2026-07-25): canonical `main` is ahead of the installed
+  commit.** `e55f410` (BTC-risk sizer self-heals across epochs instead of
+  failing closed) and `967d09e` (frozen candidate population no longer halts
+  cycles on venue drift) are pushed but NOT deployed. Until the next guarded
+  rollout, the installed runtime relies on `b2ea0bb`'s reset-boundary state
+  retirement for the sizer and still carries the cycle-killing venue-drift
+  raises — time-sensitive because four registered candidates deliver
+  2026-07-27 09:00 UTC (see retirement registry).
 - **2026-07-25 CONTINUOUS entry block, resolved.** Every cycle from 2026-07-22
   22:24 UTC (1,502 cycles) blocked all CONTINUOUS entries with
   `accepted_state_invalid`: `btc_risk_sizing_state.parquet` survived the
   2026-07-22 ledger reset while the journal evidence it references was
   archived away, and the sizer failed closed on prior-epoch state — the BTC
-  trend gate and funnel were never the blocker. Remediation: the sizer now
-  **self-heals** — persisted decisions absent from the complete authoritative
-  journal are dropped and the state rebases onto the replayed authoritative
-  chain, counted and logged, sizing uninterrupted; same-key evidence-hash
-  conflicts (corruption, not epoch drift) still fail closed. No reset-time
-  state ceremony exists or is needed. The empty forward CONTINUOUS record
-  over those three days is a block artifact, not market evidence.
+  trend gate and funnel were never the blocker. Remediation (committed on
+  `main` as `e55f410`, **not yet deployed** — see the deployment-gap bullet):
+  the sizer **self-heals** — persisted decisions absent from the complete
+  authoritative journal are dropped and the state rebases onto the replayed
+  authoritative chain, counted and logged, sizing uninterrupted; same-key
+  evidence-hash conflicts (corruption, not epoch drift) still fail closed.
+  Once `e55f410` is live no reset-time state ceremony exists or is needed; the
+  installed `b2ea0bb` runtime instead retires the state file at the
+  ledger-reset boundary. The empty forward CONTINUOUS record over those three
+  days is a block artifact, not market evidence.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256
