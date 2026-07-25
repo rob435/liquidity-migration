@@ -11,10 +11,17 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `a9ac75d1fbcdac7e3e595ce2426c8b3db3999c4c`**,
-  deployed from canonical `main`, profile `operational`. A read-only pinned check
-  on 2026-07-23 returned `verify-ok` with demo order permission intact. That
-  check did not establish current account flatness.
+- **Installed implementation commit: `bf3b6b6f0572e8bc34e7d0c1834130402778f933`**,
+  deployed from canonical `main`, profile `operational`, on 2026-07-25 via the
+  guarded `rollout` dispatch (Actions run 30159709018) after an earlier
+  `verify`-mode dispatch correctly refused the stale `a9ac75d1` checkout. The
+  rollout proved pre-stop and stopped venue flatness, installed, issued fresh
+  authority, and activated; an independent read-only check the same hour
+  returned `verify-ok commit=bf3b6b6… profile=operational` with demo order
+  permission intact. **Change point: this deploy makes the declared CONTINUOUS
+  35% component stop live** (profile revision `active_tp12_sl35_v1`; anomaly
+  research §20.1) — the 2% account fallback is no longer CONTINUOUS's de facto
+  exit rule.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256
