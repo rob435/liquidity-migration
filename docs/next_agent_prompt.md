@@ -75,6 +75,33 @@ The binding constraint is **statistical, not computational**.
   against the multiple-testing budget. Published results are survivorship-selected
   — test the mechanism, not the parameters quoted, and check both venues.
 
+## How to work
+
+**Run to completion.** Do not hand back a half-finished phase. If a phase needs
+twenty runs, do twenty runs. Report at each gate, then keep going unless a gate
+actually failed.
+
+**Dig until it resolves.** When a number is ambiguous, surprising, or too good,
+that is the beginning of the work, not the end of it. Every important finding in
+this program came from refusing to accept the first answer: the funding
+approximation that inverted a leg attribution, the overlapping-sample t-stat, the
+look-ahead in a passive-fill model, a 183% CAGR that turned out to rest on one
+free parameter. Chase those. An unexplained result is a bug or a discovery, and
+you do not know which until you look.
+
+**Depth, not breadth.** This is the one distinction that matters: go as deep as
+you like on a hypothesis you have chosen, but do not keep adding new ones.
+Testing mechanism 45 raises the correction threshold for everything and buys a
+meaningless t≈2. Exhaust an idea properly, then kill it or commit it.
+
+**Be your own adversary.** Before reporting a good result, try to break it: shift
+the sample, split the eras, delay the signal, swap the venue, check whether a
+filter is doing the work, and confirm the entry price is one you could actually
+have obtained. Assume anything that looks excellent is wrong until it survives.
+
+**Say what failed.** Negative and withdrawn results are the main product here.
+Four published claims have already been retracted; that is the process working.
+
 ## Working state
 
 `main` is current. The user keeps in-flight deploy work uncommitted in the tree —
