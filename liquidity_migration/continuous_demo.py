@@ -202,11 +202,12 @@ class ContinuousDemoCycleConfig:
     candidate_universe_file: str = ""
     strategy_profile: str = CONTINUOUS_V2_PROFILE
     # --- continuous_ensemble_v2 three-component active ensemble ---
-    # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight).
-    # Non-empty => the cycle selects entries PER COMPONENT (each with its own event
-    # trigger, age floor and account-owned TP) and sizes each entry by weight x the base
-    # per-position notional.
-    ensemble_components: tuple[tuple[str, str, int, float, float], ...] = CONTINUOUS_COMPONENTS
+    # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight,
+    # stop_loss_pct). Non-empty => the cycle selects entries PER COMPONENT (each
+    # with its own event trigger, age floor, account-owned TP and declared wide
+    # stop backstop) and sizes each entry by weight x the base per-position
+    # notional.
+    ensemble_components: tuple[tuple[str, str, int, float, float, float], ...] = CONTINUOUS_COMPONENTS
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
@@ -947,7 +948,7 @@ def _observe_continuous_component_selection(
         strategy_id=strategy_id,
     )
 
-    for component, trigger, age_days, take_profit_pct, component_weight in config.ensemble_components:
+    for component, trigger, age_days, take_profit_pct, component_weight, stop_loss_pct in config.ensemble_components:
         component_is_authoritative = active_entries_enabled and len(candidates) < entry_capacity
         try:
             (
@@ -1030,6 +1031,7 @@ def _observe_continuous_component_selection(
                         "component": component,
                         "component_weight": component_weight,
                         "take_profit_pct": take_profit_pct,
+                        "stop_loss_pct": stop_loss_pct,
                         "trade_id": f"{candidate['trade_id']}-{component}",
                     }
                 )
@@ -1653,6 +1655,7 @@ def _continuous_entry_target_intents(
             equity_usdt * order_notional_frac * component_weight * vol_weight_multiplier * btc_risk_multiplier
         )
         take_profit_pct = _float(candidate.get("take_profit_pct"))
+        stop_loss_pct = _float(candidate.get("stop_loss_pct")) or 0.0
         max_hold_duration_ms = exact_duration_ms(hours=demo.max_hold_hours) if demo.max_hold_hours > 0 else 0
         intents.append(
             component_target_intent(
@@ -1669,6 +1672,9 @@ def _continuous_entry_target_intents(
                     "source": "continuous_target_adapter",
                     "decision_reference_price": price,
                     "take_profit_pct": take_profit_pct,
+                    # Declared wide backstop: the account places the venue stop
+                    # here instead of its 2% disaster fallback (§16.3 parity).
+                    **({"stop_loss_pct": stop_loss_pct} if stop_loss_pct > 0.0 else {}),
                     "max_hold_duration_ms": max_hold_duration_ms,
                     "signal_ts_ms": int(candidate.get("signal_ts_ms") or 0),
                     "signal_valid_until_ms": (((int(now_ms) // MS_PER_HOUR) + 1) * MS_PER_HOUR),
@@ -1801,6 +1807,12 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             if config.entry_confirm_delay_hours <= 0:
                 raise ValueError("ensemble component entry_event_trigger requires confirmed-bar entry timing")
             _entry_event_expr(comp_trigger)
+        # Declared stop is the venue backstop the account will place; a value
+        # outside (0, 1) would be rejected downstream by the kernel's
+        # provisional-stop contract, so fail at startup instead.
+        comp_stop = float(comp[5])
+        if not 0.0 < comp_stop < 1.0:
+            raise ValueError("ensemble component stop_loss_pct must be a fraction in (0, 1)")
     if not has_account_inbox:
         raise ValueError(
             "operational demo/paper mode requires account_intent_inbox_root and "

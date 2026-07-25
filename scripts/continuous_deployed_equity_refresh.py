@@ -135,6 +135,7 @@ def active_component_config(
         entry_event_trigger=spec.entry_event_trigger,
         age_days_min=spec.age_days_min,
         take_profit_pct=spec.take_profit_pct,
+        stop_loss_pct=spec.stop_loss_pct,
     )
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
@@ -438,6 +439,7 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
                 "trades": payload.get("n_trades"),
                 "funding_mode": payload.get("funding_mode"),
                 "take_profit_pct": cfg.get("take_profit_pct"),
+                "stop_loss_pct": cfg.get("stop_loss_pct"),
                 "btc_trend_gate": cfg.get("btc_trend_gate"),
                 "btc_trend_mode": "daily_prior",
                 "btc_trend_lookback_days": cfg.get("btc_trend_lookback_days"),
@@ -480,6 +482,7 @@ def _assert_active_component_reports(
             "entry_event_trigger": (cfg.get("entry_event_trigger"), component.entry_event_trigger),
             "age_days_min": (cfg.get("age_days_min"), component.age_days_min),
             "take_profit_pct": (cfg.get("take_profit_pct"), component.take_profit_pct),
+            "stop_loss_pct": (cfg.get("stop_loss_pct"), component.stop_loss_pct),
             "btc_trend_gate": (cfg.get("btc_trend_gate"), expected_gate),
         }
         mismatches = [

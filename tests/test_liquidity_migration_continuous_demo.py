@@ -322,15 +322,15 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
         max_active=5,
         max_new_entries_per_cycle=2,
         ensemble_components=(
-            ("first", "none", 0, 0.12, 0.4),
-            ("second", "none", 0, 0.12, 0.6),
+            ("first", "none", 0, 0.12, 0.4, 0.35),
+            ("second", "none", 0, 0.12, 0.6, 0.35),
         ),
     )
     signal_ts = 1_700_000_000_000
     prices = {"A": 10.0, "B": 20.0, "C": 30.0}
 
     legacy: list[dict[str, Any]] = []
-    for component, _trigger, _age, take_profit_pct, weight in config.ensemble_components:
+    for component, _trigger, _age, take_profit_pct, weight, stop_loss_pct in config.ensemble_components:
         if len(legacy) >= 2:
             break
         picks = select_continuous_entries(
@@ -357,6 +357,7 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
                     "component": component,
                     "component_weight": weight,
                     "take_profit_pct": take_profit_pct,
+                    "stop_loss_pct": stop_loss_pct,
                     "trade_id": f"{candidate['trade_id']}-{component}",
                 }
             )
@@ -463,7 +464,7 @@ def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
         config=ContinuousDemoCycleConfig(
             max_active=1,
             max_new_entries_per_cycle=1,
-            ensemble_components=(("p3", "none", 0, 0.12, 1.0),),
+            ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35),),
         ),
         active_entries_enabled=True,
     )
@@ -713,6 +714,10 @@ def test_target_intents_preserve_component_identity_and_duration_metadata() -> N
     assert entry.metadata["max_hold_duration_ms"] == 24 * MS_PER_HOUR
     assert entry.metadata["entry_attempt_key"] == (f"entry-attempt/{entry.target_key}")
     assert entry.metadata["quantity_authority"] == "account_kernel_demo_rules"
+    # A candidate without a declared stop publishes none, so the account's
+    # tighter disaster fallback applies — fail-closed. The active ensemble
+    # always declares one (validated at startup); presence is pinned by
+    # test_continuous_active_profile_contract.
     assert {
         "take_profit_price",
         "max_hold_ms",
@@ -858,8 +863,8 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         max_hold_hours=24,
         candidate_universe_file=str(candidate_path),
         ensemble_components=(
-            ("p3", "none", 0, 0.12, 0.4),
-            ("p4p5", "none", 0, 0.12, 0.6),
+            ("p3", "none", 0, 0.12, 0.4, 0.35),
+            ("p4p5", "none", 0, 0.12, 0.6, 0.35),
         ),
     )
     canonical = pl.DataFrame(
@@ -1076,9 +1081,9 @@ def test_profile_resolves_only_the_active_target_contract() -> None:
     assert config.target_vol_per_name == pytest.approx(0.01)
     assert config.vol_weight_clamp == pytest.approx(2.0)
     assert config.ensemble_components == (
-        ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333),
-        ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222),
-        ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444),
+        ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333, 0.35),
+        ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222, 0.35),
+        ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444, 0.35),
     )
     assert continuous_managed_strategy_ids(config) == ("continuous_fade_v2",)
     assert (

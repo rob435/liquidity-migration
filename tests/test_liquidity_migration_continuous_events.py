@@ -57,6 +57,8 @@ def _active_test_config(**updates: object) -> ContinuousEventConfig:
         "btc_trend_gate": "off",
         "sizing_mode": "flat",
         "take_profit_pct": 0.0,
+        # Noise-free fixture: each test enables exactly the exit it exercises.
+        "stop_loss_pct": 0.0,
         "use_funding": False,
     }
     values.update(updates)
@@ -290,6 +292,55 @@ def test_take_profit_reference_owns_decision_symbol_book(tmp_path: Path) -> None
     assert trades["exit_reason"][0] == "take_profit"
     assert trades["exit_price"][0] == pytest.approx(trades["entry_price"][0] * 0.90)
     assert all(output.target_result.accepted for output in session.outputs)
+
+
+def test_declared_stop_loss_exits_short_at_capped_slippage() -> None:
+    # A short breaches its declared stop when the bar HIGH crosses
+    # entry * (1 + stop_loss_pct); the fill is the bar extreme capped at 10%
+    # beyond the trigger (stop_fill_mode="bar_extreme_capped"), so a single
+    # thin wick cannot dictate the fill. §16.3/§20 parity: this is the modeled
+    # twin of the venue stop the account places from metadata stop_loss_pct.
+    klines = _grid_klines(["A"], 8).with_columns(
+        pl.when(pl.col("ts_ms") == 2 * MS_PER_HOUR)
+        .then(pl.lit(150.0))
+        .otherwise(pl.col("high"))
+        .alias("high"),
+    )
+    bars = _indexed_price_bars_by_symbol(klines)
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1_000_000.0]}
+    )
+    config = _active_test_config(stop_loss_pct=0.20, hold_hours=4)
+
+    trades, _skips = _run_trades(entries, bars, None, config)
+
+    assert trades.height == 1
+    entry_price = trades["entry_price"][0]
+    assert trades["exit_reason"][0] == "stop_loss"
+    assert trades["stop_price"][0] == pytest.approx(entry_price * 1.20)
+    # Bar high 150 is far beyond the trigger, so the fill is the slippage cap.
+    assert trades["exit_price"][0] == pytest.approx(entry_price * 1.20 * 1.10)
+
+
+def test_stop_disabled_still_runs_to_max_hold() -> None:
+    # stop_loss_pct=0.0 must reproduce the pre-sl35 no-stop reconstruction.
+    klines = _grid_klines(["A"], 8).with_columns(
+        pl.when(pl.col("ts_ms") == 2 * MS_PER_HOUR)
+        .then(pl.lit(150.0))
+        .otherwise(pl.col("high"))
+        .alias("high"),
+    )
+    bars = _indexed_price_bars_by_symbol(klines)
+    entries = pl.DataFrame(
+        {"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1_000_000.0]}
+    )
+    config = _active_test_config(stop_loss_pct=0.0, hold_hours=4)
+
+    trades, _skips = _run_trades(entries, bars, None, config)
+
+    assert trades.height == 1
+    assert trades["exit_reason"][0] == "max_hold"
+    assert trades["stop_price"][0] is None
 
 
 def test_cross_sectional_decile_keeps_singleton() -> None:

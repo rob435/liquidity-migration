@@ -7,7 +7,7 @@ policy lives in `docs/governance.md`.
 | Surface | Contract | Status |
 | --- | --- | --- |
 | Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG and CONTINUOUS, executable as `liquidity_migration/sleeve_kill_criteria.py` and checkable via `scripts/check_kill_criteria.py`. |
-| Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B, implemented in `liquidity_migration/passive_execution.py`; target is 100 fills per arm before an economics conclusion. |
+| Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B, implemented in `liquidity_migration/passive_execution.py`; target is 100 fills per arm before an economics conclusion. Auxiliary standalone demo probe (2026-07-25): `scripts/probe_passive_fill_ab.py`, protocol in `liquidity_migration/passive_fill_probe.py` — bounds the mechanism fast; does not conclude H. |
 
 Both remaining contracts have a live executable form. A contract with no verifier
 does not belong here — it is history, and history lives in Git.

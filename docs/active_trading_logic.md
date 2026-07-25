@@ -31,11 +31,11 @@ The profile shorts decile 9 of the hourly composite after:
 - hourly turnover of at least 500,000 USDT; and
 - the component's 240-day listing-age and event gate.
 
-| Component | Event gate | Take profit | Weight |
-| --- | --- | ---: | ---: |
-| `p3` | `turn3_pop3` | 12% | 1/3 |
-| `p4p3` | `turn4_pop3` | 12% | 2/9 |
-| `p4p5` | `turn4_pop5` | 12% | 4/9 |
+| Component | Event gate | Take profit | Declared stop | Weight |
+| --- | --- | ---: | ---: | ---: |
+| `p3` | `turn3_pop3` | 12% | 35% | 1/3 |
+| `p4p3` | `turn4_pop3` | 12% | 35% | 2/9 |
+| `p4p5` | `turn4_pop5` | 12% | 35% | 4/9 |
 
 The producer admits at most 25 active component reservations and five new
 components per cycle. It pauses new entries when the verified account journal
@@ -77,9 +77,13 @@ leverage and absolute exposure caps.
 
 After an attributable fill, the account owner derives the 12% take-profit from
 fill VWAP. The producer publishes a zero component target after 24 hours from
-the first attributable fill. There is no component strategy stop. The demo
-owner separately requires exchange-native disaster protection for net venue
-exposure; that is an account safety control, not part of the alpha logic.
+the first attributable fill. Since profile revision `active_tp12_sl35_v1`
+(2026-07-25, undeployed until the normal rollout) each component also declares
+a 35% `stop_loss_pct`, so the venue stop the account places is this wide
+backstop rather than its own disaster fallback; the research engine models the
+identical stop (`docs/anomaly_research_2026-07-24.md` §20.1). The demo owner's
+exchange-native disaster protection remains a separate account safety control
+outside the alpha logic.
 
 The separate demo hedge targets BTC and ETH using a causal 90-day rolling beta,
 60-observation minimum, 2.0 cap, and 5 bps modeled cost. Its BTC-vol intensity

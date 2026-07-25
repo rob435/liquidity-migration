@@ -10,7 +10,10 @@ from .continuous_regime import ACTIVE_BTCVOL_REGIME
 
 
 CONTINUOUS_PROFILE_ID = "continuous_ensemble_v2"
-CONTINUOUS_PROFILE_REVISION = "active_tp12_code_v1"
+# sl35: declared 35% component stop replaces the account 2% disaster fallback as
+# the de facto exit (docs/anomaly_research_2026-07-24.md §16.3/§20). Change point
+# recorded by this revision bump.
+CONTINUOUS_PROFILE_REVISION = "active_tp12_sl35_v1"
 CONTINUOUS_HISTORY_START_DATE = "2023-04-01"
 CONTINUOUS_EQUITY_EVIDENCE_LABEL = "exploratory_historical_equity"
 CONTINUOUS_HISTORICAL_RUN_LABEL = (
@@ -27,6 +30,12 @@ class ContinuousComponentProfile:
     age_days_min: int
     take_profit_pct: float
     weight: float
+    # Declared per-component stop, published to the account so the venue stop is
+    # this backstop instead of the 2% account disaster fallback. Chosen from the
+    # §16.3/§20 MAE counterfactual: every binding stop costs expectancy, so the
+    # level is the widest that still caps the tail well inside 2x-leverage
+    # liquidation distance (~48%). Modeled identically in the research engine.
+    stop_loss_pct: float
 
 
 ACTIVE_CONTINUOUS_COMPONENTS = (
@@ -38,6 +47,7 @@ ACTIVE_CONTINUOUS_COMPONENTS = (
         age_days_min=240,
         take_profit_pct=0.12,
         weight=0.3333333333333333,
+        stop_loss_pct=0.35,
     ),
     ContinuousComponentProfile(
         key="turn4p3",
@@ -47,6 +57,7 @@ ACTIVE_CONTINUOUS_COMPONENTS = (
         age_days_min=240,
         take_profit_pct=0.12,
         weight=0.2222222222222222,
+        stop_loss_pct=0.35,
     ),
     ContinuousComponentProfile(
         key="turn4p5",
@@ -56,6 +67,7 @@ ACTIVE_CONTINUOUS_COMPONENTS = (
         age_days_min=240,
         take_profit_pct=0.12,
         weight=0.4444444444444444,
+        stop_loss_pct=0.35,
     ),
 )
 ACTIVE_CONTINUOUS_COMPONENT_BY_KEY = {
@@ -68,6 +80,9 @@ CONTINUOUS_RUNTIME_COMPONENTS = tuple(
         component.age_days_min,
         component.take_profit_pct,
         component.weight,
+        # Appended last so positional readers of the first five fields (e.g.
+        # operational_profile weight checks) stay valid.
+        component.stop_loss_pct,
     )
     for component in ACTIVE_CONTINUOUS_COMPONENTS
 )

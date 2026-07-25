@@ -73,6 +73,10 @@ class ContinuousEventConfig:
     entry_delay_hours: int = 1
     hold_hours: int = 24
     take_profit_pct: float = 0.12
+    # Declared wide backstop, mirrored from the active profile so the modeled
+    # exit rule matches what the account places at the venue (§16.3 parity).
+    # Zero disables it; the pre-sl35 reconstruction is stop_loss_pct=0.0.
+    stop_loss_pct: float = 0.35
     gross_exposure: float = 0.5
     max_active: int = 25
     taker_fee_bps: float = 5.5
@@ -771,6 +775,7 @@ def _build_lifecycle_config(config: ContinuousEventConfig) -> TradeLifecycleConf
     return TradeLifecycleConfig(
         start_date=config.start_date, end_date=config.end_date,
         hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
+        stop_loss_pct=max(config.stop_loss_pct, 0.0),
         side_mode="long_low_short_high",
     )
 
@@ -1066,7 +1071,16 @@ def _run_trades(
             position_weight=1.0,
             config=lifecycle,
             round_trip_cost_bps=round_trip,
-            stop_price=None,
+            stop_price=(
+                None
+                if lifecycle.stop_loss_pct <= 0.0
+                else entry_price
+                * (
+                    1.0 - lifecycle.stop_loss_pct
+                    if config.side == "long"
+                    else 1.0 + lifecycle.stop_loss_pct
+                )
+            ),
             take_profit_price=(
                 None
                 if lifecycle.take_profit_pct <= 0.0
@@ -1107,6 +1121,11 @@ def _run_trades(
                         "signal_ts_ms": int(sig_ts),
                         "signal_valid_until_ms": entry_bar_end + MS_PER_HOUR,
                         "take_profit_pct": float(lifecycle.take_profit_pct),
+                        **(
+                            {"stop_loss_pct": float(lifecycle.stop_loss_pct)}
+                            if lifecycle.stop_loss_pct > 0.0
+                            else {}
+                        ),
                         "max_hold_duration_ms": hold_ms,
                         "notional_weight": nw,
                     },

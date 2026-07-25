@@ -878,3 +878,879 @@ The design that gets both, and does not require giving up either:
 `AGENTS.md` is explicit that capital-preservation controls are not traded for
 alpha metrics. This design does not trade them; it demotes the native stop from
 primary exit to backstop, which is what it should have been.
+
+---
+
+## 16. Phase 0 — the instruments, repaired (2026-07-25)
+
+Executing `docs/roadmap_2026-07-25.md` §2. Three of the four tasks close; one is
+blocked on access. Two published claims are withdrawn, and **Gate 0.3 is
+explained** — the CONTINUOUS backtest and the forward record were never
+measuring the same strategy.
+
+Run identity: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
+--end 2026-07-17`, root `~/SHARED_DATA/bybit_full_pit`, config
+`configs/volume_alpha.default.yaml`, profile `continuous_ensemble_v2` revision
+`active_tp12_code_v1`. Reproduces §10 exactly: **Sharpe 2.73, max DD −1.29%,
+worst day −0.93%, +23.09%** over 2023-03-13→2026-07-09. All three components
+report `funding=partial`. Lane-1 on seen data.
+
+### 16.1 Task 0.1 — WITHDRAWN: the repo was never priced at 4 bp
+
+The roadmap's premise was that "every historical conclusion in this repository
+was priced wrong" at 4 bp. That is true of the cross-venue anomaly work and the
+Lane-2 config, and **false of the deployed-sleeve equity curves**. Measured from
+`configs/volume_alpha.default.yaml` and the engines:
+
+| surface | modelled round trip | vs measured 15.56 bp |
+| --- | ---: | ---: |
+| engine base (`maker_fill_probability: 0.0`, taker 5.5 + slip 2.0, both legs) | 15.00 bp | 1.04× |
+| LONG (`cost_multiplier` 3.0×) | 45.00 bp | **0.35× — 2.9× conservative** |
+| CONTINUOUS, nominal `2×(taker 5.5 + spread 2.5)` | 16.00 bp | 0.97× |
+| **CONTINUOUS, actually charged in the ledger (incl. impact)** | **24.12 bp** | **0.65× — 1.55× conservative** |
+| `lane2_premium_momentum_blend_v1.json` | 4.00 bp | 3.89× |
+| cross-venue anomaly harness (§9, §11.2, §12.4, §14, §15.1) | 4.00 bp | 3.89× |
+
+The 24.12 bp is measured, not inferred: `−Σ cost_return / Σ|notional_weight| ×
+1e4` over the 2,344 ensemble trades.
+
+**Two claims are withdrawn.**
+
+1. **§12.2 is wrong.** It applied the 3.89× fee ratio to CONTINUOUS and reported
+   net falling +21.13% → +14.80%. CONTINUOUS was never priced at 4 bp; it is
+   charged 24.12 bp, already **1.55× more than realised**. Correcting the cost
+   basis moves CONTINUOUS *up*, not down. The 3.89× ratio belongs only to the
+   4 bp surfaces.
+2. **§11.1's "implausibly cheap" is wrong.** Modelled trading cost is 10.3% of
+   gross here (−2.52% against +24.35%) not because the *price* is low — 24 bp is
+   expensive — but because **turnover is low**: 10.44 units of capital
+   round-tripped over 3.3 years. Cheapness was read off a ratio when the
+   denominator was the anomaly.
+
+**Change made.** `liquidity_migration.cross_section` now owns a single
+`MEASURED_ROUND_TRIP_BP = 15.56` with its provenance, plus
+`PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40`. `cross_section.summary` defaults `cost_bp`
+to the measured basis instead of `0.0`, so omitting the argument yields an honest
+number rather than a gross one; a gross read must now be asked for explicitly.
+`lane2_blend` charges the measured basis by default, reports `cost_basis_bp` in
+every score row, and keeps `maker_round_trip_bp` reachable only by explicit
+override so the as-registered figures stay reproducible. The rule itself is
+untouched — this is a re-pricing, not a new registration.
+
+### 16.2 Task 0.2 — RESOLVED: `funding=partial` is a label artifact
+
+§10 called this "the single most likely source of flattery" and "the first thing
+to check". It is not the source. `funding_mode` is set per trade by
+`trade_lifecycle._perp_funding_return`, which flags `partial` when a trade's
+window extends beyond the symbol's funding-history span — while **still charging
+every settlement it does cover**. It is a coverage flag, not a modelling gap, and
+`_funding_mode_summary` collapses the whole book to `partial` if a single trade
+is.
+
+| component | trades | notional-weighted modelled fraction | partial | missing |
+| --- | ---: | ---: | ---: | ---: |
+| turn3p3 | 843 | **99.82%** | 2 | 0 |
+| turn4p3 | 795 | **99.82%** | 2 | 0 |
+| turn4p5 | 706 | **99.79%** | 2 | 0 |
+
+Two trades per component, carrying +0.000106 of funding return against a
+component total of about −0.036. Funding is materially fully modelled and cannot
+explain Sharpe 2.73. Ensemble funding is −3.60% of capital over the window, i.e.
+a real drag that is being paid, not skipped.
+
+The honest fix is to the *label*, not the model: a coarse `partial` that fires on
+2 of 843 trades tells a reader the opposite of the truth. The notional-weighted
+fraction already exists (`_funding_modeled_fraction`) and should be what gets
+reported.
+
+### 16.3 Task 0.3 — GATE EXPLAINED: the backtest models no stop; the deployment always has one
+
+The gap is not cost, not funding, and not signal decay. It is that **the
+reconstruction and the deployed daemon do not share an exit rule.**
+
+`ContinuousEventConfig` has `take_profit_pct = 0.12` and **no stop-loss field**.
+The ledger confirms it: `stop_price` is empty on every one of the 2,344 trades,
+and the exit mix is only `max_hold` 72.2%, `take_profit` 27.7%, `data_end` 0.1%.
+The return distribution is hard-capped on the upside at exactly +12.00% (p95, p99
+and p99.9 are all +12.00%) and open on the downside — worst single trade
+**−92.60%**, 60 trades below −25%, 15 below −50%.
+
+The deployed demo is different. CONTINUOUS declares **no** `stop_loss_pct` to the
+account (verified: `continuous_demo.py` sets only `take_profit_pct`), so per
+`account_kernel`'s provisional-stop contract — *"the account fallback is used only
+when no same-direction component declares a stop"* — the account-level
+`--disaster-stop-fraction` seatbelt becomes CONTINUOUS's **de facto exit rule**.
+`STATE.md`'s DEXEUSDT record fixes its size: short entry 12.659, intended stop
+12.913 = **2.006%**.
+
+Applying that stop to the *same* modelled trades, using each trade's recorded
+`mae` (max adverse excursion) and filling at exactly the stop:
+
+| stop | total return | Sharpe | max DD | worst day | t |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **none — what the backtest reports** | **+18.24%** | **2.50** | 1.50% | −0.99% | **4.56** |
+| 12.0% | +4.42% | 0.70 | 3.36% | −0.58% | 1.27 |
+| 8.0% | +1.58% | 0.29 | 3.27% | −0.45% | 0.52 |
+| 5.0% | −0.47% | −0.10 | 3.68% | −0.34% | −0.19 |
+| 3.0% | −1.90% | −0.49 | 4.17% | −0.27% | −0.90 |
+| **2.0% — the deployed seatbelt** | **−2.54%** | **−0.75** | 2.95% | −0.24% | **−1.36** |
+
+- **77.5% of all 2,344 trades** breach a 2% stop.
+- **64.3% of the model's 649 take-profit winners first dipped 2% against the
+  position.** The live stop converts a +12% winner into a −2% loser in 417 cases.
+- The book's sign flips between a 5% and an 8% stop. Even a stop set equal to the
+  take-profit distance (12%) leaves only Sharpe 0.70.
+
+**The deployed CONTINUOUS sleeve is a losing book under its own risk controls, and
+its backtest cannot see that** because the backtest has no stop. Sharpe 2.73 is
+not a data error, a funding error, or a cost error — it is the Sharpe of a
+strategy that is not the one running. This also explains the forward record
+directly: the eight native-stop closes on 2026-07-19 (−9.49 USDT combined) are the
+predicted behaviour, not an anomaly.
+
+**LONG does not have this defect**, which is the control that makes the finding
+credible rather than a harness bug. LONG declares `stop_loss_pct` to the account
+(`long_native_event_demo.py:911`) *and* models the identical stop in its own
+backtest (`long_native.py:1042-1047`, exit reason `stop_loss`). LONG's comparator
+is fair; CONTINUOUS's is not.
+
+**Gate 0.3 verdict.** The gap is explained, so the roadmap's stated fallback —
+"every historical reconstruction in this repository is suspect and the program
+restarts on forward data only" — is **not** triggered. The defect is specific,
+located, and asymmetric: it is a missing exit rule in one sleeve's comparator, not
+a systemic reconstruction failure.
+
+#### Scale, measured while we were in here
+
+Separately worth recording, because §10 framed it as "risk utilisation": the
+reconstruction's nominal target is `gross_exposure 0.5` (`max_active 25` ×
+`notional_weight 0.02`). Realised is far below it.
+
+| | |
+| --- | ---: |
+| nominal gross target | 0.500 |
+| mean realised gross exposure | **0.0075** |
+| mean on days in market | 0.0196 (≈1 position) |
+| max ever realised | 0.0800 |
+| days in market | 325/849 = 38% |
+| **realised / nominal** | **1.5%** |
+
+The book holds roughly **one position at a time on 38% of days**, not 25. So max
+DD −1.29% and worst day −0.93% are small because the *book* is small, not because
+the strategy is safe — the cap is never near binding, and the constraint is
+candidate supply. Any restatement of these numbers at a larger size must scale the
+drawdown by the same factor it scales the return.
+
+### 16.4 Task 0.4 — BLOCKED on access, but structurally constrained
+
+§15.2 left open whether the 30 reduce-only exit fills were native-stop triggers or
+owner-issued reduce-only orders — the split that decides whether exit-side cost is
+addressable. **This box has no VPS access**: `ssh root@116.202.15.128` returns
+`Permission denied (publickey)`, so the archived journal cannot be re-read and the
+fill-level classification is not resolved here. Reported as blocked rather than
+estimated.
+
+Two things do constrain it from this side:
+
+- §16.3 predicts native-stop triggers should **dominate** CONTINUOUS exits, since
+  77.5% of trades breach the 2% seatbelt. Native-stop triggers are market orders,
+  which is consistent with §12's measurement that fills price on Bybit's taker
+  tiers.
+- `STATE.md` independently records the shape: eight native-stop closes on
+  2026-07-19, ONDOUSDT closed by native protection on 2026-07-18, DEXEUSDT closed
+  by take profit on 2026-07-21.
+
+To finish it, from a box with access: `scripts/ops.sh venue-accounting` for
+read-only demo accounting evidence, then classify each `fill` event by whether a
+`protection` event with a matching venue order id precedes it in the journal.
+
+### 16.5 What Phase 0 changes
+
+1. **Cost is not the problem it was reported to be.** Two of the three deployed
+   surfaces are priced *conservatively* against realised fees. The 4 bp error is
+   real but confined to the cross-venue anomaly reads and the Lane-2 config.
+2. **`funding=partial` is closed** and was never load-bearing.
+3. **CONTINUOUS's Sharpe 2.73 is withdrawn as evidence about the deployed
+   sleeve.** It describes a no-stop variant. The deployed variant, measured on the
+   same trades, is Sharpe −0.75.
+4. **The highest-value open item is now a design question, not a search
+   question**: CONTINUOUS needs a real strategy-level exit whose backtest and
+   deployment agree. §15.3's proposal — wide native backstop plus a tighter
+   strategy exit — is the right shape, and §16.3 gives it a target: the exit must
+   be at least 5-8% away before the book has any positive expectancy at all, and
+   the 2% seatbelt must stop being the exit rule.
+5. Phase 1's re-screen should not include CONTINUOUS's reconstruction as a
+   surviving mechanism until 4 is done. It is not a candidate; it is a
+   miscomparison.
+
+**Caveats.** `mae` is derived from hourly bar highs/lows while the native stop
+triggers on **MarkPrice**, so the breach counts are close but not exact; the
+conclusion is insensitive across the whole 2-8% range, so this does not change it.
+Filling at exactly the stop is **optimistic** — a MarkPrice stop becomes a market
+order, and in a short squeeze it slips further, so −2.54% is a ceiling not a floor.
+Early stop-outs free capital the counterfactual does not redeploy, and shorter
+holds would pay slightly less funding; both are second-order against a sign flip.
+The 2.006% stop distance is inferred from one `STATE.md` record because
+`deploy/sleeves.env` is unreadable from here. All of §16 is Lane-1 on seen data and
+grades nothing.
+
+---
+
+## 17. Phase 1 — the honest re-screen, and 2A/2B (2026-07-25)
+
+Executing `docs/roadmap_2026-07-25.md` §3–§4. One pass over the mechanisms that
+had survived something, at the honest cost basis, threshold **t ≥ 3.25**.
+
+**Gate 1 result: 0 of 12 cells clear t ≥ 3.25.** That is the roadmap's expected
+outcome, so no further sweeps were run.
+
+Substrate: `scripts/build_cross_venue_panel.py --start 2021-01-01 --end
+2026-07-18`, **11,430,624 rows / 636 both-venue symbols** across six yearly
+shards, panel commit `ec29aa9`, zero exclusions, `execution_delay_ms=0` on top of
+the mandatory 1h bar-completion lag. Harness: `scripts/screen_phase1.py`
+(19 tests). Top-100 by trailing-24h turnover on the venue being traded, 24h
+disjoint holds, settlement-exact funding. Lane-1 on seen data.
+
+### 17.1 A second cost error, independent of the 4 bp one
+
+§16.1 corrected the fee *level*. This corrects the *quantity*.
+
+`cross_section.long_short` returns a book that is **1 unit long + 1 unit short on
+one unit of capital** — 2x gross, as the registered config states outright. Every
+read in §9–§15 charged **one** round trip to that book. A full rebalance into a
+disjoint name set round-trips **four units** of notional per period (close both
+legs, open both legs), which at 7.78 bp/side is 31.12 bp — not 15.56.
+
+But deciles overlap, and a name held through pays nothing, so the right answer is
+measured rather than assumed. Measured per mechanism, and cross-checked against
+decile persistence:
+
+| mechanism | names retained period-to-period | predicted turnover | measured | charged |
+| --- | ---: | ---: | ---: | ---: |
+| momentum_1w | 63.4% | 1.46 | **1.52** | 11.9 bp |
+| funding carry | 51.9% | 1.92 | **2.16** | 16.8 bp |
+| premium_diff | 26.6% | 2.94 | **3.23** | 25.2 bp |
+
+(predicted = 4 × (1 − retained); the small gap is leg-size drift.)
+
+**The flat charge was not uniformly wrong — it was wrong in opposite directions.**
+It *overcharged* the slow-rotating momentum book (11.9 actual vs 15.56 charged)
+and *undercharged* the fast-rotating premium book (25.2 vs 15.56) by a third. A
+uniform cost model systematically flatters signals that churn and penalises
+signals that persist, which is a reranking, not a rescaling.
+
+### 17.2 Phase 1 — every cell
+
+Ungated, honest cost basis. `repo_1x` is the historical convention shown for
+audit; `honest` is the number that means something.
+
+| venue | mechanism | n | repo_1x | honest | charged | survives |
+| --- | --- | ---: | ---: | ---: | ---: | :--: |
+| bybit | premium_diff | 1849 | +2.29 bp t 0.22 | **−7.31 bp t −0.69** | 25.2 | no |
+| bybit | momentum_1w continuation | 1875 | +26.78 t 1.84 | **+30.48 t +2.10** | 11.9 | no |
+| bybit | blend 50/50 (registered) | 1849 | +16.80 t 1.89 | **+16.00 t +1.80** | 16.4 | no |
+| bybit | funding carry (dead control) | 1875 | +35.29 t 3.16 | **+34.09 t +3.05** | 16.8 | no |
+| bybit | basket short (§11.2 B) | 1982 | −0.27 t −0.04 | −5.07 t −0.70 | 20.4 | no |
+| bybit | short 4d drop < −10% | 1621 | −9.73 t −0.54 | −9.73 t −0.54 | 15.6 | no |
+| binance | premium_diff | 1850 | −8.16 t −0.80 | −17.87 t −1.76 | 25.3 | no |
+| binance | momentum_1w continuation | 1876 | +9.91 t 0.72 | +13.64 t +0.99 | 11.8 | no |
+| binance | blend 50/50 (registered) | 1850 | +3.11 t 0.37 | +2.33 t +0.28 | 16.3 | no |
+| binance | funding carry (dead control) | 1876 | +9.24 t 0.84 | +7.42 t +0.67 | 17.4 | no |
+| binance | basket short (§11.2 B) | 1982 | −10.99 t −1.52 | −15.85 t −2.19 | 20.4 | no |
+| binance | short 4d drop < −10% | 1599 | −10.95 t −0.63 | −10.95 t −0.63 | 15.6 | no |
+
+**Two published conclusions invert once turnover is charged correctly.**
+
+1. **premium_diff — the program's headline signal — is negative.** §9.4 reported
+   t 2.06 at 24h and the config's known-weaknesses list called it "marginal".
+   Charged its actual 3.23-unit turnover it earns **−7.31 bp/day, t −0.69**. It is
+   the fastest-rotating book in the set (26.6% name retention), so the flat charge
+   was hiding a third of its cost. Its era splits show the effect was never there
+   after 2021: −57.9, +6.9, +0.0, −14.3, +7.4, −2.8 bp/day.
+2. **funding carry — catalogued as the known-dead control — is the strongest cell
+   in the screen**: +34.09 bp/day, **t 3.05**, Sharpe 1.34, and positive in **all
+   six eras** (+21.7, +14.7, +24.2, +22.5, +72.9, +53.0). It still does not clear
+   3.25, and it fails 2A below. But a control outscoring every real signal is a
+   finding about the screen, not a footnote.
+
+   Scope note, so this is not overclaimed: the earlier "carry is dead" verdict was
+   reached on a **hedged extreme-funding** construction
+   (`docs/strategy_program.md`), which is a different book from this unhedged
+   top-100 decile long/short. This does not withdraw that result; it measures a
+   simpler construction the program had not priced this way. And the shape is the
+   textbook carry shape — worst 1% −18.6%, max drawdown 77.9%, tail concentration
+   12.6% — collect small, lose large. Sharpe 1.34 with that tail is not a free lunch.
+
+3. Momentum continuation improves rather than degrades: t 1.65 in §12.4 becomes
+   **t 2.10**, because the honest charge for it is *lower* than the flat one. Its
+   era pattern strengthens monotonically after 2022 (+49.4, +11.4, +54.1, +75.7).
+
+### 17.3 2A — cross-venue replication: 5 of 6 killed
+
+Kill rule as registered: opposite sign on either venue, or an effect ratio outside
+[0.5, 2.0]. Universe overlap between arms is **79.9% Jaccard** (152,715 shared
+name-periods of 172,102 / 171,659), so divergence is not a universe artifact —
+each arm ranks turnover on the venue it trades, and that is now a number.
+
+| mechanism | bybit | binance | ratio | same sign | verdict |
+| --- | ---: | ---: | ---: | :--: | --- |
+| premium_diff | −7.31 bp | −17.87 bp | 2.44 | yes | **KILLED** |
+| momentum_1w continuation | +30.48 | +13.64 | 0.45 | yes | **KILLED** |
+| blend 50/50 (registered) | +16.00 | +2.33 | 0.15 | yes | **KILLED** |
+| funding carry | +34.09 | +7.42 | 0.22 | yes | **KILLED** |
+| basket short (§11.2 B) | −5.07 | −15.85 | 3.12 | yes | **KILLED** |
+| short 4d drop < −10% | −9.73 | −10.95 | 1.13 | yes | replicates |
+
+**Every mechanism with a positive Bybit effect fails replication.** Bybit's effect
+is 2.2× to 6.9× Binance's on momentum, blend, and carry. The only mechanism that
+replicates is the one that is *dead on both venues* — it replicates being worthless.
+
+This is consistent with §9.4's "the edge is Bybit-local", but the framing must
+change. §9.4 read venue-locality as a convenience: *"the true cross-venue
+execution capability this repo does not have is not worth building."* Under the
+roadmap's escape #2 — multiply the sample by replication instead of waiting — the
+same fact is a **failure**. A signal that exists on one venue and not its largest
+competitor has not been corroborated; it has been contradicted by the closest
+available independent sample. Escape #2 is closed for every mechanism here.
+
+### 17.4 2B — regime conditioning: no evidence it generalises
+
+The BTC 30-day uptrend gate, applied to each book on each venue. Kill rule: fewer
+than half the books improved is a kill.
+
+Gate improved Sharpe on **6 of 12 books (50%)** — exactly at the boundary, so not
+killed and not supported. But the pattern is not random, and that is more
+informative than the count:
+
+| helped by the gate | hurt by the gate |
+| --- | --- |
+| momentum_1w (both venues) | premium_diff (both venues) |
+| blend 50/50 (both venues) | funding carry (both venues) |
+| short 4d drop (both venues) | basket short (both venues) |
+
+The split is perfectly consistent across venues — every mechanism is helped on
+both or hurt on both. So the gate is doing something real and directional, but it
+is **not a general conditioner**: it helps momentum-shaped books and harms
+carry/premium-shaped ones. Applying it as a book-level overlay would be a coin
+flip on which sleeve it landed on.
+
+**§14's headline lead survives in direction and dies in significance.** §14
+reported the gate taking the reconstructed short book from +1.29 to +41.09 bp/day
+at 4 bp. At the honest basis it goes **−9.73 → +24.88 bp/day on Bybit** and
+**−10.95 → +20.4 on Binance** — same sign, same mechanism, replicated across
+venues, and still only **t 1.08 / t 0.90**. The single most promising lead in the
+program is real enough to survive a venue change and far too weak to act on.
+
+The sample cost is the reason, exactly as roadmap §8 predicts: the gate keeps
+780 of 1,621 periods (48%), so it needs a ×1.44 effect merely to hold t constant.
+It delivers roughly that and no more.
+
+### 17.5 Gate 1 verdict and what it changes
+
+- **0 of 12 cells clear t ≥ 3.25.** Per roadmap §3, no further sweeps.
+- **2A closes the replication escape.** Five of six mechanisms killed; the
+  survivor is dead on both venues. This was the cheapest of the three escapes and
+  it produced a clean negative.
+- **2B is not a kill but is not support either.** The gate is venue-consistent and
+  mechanism-specific, which makes it a candidate *component* of a momentum book,
+  not a portfolio overlay.
+- **The two cost corrections have now reranked the program twice.** §16.1 fixed
+  the level; §17.1 fixed the quantity. Between them, the headline signal
+  (premium_diff) is negative and the designated dead control (carry) is the
+  strongest cell. Any conclusion in §9–§15 that compared two mechanisms at a
+  single flat cost is suspect on those grounds alone, and the ones that ranked
+  fast-rotating against slow-rotating books are the ones to re-read first.
+- **The most interesting unpriced object is now funding carry on Bybit**: t 3.05,
+  positive in six of six eras, and killed only by cross-venue replication. It
+  should be treated as a Lane-1 lead with a known tail problem and a known
+  venue-locality problem, not as a candidate.
+
+**Caveats.** `execution_delay_ms=0` means entries are booked at the close whose
+completion produced the signal — standard here and consistent with §9–§15, but
+mildly optimistic; a delay sweep was not run because it would be a new sweep.
+Costs are charged as measured turnover × 7.78 bp/side with no impact or
+partial-fill term, so they remain a floor. The 15.56 bp basis is a demo-account
+measurement at small notional and is not a capacity statement. Turnover is
+measured on the traded venue's own universe, so the two 2A arms differ on ~20% of
+name-periods. All of §17 is Lane-1 on data these mechanisms have already seen and
+grades nothing (`docs/governance.md` §1).
+
+---
+
+## 18. Phase 5A — tuned for *t*. One mechanism clears, and it is uninvestable (2026-07-25)
+
+`docs/roadmap_2026-07-25.md` §8. One-dimensional strictness sweeps on the
+already-selected books, selecting on **t** rather than mean, at each cell's own
+measured turnover. Harness `scripts/tune_phase5.py`. 8 cells × 3 parameters ×
+3 signals × 2 venues = **144 cells swept, all reported**. Lane-1 on seen data.
+
+### 18.1 The roadmap's arithmetic is confirmed empirically
+
+Roadmap §8 predicted that loosening a filter can *raise* t by buying sample. It
+does, and the BTC gate on the momentum book is the clean demonstration:
+
+| gate | n | mean bp | t | Sharpe |
+| --- | ---: | ---: | ---: | ---: |
+| off | 1875 | +30.48 | +2.10 | +0.93 |
+| > −0.20 | 1724 | +36.23 | +2.44 | +1.12 |
+| > −0.10 | 1441 | +39.35 | +2.52 | +1.27 |
+| **> −0.05** | 1247 | +46.99 | **+2.78** | +1.50 |
+| > 0.00 *(the registered "uptrend")* | 952 | +46.78 | +2.50 | +1.55 |
+| > +0.05 | 690 | +53.79 | +2.52 | +1.83 |
+| > +0.10 | 493 | +40.14 | +1.61 | +1.38 |
+| > +0.20 | 240 | +7.46 | +0.20 | +0.25 |
+
+Shape: **PLATEAU** (5/8 cells within 20% of peak, sd 0.78) — a real parameter,
+not a fitted one. The registered `> 0.00` threshold is *not* the t-maximising
+setting: relaxing it to `> −0.05` keeps 66% of periods instead of 51% and lifts t
+from 2.50 to 2.78, while Sharpe *falls* from 1.55 to 1.50. That is precisely the
+trade roadmap §8 describes — and it means every gate in this program that was set
+to maximise Sharpe was set against the evidence it was trying to produce.
+
+Still short of 3.25.
+
+### 18.2 premium_diff cannot be tuned into existence
+
+All three sweeps return **"no positive cell"**. Not one of 24 settings is
+positive, and it gets monotonically *worse* as the cut loosens (cut 0.45 →
+t −3.02). This is not a strictness problem; the signal is absent. The §16.1/§17.2
+withdrawal stands and is now robust to the whole parameter space.
+
+### 18.3 The §14 lead cannot be tuned either
+
+The BTC-gated conditional short — "the most promising single lead in the program"
+— across the entire drop-threshold curve, gate on:
+
+| drop | −30% | −20% | −15% | −10% | −7% | −5% | −3% |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| t | +0.37 | +0.64 | **+1.30** | +1.08 | +0.88 | +1.23 | +0.87 |
+
+Peak t 1.30, exactly where §14 left it, and flat across seven thresholds (sd
+0.30). There is no setting at which this book becomes evidence. Closed.
+
+### 18.4 Funding carry clears 3.25 on a broad plateau — on Bybit
+
+The one mechanism that survives everything §16–§17 threw at the program.
+
+Universe-size curve, Bybit, cut 0.10, charged at measured turnover:
+
+| top_n | n | mean bp | t | Sharpe | worst 1% | max DD | negative eras |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 30 | 1875 | +84.33 | +3.60 | +1.59 | −35.17% | **275.7%** | 0/6 |
+| 50 | 1875 | +57.74 | +3.27 | +1.44 | −27.38% | **166.0%** | 0/6 |
+| 75 | 1875 | +37.80 | +2.91 | +1.28 | −21.44% | 98.7% | 0/6 |
+| 100 | 1875 | +34.09 | +3.05 | +1.34 | −18.61% | 77.9% | 0/6 |
+| 300 | 1875 | +24.59 | **+3.96** | +1.75 | −10.03% | 58.8% | 0/6 |
+
+Shape: **PLATEAU** (6/8 cells within 20% of peak, sd 0.36) — the tightest curve
+in this document. **Positive in all six eras at every universe size**: 30 of 30
+era/size cells positive. Bonferroni over the full 144-cell grid needs t ≈ 3.58;
+top-300's 3.96 clears it and top-30's 3.60 is at the line.
+
+**This is the only mechanism in the program that clears an honest threshold after
+an honest cost basis, a corrected turnover charge, and a multiple-testing
+correction over its own grid. And it is not investable.**
+
+#### Why not: the drawdown exceeds capital
+
+Max drawdown runs **58.8% to 275.7%**, and the worst single 1% of days is
+**−10% to −35%**. A 275.7% drawdown on a 2x-gross book is not a drawdown, it is
+several liquidations. Sharpe 1.59 is a meaningless statistic next to it. The tail
+does not come out with any knob swept here: even the most diversified cell
+(top-300, the *best* t) still carries 58.8% max drawdown and a −10% worst-1% day.
+
+#### Why not, second reason: the two criteria disagree
+
+| top_n | bybit | binance | ratio | 2A verdict |
+| ---: | ---: | ---: | ---: | --- |
+| 30 | +84.33 | +58.51 | 0.69 | replicates |
+| 50 | +57.74 | +40.28 | 0.70 | replicates |
+| 75 | +37.80 | +19.71 | 0.52 | replicates |
+| 100 | +34.09 | +7.42 | 0.22 | **KILLED** |
+| 300 | +24.59 | +8.41 | 0.34 | **KILLED** |
+
+The cell that maximises t (top-300) **fails** replication. The cells that
+replicate (top-30/50/75) are the ones with 99–276% drawdowns. A single clean
+phenomenon would not split its criteria like this. Binance also carries a
+negative 2024 at *every* universe size (−25, −12, −20, −15, −8 bp/day) that Bybit
+does not — one venue's worst year is the other's flat year, on largely the same
+names.
+
+#### The replication caveat that weakens escape #2 generally
+
+Universe overlap between the two arms is **79.9% Jaccard**. The two venues are
+therefore *not* two partly-independent samples of the same phenomenon — they are
+largely **the same names**, priced with different funding rates and fees. So a
+cross-venue agreement is closer to a robustness check on funding data than to the
+√2 effective-t gain roadmap §4 assumed for 2A.
+
+This does not rescue the mechanisms 2A killed — failing a weak test is still
+failing. But it means **2A was never able to deliver the sample multiplication it
+was designed for**, and escape #2 should be marked closed for a structural
+reason, not just an empirical one. Genuine sample multiplication needs a venue
+with a different name population, or a different asset class, not Bybit's
+neighbour trading the same 500 perps.
+
+### 18.5 Verdict on carry: a real risk premium, fairly priced
+
+Carry passes the roadmap's own "who is on the other side" test better than
+anything else here, and the answer explains the result completely. Leveraged longs
+pay funding; a short-the-high-funding book collects it. The compensation is real,
+persistent, and visible in every era on both venues — because it is **payment for
+taking liquidation risk**, not a mispricing. And the payment appears to be roughly
+fair: you collect tens of bp per day and periodically give back 10–35% in one day.
+
+That is a risk premium, not an edge. Harvesting it needs capital structure and a
+liquidation-survival mechanism this program does not have, and the roadmap's
+threshold was never the binding constraint on it — the drawdown was.
+
+**Not promoted, not registered, not a candidate.** Recorded as the program's only
+mechanism with a genuine effect and a named economic counterparty, and as the
+strongest argument yet for Phase 3: the missing input that would make carry
+tradeable is a **liquidation feed**, which is exactly the dataset §5 ranks first.
+
+### 18.6 What 5A changes
+
+1. Gates in this program were tuned on Sharpe and are therefore **mis-set for
+   evidence**. The momentum BTC gate should be `> −0.05`, not `> 0.00`, on t
+   grounds — a 1-line change worth 0.28 of t.
+2. premium_diff and the §14 conditional short are closed across their whole
+   parameter spaces, not just at their registered settings.
+3. Funding carry is the one live object, and its problem is tail/capital, not
+   significance. It is the first mechanism here whose next step is **risk
+   engineering rather than more measurement**.
+4. 2A's design limit is now known (79.9% name overlap). Any future replication
+   claim on this panel must report the overlap, or it is overstating its evidence.
+
+**Caveats.** 144 cells were swept and all are reported; the plateau/spike
+classification is a heuristic, not a test. Costs remain a floor — measured
+turnover × 7.78 bp/side, no impact or partial-fill term — and carry at top-30
+concentrates into the most liquid names where that assumption is most defensible
+and capacity is smallest. Drawdowns above 100% are arithmetic on an unlevered
+2x-gross book and indicate the construction is inadmissible, not that a real
+account lost 275%. All Lane-1 on seen data; grades nothing.
+
+---
+
+## 19. Phase 5C — one external hypothesis, tested to destruction (2026-07-25)
+
+`docs/roadmap_2026-07-25.md` §8, 5C. Few hypotheses, chosen for mechanism
+plausibility, tested deeply. One was imported and it turned out to explain a
+result this program had already produced — and then to fail for the reason its own
+author gave.
+
+### 19.1 The source predicted §18.4 in advance
+
+Robot Wealth, *"The Art and Science of Trading Carry"*
+(<https://robotwealth.com/the-art-and-science-of-trading-carry/>), verbatim:
+
+> "An obvious one is shorting perpetual futures trading at a premium and longing
+> the spot to hedge the risk, thus collecting the funding."
+
+> "A messier variation is to create a long-short basket of perpetuals trading at a
+> discount or premium, respectively. This trade will see **a much higher return
+> variance than the spot-perpetual version because the basket components will
+> dislocate and do all sorts of weird idiosyncratic things**."
+
+§18.4's funding-carry book **is** that messier variation, and its measured failure
+mode is exactly the predicted one: 166–276% max drawdown produced by idiosyncratic
+single-name dislocation. An outside practitioner, writing independently, diagnosed
+in one sentence what this program spent ~44 mechanisms arriving at. That alone
+justifies roadmap §5C as a standing practice.
+
+**Mechanism and counterparty.** Funding is paid by leveraged directional longs to
+stay long. A short-perp/long-spot pair holds no price view; it is paid for
+supplying the leverage those longs demand. The premium is sticky because it is
+autocorrelated, so funding accrues faster than the basis mean-reverts. This is the
+only mechanism in the program with a named counterparty and a reason to persist.
+
+### 19.2 H1 as tested, and one bug worth recording
+
+The repository holds **no spot dataset**. But the panel carries the venue's own
+**index price** — a basket of major spot exchanges — so the spot leg was proxied by
+`by_index_close`. Per name over the hold:
+
+    pair return = funding_received − (perp_return − index_return)
+
+i.e. keep the funding unless the basis moves against you by more. Costs charged
+asymmetrically and honestly: perp at the measured **7.78 bp/side**, spot at
+**10.0 bp/side** (Bybit/Binance spot taker ≈0.10%, *worse* than perp), so a pair
+round-trips **35.56 bp**.
+
+**A bug caught before publication, recorded because it is the house failure mode.**
+The first pass reported +696 bp/day, Sharpe 4.09, and a 3,049% drawdown — mutually
+contradictory numbers. Cause: `shift(-24)` was applied to the *disjoint-sampled*
+frame, where 24 rows is 24 **days**, so a 24-day spot move was differenced against
+a 24-hour perp move. The spot leg must be built on the hourly frame before
+sampling. Pinned in `attach_pair_return`'s docstring and by a contiguity guard.
+
+### 19.3 The hedge works — decisively, on the tail
+
+Same signal, same universe, same cost discipline; only the short leg's hedge
+changes. This is the cleanest structural result in the document.
+
+| construction | mean | t | Sharpe | worst 1% | max DD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| perp-only basket (§18.4 control) | +34.09 bp/day | +3.05 | +1.34 | **−18.61%** | **77.9%** |
+| delta-neutral pair, gross, 24h | +17.76 bp/day | — | +9.99 | **−0.78%** | **4.5%** |
+
+**Worst-1% improves 24×; max drawdown improves 17×.** Robot Wealth's prediction is
+confirmed quantitatively. The idiosyncratic dislocation that makes the perp-only
+carry uninvestable is entirely removable by hedging each name with its own spot.
+
+At a 24h rebalance the pair is nonetheless a *losing* book — 35.56 bp of cost
+against 17.76 bp of gross — but that is a construction artifact, not the mechanism:
+a carry pair is held while funding is positive, not churned daily.
+
+| hold | n | gross/period | net/period | net bp/day | t | Sharpe | max DD |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 24h | 2007 | +17.76 | −17.80 | −17.80 | −23.49 | −10.02 | 419.8% |
+| 72h | 668 | +42.28 | +6.72 | +2.24 | +1.98 | +0.85 | 73.6% |
+| **168h** | 285 | +83.39 | **+47.83** | +6.83 | **+4.33** | +1.85 | 26.5% |
+| 336h | 142 | +153.54 | +117.98 | +8.43 | +4.13 | +1.77 | 16.2% |
+
+At a 7-day hold this beats the perp-only carry on **every** dimension — higher t
+(4.33 vs 3.05), higher Sharpe (1.85 vs 1.34), 3× smaller drawdown, 3× smaller
+tail — and clears t ≥ 3.25 even after admitting itself as mechanism 45.
+
+### 19.4 And then the era split kills it
+
+Governance §4: a pooled number that hides decay is a wrong answer.
+
+| hold / universe | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 | neg eras |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 168h top-100 | **+245** | −18 | +10 | +58 | −27 | −13 | 3/6 |
+| 168h top-300 | **+245** | −13 | +19 | +51 | −9 | +1 | 2/6 |
+| 336h top-100 | **+498** | −1 | +53 | +135 | +14 | −119 | 2/6 |
+| 336h top-300 | **+498** | +6 | +66 | +121 | +14 | −0 | 1/6 |
+
+**The entire result is 2021.** Strip that era and the book is flat-to-negative in
+three of the remaining five. The pooled t 4.33 is single-era contamination, not
+evidence. 2021 is also the panel's thinnest, least efficient era — 84 both-venue
+symbols against 552 in 2025.
+
+The source said this too, and it was the one caveat not to skip:
+
+> "This was a fantastic trade for a while, but it's gotten harder as more people
+> chase it."
+
+**H1 is killed.** Not on significance — it cleared — but on era stability, which
+is the check that significance cannot substitute for.
+
+### 19.5 The real conclusion, and it is an economic one
+
+Put §18.4 and §19 side by side:
+
+| | perp-only carry | delta-neutral carry |
+| --- | --- | --- |
+| effect persistence | **positive in 6 of 6 eras** | **2021 only** |
+| tail | uninvestable (−18.6% worst 1%, 78% DD) | benign (−0.78%, 4.5% DD) |
+| who wants this risk | nobody | everybody |
+
+The two results are the same fact from opposite sides. **In this market you are
+paid for holding the risk nobody wants, and not paid for the hedged version anybody
+can run.** The delta-neutral pair is easy, popular, and arbitraged out by 2022. The
+perp-only basket still pays because it carries idiosyncratic liquidation risk that
+is genuinely unpleasant to hold — the compensation is real, persistent, and roughly
+fair for what it is.
+
+That reframes the whole program's search. There is no free lunch left in the
+constructions this repository can express, and the one durable premium is a payment
+for tail risk that the current capital structure cannot survive.
+
+### 19.6 What this changes about Phase 3
+
+Roadmap §5 ranks the missing datasets: (1) liquidation feed, (2) multi-venue
+funding, (3) sub-hourly bars. Two amendments, both evidence-driven:
+
+- **Spot klines are not on that list and should be**, because they are the input
+  that makes the §19 test executable rather than proxied — and they are free from
+  the same public archives the repo already uses for perps. That said, §19.4 has
+  already used the proxy to establish the answer is *no*, so this is now a
+  low-priority completeness item rather than a lead. **Proxy first, procure second**
+  turned out to be the right order and saved the purchase.
+- **The liquidation feed's priority is confirmed and its purpose has changed.** It
+  is no longer "a squeeze-hazard model" in the abstract. §19.5 identifies the one
+  durable premium as payment for liquidation risk, so a liquidation feed is the
+  input that would let that risk be *sized and survived* rather than merely
+  observed. The cascade literature supports this: minute-level work on the
+  2025-10-10/11 event found futures led the crash with volume 22× baseline seven
+  minutes before the trough, and that the liquidation-trigger mark price undershot
+  both spot and futures, creating a reflexive loop
+  (<https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6579278>). It also records a
+  hazard no backtest here can see: venues activated **auto-deleveraging**, which
+  can force-close a winning short.
+
+Corroborating external negative, worth keeping as a prior: a 26-exchange,
+35.7M-observation study found 17% of observations show ≥20 bp arbitrage spreads
+but **only 40% of the best opportunities are profitable after costs**
+(<https://www.mdpi.com/2227-7390/14/2/346>). That independently matches §17.3 and
+this program's cost discipline.
+
+**Caveats.** The spot leg is a synthetic index that cannot be bought; real spot
+adds tracking error, per-exchange fees, and possible borrow, so every H1 number is
+a mechanism read, not a tradeable one. **2A was not run for H1** — the panel has no
+Binance index column, so no cross-venue replication exists for it; the kill rests
+on era stability alone. n is 285 at 168h and 142 at 336h. H1 counts against the
+multiple-testing budget as mechanism 45. Auto-deleveraging and borrow are unmodelled
+everywhere. Lane-1 on seen data; grades nothing.
+
+**Sources:** [Robot Wealth — The Art and Science of Trading
+Carry](https://robotwealth.com/the-art-and-science-of-trading-carry/) ·
+[Anatomy of a Crypto Cascade: Minute-Level Evidence from the October 2025
+Crash](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6579278) ·
+[Two-Regime Liquidity Recovery After a Perpetual Futures Liquidation
+Cascade](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6636998) ·
+[The Two-Tiered Structure of Cryptocurrency Funding Rate
+Markets](https://www.mdpi.com/2227-7390/14/2/346) ·
+[Robot Wealth — Ideas for Crypto Stat Arb
+Features](https://robotwealth.com/ideas-for-crypto-stat-arb-features/)
+
+
+---
+
+## 20. Post-roadmap execution: the two kept items, built (2026-07-25)
+
+The roadmap closed with no validated edge and two owner-directed follow-ups:
+fix the CONTINUOUS exit rule (§16.5 item 4) and measure passive execution.
+Both were built this session. Everything here is engineering plus Lane-1
+measurement on seen data; nothing grades anything.
+
+### 20.1 The CONTINUOUS exit rule: declared 35% backstop, modeled on both sides
+
+§16.3 established the defect: the backtest models no stop, the deployment
+always has one (the account's 2.006% disaster fallback), and the deployed
+variant of the same trades is Sharpe −0.75. The fix has two halves that must
+agree — a declared stop the account places at the venue, and the identical
+stop modeled in the reconstruction.
+
+**Choosing the level.** The §16.3 counterfactual was extended upward
+(`scripts/continuous_stop_counterfactual.py`, same MAE method, same caveats,
+deployed component weights — the published "none" row reproduces exactly):
+
+| stop | breached | TP→stop | total | Sharpe | t | maxDD | worst day |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | 0% | 0 | +18.24% | +2.50 | +4.56 | 1.50% | −0.99% |
+| 40% | 3.6% | 6 | +15.56% | +2.12 | +3.87 | 1.88% | −0.68% |
+| **35%** | **4.9%** | **8** | **+14.42%** | **+1.93** | **+3.53** | **2.09%** | −0.90% |
+| 30% | 7.0% | 8 | +12.43% | +1.66 | +3.03 | 2.52% | −0.82% |
+| 25% | 10.4% | 14 | +11.13% | +1.52 | +2.77 | 3.30% | −0.71% |
+| 20% | 14.4% | 39 | +8.92% | +1.24 | +2.27 | 2.82% | −0.74% |
+| 12% | 27.6% | 100 | +4.42% | +0.70 | +1.27 | 3.36% | −0.58% |
+| 2% (old fallback) | 77.5% | 417 | −2.54% | −0.75 | −1.36 | 2.95% | −0.24% |
+
+The curve is monotone: **every binding stop costs expectancy**, because
+adverse excursion is this strategy's entry thesis temporarily winning (§16.3:
+64.3% of TP winners first dip 2%). So the declared level is not tuned for
+return — it is the widest level that still caps catastrophe inside the
+mechanics: at 2× leverage liquidation sits near ~48% adverse, and **35%**
+keeps a ~13 pp slippage buffer below it while capping the worst modeled trade
+(−92.6%) at −35% and binding on only 4.9% of trades. 30–40% is a judgment
+band; every value in it preserves the sign and most of the t. The choice
+trades ~0.6 Sharpe against the no-stop ideal for a real venue-placed backstop
+— and reclaims the difference between +14.4% and the −2.5% the 2% fallback
+was silently producing.
+
+**Implementation.** `ContinuousComponentProfile` gains `stop_loss_pct = 0.35`
+(all three components); the runtime tuple, demo producer candidate, and target
+metadata carry it, so `venue_protection`/`account_kernel` place the declared
+stop instead of the disaster fallback (both already consumed
+`metadata.stop_loss_pct` — LONG's path, now shared). Startup validation
+rejects a component without a declared stop in (0, 1): the 2% fallback can
+never silently become CONTINUOUS's exit rule again. A candidate that lacks
+the field publishes no stop and falls to the tighter account fallback —
+fail-closed. On the model side `ContinuousEventConfig.stop_loss_pct` feeds
+the shared lifecycle's existing stop machinery (`bar_extreme_capped` fills,
+10% slippage cap — *more* conservative than the counterfactual's exact-stop
+fills). Profile revision bumped to `active_tp12_sl35_v1`; that bump is the
+recorded change point. The equity-refresh parity gate now asserts the modeled
+stop equals the profile stop, and it caught its own fixture in testing.
+
+**Render — the two methods converge.** The full engine re-run with the
+declared stop (`equity_curves_sl35`, identical window/root/args to the Phase 0
+render, run label `continuous_ensemble_v2_active_tp12_sl35_v1_historical_equity`):
+
+| | Phase 0 (no stop, withdrawn) | sl35 render | counterfactual predicted |
+| --- | ---: | ---: | ---: |
+| Sharpe | 2.73 | **1.87** | 1.93 |
+| total return | — | +15.79% | +14.42% |
+| max DD | −1.29% | −2.85% | 2.09% (unhedged blend) |
+| worst day | −0.93% | −0.70% | — |
+
+Exit mix: `max_hold` 1,586 / `take_profit` 641 / **`stop_loss` 114 = 4.9%** —
+exactly the counterfactual's predicted breach count — with `stop_price`
+populated on all 2,344 rows. The MAE counterfactual on the old ledger and the
+full intrabar engine agree within 3% of Sharpe despite independent methods and
+the engine's harsher fills.
+
+One fill-mechanics subtlety, caught while validating the worst trades: the
+10% slippage cap is multiplicative **on the stop price**, so a short's worst
+modeled fill is entry × 1.35 × 1.10 = **−48.5%**, and four squeeze trades
+(MAE −49% to −57%) fill exactly there. That lands essentially at the ~48%
+2×-leverage liquidation distance — the declared trigger sits 13 pp inside
+liquidation precisely so modeled slippage can consume that buffer. It also
+sharpens the 35-vs-40 choice: a 40% trigger's capped worst fill (−54.9%)
+would sit *beyond* liquidation, meaning the venue would liquidate first and
+the modeled fill would be a fiction. 35% is the widest level whose worst
+modeled outcome is still real.
+
+**The honest headline for the deployed CONTINUOUS variant is now Sharpe 1.87**
+(hedged reconstruction, 2023-03→2026-07), replacing the withdrawn 2.73. t =
+1.87 × √3.33 ≈ 3.4 on seen data — a reconstruction of a runtime configuration,
+not a validated alpha claim, and it grades nothing (Lane-1).
+
+**What still does not agree.** The deployed daemon holds until TP/max-hold
+with the venue stop as backstop; the reconstruction now models the same. But
+exit *fills* remain unmeasured (§16.4, blocked on VPS access), and the stop
+this section declares has never fired live. The first live stop_loss exits in
+the forward record are the natural check that the venue placement matches the
+model.
+
+### 20.2 Passive execution: a fast probe joined to the registered experiment
+
+Discovery first: the roadmap's "measure passive execution" already has a
+registered in-flow A/B
+(`docs/preregistration/passive_execution_experiment_2026-07-20.md`, arm B
+shipped in `liquidity_migration/passive_execution.py` on the paper owner).
+That instrument is the right grader — hash-assigned arms on *real* entries at
+*signal* times — and it is slow for a measured reason: §16.3's realized-scale
+finding (~1 position on 38% of days) makes 100 fills/arm months of accrual.
+
+What was missing is a fast bound on the mechanism. Built this session:
+`scripts/probe_passive_fill_ab.py` + `liquidity_migration/passive_fill_probe.py`
+(protocol pre-declared in the module docstring; 22 unit tests):
+
+- standalone, operator-run, demo-only, min-notional, sequential, mutation-lease
+  guarded, flat-account preflight — the `probe_bybit_demo_rules.py` skeleton;
+- deterministic hash allocation to taker / post-only arms;
+- **intention-to-treat cost**: an unfilled post-only attempt is charged the
+  taker fallback at the terminal quote, so drift-while-waiting and would-cross
+  rejects are inside the metric, not excluded as inconvenient;
+- maker fills with unresolved fees return "unresolved," never a fabricated
+  rebate; adverse selection read at fill +30 s;
+- written kill criteria: post-only fill rate < 40% in 60 s → passive is
+  infeasible for this flow; ITT difference ≥ 0 at 100 resolved attempts/arm →
+  no passive edge; otherwise re-price the ledger at the measured passive cost
+  with a recorded change point.
+
+Scope boundary, stated in the contract amendment: probe attempts sample
+ordinary market states; CONTINUOUS entries sample pumps. The probe bounds
+whether the 5.40 bp floor is *mechanically reachable*; only the in-flow A/B
+grades the flow. The probe's 60 s window contains arm B's 20 s chase window,
+so fill-rate-at-20s is derivable and the instruments stay comparable.
+
+**Blocked here:** this box holds no demo credentials. The first run needs a
+box with `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET`, the fleet stopped and
+flat: `python scripts/probe_passive_fill_ab.py --symbols <liquid set>
+--demo-rules-file <verified rules> --output <receipt> --confirm-demo-probe`.
+
+### 20.3 Bookkeeping
+
+`scripts/run_with_stub.py` gained three research-only Windows patches
+(btc-risk fsync, account-route directory fsync, `rename_noreplace` via
+Windows-native no-replace rename) so the contract tests were runnable here;
+the account-route **mode-0600 enforcement is deliberately not stubbed**, so
+tests that require it stay Windows-red (platform baseline, listed in §16
+lineage). Affected suites: 134 passed locally; the 7 remaining failures are
+that baseline plus fresh-interpreter import checks, all failing identically
+at HEAD.

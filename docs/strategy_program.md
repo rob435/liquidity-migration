@@ -21,6 +21,94 @@ deployment, or opens the separate real-money boundary.
   rolling record under `docs/governance.md`.
 - The account-kernel remediation in the local worktree is independent of this
   research reset and remains undeployed.
+- **Phase 0 of `docs/roadmap_2026-07-25.md` is complete (2026-07-25); see
+  `docs/anomaly_research_2026-07-24.md` §16.** Three results change the position:
+  - **CONTINUOUS's Sharpe 2.73 is withdrawn as evidence about the deployed
+    sleeve.** Its backtest models no stop-loss; the deployed account attaches a
+    ~2% native seatbelt that is CONTINUOUS's de facto exit rule because the
+    component declares no stop of its own. On the same 2,344 modelled trades that
+    stop takes the book from +18.24% / Sharpe 2.50 / t 4.56 to −2.54% / Sharpe
+    −0.75. 77.5% of trades breach it, including 64.3% of the take-profit winners.
+    LONG models its own declared stop and is not affected.
+  - **`funding=partial` is closed as a non-issue**: 99.8% of notional is fully
+    modelled, 2 trades per component are flagged. It never explained anything.
+  - **The 4 bp cost error is narrower than reported.** LONG is priced at 45 bp and
+    CONTINUOUS at a measured 24.12 bp round trip — both *conservative* against the
+    realised 15.56 bp. The 4 bp assumption was confined to the cross-venue anomaly
+    reads and `lane2_premium_momentum_blend_v1`. §12.2's 3.89× restatement of
+    CONTINUOUS and §11.1's "implausibly cheap" are withdrawn.
+  - The binding open item is therefore a **design** question — give CONTINUOUS a
+    strategy-level exit its backtest also models — not another signal search.
+- **Phase 1 and 2A/2B are complete (2026-07-25); see §17.** Screened on an
+  11.4M-row / 636-symbol both-venue panel, 2021-2026, at the honest cost basis.
+  - **Gate 1: 0 of 12 cells clear t ≥ 3.25.** No further sweeps, per roadmap §3.
+  - **A second cost error, independent of the 4 bp one.** The long/short books are
+    2x gross but were charged one round trip. Charged their *measured* turnover,
+    the flat rate had **overcharged** slow-rotating momentum (11.9 bp actual) and
+    **undercharged** fast-rotating premium (25.2 bp). Correcting it reranks the
+    program: **premium_diff, the headline signal, is negative (t −0.69)**, and
+    **funding carry — the designated dead control — is the strongest cell
+    (t 3.05, Sharpe 1.34, positive in six of six eras)**.
+  - **2A kills five of six mechanisms.** Every positive Bybit effect fails
+    cross-venue replication (ratios 0.15–0.45); the only mechanism that replicates
+    is dead on both venues. The replication escape is closed. "Bybit-local" must
+    now be read as *uncorroborated*, not as a convenience.
+  - **2B: the gate helped 6/12 books (50%)** — not a kill, not support. It is
+    perfectly venue-consistent but mechanism-specific: it helps momentum-shaped
+    books and harms carry/premium-shaped ones, so it is a candidate component, not
+    a portfolio overlay. §14's headline lead replicates in direction
+    (−9.73 → +24.88 bp/day) and still reaches only t 1.08.
+- **Phase 5 is complete (2026-07-25); see §18–§19.** The program's conclusion is
+  now economic rather than statistical.
+  - **5A.** Gates here were tuned on Sharpe and are therefore mis-set for
+    evidence: the momentum BTC gate should be `> −0.05`, not `> 0.00`, worth 0.28
+    of t for a one-line change. premium_diff has **no positive cell** in 24
+    settings and §14's conditional short peaks at t 1.30 across its whole curve —
+    both closed across their parameter spaces, not just at their registered points.
+  - **5A found one mechanism that clears**: perp-only funding carry, t 3.96 on a
+    broad plateau, positive in **6 of 6 eras at every universe size**. It is
+    **uninvestable** — 59–276% max drawdown, −10% to −35% worst-1% day — and its
+    t-maximising cell fails cross-venue replication while its replicating cells
+    have the worst tails.
+  - **5C imported one external hypothesis and it explained our own result.** Robot
+    Wealth predicted §18.4's exact failure mode in advance, and named the fix
+    (delta-neutral spot-perp). Tested with the venue index as a spot proxy, the
+    hedge works decisively — **worst-1% improves 24×, max drawdown 17×** — and at a
+    7-day hold it clears t 4.33. **Then the era split killed it: the entire result
+    is 2021.** The source's own decay caveat was correct.
+  - **The synthesis (§19.5): in this market you are paid for holding the risk
+    nobody wants, and not paid for the hedged version anybody can run.** The easy,
+    popular construction was arbitraged out by 2022; the durable premium is
+    compensation for idiosyncratic liquidation risk the current capital structure
+    cannot survive. There is no free lunch left in the constructions this
+    repository can express.
+  - **Phase 3 amended**: the liquidation feed's priority is confirmed but its
+    purpose has changed — it is the input that would let the one durable premium be
+    *sized and survived*, not merely observed. Spot klines are a low-priority
+    completeness item only; the proxy already answered the question, which saved
+    the purchase.
+- **The two owner-directed follow-ups were built 2026-07-25; see §20.**
+  - **CONTINUOUS now declares a 35% stop and its backtest models the same
+    stop.** The level comes from extending §16.3's counterfactual upward: every
+    binding stop costs expectancy, so the declared level is the widest whose
+    worst modeled outcome is still real — 35% binds on 4.9% of trades, and its
+    slippage-capped worst fill (−48.5%) sits just inside the ~48% 2×-leverage
+    liquidation distance, where a 40% trigger's would not. **The honest headline
+    for the deployed variant is the sl35 render: Sharpe 1.87, +15.79%, max DD
+    −2.85%** (2023-03→2026-07, hedged reconstruction) — replacing the withdrawn
+    no-stop 2.73, versus the −2.54% the old 2% fallback produced, with the
+    counterfactual and the engine agreeing within 3%. Profile revision
+    `active_tp12_sl35_v1` is the change point; startup now rejects a CONTINUOUS
+    component without a declared stop, and the equity-refresh parity gate asserts
+    model = profile. Undeployed until the normal rollout; the first live
+    `stop_loss` exits are the deployment check.
+  - **Passive execution has a fast instrument beside the registered slow one.**
+    The 2026-07-20 in-flow paper A/B remains the grader; §16.3's scale finding
+    explains why it accrues slowly. `scripts/probe_passive_fill_ab.py` (protocol
+    in `liquidity_migration/passive_fill_probe.py`, ITT accounting, written kill
+    criteria) bounds the mechanism in hours — it answers whether the 5.40 bp
+    passive floor is mechanically reachable, and only that. Blocked on demo
+    credentials this box does not hold; run with the fleet stopped and flat.
 
 ## What survived the audit
 

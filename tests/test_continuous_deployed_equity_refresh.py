@@ -220,6 +220,7 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
                     "entry_event_trigger": component.entry_event_trigger,
                     "age_days_min": component.age_days_min,
                     "take_profit_pct": component.take_profit_pct,
+                    "stop_loss_pct": component.stop_loss_pct,
                     "btc_trend_gate": "uptrend",
                     "gross_exposure": 2.5,
                     "taker_fee_bps": 5.5,

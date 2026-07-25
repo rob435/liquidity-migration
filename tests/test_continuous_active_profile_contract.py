@@ -40,9 +40,9 @@ from liquidity_migration.continuous_events import compute_continuous_decile_pane
 
 
 ACTIVE_COMPONENTS = (
-    ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333),
-    ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222),
-    ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444),
+    ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333, 0.35),
+    ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222, 0.35),
+    ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444, 0.35),
 )
 STRATEGY_ID = "continuous_fade_v2"
 SYMBOL = "ABCUSDT"
@@ -285,11 +285,12 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
             "component": tag,
             "component_weight": weight,
             "take_profit_pct": take_profit_pct,
+            "stop_loss_pct": stop_loss_pct,
             "rv_168h": 0.02,
             "btc_risk_stack_mult": 0.35,
             BTC_RISK_EVIDENCE_METADATA_KEY: evidence,
         }
-        for tag, _trigger, _age_days, take_profit_pct, weight in ACTIVE_COMPONENTS
+        for tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct in ACTIVE_COMPONENTS
     ]
 
     requested = _continuous_entry_target_intents(
@@ -304,7 +305,7 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
 
     assert len(requested) == len(ACTIVE_COMPONENTS)
     for requested_intent, component in zip(requested, ACTIVE_COMPONENTS):
-        tag, _trigger, _age_days, take_profit_pct, weight = component
+        tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct = component
         trade_id = f"{STRATEGY_ID}-{SYMBOL}-{signal_ts_ms}-{tag}"
         target = requested_intent.intent
         expected_notional = 10_000.0 * 0.02 * weight * 0.5 * 0.35
@@ -327,13 +328,16 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
         assert target.metadata["btc_risk_multiplier"] == pytest.approx(0.35)
         assert target.metadata["raw_target_notional_usdt"] == pytest.approx(expected_notional)
         assert target.metadata["take_profit_pct"] == pytest.approx(take_profit_pct)
+        # Declared wide backstop (§16.3/§20): published as a fraction so the
+        # account places the venue stop here instead of its disaster fallback.
+        assert target.metadata["stop_loss_pct"] == pytest.approx(stop_loss_pct)
         assert target.metadata["max_hold_duration_ms"] == 24 * MS_PER_HOUR
         assert target.metadata["decision_reference_price"] == pytest.approx(100.0)
+        # Price-level fields stay account-owned: only fractions are published.
         assert {
             "take_profit_price",
             "max_hold_deadline_ts_ms",
             "max_hold_ms",
-            "stop_loss_pct",
             "stop_price",
         }.isdisjoint(target.metadata)
         assert target.metadata["quantity_authority"] == "account_kernel_demo_rules"

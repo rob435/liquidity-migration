@@ -74,3 +74,24 @@ establishes only that the cost telescope now exists and that the first look
 justifies the experiment. The cost report should be re-run
 (read-only, any time) as fills accumulate, and its notional-weighted
 numbers travel with every future execution claim.
+
+## Auxiliary instrument — standalone demo probe (added 2026-07-25)
+
+The in-flow A/B above is the graded instrument, and §16.3 of
+`docs/anomaly_research_2026-07-24.md` showed why it is slow: CONTINUOUS holds
+roughly one position on 38% of days, so 100 fills per arm is months of accrual.
+`scripts/probe_passive_fill_ab.py` (protocol pre-declared in
+`liquidity_migration/passive_fill_probe.py`) is a complementary, operator-run
+probe that manufactures a powered sample in hours with its own min-notional
+demo orders: hash-allocated taker/post-only arms, intention-to-treat cost vs
+the decision mid (an unfilled passive attempt is charged the taker fallback at
+the terminal quote), fees from observed executions, adverse selection at +30 s,
+and written kill criteria.
+
+Scope boundary, fixed here: probe attempts sample ordinary market states while
+CONTINUOUS entries sample pumps, so the probe **bounds the mechanism** (is the
+passive floor mechanically reachable at all, and at what base-rate cost) and
+cannot conclude H. Its 60 s window strictly contains arm B's 20 s chase window,
+so fill-rate-at-20s is derivable from the recorded time-to-fill curve and the
+two instruments stay comparable. This section changes nothing about the frozen
+arm design above.
