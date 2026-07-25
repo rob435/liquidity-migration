@@ -12,6 +12,15 @@ policy lives in `docs/governance.md`.
 Both remaining contracts have a live executable form. A contract with no verifier
 does not belong here — it is history, and history lives in Git.
 
+## Withdrawn on 2026-07-25
+
+**`basket_short_tail_experiment_2026-07-25.md` was withdrawn before start** —
+no arms implemented, no forward data consumed, no peek. The in-file note
+records the measured reasons; the Phase 1 re-screen has since priced the
+basket-short structure negative on both venues (anomaly research §17.2).
+Prospective re-registration stays open per `docs/governance.md` if a
+short-book substrate ever survives at measured cost.
+
 ## Removed on 2026-07-24
 
 **The prospective runtime-parity execution epoch is fully retired**: the

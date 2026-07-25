@@ -59,14 +59,18 @@ dressed is a fit, and the dressing is where the search cost hides.
   CONTINUOUS backtest (Sharpe 2.74, max DD 1.29%) against forward reality, which
   lost money. If you cannot explain that gap, **say so** — it means every
   historical reconstruction here is suspect, and that is a legitimate and
-  valuable finding.
+  valuable finding. Phase 0 has since been executed (anomaly research §16;
+  Gate 0.3 is explained by §16.3), and 0.4 is resolved from a box with the VPS
+  key (§21: 88% of exit notional left via native stop triggers).
 - **Phase 1 — re-screen once at t ≥ 3.25.** If nothing survives, do not run more
-  sweeps. Go to Phase 2.
-- **Phase 2 — three parallel A/Bs.** Cross-venue replication (2A); regime
+  sweeps. Go to Phase 2. Executed 2026-07-25: 0 of 12 cells clear (§17).
+- **Phase 2 — parallel A/Bs.** Cross-venue replication (2A); regime
   conditioning (2B — a BTC 30-day uptrend gate took a short book from +1.29 to
-  +41.09 bp/day *while improving* its tail, the most promising single lead in the
-  program); and the registered basket-short structure experiment (2C, see
-  `docs/preregistration/basket_short_tail_experiment_2026-07-25.md`).
+  +41.09 bp/day *while improving* its tail, the most promising single lead in
+  the program). The basket-short structure experiment (2C) was **withdrawn
+  before start on 2026-07-25** — §17.2 prices the structure negative on both
+  venues at honest turnover — see the note in
+  `docs/preregistration/basket_short_tail_experiment_2026-07-25.md`.
 - **Phase 3 — procure a liquidation feed.** The only genuinely new input.
 - **Phase 4 — commit and grade forward.** The commit is the registration.
 - **Phase 5 — only after 0–4 have run and reported.** Two things. First, tune

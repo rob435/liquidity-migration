@@ -1064,6 +1064,11 @@ To finish it, from a box with access: `scripts/ops.sh venue-accounting` for
 read-only demo accounting evidence, then classify each `fill` event by whether a
 `protection` event with a matching venue order id precedes it in the journal.
 
+**Resolved in §21** (2026-07-25, from a box with the key): 24 of 30 exit fills
+— 88.3% of exit notional — are native stop triggers, labelled directly by
+Bybit's `create_type` in each fill's journaled metadata. §16.3's prediction is
+confirmed at the fill level.
+
 ### 16.5 What Phase 0 changes
 
 1. **Cost is not the problem it was reported to be.** Two of the three deployed
@@ -1754,3 +1759,56 @@ tests that require it stay Windows-red (platform baseline, listed in §16
 lineage). Affected suites: 134 passed locally; the 7 remaining failures are
 that baseline plus fresh-interpreter import checks, all failing identically
 at HEAD.
+
+---
+
+## 21. Phase 0.4 resolved: the exits are native stop triggers (2026-07-25)
+
+§16.4 reported task 0.4 blocked on VPS access. From a box with the key, it is
+resolved — and the journal already held the answer: Bybit reports
+`create_type` on every private execution, it is journaled verbatim in each
+fill's metadata, and it had simply never been read. No venue query was needed.
+
+Method: the sha256-verified archive of the pre-reset demo journal
+(`ledger-reset-20260722T213413Z-owner-authorized-full-reset-20260722.tar.gz`)
+was extracted read-only to `/tmp` on the VPS, read through
+`account_kernel.read_account_journal`, and the extraction removed — the same
+85-fill sample as §12 and §15 — plus the live post-reset journal.
+
+| exit fills (30) | fills | notional | bp/side | exit-notional share |
+| --- | ---: | ---: | ---: | ---: |
+| `CreateByStopLoss` — native venue stop trigger | **24** | 1,927.48 | 7.86 | **88.3%** |
+| `CreateByUser` — owner reduce-only order | 6 | 256.37 | 7.39 | 11.7% |
+
+All 55 entry fills are `CreateByUser`. Close reasons in the window
+(07-18 → 07-22): 22 `native_protection_triggered` — every one
+`verified_native_stop`, and every external execution id also appears in the
+fill stream, so §15.2's fee sample was complete — plus 2
+`bybit_stop_loss_identity_unverified` (the 2026-07-22 publication-race audit),
+5 `take_profit`, and 1 owner-authorized terminal flat. Protection events: 135
+(65 active / 27 triggered / 38 replaced / 5 other). The deployed protection in
+that window was the fill-anchored outermost component stop with the
+account-level fallback `DISASTER_STOP_FRACTION=0.02`, MarkPrice trigger. The
+live post-reset journal holds one round trip so far: entry and exit both
+`CreateByUser` at 5.50 bp/side, no stop closes.
+
+Three consequences.
+
+1. **§16.3's prediction is confirmed at the fill level.** Under the pre-reset
+   2% fallback regime the seatbelt was the book's de facto exit: 88% of exit
+   notional left through a native stop trigger, taker by construction. Exit
+   flow was *not* chaseable as architected — chase logic never sees a
+   stop-triggered fill.
+2. **§20.1's declared 35% stop is the repair, and it makes a checkable
+   forward prediction**: the modeled binding rate falls from 77.5% to 4.9%,
+   so exit fills should shift from `CreateByStopLoss` to owner-path
+   `CreateByUser` — which chase-then-cross can reach. The same one-line
+   classification, re-run on the forward journal, verifies the deployed
+   behaviour.
+3. **Not one of the 87 fills across both journals is maker** — `is_maker` is
+   false on every fill. §12's taker conclusion, inferred there from fee
+   tiers, is now a venue-labelled fact.
+
+Caveat: this is one adverse week. A week in which positions keep hitting
+their stops is exactly when stop exits dominate, so 88% is the measured share
+for this sample, not a stationary property of the book.

@@ -4,6 +4,25 @@ Paper-only A/B on the CONTINUOUS sleeve. **Authorizes nothing**: no runtime
 change, no demo exposure change, no mainnet, no `REAL_MONEY`. Registered under
 `docs/governance.md`; the commit is the registration.
 
+> **WITHDRAWN 2026-07-25, before start.** No arms were implemented, no forward
+> data was consumed, and no primary metric was peeked. Reasons, measured: the
+> motivating §11.2 table below is priced at 4 bp charged once per period; the
+> honest re-screen with measured per-mechanism turnover
+> (`docs/anomaly_research_2026-07-24.md` §17.2) prices the basket-short
+> structure at **−5.07 bp/day (t −0.70) on Bybit and −15.85 bp/day (t −2.19)
+> on Binance** — negative on both venues, nowhere near the corrected t = 3.25
+> bar. The sleeve it would instrument was simultaneously shown to be a losing
+> book under its then-deployed exit rule (§16.3), a defect since repaired by
+> the declared 35% stop (§20.1), and its exit fills under the old regime were
+> 88% native-stop taker by notional (§21) — a cost floor no arm comparison
+> here could move. Starting the run would have locked paper CONTINUOUS
+> unchanged for 60 round trips per arm or 90 days, blocking exactly those
+> repairs, and the hedge double-count check required by the limitations below
+> was never done. The structural claim — a basket short halves the tail —
+> remains a live Lane-1 shape result; prospective re-registration is open per
+> `docs/governance.md` only if a short-book substrate ever survives at
+> measured cost. The registration below is preserved unchanged as the receipt.
+
 ## Claim under test
 
 > Replacing CONTINUOUS's idiosyncratic short leg with an equal-notional basket
