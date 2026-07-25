@@ -17,6 +17,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"
+# Windows venvs place the interpreter under Scripts/ instead of bin/.
+[ -x "$PY" ] || PY="$HERE/.venv/Scripts/python.exe"
 [ -x "$PY" ] || PY="python3"
 
 export POLARS_MAX_THREADS="${POLARS_MAX_THREADS:-6}"

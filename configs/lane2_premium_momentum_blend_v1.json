@@ -4,7 +4,7 @@
   "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
-  "claim": "A daily, market-neutral, top-100 Bybit book that is 50/50 cross-venue premium divergence and 1-week cross-sectional momentum continuation earns a positive risk-adjusted return net of settlement-exact funding and a 4 bp maker round trip.",
+  "claim": "A daily, market-neutral, top-100 Bybit book that is 50/50 cross-venue premium divergence and 1-week cross-sectional momentum continuation earns a positive risk-adjusted return net of settlement-exact funding and the MEASURED 15.56 bp round trip. At that honest cost basis the claim is marginal, not established: 14.43 bp/day, Sharpe 0.69 (t 2.06 on the premium leg, below the t=3.25 multiple-testing threshold). The original claim was written against a 4 bp maker round trip that the forward journal disproved; that figure is retained below only so the as-registered record stays reproducible.",
   "rule": {
     "venue": "bybit",
     "universe": {
@@ -47,7 +47,10 @@
     }
   },
   "cost_model": {
+    "cost_basis_default": "MEASURED_round_trip_bp",
+    "cost_basis_default_note": "Corrected 2026-07-25 (roadmap task 0.1). liquidity_migration.lane2_blend now charges MEASURED_round_trip_bp by default; maker_round_trip_bp is reachable only by passing it explicitly. The rule itself (universe, signals, weights, volatility target) is unchanged, so this is a re-pricing of the same book and not a new rule.",
     "maker_round_trip_bp": 4.0,
+    "maker_round_trip_bp_status": "RETIRED as a scoring basis. Retained for reproducing the as-registered figures only. It was never reachable: the paper passive-execution A/B implies 5.40 bp round trip even at a 100% passive fill rate.",
     "funding": "settlement_exact",
     "funding_note": "funding accrues ONLY at settlements falling inside the hold; the rate*hours/8 pro-rating used in earlier drafts overstates the premium leg by roughly 2x",
     "not_modelled": [

@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from .cross_section import long_short, top_by
+from .cross_section import MEASURED_ROUND_TRIP_BP, long_short, top_by
 
 HOUR_MS = 3_600_000
 #: Bybit settles funding every 8 hours. A joined rate younger than one hour marks
@@ -62,9 +62,22 @@ class BlendConfig:
     premium_weight: float
     momentum_weight: float
     maker_round_trip_bp: float
+    measured_round_trip_bp: float
     vol_target_annual: float
     vol_lookback_days: int
     max_leverage: float
+
+    @property
+    def cost_basis_bp(self) -> float:
+        """The cost basis a score is charged at unless a caller overrides it.
+
+        The measured basis, not the registered 4 bp maker assumption. The rule
+        (universe, signals, weights, volatility target) is untouched; only the
+        price of trading it is corrected to what the forward journal actually
+        paid. ``maker_round_trip_bp`` is retained so the as-registered number
+        stays reproducible.
+        """
+        return self.measured_round_trip_bp
 
     @classmethod
     def from_json(cls, path: str | Path) -> "BlendConfig":
@@ -80,6 +93,9 @@ class BlendConfig:
             premium_weight=float(signals["premium_diff_bp"]["weight"]),
             momentum_weight=float(signals["momentum_1w"]["weight"]),
             maker_round_trip_bp=float(payload["cost_model"]["maker_round_trip_bp"]),
+            measured_round_trip_bp=float(
+                payload["cost_model"].get("MEASURED_round_trip_bp", MEASURED_ROUND_TRIP_BP)
+            ),
             vol_target_annual=float(rule["risk"]["vol_target_annual"]),
             vol_lookback_days=int(rule["risk"]["vol_lookback_days"]),
             max_leverage=float(rule["risk"]["max_leverage"]),
@@ -134,13 +150,19 @@ def prepare(panel: pl.DataFrame, cfg: BlendConfig) -> pl.DataFrame:
     return frame.with_columns((pl.col("price_return") - pl.col("funding_paid")).alias("net_return"))
 
 
-def daily_book(prepared: pl.DataFrame, cfg: BlendConfig) -> pl.DataFrame:
+def daily_book(
+    prepared: pl.DataFrame, cfg: BlendConfig, *, cost_bp: float | None = None
+) -> pl.DataFrame:
     """One row per decision day: the blended net book return in bp.
 
     Entries are sampled every ``hold_hours`` from the first observation so the
     holding windows never overlap. Overlapping entries do not bias the mean but
     badly inflate its t-statistic, which is how an earlier draft convinced itself
     a weekly hold was better.
+
+    ``cost_bp`` defaults to :attr:`BlendConfig.cost_basis_bp` — the measured
+    round trip. Pass ``cfg.maker_round_trip_bp`` to reproduce the as-registered
+    4 bp figures.
     """
     universe = top_by(prepared, "adv24", cfg.universe_top_n)
     if universe.height == 0:
@@ -157,9 +179,10 @@ def daily_book(prepared: pl.DataFrame, cfg: BlendConfig) -> pl.DataFrame:
         universe, signal="momentum_1w", ret="net_return", sign=-1, cut=cfg.decile_cut
     ).rename({"ret_bp": "momentum_bp"})
 
+    charged = cfg.cost_basis_bp if cost_bp is None else float(cost_bp)
     joined = premium.join(momentum, on="bar_ts_ms", how="inner").sort("bar_ts_ms")
     gross = cfg.premium_weight * pl.col("premium_bp") + cfg.momentum_weight * pl.col("momentum_bp")
-    return joined.with_columns((gross - cfg.maker_round_trip_bp).alias("ret_bp"))
+    return joined.with_columns((gross - charged).alias("ret_bp"))
 
 
 def volatility_scale(ret_bp: np.ndarray, cfg: BlendConfig) -> np.ndarray:
@@ -199,9 +222,16 @@ def summarize(ret_bp: np.ndarray, cfg: BlendConfig) -> dict[str, float]:
     }
 
 
-def score(panel: pl.DataFrame, cfg: BlendConfig) -> dict[str, Any]:
-    """Full pass: panel in, scoring row out."""
-    book = daily_book(prepare(panel, cfg), cfg)
-    result: dict[str, Any] = {"config_id": cfg.config_id}
+def score(
+    panel: pl.DataFrame, cfg: BlendConfig, *, cost_bp: float | None = None
+) -> dict[str, Any]:
+    """Full pass: panel in, scoring row out.
+
+    The charged cost basis is reported in the result so no downstream table can
+    be ambiguous about which cost a number was produced at.
+    """
+    charged = cfg.cost_basis_bp if cost_bp is None else float(cost_bp)
+    book = daily_book(prepare(panel, cfg), cfg, cost_bp=charged)
+    result: dict[str, Any] = {"config_id": cfg.config_id, "cost_basis_bp": charged}
     result.update(summarize(book["ret_bp"].to_numpy(), cfg))
     return result

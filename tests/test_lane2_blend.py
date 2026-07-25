@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from liquidity_migration.cross_section import MEASURED_ROUND_TRIP_BP
 from liquidity_migration.lane2_blend import (
     HOUR_MS,
     BlendConfig,
@@ -78,6 +79,37 @@ class TestConfig:
         payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         assert "REAL_MONEY" in payload["authorizes"]
         assert payload["surface"] == "research-only"
+
+
+class TestCostBasis:
+    """The default cost basis is the measured round trip, not the registered 4 bp.
+
+    Roadmap task 0.1: a result that only survives at 4 bp is not a result. The
+    registered maker figure stays loadable so the as-registered record remains
+    reproducible, but it is never what a fresh score is charged at.
+    """
+
+    def test_default_basis_is_measured_not_maker(self, cfg: BlendConfig) -> None:
+        assert cfg.maker_round_trip_bp == pytest.approx(4.0)
+        assert cfg.measured_round_trip_bp == pytest.approx(MEASURED_ROUND_TRIP_BP)
+        assert cfg.cost_basis_bp == pytest.approx(MEASURED_ROUND_TRIP_BP)
+
+    def test_book_charges_the_measured_basis_by_default(self, cfg: BlendConfig) -> None:
+        prepared = prepare(_panel(), cfg)
+        default = daily_book(prepared, cfg)
+        as_registered = daily_book(prepared, cfg, cost_bp=cfg.maker_round_trip_bp)
+        if default.height == 0:
+            pytest.skip("synthetic panel produced no disjoint decision day")
+        delta = (
+            as_registered["ret_bp"].to_numpy() - default["ret_bp"].to_numpy()
+        )
+        # The registered basis is cheaper, so it reports a HIGHER return by
+        # exactly the difference between the two cost bases.
+        assert delta == pytest.approx(MEASURED_ROUND_TRIP_BP - 4.0)
+
+    def test_score_reports_the_basis_it_charged(self, cfg: BlendConfig) -> None:
+        result = score(_panel(), cfg)
+        assert result["cost_basis_bp"] == pytest.approx(MEASURED_ROUND_TRIP_BP)
 
 
 class TestFundingCausality:

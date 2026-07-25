@@ -11,6 +11,8 @@ import polars as pl
 import pytest
 
 from liquidity_migration.cross_section import (
+    MEASURED_ROUND_TRIP_BP,
+    PASSIVE_FLOOR_ROUND_TRIP_BP,
     CrossSectionError,
     long_short,
     summary,
@@ -113,7 +115,7 @@ class TestTopBy:
 class TestSummary:
     def test_known_series_statistics(self) -> None:
         r = np.array([10.0, -5.0, 20.0, -5.0, 10.0, 0.0])
-        s = summary(r, periods_per_year=365)
+        s = summary(r, periods_per_year=365, cost_bp=0.0)
         assert s.n == 6
         assert s.mean_bp == pytest.approx(5.0)
         assert s.hit_rate_pct == pytest.approx(50.0)
@@ -123,33 +125,52 @@ class TestSummary:
         r = np.full(100, 10.0)
         assert summary(r, periods_per_year=365, cost_bp=4.0).mean_bp == pytest.approx(6.0)
 
+    def test_default_cost_basis_is_the_measured_round_trip_not_gross(self) -> None:
+        """Omitting ``cost_bp`` must not silently produce a gross number.
+
+        A gross read is a diagnostic, not a result (``docs/governance.md`` §2),
+        so the default is the measured round trip and a gross read has to be
+        asked for.
+        """
+        r = np.full(100, 30.0)
+        assert MEASURED_ROUND_TRIP_BP == pytest.approx(15.56)
+        assert summary(r, periods_per_year=365).mean_bp == pytest.approx(
+            30.0 - MEASURED_ROUND_TRIP_BP
+        )
+
+    def test_passive_floor_is_above_the_retired_maker_assumption(self) -> None:
+        """The 4 bp maker assumption was never reachable, even at a 100% fill rate."""
+        assert PASSIVE_FLOOR_ROUND_TRIP_BP == pytest.approx(5.40)
+        assert PASSIVE_FLOOR_ROUND_TRIP_BP > 4.0
+        assert PASSIVE_FLOOR_ROUND_TRIP_BP < MEASURED_ROUND_TRIP_BP
+
     def test_max_drawdown_is_measured_on_the_equity_path(self) -> None:
         # +100bp then -300bp then +100bp -> peak at 1.0%, trough at -1.0%
         r = np.array([100.0, -300.0, 100.0] + [0.0] * 10)
-        assert summary(r, periods_per_year=365).max_drawdown_pct == pytest.approx(3.0)
+        assert summary(r, periods_per_year=365, cost_bp=0.0).max_drawdown_pct == pytest.approx(3.0)
 
     def test_tail_concentration_flags_a_fat_left_tail(self) -> None:
         fat = np.array([1.0] * 99 + [-1000.0])
         even = np.array([1.0, -1.0] * 50)
-        assert summary(fat, periods_per_year=365).tail_concentration_pct == pytest.approx(100.0)
-        assert summary(even, periods_per_year=365).tail_concentration_pct < 10.0
+        assert summary(fat, periods_per_year=365, cost_bp=0.0).tail_concentration_pct == pytest.approx(100.0)
+        assert summary(even, periods_per_year=365, cost_bp=0.0).tail_concentration_pct < 10.0
 
     def test_short_series_returns_nan_rather_than_a_confident_number(self) -> None:
-        s = summary(np.array([1.0, 2.0]), periods_per_year=365)
+        s = summary(np.array([1.0, 2.0]), periods_per_year=365, cost_bp=0.0)
         assert s.n == 2
         assert np.isnan(s.sharpe) and np.isnan(s.t_stat)
 
     def test_zero_variance_series_does_not_divide_by_zero(self) -> None:
-        s = summary(np.full(50, 3.0), periods_per_year=365)
+        s = summary(np.full(50, 3.0), periods_per_year=365, cost_bp=0.0)
         assert s.mean_bp == pytest.approx(3.0)
         assert np.isnan(s.sharpe)
 
     def test_non_finite_values_are_excluded(self) -> None:
         r = np.array([10.0, np.nan, 10.0, np.inf, 10.0, 10.0, 10.0])
-        s = summary(r, periods_per_year=365)
+        s = summary(r, periods_per_year=365, cost_bp=0.0)
         assert s.n == 5
         assert s.mean_bp == pytest.approx(10.0)
 
     def test_accepts_a_polars_series(self) -> None:
-        s = summary(pl.Series([1.0, 2.0, 3.0, 4.0, 5.0]), periods_per_year=365)
+        s = summary(pl.Series([1.0, 2.0, 3.0, 4.0, 5.0]), periods_per_year=365, cost_bp=0.0)
         assert s.mean_bp == pytest.approx(3.0)

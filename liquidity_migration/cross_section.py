@@ -34,6 +34,31 @@ import polars as pl
 
 DEFAULT_CUT = 0.10
 
+#: Measured round-trip execution cost in basis points, and the default cost basis
+#: for every Lane-1 read in this repository.
+#:
+#: Provenance: measured 2026-07-25 from the archived pre-reset demo account
+#: journal (the 2026-07-22 owner-authorized reset), read through
+#: ``liquidity_migration.account_kernel``. 85 fills, 4,406.62 USDT notional,
+#: 7.78 bp/side notional-weighted (median 11.00, range 5.50-11.00) => a 15.56 bp
+#: round trip. The distribution sits exactly on Bybit's taker tiers, i.e. fills
+#: price as **taker**, not maker.
+#:
+#: This replaces the 4.00 bp maker assumption used by the cross-venue anomaly
+#: reads and by ``configs/lane2_premium_momentum_blend_v1.json``. A result that
+#: only survives at 4 bp is not a result
+#: (``docs/roadmap_2026-07-25.md`` §2, task 0.1).
+#:
+#: Note this is NOT a repo-wide correction: the LONG and CONTINUOUS engine
+#: surfaces were never priced at 4 bp. See ``docs/anomaly_research_2026-07-24.md``
+#: §16.1 for the per-surface audit.
+MEASURED_ROUND_TRIP_BP = 15.56
+
+#: Round trip a perfect passive book would pay, from the paper passive-execution
+#: A/B (``docs/anomaly_research_2026-07-24.md`` §13): 2.70 bp/side implied at a
+#: 100% passive fill rate. The floor, never an achieved cost.
+PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40
+
 
 class CrossSectionError(ValueError):
     """A cross-sectional read was requested with incoherent inputs."""
@@ -121,12 +146,23 @@ def long_short(
     )
 
 
-def summary(returns_bp: np.ndarray | pl.Series, *, periods_per_year: int, cost_bp: float = 0.0) -> Summary:
+def summary(
+    returns_bp: np.ndarray | pl.Series,
+    *,
+    periods_per_year: int,
+    cost_bp: float = MEASURED_ROUND_TRIP_BP,
+) -> Summary:
     """Summarise a per-period long/short series already expressed in bp.
 
     ``cost_bp`` is charged once per period, i.e. it assumes the book fully
     rebalances each period. That is the pessimistic reading; a book that
     turns over less should model its own turnover rather than lowering this.
+
+    The default is :data:`MEASURED_ROUND_TRIP_BP`, not zero. A caller that omits
+    the argument gets the honest cost basis rather than a gross number, because
+    a gross number is a diagnostic and not a result (``docs/governance.md`` §2).
+    Pass ``cost_bp=0.0`` explicitly when a gross read is genuinely what is
+    wanted, and label it as such.
     """
 
     r = np.asarray(returns_bp, dtype=float)
