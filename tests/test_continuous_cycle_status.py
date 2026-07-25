@@ -97,9 +97,21 @@ def test_status_round_trip_is_private_and_renders_operator_diagnostics(
     assert read_continuous_cycle_status(tmp_path) == status
     rendered = render_continuous_cycle_status(status)
     assert "CONTINUOUS BTC gate: BLOCKED · uptrend · 30d -0.44%" in rendered
+    assert "CONTINUOUS funnel (component opportunities): " in rendered
     assert "D9 6 → liquidity 4 → event 3 → age 2 → capacity 2" in rendered
     assert "AAAUSDT, BBBUSDT" in rendered
     assert "first rejection btc trend gate" in rendered
+
+    # With a reference instant the block names the cycle it describes, so a
+    # reader cannot mistake a minutes-old funnel snapshot for send-time state.
+    annotated = render_continuous_cycle_status(
+        status,
+        now_ns=status.cycle_ts_ms * 1_000_000 + 150_000_000_000,
+    )
+    assert (
+        "CONTINUOUS funnel (component opportunities · cycle 00:00 UTC, "
+        "2.5 min before this update): " in annotated
+    )
 
 
 def test_reader_binds_projection_to_receipt_and_marks_stale_cycles(
@@ -120,6 +132,7 @@ def test_reader_binds_projection_to_receipt_and_marks_stale_cycles(
 
     fresh = reader.render(now_ns=completed_ts_ns + 60_000_000_000)
     assert fresh.startswith("CONTINUOUS BTC gate: BLOCKED")
+    assert "cycle 00:16 UTC, 17.7 min before this update" in fresh
     stale = reader.render(now_ns=completed_ts_ns + 16 * 60_000_000_000)
     assert stale == "CONTINUOUS BTC gate: STALE · last completed cycle is 16.0 min old"
 

@@ -15,6 +15,7 @@ import os
 import threading
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -263,7 +264,21 @@ def _human_reason(value: str) -> str:
     return value.replace("_", " ").strip() or "none"
 
 
-def render_continuous_cycle_status(status: ContinuousCycleStatus) -> str:
+def render_continuous_cycle_status(
+    status: ContinuousCycleStatus,
+    *,
+    now_ns: int | None = None,
+) -> str:
+    """Render the notification block for one completed cycle.
+
+    The funnel and blocked lines describe the cycle that STARTED at
+    ``cycle_ts_ms``, which can lag the surrounding message by several minutes
+    (the reader serves the newest fully completed cycle).  When ``now_ns`` is
+    provided the block names that instant and its age, so a reader cannot
+    mistake a pre-close funnel snapshot for the account state rendered next to
+    it in the same message.
+    """
+
     gate_state = "OPEN" if status.btc_trend_gate_allows_entry else "BLOCKED"
     if status.btc_trend_gate == "off":
         gate_detail = "off"
@@ -280,10 +295,22 @@ def render_continuous_cycle_status(status: ContinuousCycleStatus) -> str:
     blocked_text = ", ".join(visible) if visible else "none"
     if len(symbols) > len(visible):
         blocked_text += f" +{len(symbols) - len(visible)} more"
+    funnel_scope = "component opportunities"
+    if now_ns is not None:
+        cycle_hhmm = datetime.fromtimestamp(
+            status.cycle_ts_ms / 1000.0, tz=timezone.utc
+        ).strftime("%H:%M")
+        age_minutes = max(
+            0.0, (int(now_ns) - status.cycle_ts_ms * 1_000_000) / 60_000_000_000
+        )
+        funnel_scope = (
+            f"component opportunities · cycle {cycle_hhmm} UTC, "
+            f"{age_minutes:.1f} min before this update"
+        )
     return "\n".join(
         (
             f"CONTINUOUS BTC gate: {gate_state} · {gate_detail}",
-            "CONTINUOUS funnel (component opportunities): "
+            f"CONTINUOUS funnel ({funnel_scope}): "
             f"D9 {totals['d9']} → liquidity {totals['liquidity']} → "
             f"event {totals['event']} → age {totals['age']} → capacity {totals['capacity']}",
             f"CONTINUOUS qualified but blocked: {blocked_text} · "
@@ -335,7 +362,7 @@ class ContinuousCycleStatusReader:
                 age_minutes = age_ns / 60_000_000_000
                 return f"CONTINUOUS BTC gate: STALE · last completed cycle is {age_minutes:.1f} min old"
             assert self._status is not None
-            return render_continuous_cycle_status(self._status)
+            return render_continuous_cycle_status(self._status, now_ns=int(now_ns))
         except (OSError, RuntimeError, ValueError) as exc:
             detail = str(exc).replace("\n", " ").strip()[:160]
             return f"CONTINUOUS BTC gate: unavailable · {detail or type(exc).__name__}"

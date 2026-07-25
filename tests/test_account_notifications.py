@@ -366,7 +366,7 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
     assert "funding journaled separately" in closed.message
     assert "venue closed-PnL not cross-checked online" in closed.message
     assert "fees unresolved" in closed.message
-    assert "component P&L not allocated (account-netted)" in closed.message
+    assert "P&L account-netted; component attribution tracked in canonical trade rows" in closed.message
     assert "awaiting" not in closed.message.lower()
     notifier.commit(closed)
 
@@ -519,7 +519,7 @@ def test_same_symbol_component_exit_reports_reduction_before_later_close(
     )
     first_exit = notifier.prepare(midpoint_by_symbol={"BUSDT": 12.0}, health="healthy")
     assert "✅ Reduced BUSDT · take profit · component trade" in first_exit.message
-    assert "component P&L not allocated (account-netted)" in first_exit.message
+    assert "P&L account-netted; component attribution tracked in canonical trade rows" in first_exit.message
     notifier.commit(first_exit)
 
     target_and_fill(

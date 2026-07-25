@@ -363,7 +363,7 @@ class AccountNotificationEngine:
                 )
                 component = " · component " + ", ".join(component_ids) if component_ids else ""
                 attribution = (
-                    " · component P&L not allocated (account-netted)"
+                    " · P&L account-netted; component attribution tracked in canonical trade rows"
                     if _component_attribution_pending(event.payload)
                     else ""
                 )
@@ -457,9 +457,7 @@ def _hourly_summary(
         realized = _realized_pnl_truth(state)
         lines.append(f"Local journal {_realized_text(realized)} · exposure/estimated uPnL suppressed until reconciled")
         if realized.component_attribution_pending:
-            lines.append(
-                f"Component P&L not allocated for {realized.component_attribution_pending} account-netted reduction(s)"
-            )
+            lines.append(_component_netting_scope_line(realized.component_attribution_pending))
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
             lines.append(rejection_summary)
@@ -508,9 +506,7 @@ def _hourly_summary(
     if unpriced_symbols:
         lines.append("⚠️ L2 midpoint valuation unavailable: " + ", ".join(unpriced_symbols))
     if realized.component_attribution_pending:
-        lines.append(
-            f"Component P&L not allocated for {realized.component_attribution_pending} account-netted reduction(s)"
-        )
+        lines.append(_component_netting_scope_line(realized.component_attribution_pending))
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
         lines.append(rejection_summary)
@@ -902,6 +898,21 @@ def _realized_pnl_truth(state: AccountState) -> _RealizedPnlTruth:
 
 def _realized_text(truth: _RealizedPnlTruth) -> str:
     return f"realized {_usd(truth.amount_usdt, signed=True)}{_accounting_scope_text(truth.pending_labels)}"
+
+
+def _component_netting_scope_line(count: int) -> str:
+    """Scope the lifetime account-netting count so it cannot read as a backlog.
+
+    The kernel stamps every terminal reduce batch account-netted once and never
+    upgrades the row, so this count grows for the life of the journal epoch;
+    per-component allocation lives in the canonical trade attribution, not
+    here.
+    """
+
+    return (
+        f"P&L account-netted for {count} reduction(s) since journal epoch "
+        "(kernel scope; canonical trade rows carry per-component attribution)"
+    )
 
 
 def _accounting_scope_text(labels: Sequence[str]) -> str:
