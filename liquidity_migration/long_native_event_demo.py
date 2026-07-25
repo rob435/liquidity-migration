@@ -133,8 +133,10 @@ class LongNativeDemoCycleConfig:
     # required together so planning cannot mix account targets with stale
     # sleeve-owned open rows.
     account_execution_root: str | None = None
-    # Optional bounded-evidence population contract. When set, every cycle
-    # fails if a frozen symbol disappears and ignores post-freeze listings.
+    # Optional bounded-evidence population contract. When set, post-freeze
+    # listings never enter; a frozen symbol that disappears drops to journaled
+    # temporary ineligibility (or scheduled retirement on delivery evidence)
+    # and the cycle continues.
     candidate_universe_file: str = ""
     data_name: str = "long-native-event-demo"
     # Daemon constructs a KlineStreamManager to feed an in-memory store. The

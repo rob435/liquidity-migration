@@ -333,30 +333,144 @@ def test_profile_reconciliation_treats_live_liquidity_drift_as_temporary(
     assert not (tmp_path / "retirements.json").exists()
 
 
-def test_profile_reconciliation_does_not_mask_structural_contract_change(
+def test_profile_reconciliation_journals_unexplained_absence_and_continues(
+    tmp_path: Path,
+) -> None:
+    # A structural change without delivery evidence drops the symbol to
+    # journaled temporary ineligibility instead of turning every cycle into
+    # an outage. It re-enters automatically if the venue restores it; nothing
+    # post-freeze can enter regardless.
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    reconciliation = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT", status="Settling"),
+                _instrument("BBBUSDT"),
+            ]
+        ),
+        _normalize_tickers(
+            [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+        ),
+        frozen,
+        profile="long",
+        snapshot_ts_ms=now_ms,
+        context="test LONG",
+        retirement_registry_path=tmp_path / "retirements.json",
+    )
+
+    assert reconciliation.active_symbols == ()
+    assert reconciliation.temporarily_ineligible_rows() == [
+        {"symbol": "AAAUSDT", "reasons": ["unexplained_absence_from_venue"]}
+    ]
+    assert reconciliation.scheduled_retirements == ()
+    assert not (tmp_path / "retirements.json").exists()
+
+
+def test_delivery_time_change_updates_registry_and_continues(tmp_path: Path) -> None:
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    first_delivery_ms = now_ms + 3 * 24 * 60 * 60 * 1_000
+    moved_delivery_ms = first_delivery_ms + 24 * 60 * 60 * 1_000
+    registry = tmp_path / "retirements.json"
+    tickers = _normalize_tickers(
+        [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+    )
+
+    first = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(first_delivery_ms)),
+            ]
+        ),
+        tickers,
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+    assert [row.delivery_time_ms for row in first.scheduled_retirements] == [
+        first_delivery_ms
+    ]
+
+    moved = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(moved_delivery_ms)),
+            ]
+        ),
+        tickers,
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms + 1_000,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+
+    row = moved.scheduled_retirements[0]
+    assert row.symbol == "BBBUSDT"
+    assert row.delivery_time_ms == moved_delivery_ms
+    assert row.first_observed_ts_ms == first.scheduled_retirements[0].first_observed_ts_ms
+    assert row.evidence_source == "live_instrument_delivery_time_updated"
+    assert moved.active_symbols == ("AAAUSDT",)
+
+
+def test_scheduled_retirement_reentry_stays_nontradable_and_continues(
     tmp_path: Path,
 ) -> None:
     frozen = load_candidate_universe(
         write_candidate_universe(tmp_path / "candidate.json", _payload())
     )
     now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
-    with pytest.raises(RuntimeError, match="lost 1 unexplained symbol.*AAAUSDT"):
-        enforce_frozen_candidate_frames(
-            _normalize_instruments(
-                [
-                    _instrument("AAAUSDT", status="Settling"),
-                    _instrument("BBBUSDT"),
-                ]
-            ),
-            _normalize_tickers(
-                [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
-            ),
-            frozen,
-            profile="long",
-            snapshot_ts_ms=now_ms,
-            context="test LONG",
-            retirement_registry_path=tmp_path / "retirements.json",
-        )
+    delivery_ms = now_ms + 3 * 24 * 60 * 60 * 1_000
+    registry = tmp_path / "retirements.json"
+    tickers = _normalize_tickers(
+        [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+    )
+
+    enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(delivery_ms)),
+            ]
+        ),
+        tickers,
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+
+    # The venue cancels the delisting: BBBUSDT is fully eligible again. The
+    # cycle continues; the symbol stays non-tradable while its prospective
+    # delivery evidence stands.
+    reentered = enforce_frozen_candidate_frames(
+        _normalize_instruments([_instrument("AAAUSDT"), _instrument("BBBUSDT")]),
+        tickers,
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms + 1_000,
+        context="test CONT",
+        retirement_registry_path=registry,
+    )
+
+    assert reentered.active_symbols == ("AAAUSDT",)
+    assert reentered.temporarily_ineligible_rows() == [
+        {
+            "symbol": "BBBUSDT",
+            "reasons": ["scheduled_retirement_reentered_eligibility"],
+        }
+    ]
+    assert [row.symbol for row in reentered.scheduled_retirements] == ["BBBUSDT"]
 
 
 def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path) -> None:

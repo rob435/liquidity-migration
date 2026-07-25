@@ -159,12 +159,16 @@ cycle receipt. That normal ranking movement is distinct from disappearance.
 
 A symbol with a newly observed future venue `deliveryTime` is recorded
 prospectively in a private retirement registry and removed from new-entry
-membership. The cycle continues only when the canonical position, component
-desires/targets, working orders, aggregate target, and unresolved inbox are all
-flat for that symbol. The registry preserves the observation after the venue
-removes the instrument row. A missing ticker/instrument without prior evidence,
-a structural contract change, malformed eligibility input, or any remaining
-exposure still fails closed.
+membership; a moved delivery date updates the registry in place. Retirement
+itself still requires the canonical position, component desires/targets,
+working orders, aggregate target, and unresolved inbox to be flat for that
+symbol. The registry preserves the observation after the venue removes the
+instrument row. A missing ticker/instrument without prior evidence or a
+structural contract change drops the symbol to journaled temporary
+ineligibility and the cycle continues — it re-enters automatically if the
+venue restores it, and a cancelled delisting leaves the symbol non-tradable
+while its delivery evidence stands. Malformed eligibility input and any
+remaining exposure on a retiring symbol still fail closed.
 
 ### Reconstruction limits
 

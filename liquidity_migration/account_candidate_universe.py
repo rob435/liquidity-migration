@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import time
@@ -26,6 +27,8 @@ from .deterministic_serialization import canonical_json, json_safe
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .universe import CRYPTO_LINEAR_SYMBOL_TYPES, build_current_universe_table
 
+
+_LOGGER = logging.getLogger(__name__)
 
 CANDIDATE_UNIVERSE_SCHEMA_VERSION = 3
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
@@ -1051,10 +1054,22 @@ def enforce_frozen_candidate_frames(
     changed = False
     reactivated = sorted(set(registry) & current)
     if reactivated:
-        raise RuntimeError(
-            f"{context}: scheduled retirement re-entered current eligibility: "
-            f"{','.join(reactivated)}"
+        # A venue can cancel or move a delisting; that is external reality,
+        # not a reason to halt the sleeve. The symbol stays non-tradable (its
+        # prospective delivery evidence stands until it retires or the record
+        # is deliberately revisited) and the cycle continues.
+        _LOGGER.warning(
+            "%s: scheduled retirement re-entered current eligibility; kept "
+            "non-tradable: %s",
+            context,
+            ",".join(reactivated),
         )
+        for symbol in reactivated:
+            retirements[symbol] = registry[symbol]
+            temporarily_ineligible[symbol] = TemporarilyIneligibleCandidate(
+                symbol=symbol,
+                reasons=("scheduled_retirement_reentered_eligibility",),
+            )
     profile_config = _universe_config(frozen.profile_inputs[profile])
     for symbol in missing:
         row = instrument_rows.get(symbol)
@@ -1065,11 +1080,28 @@ def enforce_frozen_candidate_frames(
         prior = registry.get(symbol)
         if prior is not None and delivery_time_ms > 0:
             if prior.delivery_time_ms != delivery_time_ms:
-                raise RuntimeError(
-                    f"{context}: {symbol} delivery time changed from "
-                    f"{prior.delivery_time_ms} to {delivery_time_ms}"
+                # The venue moved the delivery date. Track the latest venue
+                # observation, keep the original first-observed timestamp as
+                # the causal anchor, and continue.
+                _LOGGER.warning(
+                    "%s: %s delivery time changed from %d to %d; registry updated",
+                    context,
+                    symbol,
+                    prior.delivery_time_ms,
+                    delivery_time_ms,
                 )
-            retirements[symbol] = prior
+                updated = ScheduledCandidateRetirement(
+                    symbol=symbol,
+                    delivery_time_ms=delivery_time_ms,
+                    first_observed_ts_ms=prior.first_observed_ts_ms,
+                    observed_status=str((row or {}).get("status") or ""),
+                    evidence_source="live_instrument_delivery_time_updated",
+                )
+                registry[symbol] = updated
+                changed = True
+                retirements[symbol] = updated
+            else:
+                retirements[symbol] = prior
         elif (
             delivery_time_ms > frozen.snapshot_ts_ns // 1_000_000
             and delivery_time_ms > snapshot_ts_ms
@@ -1104,16 +1136,32 @@ def enforce_frozen_candidate_frames(
                     reasons=temporary_reasons,
                 )
     if unexplained:
+        # A symbol vanishing without delivery evidence (abrupt delist, rename,
+        # venue hiccup) drops to temporarily-ineligible — journaled every
+        # cycle, active again automatically if it returns — instead of
+        # halting the sleeve. The population contract is unchanged: nothing
+        # post-freeze can enter.
         preview = ",".join(unexplained[:20])
         suffix = "..." if len(unexplained) > 20 else ""
-        raise RuntimeError(
-            f"{context}: frozen {profile} candidate population lost "
-            f"{len(unexplained)} unexplained symbol(s): {preview}{suffix}"
+        _LOGGER.warning(
+            "%s: frozen %s candidate population lost %d unexplained symbol(s): %s%s",
+            context,
+            profile,
+            len(unexplained),
+            preview,
+            suffix,
         )
+        for symbol in unexplained:
+            temporarily_ineligible[symbol] = TemporarilyIneligibleCandidate(
+                symbol=symbol,
+                reasons=("unexplained_absence_from_venue",),
+            )
     if changed:
         _write_retirement_registry(registry_path, frozen=frozen, records=registry)
     active = tuple(
-        symbol for symbol in frozen.profile_symbols[profile] if symbol in current
+        symbol
+        for symbol in frozen.profile_symbols[profile]
+        if symbol in current and symbol not in temporarily_ineligible
     )
     return CandidatePopulationReconciliation(
         profile=profile,
