@@ -401,6 +401,7 @@ class BtcRiskLiveSizer:
         self._state_hash = _BTC_RISK_STATE_GENESIS_HASH
         self._dirty = False
         self._authoritative_reconciliation_error: str | None = None
+        self._epoch_orphaned_rows = 0
         self.load()
 
     @property
@@ -437,6 +438,20 @@ class BtcRiskLiveSizer:
             decision_key = str(row.get("decision_key") or "")
             if not symbol or signal_ts_ms <= 0 or decision_key != f"{symbol}|{signal_ts_ms}":
                 raise ValueError("BTC-risk state row has invalid decision identity")
+            evidence_json = row.get("decision_evidence_json")
+            if evidence_json is None or str(evidence_json).strip() == "":
+                raise ValueError("BTC-risk state row is missing decision evidence")
+            try:
+                raw_evidence = json.loads(evidence_json) if isinstance(evidence_json, str) else evidence_json
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("BTC-risk state contains unreadable decision evidence") from exc
+            evidence = normalize_btc_risk_decision_evidence(raw_evidence)
+            if evidence["arm_id"] != self.arm_id or evidence["policy"] != self.policy:
+                # A persisted decision from another arm epoch (policy or arm
+                # retune) is a prior-epoch orphan, not corruption: drop it and
+                # count it for the next authoritative reconciliation.
+                self._epoch_orphaned_rows += 1
+                continue
             raw_values = {name: _finite(row.get(name)) for name in BTC_RISK_COMPONENTS}
             score = self.state.score(decision_key=decision_key, raw_values=raw_values)
             result_state_hash = _next_state_hash(
@@ -446,28 +461,25 @@ class BtcRiskLiveSizer:
                 signal_ts_ms=signal_ts_ms,
                 raw_values=raw_values,
             )
-            evidence_json = row.get("decision_evidence_json")
-            if evidence_json is None or str(evidence_json).strip() == "":
-                raise ValueError("BTC-risk state row is missing decision evidence")
-            try:
-                raw_evidence = json.loads(evidence_json) if isinstance(evidence_json, str) else evidence_json
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ValueError("BTC-risk state contains unreadable decision evidence") from exc
-            evidence = normalize_btc_risk_decision_evidence(
-                raw_evidence,
-                expected_arm_id=self.arm_id,
-                expected_policy=self.policy,
-            )
-            self._validate_evidence(
-                evidence,
-                decision_key=decision_key,
-                symbol=symbol,
-                signal_ts_ms=signal_ts_ms,
-                raw_values=raw_values,
-                score=score,
-                predecessor_state_hash=self._state_hash,
-                result_state_hash=result_state_hash,
-            )
+            if evidence["predecessor_state_hash"] == self._state_hash:
+                self._validate_evidence(
+                    evidence,
+                    decision_key=decision_key,
+                    symbol=symbol,
+                    signal_ts_ms=signal_ts_ms,
+                    raw_values=raw_values,
+                    score=score,
+                    predecessor_state_hash=self._state_hash,
+                    result_state_hash=result_state_hash,
+                )
+            else:
+                self._validate_rebased_evidence(
+                    evidence,
+                    decision_key=decision_key,
+                    symbol=symbol,
+                    signal_ts_ms=signal_ts_ms,
+                    raw_values=raw_values,
+                )
             normalized_row = {
                 "decision_key": decision_key,
                 "symbol": symbol,
@@ -562,23 +574,78 @@ class BtcRiskLiveSizer:
         if evidence != expected:
             raise ValueError("BTC-risk evidence result conflicts with causal replay")
 
+    def _validate_rebased_evidence(
+        self,
+        evidence: Mapping[str, Any],
+        *,
+        decision_key: str,
+        symbol: str,
+        signal_ts_ms: int,
+        raw_values: Mapping[str, float | None],
+    ) -> None:
+        """Validate a receipt rebased across a never-accepted predecessor link.
+
+        The recorded chain hashes and score live on a proposal branch whose
+        predecessor was never accepted, so a causal replay of the recorded
+        result is impossible: validation is limited to identity, raw-value
+        agreement, recorded-link integrity, and the receipt's own policy
+        arithmetic.
+        """
+
+        if (
+            evidence["decision_key"] != decision_key
+            or evidence["symbol"] != symbol
+            or evidence["signal_ts_ms"] != signal_ts_ms
+        ):
+            raise ValueError("BTC-risk evidence identity conflicts with the accepted target")
+        for name in BTC_RISK_COMPONENTS:
+            if not self._equal_optional_float(evidence["raw_values"].get(name), raw_values.get(name)):
+                raise ValueError(f"BTC-risk evidence raw value {name} conflicts with accepted state")
+        if evidence["result_state_hash"] != _next_state_hash(
+            evidence["predecessor_state_hash"],
+            decision_key=decision_key,
+            symbol=symbol,
+            signal_ts_ms=signal_ts_ms,
+            raw_values=evidence["raw_values"],
+        ):
+            raise ValueError("BTC-risk evidence result state hash mismatch")
+        policy = evidence["policy"]
+        result = evidence["result"]
+        selected = (not result["score_warmup"]) and policy["low"] <= result["btc_risk_score"] < policy["high"]
+        expected_mult = policy["tail_mult"] if selected else 1.0
+        if (
+            result["tail_selected"] != selected
+            or not math.isclose(result["stack_mult"], expected_mult, rel_tol=1e-12, abs_tol=1e-12)
+            or result["score_warmup"] != (result["prior_decision_count"] < policy["min_prior"])
+        ):
+            raise ValueError("BTC-risk evidence result conflicts with its recorded policy")
+        present = sum(1 for name in BTC_RISK_COMPONENTS if evidence["raw_values"].get(name) is not None)
+        if (
+            result["score_component_count"] != present
+            or result["score_missing_component_count"] != len(BTC_RISK_COMPONENTS) - present
+        ):
+            raise ValueError("BTC-risk evidence component counts conflict with its raw values")
+
     def _normalize_accepted_evidence_rows(
         self,
         rows: Iterable[Mapping[str, Any]],
-    ) -> tuple[dict[str, dict[str, Any]], int, int]:
+    ) -> tuple[dict[str, dict[str, Any]], int, int, int]:
         evidence_by_key: dict[str, dict[str, Any]] = {}
         ignored = 0
+        epoch_ignored = 0
         duplicate_rows = 0
         for row in rows:
             raw_evidence = row.get(BTC_RISK_EVIDENCE_METADATA_KEY)
             if raw_evidence is None:
                 ignored += 1
                 continue
-            evidence = normalize_btc_risk_decision_evidence(
-                raw_evidence,
-                expected_arm_id=self.arm_id,
-                expected_policy=self.policy,
-            )
+            evidence = normalize_btc_risk_decision_evidence(raw_evidence)
+            if evidence["arm_id"] != self.arm_id or evidence["policy"] != self.policy:
+                # Accepted evidence from another arm epoch (policy or arm
+                # retune) is not authority for the active arm: ignore it and
+                # count it. Same-key conflicts apply within one epoch only.
+                epoch_ignored += 1
+                continue
             row_symbol = str(row.get("symbol") or "").upper()
             row_signal_ts = int(row.get("signal_ts_ms") or 0)
             if row_symbol and row_symbol != evidence["symbol"]:
@@ -592,7 +659,7 @@ class BtcRiskLiveSizer:
                 duplicate_rows += 1
                 continue
             evidence_by_key[evidence["decision_key"]] = evidence
-        return evidence_by_key, ignored, duplicate_rows
+        return evidence_by_key, ignored, epoch_ignored, duplicate_rows
 
     def _persisted_evidence_by_key(self) -> dict[str, dict[str, Any]]:
         return {
@@ -624,19 +691,51 @@ class BtcRiskLiveSizer:
         *,
         candidate_state: ExpandingBtcRiskState,
         candidate_state_hash: str,
-    ) -> tuple[ExpandingBtcRiskState, str, list[dict[str, Any]]]:
+    ) -> tuple[ExpandingBtcRiskState, str, list[dict[str, Any]], int]:
+        """Replay accepted receipts as one chain, healing never-accepted links.
+
+        Only accepted proposals reach the authority, so a receipt chained past
+        a never-accepted same-cycle proposal (risk rejection, suppression,
+        publication error) records a predecessor no accepted evidence can
+        fill. Such a receipt commits rebased onto the replayed head — counted
+        per severed link — and its same-cycle successors follow the recorded
+        proposal branch so acceptance order is preserved. Receipts whose
+        recorded predecessor matches the replayed head still commit strictly,
+        and a forked predecessor still fails closed.
+        """
+
         replayed_rows: list[dict[str, Any]] = []
+        orphaned_links = 0
+        linked_state_hash = candidate_state_hash
         remaining = dict(evidence_by_key)
         while remaining:
+            rebased = False
             next_receipts = [
                 evidence
                 for evidence in remaining.values()
                 if evidence["predecessor_state_hash"] == candidate_state_hash
             ]
-            if not next_receipts:
-                raise ValueError("accepted BTC-risk evidence has a predecessor gap or stale branch")
+            if not next_receipts and linked_state_hash != candidate_state_hash:
+                next_receipts = [
+                    evidence
+                    for evidence in remaining.values()
+                    if evidence["predecessor_state_hash"] == linked_state_hash
+                ]
+                rebased = True
             if len(next_receipts) > 1:
                 raise ValueError("accepted BTC-risk evidence contains a forked predecessor")
+            if not next_receipts:
+                recorded_results = {evidence["result_state_hash"] for evidence in remaining.values()}
+                heads = [
+                    evidence
+                    for evidence in remaining.values()
+                    if evidence["predecessor_state_hash"] not in recorded_results
+                ]
+                if not heads:
+                    raise ValueError("accepted BTC-risk evidence has a predecessor gap or stale branch")
+                next_receipts = heads[:1]
+                orphaned_links += 1
+                rebased = True
             evidence = next_receipts[0]
             decision_key = evidence["decision_key"]
             symbol = evidence["symbol"]
@@ -650,20 +749,30 @@ class BtcRiskLiveSizer:
                 signal_ts_ms=signal_ts_ms,
                 raw_values=raw_values,
             )
-            self._validate_evidence(
-                evidence,
-                decision_key=decision_key,
-                symbol=symbol,
-                signal_ts_ms=signal_ts_ms,
-                raw_values=raw_values,
-                score=score,
-                predecessor_state_hash=candidate_state_hash,
-                result_state_hash=result_state_hash,
-            )
+            if rebased:
+                self._validate_rebased_evidence(
+                    evidence,
+                    decision_key=decision_key,
+                    symbol=symbol,
+                    signal_ts_ms=signal_ts_ms,
+                    raw_values=raw_values,
+                )
+            else:
+                self._validate_evidence(
+                    evidence,
+                    decision_key=decision_key,
+                    symbol=symbol,
+                    signal_ts_ms=signal_ts_ms,
+                    raw_values=raw_values,
+                    score=score,
+                    predecessor_state_hash=candidate_state_hash,
+                    result_state_hash=result_state_hash,
+                )
             replayed_rows.append(self._state_row_from_evidence(evidence))
             candidate_state_hash = result_state_hash
+            linked_state_hash = evidence["result_state_hash"]
             del remaining[decision_key]
-        return candidate_state, candidate_state_hash, replayed_rows
+        return candidate_state, candidate_state_hash, replayed_rows, orphaned_links
 
     def _commit_replayed_state(
         self,
@@ -787,18 +896,29 @@ class BtcRiskLiveSizer:
         """Reconcile against a complete canonical set of accepted receipts.
 
         The supplied evidence is replayed from genesis and treated as the
-        entire authority for this arm. Persisted decisions missing from that
-        set are prior-epoch orphans (ledger reset, migration): the state is
-        rebased onto the replayed authoritative chain and the orphans are
-        dropped and counted — never a reason to block entries. A same-key
-        evidence-hash conflict is corruption, not epoch drift, and still fails
-        closed until a complete reconciliation succeeds.
+        entire authority for the active arm epoch. Bookkeeping drift is
+        self-healed — never a reason to block entries:
+
+        * persisted decisions missing from the authority, or recorded under
+          another arm epoch (policy or arm retune), are prior-epoch orphans
+          (ledger reset, migration): the state is rebased onto the replayed
+          authoritative chain and the orphans are dropped and counted
+          (``orphaned_dropped``);
+        * accepted evidence from another arm epoch is ignored and counted
+          (``epoch_ignored``);
+        * accepted evidence chained past a never-accepted proposal is rebased
+          onto the replayed head and counted per severed link
+          (``orphaned_links``).
+
+        A same-key same-arm evidence-hash conflict is corruption, not epoch
+        drift, and still fails closed until a complete reconciliation
+        succeeds.
         """
 
         self._authoritative_reconciliation_error = "authoritative reconciliation did not complete"
         try:
-            evidence_by_key, ignored, duplicate_rows = self._normalize_accepted_evidence_rows(rows)
-            candidate_state, candidate_state_hash, authoritative_rows = self._replay_evidence_chain(
+            evidence_by_key, ignored, epoch_ignored, duplicate_rows = self._normalize_accepted_evidence_rows(rows)
+            candidate_state, candidate_state_hash, authoritative_rows, orphaned_links = self._replay_evidence_chain(
                 evidence_by_key,
                 candidate_state=ExpandingBtcRiskState(min_prior=self.state.min_prior),
                 candidate_state_hash=_BTC_RISK_STATE_GENESIS_HASH,
@@ -814,9 +934,10 @@ class BtcRiskLiveSizer:
                         f"authoritative accepted BTC-risk evidence conflicts with persisted decision {decision_key}"
                     )
 
+            epoch_orphaned_rows = self._epoch_orphaned_rows
             retained = len(persisted_by_key) - len(missing_from_authority)
             ingested = len(evidence_by_key) - retained
-            if ingested or missing_from_authority:
+            if ingested or missing_from_authority or epoch_orphaned_rows:
                 self._commit_replayed_state(
                     candidate_state=candidate_state,
                     candidate_state_hash=candidate_state_hash,
@@ -826,11 +947,14 @@ class BtcRiskLiveSizer:
             self._authoritative_reconciliation_error = str(exc)
             raise
         self._authoritative_reconciliation_error = None
+        self._epoch_orphaned_rows = 0
         return {
             "ingested": ingested,
             "duplicates": duplicate_rows + retained,
             "ignored": ignored,
-            "orphaned_dropped": len(missing_from_authority),
+            "epoch_ignored": epoch_ignored,
+            "orphaned_dropped": len(missing_from_authority) + epoch_orphaned_rows,
+            "orphaned_links": orphaned_links,
             "authoritative_rows": len(evidence_by_key),
         }
 

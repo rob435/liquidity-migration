@@ -525,7 +525,9 @@ def test_authoritative_empty_projection_accepts_empty_state(tmp_path: Path) -> N
         "ingested": 0,
         "duplicates": 0,
         "ignored": 0,
+        "epoch_ignored": 0,
         "orphaned_dropped": 0,
+        "orphaned_links": 0,
         "authoritative_rows": 0,
     }
     assert sizer.rows == 0
@@ -631,7 +633,9 @@ def test_authoritative_complete_replay_catches_up_persisted_prefix(
         "ingested": 1,
         "duplicates": 2,
         "ignored": 0,
+        "epoch_ignored": 0,
         "orphaned_dropped": 0,
+        "orphaned_links": 0,
         "authoritative_rows": 2,
     }
     assert pl.read_parquet(state_path)["decision_key"].to_list() == [
@@ -682,6 +686,206 @@ def test_authoritative_conflict_with_persisted_decision_fails_closed(
     assert pl.read_parquet(state_path).height == 1
     with pytest.raises(RuntimeError, match="scoring is blocked"):
         sizer.score_decisions([], btc_context={})
+
+
+def test_partial_acceptance_of_chained_cycle_rebases_orphan_link(tmp_path: Path) -> None:
+    source = BtcRiskLiveSizer(tmp_path / "source.parquet", min_prior=0)
+    day = 10 * DAY_MS
+    lookup, stats = source.score_decisions(
+        [
+            {"symbol": "AAAUSDT", "signal_ts_ms": day},
+            {"symbol": "BBBUSDT", "signal_ts_ms": day},
+            {"symbol": "CCCUSDT", "signal_ts_ms": day},
+        ],
+        btc_context={day: {name: None for name in BTC_RISK_COMPONENTS}},
+    )
+    assert stats["scored"] == 3
+    # The first-scored candidate is never accepted (risk rejection); the two
+    # later-scored candidates of the same cycle are.
+    accepted = [
+        _accepted_evidence_row(lookup[("BBBUSDT", day)]["decision_evidence"]),
+        _accepted_evidence_row(lookup[("CCCUSDT", day)]["decision_evidence"]),
+    ]
+
+    sink_path = tmp_path / "sink.parquet"
+    sink = BtcRiskLiveSizer(sink_path, min_prior=0)
+    result = sink.reconcile_authoritative_accepted_decisions(accepted)
+
+    assert result["ingested"] == 2
+    assert result["orphaned_links"] == 1
+    assert pl.read_parquet(sink_path)["decision_key"].to_list() == [
+        f"BBBUSDT|{day}",
+        f"CCCUSDT|{day}",
+    ]
+    assert BtcRiskLiveSizer(sink_path, min_prior=0).rows == 2
+
+    repeat = sink.reconcile_authoritative_accepted_decisions(accepted)
+    assert repeat["ingested"] == 0
+    assert repeat["duplicates"] == 2
+    assert repeat["orphaned_links"] == 1
+    # Scoring continues immediately on the rebased chain.
+    assert (
+        _propose_evidence(
+            sink,
+            symbol="DDDUSDT",
+            signal_ts_ms=11 * DAY_MS,
+        )["decision_key"]
+        == f"DDDUSDT|{11 * DAY_MS}"
+    )
+
+
+def test_partial_cycle_acceptance_does_not_poison_future_entries(tmp_path: Path) -> None:
+    state_root = tmp_path / "strategy"
+    demo = _demo()
+    first = _candidate("AAAUSDT", 11 * DAY_MS)
+    second = _candidate("BBBUSDT", 11 * DAY_MS)
+    stats = _apply_btc_risk_sizing(
+        [first, second],
+        config=demo,
+        root=state_root,
+        btc_klines=_btc_klines(),
+    )
+    assert stats["scored"] == 2
+
+    intent = _entry_intent(demo, second)
+    route = _route(tmp_path)
+    _submit_to_kernel(route.account_path, intent, accept=True, batch_id="accepted-second")
+    accepted_rows = canonical_strategy_trade_rows(
+        route.account_path,
+        sleeve="continuous",
+        strategy_ids=("continuous-test",),
+    )
+
+    healed = _apply_btc_risk_sizing(
+        [_candidate("CCCUSDT", 12 * DAY_MS)],
+        config=demo,
+        root=state_root,
+        btc_klines=_btc_klines(),
+        accepted_target_rows=accepted_rows,
+    )
+
+    assert not healed["entry_blocked"]
+    assert healed["blocking_reason"] == ""
+    assert healed["accepted_ingested"] == 1
+    assert healed["scored"] == 1
+    state_path = state_root / "btc_risk_sizing_state.parquet"
+    assert pl.read_parquet(state_path)["decision_key"].to_list() == [f"BBBUSDT|{11 * DAY_MS}"]
+
+
+def test_orphan_link_rebase_keeps_same_key_conflicts_fatal(tmp_path: Path) -> None:
+    source = BtcRiskLiveSizer(tmp_path / "source.parquet", min_prior=0)
+    day = 10 * DAY_MS
+    lookup, _ = source.score_decisions(
+        [
+            {"symbol": "AAAUSDT", "signal_ts_ms": day},
+            {"symbol": "BBBUSDT", "signal_ts_ms": day},
+        ],
+        btc_context={day: {name: None for name in BTC_RISK_COMPONENTS}},
+    )
+    partial = _accepted_evidence_row(lookup[("BBBUSDT", day)]["decision_evidence"])
+    sink = BtcRiskLiveSizer(tmp_path / "sink.parquet", min_prior=0)
+    assert sink.reconcile_authoritative_accepted_decisions([partial])["orphaned_links"] == 1
+
+    conflicting_source = BtcRiskLiveSizer(tmp_path / "conflicting-source.parquet", min_prior=0)
+    conflicting = _propose_evidence(
+        conflicting_source,
+        symbol="BBBUSDT",
+        signal_ts_ms=day,
+        raw_values={"btc_trend_30d": 0.25},
+    )
+
+    with pytest.raises(ValueError, match="conflicts with persisted decision"):
+        sink.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(conflicting)])
+    with pytest.raises(RuntimeError, match="scoring is blocked"):
+        sink.score_decisions([], btc_context={})
+
+
+@pytest.mark.parametrize(
+    "retune",
+    [{"tail_mult": 0.50}, {"arm_id": "CTRL_BTC_RISK_V2"}],
+    ids=["policy", "arm_id"],
+)
+def test_arm_epoch_change_rebases_state_and_ignores_prior_epoch_journal(
+    tmp_path: Path,
+    retune: dict[str, object],
+) -> None:
+    state_path = tmp_path / "epoch.parquet"
+    sizer = BtcRiskLiveSizer(state_path, min_prior=0)
+    prior_epoch = _propose_evidence(sizer, symbol="AAAUSDT", signal_ts_ms=10 * DAY_MS)
+    sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(prior_epoch)])
+
+    retuned = BtcRiskLiveSizer(state_path, min_prior=0, **retune)  # type: ignore[arg-type]
+    assert retuned.rows == 0
+
+    rebased = retuned.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(prior_epoch)])
+    assert rebased["epoch_ignored"] == 1
+    assert rebased["orphaned_dropped"] == 1
+    assert rebased["authoritative_rows"] == 0
+    assert rebased["ingested"] == 0
+
+    # Scoring continues immediately in the new arm epoch; the same decision
+    # key re-scored under the new arm is not a conflict with the ignored
+    # prior-epoch evidence.
+    fresh = _propose_evidence(retuned, symbol="AAAUSDT", signal_ts_ms=10 * DAY_MS)
+    assert fresh["decision_key"] == f"AAAUSDT|{10 * DAY_MS}"
+    assert fresh["evidence_hash"] != prior_epoch["evidence_hash"]
+
+    recovered = retuned.reconcile_authoritative_accepted_decisions(
+        [_accepted_evidence_row(prior_epoch), _accepted_evidence_row(fresh)]
+    )
+    assert recovered["ingested"] == 1
+    assert recovered["epoch_ignored"] == 1
+    assert recovered["orphaned_dropped"] == 0
+    assert retuned.rows == 1
+
+    reloaded = BtcRiskLiveSizer(state_path, min_prior=0, **retune)  # type: ignore[arg-type]
+    assert reloaded.rows == 1
+    healed = reloaded.reconcile_authoritative_accepted_decisions(
+        [_accepted_evidence_row(prior_epoch), _accepted_evidence_row(fresh)]
+    )
+    assert healed["orphaned_dropped"] == 0
+    assert healed["epoch_ignored"] == 1
+
+
+def test_policy_retune_does_not_block_entries_over_prior_epoch_state(tmp_path: Path) -> None:
+    state_root = tmp_path / "strategy"
+    demo, candidate, _ = _score_candidate(state_root)
+    intent = _entry_intent(demo, candidate)
+    route = _route(tmp_path)
+    _submit_to_kernel(route.account_path, intent, accept=True, batch_id="accepted-old-policy")
+    accepted_rows = canonical_strategy_trade_rows(
+        route.account_path,
+        sleeve="continuous",
+        strategy_ids=("continuous-test",),
+    )
+    synchronized = _apply_btc_risk_sizing(
+        [],
+        config=demo,
+        root=state_root,
+        btc_klines=pl.DataFrame(),
+        accepted_target_rows=accepted_rows,
+    )
+    assert synchronized["accepted_ingested"] == 1
+
+    tuned = ContinuousDemoCycleConfig(
+        entry_btc_risk_sizing_enabled=True,
+        entry_btc_risk_min_prior=0,
+        entry_btc_risk_tail_mult=0.50,
+        sizing_mode="flat",
+    )
+    retuned = _apply_btc_risk_sizing(
+        [_candidate("BBBUSDT", 12 * DAY_MS)],
+        config=tuned,
+        root=state_root,
+        btc_klines=_btc_klines(),
+        accepted_target_rows=accepted_rows,
+    )
+
+    assert not retuned["entry_blocked"]
+    assert retuned["blocking_reason"] == ""
+    assert retuned["scored"] == 1
+    assert retuned["state_rows"] == 0
+    assert retuned["accepted_authoritative_rows"] == 0
 
 
 @pytest.mark.parametrize("failure_mode", ["file_fsync", "replace", "directory_fsync"])
