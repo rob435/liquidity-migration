@@ -60,6 +60,20 @@ The binding constraint is **statistical, not computational**.
   `docs/preregistration/basket_short_tail_experiment_2026-07-25.md`).
 - **Phase 3 — procure a liquidation feed.** The only genuinely new input.
 - **Phase 4 — commit and grade forward.** The commit is the registration.
+- **Phase 5 — only after 0–4 have run and reported.** Two things. First, tune
+  every gate, filter, entry level and universe bound to maximise **t, not mean**:
+  `t = effect × √n`, so a filter that lifts the mean while halving the sample
+  needs a ×1.41 effect just to break even, and the BTC gate's 32× mean lift still
+  only reaches t 1.30 because it keeps 39% of days. Loosening for sample is often
+  the cheapest route from t≈1.3 to t≈2. Report whole curves, never the best cell.
+  Second, source hypotheses from **outside** this repository — practitioner
+  substacks, crypto-microstructure papers, liquidation-cascade literature. The
+  24h-display rollover came from one such write-up and, though it did not pay, it
+  was a mechanism this program would never have invented. Prefer sources that
+  explain *why* an effect exists and who is on the other side. External ideas get
+  no discount: same 15.56 bp, same A/B structure, same threshold, and they count
+  against the multiple-testing budget. Published results are survivorship-selected
+  — test the mechanism, not the parameters quoted, and check both venues.
 
 ## Working state
 
