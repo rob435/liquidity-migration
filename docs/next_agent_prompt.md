@@ -26,6 +26,15 @@ Execution work cannot rescue this: its ceiling is Sharpe 0.69 → ~1.17. And sin
 
 The binding constraint is **statistical, not computational**.
 
+**And the architecture is suspect.** The repo's own audit found that *barebones*
+books — the sleeves stripped of their tuning — were **−3.23% LONG and −20.23%
+CONTINUOUS** after costs. Everything positive comes from a parameter layer over a
+negative base, built across 29 families and 150+ configurations whose search cost
+was never charged. `continuous_ensemble_v2` is three adjacent cells of one
+turnover sweep averaged together; `LongV11a` encodes eleven-plus iterations. See
+roadmap §9. Treat **barebones-beats-costs as a gate**: a signal that only works
+dressed is a fit, and the dressing is where the search cost hides.
+
 ## Rules that are not negotiable
 
 1. **Price everything at 15.56 bp round trip**, or at realised journal fees. A
