@@ -413,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-private-requests-per-second",
         type=int,
         default=REGISTERED_MAX_PRIVATE_REQUESTS_PER_SECOND,
-        help="shared rate ceiling for authenticated demo reads/mutations (default: 5)",
+        help="shared rate ceiling for authenticated demo reads/mutations (default: 10)",
     )
     parser.add_argument("--confirm-demo-probe", action="store_true")
     args = parser.parse_args(argv)
@@ -517,10 +517,14 @@ def main(argv: list[str] | None = None) -> int:
             str(row.get("symbol") or "").upper(): row
             for row in client.get_instruments_info()
         }
+        progress_started = time.monotonic()
         for symbol_index, symbol in enumerate(symbols, start=1):
             instrument = instrument_rows.get(symbol)
             if instrument is None:
                 raise RuntimeError(f"{symbol}: absent from api-demo instruments-info")
+            # Keep the PostOnly distance bound to a current per-symbol bid. A
+            # single all-symbol snapshot can be many minutes old by the tail of
+            # a broad exceptional refresh and is not a safe latency shortcut.
             tickers = client.get_tickers(symbol=symbol)
             if not tickers:
                 raise RuntimeError(f"{symbol}: api-demo ticker is unavailable")
@@ -549,10 +553,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             rules[symbol] = asdict(rule)
             evidence[symbol] = receipt.to_dict()
+            elapsed_seconds = max(0.001, time.monotonic() - progress_started)
+            remaining_symbols = len(symbols) - symbol_index
+            eta_seconds = int(round(remaining_symbols * elapsed_seconds / symbol_index))
             print(
                 "demo-rule-probe-progress "
                 f"completed={symbol_index}/{len(symbols)} "
-                f"symbol={symbol} attempts={len(symbol_attempts)}",
+                f"symbol={symbol} attempts={len(symbol_attempts)} "
+                f"elapsed_seconds={int(round(elapsed_seconds))} "
+                f"eta_seconds={eta_seconds}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -605,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
                 "https://bybit-exchange.github.io/docs/v5/order/create-order",
                 "https://bybit-exchange.github.io/docs/v5/order/open-order",
                 "https://bybit-exchange.github.io/docs/v5/order/order-list",
+                "https://bybit-exchange.github.io/docs/v5/rate-limit",
                 "https://bybit-exchange.github.io/docs/v5/error",
             ],
             "account_identity": account_identity,

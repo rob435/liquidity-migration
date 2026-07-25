@@ -81,6 +81,39 @@ def test_rmom_staleness_empty_fresh_and_stale() -> None:
     assert stale is not None and stale.severity == M.CRITICAL and "STALE" in stale.message
 
 
+def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
+    hour_ns = 3_600_000_000_000
+    verified = 1_000 * hour_ns
+
+    assert M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified + 143 * hour_ns,
+    ) is None
+    warning = M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified + 144 * hour_ns,
+    )
+    assert warning is not None
+    assert warning.severity == M.WARNING
+    assert "24.0h" in warning.message
+
+    expired = M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified + 169 * hour_ns,
+    )
+    assert expired is not None
+    assert expired.severity == M.CRITICAL
+    assert "expired 1.0h ago" in expired.message
+
+    future = M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified - hour_ns,
+    )
+    assert future is not None
+    assert future.severity == M.CRITICAL
+    assert "future-dated" in future.message
+
+
 def test_unit_states_alert_only_on_terminal_failed() -> None:
     # Transient restart states (activating/deactivating/inactive) must NOT alert —
     # they happen on every deploy; only the terminal 'failed' is unambiguous.

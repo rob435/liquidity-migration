@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,8 +17,11 @@ from liquidity_migration.account_candidate_universe import (
     write_candidate_universe,
 )
 from liquidity_migration.candidate_rule_coverage import (
+    CandidateRuleRefreshRequired,
     REGISTERED_MAX_RULE_AGE_SECONDS,
     build_candidate_rule_coverage,
+    classify_demo_rule_receipt_freshness,
+    project_demo_rules_to_candidate_subset,
 )
 from liquidity_migration.artifact_snapshot import read_stable_file
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
@@ -37,40 +42,76 @@ from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 NOW_NS = 1_800_000_000_000_000_000
 
 
-def _candidate(tmp_path: Path) -> Path:
-    instrument = {
-        "symbol": "AAAUSDT",
-        "contractType": "LinearPerpetual",
-        "status": "Trading",
-        "baseCoin": "AAA",
-        "quoteCoin": "USDT",
-        "settleCoin": "USDT",
-        "launchTime": "1700000000000",
-        "deliveryTime": "0",
-        "priceFilter": {"tickSize": "0.1"},
-        "lotSizeFilter": {
-            "qtyStep": "0.01",
-            "minOrderQty": "0.01",
-            "minNotionalValue": "5",
-            "maxOrderQty": "1000",
-            "maxMktOrderQty": "500",
-        },
-        "fundingInterval": "480",
-        "isPreListing": False,
-    }
-    ticker = {
-        "symbol": "AAAUSDT",
-        "lastPrice": "10",
-        "turnover24h": "3000000",
-    }
+def _projection_cli_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "project_demo_rules_to_candidate.py"
+    spec = importlib.util.spec_from_file_location("project_demo_rules_to_candidate_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _candidate_symbols(
+    tmp_path: Path,
+    symbols: tuple[str, ...],
+    *,
+    filename: str,
+    min_notional: str = "5",
+    qty_step: str = "0.01",
+    min_qty: str = "0.01",
+    tick_size: str = "0.1",
+    max_market_qty: str = "500",
+    max_leverage: str = "10",
+) -> Path:
+    instruments = [
+        {
+            "symbol": symbol,
+            "contractType": "LinearPerpetual",
+            "status": "Trading",
+            "baseCoin": symbol.removesuffix("USDT"),
+            "quoteCoin": "USDT",
+            "settleCoin": "USDT",
+            "launchTime": "1700000000000",
+            "deliveryTime": "0",
+            "priceFilter": {"tickSize": tick_size},
+            "leverageFilter": {"maxLeverage": max_leverage},
+            "lotSizeFilter": {
+                "qtyStep": qty_step,
+                "minOrderQty": min_qty,
+                "minNotionalValue": min_notional,
+                "maxOrderQty": "1000",
+                "maxMktOrderQty": max_market_qty,
+            },
+            "fundingInterval": "480",
+            "isPreListing": False,
+        }
+        for symbol in symbols
+    ]
+    tickers = [
+        {
+            "symbol": symbol,
+            "lastPrice": "10",
+            "turnover24h": str(3_000_000 - index),
+        }
+        for index, symbol in enumerate(symbols)
+    ]
     payload = build_candidate_universe_artifact(
-        [instrument],
-        [ticker],
+        instruments,
+        tickers,
         snapshot_ts_ns=NOW_NS,
         long_config=LongNativeDemoCycleConfig(),
         continuous_config=ContinuousDemoCycleConfig(),
     )
-    return write_candidate_universe(tmp_path / "candidate.json", payload)
+    return write_candidate_universe(tmp_path / filename, payload)
+
+
+def _candidate(tmp_path: Path) -> Path:
+    return _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="candidate.json",
+    )
 
 
 def _rules(
@@ -79,6 +120,7 @@ def _rules(
     *,
     extra: bool = False,
     legacy_evidence: bool = False,
+    filename: str | None = None,
 ) -> Path:
     candidate = load_candidate_universe(candidate_path)
     symbols = list(candidate.symbols) + (["EXTRAUSDT"] if extra else [])
@@ -106,7 +148,7 @@ def _rules(
                 "min_qty": 0.01,
                 "min_notional": 5.0,
                 "tick_size": 0.1,
-                "max_order_qty": 1000.0,
+                "max_order_qty": 500.0,
                 "max_leverage": 10.0,
                 "source": "bybit_demo_post_only_acceptance_probe",
                 "environment": "demo",
@@ -174,7 +216,9 @@ def _rules(
         "artifact_sha256": "",
     }
     payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
-    path = tmp_path / ("rules-extra.json" if extra else "rules.json")
+    path = tmp_path / (
+        filename or ("rules-extra.json" if extra else "rules.json")
+    )
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
     return path
@@ -192,6 +236,246 @@ def test_coverage_validation_reproduces_sources(tmp_path: Path) -> None:
     assert payload["status"] == "passed"
     assert payload["symbols"] == ["AAAUSDT"]
     assert payload["coverage"]["missing"] == 0
+
+
+def test_rule_freshness_classifier_separates_expiry_from_future_dating(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path)
+    rules = _rules(tmp_path, candidate)
+
+    assert classify_demo_rule_receipt_freshness(
+        rules,
+        validation_now_ns=NOW_NS + 1,
+    ) == "fresh"
+    assert classify_demo_rule_receipt_freshness(
+        rules,
+        validation_now_ns=(
+            NOW_NS + (REGISTERED_MAX_RULE_AGE_SECONDS + 1) * 1_000_000_000
+        ),
+    ) == "expired"
+    with pytest.raises(ValueError, match="future-dated"):
+        classify_demo_rule_receipt_freshness(
+            rules,
+            validation_now_ns=NOW_NS - 1,
+        )
+
+
+def test_fresh_rule_evidence_projects_to_current_candidate_subset(
+    tmp_path: Path,
+) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="source-candidate.json",
+    )
+    target_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="target-candidate.json",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    source_bytes = source_rules.read_bytes()
+    output = tmp_path / "projected-rules.json"
+
+    projected = project_demo_rules_to_candidate_subset(
+        target_candidate,
+        source_rules,
+        output,
+        validation_now_ns=NOW_NS + 1,
+    )
+
+    assert projected == output.resolve()
+    assert source_rules.read_bytes() == source_bytes
+    payload = json.loads(projected.read_text(encoding="utf-8"))
+    assert payload["verified_ts_ns"] == NOW_NS
+    assert list(payload["rules"]) == ["AAAUSDT"]
+    assert list(payload["evidence"]) == ["AAAUSDT"]
+    assert payload["candidate_projection"]["removed_symbols"] == ["BBBUSDT"]
+    assert payload["candidate_projection"]["added_symbols"] == []
+    assert payload["candidate_projection"]["limitation"] == (
+        "projection_does_not_extend_empirical_evidence_freshness"
+    )
+    coverage = build_candidate_rule_coverage(
+        target_candidate,
+        projected,
+        created_ts_ns=NOW_NS + 1,
+        validation_now_ns=NOW_NS + 1,
+    )
+    assert coverage["symbols"] == ["AAAUSDT"]
+
+
+def test_candidate_expansion_requires_fresh_probe_and_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="source-candidate.json",
+    )
+    expanded_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="expanded-candidate.json",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    output = tmp_path / "projected-rules.json"
+
+    with pytest.raises(CandidateRuleRefreshRequired, match="BBBUSDT"):
+        project_demo_rules_to_candidate_subset(
+            expanded_candidate,
+            source_rules,
+            output,
+            validation_now_ns=NOW_NS + 1,
+        )
+
+    assert not output.exists()
+
+
+def test_projection_cli_reserves_exit_three_for_fresh_probe_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="source-candidate.json",
+    )
+    expanded_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="expanded-candidate.json",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    output = tmp_path / "projected-rules.json"
+
+    module = _projection_cli_module()
+    monkeypatch.setattr(module.time, "time_ns", lambda: NOW_NS + 1)
+    status = module.main(
+        [
+            "--candidate-file",
+            str(expanded_candidate),
+            "--prior-rules-file",
+            str(source_rules),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert status == 3
+    assert not output.exists()
+    assert '"status": "fresh_probe_required"' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        {"min_notional": "6"},
+        {"min_qty": "0.02"},
+        {"qty_step": "0.02"},
+        {"tick_size": "0.2"},
+        {"max_market_qty": "400"},
+        {"max_market_qty": "0"},
+        {"max_leverage": "5"},
+        {"max_leverage": "0"},
+    ],
+)
+def test_candidate_projection_rejects_unsafe_structural_rule_drift(
+    tmp_path: Path,
+    changed_field: dict[str, str],
+) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="source-candidate.json",
+    )
+    changed_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="changed-candidate.json",
+        **changed_field,
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    output = tmp_path / "projected-rules.json"
+
+    with pytest.raises(CandidateRuleRefreshRequired, match="structural rules"):
+        project_demo_rules_to_candidate_subset(
+            changed_candidate,
+            source_rules,
+            output,
+            validation_now_ns=NOW_NS + 1,
+        )
+
+    assert not output.exists()
+
+
+def test_candidate_projection_accepts_only_conservative_structural_relaxation(
+    tmp_path: Path,
+) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="source-candidate.json",
+    )
+    relaxed_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="relaxed-candidate.json",
+        min_notional="4",
+        max_market_qty="600",
+        max_leverage="20",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+
+    projected = project_demo_rules_to_candidate_subset(
+        relaxed_candidate,
+        source_rules,
+        tmp_path / "projected-rules.json",
+        validation_now_ns=NOW_NS + 1,
+    )
+
+    assert projected.is_file()
+
+
+def test_candidate_projection_cannot_retimestamp_stale_evidence(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path)
+    rules = _rules(tmp_path, candidate)
+    output = tmp_path / "projected-rules.json"
+
+    with pytest.raises(ValueError, match="stale or future-dated"):
+        project_demo_rules_to_candidate_subset(
+            candidate,
+            rules,
+            output,
+            validation_now_ns=(
+                NOW_NS + (REGISTERED_MAX_RULE_AGE_SECONDS + 1) * 1_000_000_000
+            ),
+        )
+
+    assert not output.exists()
 
 
 def test_operational_authority_accepts_byte_exact_private_paper_mirrors(

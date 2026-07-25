@@ -42,12 +42,19 @@ subscription transition: the owner latches it to a maximum of 30 seconds, and
 the resulting terminal timeout still pages. Missing, stale, reconciliation, and
 capital health failures are never suppressed.
 
+The watchdog also reopens the bound empirical demo-rule receipt and warns in
+its final 24 hours before the strict 168-hour limit. Invalid, future-dated, or
+expired evidence is critical. This is advance maintenance visibility only: the
+watchdog never submits refresh orders, changes authority, or starts a deploy.
+
 ## Deployment lifecycle
 
 GitHub dispatches share one repository-wide VPS concurrency group, independent
-of the selected Git ref. The remote deploy entrypoint also holds a non-blocking
-host-local advisory lock for the complete `install`, `activate`, or `verify`
-operation. Operational-authority issuance joins that boundary: its supported
+of the selected Git ref. The workflow exposes guarded `rollout` and `recover`
+alongside staged `install`, `activate`, and read-only `verify`; the two guarded
+modes require explicit authorization inputs and a push alone remains CI-only.
+The remote deploy entrypoint holds a non-blocking host-local advisory lock for
+the complete operation. Operational-authority issuance joins that boundary: its supported
 operator route flocks the canonical maintenance inode and the legacy deploy and
 reset inodes before opening the checkout or importing deployed Python, then the
 helper and issuer revalidate those inherited descriptors. A concurrent
@@ -74,7 +81,9 @@ Install requires a clean target checkout and a fully quiescent project fleet.
 It checks out the exact remote commit, installs locked dependencies, runs the
 focused validation, installs only the current unit manifest, disables every
 project unit, removes unknown surfaces, writes resolved sleeve toggles, and
-archives retired authority files. It starts nothing.
+archives retired authority files. Paper/demo tree preflights run concurrently;
+both must pass before the two disjoint normalizers run concurrently, and each
+normalizer keeps its independent final complete rescan. Install starts nothing.
 
 ### Authorize
 
@@ -132,8 +141,10 @@ Activation reopens all bound identities and requires the fleet still quiescent.
 When the hedge timer is enabled, activation validates the commit-owned hedge
 model prior before starting anything and verification rechecks it. This is an
 integrity/sufficiency check, not a wall-clock freshness gate. It then starts owners
-before enabled producers, seeds RMOM when needed, enables only allowed timers,
-and verifies the topology. `verify` is read-only. Both refuse a dirty/wrong
+before enabled producers. A preserved RMOM table is reused only when the full
+current-day gate passes and the prior refresh unit is not failed; otherwise the
+bounded refresh path repairs it. Activation enables only allowed timers and
+verifies the topology. `verify` is read-only. Both refuse a dirty/wrong
 checkout, changed inputs, unknown unit surfaces, unit overrides, mainnet
 variables, or profile/topology disagreement.
 

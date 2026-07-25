@@ -47,6 +47,10 @@ sys.path.insert(0, str(_REPO_ROOT))
 from liquidity_migration._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
 from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
+from liquidity_migration.account_execution_config import (  # noqa: E402
+    REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
+    load_demo_rules,
+)
 from liquidity_migration.account_owner_health import (  # noqa: E402
     AccountOwnerMarketWarmupPending,
     require_recent_account_owner_health,
@@ -69,6 +73,7 @@ from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+DEMO_RULE_MAINTENANCE_WARNING_HOURS = 24.0
 
 _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
 _PAPER_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-paper-execution.service"
@@ -355,6 +360,85 @@ def evaluate_rmom_staleness(*, max_rmom_day_ts: int, now_ms: int, max_stale_days
             ),
         )
     return None
+
+
+def evaluate_demo_rule_age(
+    *,
+    verified_ts_ns: int,
+    now_ns: int,
+) -> Alert | None:
+    """Warn before empirical rule evidence turns a future rollout exceptional."""
+
+    age_hours = (now_ns - verified_ts_ns) / 3_600_000_000_000.0
+    remaining_hours = REGISTERED_MAX_DEMO_RULE_AGE_HOURS - age_hours
+    if age_hours < 0.0:
+        return Alert(
+            key="demo_rules_age",
+            severity=CRITICAL,
+            message=(
+                f"demo-rule evidence is {-age_hours:.1f}h future-dated; "
+                "runtime quantity authority is invalid."
+            ),
+        )
+    if remaining_hours <= 0.0:
+        return Alert(
+            key="demo_rules_age",
+            severity=CRITICAL,
+            message=(
+                f"demo-rule evidence expired {abs(remaining_hours):.1f}h ago; "
+                "the next authorized runtime start will fail closed and require a full probe."
+            ),
+        )
+    if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
+        return Alert(
+            key="demo_rules_age",
+            severity=WARNING,
+            message=(
+                f"demo-rule evidence expires in {remaining_hours:.1f}h; schedule the guarded "
+                "flat-account maintenance window before expiry so the slow path is planned."
+            ),
+        )
+    return None
+
+
+def gather_demo_rule_alerts(
+    *,
+    rules_path: Path,
+    now_ns: int | None = None,
+) -> list[Alert]:
+    """Reopen the bound receipt and report corruption, future dating, or expiry."""
+
+    try:
+        snapshot = read_stable_file(
+            rules_path,
+            label="demo-rule receipt",
+            reject_empty=True,
+            require_mode=0o600,
+            require_owner=True,
+        )
+        load_demo_rules(
+            snapshot.path,
+            max_age_seconds=None,
+            snapshot=snapshot,
+        )
+        payload = json.loads(snapshot.data)
+        verified_ts_ns = int(payload.get("verified_ts_ns") or 0)
+        alert = evaluate_demo_rule_age(
+            verified_ts_ns=verified_ts_ns,
+            now_ns=time.time_ns() if now_ns is None else now_ns,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        return [
+            Alert(
+                key="demo_rules_invalid",
+                severity=CRITICAL,
+                message=(
+                    "bound demo-rule evidence is unreadable or invalid: "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                ),
+            )
+        ]
+    return [] if alert is None else [alert]
 
 
 # Pending resolved-note retries must not share alert cooldown keys.
@@ -1115,6 +1199,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="demo account-owner market/readiness and decision-context root",
     )
     p.add_argument(
+        "--demo-rules-file",
+        default=os.environ.get("ACCOUNT_DEMO_RULES_FILE") or "",
+        help="bound empirical demo-rule receipt; warns during its final 24 hours ('' to skip)",
+    )
+    p.add_argument(
         "--account-paper-capture-root",
         default=os.environ.get("ACCOUNT_PAPER_CAPTURE_ROOT")
         or _default_root("data/bybit-account-paper-market-capture"),
@@ -1223,6 +1312,13 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
+    if str(args.demo_rules_file).strip():
+        alerts.extend(
+            gather_demo_rule_alerts(
+                rules_path=Path(args.demo_rules_file),
+                now_ns=now_ms * 1_000_000,
+            )
+        )
     if paper_root_alert is not None:
         alerts.append(paper_root_alert)
     alerts.extend(

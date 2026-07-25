@@ -537,6 +537,9 @@ def test_probe_cli_checks_explicit_conditional_order_view() -> None:
     assert 'client.get_open_orders(settle_coin="USDT")' in text
     assert 'order_filter="StopOrder"' in text
     assert "_open_orders_all_kinds(client)" in text
+    assert "client.get_tickers(symbol=symbol)" in text
+    assert "single all-symbol snapshot" in text
+    assert "eta_seconds=" in text
     assert "DemoAccountIdentity.from_api_key_info" in text
     assert "DemoAccountMutationLease(identity)" in text
     assert "--owner-lock" not in text
@@ -550,8 +553,6 @@ def test_probe_cli_checks_explicit_conditional_order_view() -> None:
     [
         ["--max-probe-notional-usdt", "201"],
         ["--probe-distance-bps", "50"],
-        # Just outside the registered ceiling, which 4b919cd raised from 5 to
-        # the venue's 10/s UTA budget.
         ["--max-private-requests-per-second", "11"],
         ["--leverage", "11"],
         ["--leverage", "nan"],
