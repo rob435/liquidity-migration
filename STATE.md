@@ -22,6 +22,17 @@ history is in Git and in the audit receipts indexed at the bottom.
   35% component stop live** (profile revision `active_tp12_sl35_v1`; anomaly
   research §20.1) — the 2% account fallback is no longer CONTINUOUS's de facto
   exit rule.
+- **2026-07-25 CONTINUOUS entry block, resolved.** Every cycle from 2026-07-22
+  22:24 UTC (1,502 cycles) blocked all CONTINUOUS entries with
+  `accepted_state_invalid`: `btc_risk_sizing_state.parquet` survived the
+  2026-07-22 ledger reset while the journal evidence it references was
+  archived away, and the sizer fails closed on unverifiable state — the BTC
+  trend gate and funnel were never the blocker. Remediation: both stale state
+  files (demo + paper) retired in place with sha256 receipts, and the reset
+  flow now retires this account-epoch state unconditionally at the epoch
+  boundary (this commit's change to `scripts/reset_demo_paper_ledgers.sh`).
+  The empty forward CONTINUOUS record over those three days is a block
+  artifact, not market evidence.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256
