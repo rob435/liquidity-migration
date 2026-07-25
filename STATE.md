@@ -11,38 +11,38 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `b2ea0bbd85b52bdff44c6f059e24b9e1717c50c9`**
-  ("Retire account-epoch BTC-risk sizing state at the ledger-reset boundary"),
-  verified read-only against the VPS checkout on 2026-07-25 ~16:35 UTC after
-  the same-day `bf3b6b6` rollout (guarded `rollout` dispatch, Actions run
-  30159709018, which had followed an earlier `verify`-mode dispatch correctly
-  refusing the stale `a9ac75d1` checkout). **Change point retained from
-  `bf3b6b6`: the declared CONTINUOUS 35% component stop is live** (profile
-  revision `active_tp12_sl35_v1`; anomaly research §20.1) — the 2% account
-  fallback is no longer CONTINUOUS's de facto exit rule.
-- **Deployment gap (2026-07-25): canonical `main` is ahead of the installed
-  commit.** `e55f410` (BTC-risk sizer self-heals across epochs instead of
-  failing closed) and `967d09e` (frozen candidate population no longer halts
-  cycles on venue drift) are pushed but NOT deployed. Until the next guarded
-  rollout, the installed runtime relies on `b2ea0bb`'s reset-boundary state
-  retirement for the sizer and still carries the cycle-killing venue-drift
-  raises — time-sensitive because four registered candidates deliver
-  2026-07-27 09:00 UTC (see retirement registry).
+- **Installed implementation commit:
+  `ac18332b7` ("Land the 2026-07-23 deployment-automation candidate")**,
+  deployed from canonical `main`, profile `operational`, on 2026-07-25 via the
+  guarded `rollout` dispatch (Actions run 30167979878, owner authorization
+  "do all of these" chat instruction). A subsequent independent read-only
+  `verify` dispatch passed the same hour (Actions run 30168234520), and the
+  first post-deploy cycles ran clean (sizer unblocked, new
+  `btc_risk_sizing_accepted_orphaned_dropped` telemetry journaling). This
+  closes the same-day deployment gap: the sizer epoch self-heal (`e55f410`,
+  extended by `ddbded5` to partial-acceptance chain gaps and arm/policy
+  retunes), the venue-drift cycle-halt fix (`967d09e`) — in place before the
+  four registered candidate deliveries at 2026-07-27 09:00 UTC — the
+  2026-07-25 execution-plumbing audit fixes (`bd54b9f`..`1a8f5f7`), and the
+  parallelized deploy automation are all live. **Change points: the
+  research-parity admission gates (per-component 24h re-entry cooldown,
+  crowd-2) are now live** alongside the retained CONTINUOUS 35% component
+  stop (`active_tp12_sl35_v1`; anomaly research §20.1).
 - **2026-07-25 CONTINUOUS entry block, resolved.** Every cycle from 2026-07-22
   22:24 UTC (1,502 cycles) blocked all CONTINUOUS entries with
   `accepted_state_invalid`: `btc_risk_sizing_state.parquet` survived the
   2026-07-22 ledger reset while the journal evidence it references was
   archived away, and the sizer failed closed on prior-epoch state — the BTC
-  trend gate and funnel were never the blocker. Remediation (committed on
-  `main` as `e55f410`, **not yet deployed** — see the deployment-gap bullet):
-  the sizer **self-heals** — persisted decisions absent from the complete
-  authoritative journal are dropped and the state rebases onto the replayed
-  authoritative chain, counted and logged, sizing uninterrupted; same-key
-  evidence-hash conflicts (corruption, not epoch drift) still fail closed.
-  Once `e55f410` is live no reset-time state ceremony exists or is needed; the
-  installed `b2ea0bb` runtime instead retires the state file at the
-  ledger-reset boundary. The empty forward CONTINUOUS record over those three
-  days is a block artifact, not market evidence.
+  trend gate and funnel were never the blocker. Remediation (deployed with the
+  `ac18332b7` rollout): the sizer **self-heals** — persisted decisions absent
+  from the complete authoritative journal are dropped and the state rebases
+  onto the replayed authoritative chain, counted and journaled per cycle,
+  sizing uninterrupted; `ddbded5` extends the same healing to
+  partial-acceptance predecessor gaps and arm/policy retunes. Same-key
+  same-arm evidence-hash conflicts (corruption, not epoch drift) still fail
+  closed. No reset-time state ceremony exists or is needed. The empty forward
+  CONTINUOUS record over those three days is a block artifact, not market
+  evidence.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256
