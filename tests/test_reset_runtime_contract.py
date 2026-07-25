@@ -364,33 +364,3 @@ def test_leave_stopped_receipt_is_created_before_owner_leases_are_released() -> 
     completion = text.index("RESTART_COMPLETE=1", stopped_release)
 
     assert receipt < stopped_release < completion
-
-
-def test_reset_retires_account_epoch_btc_risk_sizing_state() -> None:
-    # The sizer reconciles its persisted decisions against the canonical
-    # journal and fails closed once a reset archives that journal away; stale
-    # state surviving the epoch boundary blocked every CONTINUOUS entry from
-    # 2026-07-22 to 2026-07-25. Retirement is unconditional (the account epoch
-    # resets regardless of sleeve selection), preserves bytes under the epoch
-    # stamp, and lands before the boundary heartbeats.
-    text = _text()
-    retire = text.index("Retiring account-epoch BTC-risk sizing state")
-    heartbeat = text.index(
-        "Writing post-reset demo-flat and paper-archive boundary heartbeats"
-    )
-    dry_run_exit = text.index("DRY RUN: no services or files were changed")
-
-    assert dry_run_exit < retire < heartbeat
-    retire_block = text[retire:heartbeat]
-    assert '"$PWD/data/bybit-continuous-demo-event"' in retire_block
-    assert '"$PWD/data/bybit-continuous-paper-event"' in retire_block
-    assert "btc_risk_sizing_state.parquet" in retire_block
-    assert 'btc_risk_sizing_state.retired-$STAMP.parquet' in retire_block
-    assert 'sha256sum -- "$btc_risk_state"' in retire_block
-    assert 'mv -- "$btc_risk_state" "$retired_state"' in retire_block
-    assert 'rm ' not in retire_block
-    # The retire loop closes before the sleeve gate opens: retirement is
-    # unconditional, not continuous-selection-gated.
-    select_gate = text.index("if (( SELECT_CONTINUOUS ))", retire)
-    assert retire < select_gate < heartbeat
-    assert "done" in text[retire:select_gate]

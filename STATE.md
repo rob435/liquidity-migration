@@ -26,13 +26,14 @@ history is in Git and in the audit receipts indexed at the bottom.
   22:24 UTC (1,502 cycles) blocked all CONTINUOUS entries with
   `accepted_state_invalid`: `btc_risk_sizing_state.parquet` survived the
   2026-07-22 ledger reset while the journal evidence it references was
-  archived away, and the sizer fails closed on unverifiable state — the BTC
-  trend gate and funnel were never the blocker. Remediation: both stale state
-  files (demo + paper) retired in place with sha256 receipts, and the reset
-  flow now retires this account-epoch state unconditionally at the epoch
-  boundary (this commit's change to `scripts/reset_demo_paper_ledgers.sh`).
-  The empty forward CONTINUOUS record over those three days is a block
-  artifact, not market evidence.
+  archived away, and the sizer failed closed on prior-epoch state — the BTC
+  trend gate and funnel were never the blocker. Remediation: the sizer now
+  **self-heals** — persisted decisions absent from the complete authoritative
+  journal are dropped and the state rebases onto the replayed authoritative
+  chain, counted and logged, sizing uninterrupted; same-key evidence-hash
+  conflicts (corruption, not epoch drift) still fail closed. No reset-time
+  state ceremony exists or is needed. The empty forward CONTINUOUS record
+  over those three days is a block artifact, not market evidence.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256

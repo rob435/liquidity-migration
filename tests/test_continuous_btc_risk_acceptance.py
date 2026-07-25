@@ -266,7 +266,7 @@ def test_publication_does_not_advance_but_accepted_target_advances_once(
     assert pl.read_parquet(state_path).height == 1
 
 
-def test_runtime_rejects_persisted_btc_state_absent_from_complete_account_projection(
+def test_runtime_rebases_persisted_btc_state_absent_from_complete_account_projection(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "strategy"
@@ -304,10 +304,14 @@ def test_runtime_rejects_persisted_btc_state_absent_from_complete_account_projec
     )
 
     assert synchronized["accepted_authoritative_rows"] == 1
-    assert stale["entry_blocked"]
-    assert "absent from complete authoritative" in stale["blocking_reason"]
-    assert state_path.read_bytes() == before
-    assert BTC_RISK_EVIDENCE_METADATA_KEY not in next_candidate
+    # Prior-epoch state rebases onto the (empty) authority and sizing
+    # continues in the same cycle — entries never block on bookkeeping.
+    assert not stale["entry_blocked"]
+    assert stale["blocking_reason"] == ""
+    assert stale["state_rows"] == 0
+    assert stale["scored"] == 1
+    assert state_path.read_bytes() != before
+    assert BTC_RISK_EVIDENCE_METADATA_KEY in next_candidate
 
     recovered = _apply_btc_risk_sizing(
         [next_candidate],
@@ -521,6 +525,7 @@ def test_authoritative_empty_projection_accepts_empty_state(tmp_path: Path) -> N
         "ingested": 0,
         "duplicates": 0,
         "ignored": 0,
+        "orphaned_dropped": 0,
         "authoritative_rows": 0,
     }
     assert sizer.rows == 0
@@ -535,7 +540,7 @@ def test_authoritative_empty_projection_accepts_empty_state(tmp_path: Path) -> N
     )
 
 
-def test_authoritative_empty_reset_rejects_persisted_state_and_blocks_scoring(
+def test_authoritative_empty_reset_rebases_persisted_state_and_continues(
     tmp_path: Path,
 ) -> None:
     first, _ = _accepted_evidence_chain(tmp_path)
@@ -544,17 +549,22 @@ def test_authoritative_empty_reset_rejects_persisted_state_and_blocks_scoring(
     sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     last_good = state_path.read_bytes()
 
-    with pytest.raises(ValueError, match="absent from complete authoritative"):
-        sizer.reconcile_authoritative_accepted_decisions([])
+    rebased = sizer.reconcile_authoritative_accepted_decisions([])
 
-    assert state_path.read_bytes() == last_good
-    assert sizer.rows == 1
-    with pytest.raises(RuntimeError, match="scoring is blocked"):
+    assert rebased["orphaned_dropped"] == 1
+    assert rebased["authoritative_rows"] == 0
+    assert rebased["ingested"] == 0
+    assert sizer.rows == 0
+    assert state_path.read_bytes() != last_good
+    # Scoring continues immediately on the rebased state.
+    assert (
         _propose_evidence(
             sizer,
             symbol="BBBUSDT",
             signal_ts_ms=11 * DAY_MS,
-        )
+        )["decision_key"]
+        == f"BBBUSDT|{11 * DAY_MS}"
+    )
 
     recovered = sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
     assert recovered["authoritative_rows"] == 1
@@ -568,7 +578,9 @@ def test_authoritative_empty_reset_rejects_persisted_state_and_blocks_scoring(
     )
 
 
-def test_authoritative_subset_of_persisted_chain_fails_closed(tmp_path: Path) -> None:
+def test_authoritative_subset_of_persisted_chain_rebases_and_recovers(
+    tmp_path: Path,
+) -> None:
     first, second = _accepted_evidence_chain(tmp_path)
     sizer = BtcRiskLiveSizer(tmp_path / "persisted-full.parquet", min_prior=0)
     sizer.reconcile_authoritative_accepted_decisions(
@@ -578,9 +590,24 @@ def test_authoritative_subset_of_persisted_chain_fails_closed(tmp_path: Path) ->
         ]
     )
 
-    with pytest.raises(ValueError, match=f"BBBUSDT\\|{11 * DAY_MS}"):
-        sizer.reconcile_authoritative_accepted_decisions([_accepted_evidence_row(first)])
+    rebased = sizer.reconcile_authoritative_accepted_decisions(
+        [_accepted_evidence_row(first)]
+    )
 
+    assert rebased["orphaned_dropped"] == 1
+    assert rebased["authoritative_rows"] == 1
+    assert sizer.rows == 1
+
+    # The state is a pure function of the authoritative chain: re-supplying
+    # the full evidence re-ingests the dropped decision identically.
+    recovered = sizer.reconcile_authoritative_accepted_decisions(
+        [
+            _accepted_evidence_row(first),
+            _accepted_evidence_row(second),
+        ]
+    )
+    assert recovered["ingested"] == 1
+    assert recovered["orphaned_dropped"] == 0
     assert sizer.rows == 2
 
 
@@ -604,6 +631,7 @@ def test_authoritative_complete_replay_catches_up_persisted_prefix(
         "ingested": 1,
         "duplicates": 2,
         "ignored": 0,
+        "orphaned_dropped": 0,
         "authoritative_rows": 2,
     }
     assert pl.read_parquet(state_path)["decision_key"].to_list() == [

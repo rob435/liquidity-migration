@@ -1561,31 +1561,6 @@ done
   "${generic_remove_args[@]}" \
   || die "descriptor-rooted generated-target removal failed"
 
-# The BTC-risk sizer's persisted decisions are account-epoch evidence: every
-# cycle it reconciles them against the canonical journal and fails closed once
-# a reset archives that journal away (2026-07-22 → 2026-07-25: 1,502
-# consecutive cycles blocked every CONTINUOUS entry with
-# accepted_state_invalid). The account epoch resets unconditionally, so the
-# state retires unconditionally — in place, bytes preserved under the epoch
-# stamp; the sizer rebuilds from the new journal.
-echo
-echo "Retiring account-epoch BTC-risk sizing state ..."
-for continuous_event_root in \
-  "$PWD/data/bybit-continuous-demo-event" \
-  "$PWD/data/bybit-continuous-paper-event"; do
-  btc_risk_state="$continuous_event_root/btc_risk_sizing_state.parquet"
-  [[ -e "$btc_risk_state" ]] || continue
-  retired_state="$continuous_event_root/btc_risk_sizing_state.retired-$STAMP.parquet"
-  [[ ! -e "$retired_state" ]] \
-    || die "refusing to overwrite retired BTC-risk state: $retired_state"
-  btc_risk_state_sha="$(sha256sum -- "$btc_risk_state" | awk '{print $1}')" \
-    || die "cannot hash BTC-risk sizing state: $btc_risk_state"
-  mv -- "$btc_risk_state" "$retired_state" \
-    || die "cannot retire BTC-risk sizing state: $btc_risk_state"
-  echo "  retired: $retired_state"
-  echo "  sha256: $btc_risk_state_sha"
-done
-
 # Seed the continuous cycle stream with the verified reset boundary so liveness
 # monitoring has an explicit new-epoch fact before the producer restarts.
 if (( SELECT_CONTINUOUS )); then

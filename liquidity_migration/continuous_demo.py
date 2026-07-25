@@ -1412,6 +1412,12 @@ def _apply_btc_risk_sizing(
         stats["accepted_ignored"] = ingestion["ignored"]
         stats["accepted_authoritative_rows"] = ingestion["authoritative_rows"]
         stats["state_rows"] = sizer.rows
+        orphaned_dropped = int(ingestion.get("orphaned_dropped", 0))
+        if orphaned_dropped:
+            _logger.warning(
+                "BTC-risk state rebased onto authoritative evidence; dropped %d prior-epoch decisions",
+                orphaned_dropped,
+            )
     except Exception as exc:  # noqa: BLE001 - malformed accepted state must fail closed
         _logger.exception("BTC-risk accepted-state synchronization failed; blocking new entries")
         stats["error"] = 1

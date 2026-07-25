@@ -788,8 +788,11 @@ class BtcRiskLiveSizer:
 
         The supplied evidence is replayed from genesis and treated as the
         entire authority for this arm. Persisted decisions missing from that
-        set are an error. A failed reconciliation blocks subsequent scoring on
-        this instance until a complete reconciliation succeeds.
+        set are prior-epoch orphans (ledger reset, migration): the state is
+        rebased onto the replayed authoritative chain and the orphans are
+        dropped and counted — never a reason to block entries. A same-key
+        evidence-hash conflict is corruption, not epoch drift, and still fails
+        closed until a complete reconciliation succeeds.
         """
 
         self._authoritative_reconciliation_error = "authoritative reconciliation did not complete"
@@ -802,20 +805,18 @@ class BtcRiskLiveSizer:
             )
             persisted_by_key = self._persisted_evidence_by_key()
             missing_from_authority = sorted(set(persisted_by_key) - set(evidence_by_key))
-            if missing_from_authority:
-                sample = ", ".join(missing_from_authority[:5])
-                raise ValueError(
-                    f"persisted BTC-risk decisions are absent from complete authoritative accepted evidence: {sample}"
-                )
             for decision_key, persisted in persisted_by_key.items():
-                authoritative = evidence_by_key[decision_key]
+                authoritative = evidence_by_key.get(decision_key)
+                if authoritative is None:
+                    continue
                 if persisted["evidence_hash"] != authoritative["evidence_hash"]:
                     raise ValueError(
                         f"authoritative accepted BTC-risk evidence conflicts with persisted decision {decision_key}"
                     )
 
-            ingested = len(evidence_by_key) - len(persisted_by_key)
-            if ingested:
+            retained = len(persisted_by_key) - len(missing_from_authority)
+            ingested = len(evidence_by_key) - retained
+            if ingested or missing_from_authority:
                 self._commit_replayed_state(
                     candidate_state=candidate_state,
                     candidate_state_hash=candidate_state_hash,
@@ -827,8 +828,9 @@ class BtcRiskLiveSizer:
         self._authoritative_reconciliation_error = None
         return {
             "ingested": ingested,
-            "duplicates": duplicate_rows + len(persisted_by_key),
+            "duplicates": duplicate_rows + retained,
             "ignored": ignored,
+            "orphaned_dropped": len(missing_from_authority),
             "authoritative_rows": len(evidence_by_key),
         }
 
