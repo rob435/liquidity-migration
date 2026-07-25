@@ -7,11 +7,38 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Stopped install, authorized activation, or read-only verification.
+        description: >-
+          Guarded flat-account rollout/recover, stopped install, authorized
+          activation, or read-only verification.
         required: true
         default: verify
         type: choice
-        options: [install, activate, verify]
+        options: [rollout, recover, install, activate, verify]
+      profile:
+        description: Operational profile bound by rollout/recover.
+        required: false
+        default: operational
+        type: choice
+        options: [operational, demo-operational]
+      authorize_demo_paper_operation:
+        description: >-
+          Owner acknowledgement for rollout/recover. Ticking this appends the
+          exact AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
+          handshake; it authorizes demo/paper operation only and grants no
+          real-money authority.
+        required: false
+        default: false
+        type: boolean
+      authorization_reference:
+        description: 1-500 character owner authorization reference (rollout/recover).
+        required: false
+        default: ""
+        type: string
+      reset_receipt:
+        description: Absolute VPS reset-receipt path (recover only).
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -72,9 +99,30 @@ jobs:
       - name: Run staged VPS mode
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_MODE_INPUT: ${{ inputs.mode }}
+          DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
+          DEPLOY_AUTHORIZATION_REFERENCE_INPUT: ${{ inputs.authorization_reference }}
+          DEPLOY_OWNER_ACKNOWLEDGED_INPUT: ${{ inputs.authorize_demo_paper_operation }}
+          DEPLOY_RESET_RECEIPT_INPUT: ${{ inputs.reset_receipt }}
         run: |
+          deploy_args=("$DEPLOY_MODE_INPUT")
+          case "$DEPLOY_MODE_INPUT" in
+            rollout|recover)
+              # The dispatching owner must tick the acknowledgement box; only
+              # then is the exact demo/paper-only handshake string appended for
+              # the remote guard. An unticked box fails the step here, before
+              # any SSH mutation.
+              test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true
+              deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT")
+              deploy_args+=(--authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT")
+              deploy_args+=(--owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION)
+              ;;
+          esac
+          if [ "$DEPLOY_MODE_INPUT" = recover ]; then
+            deploy_args+=(--reset-receipt "$DEPLOY_RESET_RECEIPT_INPUT")
+          fi
           EXPECTED_COMMIT="$GITHUB_SHA" \
           BRANCH="$GITHUB_REF_NAME" \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
-          scripts/deploy_vps_live.sh "${{ inputs.mode }}"
+          scripts/deploy_vps_live.sh "${deploy_args[@]}"

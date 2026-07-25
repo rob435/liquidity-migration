@@ -550,7 +550,9 @@ def test_probe_cli_checks_explicit_conditional_order_view() -> None:
     [
         ["--max-probe-notional-usdt", "201"],
         ["--probe-distance-bps", "50"],
-        ["--max-private-requests-per-second", "6"],
+        # Just outside the registered ceiling, which 4b919cd raised from 5 to
+        # the venue's 10/s UTA budget.
+        ["--max-private-requests-per-second", "11"],
         ["--leverage", "11"],
         ["--leverage", "nan"],
     ],
