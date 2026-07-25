@@ -26,6 +26,10 @@ from liquidity_migration.account_service import (
     SleeveAdapterKind,
 )
 from liquidity_migration.account_intent_client import completed_expired_entry_attempt_keys
+from liquidity_migration.account_strategy_state import (
+    canonical_strategy_trade_rows,
+    target_reservation_rows,
+)
 from liquidity_migration.bybit_errors import BybitSubmissionUncertain
 from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.deterministic_runtime import VirtualClock
@@ -1585,6 +1589,104 @@ def test_retry_limit_exhaustion_blocks_health_immediately_and_stays_bounded(tmp_
         overdue.require_healthy()
     assert service.run_once(inbox) is None
     assert adapter.submit_calls == 2
+
+
+def test_retry_exhausted_unfilled_entry_unwinds_desire_and_releases_reservation(tmp_path: Path) -> None:
+    adapter = ScriptedExecutionAdapter("reject", "reject")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        convergence_health_grace_ns=500,
+        max_convergence_retries=1,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="unfilled-entry",
+            batch_id="unfilled-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    clock.advance_ns(100)
+    assert service.run_once(inbox) is None
+
+    # The incident is loud before any unwind: retries exhausted with zero fill.
+    exhausted = service.convergence_report()
+    assert exhausted.items[0].status == "retry_exhausted"
+    assert not exhausted.healthy
+    rows = canonical_strategy_trade_rows(_route(tmp_path).account_path, sleeve="long")
+    assert rows["status"].to_list() == ["target_pending"]
+    assert target_reservation_rows(rows)["target_key"].to_list() == ["long/main/BUSDT"]
+
+    # The next convergence pass unwinds the provably unfilled entry desire.
+    unwound = service.converge_once()
+    assert unwound is not None
+    assert unwound.accepted
+    assert unwound.batch_id.startswith("account-convergence/BUSDT/")
+    assert unwound.batch_id.endswith("/entry-unwind")
+    assert not unwound.commands
+    assert adapter.submit_calls == 2
+
+    state = service.kernel.state()
+    desire = state.component_target_desires["long/main/BUSDT"]
+    assert float(desire["signed_qty"]) == pytest.approx(0.0)
+    assert str(desire["reason"]) == "entry_retry_exhausted"
+    assert state.aggregate_targets.get("BUSDT", 0.0) == pytest.approx(0.0)
+    assert service.convergence_report().converged
+
+    rows = canonical_strategy_trade_rows(_route(tmp_path).account_path, sleeve="long")
+    assert rows["status"].to_list() == ["entry_retry_exhausted"]
+    assert rows["entry_ts_ms"].to_list() == [None]
+    assert target_reservation_rows(rows).is_empty()
+
+    # Idempotent: the unwind fully settles the symbol.
+    assert service.converge_once() is None
+
+
+def test_retry_exhausted_partially_filled_entry_is_never_zero_targeted(tmp_path: Path) -> None:
+    adapter = ScriptedExecutionAdapter("partial_cancel", "reject")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        convergence_health_grace_ns=500,
+        max_convergence_retries=1,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="partial-then-exhausted",
+            batch_id="partial-then-exhausted",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(0.6)
+    clock.advance_ns(100)
+    assert service.run_once(inbox) is None
+
+    exhausted = service.convergence_report()
+    assert exhausted.items[0].status == "retry_exhausted"
+    assert not exhausted.healthy
+
+    # Real exposure exists, so the unwind must never zero-target this entry.
+    assert service.converge_once() is None
+    state = service.kernel.state()
+    assert float(state.component_target_desires["long/main/BUSDT"]["signed_qty"]) == pytest.approx(2.0)
+    assert state.positions["BUSDT"].signed_qty == pytest.approx(0.6)
+    assert not service.convergence_report().healthy
+    rows = canonical_strategy_trade_rows(_route(tmp_path).account_path, sleeve="long")
+    assert not target_reservation_rows(rows).is_empty()
 
 
 def test_pending_replacements_coalesce_before_old_residual_can_trade(tmp_path: Path) -> None:

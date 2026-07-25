@@ -455,6 +455,78 @@ def test_terminal_order_does_not_release_still_desired_target_reservation(
     assert target_reservation_rows(projected)["trade_id"].to_list() == ["trade-1"]
 
 
+def test_entry_retry_unwind_maps_terminal_and_releases_reservation(tmp_path: Path) -> None:
+    root = tmp_path / "account"
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=1)
+    kernel = AccountExecutionKernel(root, account_id="a", clock=clock)
+    submitted = _submit(kernel, batch="open", qty=2.0, reason="entry")
+    command = submitted.commands[0]
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=False,
+        venue_order_id="",
+        rejection_key="venue:definite-reject",
+        exchange_ts_ns=1_000_100_000,
+        local_ack_ts_ns=1_000_200_000,
+    )
+    rows = canonical_strategy_trade_rows(root, sleeve="long")
+    assert rows["status"].to_list() == ["target_pending"]
+    assert target_reservation_rows(rows)["trade_id"].to_list() == ["trade-1"]
+
+    clock.advance_ns(1_000_000)
+    _submit(
+        kernel,
+        batch="account-convergence/BUSDT/generation/entry-unwind",
+        qty=0.0,
+        reason="entry_retry_exhausted",
+        metadata={"account_entry_retry_unwind": True},
+    )
+
+    rows = canonical_strategy_trade_rows(root, sleeve="long")
+    assert rows.select(
+        "status",
+        "account_execution_lifecycle_status",
+        "target_action",
+        "target_reason",
+        "entry_ts_ms",
+        "exit_ts_ms",
+        "cooldown_start_ts_ms",
+    ).to_dicts() == [{
+        "status": "entry_retry_exhausted",
+        "account_execution_lifecycle_status": "entry_unfilled",
+        "target_action": "none",
+        "target_reason": "entry_retry_exhausted",
+        "entry_ts_ms": None,
+        "exit_ts_ms": None,
+        "cooldown_start_ts_ms": None,
+    }]
+    assert target_reservation_rows(rows).is_empty()
+
+
+def test_entry_retry_unwind_marker_never_terminates_a_filled_entry(tmp_path: Path) -> None:
+    root = tmp_path / "account"
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=1)
+    kernel = AccountExecutionKernel(root, account_id="a", clock=clock)
+    opened = _submit(kernel, batch="open", qty=2.0, reason="entry")
+    _ack_and_fill(kernel, opened, fills=[("fill-open", 2.0, 10.5, 1_000_400_000)])
+
+    clock.advance_ns(1_000_000)
+    _submit(
+        kernel,
+        batch="account-convergence/BUSDT/generation/entry-unwind",
+        qty=0.0,
+        reason="entry_retry_exhausted",
+        metadata={"account_entry_retry_unwind": True},
+    )
+
+    # A spoofed/erroneous unwind marker cannot terminate a filled lifecycle:
+    # the position still needs the ordinary close machinery and reservation.
+    rows = canonical_strategy_trade_rows(root, sleeve="long")
+    assert rows["status"].to_list() == ["target_pending"]
+    assert rows["account_execution_lifecycle_status"].to_list() == ["open"]
+    assert target_reservation_rows(rows)["trade_id"].to_list() == ["trade-1"]
+
+
 def test_projection_ignores_owner_convergence_retry_target_metadata(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=1)
     kernel = AccountExecutionKernel(tmp_path / "account", account_id="a", clock=clock)

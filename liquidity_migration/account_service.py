@@ -1105,6 +1105,10 @@ class PositionTruthProvider(Protocol):
 class _ConvergencePlan:
     item: AccountConvergenceItem
     targets: tuple[Mapping[str, Any], ...]
+    # True only for a retry-exhausted, non-reduce-only desire whose symbol is
+    # flat with every command terminal and zero observed fill: the owner may
+    # unwind the desire to zero without touching any real exposure.
+    entry_unwind_eligible: bool = False
 
 
 class AccountExecutionService:
@@ -1661,6 +1665,27 @@ class AccountExecutionService:
                 status = "retry_backoff"
             else:
                 status = "retry_due"
+            # A retry-exhausted entry residual is only safe to unwind when the
+            # accepted nonzero desires provably never filled: the symbol is
+            # flat, every command since the earliest active desire revision is
+            # terminal, and no fill was observed for the symbol since then.  A
+            # partially filled entry carries real exposure and must stay with
+            # the ordinary exit machinery, so it never qualifies.
+            entry_unwind_eligible = (
+                exhausted
+                and can_rebuild
+                and not reduce_only
+                and bool(active)
+                and abs(target_qty) > tolerance
+                and abs(position_qty) <= tolerance
+                and self._entry_commands_terminal_without_fill(
+                    state=state,
+                    events=events,
+                    symbol=symbol,
+                    since_sequence=min(sequence for _, _, sequence in active),
+                    tolerance=tolerance,
+                )
+            )
             item = AccountConvergenceItem(
                 symbol=symbol,
                 generation=generation,
@@ -1690,7 +1715,13 @@ class AccountExecutionService:
                 status=status,
                 venue_minimum_dust=venue_minimum_dust,
             )
-            plans.append(_ConvergencePlan(item=item, targets=target_rows))
+            plans.append(
+                _ConvergencePlan(
+                    item=item,
+                    targets=target_rows,
+                    entry_unwind_eligible=entry_unwind_eligible,
+                )
+            )
         unconverged_symbols = {plan.item.symbol for plan in plans}
         for symbol in list(self._unconverged_first_observed_ns):
             if symbol not in unconverged_symbols:
@@ -1736,6 +1767,39 @@ class AccountExecutionService:
             if price > 0.0 and qty * price + tolerance < rule.min_notional:
                 return True
         return False
+
+    def _entry_commands_terminal_without_fill(
+        self,
+        *,
+        state: Any,
+        events: Sequence[Any],
+        symbol: str,
+        since_sequence: int,
+        tolerance: float,
+    ) -> bool:
+        """True when the symbol provably has zero entry fill since a revision.
+
+        Positions only change through FILL events, so the proof is direct: no
+        fill event for the symbol at or after ``since_sequence`` and every
+        command created since then terminal with zero filled quantity.  Any
+        non-terminal command or observed fill fails closed — the residual then
+        stays with the ordinary retry/exit machinery and manual recovery.
+        """
+
+        for event in events:
+            if (
+                event.sequence >= since_sequence
+                and event.symbol == symbol
+                and event.event_type == AccountEventType.FILL.value
+            ):
+                return False
+        terminal = {"rejected", "cancelled", "filled", "partially_filled_cancelled"}
+        for order in state.orders.values():
+            if order.symbol != symbol or order.command_sequence < since_sequence:
+                continue
+            if order.status not in terminal or abs(order.filled_signed_qty) > tolerance:
+                return False
+        return True
 
     @staticmethod
     def _orphan_observed_since_ns(
@@ -1845,6 +1909,80 @@ class AccountExecutionService:
             )
         return result
 
+    def _submit_entry_unwind(
+        self,
+        plan: _ConvergencePlan,
+        *,
+        batch_id: str,
+    ) -> TargetBatchResult:
+        """Unwind a retry-exhausted, provably unfilled entry desire to zero.
+
+        Without this receipt the accepted nonzero desire reserves its symbol
+        and a capacity slot forever: the canonical row stays ``target_pending``
+        while nothing can ever fill it.  The unwind is an ordinary owner zero
+        revision — deliberately without the ``account_convergence_retry``
+        marker — so the kernel advances the durable desire registry and the
+        canonical projection maps the lifecycle to a terminal non-reserving
+        status.  It is journaled with an explicit reason and does not suppress
+        the convergence health trip that already fired for the exhaustion.
+        """
+
+        requested_symbols = {plan.item.symbol}
+        market_inputs, snapshot, rules = self._execution_inputs(
+            requested_symbols=requested_symbols,
+            batch_id=batch_id,
+            require_external_health=False,
+            account_wide=False,
+            allow_stale_market_for_reduction_preview=True,
+            allow_unavailable_snapshot_for_reduction_preview=True,
+        )
+        targets: list[DesiredTarget] = []
+        for row in plan.targets:
+            symbol = str(row.get("symbol") or plan.item.symbol).upper()
+            market = market_inputs[symbol]
+            target_key = str(row.get("target_key") or "")
+            targets.append(
+                DesiredTarget(
+                    decision_key=f"{batch_id}:decision:{target_key}",
+                    target_key=target_key,
+                    sleeve=str(row.get("sleeve") or "account_risk"),
+                    strategy_id=str(row.get("strategy_id") or "account-convergence"),
+                    component_id=str(row.get("component_id") or "account"),
+                    symbol=symbol,
+                    signed_qty=0.0,
+                    reference_price=market.reference_price,
+                    leverage=float(row.get("leverage") or 1.0),
+                    reason="entry_retry_exhausted",
+                    metadata={
+                        "account_entry_retry_unwind": True,
+                        "account_convergence_generation": plan.item.generation,
+                        "account_convergence_attempts": plan.item.retry_attempts,
+                    },
+                )
+            )
+        # Zero targets against a flat symbol are strictly risk reducing; the
+        # kernel re-proves that inside the transaction, so a fill or command
+        # racing this pass rejects the batch instead of zeroing exposure.
+        self._require_reduction_position_truth(requested_symbols)
+        result = self.kernel.submit_targets(
+            batch_id=batch_id,
+            market_inputs=tuple(market_inputs.values()),
+            targets=targets,
+            risk_snapshot=snapshot,
+            risk_policy=self.risk_policy,
+            instrument_rules=rules,
+            native_protection_policy=self.native_protection_policy,
+            command_symbols=requested_symbols,
+            require_strict_risk_reduction=True,
+        )
+        if result.accepted and result.commands and self.execution_adapter is not None:
+            self.runtime.driver.execute_batch(
+                result,
+                market_inputs=market_inputs,
+                adapter=self.execution_adapter,
+            )
+        return result
+
     def converge_once(self) -> TargetBatchResult | None:
         """Replay or create at most one deterministic convergence batch."""
 
@@ -1876,7 +2014,16 @@ class AccountExecutionService:
             if plan.item.retryable and plan.item.next_retry_ts_ns is not None and plan.item.next_retry_ts_ns <= now_ns
         ]
         if not due:
-            return None
+            # With no risk-reducing or retryable work pending, retire at most
+            # one retry-exhausted entry that provably never filled. Anything
+            # partially filled or still ambiguous stays exhausted and loud.
+            unwindable = [plan for plan in plans if plan.entry_unwind_eligible]
+            if not unwindable:
+                return None
+            unwindable.sort(key=lambda plan: (plan.item.desired_since_ns, plan.item.symbol))
+            plan = unwindable[0]
+            batch_id = f"account-convergence/{plan.item.symbol}/{plan.item.generation}/entry-unwind"
+            return self._submit_entry_unwind(plan, batch_id=batch_id)
         # Close/reduce risk before any retry that adds exposure, then preserve a
         # stable age/symbol order for deterministic multi-symbol convergence.
         due.sort(

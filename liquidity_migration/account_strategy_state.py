@@ -1814,6 +1814,21 @@ def canonical_strategy_trade_rows(
             0.0,
             tolerance=quantity_tolerance,
         )
+        latest_metadata = latest_payload.get("metadata") or {}
+        if not isinstance(latest_metadata, Mapping):
+            latest_metadata = {}
+        entry_retry_unwound = (
+            latest_metadata.get("account_entry_retry_unwind") is True
+            and not entry_attributed
+            and not close_attributed
+            and (
+                anchor is None
+                or (
+                    anchor.entry_fill_ts_ms is None
+                    and abs(anchor.entry_observed_signed_qty) <= quantity_tolerance
+                )
+            )
+        )
         if close_attributed and target_is_flat:
             row["status"] = "closed"
             row["account_execution_lifecycle_status"] = "closed"
@@ -1821,6 +1836,16 @@ def canonical_strategy_trade_rows(
             row["exit_reason"] = str(
                 latest_payload.get("reason") or "target_flat"
             )
+        elif target_is_flat and entry_retry_unwound:
+            # The owner unwound a retry-exhausted entry whose commands went
+            # terminal with zero observed fill.  No entry clock ever started,
+            # so the lifecycle is terminal without a close or cooldown; the
+            # zero-fill requirement keeps this branch unreachable for any
+            # partially filled entry, which must stay reserved for the
+            # ordinary exit machinery.
+            row["status"] = "entry_retry_exhausted"
+            row["account_execution_lifecycle_status"] = "entry_unfilled"
+            row["target_action"] = "none"
         elif target_is_flat:
             row["status"] = "target_pending"
             row["account_execution_lifecycle_status"] = (
@@ -1854,7 +1879,9 @@ def target_reservation_rows(rows: pl.DataFrame) -> pl.DataFrame:
     converging.  Both reserve the component/symbol for admission and capacity,
     but callers must continue to use their filled/open view for exits, P&L, and
     position reporting.  Keeping this as a separate read-model operation avoids
-    relabelling an unfilled desired target as a position.
+    relabelling an unfilled desired target as a position.  A terminal
+    ``entry_retry_exhausted`` row — the owner unwound an entry whose commands
+    went terminal with zero observed fill — releases its reservation.
     """
 
     if rows.is_empty() or "status" not in rows.columns:
