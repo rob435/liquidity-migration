@@ -43,6 +43,20 @@ contains at least eight adverse reduction batches in the preceding 1,440
 minutes; the pause never changes existing targets. That threshold is an
 operational guardrail, not a validated optimum.
 
+Two research-parity admission gates mirror the engine that produced the
+profile's equity evidence (added 2026-07-25 after the DEXEUSDT round-trip
+audit): an entry-anchored re-entry cooldown equal to the 24-hour maximum hold
+(`cooldown_ms = hold_ms`; a fast take-profit close therefore cannot re-enter
+on the next hourly signal), and the crowd-2 gate
+(`entry_crowding_max_fresh = 2`) that skips a component's entire fresh stack
+when more than two qualifying signals share one `signal_ts`. Both surface as
+named `entry_cooldown` / `crowding` rejection reasons in the funnel
+diagnostics. Reservation, cooldown, and same-signal window guards are scoped
+per component book, exactly like the independent research books: a sibling
+component may complete a capacity-truncated stack later in the same window,
+while a lifecycle that cannot be attributed to one component fails safe to
+blocking every component for its symbol.
+
 Each cycle also persists an observer-only component funnel (D9, liquidity,
 event, age, and capacity), qualified-but-blocked symbols, the first rejection
 reason, an exact entry-feature-state hash, and both full-file and signal-day

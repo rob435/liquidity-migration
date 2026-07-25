@@ -164,8 +164,8 @@ terminal disposition, evaluation count, and first/last timestamps.
   target, terminal-attempt, and publication gates become transitions.
 - CONTINUOUS sources are `entry_state` symbol/hour rows before decile/liquidity
   filters, with component scope for trigger/age differences; shared health,
-  adverse-pause, BTC-trend/risk, capacity, reentry, unresolved-target, and
-  publication gates remain separately named.
+  adverse-pause, BTC-trend/risk, capacity, reentry, cooldown, crowding,
+  unresolved-target, and publication gates remain separately named.
 
 The prospective epoch must freeze source-population and transition semantics
 before this writer is added. Otherwise a convenient logging grain would become

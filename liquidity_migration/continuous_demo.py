@@ -129,6 +129,8 @@ class ContinuousEntrySelectionObservation:
     selection_rejections: tuple[dict[str, str], ...]
     skipped_same_signal_reentry: int
     observed_same_signal_reentry: int
+    observed_entry_cooldown: int = 0
+    observed_crowding: int = 0
     observer_error: str = ""
 
 
@@ -148,6 +150,14 @@ class ContinuousDemoCycleConfig:
     max_active: int = 25
     max_new_entries_per_cycle: int = 5
     max_hold_hours: int = 48  # force-exit cap if a name never leaves the decile
+    # Research parity: the engine that produced the active profile's equity
+    # evidence skips any fresh entry within hold_ms of the symbol's last entry
+    # (cooldown_ms = hold_ms) and skips ALL of a component's fresh signals when
+    # more than entry_crowding_max_fresh share one signal_ts.  The live sleeve
+    # mirrors both; the validated record contains no faster re-entries and no
+    # crowded-hour books.
+    entry_reentry_cooldown_enabled: bool = True
+    entry_crowding_max_fresh: int = 2  # 0 disables the crowding gate
     # The active profile selects from a confirmed close and enters one hour later.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"  # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
@@ -691,12 +701,17 @@ def select_continuous_entries(
     open_count: int,
     config: ContinuousDemoCycleConfig,
     eligible_symbols: set[str] | None = None,
+    prior_symbols: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fresh shorts: names currently in the top decile + liquid + not held + not in cooldown (+ age-
     eligible if `eligible_symbols` is supplied — the inherited fresh-listing-squeezer floor).
 
     Holding a position IS the 'still in the spell' state, so 'not held' implements fresh-entry; the
-    exit (left-decile) is planned separately. Ranked by composite desc, capped by capacity."""
+    exit (left-decile) is planned separately. Ranked by composite desc, capped by capacity.
+
+    `prior_symbols` (already traded this signal window) must be excluded BEFORE the capacity
+    truncation: a closed same-signal trade otherwise re-occupies a top composite slot every cycle
+    and silently starves fresh names ranked just below the cutoff."""
     if live_state.is_empty():
         return []
     room = max(0, config.max_active - open_count)
@@ -711,6 +726,8 @@ def select_continuous_entries(
         cand = cand.filter(~pl.col("symbol").is_in(list(held_symbols)))
     if cooldown_symbols:
         cand = cand.filter(~pl.col("symbol").is_in(list(cooldown_symbols)))
+    if prior_symbols:
+        cand = cand.filter(~pl.col("symbol").is_in(list(prior_symbols)))
     if eligible_symbols is not None:
         cand = cand.filter(pl.col("symbol").is_in(list(eligible_symbols)))
     return cand.sort("composite", descending=True).head(min(config.max_new_entries_per_cycle, room)).to_dicts()
@@ -781,35 +798,137 @@ def entry_circuit_breaker_tripped(
     return count >= config.entry_pause_after_adverse_exits, count
 
 
-def _prior_continuous_signal_symbols(
+_ALL_COMPONENTS = "*"
+
+
+def _component_suffix(
+    trade_id: str,
+    *,
+    strategy_id: str,
+    symbol: str,
+    signal_ts_ms: int | None,
+) -> str:
+    """Component name embedded in a canonical trade id; '' when unattributable."""
+
+    if signal_ts_ms is None:
+        return ""
+    base = f"{continuous_trade_id(strategy_id, symbol, int(signal_ts_ms))}-"
+    if trade_id.startswith(base) and len(trade_id) > len(base):
+        return trade_id[len(base):]
+    return ""
+
+
+def _component_scope_map(
+    frame: pl.DataFrame,
+    *,
+    strategy_id: str,
+) -> dict[str, set[str]]:
+    """symbol -> owning components; the ``*`` wildcard blocks every component.
+
+    The research books run independently per component, so admission guards
+    must not let one component's lifecycle blanket-block its siblings.  A row
+    whose trade id cannot be attributed to exactly one component (legacy id,
+    foreign producer) fails safe to the wildcard: unattributable lifecycles
+    can only narrow admission, never widen it.
+    """
+
+    scope: dict[str, set[str]] = {}
+    if frame.is_empty() or "symbol" not in frame.columns:
+        return scope
+    has_identity = {"trade_id", "signal_ts_ms"} <= set(frame.columns)
+    columns = ["symbol"]
+    if has_identity:
+        columns += ["trade_id", "signal_ts_ms"]
+    if "strategy_id" in frame.columns:
+        columns.append("strategy_id")
+    for row in frame.select(columns).to_dicts():
+        symbol = str(row["symbol"])
+        component = ""
+        if has_identity:
+            signal_value = row.get("signal_ts_ms")
+            component = _component_suffix(
+                str(row.get("trade_id") or ""),
+                strategy_id=str(row.get("strategy_id") or strategy_id),
+                symbol=symbol,
+                signal_ts_ms=(None if signal_value is None else int(signal_value)),
+            )
+        scope.setdefault(symbol, set()).add(component or _ALL_COMPONENTS)
+    return scope
+
+
+def _symbols_blocking_component(
+    component: str,
+    scope: dict[str, set[str]],
+) -> set[str]:
+    return {
+        symbol
+        for symbol, components in scope.items()
+        if _ALL_COMPONENTS in components or component in components
+    }
+
+
+def _continuous_cooldown_components(
+    all_trades: pl.DataFrame,
+    *,
+    now_ms: int,
+    strategy_id: str,
+    config: ContinuousDemoCycleConfig,
+) -> dict[str, set[str]]:
+    """(symbol -> components) inside the entry-anchored re-entry cooldown.
+
+    Research parity: the engine pins ``cooldown_ms = hold_ms`` per symbol per
+    component book, so the validated equity evidence contains no re-entry
+    within ``max_hold_hours`` of that component's last entry — including after
+    a fast take-profit close — while a sibling book may still trade the
+    symbol.  Derived from canonical entry timestamps; rows without an
+    attributed entry carry no cooldown clock (they are reserved instead).
+    """
+
+    if not config.entry_reentry_cooldown_enabled or config.max_hold_hours <= 0:
+        return {}
+    if all_trades.is_empty() or not {"symbol", "entry_ts_ms"} <= set(all_trades.columns):
+        return {}
+    frame = all_trades
+    if "strategy_id" in frame.columns:
+        frame = frame.filter(pl.col("strategy_id") == strategy_id)
+    cutoff = int(now_ms) - exact_duration_ms(hours=config.max_hold_hours)
+    frame = frame.filter(
+        pl.col("entry_ts_ms").cast(pl.Int64, strict=False).fill_null(0) > cutoff
+    )
+    return _component_scope_map(frame, strategy_id=strategy_id)
+
+
+def _prior_continuous_signal_entries(
     all_trades: pl.DataFrame,
     *,
     signal_ts: int,
     strategy_id: str,
-) -> set[str]:
-    prior_symbols: set[str] = set()
-    if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
-        frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
-        if "strategy_id" in frame.columns:
-            frame = frame.filter(pl.col("strategy_id") == strategy_id)
-        prior_symbols = {str(symbol) for symbol in frame.get_column("symbol").to_list()}
-    return prior_symbols
+) -> dict[str, set[str]]:
+    """(symbol -> components) that already own an entry for this signal window."""
+
+    if all_trades.is_empty() or not {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
+        return {}
+    frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
+    if "strategy_id" in frame.columns:
+        frame = frame.filter(pl.col("strategy_id") == strategy_id)
+    return _component_scope_map(frame, strategy_id=strategy_id)
 
 
 def _continuous_entry_candidates_with_signal_metadata(
     picks: list[dict[str, Any]],
-    all_trades: pl.DataFrame,
     *,
     signal_ts: int,
     strategy_id: str,
     price_by_symbol: dict[str, float],
+    prior_symbols: set[str],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Attach signal metadata and enforce one entry per symbol/signal window."""
-    prior_symbols = _prior_continuous_signal_symbols(
-        all_trades,
-        signal_ts=signal_ts,
-        strategy_id=strategy_id,
-    )
+    """Attach signal metadata and enforce one entry per component/signal window.
+
+    ``prior_symbols`` must already be scoped to the admitting component: the
+    guard is per component book (research parity), so a sibling component
+    completing a capacity-truncated stack is legal and must not be skipped
+    here.
+    """
     candidates: list[dict[str, Any]] = []
     skipped_same_signal_reentry = 0
     for c in picks:
@@ -854,6 +973,7 @@ def _component_funnel_state(
     universe: pl.DataFrame,
     klines: pl.DataFrame,
     reserved_symbols: set[str],
+    cooldown_symbols: set[str],
     prior_symbols: set[str],
     trigger: str,
     age_days: int,
@@ -868,6 +988,7 @@ def _component_funnel_state(
     pl.DataFrame,
     pl.DataFrame,
     pl.DataFrame,
+    int,
     int,
 ]:
     component_config = replace(config, entry_event_trigger=trigger)
@@ -886,15 +1007,19 @@ def _component_funnel_state(
     if not fresh.is_empty() and reserved_symbols:
         fresh = fresh.filter(~pl.col("symbol").is_in(sorted(reserved_symbols)))
     reserved_count = age.height - fresh.height
+    cooled = fresh
+    if not cooled.is_empty() and cooldown_symbols:
+        cooled = cooled.filter(~pl.col("symbol").is_in(sorted(cooldown_symbols)))
+    cooldown_count = fresh.height - cooled.height
     same_signal = (
-        fresh.filter(pl.col("symbol").is_in(sorted(prior_symbols)))
-        if not fresh.is_empty() and prior_symbols
-        else fresh.head(0)
+        cooled.filter(pl.col("symbol").is_in(sorted(prior_symbols)))
+        if not cooled.is_empty() and prior_symbols
+        else cooled.head(0)
     )
     available = (
-        fresh.filter(~pl.col("symbol").is_in(sorted(prior_symbols)))
-        if not fresh.is_empty() and prior_symbols
-        else fresh
+        cooled.filter(~pl.col("symbol").is_in(sorted(prior_symbols)))
+        if not cooled.is_empty() and prior_symbols
+        else cooled
     )
     if not available.is_empty():
         available = available.sort("composite", descending=True)
@@ -908,6 +1033,7 @@ def _component_funnel_state(
         same_signal,
         available,
         reserved_count,
+        cooldown_count,
     )
 
 
@@ -916,7 +1042,8 @@ def _observe_continuous_component_selection(
     *,
     universe: pl.DataFrame,
     klines: pl.DataFrame,
-    reserved_symbols: set[str],
+    reserved_components: dict[str, set[str]],
+    cooldown_components: dict[str, set[str]],
     reservations_count: int,
     entry_capacity: int,
     all_trades: pl.DataFrame,
@@ -932,6 +1059,10 @@ def _observe_continuous_component_selection(
     The candidate loop intentionally calls the same selector and metadata
     helper as the historical active path.  Continuing after capacity is full is
     telemetry-only; those later rows never enter ``candidates``.
+
+    Reservation, cooldown, and same-signal guards are scoped per component
+    (research parity: independent component books), so a sibling component can
+    complete a capacity-truncated stack in a later cycle of the same window.
     """
 
     candidates: list[dict[str, Any]] = []
@@ -941,8 +1072,10 @@ def _observe_continuous_component_selection(
     selection_rejections: list[dict[str, str]] = []
     skipped_same_signal_reentry = 0
     observed_same_signal_reentry = 0
+    observed_entry_cooldown = 0
+    observed_crowding = 0
     observer_errors: list[str] = []
-    prior_symbols = _prior_continuous_signal_symbols(
+    prior_entries = _prior_continuous_signal_entries(
         all_trades,
         signal_ts=signal_ts,
         strategy_id=strategy_id,
@@ -950,6 +1083,9 @@ def _observe_continuous_component_selection(
 
     for component, trigger, age_days, take_profit_pct, component_weight, stop_loss_pct in config.ensemble_components:
         component_is_authoritative = active_entries_enabled and len(candidates) < entry_capacity
+        reserved_symbols = _symbols_blocking_component(component, reserved_components)
+        cooldown_symbols = _symbols_blocking_component(component, cooldown_components)
+        prior_symbols = _symbols_blocking_component(component, prior_entries)
         try:
             (
                 component_config,
@@ -961,11 +1097,13 @@ def _observe_continuous_component_selection(
                 same_signal,
                 available,
                 reserved_count,
+                cooldown_count,
             ) = _component_funnel_state(
                 entry_state,
                 universe=universe,
                 klines=klines,
                 reserved_symbols=reserved_symbols,
+                cooldown_symbols=cooldown_symbols,
                 prior_symbols=prior_symbols,
                 trigger=trigger,
                 age_days=age_days,
@@ -991,13 +1129,28 @@ def _observe_continuous_component_selection(
             )
             continue
         observed_same_signal_reentry += same_signal.height
+        observed_entry_cooldown += cooldown_count
+        # Research parity (entry_crowding_max_fresh): more fresh qualifying
+        # signals than the cap at one signal_ts skips the component's ENTIRE
+        # stack for the window, exactly like the equity-evidence engine.
+        component_crowded = 0 < config.entry_crowding_max_fresh < age.height
+        if component_crowded:
+            observed_crowding += age.height
         for row in age.to_dicts():
             symbol = str(row["symbol"])
             opportunity = {"component": component, "symbol": symbol}
             qualified.append(opportunity)
-            if symbol in reserved_symbols:
+            if component_crowded:
+                selection_rejections.append(
+                    {**opportunity, "first_rejection_reason": "crowding"}
+                )
+            elif symbol in reserved_symbols:
                 selection_rejections.append(
                     {**opportunity, "first_rejection_reason": "already_reserved"}
+                )
+            elif symbol in cooldown_symbols:
+                selection_rejections.append(
+                    {**opportunity, "first_rejection_reason": "entry_cooldown"}
                 )
             elif symbol in prior_symbols:
                 selection_rejections.append(
@@ -1005,21 +1158,22 @@ def _observe_continuous_component_selection(
                 )
 
         component_capacity_count = 0
-        if len(candidates) < entry_capacity:
+        if not component_crowded and len(candidates) < entry_capacity:
             picks = select_continuous_entries(
                 entry_state,
                 held_symbols=reserved_symbols,
-                cooldown_symbols=reserved_symbols,
+                cooldown_symbols=reserved_symbols | cooldown_symbols,
                 open_count=reservations_count + len(candidates),
                 config=component_config,
                 eligible_symbols=eligible,
+                prior_symbols=prior_symbols,
             )
             component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
                 picks,
-                all_trades,
                 signal_ts=signal_ts,
                 strategy_id=strategy_id,
                 price_by_symbol=price_by_symbol,
+                prior_symbols=prior_symbols,
             )
             skipped_same_signal_reentry += skipped
             for candidate in component_candidates:
@@ -1059,6 +1213,8 @@ def _observe_continuous_component_selection(
         selection_rejections=tuple(selection_rejections),
         skipped_same_signal_reentry=skipped_same_signal_reentry,
         observed_same_signal_reentry=observed_same_signal_reentry,
+        observed_entry_cooldown=observed_entry_cooldown,
+        observed_crowding=observed_crowding,
         observer_error=" · ".join(observer_errors)[:500],
     )
 
@@ -1143,6 +1299,12 @@ def _first_entry_rejection_reason(
 ) -> str:
     if observation.observer_error and not observation.funnel_rows:
         return preselection_reason or "entry_observer_error"
+    if preselection_reason:
+        # A cycle-level gate (health, pause, capacity, BTC trend) disabled
+        # entries before any admission ran.  _qualified_block_reasons names the
+        # same gate for every qualified symbol; both channels must agree or an
+        # operator chases funnel-stage plumbing that never ran.
+        return preselection_reason
     totals = {
         field: sum(int(row[field]) for row in observation.funnel_rows)
         for field in ("d9", "liquidity", "event", "age", "available", "capacity", "reserved", "same_signal_reentry")
@@ -1156,14 +1318,18 @@ def _first_entry_rejection_reason(
     if totals["age"] == 0:
         return "age"
     if totals["available"] == 0:
+        if observation.observed_crowding > 0:
+            return "crowding"
         if totals["reserved"] > 0:
             return "already_reserved"
+        if observation.observed_entry_cooldown > 0:
+            return "entry_cooldown"
         if totals["same_signal_reentry"] > 0:
             return "same_signal_reentry"
         return "capacity"
-    if preselection_reason:
-        return preselection_reason
     if totals["capacity"] == 0:
+        if observation.observed_crowding > 0:
+            return "crowding"
         if observation.skipped_same_signal_reentry > 0:
             return "same_signal_reentry"
         return "capacity"
@@ -1384,6 +1550,7 @@ def _apply_btc_risk_sizing(
         "accepted_duplicates": 0,
         "accepted_ignored": 0,
         "accepted_authoritative_rows": 0,
+        "accepted_orphaned_dropped": 0,
         "unresolved_entry_requests": int(unresolved_entry_requests),
         "entry_blocked": False,
         "blocking_reason": "",
@@ -1413,6 +1580,7 @@ def _apply_btc_risk_sizing(
         stats["accepted_authoritative_rows"] = ingestion["authoritative_rows"]
         stats["state_rows"] = sizer.rows
         orphaned_dropped = int(ingestion.get("orphaned_dropped", 0))
+        stats["accepted_orphaned_dropped"] = orphaned_dropped
         if orphaned_dropped:
             _logger.warning(
                 "BTC-risk state rebased onto authoritative evidence; dropped %d prior-epoch decisions",
@@ -1518,6 +1686,10 @@ def _btc_risk_sizing_payload_fields(stats: dict[str, Any]) -> dict[str, Any]:
         "btc_risk_sizing_accepted_duplicates": stats.get("accepted_duplicates", 0),
         "btc_risk_sizing_accepted_ignored": stats.get("accepted_ignored", 0),
         "btc_risk_sizing_accepted_authoritative_rows": stats.get("accepted_authoritative_rows", 0),
+        # A rebase that drops prior-epoch decisions must be journaled per
+        # cycle, not only logged: state_rows collapsing with no recorded cause
+        # is exactly the unreconstructable mutation incident reviews fight.
+        "btc_risk_sizing_accepted_orphaned_dropped": stats.get("accepted_orphaned_dropped", 0),
         "btc_risk_sizing_unresolved_entry_requests": stats.get("unresolved_entry_requests", 0),
         "btc_risk_sizing_entry_blocked": stats.get("entry_blocked", False),
         "btc_risk_sizing_blocking_reason": stats.get("blocking_reason", ""),
@@ -1795,6 +1967,8 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             raise ValueError("vol_weight_clamp must be >= 1.0 for inverse_vol sizing")
     if not config.feature_set:
         raise ValueError("feature_set must contain at least one causal feature")
+    if config.entry_crowding_max_fresh < 0:
+        raise ValueError("entry_crowding_max_fresh must be >= 0 (0 disables the crowding gate)")
     if not config.ensemble_components:
         raise ValueError("continuous profile requires component entries")
     has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
@@ -2022,7 +2196,13 @@ def run_continuous_demo_cycle(
             managed_strategy_ids,
         )
         held_symbols = set(open_trades.get_column("symbol").to_list()) if not open_trades.is_empty() else set()
-        reserved_symbols = set(reservations.get_column("symbol").to_list()) if not reservations.is_empty() else set()
+        reserved_components = _component_scope_map(reservations, strategy_id=strategy_id)
+        cooldown_components = _continuous_cooldown_components(
+            canonical_trades,
+            now_ms=cycle_now_ms,
+            strategy_id=strategy_id,
+            config=demo,
+        )
 
         exit_plans = plan_continuous_exits(
             open_trades.to_dicts(),
@@ -2081,7 +2261,8 @@ def run_continuous_demo_cycle(
                 entry_state,
                 universe=universe,
                 klines=klines,
-                reserved_symbols=reserved_symbols,
+                reserved_components=reserved_components,
+                cooldown_components=cooldown_components,
                 reservations_count=reservations.height,
                 entry_capacity=entry_capacity,
                 all_trades=canonical_trades,

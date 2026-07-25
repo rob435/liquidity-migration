@@ -43,6 +43,7 @@ from liquidity_migration.continuous_demo import (
     _continuous_age_eligible_symbols,
     _continuous_base_notional_pct_equity,
     _continuous_btc_risk_multiplier,
+    _continuous_cooldown_components,
     _continuous_entry_candidates_with_signal_metadata,
     _continuous_entry_target_intents,
     _continuous_exit_target_intents,
@@ -343,10 +344,10 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
         )
         component_candidates, _ = _continuous_entry_candidates_with_signal_metadata(
             picks,
-            pl.DataFrame(),
             signal_ts=signal_ts,
             strategy_id="continuous_fade_v2",
             price_by_symbol=prices,
+            prior_symbols=set(),
         )
         for candidate in component_candidates:
             if len(legacy) >= 2:
@@ -366,7 +367,8 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
         state,
         universe=pl.DataFrame(),
         klines=pl.DataFrame(),
-        reserved_symbols=set(),
+        reserved_components={},
+        cooldown_components={},
         reservations_count=0,
         entry_capacity=2,
         all_trades=pl.DataFrame(),
@@ -453,7 +455,8 @@ def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
         state,
         universe=pl.DataFrame(),
         klines=pl.DataFrame(),
-        reserved_symbols=set(),
+        reserved_components={},
+        cooldown_components={},
         reservations_count=0,
         entry_capacity=1,
         all_trades=prior,
@@ -482,6 +485,371 @@ def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
         "component": "p3",
         "symbol": "TLMUSDT",
         "first_rejection_reason": "same_signal_reentry",
+    }]
+
+
+def _single_component_config(**overrides: Any) -> ContinuousDemoCycleConfig:
+    values: dict[str, Any] = {
+        "max_active": 5,
+        "max_new_entries_per_cycle": 5,
+        "max_hold_hours": 24,
+        "ensemble_components": (("p3", "none", 0, 0.12, 1.0, 0.35),),
+    }
+    values.update(overrides)
+    return ContinuousDemoCycleConfig(**values)
+
+
+def _observe_single_component(
+    state: pl.DataFrame,
+    *,
+    all_trades: pl.DataFrame,
+    cooldown_components: dict[str, set[str]],
+    signal_ts: int,
+    config: ContinuousDemoCycleConfig,
+    entry_capacity: int = 5,
+    reserved_components: dict[str, set[str]] | None = None,
+    reservations_count: int = 0,
+) -> Any:
+    return _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components=reserved_components or {},
+        cooldown_components=cooldown_components,
+        reservations_count=reservations_count,
+        entry_capacity=entry_capacity,
+        all_trades=all_trades,
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+    )
+
+
+def test_entry_cooldown_matches_research_hold_anchor() -> None:
+    """cooldown_ms = hold_ms from last entry per component book, so a fast TP
+    close cannot re-enter on the next hourly signal (research parity) while a
+    sibling component keeps its own clock."""
+
+    now_ms = 1_700_000_000_000
+    entry_signal = now_ms - 3 * MS_PER_HOUR
+    trades = pl.DataFrame(
+        [
+            {
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "FASTUSDT",
+                "status": "closed",
+                "entry_ts_ms": now_ms - 3 * MS_PER_HOUR,
+                "signal_ts_ms": entry_signal,
+                "trade_id": f"continuous_fade_v2-FASTUSDT-{entry_signal}-p3",
+            },
+            {
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "OLDUSDT",
+                "status": "closed",
+                "entry_ts_ms": now_ms - 30 * MS_PER_HOUR,
+                "signal_ts_ms": now_ms - 30 * MS_PER_HOUR,
+                "trade_id": f"continuous_fade_v2-OLDUSDT-{now_ms - 30 * MS_PER_HOUR}-p3",
+            },
+            {
+                "strategy_id": "long_v11a",
+                "symbol": "OTHERUSDT",
+                "status": "closed",
+                "entry_ts_ms": now_ms - 1 * MS_PER_HOUR,
+                "signal_ts_ms": now_ms - 1 * MS_PER_HOUR,
+                "trade_id": f"long_v11a-OTHERUSDT-{now_ms - 1 * MS_PER_HOUR}",
+            },
+        ]
+    )
+    config = _single_component_config()
+
+    cooldown = _continuous_cooldown_components(
+        trades,
+        now_ms=now_ms,
+        strategy_id="continuous_fade_v2",
+        config=config,
+    )
+    # Component-attributed: only p3 cools; a sibling book stays free.
+    assert cooldown == {"FASTUSDT": {"p3"}}
+
+    unattributed = _continuous_cooldown_components(
+        trades.drop("trade_id"),
+        now_ms=now_ms,
+        strategy_id="continuous_fade_v2",
+        config=config,
+    )
+    # Without component attribution the whole symbol fails safe to cooling.
+    assert unattributed == {"FASTUSDT": {"*"}}
+
+    disabled = _continuous_cooldown_components(
+        trades,
+        now_ms=now_ms,
+        strategy_id="continuous_fade_v2",
+        config=_single_component_config(entry_reentry_cooldown_enabled=False),
+    )
+    assert disabled == {}
+
+    state = pl.DataFrame(
+        {
+            "symbol": ["FASTUSDT"],
+            "decile": [9],
+            "composite": [0.9],
+            "turnover_quote": [1_000_000.0],
+            "rv_168h": [0.01],
+        }
+    )
+    observed = _observe_single_component(
+        state,
+        all_trades=pl.DataFrame(),
+        cooldown_components=cooldown,
+        signal_ts=now_ms - MS_PER_HOUR,
+        config=config,
+    )
+    assert observed.candidates == ()
+    assert observed.observed_entry_cooldown == 1
+    assert observed.selection_rejections == (
+        {
+            "component": "p3",
+            "symbol": "FASTUSDT",
+            "first_rejection_reason": "entry_cooldown",
+        },
+    )
+    assert (
+        _first_entry_rejection_reason(
+            observed,
+            preselection_reason="",
+            btc_risk_reason="",
+            raw_entry_intent_count=0,
+            unresolved_suppressions=0,
+            terminal_suppressions=0,
+            publication_error_count=0,
+            published_entry_count=0,
+            blocked_rows=_blocked_rows_from_reasons(
+                observed,
+                _qualified_block_reasons(
+                    observed, preselection_reason="", btc_risk_reason=""
+                ),
+            ),
+        )
+        == "entry_cooldown"
+    )
+
+
+def test_entry_crowding_gate_skips_the_whole_component_stack() -> None:
+    """More fresh qualifying signals than entry_crowding_max_fresh at one
+    signal_ts admits NOTHING for the component (research skip-all parity)."""
+
+    signal_ts = 1_700_000_000_000
+    state = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1e6, 1e6, 1e6],
+            "rv_168h": [0.01, 0.01, 0.01],
+        }
+    )
+    observed = _observe_single_component(
+        state,
+        all_trades=pl.DataFrame(),
+        cooldown_components={},
+        signal_ts=signal_ts,
+        config=_single_component_config(entry_crowding_max_fresh=2),
+    )
+    assert observed.candidates == ()
+    assert observed.observed_crowding == 3
+    assert {row["first_rejection_reason"] for row in observed.selection_rejections} == {"crowding"}
+    assert (
+        _first_entry_rejection_reason(
+            observed,
+            preselection_reason="",
+            btc_risk_reason="",
+            raw_entry_intent_count=0,
+            unresolved_suppressions=0,
+            terminal_suppressions=0,
+            publication_error_count=0,
+            published_entry_count=0,
+            blocked_rows=[],
+        )
+        == "crowding"
+    )
+
+    uncrowded = _observe_single_component(
+        state,
+        all_trades=pl.DataFrame(),
+        cooldown_components={},
+        signal_ts=signal_ts,
+        config=_single_component_config(entry_crowding_max_fresh=0),
+    )
+    assert [row["symbol"] for row in uncrowded.candidates] == ["A", "B", "C"]
+
+
+def test_same_signal_symbols_cannot_starve_fresh_names_below_the_cutoff() -> None:
+    """Prior-signal symbols are excluded BEFORE the capacity truncation, so a
+    closed same-signal trade cannot re-occupy a top slot and silently drop the
+    fresh name ranked just below it."""
+
+    signal_ts = 1_700_000_000_000
+    state = pl.DataFrame(
+        {
+            "symbol": ["DONE", "FRESH"],
+            "decile": [9, 9],
+            "composite": [0.9, 0.8],
+            "turnover_quote": [1e6, 1e6],
+            "rv_168h": [0.01, 0.01],
+        }
+    )
+    prior = pl.DataFrame(
+        [
+            {
+                "trade_id": f"continuous_fade_v2-DONE-{signal_ts}",
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "DONE",
+                "status": "closed",
+                "signal_ts_ms": signal_ts,
+            }
+        ]
+    )
+    observed = _observe_single_component(
+        state,
+        all_trades=prior,
+        cooldown_components={},
+        signal_ts=signal_ts,
+        config=_single_component_config(max_new_entries_per_cycle=1),
+        entry_capacity=1,
+    )
+    assert [row["symbol"] for row in observed.candidates] == ["FRESH"]
+    assert observed.skipped_same_signal_reentry == 0
+
+
+def test_capacity_truncated_stack_completes_in_a_later_cycle() -> None:
+    """Window guards are scoped per component book: a symbol reserved by one
+    component does not block a sibling from completing the capacity-truncated
+    stack later in the same signal window (research parity: independent
+    books). An unattributable reservation still fails safe to blocking all."""
+
+    signal_ts = 1_700_000_000_000
+    state = pl.DataFrame(
+        {
+            "symbol": ["STACKUSDT"],
+            "decile": [9],
+            "composite": [0.9],
+            "turnover_quote": [1_000_000.0],
+            "rv_168h": [0.01],
+        }
+    )
+    config = _single_component_config(
+        ensemble_components=(
+            ("p3", "none", 0, 0.12, 1.0 / 3.0, 0.35),
+            ("p4p5", "none", 0, 0.12, 4.0 / 9.0, 0.35),
+        ),
+    )
+    prior = pl.DataFrame(
+        [
+            {
+                "trade_id": f"continuous_fade_v2-STACKUSDT-{signal_ts}-p3",
+                "strategy_id": "continuous_fade_v2",
+                "symbol": "STACKUSDT",
+                "status": "open",
+                "signal_ts_ms": signal_ts,
+            }
+        ]
+    )
+
+    observed = _observe_single_component(
+        state,
+        all_trades=prior,
+        cooldown_components={"STACKUSDT": {"p3"}},
+        signal_ts=signal_ts,
+        config=config,
+        reserved_components={"STACKUSDT": {"p3"}},
+        reservations_count=1,
+    )
+    # p3 already owns the symbol for this window; p4p5 completes the stack.
+    assert [(row["component"], row["symbol"]) for row in observed.admitted_opportunities] == [
+        ("p4p5", "STACKUSDT")
+    ]
+    assert [row["trade_id"] for row in observed.candidates] == [
+        f"continuous_fade_v2-STACKUSDT-{signal_ts}-p4p5"
+    ]
+    p3_rejections = [
+        row for row in observed.selection_rejections if row["component"] == "p3"
+    ]
+    assert p3_rejections == [
+        {
+            "component": "p3",
+            "symbol": "STACKUSDT",
+            "first_rejection_reason": "already_reserved",
+        }
+    ]
+
+    wildcard = _observe_single_component(
+        state,
+        all_trades=prior,
+        cooldown_components={},
+        signal_ts=signal_ts,
+        config=config,
+        reserved_components={"STACKUSDT": {"*"}},
+        reservations_count=1,
+    )
+    assert wildcard.candidates == ()
+
+
+def test_preselection_reason_wins_in_both_rejection_channels() -> None:
+    """A cycle-level gate (e.g. owner-health failure) must be the first
+    rejection in BOTH the funnel channel and the blocked-rows channel; a
+    reserved symbol must not mask it (2026-07-25 15:57:46Z contradiction)."""
+
+    signal_ts = 1_700_000_000_000
+    state = pl.DataFrame(
+        {
+            "symbol": ["HELDUSDT"],
+            "decile": [9],
+            "composite": [0.9],
+            "turnover_quote": [1_000_000.0],
+            "rv_168h": [0.01],
+        }
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components={"HELDUSDT": {"*"}},
+        cooldown_components={},
+        reservations_count=1,
+        entry_capacity=1,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=_single_component_config(),
+        active_entries_enabled=False,
+    )
+    reasons = _qualified_block_reasons(
+        observed,
+        preselection_reason="account_execution_health",
+        btc_risk_reason="",
+    )
+    blocked = _blocked_rows_from_reasons(observed, reasons)
+    first = _first_entry_rejection_reason(
+        observed,
+        preselection_reason="account_execution_health",
+        btc_risk_reason="",
+        raw_entry_intent_count=0,
+        unresolved_suppressions=0,
+        terminal_suppressions=0,
+        publication_error_count=0,
+        published_entry_count=0,
+        blocked_rows=blocked,
+    )
+    assert first == "account_execution_health"
+    assert blocked == [{
+        "component": "p3",
+        "symbol": "HELDUSDT",
+        "first_rejection_reason": "account_execution_health",
     }]
 
 
@@ -595,12 +963,21 @@ def test_same_signal_entry_is_suppressed() -> None:
     )
     picks = [{"symbol": "WIFUSDT", "decile": 9, "composite": 1.0}]
 
-    blocked, skipped = _continuous_entry_candidates_with_signal_metadata(
-        picks,
+    from liquidity_migration.continuous_demo import _prior_continuous_signal_entries, _symbols_blocking_component
+
+    prior_entries = _prior_continuous_signal_entries(
         prior,
         signal_ts=signal_ts_ms,
         strategy_id=strategy_id,
+    )
+    # The legacy component-less trade id fails safe to the wildcard.
+    assert prior_entries == {"WIFUSDT": {"*"}}
+    blocked, skipped = _continuous_entry_candidates_with_signal_metadata(
+        picks,
+        signal_ts=signal_ts_ms,
+        strategy_id=strategy_id,
         price_by_symbol={"WIFUSDT": 100.0},
+        prior_symbols=_symbols_blocking_component("p3", prior_entries),
     )
 
     assert blocked == []
