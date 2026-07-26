@@ -59,34 +59,65 @@ signal diversity (the cells are nested supersets of one trigger).
    two fewer hand-tuned parameter sets — retiring the §9.1 grid-smoothing
    critique.
 
-## 3. Proposed new CONTINUOUS shape
+## 3. The hedged parity renders (added same day; supersedes the §3 expectation)
 
-> Single component `turn3_pop3`, age ≥ 240d, rmom-low decile, **funding ≥ 0
-> admission**, BTC 30d uptrend gate unchanged, tp 12% / declared sl 35%,
-> inverse-vol sizing, BTC+ETH hedge overlay unchanged.
+The full deployed hedge overlay (winner rule, BTC+ETH hedge, btcvol intensity
+regime) applied to the candidate shapes, beside the deployed render
+(`hedged_parity_summary.json` in the artifacts dir):
 
-Expected (component-level evidence): ensemble-level return roughly preserved
-once the hedge overlay is applied, with roughly half the component drawdown
-and a daily Sharpe premium of ~+0.3 over the deployed book. Beside it, the
-carry-hold sleeve (corr **−0.08** to CONTINUOUS) does the heavy lifting on
-return; the two are complementary, not substitutes.
+| hedged book, 2023-03→2026-07 | trades | total | maxDD | Sharpe | MAR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| single cell `turn3_pop3` | 853 | +14.75% | −3.36% | 1.62 | 1.32 |
+| **single cell + funding ≥ 0 (proposal)** | 704 | +13.72% | **−1.69%** | 1.72 | **2.43** |
+| 3-cell ensemble + funding ≥ 0 on each | 1,940 | +12.62% | −1.90% | 1.66 | 1.99 |
+| **deployed 3-cell ensemble** | 2,372 | +15.85% | −2.85% | **1.84** | 1.66 |
+
+The component-level Sharpe premium of the funding admission (+0.30) shrinks
+to +0.10 at the hedged level and does **not** overtake the deployed book's
+1.84: the deployed ensemble's density (2,372 entries — the nested cells act
+as a scale-in ladder into the same pump) smooths the daily series the hedge
+overlay works on, and the funding filter costs exactly that density. Applying
+the filter to all three cells does not recover it (1.66) — the later-ladder
+entries it keeps are the diluted ones.
+
+**The measured trade-off, stated plainly:**
+
+- **Sharpe**: deployed shape wins (1.84 vs 1.72), by an amount (~0.1) that is
+  inside Lane-1 noise on 3.3 years.
+- **Drawdown/MAR**: the proposal wins decisively (−1.69% vs −2.85%; MAR 2.43
+  vs 1.66), and drawdown quality is what the owner has flagged as the binding
+  constraint — and is the property that matters for CONTINUOUS's portfolio
+  role as the low-vol stabilizer beside carry-hold (corr −0.08).
+- **Simplicity**: the proposal retires two hand-tuned parameter sets and the
+  §9.1 grid-smoothing critique.
+
+**Recommendation**: adopt the single-cell + funding≥0 shape as the forward
+candidate — register it and let the rolling record arbitrate the 0.1-Sharpe
+question the backtest cannot settle; keep the deployed shape running as the
+control until then. Not a deployment decision; the normal governance path
+applies.
 
 ## 4. Next discriminating steps, in order
 
-1. **Full hedged render** of the proposed shape (single cell + funding
-   admission + hedge overlay) against the deployed ensemble render — the
-   parity artifact a profile change needs. Requires wiring the funding
-   admission through the refresh runner; the runtime producer would need the
-   same check at candidate admission (the account owner already consumes
-   funding for reconciliation, so the feed exists).
-2. **Cooldown as the one remaining funnel knob**: the engine skip counters
-   show capacity never binds (0 skips); the binding funnel constraints are
-   the 24h re-entry cooldown (606 skips) and crowd-2 (292). A single
-   cooldown-relaxation cell (24h → 12h) is the only loosening left untested
-   that the skip data motivates.
-3. **Profile change + change point** per `docs/governance.md` when 1 holds:
-   revision bump (e.g. `active_tp12_sl35_fund0_v1`), five-line note, normal
-   rollout. Not authorized by this document.
+1. ~~Full hedged render~~ **Done (§3)**: `hedged_FUND0_ensemble.csv`,
+   `hedged_V3_proposal.csv`, `hedged_V0_single_cell.csv` +
+   `hedged_parity_summary.json` in the artifacts dir.
+2. **Forward A/B**: register the single-cell + funding≥0 shape as a Lane-2
+   config scored daily beside the deployed profile; the rolling record
+   arbitrates the 0.1-Sharpe / 1.2-MAR trade the backtest cannot settle.
+   Runtime adoption would need the funding check at candidate admission (the
+   account owner already consumes funding for reconciliation, so the feed
+   exists) and an engine `funding_min_at_entry` field added deliberately —
+   note that adding ContinuousEventConfig fields shifts config hashes and
+   kernel strategy identities, so it ships as its own change point.
+3. **Cooldown as the one remaining funnel knob**: capacity never binds
+   (0 skips); the binding funnel constraints are the 24h re-entry cooldown
+   (606 skips) and crowd-2 (292). Cooldown is derived from `hold_hours`
+   inside the trade loop, so testing 12h needs the same deliberate engine
+   parameter — bundled with step 2's field addition, not hacked in research.
+4. **Profile change + change point** per `docs/governance.md` if the forward
+   record earns it: revision bump (e.g. `active_tp12_sl35_fund0_v1`),
+   five-line note, normal rollout. Not authorized by this document.
 
 ## 5. Caveats
 
