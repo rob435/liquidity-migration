@@ -93,6 +93,12 @@ class ContinuousEventConfig:
     entry_event_trigger: str = "none"
     entry_crowding_max_fresh: int = 2
     use_funding: bool = True
+    # Entry-admission floor on the candidate's last SETTLED funding print at the
+    # decision timestamp (signal-bar close): admit only when rate >= floor.
+    # None disables the admission entirely (exact pre-2026-07-26 behavior).
+    # Settled history only — never a predicted/next rate. A candidate with no
+    # settled print admits and is counted (unknown-admits, the research basis).
+    funding_min_at_entry: float | None = None
     split_date: str = "2025-06-01"
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
 
@@ -708,6 +714,46 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
         "turnover_zscore_168h",
     ]
     return d.select([c for c in keep_cols if c in d.columns]).sort(["ts_ms", "symbol"])
+
+
+def _funding_admission_filter(
+    entries: pl.DataFrame,
+    funding_lookup: dict[str, dict[str, Any]] | None,
+    config: ContinuousEventConfig,
+) -> tuple[pl.DataFrame, dict[str, int]]:
+    """Admit fresh entries whose last settled funding print clears the floor.
+
+    The rate is the last settlement at-or-before each entry's decision
+    timestamp (signal-bar close, ``ts_ms + 1h``) — the same backward as-of
+    semantics as the cross-venue panel join that produced the V3 evidence
+    (docs/continuous_redesign_2026-07-26.md). Entries with no settled print
+    admit and are counted. The filter runs BEFORE ``_run_trades`` so crowding,
+    cooldown, and capacity see only admitted candidates, exactly like the
+    research render that produced the adopted numbers.
+    """
+    counters = {"checked": 0, "rejected": 0, "unknown_admitted": 0}
+    if config.funding_min_at_entry is None or entries.is_empty():
+        return entries, counters
+    floor = float(config.funding_min_at_entry)
+    keep: list[bool] = []
+    for sym, sig_ts in entries.select("symbol", "ts_ms").iter_rows():
+        counters["checked"] += 1
+        cutoff = int(sig_ts) + MS_PER_HOUR
+        rate: float | None = None
+        series = (funding_lookup or {}).get(str(sym))
+        if series is not None:
+            idx = bisect.bisect_right(series["events_ts"], cutoff) - 1
+            if idx >= 0:
+                rate = float(series["events_rate"][idx])
+        if rate is None:
+            counters["unknown_admitted"] += 1
+            keep.append(True)
+        elif rate >= floor:
+            keep.append(True)
+        else:
+            counters["rejected"] += 1
+            keep.append(False)
+    return entries.filter(pl.Series(keep)), counters
 
 
 def _round_trip_bps(
@@ -1390,13 +1436,14 @@ def _prepare_inputs(
     symbol_bars = _indexed_price_bars_by_symbol(klines) if not klines.is_empty() else {}
 
     funding_lookup = None
-    if config.use_funding:
+    if config.use_funding or config.funding_min_at_entry is not None:
         fname = _autodetect_dataset_names(root)["funding_dataset"]
         funding = _read_window(root, fname, start_ms=start_ms - 10 * MS_PER_DAY, end_ms=end_ms + pad_fwd)
         # Canonical funding datasets come from venue funding-history endpoints:
         # each distinct timestamp is a realized settlement. Exact stamps preserve
         # temporary cadence changes during stressed funding regimes.
         funding_lookup = _funding_lookup(funding)
+    entries, funding_admission = _funding_admission_filter(entries, funding_lookup, config)
 
     btc_trend_daily = None
     if config.btc_trend_gate != "off" and not klines.is_empty():
@@ -1414,6 +1461,7 @@ def _prepare_inputs(
         "klines": klines,
         "symbol_bars": symbol_bars,
         "funding_lookup": funding_lookup,
+        "funding_admission": funding_admission,
         "btc_trend_daily": btc_trend_daily,
         "listing_ts_by_symbol": listing_ts_by_symbol,
     }
@@ -1438,6 +1486,7 @@ def run_continuous_equity_component(
     klines = inputs["klines"]
     symbol_bars = inputs["symbol_bars"]
     funding_lookup = inputs["funding_lookup"]
+    funding_admission = inputs["funding_admission"]
     btc_trend_daily = inputs["btc_trend_daily"]
     listing_ts_by_symbol = inputs["listing_ts_by_symbol"]
 
@@ -1499,6 +1548,8 @@ def run_continuous_equity_component(
     funding_mode = splits.get("full", {}).get("funding_mode", "missing")
     run_label = CONTINUOUS_EQUITY_EVIDENCE_LABEL
 
+    if config.funding_min_at_entry is not None:
+        skips = {**skips, "skipped_funding_admission": funding_admission["rejected"]}
     payload: dict[str, Any] = {
         "config": asdict(config),
         "config_hash": config.config_hash(),
@@ -1507,6 +1558,10 @@ def run_continuous_equity_component(
         "n_fresh_entries": int(entries.height) if not entries.is_empty() else 0,
         "n_trades": int(trades.height),
         "skips": skips,
+        "funding_admission": {
+            "floor": config.funding_min_at_entry,
+            **funding_admission,
+        },
         "funding_mode": funding_mode,
         "metrics": splits,                 # realized-PnL-at-exit (additive, fixed-capital)
         "metrics_mtm": mtm,                # portfolio mark-to-market (correlated-DD aware)

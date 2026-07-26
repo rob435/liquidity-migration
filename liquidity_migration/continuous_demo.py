@@ -131,6 +131,8 @@ class ContinuousEntrySelectionObservation:
     observed_same_signal_reentry: int
     observed_entry_cooldown: int = 0
     observed_crowding: int = 0
+    funding_admission_rejected: int = 0
+    funding_admission_unknown_admitted: int = 0
     observer_error: str = ""
 
 
@@ -211,13 +213,15 @@ class ContinuousDemoCycleConfig:
     # demo and paper alike.
     candidate_universe_file: str = ""
     strategy_profile: str = CONTINUOUS_V2_PROFILE
-    # --- continuous_ensemble_v2 three-component active ensemble ---
+    # --- continuous_ensemble_v2 active component book ---
     # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight,
-    # stop_loss_pct). Non-empty => the cycle selects entries PER COMPONENT (each
-    # with its own event trigger, age floor, account-owned TP and declared wide
-    # stop backstop) and sizes each entry by weight x the base per-position
-    # notional.
-    ensemble_components: tuple[tuple[str, str, int, float, float, float], ...] = CONTINUOUS_COMPONENTS
+    # stop_loss_pct, funding_min_at_entry|None). Non-empty => the cycle selects
+    # entries PER COMPONENT (each with its own event trigger, age floor,
+    # settled-funding admission floor, account-owned TP and declared wide stop
+    # backstop) and sizes each entry by weight x the base per-position notional.
+    ensemble_components: tuple[tuple[str, str, int, float, float, float, float | None], ...] = (
+        CONTINUOUS_COMPONENTS
+    )
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
@@ -770,8 +774,8 @@ def _recent_adverse_reduction_count(
     """Count journal-confirmed adverse reduction batches in the causal window.
 
     Each ``pnl_key`` is one account/symbol reduction fact. Component rows are
-    ownership context only, so a three-component close is never counted three
-    times. Local receive time is the causal availability clock.
+    ownership context only, so a multi-component close is never counted more
+    than once. Local receive time is the causal availability clock.
     """
 
     if window_minutes <= 0:
@@ -947,6 +951,58 @@ def _continuous_entry_candidates_with_signal_metadata(
     return candidates, skipped_same_signal_reentry
 
 
+class _CycleSettledFundingProbe:
+    """Last settled funding print at-or-before one cycle's admission cutoff.
+
+    Reads the venue funding-HISTORY endpoint (realized settlements only — never
+    the ticker's predicted next rate) and memoizes per symbol for the cycle.
+    Any fetch error, missing client method, or absent history returns ``None``:
+    the admission fails open and the cycle counts the unknown admit, matching
+    the engine's unknown-admits semantics.
+    """
+
+    def __init__(
+        self,
+        market_client: Any,
+        *,
+        cutoff_ts_ms: int,
+        lookback_ms: int = 3 * MS_PER_DAY,
+    ) -> None:
+        self._client = market_client
+        self._cutoff_ts_ms = int(cutoff_ts_ms)
+        self._lookback_ms = int(lookback_ms)
+        self._rates: dict[str, float | None] = {}
+
+    def _fetch(self, symbol: str) -> float | None:
+        fetch = getattr(self._client, "get_funding_history", None)
+        if fetch is None:
+            return None
+        try:
+            rows = fetch(symbol, self._cutoff_ts_ms - self._lookback_ms, self._cutoff_ts_ms)
+        except Exception:  # noqa: BLE001 - admission fails open and is counted
+            _logger.exception("settled-funding probe failed for %s; admitting as unknown", symbol)
+            return None
+        best_ts: int | None = None
+        best_rate: float | None = None
+        for row in rows or []:
+            try:
+                ts = int(row["fundingRateTimestamp"])
+                rate = float(row["fundingRate"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ts <= self._cutoff_ts_ms and math.isfinite(rate) and (best_ts is None or ts > best_ts):
+                best_ts = ts
+                best_rate = rate
+        return best_rate
+
+    def rates_for(self, symbols: Sequence[str]) -> dict[str, float | None]:
+        for symbol in symbols:
+            key = str(symbol)
+            if key not in self._rates:
+                self._rates[key] = self._fetch(key)
+        return {str(symbol): self._rates[str(symbol)] for symbol in symbols}
+
+
 def _entry_stage_frames(
     entry_state: pl.DataFrame,
     *,
@@ -977,6 +1033,8 @@ def _component_funnel_state(
     prior_symbols: set[str],
     trigger: str,
     age_days: int,
+    funding_min_at_entry: float | None,
+    settled_funding_probe: "_CycleSettledFundingProbe | None",
     now_ms: int,
     config: ContinuousDemoCycleConfig,
 ) -> tuple[
@@ -988,6 +1046,10 @@ def _component_funnel_state(
     pl.DataFrame,
     pl.DataFrame,
     pl.DataFrame,
+    pl.DataFrame,
+    int,
+    int,
+    dict[str, float | None],
     int,
     int,
 ]:
@@ -1003,10 +1065,34 @@ def _component_funnel_state(
         component_config=component_config,
         eligible_symbols=eligible,
     )
-    fresh = age
+    # Settled-funding admission runs before the lifecycle guards so the
+    # crowding count below sees only admitted candidates — the engine applies
+    # the same filter on its fresh-entries frame before its crowd counts.
+    funded = age
+    funding_rates: dict[str, float | None] = {}
+    funding_rejected = 0
+    funding_unknown_admitted = 0
+    if funding_min_at_entry is not None and not age.is_empty():
+        symbols = [str(symbol) for symbol in age["symbol"].to_list()]
+        if settled_funding_probe is not None:
+            funding_rates = settled_funding_probe.rates_for(sorted(set(symbols)))
+        floor = float(funding_min_at_entry)
+        admitted: list[str] = []
+        for symbol in symbols:
+            rate = funding_rates.get(symbol)
+            if rate is None:
+                funding_unknown_admitted += 1
+                admitted.append(symbol)
+            elif rate >= floor:
+                admitted.append(symbol)
+            else:
+                funding_rejected += 1
+        if funding_rejected:
+            funded = age.filter(pl.col("symbol").is_in(admitted))
+    fresh = funded
     if not fresh.is_empty() and reserved_symbols:
         fresh = fresh.filter(~pl.col("symbol").is_in(sorted(reserved_symbols)))
-    reserved_count = age.height - fresh.height
+    reserved_count = funded.height - fresh.height
     cooled = fresh
     if not cooled.is_empty() and cooldown_symbols:
         cooled = cooled.filter(~pl.col("symbol").is_in(sorted(cooldown_symbols)))
@@ -1030,10 +1116,14 @@ def _component_funnel_state(
         liquid,
         event,
         age,
+        funded,
         same_signal,
         available,
         reserved_count,
         cooldown_count,
+        funding_rates,
+        funding_rejected,
+        funding_unknown_admitted,
     )
 
 
@@ -1053,6 +1143,7 @@ def _observe_continuous_component_selection(
     now_ms: int,
     config: ContinuousDemoCycleConfig,
     active_entries_enabled: bool,
+    settled_funding_probe: "_CycleSettledFundingProbe | None" = None,
 ) -> ContinuousEntrySelectionObservation:
     """Evaluate the entry funnel without bypassing any admission control.
 
@@ -1074,6 +1165,8 @@ def _observe_continuous_component_selection(
     observed_same_signal_reentry = 0
     observed_entry_cooldown = 0
     observed_crowding = 0
+    funding_admission_rejected = 0
+    funding_admission_unknown_admitted = 0
     observer_errors: list[str] = []
     prior_entries = _prior_continuous_signal_entries(
         all_trades,
@@ -1081,7 +1174,15 @@ def _observe_continuous_component_selection(
         strategy_id=strategy_id,
     )
 
-    for component, trigger, age_days, take_profit_pct, component_weight, stop_loss_pct in config.ensemble_components:
+    for (
+        component,
+        trigger,
+        age_days,
+        take_profit_pct,
+        component_weight,
+        stop_loss_pct,
+        funding_min_at_entry,
+    ) in config.ensemble_components:
         component_is_authoritative = active_entries_enabled and len(candidates) < entry_capacity
         reserved_symbols = _symbols_blocking_component(component, reserved_components)
         cooldown_symbols = _symbols_blocking_component(component, cooldown_components)
@@ -1094,10 +1195,14 @@ def _observe_continuous_component_selection(
                 liquid,
                 event,
                 age,
+                funded,
                 same_signal,
                 available,
                 reserved_count,
                 cooldown_count,
+                funding_rates,
+                funding_rejected,
+                funding_unknown,
             ) = _component_funnel_state(
                 entry_state,
                 universe=universe,
@@ -1107,6 +1212,8 @@ def _observe_continuous_component_selection(
                 prior_symbols=prior_symbols,
                 trigger=trigger,
                 age_days=age_days,
+                funding_min_at_entry=funding_min_at_entry,
+                settled_funding_probe=settled_funding_probe,
                 now_ms=now_ms,
                 config=config,
             )
@@ -1121,6 +1228,7 @@ def _observe_continuous_component_selection(
                     "liquidity": 0,
                     "event": 0,
                     "age": 0,
+                    "funding": 0,
                     "available": 0,
                     "capacity": 0,
                     "reserved": 0,
@@ -1130,13 +1238,17 @@ def _observe_continuous_component_selection(
             continue
         observed_same_signal_reentry += same_signal.height
         observed_entry_cooldown += cooldown_count
+        funding_admission_rejected += funding_rejected
+        funding_admission_unknown_admitted += funding_unknown
         # Research parity (entry_crowding_max_fresh): more fresh qualifying
         # signals than the cap at one signal_ts skips the component's ENTIRE
-        # stack for the window, exactly like the equity-evidence engine.
-        component_crowded = 0 < config.entry_crowding_max_fresh < age.height
+        # stack for the window, exactly like the equity-evidence engine — the
+        # engine counts crowding on its funding-admitted fresh entries, so the
+        # funded frame is the counting base here.
+        component_crowded = 0 < config.entry_crowding_max_fresh < funded.height
         if component_crowded:
-            observed_crowding += age.height
-        for row in age.to_dicts():
+            observed_crowding += funded.height
+        for row in funded.to_dicts():
             symbol = str(row["symbol"])
             opportunity = {"component": component, "symbol": symbol}
             qualified.append(opportunity)
@@ -1159,13 +1271,18 @@ def _observe_continuous_component_selection(
 
         component_capacity_count = 0
         if not component_crowded and len(candidates) < entry_capacity:
+            picks_eligible = eligible
+            if funding_min_at_entry is not None:
+                # The selector re-derives from entry_state, so the settled-funding
+                # admission must constrain it the same way the funnel was cut.
+                picks_eligible = {str(symbol) for symbol in funded["symbol"].to_list()}
             picks = select_continuous_entries(
                 entry_state,
                 held_symbols=reserved_symbols,
                 cooldown_symbols=reserved_symbols | cooldown_symbols,
                 open_count=reservations_count + len(candidates),
                 config=component_config,
-                eligible_symbols=eligible,
+                eligible_symbols=picks_eligible,
                 prior_symbols=prior_symbols,
             )
             component_candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
@@ -1179,6 +1296,7 @@ def _observe_continuous_component_selection(
             for candidate in component_candidates:
                 if len(candidates) >= entry_capacity:
                     break
+                symbol = str(candidate["symbol"])
                 candidates.append(
                     {
                         **candidate,
@@ -1187,9 +1305,18 @@ def _observe_continuous_component_selection(
                         "take_profit_pct": take_profit_pct,
                         "stop_loss_pct": stop_loss_pct,
                         "trade_id": f"{candidate['trade_id']}-{component}",
+                        **(
+                            {
+                                "funding_min_at_entry": float(funding_min_at_entry),
+                                "funding_rate_at_admission": funding_rates.get(symbol),
+                                "funding_admission_unknown": funding_rates.get(symbol) is None,
+                            }
+                            if funding_min_at_entry is not None
+                            else {}
+                        ),
                     }
                 )
-                admitted.append({"component": component, "symbol": str(candidate["symbol"])})
+                admitted.append({"component": component, "symbol": symbol})
                 component_capacity_count += 1
         funnel_rows.append(
             {
@@ -1198,6 +1325,7 @@ def _observe_continuous_component_selection(
                 "liquidity": liquid.height,
                 "event": event.height,
                 "age": age.height,
+                "funding": funded.height,
                 "available": available.height,
                 "capacity": component_capacity_count,
                 "reserved": reserved_count,
@@ -1215,6 +1343,8 @@ def _observe_continuous_component_selection(
         observed_same_signal_reentry=observed_same_signal_reentry,
         observed_entry_cooldown=observed_entry_cooldown,
         observed_crowding=observed_crowding,
+        funding_admission_rejected=funding_admission_rejected,
+        funding_admission_unknown_admitted=funding_admission_unknown_admitted,
         observer_error=" · ".join(observer_errors)[:500],
     )
 
@@ -1361,7 +1491,8 @@ def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
     """Resolve the active demo/paper profile into explicit knobs.
 
-    It uses the shared three-component book, inverse-vol sizing, TP12, and a
+    It uses the shared code-defined component book (single funding-gated
+    turn3_pop3 cell since 2026-07-26), inverse-vol sizing, TP12, and a
     24-hour maximum hold.
     """
     if config.strategy_profile != CONTINUOUS_V2_PROFILE:
@@ -1862,6 +1993,18 @@ def _continuous_entry_target_intents(
                     "raw_target_notional_usdt": target_notional,
                     "quantity_authority": "account_kernel_demo_rules",
                     **({BTC_RISK_EVIDENCE_METADATA_KEY: btc_risk_evidence} if btc_risk_evidence is not None else {}),
+                    # Settled-funding admission evidence: the last settled print
+                    # observed at the decision cutoff (null = unknown-admitted),
+                    # journaled so the forward record can revisit unknown-admits.
+                    **(
+                        {
+                            "funding_min_at_entry": _float(candidate.get("funding_min_at_entry")),
+                            "funding_rate_at_admission": candidate.get("funding_rate_at_admission"),
+                            "funding_admission_unknown": bool(candidate.get("funding_admission_unknown")),
+                        }
+                        if candidate.get("funding_min_at_entry") is not None
+                        else {}
+                    ),
                 },
             )
         )
@@ -1993,6 +2136,9 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         comp_stop = float(comp[5])
         if not 0.0 < comp_stop < 1.0:
             raise ValueError("ensemble component stop_loss_pct must be a fraction in (0, 1)")
+        comp_funding_min = comp[6]
+        if comp_funding_min is not None and not np.isfinite(float(comp_funding_min)):
+            raise ValueError("ensemble component funding_min_at_entry must be None or finite")
     if not has_account_inbox:
         raise ValueError(
             "operational demo/paper mode requires account_intent_inbox_root and "
@@ -2256,6 +2402,16 @@ def run_continuous_demo_cycle(
             entry_capacity=entry_capacity,
             btc_trend_gate_allows_entry=btc_trend_gate_allows_entry,
         )
+        settled_funding_probe = (
+            _CycleSettledFundingProbe(
+                public,
+                # Admission cutoff = the signal bar's close (decision time),
+                # matching the engine's last-settled-print-at-or-before join.
+                cutoff_ts_ms=signal_ts + MS_PER_HOUR,
+            )
+            if any(component[6] is not None for component in demo.ensemble_components)
+            else None
+        )
         try:
             selection_observation = _observe_continuous_component_selection(
                 entry_state,
@@ -2272,6 +2428,7 @@ def run_continuous_demo_cycle(
                 now_ms=cycle_now_ms,
                 config=demo,
                 active_entries_enabled=not preselection_reason,
+                settled_funding_probe=settled_funding_probe,
             )
         except Exception as exc:
             # The observer path must never turn a pre-existing hard block into a
@@ -2435,7 +2592,7 @@ def run_continuous_demo_cycle(
             )
         funnel_totals = {
             field: sum(int(row[field]) for row in selection_observation.funnel_rows)
-            for field in ("d9", "liquidity", "event", "age", "available", "capacity")
+            for field in ("d9", "liquidity", "event", "age", "funding", "available", "capacity")
         }
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
@@ -2538,8 +2695,13 @@ def run_continuous_demo_cycle(
             "entry_funnel_liquidity": funnel_totals["liquidity"],
             "entry_funnel_event": funnel_totals["event"],
             "entry_funnel_age": funnel_totals["age"],
+            "entry_funnel_funding": funnel_totals["funding"],
             "entry_funnel_available": funnel_totals["available"],
             "entry_funnel_capacity": funnel_totals["capacity"],
+            "funding_admission_rejected": selection_observation.funding_admission_rejected,
+            "funding_admission_unknown_admitted": (
+                selection_observation.funding_admission_unknown_admitted
+            ),
             "entry_funnel_json": json.dumps(
                 selection_observation.funnel_rows,
                 sort_keys=True,

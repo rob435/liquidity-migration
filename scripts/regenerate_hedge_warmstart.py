@@ -3,7 +3,7 @@
 Run this after refreshing the data root and code-defined component equity.
 
 Construction:
-- components = the three code-defined ``continuous_ensemble_v2`` TP12 base
+- components = the code-defined ``continuous_ensemble_v2`` TP12 base
   component ledgers combined at the active weights;
 - unit_ret[day] = gross + funding + scale-1 entry costs per LEDGER day (the
   scale-independent day return `apply_rebalance_rule` scales);

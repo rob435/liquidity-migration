@@ -723,6 +723,8 @@ def _config_identities(start: dt.date, end: dt.date) -> dict[str, Any]:
             entry_event_trigger=component.entry_event_trigger,
             age_days_min=component.age_days_min,
             take_profit_pct=component.take_profit_pct,
+            stop_loss_pct=component.stop_loss_pct,
+            funding_min_at_entry=component.funding_min_at_entry,
         )
         components[component.key] = {
             "config_hash": config.config_hash(),

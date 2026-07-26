@@ -40,9 +40,9 @@ from liquidity_migration.continuous_events import compute_continuous_decile_pane
 
 
 ACTIVE_COMPONENTS = (
-    ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333, 0.35),
-    ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222, 0.35),
-    ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444, 0.35),
+    # Operator override 2026-07-26: single turn3_pop3 cell with the
+    # settled-funding >= 0 admission (docs/continuous_redesign_2026-07-26.md).
+    ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
 )
 STRATEGY_ID = "continuous_fade_v2"
 SYMBOL = "ABCUSDT"
@@ -286,11 +286,14 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
             "component_weight": weight,
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
+            "funding_min_at_entry": funding_min,
+            "funding_rate_at_admission": 0.0001,
+            "funding_admission_unknown": False,
             "rv_168h": 0.02,
             "btc_risk_stack_mult": 0.35,
             BTC_RISK_EVIDENCE_METADATA_KEY: evidence,
         }
-        for tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct in ACTIVE_COMPONENTS
+        for tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct, funding_min in ACTIVE_COMPONENTS
     ]
 
     requested = _continuous_entry_target_intents(
@@ -305,7 +308,7 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
 
     assert len(requested) == len(ACTIVE_COMPONENTS)
     for requested_intent, component in zip(requested, ACTIVE_COMPONENTS):
-        tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct = component
+        tag, _trigger, _age_days, take_profit_pct, weight, stop_loss_pct, funding_min = component
         trade_id = f"{STRATEGY_ID}-{SYMBOL}-{signal_ts_ms}-{tag}"
         target = requested_intent.intent
         expected_notional = 10_000.0 * 0.02 * weight * 0.5 * 0.35
@@ -331,6 +334,10 @@ def test_active_component_targets_preserve_sizing_identity_and_tp(
         # Declared wide backstop (§16.3/§20): published as a fraction so the
         # account places the venue stop here instead of its disaster fallback.
         assert target.metadata["stop_loss_pct"] == pytest.approx(stop_loss_pct)
+        # Settled-funding admission evidence is journaled with the entry.
+        assert target.metadata["funding_min_at_entry"] == pytest.approx(funding_min)
+        assert target.metadata["funding_rate_at_admission"] == pytest.approx(0.0001)
+        assert target.metadata["funding_admission_unknown"] is False
         assert target.metadata["max_hold_duration_ms"] == 24 * MS_PER_HOUR
         assert target.metadata["decision_reference_price"] == pytest.approx(100.0)
         # Price-level fields stay account-owned: only fractions are published.

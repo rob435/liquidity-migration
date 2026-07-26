@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Historical equity for the code-defined active continuous profile.
 
-The three component triggers, weights, age gates, and 12% take profits come
-from ``liquidity_migration.continuous_profile``. Generated reports are outputs,
+The active component triggers, weights, age gates, take profits, stops, and
+the settled-funding admission floor come from
+``liquidity_migration.continuous_profile``. Generated reports are outputs,
 not configuration inputs. The output remains descriptive
 historical evidence, not forward-runtime parity or deployment authorization.
 
@@ -136,6 +137,7 @@ def active_component_config(
         age_days_min=spec.age_days_min,
         take_profit_pct=spec.take_profit_pct,
         stop_loss_pct=spec.stop_loss_pct,
+        funding_min_at_entry=spec.funding_min_at_entry,
     )
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
@@ -440,6 +442,8 @@ def _component_report_rows(payloads: list[dict[str, Any]]) -> list[dict[str, Any
                 "funding_mode": payload.get("funding_mode"),
                 "take_profit_pct": cfg.get("take_profit_pct"),
                 "stop_loss_pct": cfg.get("stop_loss_pct"),
+                "funding_min_at_entry": cfg.get("funding_min_at_entry"),
+                "funding_admission": payload.get("funding_admission"),
                 "btc_trend_gate": cfg.get("btc_trend_gate"),
                 "btc_trend_mode": "daily_prior",
                 "btc_trend_lookback_days": cfg.get("btc_trend_lookback_days"),
@@ -483,6 +487,7 @@ def _assert_active_component_reports(
             "age_days_min": (cfg.get("age_days_min"), component.age_days_min),
             "take_profit_pct": (cfg.get("take_profit_pct"), component.take_profit_pct),
             "stop_loss_pct": (cfg.get("stop_loss_pct"), component.stop_loss_pct),
+            "funding_min_at_entry": (cfg.get("funding_min_at_entry"), component.funding_min_at_entry),
             "btc_trend_gate": (cfg.get("btc_trend_gate"), expected_gate),
         }
         mismatches = [

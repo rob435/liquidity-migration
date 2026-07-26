@@ -105,6 +105,26 @@ runtime admission, parity render, records, local commit). The override does
 not change the real-money boundary or the owner-gated rollout mechanics, and
 the trade-off table above travels with the promotion note unspun.
 
+**Status, 2026-07-26 (later the same day): EXECUTED — committed on local
+`main`, awaiting the owner's rollout dispatch.** Profile revision
+`active_single_fund0_tp12_sl35_v1`; engine field `funding_min_at_entry`
+(admission on the last settled print at-or-before the signal-bar close,
+unknown admits and is counted); runtime admission via the venue
+funding-history endpoint with per-cycle counters and journaled per-entry
+funding evidence. The promotion note, including the re-render parity
+reconciliation against this document's §3 table, lives in
+`docs/strategy_program.md`. One admission-basis difference surfaced during
+implementation and is recorded there: this document's V3 numbers admitted
+28% of entries with **unknown** funding — 92% of them from 147 Bybit-only
+contracts outside the cross-venue panel's both-venue universe — while the
+engine's root funding dataset covers essentially all of them. The shipped
+rule therefore rejects 434 additional known-negative entries the research
+render admitted blind, and the shipped standard render is
+**+11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80 (655 trades)** — still the
+drawdown/MAR side of the trade versus the deployed ensemble, but a larger
+Sharpe/return concession than this document's V3 row (which embedded the
+blind admissions; those 54 excluded trades carried +2.30% on seen data).
+
 ## 4. Next discriminating steps, in order
 
 1. ~~Full hedged render~~ **Done (§3)**: `hedged_FUND0_ensemble.csv`,

@@ -13,6 +13,7 @@ from liquidity_migration.continuous_events import (
     ContinuousEventConfig,
     _btc_trend_returns,
     _fresh_entries,
+    _funding_admission_filter,
     _notional_weight,
     _round_trip_bps,
     _run_trades,
@@ -366,7 +367,104 @@ def test_cross_sectional_decile_keeps_singleton() -> None:
     assert panel["composite"][0] == pytest.approx(0.0)
 
 
-def _synthetic_root(tmp_path: Path, *, symbols: int = 60, hours: int = 720) -> tuple[Path, int]:
+def _funding_series(events: list[tuple[int, float]]) -> dict[str, object]:
+    return {
+        "events_ts": [ts for ts, _rate in events],
+        "events_rate": [rate for _ts, rate in events],
+        "start_ts_ms": events[0][0],
+        "end_ts_ms": events[-1][0],
+    }
+
+
+def _admission_entries(symbols: list[str], *, sig_ts: int) -> pl.DataFrame:
+    return pl.DataFrame({"symbol": symbols, "ts_ms": [sig_ts] * len(symbols)})
+
+
+def test_funding_admission_sign_boundary_admits_exact_zero() -> None:
+    sig_ts = 100 * MS_PER_HOUR
+    cutoff = sig_ts + MS_PER_HOUR
+    entries = _admission_entries(["ZERO", "NEG", "POS"], sig_ts=sig_ts)
+    lookup = {
+        "ZERO": _funding_series([(cutoff - 8 * MS_PER_HOUR, 0.0)]),
+        "NEG": _funding_series([(cutoff - 8 * MS_PER_HOUR, -1e-9)]),
+        "POS": _funding_series([(cutoff - 8 * MS_PER_HOUR, 1e-9)]),
+    }
+    config = _active_test_config(funding_min_at_entry=0.0)
+
+    admitted, counters = _funding_admission_filter(entries, lookup, config)
+
+    assert admitted["symbol"].to_list() == ["ZERO", "POS"]
+    assert counters == {"checked": 3, "rejected": 1, "unknown_admitted": 0}
+
+
+def test_funding_admission_uses_last_settled_print_at_or_before_decision() -> None:
+    """Settled-only semantics: the decision uses the last print at-or-before the
+    signal-bar close; later prints (the venue's next/predicted cycle) never do."""
+    sig_ts = 100 * MS_PER_HOUR
+    cutoff = sig_ts + MS_PER_HOUR
+    entries = _admission_entries(["PASTPOS", "ATCUTOFF", "ONLYFUTURE"], sig_ts=sig_ts)
+    lookup = {
+        # Older positive print decides; the later negative print is not settled
+        # knowledge at decision time and must be ignored.
+        "PASTPOS": _funding_series(
+            [(cutoff - 8 * MS_PER_HOUR, 0.0002), (cutoff + MS_PER_HOUR, -0.05)]
+        ),
+        # A print stamped exactly at the decision cutoff is settled knowledge.
+        "ATCUTOFF": _funding_series([(cutoff, -0.0001)]),
+        # No print at-or-before the cutoff: unknown, admits.
+        "ONLYFUTURE": _funding_series([(cutoff + MS_PER_HOUR, -0.05)]),
+    }
+    config = _active_test_config(funding_min_at_entry=0.0)
+
+    admitted, counters = _funding_admission_filter(entries, lookup, config)
+
+    assert admitted["symbol"].to_list() == ["PASTPOS", "ONLYFUTURE"]
+    assert counters == {"checked": 3, "rejected": 1, "unknown_admitted": 1}
+
+
+def test_funding_admission_unknown_admits_and_counts() -> None:
+    sig_ts = 100 * MS_PER_HOUR
+    entries = _admission_entries(["NODATA", "NOSERIES"], sig_ts=sig_ts)
+    lookup = {"NOSERIES": _funding_series([(sig_ts + 9 * MS_PER_HOUR, -0.01)])}
+    config = _active_test_config(funding_min_at_entry=0.0)
+
+    admitted, counters = _funding_admission_filter(entries, lookup, config)
+    assert admitted["symbol"].to_list() == ["NODATA", "NOSERIES"]
+    assert counters == {"checked": 2, "rejected": 0, "unknown_admitted": 2}
+
+    all_unknown, none_counters = _funding_admission_filter(entries, None, config)
+    assert all_unknown["symbol"].to_list() == ["NODATA", "NOSERIES"]
+    assert none_counters == {"checked": 2, "rejected": 0, "unknown_admitted": 2}
+
+
+def test_funding_admission_disabled_is_identity() -> None:
+    entries = _admission_entries(["A"], sig_ts=MS_PER_HOUR)
+    lookup = {"A": _funding_series([(0, -0.05)])}
+
+    admitted, counters = _funding_admission_filter(
+        entries, lookup, _active_test_config(funding_min_at_entry=None)
+    )
+
+    assert admitted is entries
+    assert counters == {"checked": 0, "rejected": 0, "unknown_admitted": 0}
+
+
+def test_funding_admission_field_is_identity_bearing() -> None:
+    # Deliberate change point: the field shifts config_hash and thus the
+    # kernel strategy identity for every CONTINUOUS config.
+    assert (
+        ContinuousEventConfig(funding_min_at_entry=0.0).config_hash()
+        != ContinuousEventConfig().config_hash()
+    )
+
+
+def _synthetic_root(
+    tmp_path: Path,
+    *,
+    symbols: int = 60,
+    hours: int = 720,
+    negative_funding_symbol_stride: int = 0,
+) -> tuple[Path, int]:
     root = tmp_path / "full_pit"
     root.mkdir()
     start = 1_700_000_000_000
@@ -400,6 +498,15 @@ def _synthetic_root(tmp_path: Path, *, symbols: int = 60, hours: int = 720) -> t
             pl.lit(480).alias("funding_interval_min"),
         )
     )
+    if negative_funding_symbol_stride:
+        funding = funding.with_columns(
+            pl.when(
+                (pl.col("symbol").str.slice(1).cast(pl.Int64) % negative_funding_symbol_stride) == 0
+            )
+            .then(-0.0001)
+            .otherwise(pl.col("funding_rate"))
+            .alias("funding_rate")
+        )
     write_dataset(funding, root, "funding")
     days = sorted({(start + hour * MS_PER_HOUR) // MS_PER_DAY * MS_PER_DAY for hour in range(hours)})
     rmom = pl.DataFrame(
@@ -441,3 +548,33 @@ def test_active_run_writes_equity_and_account_receipt(tmp_path: Path) -> None:
     assert (report_dir / "continuous_report.json").exists()
     assert (report_dir / "continuous_trades.csv").exists()
     assert (report_dir / "continuous_mtm_equity.csv").exists()
+
+
+def test_funding_admission_flows_through_component_run(tmp_path: Path) -> None:
+    root, start = _synthetic_root(tmp_path, negative_funding_symbol_stride=2)
+    config = _active_test_config(
+        start_date=_iso(start + 8 * MS_PER_DAY),
+        end_date=_iso(start + 28 * MS_PER_DAY),
+        hold_hours=6,
+        max_active=10,
+        split_date=_iso(start + 16 * MS_PER_DAY),
+        use_funding=True,
+        funding_min_at_entry=0.0,
+    )
+
+    payload = run_continuous_equity_component(
+        root, config=config, report_dir=tmp_path / "report-fund0"
+    )
+
+    admission = payload["funding_admission"]
+    assert admission["floor"] == pytest.approx(0.0)
+    assert admission["rejected"] > 0
+    assert admission["checked"] == payload["n_fresh_entries"] + admission["rejected"]
+    assert payload["skips"]["skipped_funding_admission"] == admission["rejected"]
+    assert payload["config"]["funding_min_at_entry"] == pytest.approx(0.0)
+    # Even-index symbols settle negative funding in this fixture; none of them
+    # may enter the traded book while odd-index symbols still can.
+    trades = pl.read_csv(tmp_path / "report-fund0" / "continuous_trades.csv")
+    if not trades.is_empty():
+        traded_indexes = {int(str(s)[1:]) for s in trades["symbol"].to_list()}
+        assert all(index % 2 == 1 for index in traded_indexes)

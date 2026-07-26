@@ -24,7 +24,9 @@ from .deterministic_serialization import canonical_json
 from .strategy_cycle_health import read_strategy_cycle_health
 
 
-CONTINUOUS_CYCLE_STATUS_SCHEMA_VERSION = 1
+# v2: funnel rows gained the settled-funding admission stage ("funding"),
+# 2026-07-26 single-component profile change point.
+CONTINUOUS_CYCLE_STATUS_SCHEMA_VERSION = 2
 CONTINUOUS_CYCLE_STATUS_FILENAME = "continuous_cycle_status.json"
 CONTINUOUS_CYCLE_STATUS_MAX_BYTES = 64 * 1024
 _FUNNEL_FIELDS = (
@@ -33,6 +35,7 @@ _FUNNEL_FIELDS = (
     "liquidity",
     "event",
     "age",
+    "funding",
     "available",
     "capacity",
     "reserved",
@@ -288,7 +291,7 @@ def render_continuous_cycle_status(
         gate_detail = f"{status.btc_trend_gate} · {status.btc_trend_gate_lookback_days}d {rendered_value}"
     totals = {
         field: sum(int(row[field]) for row in status.entry_funnel)
-        for field in ("d9", "liquidity", "event", "age", "capacity")
+        for field in ("d9", "liquidity", "event", "age", "funding", "capacity")
     }
     symbols = sorted({row["symbol"] for row in status.qualified_but_blocked})
     visible = symbols[:8]
@@ -312,7 +315,8 @@ def render_continuous_cycle_status(
             f"CONTINUOUS BTC gate: {gate_state} · {gate_detail}",
             f"CONTINUOUS funnel ({funnel_scope}): "
             f"D9 {totals['d9']} → liquidity {totals['liquidity']} → "
-            f"event {totals['event']} → age {totals['age']} → capacity {totals['capacity']}",
+            f"event {totals['event']} → age {totals['age']} → "
+            f"funding {totals['funding']} → capacity {totals['capacity']}",
             f"CONTINUOUS qualified but blocked: {blocked_text} · "
             f"first rejection {_human_reason(status.entry_first_rejection_reason)}",
         )

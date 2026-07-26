@@ -51,20 +51,39 @@ history is in Git and in the audit receipts indexed at the bottom.
 - Deployment status is authoritative only when tied to an exact pushed commit and
   a fresh authenticated rollout receipt.
 
-### Local candidate — not committed, not deployed
+### Local candidate — committed on local `main`, not deployed
 
-A 2026-07-23 deployment-automation candidate exists in the working tree and
-**grants no mainnet or `REAL_MONEY` authority**. It parallelizes the paper and
-demo rollout trees (modelled critical path 102s instead of 200s), reuses a
-still-valid residual-momentum table instead of rebuilding, adds a create-only
-rule projection that retains fresh evidence for an equal/safe-subset candidate
-population, and fixes a safety-significant classifier defect where the combined
-stale/future-dated loader error could send future evidence into the expiry
-refresh path. Fresh, expired, and future-dated states are now distinguished from
-one stable receipt snapshot; only genuine expiry is refreshable.
+The 2026-07-26 **operator-ordered CONTINUOUS replacement** is committed on
+local `main` (not pushed; push remains CI-only) and **grants no mainnet or
+`REAL_MONEY` authority**. It replaces the three-component ensemble with the
+single funding-gated cell: `turn3_pop3`, age 240d, TP 12%, declared stop 35%,
+weight 1.0, plus the new settled-funding admission (`funding_min_at_entry=0.0`;
+unknown funding admits and is counted/journaled). Profile revision
+`active_single_fund0_tp12_sl35_v1` is the recorded change point; the promotion
+note is in `docs/strategy_program.md` and the evidence basis in
+`docs/continuous_redesign_2026-07-26.md`.
 
-Local validation passed repository doctor, Ruff, mypy, shell/YAML checks, and the
-full gate at `2,274 passed / 1 skipped`.
+Deliberate identity consequence: the new `ContinuousEventConfig` field shifts
+`config_hash()`/`kernel_strategy_id` for every CONTINUOUS config, and the
+cycle-status funnel schema bumped to v2. On the first post-deploy cycles the
+sizer's authoritative-chain self-heal (`ddbded5`) is expected to rebase
+prior-epoch state — verify the healing telemetry rather than treating it as an
+incident. The sleeve kill criteria
+(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to govern
+the sleeve; the revision's forward evidence run restarts at this commit.
+
+The prior local candidate recorded here (2026-07-23 deployment automation)
+landed as `ac18332b7` and deployed 2026-07-25 — see Deployment above.
+
+Local validation passed Ruff, mypy, and the full gate at
+`2,374 passed / 1 skipped`. The standard render of the shipped shape is
+**+11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80** (hedged, 2023-03→2026-07)
+— better drawdown/MAR than the deployed ensemble (−2.85% / 1.66) at a larger
+Sharpe/return concession (1.84 → 1.45) than the redesign table's V3 row,
+because that row admitted 434 negative-funding entries blind through
+cross-venue-panel coverage holes; the reconciliation is line-item exact in the
+`docs/strategy_program.md` promotion note. The owner should re-read that
+trade-off before dispatching the rollout.
 
 ## Topology
 

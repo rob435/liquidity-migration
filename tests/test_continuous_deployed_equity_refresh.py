@@ -23,20 +23,24 @@ def _write_trades(path: Path, rows: list[dict[str, object]]) -> None:
 def test_monthly_trade_counts_dedupes_component_overlap(tmp_path: Path) -> None:
     output_root = tmp_path / "continuous"
     venue_root = output_root / "components" / "bybit"
-    cells = {
-        refresh.ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[name].artifact_cell
-        for name in refresh.WINNER_WEIGHTS
-    }
-    first, second = sorted(cells)[:2]
+    cells = sorted(
+        {
+            refresh.ACTIVE_CONTINUOUS_COMPONENT_BY_KEY[name].artifact_cell
+            for name in refresh.WINNER_WEIGHTS
+        }
+    )
     duplicate = {
         "entry_ts_ms": 1_682_640_000_000,
         "symbol": "BTCUSDT",
         "side": "short",
     }
-    _write_trades(venue_root / first / "continuous_trades.csv", [duplicate])
+    # One duplicated (entry, symbol, side) row per active cell plus a repeat in
+    # the first cell: the count must collapse the overlap however many active
+    # component books exist.
     _write_trades(
-        venue_root / second / "continuous_trades.csv",
+        venue_root / cells[0] / "continuous_trades.csv",
         [
+            duplicate,
             duplicate,
             {
                 "entry_ts_ms": 1_685_318_400_000,
@@ -45,6 +49,8 @@ def test_monthly_trade_counts_dedupes_component_overlap(tmp_path: Path) -> None:
             },
         ],
     )
+    for cell in cells[1:]:
+        _write_trades(venue_root / cell / "continuous_trades.csv", [duplicate])
 
     rows = refresh.monthly_trade_counts(output_root=output_root, venue="bybit").to_dicts()
 
@@ -122,6 +128,7 @@ def test_active_component_config_is_code_defined_tp12() -> None:
         assert cfg.entry_event_trigger == component.entry_event_trigger
         assert cfg.age_days_min == component.age_days_min
         assert cfg.take_profit_pct == pytest.approx(0.12)
+        assert cfg.funding_min_at_entry == component.funding_min_at_entry
         assert cfg.btc_trend_gate == "uptrend"
         assert cfg.gross_exposure == pytest.approx(2.5)
 
@@ -221,6 +228,7 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
                     "age_days_min": component.age_days_min,
                     "take_profit_pct": component.take_profit_pct,
                     "stop_loss_pct": component.stop_loss_pct,
+                    "funding_min_at_entry": component.funding_min_at_entry,
                     "btc_trend_gate": "uptrend",
                     "gross_exposure": 2.5,
                     "taker_fee_bps": 5.5,

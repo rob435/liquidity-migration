@@ -265,7 +265,7 @@ def test_component_loader_uses_explicit_component_root(monkeypatch, tmp_path: Pa
     )
 
     assert out == ("current-component", 2, {"take_profit_pct": 0.12})
-    assert seen == [(component_root, "merged_signal", "bybit")]
+    assert seen == [(component_root, "age240_turn3pop3_fund0_crowd2", "bybit")]
 
 
 def _write_component_funding_rows(

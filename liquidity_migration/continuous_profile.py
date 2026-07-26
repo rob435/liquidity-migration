@@ -10,10 +10,13 @@ from .continuous_regime import ACTIVE_BTCVOL_REGIME
 
 
 CONTINUOUS_PROFILE_ID = "continuous_ensemble_v2"
-# sl35: declared 35% component stop replaces the account 2% disaster fallback as
-# the de facto exit (docs/anomaly_research_2026-07-24.md §16.3/§20). Change point
-# recorded by this revision bump.
-CONTINUOUS_PROFILE_REVISION = "active_tp12_sl35_v1"
+# single_fund0: operator override 2026-07-26 replaced the three nested-trigger
+# components with the single turn3_pop3 cell plus a settled-funding >= 0
+# admission ("only fade pumps whose longs are paying") — the V3 shape in
+# docs/continuous_redesign_2026-07-26.md. sl35 semantics unchanged (declared
+# 35% component stop, docs/anomaly_research_2026-07-24.md §16.3/§20). Change
+# point recorded by this revision bump; the forward evidence run restarts here.
+CONTINUOUS_PROFILE_REVISION = "active_single_fund0_tp12_sl35_v1"
 CONTINUOUS_HISTORY_START_DATE = "2023-04-01"
 CONTINUOUS_EQUITY_EVIDENCE_LABEL = "exploratory_historical_equity"
 CONTINUOUS_HISTORICAL_RUN_LABEL = (
@@ -36,38 +39,26 @@ class ContinuousComponentProfile:
     # level is the widest that still caps the tail well inside 2x-leverage
     # liquidation distance (~48%). Modeled identically in the research engine.
     stop_loss_pct: float
+    # Admission floor on the candidate's last SETTLED funding print at the
+    # decision timestamp; None disables. 0.0 is the economic boundary where
+    # "longs pay" flips, not a searched threshold — a pump with negative
+    # funding is a crowded short and the toxic population
+    # (docs/continuous_redesign_2026-07-26.md V1/V3/V8). Unknown funding
+    # admits and is counted, matching the research basis.
+    funding_min_at_entry: float | None = None
 
 
 ACTIVE_CONTINUOUS_COMPONENTS = (
     ContinuousComponentProfile(
         key="turn3p3",
         runtime_tag="p3",
-        artifact_cell="merged_signal",
+        artifact_cell="age240_turn3pop3_fund0_crowd2",
         entry_event_trigger="turn3_pop3",
         age_days_min=240,
         take_profit_pct=0.12,
-        weight=0.3333333333333333,
+        weight=1.0,
         stop_loss_pct=0.35,
-    ),
-    ContinuousComponentProfile(
-        key="turn4p3",
-        runtime_tag="p4p3",
-        artifact_cell="age240_turn4pop3_crowd2",
-        entry_event_trigger="turn4_pop3",
-        age_days_min=240,
-        take_profit_pct=0.12,
-        weight=0.2222222222222222,
-        stop_loss_pct=0.35,
-    ),
-    ContinuousComponentProfile(
-        key="turn4p5",
-        runtime_tag="p4p5",
-        artifact_cell="age240_turn4pop5_crowd2",
-        entry_event_trigger="turn4_pop5",
-        age_days_min=240,
-        take_profit_pct=0.12,
-        weight=0.4444444444444444,
-        stop_loss_pct=0.35,
+        funding_min_at_entry=0.0,
     ),
 )
 ACTIVE_CONTINUOUS_COMPONENT_BY_KEY = {
@@ -83,6 +74,7 @@ CONTINUOUS_RUNTIME_COMPONENTS = tuple(
         # Appended last so positional readers of the first five fields (e.g.
         # operational_profile weight checks) stay valid.
         component.stop_loss_pct,
+        component.funding_min_at_entry,
     )
     for component in ACTIVE_CONTINUOUS_COMPONENTS
 )

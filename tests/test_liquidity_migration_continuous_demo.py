@@ -48,6 +48,7 @@ from liquidity_migration.continuous_demo import (
     _continuous_entry_target_intents,
     _continuous_exit_target_intents,
     _continuous_target_reservations,
+    _CycleSettledFundingProbe,
     _entry_feature_identity_payload_fields,
     _observe_continuous_component_selection,
     _qualified_block_reasons,
@@ -323,15 +324,15 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
         max_active=5,
         max_new_entries_per_cycle=2,
         ensemble_components=(
-            ("first", "none", 0, 0.12, 0.4, 0.35),
-            ("second", "none", 0, 0.12, 0.6, 0.35),
+            ("first", "none", 0, 0.12, 0.4, 0.35, None),
+            ("second", "none", 0, 0.12, 0.6, 0.35, None),
         ),
     )
     signal_ts = 1_700_000_000_000
     prices = {"A": 10.0, "B": 20.0, "C": 30.0}
 
     legacy: list[dict[str, Any]] = []
-    for component, _trigger, _age, take_profit_pct, weight, stop_loss_pct in config.ensemble_components:
+    for component, _trigger, _age, take_profit_pct, weight, stop_loss_pct, _funding_min in config.ensemble_components:
         if len(legacy) >= 2:
             break
         picks = select_continuous_entries(
@@ -388,6 +389,7 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
             "liquidity": 2,
             "event": 2,
             "age": 2,
+            "funding": 2,
             "available": 2,
             "capacity": 2,
             "reserved": 0,
@@ -399,6 +401,7 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
             "liquidity": 2,
             "event": 2,
             "age": 2,
+            "funding": 2,
             "available": 2,
             "capacity": 0,
             "reserved": 0,
@@ -429,6 +432,168 @@ def test_entry_funnel_observer_preserves_legacy_candidate_decisions() -> None:
         )
         == "btc_trend_gate"
     )
+
+
+class _FakeFundingHistoryClient:
+    """Minimal settled-funding-history stub with per-symbol scripted rows."""
+
+    def __init__(self, rows_by_symbol: dict[str, object]) -> None:
+        self.rows_by_symbol = rows_by_symbol
+        self.calls: list[str] = []
+
+    def get_funding_history(self, symbol: str, start: int, end: int) -> list[dict[str, Any]]:
+        self.calls.append(symbol)
+        rows = self.rows_by_symbol.get(symbol, [])
+        if rows == "raise":
+            raise RuntimeError("venue unavailable")
+        return [row for row in rows if start <= int(row["fundingRateTimestamp"]) <= end]
+
+
+def test_settled_funding_probe_uses_last_settled_print_and_fails_open() -> None:
+    cutoff = 1_700_000_000_000
+    client = _FakeFundingHistoryClient(
+        {
+            "GOODUSDT": [
+                {"fundingRateTimestamp": str(cutoff - 9 * MS_PER_HOUR), "fundingRate": "0.0004"},
+                {"fundingRateTimestamp": str(cutoff - MS_PER_HOUR), "fundingRate": "-0.0002"},
+            ],
+            "JUNKUSDT": [
+                {"fundingRateTimestamp": "not-a-ts", "fundingRate": "0.1"},
+                {"fundingRateTimestamp": str(cutoff - MS_PER_HOUR), "fundingRate": "nan"},
+            ],
+            "DOWNUSDT": "raise",
+        }
+    )
+    probe = _CycleSettledFundingProbe(client, cutoff_ts_ms=cutoff)
+
+    rates = probe.rates_for(["GOODUSDT", "JUNKUSDT", "DOWNUSDT", "EMPTYUSDT"])
+
+    assert rates["GOODUSDT"] == pytest.approx(-0.0002)
+    assert rates["JUNKUSDT"] is None
+    assert rates["DOWNUSDT"] is None
+    assert rates["EMPTYUSDT"] is None
+    # Memoized per cycle: a second lookup fires no extra venue calls.
+    probe.rates_for(["GOODUSDT", "DOWNUSDT"])
+    assert client.calls == ["GOODUSDT", "JUNKUSDT", "DOWNUSDT", "EMPTYUSDT"]
+
+    no_method_probe = _CycleSettledFundingProbe(object(), cutoff_ts_ms=cutoff)
+    assert no_method_probe.rates_for(["ANYUSDT"]) == {"ANYUSDT": None}
+
+
+def test_funding_admission_filters_candidates_before_crowding() -> None:
+    """A negative-funding name is rejected ahead of the crowd count, so the
+    remaining admitted names stay inside the crowding cap and still trade —
+    the engine's fresh-entries-then-crowding order."""
+    state = pl.DataFrame(
+        {
+            "symbol": ["NEGUSDT", "POSUSDT", "UNKUSDT"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+            "rv_168h": [0.01, 0.02, 0.03],
+        }
+    )
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=5,
+        entry_crowding_max_fresh=2,
+        ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35, 0.0),),
+    )
+    signal_ts = 1_700_000_000_000
+    cutoff = signal_ts + MS_PER_HOUR
+    client = _FakeFundingHistoryClient(
+        {
+            "NEGUSDT": [
+                {"fundingRateTimestamp": str(cutoff - 2 * MS_PER_HOUR), "fundingRate": "-0.0001"}
+            ],
+            "POSUSDT": [{"fundingRateTimestamp": str(cutoff), "fundingRate": "0.0"}],
+        }
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components={},
+        cooldown_components={},
+        reservations_count=0,
+        entry_capacity=5,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"NEGUSDT": 1.0, "POSUSDT": 2.0, "UNKUSDT": 3.0},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+        settled_funding_probe=_CycleSettledFundingProbe(client, cutoff_ts_ms=cutoff),
+    )
+
+    admitted_symbols = [candidate["symbol"] for candidate in observed.candidates]
+    assert sorted(admitted_symbols) == ["POSUSDT", "UNKUSDT"]
+    assert observed.funding_admission_rejected == 1
+    assert observed.funding_admission_unknown_admitted == 1
+    assert observed.funnel_rows[0]["age"] == 3
+    assert observed.funnel_rows[0]["funding"] == 2
+    # Three fresh names would trip the crowd-2 cap; the funding rejection runs
+    # first, so the two admitted names are not crowded out.
+    assert observed.funnel_rows[0]["capacity"] == 2
+    by_symbol = {candidate["symbol"]: candidate for candidate in observed.candidates}
+    assert by_symbol["POSUSDT"]["funding_rate_at_admission"] == pytest.approx(0.0)
+    assert by_symbol["POSUSDT"]["funding_admission_unknown"] is False
+    assert by_symbol["UNKUSDT"]["funding_rate_at_admission"] is None
+    assert by_symbol["UNKUSDT"]["funding_admission_unknown"] is True
+    assert all(
+        candidate["funding_min_at_entry"] == pytest.approx(0.0)
+        for candidate in observed.candidates
+    )
+
+
+def test_funding_admission_crowding_counts_only_admitted_names() -> None:
+    state = pl.DataFrame(
+        {
+            "symbol": ["AUSDT", "BUSDT", "CUSDT"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+            "rv_168h": [0.01, 0.02, 0.03],
+        }
+    )
+    signal_ts = 1_700_000_000_000
+    cutoff = signal_ts + MS_PER_HOUR
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=5,
+        entry_crowding_max_fresh=2,
+        ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35, 0.0),),
+    )
+    all_positive = _FakeFundingHistoryClient(
+        {
+            symbol: [{"fundingRateTimestamp": str(cutoff - MS_PER_HOUR), "fundingRate": "0.0001"}]
+            for symbol in ("AUSDT", "BUSDT", "CUSDT")
+        }
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components={},
+        cooldown_components={},
+        reservations_count=0,
+        entry_capacity=5,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"AUSDT": 1.0, "BUSDT": 2.0, "CUSDT": 3.0},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+        settled_funding_probe=_CycleSettledFundingProbe(all_positive, cutoff_ts_ms=cutoff),
+    )
+
+    # All three admitted -> the crowd-2 cap still skips the whole stack.
+    assert observed.candidates == ()
+    assert observed.observed_crowding == 3
+    assert observed.funnel_rows[0]["funding"] == 3
+    assert observed.funding_admission_rejected == 0
 
 
 def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
@@ -467,7 +632,7 @@ def test_entry_funnel_names_age_qualified_same_signal_suppression() -> None:
         config=ContinuousDemoCycleConfig(
             max_active=1,
             max_new_entries_per_cycle=1,
-            ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35),),
+            ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35, None),),
         ),
         active_entries_enabled=True,
     )
@@ -493,7 +658,7 @@ def _single_component_config(**overrides: Any) -> ContinuousDemoCycleConfig:
         "max_active": 5,
         "max_new_entries_per_cycle": 5,
         "max_hold_hours": 24,
-        "ensemble_components": (("p3", "none", 0, 0.12, 1.0, 0.35),),
+        "ensemble_components": (("p3", "none", 0, 0.12, 1.0, 0.35, None),),
     }
     values.update(overrides)
     return ContinuousDemoCycleConfig(**values)
@@ -742,8 +907,8 @@ def test_capacity_truncated_stack_completes_in_a_later_cycle() -> None:
     )
     config = _single_component_config(
         ensemble_components=(
-            ("p3", "none", 0, 0.12, 1.0 / 3.0, 0.35),
-            ("p4p5", "none", 0, 0.12, 4.0 / 9.0, 0.35),
+            ("p3", "none", 0, 0.12, 1.0 / 3.0, 0.35, None),
+            ("p4p5", "none", 0, 0.12, 4.0 / 9.0, 0.35, None),
         ),
     )
     prior = pl.DataFrame(
@@ -1240,8 +1405,8 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
         max_hold_hours=24,
         candidate_universe_file=str(candidate_path),
         ensemble_components=(
-            ("p3", "none", 0, 0.12, 0.4, 0.35),
-            ("p4p5", "none", 0, 0.12, 0.6, 0.35),
+            ("p3", "none", 0, 0.12, 0.4, 0.35, None),
+            ("p4p5", "none", 0, 0.12, 0.6, 0.35, None),
         ),
     )
     canonical = pl.DataFrame(
@@ -1403,7 +1568,10 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     assert payload["entry_funnel_liquidity"] == 2
     assert payload["entry_funnel_event"] == 2
     assert payload["entry_funnel_age"] == 2
+    assert payload["entry_funnel_funding"] == 2
     assert payload["entry_funnel_capacity"] == 2
+    assert payload["funding_admission_rejected"] == 0
+    assert payload["funding_admission_unknown_admitted"] == 0
     assert payload["qualified_but_blocked_count"] == 0
     assert payload["entry_feature_state_rows"] == 1
     assert len(payload["entry_feature_state_sha256"]) == 64
@@ -1458,9 +1626,8 @@ def test_profile_resolves_only_the_active_target_contract() -> None:
     assert config.target_vol_per_name == pytest.approx(0.01)
     assert config.vol_weight_clamp == pytest.approx(2.0)
     assert config.ensemble_components == (
-        ("p3", "turn3_pop3", 240, 0.12, 0.3333333333333333, 0.35),
-        ("p4p3", "turn4_pop3", 240, 0.12, 0.2222222222222222, 0.35),
-        ("p4p5", "turn4_pop5", 240, 0.12, 0.4444444444444444, 0.35),
+        # Operator override 2026-07-26: single funding-gated turn3_pop3 cell.
+        ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
     )
     assert continuous_managed_strategy_ids(config) == ("continuous_fade_v2",)
     assert (

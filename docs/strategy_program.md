@@ -159,6 +159,71 @@ Full evidence note, including the 22-row negative-results ledger:
   controls, and promotion of any financed-longs config requires its own
   rolling record and five-line note per `docs/governance.md`.
 
+### 2026-07-26 — CONTINUOUS replaced with the single funding-gated cell (operator override)
+
+The deployed three-component CONTINUOUS ensemble was replaced by the redesign's
+V3 shape — one `turn3_pop3` cell (age 240d, TP 12%, declared stop 35%, weight
+1.0) plus the settled-funding admission `funding_min_at_entry = 0.0` ("only
+fade pumps whose longs are paying"; last settled print at-or-before the
+signal-bar close, never a predicted rate; unknown funding admits and is
+counted/journaled). Evidence basis: `docs/continuous_redesign_2026-07-26.md`.
+
+**Promotion note (recorded change point):**
+
+```text
+Claim: the single funding-gated turn3_pop3 cell preserves most of the deployed
+  CONTINUOUS return at materially better drawdown/MAR with two fewer hand-tuned
+  parameter sets; the funding admission is the mechanism (V3 vs V0/V1/V8).
+Config commit: this commit — profile revision active_single_fund0_tp12_sl35_v1
+  (the commit is the registration; the sleeve's forward run restarts here).
+Forward record (days, net delta vs baseline, tail behavior): none yet — Lane-1
+  seen-data evidence only; the deployed ensemble's record ends at this change
+  point and the new revision accrues from it.
+Decision: operator override 2026-07-26, replacing rolling-record promotion
+  (overrides the register-first recommendation in the redesign note §3).
+Date: 2026-07-26.
+```
+
+**The honest render reconciliation — the shipped rule is stricter than the
+research render that produced the decision numbers.** The research admission
+used the cross-venue panel's funding column; 28% of fresh entries (1,494 of
+5,401) had no panel row at all — 92% of those from 147 Bybit-only contracts
+outside the both-venue panel universe — and were admitted blind as "unknown".
+The engine's root funding dataset covers essentially all of them, so the
+shipped rule rejects 434 additional known-negative entries (1,834 rejected
+total vs the research's 1,400; zero unknowns historically). Line-item
+decomposition: 650 of the research's 704 trades reproduce byte-identically
+(+9.16% shared net on both sides); the 54 excluded trades carried +2.30%
+in the seen window; 5 new chain-effect trades ≈ 0. All hedged, full-calendar,
+2023-03 → 2026-07, standard render:
+
+| book | trades | total | maxDD | Sharpe | MAR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| deployed 3-cell ensemble (old baseline) | 2,372 | +15.85% | −2.85% | 1.84 | 1.66 |
+| research V3 (blind-admits included) | 704 | +13.72% | −1.69% | 1.72 | 2.43 |
+| **shipped single_fund0 (this commit)** | **655** | **+11.06%** | **−1.84%** | **1.45** | **1.80** |
+
+Stated plainly: versus the deployed ensemble the shipped shape still wins on
+drawdown (−1.84% vs −2.85%) and MAR (1.80 vs 1.66) — the side of the trade the
+operator chose — but the Sharpe concession is 1.84 → 1.45 and the return
+concession −4.79 pp, both larger than the −0.12 / −2.13 pp the redesign table
+showed, because that table's V3 row embedded the blind admissions. The
+excluded population (negative-funding Bybit-only pumps) was *profitable* in
+the seen window, which cuts against the funding thesis on that sub-population;
+54 trades on seen data decide nothing. The forward record arbitrates, and the
+per-entry funding evidence journaled at admission (including unknown-admits)
+is the dataset for revisiting both the unknown-admits choice and a possible
+venue-scoped admission variant as Lane-1 follow-ups.
+
+Deliberate identity consequence recorded with the change point: the new
+`ContinuousEventConfig` field shifts `config_hash()` / `kernel_strategy_id`
+for every CONTINUOUS config, and the cycle-status funnel schema is v2; the
+sizer's authoritative-chain self-heal (`ddbded5`) is expected to rebase
+prior-epoch state on the first post-deploy cycles. The sleeve kill criteria
+(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to govern
+the sleeve unchanged. Rollout remains owner-dispatched; this commit deploys
+nothing.
+
 ## What survived the audit
 
 | Evidence | Decision-useful conclusion | Decision |

@@ -28,14 +28,22 @@ The profile shorts decile 9 of the hourly composite after:
 - a one-hour confirmation delay on fully closed bars;
 - the causal prior-day 30-day BTC uptrend gate;
 - stable residual momentum in the lowest quartile;
-- hourly turnover of at least 500,000 USDT; and
-- the component's 240-day listing-age and event gate.
+- hourly turnover of at least 500,000 USDT;
+- the component's 240-day listing-age and event gate; and
+- the settled-funding admission: the candidate's last settled funding print
+  at the signal-bar close must be `>= 0` ("only fade pumps whose longs are
+  paying"). Settled history only, never the predicted next rate; a candidate
+  with no observable settled print admits and is counted/journaled as an
+  unknown admit (`docs/continuous_redesign_2026-07-26.md`).
 
-| Component | Event gate | Take profit | Declared stop | Weight |
-| --- | --- | ---: | ---: | ---: |
-| `p3` | `turn3_pop3` | 12% | 35% | 1/3 |
-| `p4p3` | `turn4_pop3` | 12% | 35% | 2/9 |
-| `p4p5` | `turn4_pop5` | 12% | 35% | 4/9 |
+| Component | Event gate | Take profit | Declared stop | Funding floor | Weight |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `p3` | `turn3_pop3` | 12% | 35% | 0 | 1 |
+
+Profile revision `active_single_fund0_tp12_sl35_v1` (operator override,
+2026-07-26) replaced the previous three nested-trigger components
+(`turn3_pop3` 1/3, `turn4_pop3` 2/9, `turn4_pop5` 4/9) with this single
+funding-gated cell.
 
 The producer admits at most 25 active component reservations and five new
 components per cycle. It pauses new entries when the verified account journal
@@ -58,7 +66,9 @@ while a lifecycle that cannot be attributed to one component fails safe to
 blocking every component for its symbol.
 
 Each cycle also persists an observer-only component funnel (D9, liquidity,
-event, age, and capacity), qualified-but-blocked symbols, the first rejection
+event, age, funding, and capacity), the per-cycle settled-funding admission
+counters (`funding_admission_rejected`, `funding_admission_unknown_admitted`),
+qualified-but-blocked symbols, the first rejection
 reason, an exact entry-feature-state hash, and both full-file and signal-day
 RMOM identities. Those fields never grant admission authority or bypass the
 BTC, account-health, pause, capacity, or account-risk gates.
@@ -109,8 +119,9 @@ execution, not full hedged-portfolio parity.
 
 ### Reconstruction limits
 
-The standard CONTINUOUS historical curve reconstructs the three components,
-inverse-vol sizing, TP12, 24-hour hold, disabled daily rebalance, BTC+ETH hedge,
+The standard CONTINUOUS historical curve reconstructs the active component
+book (including the settled-funding admission), inverse-vol sizing, TP12,
+24-hour hold, disabled daily rebalance, BTC+ETH hedge,
 and BTC-vol regime. It does not reproduce the live accepted-decision BTC-risk
 state, account risk admission, venue rules, fills, or reconciliation. It also
 does not establish manifest-backed historical membership merely by reading a
