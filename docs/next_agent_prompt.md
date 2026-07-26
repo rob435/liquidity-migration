@@ -1,129 +1,133 @@
-# Next research agent prompt
+# Next agent prompt
 
 Copy everything below the line into a fresh session in this repository.
 
 ---
 
-You are taking over strategy research here. Your job is to **execute
-`docs/roadmap_2026-07-25.md` end to end**, in phase order, stopping at each gate
-to report before proceeding.
+You are executing an **operator-ordered replacement of the deployed CONTINUOUS
+system** with the redesigned single-component shape selected on 2026-07-26.
+This is implementation work, not research: the decision is made, the evidence
+is recorded, and your job is to make the deployed profile, the engine, the
+runtime producer, and every downstream consumer agree on the new shape —
+correctly, test-covered, and with the change point recorded.
+
+## Authority and its limits
+
+- **Decision**: operator override, 2026-07-26 session, verbatim intent: replace
+  the deployed CONTINUOUS system with the redesigned shape. This overrides the
+  default recommendation in `docs/continuous_redesign_2026-07-26.md` §3 (which
+  was: register as a forward Lane-2 candidate first, deployed shape as
+  control). Record it as exactly that in the promotion note — an operator
+  override, not a rolling-record promotion.
+- **What the override does NOT change**: `REAL_MONEY` stays false; mainnet and
+  real-money credentials remain unauthorized; push remains CI-only (commit
+  locally on `main`, never push); the actual rollout is dispatched by the
+  owner through the guarded GitHub workflow and requires a locally and
+  directly venue-flat account plus unexpired demo rule receipts (`STATE.md`,
+  Standing operational constraints). You prepare the commit; you do not
+  deploy.
 
 ## Read first
 
-`AGENTS.md`, `docs/roadmap_2026-07-25.md`, `docs/governance.md`,
-`docs/anomaly_research_2026-07-24.md` (§9–§15 is the current evidence), and
-`STATE.md`. Use `docs/repository_map.md` to navigate. Run
-`scripts/dev.sh doctor --json` before broad work.
+`AGENTS.md`, `docs/continuous_redesign_2026-07-26.md` (the evidence and the
+hedged parity table), `docs/carry_hold.md` §for context on the portfolio role,
+`docs/governance.md`, `STATE.md`, and `docs/repository_map.md` to navigate.
+The redesign artifacts live at
+`~/SHARED_DATA/bybit_full_pit/reports/continuous_redesign_2026-07-26/`
+(V0–V10 engine reports plus `hedged_parity_summary.json` and
+`hedged_V3_proposal.csv` — your render-parity target).
 
-## The position you are inheriting
+## The target shape, exactly
 
-There is **no validated edge**. About 44 mechanisms have been tested, so the
-corrected significance threshold is **t = 3.25**; the best signals sit at
-t 1.30–2.06 when priced at the **measured 15.56 bp round trip** (7.78 bp/side,
-from 85 real forward fills — not the 4 bp maker figure older documents assume).
-Execution work cannot rescue this: its ceiling is Sharpe 0.69 → ~1.17. And since
-`t = Sharpe × √years`, a Sharpe-1.0 signal needs four years of forward data.
+Replace the three ensemble components with **one**:
 
-The binding constraint is **statistical, not computational**.
+- `entry_event_trigger="turn3_pop3"`, `age_days_min=240`,
+  `take_profit_pct=0.12`, `stop_loss_pct=0.35`, weight **1.0**.
+- **New admission rule — the only new logic**: a candidate is admitted only if
+  its **last settled funding rate ≥ 0** at the signal bar ("only fade pumps
+  whose longs are paying"). Settled rate means a historical, already-applied
+  print — never a predicted/next rate. **Unknown funding admits** (this
+  matches the research basis that produced the numbers; count and journal
+  unknown-funding admissions so the forward record can revisit that choice).
+- Everything else unchanged: side short, decile 9, rmom-low quartile,
+  BTC 30d uptrend gate **unchanged at > 0** (loosening it was measured and
+  rejected three ways — V1/V2/V4), `entry_delay_hours=1`, `hold_hours=24`,
+  crowd-2, cooldown as-is, inverse-vol sizing, `gross_exposure=0.5`,
+  `max_active=25`, BTC+ETH hedge overlay and btcvol intensity regime as-is.
+- New profile revision, suggested: `active_single_fund0_tp12_sl35_v1`. The
+  revision bump is the recorded change point.
 
-**And the architecture is suspect.** The repo's own audit found that *barebones*
-books — the sleeves stripped of their tuning — were **−3.23% LONG and −20.23%
-CONTINUOUS** after costs. Everything positive comes from a parameter layer over a
-negative base, built across 29 families and 150+ configurations whose search cost
-was never charged. `continuous_ensemble_v2` is three adjacent cells of one
-turnover sweep averaged together; `LongV11a` encodes eleven-plus iterations. See
-roadmap §9. Treat **barebones-beats-costs as a gate**: a signal that only works
-dressed is a fit, and the dressing is where the search cost hides.
+Expected performance of the new shape (hedged render, 2023-03→2026-07, from
+the parity table — put these numbers in the promotion note, including the
+trade-off): total +13.72%, max DD −1.69%, Sharpe 1.72, MAR 2.43, versus the
+deployed ensemble's +15.85%, −2.85%, 1.84, 1.66. The operator chose the
+drawdown/MAR/simplicity side of that trade; do not spin the Sharpe delta away.
 
-## Rules that are not negotiable
+## Implementation checklist
 
-1. **Price everything at 15.56 bp round trip**, or at realised journal fees. A
-   result that only works at 4 bp is not a result.
-2. **Do not run wide sweeps.** Each new mechanism raises the correction
-   threshold and buys a meaningless t≈2. Few hypotheses, tested deeply.
-3. **Every experiment is an A/B**: paired arms differing in one variable,
-   deterministic hash allocation, pre-declared metric and powered sample size,
-   no peeking, written kill criteria. Roadmap §1 specifies this.
-4. **Report negative results as results.** Phases 0 and 1 are expected to be
-   mostly negative — that is the plan working, not failing.
-5. **Correct the record when you find an error**, including in your own earlier
-   work. Four published claims have already been withdrawn this way: the
-   dispersion gate, the weekly hold, delisting decay, and the momentum direction
-   label.
-6. **Demo/paper only.** Never enable `REAL_MONEY` or use mainnet credentials.
-   VPS access is read-only through `scripts/ops.sh`; remove anything you extract.
-
-## Sequence
-
-- **Phase 0 — repair the instruments.** The gate that matters: reconcile the
-  CONTINUOUS backtest (Sharpe 2.74, max DD 1.29%) against forward reality, which
-  lost money. If you cannot explain that gap, **say so** — it means every
-  historical reconstruction here is suspect, and that is a legitimate and
-  valuable finding. Phase 0 has since been executed (anomaly research §16;
-  Gate 0.3 is explained by §16.3), and 0.4 is resolved from a box with the VPS
-  key (§21: 88% of exit notional left via native stop triggers).
-- **Phase 1 — re-screen once at t ≥ 3.25.** If nothing survives, do not run more
-  sweeps. Go to Phase 2. Executed 2026-07-25: 0 of 12 cells clear (§17).
-- **Phase 2 — parallel A/Bs.** Cross-venue replication (2A); regime
-  conditioning (2B — a BTC 30-day uptrend gate took a short book from +1.29 to
-  +41.09 bp/day *while improving* its tail, the most promising single lead in
-  the program). The basket-short structure experiment (2C) was **withdrawn
-  before start on 2026-07-25** — §17.2 prices the structure negative on both
-  venues at honest turnover — see the note in
-  `docs/preregistration/basket_short_tail_experiment_2026-07-25.md`.
-- **Phase 3 — procure a liquidation feed.** The only genuinely new input.
-- **Phase 4 — commit and grade forward.** The commit is the registration.
-- **Phase 5 — only after 0–4 have run and reported.** Two things. First, tune
-  every gate, filter, entry level and universe bound to maximise **t, not mean**:
-  `t = effect × √n`, so a filter that lifts the mean while halving the sample
-  needs a ×1.41 effect just to break even, and the BTC gate's 32× mean lift still
-  only reaches t 1.30 because it keeps 39% of days. Loosening for sample is often
-  the cheapest route from t≈1.3 to t≈2. Report whole curves, never the best cell.
-  Second, source hypotheses from **outside** this repository — practitioner
-  substacks, crypto-microstructure papers, liquidation-cascade literature. The
-  24h-display rollover came from one such write-up and, though it did not pay, it
-  was a mechanism this program would never have invented. Prefer sources that
-  explain *why* an effect exists and who is on the other side. External ideas get
-  no discount: same 15.56 bp, same A/B structure, same threshold, and they count
-  against the multiple-testing budget. Published results are survivorship-selected
-  — test the mechanism, not the parameters quoted, and check both venues.
+1. **Engine field** — `ContinuousEventConfig` gains
+   `funding_min_at_entry: float | None = None` (None = off, exact current
+   behavior). Enforce it in the engine's admission path using the funding
+   data the engine already loads (`funding_lookup` in `_prepare_inputs` /
+   `_run_trades` in `liquidity_migration/continuous_events.py`): the last
+   settlement at-or-before the signal timestamp. **Known consequence**:
+   adding a dataclass field shifts `config_hash()` and `kernel_strategy_id`
+   for every CONTINUOUS config — that is why this ships as one deliberate
+   change point. On the first post-deploy cycles the sizer's authoritative-
+   chain self-heal (`ddbded5`, see `STATE.md`) will rebase prior-epoch state;
+   expect and verify the healing telemetry rather than treating it as an
+   incident.
+2. **Profile** — `liquidity_migration/continuous_profile.py`:
+   `ACTIVE_CONTINUOUS_COMPONENTS` → the single component above;
+   `funding_min_at_entry=0.0` carried in the profile/config plumbing so
+   runtime and reconstruction share one source of truth; revision bump.
+3. **Runtime producer** — the demo/paper CONTINUOUS producer
+   (`continuous_demo*.py` path) must apply the same admission check at
+   candidate construction, from a **live settled-funding source** (the
+   account stack already consumes funding for reconciliation — find the
+   authoritative feed; do not add a parallel ad-hoc fetcher without checking
+   what exists). Same unknown-admits semantics, with a per-cycle counter in
+   the cycle telemetry.
+4. **Downstream consumers** — sweep and fix: `WINNER_WEIGHTS` and the
+   component loops in `scripts/continuous_deployed_equity_refresh.py`,
+   operational-profile weight validation (weights must sum to 1.0 with one
+   component), the equity-refresh parity gate (extend it to assert modeled
+   `funding_min_at_entry` = profile value, like it asserts the stop),
+   `continuous_component_sources` artifact cells, monthly trade counts, and
+   every test that assumes three components. Search broadly before editing
+   (`rg turn4p3`, `rg WINNER_WEIGHTS`, `rg ACTIVE_CONTINUOUS`).
+5. **Render parity** — run the full standard render
+   (`scripts/equity_curves.sh --sleeves continuous --start 2023-03-13
+   --end 2026-07-17 --out <isolated dir>`) with the new profile and compare
+   against `hedged_V3_proposal.csv` / the parity summary. Small deltas are
+   expected (the research admission used the cross-venue panel's funding
+   column; the engine uses the root's funding dataset) — reconcile and
+   explain any material gap before committing; do not shrug it off.
+6. **Tests** — unit tests for the new admission (sign boundary at exactly
+   0.0, settled-not-predicted semantics, unknown-admits, telemetry counter),
+   profile validation (single component, declared stop still mandatory),
+   parity-gate extension, plus the full gates:
+   `.venv/bin/python -m pytest -q`, ruff, mypy, `scripts/dev.sh check`.
+7. **Records** — in the same commit: the five-line promotion note
+   (`docs/governance.md` format; Decision line: "operator override
+   2026-07-26, replacing rolling-record promotion") placed in
+   `docs/strategy_program.md` with the change point; update the
+   `docs/continuous_redesign_2026-07-26.md` status; update `STATE.md`'s
+   local-candidate section (it is a local candidate until the owner's rollout
+   lands — do not claim deployment); note that the existing sleeve kill
+   criteria (`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`)
+   continue to govern the sleeve and that the new revision's forward evidence
+   run restarts at this commit.
+8. **Commit locally on `main`. Do not push.** Tell the owner the exact
+   rollout preconditions from `STATE.md` (venue-flat account, valid demo rule
+   receipts) and that the workflow dispatch is theirs.
 
 ## How to work
 
-**Run to completion.** Do not hand back a half-finished phase. If a phase needs
-twenty runs, do twenty runs. Report at each gate, then keep going unless a gate
-actually failed.
-
-**Dig until it resolves.** When a number is ambiguous, surprising, or too good,
-that is the beginning of the work, not the end of it. Every important finding in
-this program came from refusing to accept the first answer: the funding
-approximation that inverted a leg attribution, the overlapping-sample t-stat, the
-look-ahead in a passive-fill model, a 183% CAGR that turned out to rest on one
-free parameter. Chase those. An unexplained result is a bug or a discovery, and
-you do not know which until you look.
-
-**Depth, not breadth.** This is the one distinction that matters: go as deep as
-you like on a hypothesis you have chosen, but do not keep adding new ones.
-Testing mechanism 45 raises the correction threshold for everything and buys a
-meaningless t≈2. Exhaust an idea properly, then kill it or commit it.
-
-**Be your own adversary.** Before reporting a good result, try to break it: shift
-the sample, split the eras, delay the signal, swap the venue, check whether a
-filter is doing the work, and confirm the entry price is one you could actually
-have obtained. Assume anything that looks excellent is wrong until it survives.
-
-**Say what failed.** Negative and withdrawn results are the main product here.
-Four published claims have already been retracted; that is the process working.
-
-## Working state
-
-`main` is current. The user keeps in-flight deploy work uncommitted in the tree —
-**preserve it and commit only your own files.** Cross-venue panel:
-`~/SHARED_DATA/cross_venue_panel_v1`. Full PIT root:
-`~/SHARED_DATA/bybit_full_pit`. Scoring primitives:
-`liquidity_migration/cross_section.py`. Before any commit, run
-`.venv/bin/python -m pytest -q` and
-`.venv/bin/python -m ruff check liquidity_migration tests scripts`.
-
-Report at each gate. Do not proceed past a failed gate without saying so. No
-research result authorizes demo deployment or real money.
+Preserve any unrelated user work in the tree. Read every file before editing
+it; follow existing idioms; comments only where the code cannot say it. When
+something you find contradicts this prompt (a consumer this checklist missed,
+a funding feed that does not exist where expected, a parity gap you cannot
+explain), stop and report rather than improvising around it — this prompt is
+fallible; the code and `STATE.md` are the authority. Report the outcome with
+the honest numbers, including what you did not do.

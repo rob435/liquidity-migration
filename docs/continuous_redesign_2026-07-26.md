@@ -97,6 +97,14 @@ question the backtest cannot settle; keep the deployed shape running as the
 control until then. Not a deployment decision; the normal governance path
 applies.
 
+**Owner decision, 2026-07-26 (same session): operator override — replace the
+deployed CONTINUOUS system with the single-cell + funding≥0 shape directly,**
+overriding the register-first recommendation above. Execution is handed to
+the next agent via `docs/next_agent_prompt.md` (engine field, profile change,
+runtime admission, parity render, records, local commit). The override does
+not change the real-money boundary or the owner-gated rollout mechanics, and
+the trade-off table above travels with the promotion note unspun.
+
 ## 4. Next discriminating steps, in order
 
 1. ~~Full hedged render~~ **Done (§3)**: `hedged_FUND0_ensemble.csv`,
