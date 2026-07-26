@@ -60,14 +60,25 @@
     "mean_oneway_turnover": 0.35,
     "era_net_bp_per_day": {"2021": 25.4, "2022": 19.1, "2023": 54.3, "2024": 32.9, "2025": 77.6, "2026": 71.5},
     "benchmark_window_2023_03_13_to_2026_07_16": {
-      "sharpe_raw": 2.76,
-      "sharpe_vol_targeted": 2.86,
-      "total_return_raw_pct": 21943.1,
-      "total_return_vt_pct": 322.3,
-      "max_drawdown_vt_pct": 13.0,
-      "worst_day_vt_pct": -4.07,
-      "note": "vol-targeted figures from the committed module, which charges leverage-change turnover; exploratory scripts without that charge report vt Sharpe 2.98",
-      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85}
+      "basis_note": "PRIMARY basis is full-calendar: flat days (book in cash) count as zero in the daily series, exactly as the benchmark's own Sharpe counts ITS flat days (CONTINUOUS is in-market 38% of days). Corrected 2026-07-26 after registration; the active-day figures first quoted are retained below, labelled.",
+      "full_calendar": {
+        "sharpe_raw": 2.57,
+        "sharpe_vol_targeted": 2.41,
+        "t_stat": 4.69,
+        "total_return_raw_pct": 21943.1,
+        "total_return_vt_pct": 342.1,
+        "max_drawdown_vt_pct": 23.7,
+        "worst_day_vt_pct": -5.7,
+        "slippage_sensitivity": "at fee_side 9.78 bp (+2 bp beyond measured): Sharpe 2.53"
+      },
+      "active_days_only": {
+        "sharpe_raw": 2.76,
+        "sharpe_vol_targeted": 2.86,
+        "days_active_of_grid": "1059/1221",
+        "note": "per-deployed-capital view; NOT comparable to the benchmark Sharpe"
+      },
+      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85},
+      "verdict": "beats the benchmark on Sharpe AND return on both raw and vol-targeted full-calendar bases"
     },
     "validation": {
       "binance_replication": "same construction on Binance funding/prices: +25.04 bp/day, t 2.73, Sharpe 1.38 (bench vt 2.18); effect ratio 0.50, inside the 2A band [0.5, 2.0]. First positive mechanism in this program to survive cross-venue replication. corr(bybit, binance daily nets) = +0.85.",

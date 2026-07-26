@@ -60,14 +60,26 @@
     "mean_oneway_turnover": 0.35,
     "era_net_bp_per_day": {"2021": 7.2, "2022": -3.9, "2023": 42.3, "2024": 56.0, "2025": 46.9, "2026": 83.4},
     "benchmark_window_2023_03_13_to_2026_07_16": {
-      "sharpe_raw": 2.87,
-      "sharpe_vol_targeted": 3.03,
-      "total_return_raw_pct": 3070.2,
-      "total_return_vt_pct": 179.9,
-      "max_drawdown_vt_pct": 5.5,
-      "worst_day_vt_pct": -2.61,
-      "note": "vol-targeted figures from the committed module, which charges leverage-change turnover; exploratory scripts without that charge report vt Sharpe 3.17",
-      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85}
+      "basis_note": "PRIMARY basis is full-calendar: flat days count as zero, matching how the benchmark's Sharpe counts its own flat days. Corrected 2026-07-26 after registration; active-day figures retained below, labelled.",
+      "full_calendar": {
+        "sharpe_raw": 2.21,
+        "sharpe_vol_targeted": 1.87,
+        "t_stat": 4.05,
+        "total_return_raw_pct": 3070.2,
+        "total_return_vt_pct": 264.4,
+        "max_drawdown_vt_pct": 24.1,
+        "worst_day_vt_pct": -7.86,
+        "slippage_sensitivity": "at fee_side 9.78 bp (+2 bp beyond measured): Sharpe 2.18",
+        "margin_note": "the vol-targeted margin over the benchmark is thin (1.87 vs 1.84); the raw margin (2.21) is comfortable. The full-calendar vol target is penalised by leverage spiking after flat stretches; this is reported, not engineered away."
+      },
+      "active_days_only": {
+        "sharpe_raw": 2.87,
+        "sharpe_vol_targeted": 3.03,
+        "days_active_of_grid": "734/1221",
+        "note": "per-deployed-capital view; NOT comparable to the benchmark Sharpe"
+      },
+      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85},
+      "verdict": "beats the benchmark on Sharpe AND return on both raw and vol-targeted full-calendar bases (vol-targeted margin thin)"
     },
     "validation": {
       "binance_replication": "same construction Binance-native (its own turnover ranks, funding, BTC gate): +28.09 bp/day, t 2.79, bench Sharpe 2.12 raw / 2.38 vt; effect ratio 0.65, inside [0.5, 2.0]. Registered separately as lane2_financed_leaders_binance_v1.",

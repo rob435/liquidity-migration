@@ -38,18 +38,32 @@ also delay-stressed), disjoint 24h decision grid, era splits reported.
 
 ## 2. The three registered books
 
-| | bench Sharpe raw | bench Sharpe vt15 | bench return raw | bench return vt15 | maxDD vt | worst day vt | t (full sample) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **benchmark (CONTINUOUS sl35)** | **1.84** | — | **+15.85%** | — | −2.85% | −0.70% | — |
-| `lane2_carry_hold_v1` (Bybit) | **2.76** | 2.86 | +21,943% | +322% | 13.0% | −4.07% | 4.88 |
-| `lane2_financed_leaders_v1` (Bybit) | **2.87** | 3.03 | +3,070% | +180% | 5.5% | −2.61% | 4.04 |
-| `lane2_financed_leaders_binance_v1` | **2.12** | 2.21 | +993% | +117% | 11.2% | −4.33% | 2.79 |
+**Full-calendar basis (corrected 2026-07-26, same day as registration).** The
+first-pass series counted only days with positions; a strategy's capital is
+committed on flat days too, and the benchmark's own Sharpe counts *its* flat
+days (CONTINUOUS is in-market 38% of days). Flat days = 0 in the denominator
+is therefore the only apples-to-apples basis. The correction leaves t-stats
+and compounded returns unchanged and shrinks Sharpe by ≈√(active fraction);
+it **changed one verdict** — the Binance arm no longer beats on Sharpe.
 
-All three beat the benchmark on **both raw and vol-targeted accountings, on
-both return and Sharpe**. Reproduce with `scripts/screen_financed_longs.py`.
-The raw compounded totals assume full reinvestment at book scale and are shown
-for the accounting, not as a capacity claim; the vol-targeted (15% ann, 3×
-cap, leverage-change turnover charged) rows are the deployable presentation.
+| bench window 2023-03-13..2026-07-16, full calendar | Sharpe raw | Sharpe vt15 | return raw | return vt15 | maxDD vt | t | beats bench? |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| **benchmark (CONTINUOUS sl35)** | **1.84** | — | **+15.85%** | — | −2.85% | — | — |
+| `lane2_carry_hold_v1` (Bybit) | **2.57** | 2.41 | +21,943% | +342% | 23.7% | 4.69 | **yes, both metrics, both bases** |
+| `lane2_financed_leaders_v1` (Bybit) | **2.21** | 1.87 | +3,070% | +264% | 24.1% | 4.05 | **yes, both metrics, both bases** (vt margin thin) |
+| `lane2_financed_leaders_binance_v1` | 1.66 | 1.30 | +993% | +165% | 30.4% | 3.04 | **return only — NOT Sharpe** |
+
+Slippage sensitivity: +2 bp/side beyond the measured fee moves the Bybit
+books to 2.53 / 2.18 — negligible, because turnover is ~0.35 units/day.
+Active-days-only figures (2.76 / 2.87 / 2.12) are retained in the configs as
+the per-deployed-capital view, labelled not-comparable-to-benchmark.
+
+Reproduce with `scripts/screen_financed_longs.py`. The raw compounded totals
+assume full reinvestment at book scale and are shown for the accounting, not
+as a capacity claim; the vol-targeted (15% ann, 3× cap, leverage-change
+turnover charged) rows are the deployable presentation. Equity curves and the
+daily series CSV:
+`~/SHARED_DATA/bybit_full_pit/reports/financed_longs_2026-07-26/`.
 
 **The drawdown trade-off is not hidden**: the benchmark's −2.85% max DD
 reflects a book whose realized gross exposure is ~1.5% of nominal
