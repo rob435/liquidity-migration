@@ -110,6 +110,51 @@ deployment, or opens the separate real-money boundary.
     passive floor is mechanically reachable, and only that. Blocked on demo
     credentials this box does not hold; run with the fleet stopped and flat.
 
+### 2026-07-26 — the financed-longs program
+
+An owner-directed one-day program (goal: three alphas that beat the deployed
+CONTINUOUS system on return and Sharpe at full measured costs) ran ~18 new
+mechanism families through the honest harness and registered three configs.
+Full evidence note, including the 22-row negative-results ledger:
+`docs/research_2026-07-26_financed_longs.md`.
+
+- **Benchmark regenerated from primary artifacts**: CONTINUOUS sl35 render,
+  2023-03-13→2026-07-16: Sharpe 1.84, +15.85%, max DD −2.85%
+  (`equity_curves_sl35_2026-07-26`).
+- **Registered (commit = registration), all beating that benchmark on both
+  raw and vol-targeted return AND Sharpe at measured turnover × 7.78 bp/side
+  with settlement-exact funding:**
+  - `lane2_carry_hold_v1` — long top-100 names while settled funding < −10
+    bp/8h (exit > −3 bp), cap 0.10/name, gross cap 1.0. Bench Sharpe 2.76
+    raw / 2.86 vt, t 4.88. Attribution: +13.06 units funding vs −3.86 price —
+    a carry payment with a named counterparty (crowded shorts). First
+    positive mechanism in this program to survive cross-venue replication
+    (Binance ratio 0.50).
+  - `lane2_financed_leaders_v1` — top 1-week-momentum decile admitted only
+    while the name's funding ≤ 0 and BTC 30d > −0.05. Bench Sharpe 2.87
+    raw / 3.03 vt, t 4.04. The financing condition is the alpha: without it
+    the same book is Sharpe 1.57 and bleeds −61 bp/day in 2022; the
+    funding-cap curve is monotone (none 1.57 → +1bp 1.79 → 0 2.87).
+  - `lane2_financed_leaders_binance_v1` — the Binance-native replication arm
+    (ratio 0.65, bench 2.12 raw), registered so the forward record grades
+    both arms symmetrically. corr +0.82 with the Bybit arm; explicitly a
+    replication object, not an independent discovery.
+- **Family disclosure**: the two Bybit books correlate +0.75 (41% name-day
+  overlap) — one macro-premium (the market pays longs while shorts are paying
+  funding) harvested in two phases. Portfolio construction over them must use
+  the measured correlations.
+- **Structural negatives with standing value**: every short-side construction
+  fails (the payment is always on the long side of forced flow); nothing
+  intraday survives the measured round trip (the one "settlement-clock"
+  effect was a conditioning artifact caught by the prior-stamp PIT re-run);
+  crash-absorption is real but sub-bar and Bybit-local; the OI-purge
+  conditioning from the cascade literature does not discriminate on this
+  panel.
+- These are Lane-1 selections; their forward records begin at the
+  registration commit. The deployed sleeves are unchanged, remain the
+  controls, and promotion of any financed-longs config requires its own
+  rolling record and five-line note per `docs/governance.md`.
+
 ## What survived the audit
 
 | Evidence | Decision-useful conclusion | Decision |
@@ -396,6 +441,16 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       target; no dispersion gate, no Binance leg, no maturity filter. Per
       `docs/governance.md` the commit is the registration; it grades forward from
       that commit on days it never saw.
+- [x] **2026-07-26 financed-longs program**: three Lane-2 registrations
+      (`lane2_carry_hold_v1`, `lane2_financed_leaders_v1`,
+      `lane2_financed_leaders_binance_v1`) that beat the regenerated CONTINUOUS
+      sl35 benchmark (Sharpe 1.84, +15.85%) on both return and Sharpe at
+      measured costs; module `liquidity_migration/financed_longs.py`,
+      reproduction `scripts/screen_financed_longs.py`, evidence
+      `docs/research_2026-07-26_financed_longs.md` with the 22-row
+      negative-results ledger.
+- [ ] Score the three financed-longs configs on each new completed UTC day
+      (rolling forward record; the registration commit is the change point).
 - [ ] Read the paper passive-execution A/B for realised maker-fill probability
       (target was 100 fills per arm). This is the last unmeasured cost input and
       needs VPS data.

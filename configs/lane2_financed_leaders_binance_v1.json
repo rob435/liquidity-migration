@@ -1,0 +1,77 @@
+{
+  "config_id": "lane2_financed_leaders_binance_v1",
+  "registered": "2026-07-26",
+  "lane": 2,
+  "surface": "research-only",
+  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication. Binance execution capability does not exist in this repository; this registration accrues research evidence only.",
+  "claim": "The financed-leaders rule executed Binance-native (Binance turnover ranks, Binance settled funding, BTC gate from Binance prices) earns bench-window Sharpe 2.12 raw / 2.38 vol-targeted (t 3.04) versus the deployed CONTINUOUS benchmark's 1.84. This is a REPLICATION registration, not an independent discovery: it is the venue arm that makes lane2_financed_leaders_v1 the first positive mechanism family in this program to survive cross-venue replication (effect ratio 0.65). Its daily net correlates +0.82 with the Bybit book; as a return stream it is a second-venue expression of the same mechanism, and it is registered so the forward record grades both arms symmetrically.",
+  "rule": {
+    "universe": {
+      "venue": "binance",
+      "rank_by": "trailing_24h_quote_turnover",
+      "top_n": 100
+    },
+    "signal": {
+      "momentum_lookback_hours": 168,
+      "leader_percentile": 0.9,
+      "funding_cap_bp": 0.0
+    },
+    "gate": {
+      "btc_lookback_days": 30,
+      "btc_threshold": -0.05
+    },
+    "sizing": {
+      "per_name_cap": 0.1,
+      "gross_cap": 1.0
+    },
+    "risk": {
+      "vol_target_annual": 0.15,
+      "vol_lookback_days": 30,
+      "max_leverage": 3.0
+    }
+  },
+  "cost_model": {
+    "measured_fee_side_bp": 7.78,
+    "charging": "measured one-way turnover x fee per side",
+    "funding": "settlement_exact",
+    "fee_note": "7.78 bp/side is the BYBIT demo measurement applied unchanged; Binance USD-M taker tiers are comparable (4.5-5.0 bp/side typical) so the charge is mildly conservative. No Binance fill has ever been measured by this repository.",
+    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage", "any Binance-specific execution reality"]
+  },
+  "scoring_recipe": {
+    "metric": "mean net bp per day, and annualised Sharpe on raw and vol-targeted daily series",
+    "secondary": ["compounded total return", "compounded max drawdown", "worst single day", "effect ratio versus the Bybit arm"],
+    "comparator": "lane2_financed_leaders_v1 (the Bybit arm) and the deployed CONTINUOUS sl35 render",
+    "grid": "none",
+    "cadence": "one row per completed UTC day after the registration commit",
+    "eligibility": "only days strictly after the registration commit date count as forward evidence",
+    "reproduce_with": "liquidity_migration.financed_longs.score_financed_leaders(panel, FinancedLeadersConfig.from_json(this_file))"
+  },
+  "measured_at_registration": {
+    "window": "2021-01-01 to 2026-07-18",
+    "days_with_positions": 974,
+    "mean_net_bp_per_day": 28.09,
+    "t_stat": 2.79,
+    "sharpe_raw": 1.71,
+    "max_drawdown_raw_pct": 42.4,
+    "worst_day_raw_pct": -13.8,
+    "era_net_bp_per_day": {"2021": 8.3, "2022": -10.5, "2023": 28.7, "2024": 24.7, "2025": 35.5, "2026": 68.6},
+    "benchmark_window_2023_03_13_to_2026_07_16": {
+      "sharpe_raw": 2.12,
+      "sharpe_vol_targeted": 2.21,
+      "total_return_raw_pct": 993.4,
+      "total_return_vt_pct": 116.7,
+      "max_drawdown_vt_pct": 11.2,
+      "worst_day_vt_pct": -4.33,
+      "note": "vol-targeted figures from the committed module, which charges leverage-change turnover; exploratory scripts without that charge report vt Sharpe 2.38",
+      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85}
+    },
+    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 selected the parent rule on Bybit; this arm applies it unchanged to Binance data. Full evidence note: docs/research_2026-07-26_financed_longs.md."
+  },
+  "known_weaknesses": [
+    "corr +0.82 with the Bybit arm: this is the same mechanism on largely the same names (79.9% universe Jaccard, docs/anomaly_research_2026-07-24.md section 18.4); it multiplies venue evidence, not portfolio breadth",
+    "t 3.04 is below the program-wide ~3.4 Bonferroni threshold as a standalone discovery; its evidentiary role is as the replication arm of the Bybit registration",
+    "no Binance execution, fills, or fee measurement exists in this repository; every number here inherits the Bybit fee assumption",
+    "2022 is -10.5 bp/day (the Bybit arm is -3.9): the financing condition protects less on Binance",
+    "all weaknesses of the parent rule apply"
+  ]
+}
