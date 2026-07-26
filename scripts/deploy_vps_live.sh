@@ -1366,6 +1366,12 @@ stop_rollout_units() {
     for unit in "$@"; do
         ! systemctl is-active --quiet "$unit" \
             || fail "unit remained active after rollout stop: $unit"
+        # A stop that escalated past TimeoutStopSec leaves the dead unit
+        # flagged `failed` (Result=timeout), which the authority-issuance
+        # quiescence gate later rejects (it requires exactly `inactive`;
+        # 2026-07-26 rollout 30207186469). The unit is verifiably stopped
+        # here, so clear the stale flag rather than abort minutes later.
+        systemctl reset-failed "$unit" 2>/dev/null || true
     done
 }
 
@@ -1381,6 +1387,11 @@ stop_all_rollout_units_best_effort() {
         if systemctl is-active --quiet "$unit"; then
             printf 'still-active unit=%s\n' "$unit" >&2
             failed=1
+        else
+            # Leave the forced-stop end state clean for staged recovery: a
+            # verifiably stopped unit must not carry a stale `failed` flag
+            # into the next authority issuance.
+            systemctl reset-failed "$unit" 2>/dev/null || true
         fi
     done
     return "$failed"

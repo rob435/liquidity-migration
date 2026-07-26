@@ -11,23 +11,41 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit:
-  `ac18332b7` ("Land the 2026-07-23 deployment-automation candidate")**,
-  deployed from canonical `main`, profile `operational`, on 2026-07-25 via the
-  guarded `rollout` dispatch (Actions run 30167979878, owner authorization
-  "do all of these" chat instruction). A subsequent independent read-only
-  `verify` dispatch passed the same hour (Actions run 30168234520), and the
-  first post-deploy cycles ran clean (sizer unblocked, new
-  `btc_risk_sizing_accepted_orphaned_dropped` telemetry journaling). This
-  closes the same-day deployment gap: the sizer epoch self-heal (`e55f410`,
-  extended by `ddbded5` to partial-acceptance chain gaps and arm/policy
-  retunes), the venue-drift cycle-halt fix (`967d09e`) — in place before the
-  four registered candidate deliveries at 2026-07-27 09:00 UTC — the
-  2026-07-25 execution-plumbing audit fixes (`bd54b9f`..`1a8f5f7`), and the
-  parallelized deploy automation are all live. **Change points: the
-  research-parity admission gates (per-component 24h re-entry cooldown,
-  crowd-2) are now live** alongside the retained CONTINUOUS 35% component
-  stop (`active_tp12_sl35_v1`; anomaly research §20.1).
+- **Installed implementation commit: `d16daf5a8` ("Align active docs with the
+  single funding-gated CONTINUOUS shape", containing `1fe0e48` — the
+  operator-ordered CONTINUOUS replacement)**, deployed from canonical `main`,
+  profile `operational`, on 2026-07-26, owner authorization: the "align,
+  clean, consolidate docs, then deploy" chat instruction. **Change point: the
+  CONTINUOUS sleeve now runs the single funding-gated `turn3_pop3` cell**
+  (profile revision `active_single_fund0_tp12_sl35_v1`: age 240d, TP 12%,
+  declared stop 35%, weight 1.0, settled-funding admission floor 0.0 with
+  counted/journaled unknown-admits). Honest same-window render of the
+  deployed shape: +11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80 — see the
+  `docs/strategy_program.md` promotion note for the reconciliation against
+  the redesign table. Kernel strategy identities and config hashes shifted
+  for all CONTINUOUS configs; the cycle-status funnel schema is v2.
+- **Deployment mechanics receipt (2026-07-26):** the guarded `rollout`
+  dispatch (Actions run 30207186469) completed CI, every flatness proof, and
+  the stopped-install of `d16daf5`, then failed closed at
+  `create-operational-authority`: stopping the CONTINUOUS demo producer had
+  escalated past `TimeoutStopSec=180` (mid-cycle SIGKILL), leaving the dead
+  unit flagged `failed`, and authority issuance requires exactly `inactive` —
+  the run forced the managed fleet stopped with the prior authority already
+  retired. Completed the same hour via the supported staged path:
+  `systemctl reset-failed` on the verifiably-dead unit,
+  `scripts/ops.sh operational-authority --execute issue` (fresh authority for
+  the installed commit, bound to the still-fresh 2026-07-22 demo-rule
+  receipt), and `scripts/ops.sh deploy --execute activate` → `verify-ok`,
+  plus an independent read-only `verify` dispatch (Actions run 30207935844).
+  The rollout stop path now clears the stale `failed` flag after each
+  verified stop so this cannot recur.
+- Prior deployment (2026-07-25, `ac18332b7`, Actions runs 30167979878 /
+  30168234520) retained the three-component ensemble with the sizer epoch
+  self-heal (`e55f410` + `ddbded5`), the venue-drift cycle-halt fix
+  (`967d09e`), the 2026-07-25 execution-plumbing audit fixes
+  (`bd54b9f`..`1a8f5f7`), the research-parity admission gates (per-component
+  24h re-entry cooldown, crowd-2), and the retained CONTINUOUS 35% component
+  stop (`active_tp12_sl35_v1`; anomaly research §20.1) — all still live.
 - **2026-07-25 CONTINUOUS entry block, resolved.** Every cycle from 2026-07-22
   22:24 UTC (1,502 cycles) blocked all CONTINUOUS entries with
   `accepted_state_invalid`: `btc_risk_sizing_state.parquet` survived the
@@ -51,39 +69,19 @@ history is in Git and in the audit receipts indexed at the bottom.
 - Deployment status is authoritative only when tied to an exact pushed commit and
   a fresh authenticated rollout receipt.
 
-### Local candidate — committed on local `main`, not deployed
+### Local candidate — none
 
-The 2026-07-26 **operator-ordered CONTINUOUS replacement** is committed on
-local `main` (not pushed; push remains CI-only) and **grants no mainnet or
-`REAL_MONEY` authority**. It replaces the three-component ensemble with the
-single funding-gated cell: `turn3_pop3`, age 240d, TP 12%, declared stop 35%,
-weight 1.0, plus the new settled-funding admission (`funding_min_at_entry=0.0`;
-unknown funding admits and is counted/journaled). Profile revision
-`active_single_fund0_tp12_sl35_v1` is the recorded change point; the promotion
-note is in `docs/strategy_program.md` and the evidence basis in
-`docs/continuous_redesign_2026-07-26.md`.
-
-Deliberate identity consequence: the new `ContinuousEventConfig` field shifts
-`config_hash()`/`kernel_strategy_id` for every CONTINUOUS config, and the
-cycle-status funnel schema bumped to v2. On the first post-deploy cycles the
-sizer's authoritative-chain self-heal (`ddbded5`) is expected to rebase
-prior-epoch state — verify the healing telemetry rather than treating it as an
-incident. The sleeve kill criteria
-(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to govern
-the sleeve; the revision's forward evidence run restarts at this commit.
-
-The prior local candidate recorded here (2026-07-23 deployment automation)
-landed as `ac18332b7` and deployed 2026-07-25 — see Deployment above.
-
-Local validation passed Ruff, mypy, and the full gate at
-`2,374 passed / 1 skipped`. The standard render of the shipped shape is
-**+11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80** (hedged, 2023-03→2026-07)
-— better drawdown/MAR than the deployed ensemble (−2.85% / 1.66) at a larger
-Sharpe/return concession (1.84 → 1.45) than the redesign table's V3 row,
-because that row admitted 434 negative-funding entries blind through
-cross-venue-panel coverage holes; the reconciliation is line-item exact in the
-`docs/strategy_program.md` promotion note. The owner should re-read that
-trade-off before dispatching the rollout.
+No undeployed local candidate exists. The 2026-07-26 CONTINUOUS replacement
+(`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment
+above. Expected first-cycle shapes after that change point, not incidents:
+the sizer's authoritative-chain self-heal (`ddbded5`) rebases prior-epoch
+state onto the shifted kernel strategy identities (counted and journaled),
+and the account notification may show one `CONTINUOUS BTC gate: unavailable ·
+unsupported schema 1` line until the first new cycle writes the v2 status
+projection. The sleeve kill criteria
+(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to
+govern the sleeve; the new revision's forward evidence run restarts at
+`1fe0e48`.
 
 ## Topology
 
