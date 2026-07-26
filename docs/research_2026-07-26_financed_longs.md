@@ -26,6 +26,14 @@ quoted: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
 > **Benchmark: Sharpe 1.84, total +15.85% (+4.49%/yr), max DD −2.85%, worst
 > day −0.70%, window 2023-03-13 → 2026-07-16.**
 
+**Benchmark change point, 2026-07-26 (later the same day):** the deployed
+CONTINUOUS shape this benchmark renders was replaced at commit `1fe0e48`
+(profile revision `active_single_fund0_tp12_sl35_v1`; operator override,
+see `docs/strategy_program.md`). The new deployed shape's same-window render
+is **Sharpe 1.45, +11.06%, max DD −1.84%**. Every comparison in this
+document was made, and stays valid, against the pre-change 1.84 benchmark;
+forward comparisons after the change point grade against the new one.
+
 (The strategy program's documented 1.87 / +15.79% reflects the same render at
 a slightly earlier data-root state; the regenerated numbers are used
 throughout.)

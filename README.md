@@ -22,8 +22,8 @@ deployment and risk boundary.
 - [docs/governance.md](docs/governance.md) — evidence and authorization policy.
 - [docs/strategy_program.md](docs/strategy_program.md) — consolidated evidence,
   current direction, and the only active strategy-research queue.
-- [docs/next_agent_prompt.md](docs/next_agent_prompt.md) — concise transferable
-  launcher for open-ended anomaly research; not a second roadmap.
+- [docs/next_agent_prompt.md](docs/next_agent_prompt.md) — transferable task
+  launcher for owner handoffs; never a second status source.
 - [docs/data_roots.md](docs/data_roots.md) and
   [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
 - [docs/research_refresh.md](docs/research_refresh.md) — append-first data,

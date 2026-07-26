@@ -80,6 +80,12 @@ Benchmark: CONTINUOUS sl35 render, regenerated 2026-07-26 — Sharpe 1.84,
 everywhere (flat days = 0 in the denominator, identical to the benchmark's own
 accounting).
 
+*(Benchmark change point, 2026-07-26 later the same day: the deployed
+CONTINUOUS shape was replaced at commit `1fe0e48` — revision
+`active_single_fund0_tp12_sl35_v1`, same-window render Sharpe 1.45 / +11.06% /
+max DD −1.84%. The table below stays as written against the pre-change
+benchmark; forward comparisons grade against the new one.)*
+
 | bench window, full calendar | carry-hold | benchmark |
 | --- | ---: | ---: |
 | Sharpe raw / vol-targeted | **2.57 / 2.41** | 1.84 |
