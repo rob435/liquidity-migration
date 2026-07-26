@@ -65,6 +65,30 @@ turnover charged) rows are the deployable presentation. Equity curves and the
 daily series CSV:
 `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_2026-07-26/`.
 
+### 2.x Time under water — the comparison the drawdown numbers hide
+
+Same-risk comparison (every series on one full calendar; CONTINUOUS reindexed
+with flat days = 0 reproduces its official Sharpe 1.84, which validates the
+basis; scaling CONTINUOUS ×6.2 to the challengers' 15% vol is presentation
+only — it exceeds the 2× account cap and models no margin):
+
+| bench window, 15% vol basis | Sharpe | total | maxDD | %days UW | longest UW | spells ≥60d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50/50 challenger blend (vt15) | 2.41 | +308% | 22.0% | 86% | 204d | 3 |
+| blend at half size (vt7.5) | 2.41 | +105% | 11.6% | 86% | 204d | 3 |
+| CONTINUOUS ×6.2 (presentation) | 1.84 | +143% | 16.9% | 81% | **218d** | **6** |
+| **PROGRAM: 50% CONTINUOUS + 25/25 challengers (executable)** | **2.66** | +120% | **10.8%** | 84% | 203d | **2** |
+
+Three facts worth keeping: (1) long underwater spells are endemic to every
+book here **including the deployed benchmark** — CONTINUOUS's longest spell is
+215 days (2024-11-28 → 2025-07-01) at its native scale; sizing controls
+drawdown *depth*, never *duration*. (2) At equal risk the challengers have
+*fewer* long spells than the benchmark (3 vs 6 ≥60d). (3) The challengers
+correlate **−0.08 with CONTINUOUS**, so the executable 50/25/25 program has a
+higher Sharpe than any component (2.66), maxDD 10.8%, and only 2 spells ≥60d
+— diversification across the sleeves, not replacement, is what shortens the
+stomach-ache. Chart: `financed_longs_same_risk.png` in the reports dir.
+
 **The drawdown trade-off is not hidden**: the benchmark's −2.85% max DD
 reflects a book whose realized gross exposure is ~1.5% of nominal
 (anomaly research §16.3). The challengers run 0.3–1.0 gross and carry
