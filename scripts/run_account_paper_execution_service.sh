@@ -43,6 +43,23 @@ case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
         ;;
 esac
 
+telegram_args=()
+if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        echo "Telegram is enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing." >&2
+        exit 2
+    fi
+    telegram_args+=(--telegram)
+fi
+
+continuous_cycle_args=()
+if [[ -n "${CONTINUOUS_CYCLE_ROOT:-}" ]]; then
+    continuous_cycle_args+=(--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT")
+    continuous_cycle_args+=(
+        --continuous-cycle-max-age-minutes "${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
+    )
+fi
+
 exec "$PYTHON_BIN" -m liquidity_migration.account_paper_runner \
     --account-root "$ACCOUNT_ROOT" \
     --inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
@@ -53,4 +70,6 @@ exec "$PYTHON_BIN" -m liquidity_migration.account_paper_runner \
     --equity-usdt "$PAPER_EQUITY_USDT" \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
     --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
-    "${raw_market_args[@]}"
+    "${raw_market_args[@]}" \
+    "${continuous_cycle_args[@]}" \
+    "${telegram_args[@]}"

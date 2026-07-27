@@ -69,9 +69,21 @@ history is in Git and in the audit receipts indexed at the bottom.
 - Deployment status is authoritative only when tied to an exact pushed commit and
   a fresh authenticated rollout receipt.
 
-### Local candidate — none
+### Local candidate — paper-fleet Telegram notifications (committed locally, not deployed)
 
-No undeployed local candidate exists. The 2026-07-26 CONTINUOUS replacement
+2026-07-27: the paper account owner gains its own Telegram notifications
+(`account_paper_runner` now drives the shared `AccountNotificationEngine`
+with a `Bybit paper` heading and a `🧪 PAPER · integration-only twin` label
+on every page; demo output is byte-identical to before). Wiring: the paper
+owner unit stops scrubbing `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, sets
+`TELEGRAM_ENABLED=1` and the paper CONTINUOUS cycle root; deploy provisioning
+preserves operator-provided paper Telegram credentials or seeds them from
+`bybit-demo.env` (venue credentials remain forbidden in the paper
+environment); both paper producers still scrub Telegram variables. Takes
+effect only at the next owner-dispatched rollout (env content changes require
+authority reissue). Until then the paper fleet remains Telegram-silent.
+
+The prior change point: the 2026-07-26 CONTINUOUS replacement
 (`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment
 above. Expected first-cycle shapes after that change point, not incidents:
 the sizer's authoritative-chain self-heal (`ddbded5`) rebases prior-epoch

@@ -724,3 +724,35 @@ def test_recovery_generator_is_exact_commit_and_non_destructive() -> None:
     assert "reset --hard" not in text
     assert "git clean" not in text
     assert "GITHUB_TOKEN" not in text
+
+
+def test_paper_owner_owns_paper_telegram_notifications() -> None:
+    owner = _unit("liquidity-migration-account-paper-execution.service")
+    owner_unset = " ".join(
+        line for line in owner.splitlines() if line.startswith("UnsetEnvironment=")
+    )
+    assert "TELEGRAM_BOT_TOKEN" not in owner_unset
+    assert "TELEGRAM_CHAT_ID" not in owner_unset
+    environment = _environment("liquidity-migration-account-paper-execution.service")
+    assert environment["TELEGRAM_ENABLED"] == "1"
+    assert (
+        environment["CONTINUOUS_CYCLE_ROOT"]
+        == "/opt/liquidity-migration/data/bybit-continuous-paper-event"
+    )
+    assert environment["CONTINUOUS_CYCLE_MAX_AGE_MINUTES"] == "15"
+    for producer in (
+        "liquidity-migration-bybit-long-paper.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+    ):
+        unset = " ".join(
+            line for line in _unit(producer).splitlines() if line.startswith("UnsetEnvironment=")
+        )
+        assert "TELEGRAM_BOT_TOKEN" in unset
+        assert "TELEGRAM_CHAT_ID" in unset
+    script = _read("scripts/run_account_paper_execution_service.sh")
+    assert '"${TELEGRAM_ENABLED:-0}" == "1"' in script
+    assert "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing" in script
+    assert "--telegram" in script
+    assert "--continuous-cycle-root" in script
+    deploy = _read(DEPLOY)
+    assert "paper Telegram credentials unavailable" in deploy

@@ -39,7 +39,7 @@ from .account_reconcile import (
     BybitAccountReconciler,
 )
 from .account_route import derive_account_route, ensure_account_route
-from .account_notifications import AccountNotificationEngine
+from .account_notifications import AccountNotificationEngine, deliver_notification_batch
 from .continuous_cycle_status import ContinuousCycleStatusReader
 from .account_owner_health import (
     AccountOwnerHealth,
@@ -885,36 +885,12 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     now_ns=notification_now_ns,
                 )
-                if not notification.messages:
-                    notifier.commit(notification)
-                else:
-                    all_sent = True
-                    for page_number, page in enumerate(notification.messages, start=1):
-                        try:
-                            from .telegram import send_telegram_message
-
-                            sent = send_telegram_message(page, enabled=True)
-                        except Exception:  # noqa: BLE001 - do not advance dedupe state on failure
-                            _logger.exception(
-                                "account Telegram delivery failed page=%d/%d",
-                                page_number,
-                                len(notification.messages),
-                            )
-                            all_sent = False
-                            break
-                        if not sent:
-                            _logger.error(
-                                "account Telegram delivery returned false page=%d/%d",
-                                page_number,
-                                len(notification.messages),
-                            )
-                            all_sent = False
-                            break
-                    # Commit only after every page succeeds. A partial transport
-                    # failure can duplicate an earlier page on retry, but can
-                    # never acknowledge and permanently omit unsent facts.
-                    if all_sent:
-                        notifier.commit(notification)
+                deliver_notification_batch(
+                    notifier,
+                    notification,
+                    context="account",
+                    logger=_logger,
+                )
                 last_notification_poll = now
             time.sleep(max(args.idle_seconds, 0.01))
     except KeyboardInterrupt:

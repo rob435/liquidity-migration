@@ -16,6 +16,7 @@ from .account_execution_config import (
     load_risk_policy,
     require_registered_demo_rule_max_age_hours,
 )
+from .account_notifications import AccountNotificationEngine, deliver_notification_batch
 from .account_contracts import AccountEventType, AccountRiskSnapshot, OrderCommand
 from .account_kernel import AccountExecutionKernel
 from .passive_execution import (
@@ -45,6 +46,7 @@ from .account_service_bybit import (
     CapturedBybitMarketProvider,
     VerifiedBybitDemoRulesProvider,
 )
+from .continuous_cycle_status import ContinuousCycleStatusReader
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import (
     INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
@@ -195,6 +197,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--health-interval-seconds", type=float, default=5.0)
     parser.add_argument("--idle-seconds", type=float, default=0.1)
+    parser.add_argument("--telegram", action="store_true")
+    parser.add_argument("--notification-state", default="")
+    parser.add_argument("--notification-poll-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--continuous-cycle-root",
+        default="",
+        help="Read-only paper CONTINUOUS cycle status root shown in paper notifications.",
+    )
+    parser.add_argument(
+        "--continuous-cycle-max-age-minutes",
+        type=float,
+        default=15.0,
+        help="Mark CONTINUOUS notification telemetry stale beyond this age.",
+    )
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
@@ -332,12 +348,34 @@ def main(argv: list[str] | None = None) -> int:
         inbox=inbox,
         instrument_rules=rules,
     )
+    notifier = (
+        AccountNotificationEngine(
+            kernel=kernel,
+            state_path=(
+                args.notification_state or str(route.account_path / "account_notifications.json")
+            ),
+            heading="Bybit paper",
+            channel_label="🧪 PAPER · integration-only twin",
+        )
+        if args.telegram
+        else None
+    )
+    continuous_status_reader = (
+        ContinuousCycleStatusReader(
+            args.continuous_cycle_root,
+            environment="paper",
+            max_age_minutes=args.continuous_cycle_max_age_minutes,
+        )
+        if notifier is not None and str(args.continuous_cycle_root).strip()
+        else None
+    )
     recovered = inbox.recover_processing()
     if recovered:
         _logger.warning("recovered %d paper intent(s) after restart", recovered)
     last_symbol_refresh = float("-inf")
     last_health_write = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
+    last_notification_poll = 0.0
     last_batch_id = ""
     loop_sequence = 0
     requested_symbols_ready = True
@@ -472,6 +510,74 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 last_health_write = health_now
                 last_health_signature = health_signature
+            if notifier is not None and now - last_notification_poll >= max(
+                args.notification_poll_seconds, 0.25
+            ):
+                notification_now_ns = runtime_clock.wall_time_ns()
+                midpoint_by_symbol: dict[str, float] = {}
+                unavailable_midpoint_symbols: list[str] = []
+                for symbol, position in kernel._state_ref().positions.items():
+                    if position.signed_qty == 0.0:
+                        continue
+                    book, notification_wall_ns = recorder.current_book_with_observed_wall_ns(
+                        symbol
+                    )
+                    book_age_ns = (
+                        notification_wall_ns - book.local_receive_ts_ns
+                        if book is not None
+                        else -1
+                    )
+                    if (
+                        book is None
+                        or book.sequence_gap
+                        or book_age_ns < 0
+                        or book_age_ns > service.max_market_age_ns
+                    ):
+                        unavailable_midpoint_symbols.append(symbol)
+                        continue
+                    try:
+                        midpoint_by_symbol[symbol] = book.market_ref(
+                            input_key=f"notification:{symbol}:{book.sequence}",
+                            source="bybit_raw_l2",
+                        ).reference_price
+                    except ValueError:
+                        unavailable_midpoint_symbols.append(symbol)
+                notification_health_errors: list[str] = []
+                if unavailable_midpoint_symbols:
+                    notification_health_errors.append(
+                        "fresh L2 midpoint unavailable: "
+                        + ", ".join(sorted(unavailable_midpoint_symbols))
+                    )
+                if health_status is not AccountOwnerHealthStatus.HEALTHY:
+                    notification_health_errors.append(
+                        (health_detail or "paper owner blocked").strip()[:240]
+                    )
+                if notification_health_errors:
+                    notification_health = "BLOCKED · " + " · ".join(notification_health_errors)
+                elif health_detail.strip():
+                    notification_health = "healthy · " + health_detail.strip()[:240]
+                else:
+                    notification_health = "healthy"
+                # The paper twin has no external venue: the local journal is
+                # position truth by construction, so the healthy defaults of
+                # prepare() are the honest report rather than an assumption.
+                notification = notifier.prepare(
+                    midpoint_by_symbol=midpoint_by_symbol,
+                    health=notification_health,
+                    continuous_status=(
+                        continuous_status_reader.render(now_ns=notification_now_ns)
+                        if continuous_status_reader is not None
+                        else "CONTINUOUS BTC gate: unavailable · cycle root not configured"
+                    ),
+                    now_ns=notification_now_ns,
+                )
+                deliver_notification_batch(
+                    notifier,
+                    notification,
+                    context="paper account",
+                    logger=_logger,
+                )
+                last_notification_poll = now
             if retry_delay:
                 time.sleep(retry_delay)
             time.sleep(max(args.idle_seconds, 0.01))

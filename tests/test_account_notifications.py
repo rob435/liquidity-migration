@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from pathlib import Path
@@ -1119,3 +1120,172 @@ def test_first_notification_run_does_not_replay_old_entry_risk_rejections(
     assert "Entry risk: 1 unresolved attempt(s)" in first.message
     assert "active reasons below min notional" in first.message
     assert len(first.next_state.entry_rejections) == 1
+
+
+def test_paper_heading_and_channel_label_stamp_every_page(tmp_path: Path) -> None:
+    kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "paper-notify-state.json",
+        clock=clock,
+        heading="Bybit paper",
+        channel_label="🧪 PAPER · integration-only twin",
+    )
+
+    first = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+
+    assert first.hourly_included
+    assert first.messages
+    assert "🕐 Bybit paper · account update" in first.message
+    assert "Bybit demo" not in first.message
+    for page in first.messages:
+        assert page.startswith("🧪 PAPER · integration-only twin\n")
+
+
+def test_default_engine_output_carries_no_channel_label(tmp_path: Path) -> None:
+    kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+
+    first = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+
+    assert "Bybit demo · account update" in first.message
+    assert "PAPER" not in first.message
+    for page in first.messages:
+        assert page.startswith("🕐")
+
+
+def test_channel_label_counts_toward_every_page_budget(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10 * HOUR_NS, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(
+        tmp_path / "account", account_id="notify", clock=clock, id_seed="notify"
+    )
+    label = "🧪 PAPER · integration-only twin"
+    engine = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "state.json",
+        clock=clock,
+        channel_label=label,
+    )
+    sections = tuple(f"event-{index}:" + (str(index) * 700) for index in range(10))
+
+    pages = engine._labelled_pages(sections)
+
+    assert len(pages) > 1
+    for page in pages:
+        assert page.startswith(f"{label}\n")
+        assert 0 < len(page) <= 3900
+    rendered = "\n\n".join(pages)
+    for section in sections:
+        assert section in rendered
+
+
+def test_channel_label_rejects_multiline_or_oversized_values(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10 * HOUR_NS, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(
+        tmp_path / "account", account_id="notify", clock=clock, id_seed="notify"
+    )
+    for invalid in ("two\nlines", "x" * 121):
+        with pytest.raises(ValueError):
+            AccountNotificationEngine(
+                kernel=kernel,
+                state_path=tmp_path / "state.json",
+                clock=clock,
+                channel_label=invalid,
+            )
+    with pytest.raises(ValueError):
+        AccountNotificationEngine(
+            kernel=kernel,
+            state_path=tmp_path / "state.json",
+            clock=clock,
+            heading="   ",
+        )
+
+
+def test_paper_heading_labels_entry_risk_alerts(tmp_path: Path) -> None:
+    kernel, clock, _notifier, snapshot, policy = _setup_risk_notifications(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "paper-risk-state.json",
+        clock=clock,
+        heading="Bybit paper",
+    )
+    baseline = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+    notifier.commit(baseline)
+
+    _submit_entry_risk_decision(
+        kernel,
+        snapshot=snapshot,
+        loose_policy=policy,
+        batch_id="rej-1",
+    )
+    update = notifier.prepare(midpoint_by_symbol={}, health="healthy")
+
+    assert "⚠️ Entry blocked by account risk · Bybit paper" in update.message
+    assert "Bybit demo" not in update.message
+
+
+def test_deliver_notification_batch_commits_only_after_full_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import liquidity_migration.telegram as telegram_module
+
+    kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
+    state_path = tmp_path / "notify-state.json"
+    notifier = AccountNotificationEngine(kernel=kernel, state_path=state_path, clock=clock)
+    logger = logging.getLogger("test-deliver-notification-batch")
+    batch = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    assert batch.messages
+
+    monkeypatch.setattr(telegram_module, "send_telegram_message", lambda page, enabled=True: False)
+    assert not account_notifications_module.deliver_notification_batch(
+        notifier, batch, context="paper account", logger=logger
+    )
+    assert not state_path.exists()
+
+    def _raise(page: str, enabled: bool = True) -> bool:
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(telegram_module, "send_telegram_message", _raise)
+    assert not account_notifications_module.deliver_notification_batch(
+        notifier, batch, context="paper account", logger=logger
+    )
+    assert not state_path.exists()
+
+    sent_pages: list[str] = []
+
+    def _accept(page: str, enabled: bool = True) -> bool:
+        sent_pages.append(page)
+        return True
+
+    monkeypatch.setattr(telegram_module, "send_telegram_message", _accept)
+    assert account_notifications_module.deliver_notification_batch(
+        notifier, batch, context="paper account", logger=logger
+    )
+    assert state_path.exists()
+    assert sent_pages == list(batch.messages)
+    assert notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy").message == ""
+
+
+def test_deliver_notification_batch_commits_empty_batches_without_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import liquidity_migration.telegram as telegram_module
+
+    kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
+    state_path = tmp_path / "notify-state.json"
+    notifier = AccountNotificationEngine(kernel=kernel, state_path=state_path, clock=clock)
+    notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
+
+    def _explode(page: str, enabled: bool = True) -> bool:
+        raise AssertionError("no transport call expected for an empty batch")
+
+    monkeypatch.setattr(telegram_module, "send_telegram_message", _explode)
+    quiet = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    assert not quiet.messages
+    assert account_notifications_module.deliver_notification_batch(
+        notifier, quiet, context="paper account", logger=logging.getLogger("test")
+    )

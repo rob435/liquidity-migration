@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from dataclasses import asdict, dataclass, field
@@ -77,14 +78,23 @@ class AccountNotificationEngine:
         state_path: str | Path,
         clock: Clock | None = None,
         loss_thresholds: Sequence[float] = (-0.05, -0.10, -0.20),
+        heading: str = "Bybit demo",
+        channel_label: str = "",
     ) -> None:
         thresholds = tuple(sorted((float(value) for value in loss_thresholds), reverse=True))
         if not thresholds or any(not math.isfinite(value) or value >= 0.0 for value in thresholds):
             raise ValueError("loss thresholds must be finite negative returns")
+        if not heading.strip():
+            raise ValueError("notification heading must be non-empty")
+        label = channel_label.strip()
+        if "\n" in label or len(label) > 120:
+            raise ValueError("channel label must be a single line of at most 120 characters")
         self.kernel = kernel
         self.state_path = Path(state_path).expanduser()
         self.clock = clock or SystemClock()
         self.loss_thresholds = thresholds
+        self.heading = heading.strip()
+        self.channel_label = label
 
     def prepare(
         self,
@@ -144,6 +154,7 @@ class AccountNotificationEngine:
                         event,
                         notification_state=next_state,
                         kernel_state=kernel_state,
+                        heading=self.heading,
                     )
             _clear_recent_entry_rejection_counters(next_state)
             bootstrap_messages.extend(_current_protection_hazard_messages(kernel_state))
@@ -185,16 +196,26 @@ class AccountNotificationEngine:
                     continuous_status=continuous_status,
                     now_ns=now,
                     notification_state=next_state,
+                    heading=self.heading,
                 )
             )
             next_state.last_hour_bucket = hour_bucket
             _clear_recent_entry_rejection_counters(next_state)
         return AccountNotificationBatch(
-            messages=_paginate_sections(sections),
+            messages=self._labelled_pages(sections),
             next_state=next_state,
             event_messages=tuple(event_messages),
             hourly_included=hourly,
         )
+
+    def _labelled_pages(self, sections: Sequence[str]) -> tuple[str, ...]:
+        if not self.channel_label:
+            return _paginate_sections(sections)
+        # The label counts toward every page's Telegram budget so labelled
+        # pages can never exceed the transport limit the plain path respects.
+        overhead = len(self.channel_label) + 1
+        pages = _paginate_sections(sections, max_chars=3900 - overhead)
+        return tuple(f"{self.channel_label}\n{page}" for page in pages)
 
     def commit(self, batch: AccountNotificationBatch) -> None:
         payload = canonical_json(asdict(batch.next_state)) + b"\n"
@@ -285,6 +306,7 @@ class AccountNotificationEngine:
                         event,
                         notification_state=state,
                         kernel_state=kernel_state,
+                        heading=self.heading,
                     )
                 )
             elif event.event_type == AccountEventType.FILL.value:
@@ -436,6 +458,7 @@ def _hourly_summary(
     continuous_status: str,
     now_ns: int,
     notification_state: AccountNotificationState,
+    heading: str = "Bybit demo",
 ) -> str:
     positions = [
         (symbol, position) for symbol, position in sorted(state.positions.items()) if position.signed_qty != 0.0
@@ -444,7 +467,7 @@ def _hourly_summary(
         venue = {
             str(symbol).upper(): float(qty) for symbol, qty in (venue_positions or {}).items() if float(qty) != 0.0
         }
-        lines = [f"🕐 Bybit demo · account update · {_utc_hhmm(now_ns)} UTC"]
+        lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
         if position_truth_status == "mismatch":
             lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
         elif position_truth_status == "stale":
@@ -469,7 +492,7 @@ def _hourly_summary(
     exposure = 0.0
     unrealized = 0.0
     unpriced_symbols: list[str] = []
-    lines = [f"🕐 Bybit demo · account update · {_utc_hhmm(now_ns)} UTC"]
+    lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
     for symbol, position in positions:
         stop = _active_stop(state, symbol)
         stop_text = f" · SL ${stop:,.8g}" if stop > 0.0 else " · SL unavailable"
@@ -524,6 +547,7 @@ def _entry_risk_decision_messages(
     *,
     notification_state: AccountNotificationState,
     kernel_state: AccountState,
+    heading: str = "Bybit demo",
 ) -> list[str]:
     batch_id = event.correlation_id
     proposals = _entry_target_proposals(kernel_state, batch_id=batch_id)
@@ -549,7 +573,7 @@ def _entry_risk_decision_messages(
         scope = _entry_scope(resolved)
         evaluation_label = "evaluation" if rejected_evaluations == 1 else "evaluations"
         return [
-            "✅ Entry risk block cleared · Bybit demo\n"
+            f"✅ Entry risk block cleared · {heading}\n"
             f"{scope}\n"
             f"Account risk accepted after {rejected_evaluations} rejected "
             f"{evaluation_label}; execution/fill is still pending."
@@ -603,7 +627,11 @@ def _entry_risk_decision_messages(
 
     if not first and not changed:
         return []
-    title = "⚠️ Entry blocked by account risk · Bybit demo" if first else "⚠️ Entry risk block changed · Bybit demo"
+    title = (
+        f"⚠️ Entry blocked by account risk · {heading}"
+        if first
+        else f"⚠️ Entry risk block changed · {heading}"
+    )
     human_reasons = "; ".join(_human_reason(reason) for reason in reasons)
     return [
         f"{title}\n"
@@ -1036,3 +1064,44 @@ def _human_reason(value: str) -> str:
 def _utc_hhmm(now_ns: int) -> str:
     total_minutes = (now_ns // 60_000_000_000) % (24 * 60)
     return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def deliver_notification_batch(
+    engine: AccountNotificationEngine,
+    batch: AccountNotificationBatch,
+    *,
+    context: str,
+    logger: logging.Logger,
+) -> bool:
+    """Send every page, then commit; a partial delivery never advances state.
+
+    A transport retry can duplicate an already-sent page, but committed state
+    can never acknowledge and permanently omit unsent facts.
+    """
+
+    if not batch.messages:
+        engine.commit(batch)
+        return True
+    for page_number, page in enumerate(batch.messages, start=1):
+        try:
+            from .telegram import send_telegram_message
+
+            sent = send_telegram_message(page, enabled=True)
+        except Exception:  # noqa: BLE001 - do not advance dedupe state on failure
+            logger.exception(
+                "%s Telegram delivery failed page=%d/%d",
+                context,
+                page_number,
+                len(batch.messages),
+            )
+            return False
+        if not sent:
+            logger.error(
+                "%s Telegram delivery returned false page=%d/%d",
+                context,
+                page_number,
+                len(batch.messages),
+            )
+            return False
+    engine.commit(batch)
+    return True

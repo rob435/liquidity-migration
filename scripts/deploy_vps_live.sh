@@ -518,6 +518,25 @@ allowed_tuning = {
     "ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS",
 }
 values = {key: value for key, value in existing.items() if key in allowed_tuning}
+# The paper owner unit enables Telegram, so provisioning must either keep the
+# operator-provided notification credentials or seed them from the demo
+# notification channel. Venue credentials remain forbidden above; these two
+# keys are notification transport only.
+telegram_keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+telegram = {key: existing.get(key, "").strip() for key in telegram_keys}
+if not all(telegram.values()):
+    demo_channel = Path("/etc/liquidity-migration/bybit-demo.env")
+    seeded = (
+        load_private_systemd_environment(demo_channel) if demo_channel.is_file() else {}
+    )
+    for key in telegram_keys:
+        telegram[key] = telegram[key] or seeded.get(key, "").strip()
+if not all(telegram.values()):
+    raise SystemExit(
+        "paper Telegram credentials unavailable: provide TELEGRAM_BOT_TOKEN and "
+        "TELEGRAM_CHAT_ID in the paper environment or bybit-demo.env"
+    )
+values.update(telegram)
 values.update(
     {
         "ACCOUNT_PAPER_KERNEL_REQUIRED": "1",

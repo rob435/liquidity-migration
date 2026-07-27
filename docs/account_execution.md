@@ -232,8 +232,12 @@ The demo owner reads:
 
 The paper owner reads
 `/etc/liquidity-migration/account-paper-execution.env` and the resolved sleeve
-file. Target producers inherit only the public/route values they need and
-explicitly unset private API, mainnet, `REAL_MONEY`, and Telegram variables.
+file. The paper environment carries the Telegram notification credentials
+(seeded from the demo notification channel at provisioning; venue credentials
+remain forbidden there), so the paper owner emits its own labelled
+`Bybit paper` digests and lifecycle alerts through the shared notifier engine.
+Target producers inherit only the public/route values they need and explicitly
+unset private API, mainnet, `REAL_MONEY`, and Telegram variables.
 Paper runtime verification reopens only those paper/non-secret files; the
 full-profile issuer binds the demo credential file once while the fleet is
 stopped. Paper units explicitly pin `REAL_MONEY=false`, reject inherited
