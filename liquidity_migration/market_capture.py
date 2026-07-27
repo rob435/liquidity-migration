@@ -1287,6 +1287,12 @@ class BybitRawPublicMarketStream:
         self._send_lock = threading.Lock()
         self._subscription_started_monotonic: dict[str, float] = {}
         self._last_orderbook_message_monotonic: dict[str, float] = {}
+        # Cumulative transport evidence that deliberately survives socket
+        # detach: per-attempt clocks reset on every reconnect, so a fast-fail
+        # reconnect loop would otherwise never cross any staleness bound.
+        self._stream_started_monotonic: float | None = None
+        self._last_frame_monotonic: float | None = None
+        self._last_outage_warning_monotonic: float | None = None
         if websocket_factory is None:
             from websocket import WebSocketApp
 
@@ -1438,6 +1444,7 @@ class BybitRawPublicMarketStream:
                 symbol = ""
                 prior_frame_at: float | None = None
                 observed_at: float | None = None
+                outage_recovered = False
                 with self._lock:
                     # The watchdog may retire a generation while JSON parsing
                     # is in flight. The lock orders frame acceptance against
@@ -1456,6 +1463,15 @@ class BybitRawPublicMarketStream:
                             prior_frame_at = self._last_orderbook_message_monotonic.get(symbol)
                             observed_at = self._monotonic()
                             self._last_orderbook_message_monotonic[symbol] = observed_at
+                            self._last_frame_monotonic = observed_at
+                            if self._last_outage_warning_monotonic is not None:
+                                self._last_outage_warning_monotonic = None
+                                outage_recovered = True
+                if outage_recovered:
+                    _logger.info(
+                        "raw Bybit public stream recovered: frames flowing again for %s",
+                        symbol,
+                    )
                 try:
                     # Capture receive time before parsing/storage work.
                     self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
@@ -1494,10 +1510,37 @@ class BybitRawPublicMarketStream:
         """
 
         with self._lock:
-            if self._stop.is_set() or self._socket is None:
+            if self._stop.is_set():
                 return ()
             now = self._monotonic()
-            if not self._socket_open:
+            # Cumulative transport-outage bound. Per-attempt clocks reset on
+            # every reconnect and the per-symbol maps are wiped on detach, so
+            # a dead socket followed by fast-failing reconnect attempts would
+            # otherwise never cross any threshold. This bound counts from the
+            # last accepted frame (or stream start) regardless of socket
+            # state, warns once per silent window, and force-closes whatever
+            # attempt is current so the loop cannot sit half-dead.
+            outage_stale: tuple[str, ...] = ()
+            outage_seconds = 0.0
+            outage_socket: Any | None = None
+            if self._symbols and self._stream_started_monotonic is not None:
+                reference = (
+                    self._last_frame_monotonic
+                    if self._last_frame_monotonic is not None
+                    else self._stream_started_monotonic
+                )
+                if now - reference >= self.stale_reconnect_seconds:
+                    last_warned = self._last_outage_warning_monotonic
+                    if last_warned is None or now - last_warned >= self.stale_reconnect_seconds:
+                        self._last_outage_warning_monotonic = now
+                        outage_stale = tuple(sorted(self._symbols))
+                        outage_seconds = now - reference
+                        outage_socket = self._detach_socket_locked()
+            if outage_stale:
+                pass
+            elif self._socket is None:
+                return ()
+            elif not self._socket_open:
                 started_at = self._connection_started_monotonic
                 if started_at is None or now - started_at < self.first_frame_reconnect_seconds:
                     return ()
@@ -1523,6 +1566,22 @@ class BybitRawPublicMarketStream:
                 if not stale:
                     return ()
                 socket = self._detach_socket_locked()
+        if outage_stale:
+            _logger.warning(
+                "raw Bybit public stream outage: no accepted frame for %.0fs "
+                "(threshold %.0fs) across reconnect attempts; symbols=%s; "
+                "forcing socket rebuild",
+                outage_seconds,
+                self.stale_reconnect_seconds,
+                ",".join(outage_stale),
+            )
+            outage_close = getattr(outage_socket, "close", None)
+            if callable(outage_close):
+                try:
+                    outage_close()
+                except Exception:  # noqa: BLE001 - the runner still owns reconnect
+                    _logger.exception("failed to close stalled Bybit public socket")
+            return outage_stale
         _logger.warning(
             "Bybit public orderbook connection unhealthy; reconnecting socket: "
             "mode=%s symbols=%s first_frame_threshold_seconds=%.1f "
@@ -1629,6 +1688,10 @@ class BybitRawPublicMarketStream:
     def start(self, symbols: Iterable[str]) -> None:
         self.update_symbols(symbols)
         self._stop.clear()
+        with self._lock:
+            self._stream_started_monotonic = self._monotonic()
+            self._last_frame_monotonic = None
+            self._last_outage_warning_monotonic = None
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._run, name="bybit-raw-market", daemon=True)
             self._thread.start()

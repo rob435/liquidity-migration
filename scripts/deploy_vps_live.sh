@@ -1024,6 +1024,18 @@ install_mode() {
         tests/test_strategy_planning.py \
         tests/test_runtime_scripts.py
 
+    # Host log/secret hygiene (2026-07-27 audit): bound journald so unbounded
+    # logs can never crowd the data roots, and keep at most the single newest
+    # timestamped backup of the demo credential file.
+    install -d -m 0755 /etc/systemd/journald.conf.d
+    printf '[Journal]\nSystemMaxUse=1G\n' \
+        > /etc/systemd/journald.conf.d/liquidity-migration.conf
+    systemctl restart systemd-journald 2>/dev/null || true
+    find /etc/liquidity-migration -maxdepth 1 -name 'bybit-demo.env.backup.*' -type f \
+        | sort | head -n -1 | while IFS= read -r stale_backup; do
+        rm -f -- "$stale_backup"
+    done
+
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
     ensure_paper_runtime_identity

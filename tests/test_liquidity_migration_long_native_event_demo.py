@@ -1229,7 +1229,9 @@ def test_account_route_blocks_risk_increase_without_fresh_owner_health(
 
     assert payload["cycle"]["entry_targets_queued"] == 0
     assert payload["cycle"]["skipped_account_owner_health"] == 1
-    assert payload["cycle"]["equity_usdt"] == 0.0
+    # Null, not a 0.0 sentinel: cycles-derived equity curves must not read a
+    # blocked-owner cycle as a -100% equity spike.
+    assert payload["cycle"]["equity_usdt"] is None
     assert payload["cycle"]["account_owner_health_error"]
     assert list((inbox / "pending").glob("*.json")) == []
 

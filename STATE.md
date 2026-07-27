@@ -82,9 +82,18 @@ preserves operator-provided paper Telegram credentials or seeds them from
 environment); both paper producers still scrub Telegram variables. Takes
 effect only at the next owner-dispatched rollout (env content changes require
 authority reissue). Until then the paper fleet remains Telegram-silent. The
-same rollout carries the 2026-07-27 observability fixes (public-stream
-transport logging, owner INFO logging, Telegram delivery audit trail) from
-the fleet audit (docs/audit/2026-07-27-vps-fleet-telegram-audit.md). Timing
+same rollout carries the 2026-07-27 observability and resilience fixes
+(public-stream transport logging + cumulative-outage watchdog, owner INFO
+logging, Telegram delivery audit trail, REST-timeout-tolerant periodic
+reconcile, watchdog disk/digest/hedge-runtime alerts and heartbeat
+send-failure suppression, LONG_PAPER_SLEEVE toggle, null equity on blocked
+cycles, journald cap + credential-backup pruning at provision) from the
+fleet audit (docs/audit/2026-07-27-vps-fleet-telegram-audit.md). The BTC
+hedge sizing and BTC trend gate were independently verified
+legit-as-designed (bit-identical recomputation; see the audit follow-up
+section); the one open hedge item is the policy-due model-prior
+regeneration, which needs the next standard continuous equity refresh's
+component ledgers. Timing
 note: the demo-rule receipt expires 2026-07-29T21:57:44Z and the rollout
 path auto-refreshes rules only once the receipt is already expired, so
 dispatching shortly after that instant refreshes receipts and ships these

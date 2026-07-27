@@ -77,31 +77,86 @@ Takes effect at the next owner-dispatched rollout.
    updates.
 2. **Host CPU/memory saturation** (load ~5–6 on 2 vCPU, swap in use) —
    upsize or shed load; the watchdog's 3-minute full-authorization
-   revalidation (~13 s CPU per run) is the biggest sheddable cost.
+   revalidation (~13 s CPU per run) is the biggest sheddable cost. The
+   follow-up pass added a hedge-run wall-time alert (>180 s) so cadence
+   overrun pages instead of silently compounding.
 3. **No external dead-man's switch** — `LIVENESS_HEARTBEAT_URL` is designed
    but unprovisioned; total box death silences the watchdog and its alert
-   channel together. Needs an owner-provisioned heartbeat URL.
-4. **Single Telegram channel, no delivery-failure escalation** — a dead bot
-   token silences digests and watchdog alerts while everything looks
-   healthy (the new delivery log line at least makes failures visible in
-   journald).
-5. **Reconnect-loop detection hole** — the stream watchdog should keep a
-   cumulative last-accepted-frame timestamp that survives socket detach, and
-   the owner loop could self-check sidecar age (~90 s) with a proactive
-   resubscribe; optionally send Bybit's application-level ping. Deliberately
-   not changed this session (behavioral change to reconnect logic deserves
-   focused validation).
+   channel together. Needs an owner-provisioned heartbeat URL. The
+   follow-up pass makes the (future) heartbeat also page on
+   notification-channel death: the ping is now suppressed whenever a
+   Telegram send fails.
+4. **Single Telegram channel, no delivery-failure escalation** — partially
+   FIXED in the follow-up pass: the watchdog now alerts when the demo
+   owner's hourly digest stops committing (`account_digest_stale`), added a
+   disk-space alert (WARNING >80 % / CRITICAL >90 %), and suppresses the
+   external heartbeat on send failures; full independence still requires
+   the owner-provisioned heartbeat URL.
+5. **Reconnect-loop detection hole** — FIXED in the follow-up pass: the
+   stream now keeps a cumulative last-accepted-frame timestamp that
+   survives socket detach; the watchdog warns once per silent window and
+   force-closes any half-dead attempt, and logs recovery when frames flow
+   again.
 6. **Owner process died once on a REST timeout** (Jul 26 03:05, ErrCode
-   10000 killed the process; systemd restarted it in ~20 s) — separate
-   resilience item.
+   10000 killed the process; systemd restarted it in ~20 s) — FIXED in the
+   follow-up pass: the periodic reconcile catches transport failures, logs,
+   and retries next interval; the health chain's recency requirement still
+   fails closed if refreshes keep failing. Startup reconciliation stays
+   strict.
 7. Lower severity: continuous-hedge oneshot consumes 72–95 s of its ~5-min
-   cadence on the saturated host; hedge targets are below venue minimum
-   notional at current scale (zero hedge fills ever); journald at 762 MB and
-   5 stale copies of the secrets env file; `LONG_PAPER_SLEEVE` toggle
-   missing (long-paper cycle monitoring rides the demo `LONG_SLEEVE`);
+   cadence on the saturated host; hedge targets are below the venue floor at
+   current scale (zero hedge fills ever — see the verification below;
+   correction: the binding constraint for BTCUSDT is min_qty 0.001 BTC,
+   ~65 USDT, not ~5 USDT min notional); journald at 762 MB and 5 stale
+   copies of the secrets env file — FIXED at next rollout (deploy now caps
+   journald at `SystemMaxUse=1G` and prunes all but the newest credential
+   backup); `LONG_PAPER_SLEEVE` toggle missing — FIXED (watchdog-side
+   toggle, defaulting to the demo `LONG_SLEEVE` so nothing regresses);
    legacy strategy-local ledgers misread as "no trading since deploy";
-   cycles dataset writes `equity_usdt=0.0` sentinel rows during owner warmup
-   stalls (~21 in July, cosmetic).
+   cycles dataset `equity_usdt=0.0` sentinel rows — FIXED (both daemons now
+   record null when owner health is unavailable; kill criteria were never
+   affected — they read the account journal, not the cycles dataset).
+
+## 2026-07-27 follow-up: BTC hedge and BTC gate verified legit-as-designed
+
+Two independent probes, each adversarially re-verified against primary
+sources (code, the immutable prior, the VPS journal, and public market
+data):
+
+- **Hedge sizing** — the 3.92 USDT BTC target against the 147.67 USDT short
+  book (symbol `4USDT`, qty −14601 — the symbol name, not $4 of exposure)
+  reproduces **bit-identically** from first principles:
+  `target = clip(−beta_btc, 0, 2) · intensity · short_gross / 0.5` with
+  prior betas `beta_btc = −0.02213`, `beta_eth = +0.000248` (ETH leg 0 via
+  the long-only clip) and btcvol intensity 0.6. Equity cancels; only short
+  gross matters. Zero fills ever is the designed outcome: the sub-step
+  intent is deliberately preserved so the kernel emits an explicit
+  `qty_step_mismatch` rejection (22 ever: 8 on Jul 25 against the DEXEUSDT
+  short, 14 during the 4USDT window; deduplicated, no Telegram spam). The
+  hedge first becomes executable at short gross ≈ 2.5–4.9 k USDT
+  (intensity 0.6) — comfortably reachable under the 20 k gross cap for a
+  normally-sized book. The tiny hedge is the 2026-07-24 measurement ("beta
+  hedging relieves only 5 %") operating as designed, and the
+  `hedged_V3_proposal` parity render uses the identical construct.
+- **BTC trend gate** — the value (0.0883 on Jul 27) is the sum of the prior
+  30 UTC-day BTC daily returns, current day excluded; every distinct value
+  the tape has ever carried reproduces **bit-for-bit** from public Bybit
+  daily klines. PIT-safe twice over (fetch window ends at the last closed
+  hour; the accumulation loop cannot leak a day's own return into its own
+  gate value). "Uptrend allows short-fade entries" is the measured design
+  (ungated book ≈ dead: +1.29 bp/day vs +41.09 gated), not a sign error.
+- **One actionable item (medium)**: the hedge model prior
+  (`deploy/hedge_warmstart/bybit_warmstart.csv`, generated 2026-07-10 from
+  the OLD 3-component ensemble ledgers) predates the `single_fund0`
+  replacement; `docs/hedge_refresh_policy.md` schedules regeneration after
+  each standard research refresh, which is now due. It requires the fresh
+  component ledgers from the standard continuous equity refresh (not on
+  disk locally), so it is queued as the next research-ops action rather
+  than executed blind. Practical impact today is nil — any plausible beta
+  stays far below the venue floor at the current book size.
+- Deliberate non-change: no `below_venue_minimum` status was added to the
+  hedge runner — the sub-minimum path already produces an explicit,
+  deduplicated, journaled kernel rejection by design.
 
 ## Verified healthy
 

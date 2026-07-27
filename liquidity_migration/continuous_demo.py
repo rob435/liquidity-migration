@@ -2662,7 +2662,9 @@ def run_continuous_demo_cycle(
             "exits": 0,
             "candidates": len(candidates),
             "planned_exits": len(exit_plans),
-            "equity_usdt": equity_usdt,
+            # Null, not 0.0, when owner health is unavailable: a literal zero
+            # reads as a -100% equity spike in every cycles-derived curve.
+            "equity_usdt": equity_usdt if not account_owner_health_error else None,
             "entry_targets_queued": published_entry_target_count,
             "exit_targets_queued": published_exit_target_count,
             "target_intents_queued": (published_entry_target_count + published_exit_target_count),

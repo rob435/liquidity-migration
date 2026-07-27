@@ -571,7 +571,9 @@ def run_long_native_demo_cycle(
             "terminal_entry_attempt_suppressions": terminal_entry_suppressions,
             "account_owner_health_error": account_owner_health_error,
             "open_long_components": _count_open_long_positions(all_trades),
-            "equity_usdt": equity_usdt,
+            # Null, not 0.0, when owner health is unavailable: a literal zero
+            # reads as a -100% equity spike in every cycles-derived curve.
+            "equity_usdt": equity_usdt if not account_owner_health_error else None,
             "order_notional_pct_equity": order_notional_pct_equity,
             "projected_full_book_initial_margin_pct_equity": margin_projection["full_book_initial_margin_pct_equity"],
             "projected_cycle_initial_margin_pct_equity": margin_projection["cycle_initial_margin_pct_equity"],

@@ -600,3 +600,32 @@ def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
     assert set(refs) == {"BTCUSDT"}
     assert "book_sequence_gap" in skipped["BUSDT"]
     assert skipped["TLMUSDT"] == "no_book"
+
+
+def test_periodic_reconciliation_survives_transient_venue_read_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from liquidity_migration.account_service_runner import run_periodic_reconciliation
+
+    class TimeoutReconciler:
+        def reconcile_once(self):
+            raise RuntimeError("Bybit get_positions failed: Server Timeout (ErrCode: 10000)")
+
+    class HealthyFundingReconciler:
+        # The cycle runs funding first, then positions; the position timeout
+        # must discard this cycle's funding result too.
+        def reconcile_once(self):
+            return object()
+
+    with caplog.at_level("ERROR", logger="liquidity_migration.account_service_runner"):
+        report, funding_report = run_periodic_reconciliation(
+            reconciler=TimeoutReconciler(),  # type: ignore[arg-type]
+            funding_reconciler=HealthyFundingReconciler(),  # type: ignore[arg-type]
+        )
+
+    assert report is None
+    assert funding_report is None
+    assert any(
+        "periodic account reconciliation failed" in record.getMessage()
+        for record in caplog.records
+    )

@@ -107,6 +107,30 @@ def _run_reconciliation_cycle(
     return position_report, funding_report
 
 
+def run_periodic_reconciliation(
+    *,
+    reconciler: BybitAccountReconciler,
+    funding_reconciler: BybitAccountFundingReconciler,
+) -> tuple[AccountReconciliationReport | None, AccountFundingReconciliationReport | None]:
+    """One tolerated refresh attempt for the owner loop.
+
+    A lone REST timeout on a read is retryable without giving up
+    position-truth guarantees: the health chain's recency requirement fails
+    closed on its own if refreshes keep failing, while a process death here
+    would take down execution, protection, and health publishing at once.
+    Startup reconciliation stays strict and does not use this wrapper.
+    """
+
+    try:
+        return _run_reconciliation_cycle(
+            reconciler=reconciler,
+            funding_reconciler=funding_reconciler,
+        )
+    except Exception:  # noqa: BLE001 - transient venue read failure must not kill the owner
+        _logger.exception("periodic account reconciliation failed; retrying next interval")
+        return None, None
+
+
 def require_startup_reconciliation_safe(
     report: AccountReconciliationReport,
 ) -> None:
@@ -582,15 +606,19 @@ def main(argv: list[str] | None = None) -> int:
             loop_sequence += 1
             markout_observer.drain()
             if now - last_reconcile >= max(args.reconcile_seconds, 0.1):
-                report, funding_report = _run_reconciliation_cycle(
+                report, funding_report = run_periodic_reconciliation(
                     reconciler=reconciler,
                     funding_reconciler=funding_reconciler,
                 )
-                latest_reconcile_report = report
-                if not report.healthy:
-                    _logger.error("account reconcile blocked new intents: %s", "; ".join(report.mismatches))
-                if not funding_report.healthy:
-                    _logger.error("account funding reconcile blocked new intents")
+                if report is not None:
+                    latest_reconcile_report = report
+                    if not report.healthy:
+                        _logger.error(
+                            "account reconcile blocked new intents: %s",
+                            "; ".join(report.mismatches),
+                        )
+                    if funding_report is not None and not funding_report.healthy:
+                        _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
             private_stream_status = private_stream_supervisor.check(now_monotonic=now)
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):

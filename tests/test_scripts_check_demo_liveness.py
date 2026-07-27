@@ -1820,3 +1820,105 @@ def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
         )
         == []
     )
+
+
+def test_disk_space_alert_thresholds(monkeypatch, tmp_path: Path) -> None:
+    def _usage(free_fraction: float):
+        return SimpleNamespace(f_blocks=1000, f_frsize=1_000_000, f_bavail=int(1000 * free_fraction))
+
+    monkeypatch.setattr(M.os, "statvfs", lambda _path: _usage(0.25))
+    assert M.evaluate_disk_space(path=str(tmp_path)) is None
+
+    monkeypatch.setattr(M.os, "statvfs", lambda _path: _usage(0.15))
+    warning = M.evaluate_disk_space(path=str(tmp_path))
+    assert warning is not None and warning.severity == M.WARNING
+    assert warning.key == "disk_space"
+    assert "85% full" in warning.message
+
+    monkeypatch.setattr(M.os, "statvfs", lambda _path: _usage(0.05))
+    critical = M.evaluate_disk_space(path=str(tmp_path))
+    assert critical is not None and critical.severity == M.CRITICAL
+
+
+def test_notification_delivery_staleness(tmp_path: Path) -> None:
+    state = tmp_path / "account_notifications.json"
+    hour_ns = 3_600_000_000_000
+    now_ns = 500_000 * hour_ns
+
+    # Missing file: owner without Telegram, never alerts.
+    assert M.evaluate_notification_delivery(state_path=state, now_ns=now_ns) is None
+
+    # Fresh bucket (current hour) and last hour are both quiet.
+    for offset in (0, 1, 2):
+        state.write_text('{"last_hour_bucket": %d}' % (500_000 - offset))
+        assert (
+            M.evaluate_notification_delivery(state_path=state, now_ns=now_ns) is None
+        ), offset
+
+    # Two full missed hourly digests alert.
+    state.write_text('{"last_hour_bucket": %d}' % (500_000 - 3))
+    stale = M.evaluate_notification_delivery(state_path=state, now_ns=now_ns)
+    assert stale is not None
+    assert stale.key == "account_digest_stale"
+    assert stale.severity == M.WARNING
+    assert "2 full hour(s)" in stale.message
+
+    # Corrupt state is itself worth a warning.
+    state.write_text("{not json")
+    corrupt = M.evaluate_notification_delivery(state_path=state, now_ns=now_ns)
+    assert corrupt is not None and "unreadable" in corrupt.message
+
+
+def test_oneshot_runtime_alert() -> None:
+    assert (
+        M.evaluate_oneshot_runtime(
+            unit="hedge.service",
+            max_seconds=180.0,
+            start_monotonic_usec=None,
+            exit_monotonic_usec=None,
+        )
+        is None
+    )
+    # Currently running (exit stamp older than start): no alert.
+    assert (
+        M.evaluate_oneshot_runtime(
+            unit="hedge.service",
+            max_seconds=180.0,
+            start_monotonic_usec=2_000_000,
+            exit_monotonic_usec=1_000_000,
+        )
+        is None
+    )
+    # Completed within bound.
+    assert (
+        M.evaluate_oneshot_runtime(
+            unit="hedge.service",
+            max_seconds=180.0,
+            start_monotonic_usec=1_000_000,
+            exit_monotonic_usec=1_000_000 + 90_000_000,
+        )
+        is None
+    )
+    slow = M.evaluate_oneshot_runtime(
+        unit="hedge.service",
+        max_seconds=180.0,
+        start_monotonic_usec=1_000_000,
+        exit_monotonic_usec=1_000_000 + 240_000_000,
+    )
+    assert slow is not None
+    assert slow.severity == M.WARNING
+    assert "240s" in slow.message
+
+
+def test_long_paper_sleeve_defaults_to_demo_toggle(monkeypatch) -> None:
+    monkeypatch.delenv("LONG_PAPER_SLEEVE", raising=False)
+    monkeypatch.setenv("LONG_SLEEVE", "on")
+    assert M._long_paper_sleeve_on() is True
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    assert M._long_paper_sleeve_on() is False
+    # An explicit paper toggle wins over the demo fallback in both directions.
+    monkeypatch.setenv("LONG_PAPER_SLEEVE", "on")
+    assert M._long_paper_sleeve_on() is True
+    monkeypatch.setenv("LONG_SLEEVE", "on")
+    monkeypatch.setenv("LONG_PAPER_SLEEVE", "off")
+    assert M._long_paper_sleeve_on() is False

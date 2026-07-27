@@ -441,6 +441,154 @@ def gather_demo_rule_alerts(
     return [] if alert is None else [alert]
 
 
+def _long_paper_sleeve_on() -> bool:
+    """Paper LONG monitoring toggle, defaulting to the demo LONG toggle.
+
+    No LONG_PAPER_SLEEVE exists in the deployed sleeve contract yet; without
+    this fallback, turning the demo LONG sleeve off would silently drop the
+    still-running paper LONG producer from cycle monitoring.
+    """
+
+    return _sleeve_on("LONG_PAPER_SLEEVE", default=os.environ.get("LONG_SLEEVE", "off"))
+
+
+def evaluate_disk_space(
+    *,
+    path: str,
+    warning_fraction: float = 0.80,
+    critical_fraction: float = 0.90,
+) -> Alert | None:
+    """Page on the root cause before disk exhaustion cascades as owner-health noise."""
+
+    try:
+        usage = os.statvfs(path)
+    except OSError as exc:
+        return Alert(
+            key="disk_space",
+            severity=WARNING,
+            message=f"disk usage for {path} is unreadable: {type(exc).__name__}: {exc}",
+        )
+    total = usage.f_blocks * usage.f_frsize
+    if total <= 0:
+        return None
+    available = usage.f_bavail * usage.f_frsize
+    used_fraction = 1.0 - (available / total)
+    if used_fraction < warning_fraction:
+        return None
+    severity = CRITICAL if used_fraction >= critical_fraction else WARNING
+    return Alert(
+        key="disk_space",
+        severity=severity,
+        message=(
+            f"disk holding {path} is {used_fraction:.0%} full "
+            f"({available / 1e9:.1f} GB free); journals and capture roots "
+            "fail closed when it fills"
+        ),
+    )
+
+
+def evaluate_notification_delivery(
+    *,
+    state_path: Path,
+    now_ns: int,
+    max_missed_hours: int = 2,
+) -> Alert | None:
+    """Alert when the demo owner's hourly digest has stopped committing.
+
+    The notifier commits its state only after every Telegram page delivers,
+    so a stalled last_hour_bucket is direct evidence the operator has not
+    received the digest — a revoked token or chat change is otherwise
+    indistinguishable from 'all quiet'.
+    """
+
+    try:
+        payload = json.loads(state_path.read_bytes())
+        last_hour_bucket = int(payload.get("last_hour_bucket") or 0)
+    except FileNotFoundError:
+        return None  # owner runs without Telegram, or has not sent yet
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return Alert(
+            key="account_digest_stale",
+            severity=WARNING,
+            message=(
+                "account notification state is unreadable: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ),
+        )
+    if last_hour_bucket <= 0:
+        return None
+    now_bucket = int(now_ns // 3_600_000_000_000)
+    missed = now_bucket - last_hour_bucket - 1  # a 0-1 bucket gap is normal
+    if missed < max_missed_hours:
+        return None
+    return Alert(
+        key="account_digest_stale",
+        severity=WARNING,
+        message=(
+            f"account Telegram digest has not committed for {missed} full hour(s); "
+            "the notification channel may be dead (token/chat change or API outage) "
+            "while the fleet looks healthy"
+        ),
+    )
+
+
+def evaluate_oneshot_runtime(
+    *,
+    unit: str,
+    max_seconds: float,
+    start_monotonic_usec: int | None,
+    exit_monotonic_usec: int | None,
+) -> Alert | None:
+    """Warn when a periodic oneshot's completed run consumed too much wall time."""
+
+    if not start_monotonic_usec or not exit_monotonic_usec:
+        return None
+    if exit_monotonic_usec <= start_monotonic_usec:
+        return None  # currently running, or stale ordering
+    duration_seconds = (exit_monotonic_usec - start_monotonic_usec) / 1e6
+    if duration_seconds <= max_seconds:
+        return None
+    return Alert(
+        key=f"oneshot_runtime:{unit}",
+        severity=WARNING,
+        message=(
+            f"{unit} last run took {duration_seconds:.0f}s "
+            f"(bound {max_seconds:.0f}s); on a saturated host it can overrun "
+            "its own cadence and starve the fleet"
+        ),
+    )
+
+
+def _oneshot_run_window_usec(unit: str) -> tuple[int | None, int | None]:
+    try:
+        proc = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                unit,
+                "-p",
+                "ExecMainStartTimestampMonotonic",
+                "-p",
+                "ExecMainExitTimestampMonotonic",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    values: dict[str, int] = {}
+    for line in proc.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and value.strip().isdigit():
+            values[key.strip()] = int(value.strip())
+    return (
+        values.get("ExecMainStartTimestampMonotonic"),
+        values.get("ExecMainExitTimestampMonotonic"),
+    )
+
+
 # Pending resolved-note retries must not share alert cooldown keys.
 _RESOLVED_PREFIX = "resolved:"
 # Records inactive timers for the one-interval escalation debounce.
@@ -585,12 +733,9 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
 def _default_units_for_toggles() -> list[str]:
     units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
     if _sleeve_on("LONG_SLEEVE"):
-        units.extend(
-            [
-                _LONG_DEMO_UNIT,
-                _LONG_PAPER_UNIT,
-            ]
-        )
+        units.append(_LONG_DEMO_UNIT)
+    if _long_paper_sleeve_on():
+        units.append(_LONG_PAPER_UNIT)
     if _continuous_rmom_refresh_on():
         units.extend(
             [
@@ -1239,6 +1384,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="ping this URL on a healthy run (external dead-man's-switch); "
         "defaults to the LIVENESS_HEARTBEAT_URL env var so the unit can wire it via EnvironmentFile",
     )
+    p.add_argument(
+        "--account-notification-state",
+        default=(
+            str(Path(os.environ["ACCOUNT_EXECUTION_ROOT"]) / "account_notifications.json")
+            if os.environ.get("ACCOUNT_EXECUTION_ROOT")
+            else ""
+        ),
+        help="demo owner's committed notification state; alerts when the hourly digest stalls ('' to skip)",
+    )
+    p.add_argument(
+        "--max-oneshot-run-seconds",
+        type=float,
+        default=180.0,
+        help="warn when a monitored periodic oneshot's completed run exceeds this wall time",
+    )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
         "--state-file",
@@ -1405,7 +1565,7 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_LONG_DEMO_UNIT),
             )
         )
-    if args.account_scope == "demo-paper" and long_paper_root is not None and _sleeve_on("LONG_SLEEVE"):
+    if args.account_scope == "demo-paper" and long_paper_root is not None and _long_paper_sleeve_on():
         alerts.extend(
             gather_long_alerts(
                 long_root=long_paper_root,
@@ -1415,6 +1575,27 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_LONG_PAPER_UNIT),
             )
         )
+    disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))
+    if disk_alert is not None:
+        alerts.append(disk_alert)
+    if str(args.account_notification_state).strip():
+        digest_alert = evaluate_notification_delivery(
+            state_path=Path(args.account_notification_state),
+            now_ns=time.time_ns(),
+        )
+        if digest_alert is not None:
+            alerts.append(digest_alert)
+    hedge_service = "liquidity-migration-continuous-hedge.service"
+    if hedge_service in units:
+        start_usec, exit_usec = _oneshot_run_window_usec(hedge_service)
+        runtime_alert = evaluate_oneshot_runtime(
+            unit=hedge_service,
+            max_seconds=args.max_oneshot_run_seconds,
+            start_monotonic_usec=start_usec,
+            exit_monotonic_usec=exit_usec,
+        )
+        if runtime_alert is not None:
+            alerts.append(runtime_alert)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
@@ -1424,6 +1605,7 @@ def main() -> int:
         new_state[f"{_PENDING_TIMER_PREFIX}{unit}"] = now_ms
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    telegram_send_failed = False
     for alert in to_send:
         line = f"🚨 [{alert.severity}] liquidity-migration {ts}\n{alert.message}"
         print(line)
@@ -1434,6 +1616,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:
+                telegram_send_failed = True
                 # An undelivered alert must not advance its cooldown or severity.
                 print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx; will retry next run)")
                 # Revert BOTH the cooldown stamp and the last-sent-severity marker to
@@ -1459,6 +1642,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:
+                telegram_send_failed = True
                 # Retry under a separate namespace so it cannot arm alert cooldown.
                 new_state[retry_key] = now_ms
                 print("(telegram send returned False — resolved note will retry next run)")
@@ -1471,8 +1655,14 @@ def main() -> int:
 
     # Healthy run -> ping the external dead-man's-switch so a TOTAL box death is
     # caught by the external monitor (the on-box watchdog cannot alert if the box
-    # is gone). Only ping when there are no CRITICAL alerts firing.
-    if args.heartbeat_url and not any(a.severity == CRITICAL for a in alerts):
+    # is gone). Only ping when there are no CRITICAL alerts firing AND every
+    # Telegram send this run delivered — a dead notification channel must page
+    # externally instead of looking like "all quiet".
+    if (
+        args.heartbeat_url
+        and not any(a.severity == CRITICAL for a in alerts)
+        and not telegram_send_failed
+    ):
         _ping_heartbeat(args.heartbeat_url)
 
     if not to_send and not resolved:

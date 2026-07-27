@@ -1195,3 +1195,99 @@ def test_raw_stream_registers_transport_callbacks_and_logs_failures(
         assert "1006" in rendered
     finally:
         stream.close()
+
+
+def test_cumulative_outage_bound_fires_between_reconnect_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [100.0]
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=120.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT"})
+    stream._stream_started_monotonic = now[0]
+    # Between reconnect attempts there is no socket at all; the per-attempt
+    # branches would return () here forever.
+    assert stream._socket is None
+
+    now[0] = 219.9
+    assert stream.check_stale_subscriptions() == ()
+
+    with caplog.at_level("WARNING", logger="liquidity_migration.market_capture"):
+        now[0] = 220.0
+        assert stream.check_stale_subscriptions() == ("BTCUSDT",)
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "raw Bybit public stream outage" in rendered
+    assert "no accepted frame for 120s" in rendered
+
+    # Rate-limited: the next watchdog pass inside the same silent window is quiet.
+    now[0] = 230.0
+    assert stream.check_stale_subscriptions() == ()
+    # A full further silent window warns again.
+    now[0] = 340.0
+    assert stream.check_stale_subscriptions() == ("BTCUSDT",)
+
+
+def test_cumulative_outage_counts_from_last_accepted_frame_and_clears_on_recovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sent: list[str] = []
+
+        def send(self, value: str) -> None:
+            self.sent.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    now = [100.0]
+    stream = BybitRawPublicMarketStream(
+        depth=50,
+        include_public_trades=False,
+        on_message=lambda _message: None,
+        websocket_factory=lambda *_args, **_kwargs: None,
+        stale_reconnect_seconds=120.0,
+        monotonic_clock=lambda: now[0],
+    )
+    stream.update_symbols({"BTCUSDT"})
+    stream._stream_started_monotonic = now[0]
+    socket = Socket()
+    stream._socket = socket
+    stream._active_connection_generation = 1
+    stream._on_open(socket, generation=1)
+
+    now[0] = 150.0
+    frame = json.dumps({"topic": "orderbook.50.BTCUSDT", "type": "snapshot", "data": {}})
+    stream._on_message(socket, frame, generation=1)
+    assert stream._last_frame_monotonic == 150.0
+
+    # The frame evidence survives socket detach.
+    with stream._lock:
+        stream._detach_socket_locked()
+    assert stream._socket is None
+
+    now[0] = 269.9
+    assert stream.check_stale_subscriptions() == ()
+    now[0] = 270.0
+    assert stream.check_stale_subscriptions() == ("BTCUSDT",)
+
+    # Recovery: a freshly accepted frame clears the outage latch and logs once.
+    recovered = Socket()
+    stream._socket = recovered
+    stream._active_connection_generation = 2
+    stream._on_open(recovered, generation=2)
+    now[0] = 280.0
+    with caplog.at_level("INFO", logger="liquidity_migration.market_capture"):
+        stream._on_message(recovered, frame, generation=2)
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "raw Bybit public stream recovered" in rendered
+    assert stream._last_outage_warning_monotonic is None
+    now[0] = 399.9
+    assert stream.check_stale_subscriptions() == ()
