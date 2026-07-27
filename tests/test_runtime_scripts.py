@@ -298,6 +298,14 @@ def test_install_provisions_a_credential_fenced_paper_runtime_boundary() -> None
     assert "allowed_tuning" in boundary
     assert "CANDIDATE_UNIVERSE_FILE" in boundary
     assert "BYBIT_DEMO_API_KEY" in boundary
+    # The paper twin's capital base derives from the committed operational
+    # profile rather than a hidden per-host tuning value.
+    assert (
+        'values["PAPER_EQUITY_USDT"] = '
+        "f\"{load_operational_profile(sys.argv[8]).capital_reference_usdt:g}\""
+        in boundary
+    )
+    assert '"PAPER_EQUITY_USDT",' not in boundary
     assert "reset_path_safety preflight-paper" in boundary
     assert "reset_path_safety preflight-demo" in boundary
     assert "reset_path_safety normalize-paper" in boundary

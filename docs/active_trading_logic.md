@@ -155,9 +155,10 @@ a 30% position-weight cap, a 60% BTC-vol target with scale `[0.30, 1.25]`, and a
 
 The current shared operational profile uses notional multiplier `0.5`, entry
 leverage `2`, no separate per-order notional cap, at most five new entries per
-cycle, and a 50% projected initial-margin ceiling. At the profile's 10,000 USDT
-validation reference, the worst-case registered LONG envelope is 9,375 USDT
-gross and 4,687.50 USDT initial margin. Runtime profile bytes override this
+cycle, and a 50% projected initial-margin ceiling. At the profile's 250,000 USDT
+validation reference (raised 25× on 2026-07-27 with the funded demo account;
+ratios unchanged), the worst-case registered LONG envelope is 234,375 USDT
+gross and 117,187.50 USDT initial margin. Runtime profile bytes override this
 documentation.
 
 Each target carries a 1.5 ATR stop, 4.0 ATR take-profit, and three-day maximum
@@ -168,8 +169,11 @@ first attributable fill and owns the aggregate venue order.
 
 `configs/operational.demo.json` is the single editable source for LONG,
 CONTINUOUS, hedge leverage, and account caps. The current account policy caps
-projected component gross at 20,000 USDT, account gross at 20,000 USDT, one-symbol
-notional at 5,000 USDT, initial margin at 10,000 USDT, and leverage at `2`.
+projected component gross at 500,000 USDT, account gross at 500,000 USDT,
+one-symbol notional at 125,000 USDT, initial margin at 250,000 USDT, and
+leverage at `2` (all scaled 25× from the 10k-reference values on 2026-07-27;
+proportions unchanged). The paper twin's fixed capital base is provisioned
+from the same profile's capital reference.
 Authorization refuses unknown fields, producer leverage above the owner cap,
 or registered LONG/CONTINUOUS exposure envelopes outside those limits. Normal
 risk or venue-rule rejection remains possible when actual account state differs

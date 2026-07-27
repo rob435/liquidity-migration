@@ -489,13 +489,15 @@ PY
     fi
     "$PYTHON" - "$PAPER_ENVIRONMENT" \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$PAPER_SYMBOLS_FILE" "$PAPER_RULES_FILE" "$PAPER_RISK_FILE" <<'PY'
+        "$PAPER_SYMBOLS_FILE" "$PAPER_RULES_FILE" "$PAPER_RISK_FILE" \
+        "$REPO_DIR/configs/operational.demo.json" <<'PY'
 import os
 import shlex
 import sys
 import tempfile
 from pathlib import Path
 
+from liquidity_migration.operational_profile import load_operational_profile
 from liquidity_migration.systemd_environment import (
     load_private_systemd_environment,
 )
@@ -513,11 +515,14 @@ for key in (
 if existing.get("REAL_MONEY", "").strip().lower() not in {"", "0", "false", "no", "off"}:
     raise SystemExit("paper environment does not explicitly disable REAL_MONEY")
 allowed_tuning = {
-    "PAPER_EQUITY_USDT",
     "MAX_DEMO_RULE_AGE_HOURS",
     "ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS",
 }
 values = {key: value for key, value in existing.items() if key in allowed_tuning}
+# The paper twin's fixed capital base always tracks the committed operational
+# profile's capital reference, so the integration record stays comparable to
+# the demo book without a hidden per-host tuning value.
+values["PAPER_EQUITY_USDT"] = f"{load_operational_profile(sys.argv[8]).capital_reference_usdt:g}"
 # The paper owner unit enables Telegram, so provisioning must either keep the
 # operator-provided notification credentials or seed them from the demo
 # notification channel. Venue credentials remain forbidden above; these two

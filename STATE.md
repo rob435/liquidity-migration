@@ -95,6 +95,23 @@ section); the one open hedge item is the policy-due model-prior
 regeneration, which needs the next standard continuous equity refresh's
 component ledgers.
 
+2026-07-27 (owner-directed scale-up): the owner funded the demo account
+toward 250,000 USDT (live wallet read 99,920.74 at 10:52 UTC, still below
+the stated target — possibly mid-top-up) and directed a scale-up with
+leverage unchanged at 2×. `configs/operational.demo.json` is scaled exactly
+25× (capital reference 250,000; account/component gross 500,000; symbol
+125,000; margin 250,000; every ratio, sizing fraction, and leverage
+untouched), and paper provisioning now derives `PAPER_EQUITY_USDT` from the
+profile's capital reference instead of a per-host tuning value. Until the
+rollout installs the new profile, the deployed 20k-gross/5k-symbol caps
+still bind: sizing already follows live wallet equity, so positions are
+~2% of live equity each and the old caps limit concurrency, which is safe.
+Once the full 250k lands, the BTC hedge crosses its venue-minimum
+threshold on a single open short (~$133 target vs ~$65–130 floor) — the
+policy-due hedge-prior regeneration (old-ensemble vintage) becomes
+material at that point and stays queued behind the next standard research
+refresh.
+
 2026-07-27 (same batch): the demo-rule expiry deadline trap is removed —
 rollout now re-probes whenever the bound receipt is past half of its
 168-hour lifetime, not only after expiry
