@@ -11,9 +11,32 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `d16daf5a8` ("Align active docs with the
+- **Installed implementation commit: `13754d0be` (8-commit batch
+  `2c6703a..13754d0`)**, deployed from canonical `main`, profile
+  `operational`, on 2026-07-27 ~14:03 UTC, owner authorization: the "push
+  and deploy" chat instruction (Actions run 30270697928 — CI and the guarded
+  VPS rollout both green in one pass; no staged completion needed this
+  time). What this batch turns on: paper-fleet Telegram (heading "Bybit
+  paper", PAPER page label; first hourly digest lands at the next full
+  hour), WS transport observability (connect/close/error logging + the
+  cumulative silent-window clock — both owners logged
+  `raw Bybit public stream connected generation=1` at first start), the
+  2026-07-27 audit fix batch (watchdog disk/digest/hedge-runtime alerts,
+  reconcile REST-timeout tolerance, journald cap, credential-backup prune),
+  the demo-rule half-life auto-re-probe (fired during this rollout: fresh
+  receipt `demo-rules-20260727T133929Z` captured 13:39, expires ~2026-08-03
+  — the pending kernel-update reboot is now safe to schedule), and the
+  **25× operational profile: capital reference 250,000 USDT, account/
+  component gross 500,000, per-symbol 125,000, initial margin 250,000,
+  leverage unchanged at 2×**, matching the funded wallet (≈249,799 USDT
+  read post-deploy; the 2026-07-27 top-up transfers 90k+100k+50k are in the
+  venue transaction log). Strategy semantics unchanged (no engine fields
+  added; config hashes and kernel strategy identities are stable across
+  this deploy). The 10:47 unadopted-execution and L2-stale root causes
+  recorded under "Known benign alert shapes" shipped in the same batch.
+- Prior installed commit: `d16daf5a8` ("Align active docs with the
   single funding-gated CONTINUOUS shape", containing `1fe0e48` — the
-  operator-ordered CONTINUOUS replacement)**, deployed from canonical `main`,
+  operator-ordered CONTINUOUS replacement), deployed from canonical `main`,
   profile `operational`, on 2026-07-26, owner authorization: the "align,
   clean, consolidate docs, then deploy" chat instruction. **Change point: the
   CONTINUOUS sleeve now runs the single funding-gated `turn3_pop3` cell**
