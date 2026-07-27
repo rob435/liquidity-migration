@@ -210,10 +210,10 @@ concession −4.79 pp, both larger than the −0.12 / −2.13 pp the redesign ta
 showed, because that table's V3 row embedded the blind admissions. The
 excluded population (negative-funding Bybit-only pumps) was *profitable* in
 the seen window, which cuts against the funding thesis on that sub-population;
-54 trades on seen data decide nothing. The forward record arbitrates, and the
-per-entry funding evidence journaled at admission (including unknown-admits)
-is the dataset for revisiting both the unknown-admits choice and a possible
-venue-scoped admission variant as Lane-1 follow-ups.
+54 trades on seen data decide nothing. The forward record arbitrates. (Both
+named follow-ups were run 2026-07-27 — see the next section: unknown-admits
+is empty on the root basis, and the venue-scoped admission variant is now
+the registered lead.)
 
 Deliberate identity consequence recorded with the change point: the new
 `ContinuousEventConfig` field shifts `config_hash()` / `kernel_strategy_id`
@@ -223,6 +223,54 @@ prior-epoch state on the first post-deploy cycles. The sleeve kill criteria
 (`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to govern
 the sleeve unchanged. Rollout remains owner-dispatched; this commit deploys
 nothing.
+
+### 2026-07-27 — ladder mechanism decomposed; admission variants; one registered lead
+
+Owner-directed follow-up on the replacement ("why did the 3-cell ensemble
+work — was it a gradual scale-in/TWAP — and what is barebones single_fund0
+missing?"). Full evidence, all cells and negatives:
+`docs/continuous_ladder_mechanism_2026-07-27.md`; reproduction/scorer:
+`scripts/render_continuous_admission_variants.py`. Lane-1 on seen data.
+
+- **The TWAP/scale-in story is refuted twice.** The nested triggers fired in
+  the same hour (median rung lag 0.0h; 81% of base pumps were already
+  pop5-grade at entry) — the retired ensemble was an *amplitude* weighting,
+  not a time ladder. Forcing a real time ladder (3 tranches at delay 1/2/3h)
+  loses return: later entries are strictly worse (+9.21% → +6.06% → +8.07%
+  additive by tranche).
+- **The retired book's fc-Sharpe edge fully decomposes** into the funding
+  bill it kept paying (the admission is a cost filter, not selection —
+  gross-only Sharpe identical), a long-BTC/ETH hedge overlay that is gated
+  beta (+2.3–2.6 pp in this uptrend-gated window), an impact-slicing
+  modeling artifact (~+0.1 bp/day), and calendar density (646 vs 554 active
+  days). At the shipped cell's active-day quality, fc parity with 1.84 needs
+  ≈832 active days — unreachable inside the funding-gated shape. The shape
+  trades calendar density for drawdown/MAR; that remains the operator's
+  chosen side.
+- **The amplitude ladder is dead under the funding admission** (rung order
+  inverts; every reweighting loses to the plain single cell) — the strict
+  rungs were largely a funding proxy.
+- **Closed empty: the unknown-admits follow-up.** On root funding there are
+  zero historical unknowns and the 240-day age gate makes runtime unknowns
+  near-impossible; reject-unknown reproduces the shipped book
+  trade-for-trade.
+- **New negative rows** (do not re-test without new mechanism/data/defect):
+  crowd-3 and crowd-off (monotone worse — crowd-2 blocks toxic density),
+  hold-12 (destroys the edge; also deprioritizes a cooldown-only engine
+  field), hold-48 (buys density at −3.18% maxDD), TWAP tranches, fund0
+  ladders at all tested weights, V9/V10 standalone.
+- **Registered lead (commit = registration): venue-scoped admission** — the
+  funding floor applies only to both-venue symbols; Bybit-only contracts
+  admit regardless of funding sign. Hedged +12.76% / −1.75% / MAR 2.09 /
+  fc 1.61 vs shipped-shape base +11.39% / −1.84% / 1.78 / 1.49 — the only
+  variant beating the base on every aggregate axis. Unspun: the delta is 43
+  trades and the aggregate win is carried by 2025 (loses in 2024 and 2026);
+  mechanism is coherent (the toxic signature is the *both-venue* crowded
+  short; 2025 is when negative funding became ubiquitous on Bybit-only
+  names). Forward scoring: re-run the script with a later `--end-date`,
+  venue-scoped vs base, on post-commit days. The deployed profile is
+  untouched; promotion would need a deliberate admission-scope engine field
+  (identity-shifting), a frozen both-venue registry, and the five-line note.
 
 ## What survived the audit
 
@@ -520,6 +568,12 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       negative-results ledger.
 - [ ] Score the three financed-longs configs on each new completed UTC day
       (rolling forward record; the registration commit is the change point).
+- [ ] Score the venue-scoped CONTINUOUS admission variant beside the shipped
+      shape on post-2026-07-27 days
+      (`scripts/render_continuous_admission_variants.py admission --end-date …`;
+      registered 2026-07-27, evidence
+      `docs/continuous_ladder_mechanism_2026-07-27.md` §5 — the 2025-carried
+      era profile is the thing the forward record must test).
 - [ ] Read the paper passive-execution A/B for realised maker-fill probability
       (target was 100 fills per arm). This is the last unmeasured cost input and
       needs VPS data.
