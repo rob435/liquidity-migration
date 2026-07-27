@@ -81,6 +81,7 @@ class FollowerKlineStreamManager:
         self._last_confirmed_ts_ms = 0
         self._refreshes = 0
         self._refresh_errors = 0
+        self._recovery_failures = 0
         self._last_recover_rows = 0
         self._last_pruned_rows = 0
         self._snapshot_missing_logged = False
@@ -138,6 +139,7 @@ class FollowerKlineStreamManager:
             "poll_seconds": self._poll_seconds,
             "refreshes": self._refreshes,
             "refresh_errors": self._refresh_errors,
+            "recovery_failures": self._recovery_failures,
             "last_recover_rows": self._last_recover_rows,
             "last_pruned_rows": self._last_pruned_rows,
             "snapshot_age_seconds": self._snapshot_age_seconds(),
@@ -224,6 +226,13 @@ class FollowerKlineStreamManager:
             self._check_snapshot_staleness()
             return False
         rows = self._store.recover_from_disk()
+        if rows == 0 and self._store.last_recovery_failed():
+            # A FAILED read is not a consumed generation. Leaving `_last_sig`
+            # untouched retries on the next poll instead of waiting for the
+            # leader's next flush to change the file (audit L3).
+            self._recovery_failures += 1
+            self._check_snapshot_staleness()
+            return False
         # Re-stat AFTER the read and record THAT signature, not the pre-read one.
         # recover_from_disk() re-reads the file directly, so if the leader flushed
         # between our stat above and that read (atomic rename → we still see a whole

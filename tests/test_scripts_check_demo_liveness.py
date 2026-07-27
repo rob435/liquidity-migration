@@ -1922,3 +1922,72 @@ def test_long_paper_sleeve_defaults_to_demo_toggle(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("LONG_PAPER_SLEEVE", "off")
     assert M._long_paper_sleeve_on() is False
+
+
+def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
+    return [
+        "check_demo_liveness.py",
+        "--telegram",
+        "--continuous-root",
+        "",
+        "--continuous-paper-root",
+        "",
+        "--long-root",
+        "",
+        "--state-file",
+        str(state_file),
+        "--heartbeat-url",
+        heartbeat_url,
+    ]
+
+
+def test_main_pings_the_dead_mans_switch_on_a_healthy_run(tmp_path, monkeypatch) -> None:
+    """The 7af59f3 watchdog addition that never got a test: a regression makes the
+    external monitor read "all quiet" exactly when the alert channel is dead
+    (2026-07-27 audit L17)."""
+    state_file = tmp_path / "state.json"
+    pings: list[str] = []
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["healthy.timer"])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"healthy.timer": "active"})
+    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
+
+    monkeypatch.setattr("sys.argv", _heartbeat_argv(state_file, "https://hb.example/ok"))
+    assert M.main() == 0
+    assert pings == ["https://hb.example/ok"]
+
+
+def test_main_suppresses_the_heartbeat_when_a_telegram_send_fails(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "state.json"
+    pings: list[str] = []
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "inactive"})
+    # A dead notification channel must page externally, not look like "all quiet".
+    monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
+    monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
+
+    monkeypatch.setattr("sys.argv", _heartbeat_argv(state_file, "https://hb.example/ok"))
+    assert M.main() == 0
+    assert pings == []
+
+
+def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "state.json"
+    pings: list[str] = []
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
+    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
+
+    argv = _heartbeat_argv(state_file, "https://hb.example/ok")
+    monkeypatch.setattr("sys.argv", argv)
+    assert M.main() == 0  # first run debounces to WARNING and still pings
+    assert pings == ["https://hb.example/ok"]
+
+    pings.clear()
+    monkeypatch.setattr("sys.argv", argv)
+    assert M.main() == 0  # second consecutive run escalates to CRITICAL
+    assert pings == []

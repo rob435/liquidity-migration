@@ -177,6 +177,13 @@ class LongNativeDemoDaemon:
         )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
+        # Monotonic install time of the live ticker stream. A subscription that
+        # never delivered its first push leaves
+        # ``seconds_since_last_ws_event()`` at inf forever, which the health
+        # check skipped and the recovery path ignored (it only rebuilds when no
+        # stream object is installed): a born-silent subscription was neither
+        # warned about nor rebuilt (2026-07-27 audit L2).
+        self._ticker_stream_installed_monotonic: float | None = None
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
         # so a race can't leak a second ticker WS (DAEM-002; see EventDemoDaemon).
         self._ticker_stream_lock = threading.Lock()
@@ -545,6 +552,7 @@ class LongNativeDemoDaemon:
         with self._ticker_stream_lock:
             if self._ticker_stream is None:
                 self._ticker_stream = stream
+                self._ticker_stream_installed_monotonic = time.monotonic()
                 installed = True
         if not installed:
             self._close_single_ticker_stream(stream)  # lost the race; close the loser
@@ -572,6 +580,7 @@ class LongNativeDemoDaemon:
         with self._ticker_stream_lock:
             stream = self._ticker_stream
             self._ticker_stream = None
+            self._ticker_stream_installed_monotonic = None
         self._close_single_ticker_stream(stream)
 
     def _close_single_ticker_stream(self, stream: Any | None) -> None:
@@ -626,6 +635,13 @@ class LongNativeDemoDaemon:
         if threshold <= 0.0 or not self._ticker_cache.is_seeded():
             return
         ticker_silence = self._ticker_cache.seconds_since_last_ws_event()
+        if ticker_silence == float("inf"):
+            # Born silent: an installed subscription that has never pushed. Time
+            # it from installation instead of skipping it, and rebuild the stream
+            # so a lost/rejected subscribe cannot persist for the daemon's life.
+            ticker_silence = self._seconds_since_ticker_stream_installed()
+            if ticker_silence > threshold:
+                self._rebuild_born_silent_ticker_stream(ticker_silence, threshold)
         if ticker_silence != float("inf") and ticker_silence > threshold:
             self._ws_ticker_stale_ticks += 1
             if not self._ws_ticker_stale_warned:
@@ -638,6 +654,26 @@ class LongNativeDemoDaemon:
         elif self._ws_ticker_stale_warned:
             _logger.info("long ticker WS resumed (silence=%.1fs)", ticker_silence)
             self._ws_ticker_stale_warned = False
+
+    def _seconds_since_ticker_stream_installed(self) -> float:
+        with self._ticker_stream_lock:
+            installed_at = self._ticker_stream_installed_monotonic
+            if self._ticker_stream is None or installed_at is None:
+                return float("inf")
+        return time.monotonic() - installed_at
+
+    def _rebuild_born_silent_ticker_stream(self, silence_seconds: float, threshold: float) -> None:
+        _logger.warning(
+            "long ticker WS never delivered a frame %.0fs after subscribe "
+            "(threshold %.0fs); rebuilding the subscription",
+            silence_seconds,
+            threshold,
+        )
+        self._close_ticker_stream()
+        try:
+            self._open_ticker_stream()
+        except Exception as exc:  # noqa: BLE001 - REST fallback still covers the cycle
+            _logger.warning("long ticker stream rebuild failed: %s", exc)
 
     def _refresh_public_ticker_cache(self) -> None:
         """Refresh public tickers using one lazily constructed REST client."""

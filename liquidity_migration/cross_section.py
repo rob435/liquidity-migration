@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Callable
 
 import numpy as np
 import polars as pl
@@ -200,11 +201,17 @@ def summary(
 
 
 def lag_screen(
-    build,
+    build: Callable[[int], pl.DataFrame],
     *,
     signal: str,
+    ret: str,
     lags: tuple[int, ...] = (0, 1, 4),
-    **kwargs: object,
+    periods_per_year: int = 365,
+    cost_bp: float = MEASURED_ROUND_TRIP_BP,
+    sign: int = 1,
+    cut: float = DEFAULT_CUT,
+    period: str = "bar_ts_ms",
+    min_names: int = 10,
 ) -> dict[int, Summary]:
     """Re-score a signal at increasing publication delays.
 
@@ -213,11 +220,25 @@ def lag_screen(
     bid-ask-bounced print, which reverts mechanically. Genuine slow convergence
     survives a delay; a stale-print artifact collapses. ``build(lag)`` must
     return a frame with the signal already shifted by ``lag`` periods.
+
+    Every scoring knob is explicit. The previous ``**kwargs`` forwarded straight
+    into ``long_short`` — which takes no ``**kwargs`` — so supplying
+    ``periods_per_year`` (the one key the next line read) raised TypeError, and
+    omitting it silently scored at the daily default (2026-07-27 audit L19).
     """
 
     out: dict[int, Summary] = {}
     for lag in lags:
-        frame = build(lag)
-        series = long_short(frame, signal=signal, **kwargs)  # type: ignore[arg-type]
-        out[lag] = summary(series["ret_bp"], periods_per_year=kwargs.get("periods_per_year", 365))  # type: ignore[arg-type]
+        series = long_short(
+            build(lag),
+            signal=signal,
+            ret=ret,
+            sign=sign,
+            cut=cut,
+            period=period,
+            min_names=min_names,
+        )
+        out[lag] = summary(
+            series["ret_bp"], periods_per_year=periods_per_year, cost_bp=cost_bp
+        )
     return out

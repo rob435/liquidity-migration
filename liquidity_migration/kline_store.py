@@ -249,6 +249,7 @@ class KlineStore:
         # WS inserts must never block on a multi-hundred-MB parquet write.
         self._flush_io_lock = threading.Lock()
         self._flushes_total = 0
+        self._last_recovery_failed = False
         self._flush_errors = 0
         self._last_flush_rows = 0
         # Incremental newest-ts cache: maintained in _insert_bar / recovery
@@ -744,14 +745,28 @@ class KlineStore:
             self._last_flush_version = version
         return len(ts_col)
 
+    def last_recovery_failed(self) -> bool:
+        """True when the last ``recover_from_disk`` returned 0 because the read
+        or validation FAILED, rather than because there was nothing to recover.
+
+        The follower treats a failed read as consumed otherwise: it recorded the
+        new snapshot signature and only retried once the leader's next flush
+        changed the file, up to an hour later, with REST fallback paying the
+        difference and ``_refreshes`` misreporting (2026-07-27 audit L3).
+        """
+
+        return self._last_recovery_failed
+
     def recover_from_disk(self) -> int:
         """Repopulate the in-memory store from ``store.parquet`` if present.
 
         Called once during ``KlineStreamManager.start``. Returns the number of
         rows recovered. A missing or empty file is a no-op (store starts
-        empty); a corrupt file is logged and skipped so the daemon still
-        starts with a clean slate and the bootstrap path can repopulate.
+        empty); a corrupt file is logged, flagged via ``last_recovery_failed``,
+        and skipped so the daemon still starts with a clean slate and the
+        bootstrap path can repopulate.
         """
+        self._last_recovery_failed = False
         if self._cache_root is None or self._flush_path is None:
             return 0
         if not self._flush_path.exists():
@@ -760,19 +775,23 @@ class KlineStore:
             frame = pl.read_parquet(self._flush_path)
         except (OSError, pl.exceptions.PolarsError) as exc:
             _logger.warning("kline_store recovery read failed; starting empty: %s", exc)
+            self._last_recovery_failed = True
             return 0
         if frame.is_empty():
             return 0
         if set(frame.columns) != set(_KLINE_SCHEMA):
             _logger.warning("kline_store recovery file has a non-canonical schema; ignoring")
+            self._last_recovery_failed = True
             return 0
         try:
             frame = frame.select(list(_KLINE_SCHEMA)).cast(_KLINE_SCHEMA, strict=True)
         except (TypeError, ValueError, pl.exceptions.PolarsError) as exc:
             _logger.warning("kline_store recovery schema validation failed; ignoring: %s", exc)
+            self._last_recovery_failed = True
             return 0
         if frame.filter(pl.col("source") != WS_STORE_SOURCE).height:
             _logger.warning("kline_store recovery file has a non-canonical source; ignoring")
+            self._last_recovery_failed = True
             return 0
         with self._lock:
             recovered = 0

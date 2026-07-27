@@ -1596,6 +1596,25 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     assert blocked_payload["entry_first_rejection_reason"] == "btc_trend_gate"
     assert captured["entry_intents"] == []
 
+    # 7af59f3's null-not-0.0 equity fix (a literal 0.0 reads as a -100% equity
+    # spike in cycles-derived curves) was pinned only for the LONG daemon; the
+    # continuous test mocked owner health as always healthy, so a regression to
+    # 0.0 would have passed the whole suite (2026-07-27 audit M18).
+    def blocked_owner_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        raise RuntimeError("owner health receipt is stale")
+
+    monkeypatch.setattr(
+        planning_module, "require_recent_account_owner_health", blocked_owner_health
+    )
+    unhealthy_payload = run_continuous_demo_cycle(
+        tmp_path / "unhealthy-producer",
+        config=ResearchConfig(),
+        demo_config=config,
+        now_ms=now_ms,
+    )
+    assert unhealthy_payload["account_owner_health_error"]
+    assert unhealthy_payload["equity_usdt"] is None
+
 
 def test_cross_wired_account_route_fails_before_cycle_resources(tmp_path: Path) -> None:
     route_a = _route(tmp_path / "a")

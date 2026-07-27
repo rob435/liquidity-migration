@@ -127,45 +127,7 @@ class Runner:
         orig = ce._funding_admission_filter
         both = both_venue_symbols()
         print(f"[cell {cell}] mode={mode} both_venue_universe={len(both)} symbols")
-
-        def patched(
-            entries: pl.DataFrame,
-            funding_lookup: dict[str, dict[str, Any]] | None,
-            config: ContinuousEventConfig,
-        ) -> tuple[pl.DataFrame, dict[str, int]]:
-            if config.funding_min_at_entry is None or entries.is_empty():
-                return orig(entries, funding_lookup, config)
-            if mode == "venue_scoped":
-                mask = pl.col("symbol").is_in(sorted(both))
-                kept, counters = orig(entries.filter(mask), funding_lookup, config)
-                bybit_only = entries.filter(~mask)
-                counters = dict(counters)
-                counters["bybit_only_admitted_unfiltered"] = int(bybit_only.height)
-                return pl.concat([kept, bybit_only]).sort(["ts_ms", "symbol"]), counters
-            if mode == "reject_unknown":
-                import bisect
-
-                kept, counters = orig(entries, funding_lookup, config)
-                floor = float(config.funding_min_at_entry)
-                keep: list[bool] = []
-                unknown_rejected = 0
-                for sym, sig_ts in kept.select("symbol", "ts_ms").iter_rows():
-                    series = (funding_lookup or {}).get(str(sym))
-                    rate = None
-                    if series is not None:
-                        idx = bisect.bisect_right(series["events_ts"], int(sig_ts) + 3_600_000) - 1
-                        if idx >= 0:
-                            rate = float(series["events_rate"][idx])
-                    if rate is None:
-                        unknown_rejected += 1
-                    keep.append(rate is not None and rate >= floor)
-                counters = dict(counters)
-                counters["unknown_rejected"] = unknown_rejected
-                counters["unknown_admitted"] = 0
-                return kept.filter(pl.Series(keep)), counters
-            raise ValueError(f"unknown admission variant mode {mode!r}")
-
-        ce._funding_admission_filter = patched
+        ce._funding_admission_filter = admission_variant_filter(mode, orig, both)
         try:
             cfg = base_config(self.end_date, component_key=cell)
             payload = run_continuous_equity_component(DATA_ROOT, config=cfg, report_dir=out_dir)
@@ -256,6 +218,69 @@ class Runner:
         summary = {"label": label, "n_trades": n_trades, **self.stats(df)}
         print(f"[render {label}] {summary}")
         return summary
+
+
+def admission_variant_filter(
+    mode: str,
+    original: Any,
+    both_venue: set[str],
+) -> Any:
+    """Build the patched ``_funding_admission_filter`` for one admission variant.
+
+    Extracted from the runner method so the registered ``fund0_venue_scoped``
+    forward scorer is unit-testable. It was previously a closure with no tests at
+    all, and silent drift in the patched filter (the +1 h bisect boundary, the
+    concat ordering, the counter names) corrupts the forward comparison any
+    promotion depends on (2026-07-27 audit L18).
+
+    ``venue_scoped``: the settled-funding floor applies only to symbols in the
+    both-venue cross-venue-panel universe; Bybit-only contracts admit regardless
+    of funding sign.
+    ``reject_unknown``: symbols with no settled print at the decision timestamp
+    are rejected rather than admitted.
+    """
+
+    if mode not in {"venue_scoped", "reject_unknown"}:
+        raise ValueError(f"unknown admission variant mode {mode!r}")
+
+    def patched(
+        entries: pl.DataFrame,
+        funding_lookup: dict[str, dict[str, Any]] | None,
+        config: ContinuousEventConfig,
+    ) -> tuple[pl.DataFrame, dict[str, int]]:
+        if config.funding_min_at_entry is None or entries.is_empty():
+            return original(entries, funding_lookup, config)
+        if mode == "venue_scoped":
+            mask = pl.col("symbol").is_in(sorted(both_venue))
+            kept, counters = original(entries.filter(mask), funding_lookup, config)
+            bybit_only = entries.filter(~mask)
+            counters = dict(counters)
+            counters["bybit_only_admitted_unfiltered"] = int(bybit_only.height)
+            return pl.concat([kept, bybit_only]).sort(["ts_ms", "symbol"]), counters
+        import bisect
+
+        kept, counters = original(entries, funding_lookup, config)
+        floor = float(config.funding_min_at_entry)
+        keep: list[bool] = []
+        unknown_rejected = 0
+        for sym, sig_ts in kept.select("symbol", "ts_ms").iter_rows():
+            series = (funding_lookup or {}).get(str(sym))
+            rate = None
+            if series is not None:
+                # Same backward as-of cutoff as the engine: the decision
+                # timestamp is the signal-bar close, ts_ms + 1h.
+                idx = bisect.bisect_right(series["events_ts"], int(sig_ts) + 3_600_000) - 1
+                if idx >= 0:
+                    rate = float(series["events_rate"][idx])
+            if rate is None:
+                unknown_rejected += 1
+            keep.append(rate is not None and rate >= floor)
+        counters = dict(counters)
+        counters["unknown_rejected"] = unknown_rejected
+        counters["unknown_admitted"] = 0
+        return kept.filter(pl.Series(keep)), counters
+
+    return patched
 
 
 def both_venue_symbols() -> set[str]:

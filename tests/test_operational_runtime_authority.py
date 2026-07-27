@@ -1526,3 +1526,49 @@ def test_paper_authority_requires_the_committed_capital_reference_as_equity(
 
     with pytest.raises(ValueError, match=expected):
         _issue(tmp_path, repository, commit, machine_id)
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "maybe", "TRUE", "on"])
+def test_issuance_rejects_a_credential_file_that_does_not_disable_real_money(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The rejection exists at three layers but nothing set REAL_MONEY=true/"maybe"
+    against any of them; only the bybit client layer had negative-path tests
+    (2026-07-27 audit M17)."""
+
+    repository, commit, machine_id, paths = _fixture(tmp_path, monkeypatch)
+    credentials = paths["bybit-demo.env"]
+    credentials.write_text(
+        credentials.read_text(encoding="utf-8").replace("REAL_MONEY=false", f"REAL_MONEY={value}"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="does not explicitly disable REAL_MONEY"):
+        _issue(tmp_path, repository, commit, machine_id)
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "maybe", "TRUE", "on"])
+def test_verification_rejects_a_runtime_environment_that_enables_real_money(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    repository, commit, machine_id, _paths = _fixture(tmp_path, monkeypatch)
+    receipt, _payload = _issue(tmp_path, repository, commit, machine_id)
+    monkeypatch.setenv("ACCOUNT_RAW_MARKET_PERSISTENCE", "0")
+    monkeypatch.setenv("REAL_MONEY", value)
+    with pytest.raises(ValueError, match="enables or ambiguously sets REAL_MONEY"):
+        authority.verify_operational_authorization(
+            receipt_path=receipt,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            unit="liquidity-migration-account-execution.service",
+        )
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "maybe", "TRUE", "on"])
+def test_paper_owner_startup_rejects_real_money(value: str) -> None:
+    from liquidity_migration.account_paper_runner import require_paper_runtime_isolation
+
+    with pytest.raises(RuntimeError, match="requires REAL_MONEY=false or unset"):
+        require_paper_runtime_isolation({"REAL_MONEY": value})
+    # The unset and explicitly-false cases still pass.
+    require_paper_runtime_isolation({})
+    require_paper_runtime_isolation({"REAL_MONEY": "false"})

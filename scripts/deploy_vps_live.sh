@@ -807,14 +807,25 @@ require_quiescent() {
 
 git_fetch() {
     if [ -n "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
-        local auth
+        # Keep the credential OFF argv. `GIT_ENV` begins with `/usr/bin/env -i`,
+        # so a `GIT_CONFIG_VALUE_0=...` prefix is an argv word of env and is
+        # world-readable via /proc/<pid>/cmdline for the fork-exec window — and
+        # on a locally dispatched rollout that value carries the operator's
+        # long-lived `gh auth token` (2026-07-27 audit L16). Every other secret
+        # path in this repo already keeps credentials off argv. A 0600 config
+        # file written by a shell builtin puts only its PATH on argv.
+        local auth config_file status=0
         auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+        config_file="$(mktemp)" || fail "cannot create the authenticated git config"
+        chmod 0600 "$config_file"
+        printf '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: Basic %s\n' \
+            "$auth" > "$config_file"
         "${GIT_ENV[@]}" \
-        GIT_CONFIG_COUNT=1 \
-        GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
-        GIT_CONFIG_VALUE_0="AUTHORIZATION: Basic $auth" \
+        GIT_CONFIG_GLOBAL="$config_file" \
         GIT_TERMINAL_PROMPT=0 \
-        "${GIT_COMMAND[@]}" "$@"
+        "${GIT_COMMAND[@]}" "$@" || status=$?
+        rm -f "$config_file"
+        return "$status"
     else
         "${GIT_ENV[@]}" GIT_TERMINAL_PROMPT=0 "${GIT_COMMAND[@]}" "$@"
     fi

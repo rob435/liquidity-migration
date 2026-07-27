@@ -79,11 +79,16 @@ def capture_clock_offset(
     ntp_synchronized: bool,
     endpoint: str,
     transport: str = CLOCK_OFFSET_TRANSPORT,
-    sample_count: int = 21,
-    selected_count: int = 5,
+    # Defaults ARE the registered contract. The literals had drifted from it —
+    # max_error_ns=50 ms against the verifier's registered 100 ms — so any future
+    # caller using the defaults produced receipts that could never verify, a
+    # fail-closed dead end the sole production caller had to work around
+    # (2026-07-27 audit L12).
+    sample_count: int = REGISTERED_SAMPLE_COUNT,
+    selected_count: int = REGISTERED_SELECTED_COUNT,
     interval_seconds: float = 0.05,
-    max_rtt_ns: int = 250_000_000,
-    max_error_ns: int = 50_000_000,
+    max_rtt_ns: int = REGISTERED_MAX_RTT_NS,
+    max_error_ns: int = REGISTERED_MAX_ERROR_NS,
     wall_time_ns: Callable[[], int] = time.time_ns,
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
     sleeper: Callable[[float], None] = time.sleep,

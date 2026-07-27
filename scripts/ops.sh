@@ -80,7 +80,7 @@ remote_reset() {
   # Make the safe default explicit at the remote boundary. The canonical reset
   # script independently defaults to dry-run and requires --execute as well.
   if (( has_execute == 0 && has_dry_run == 0 )); then
-    reset_args=(--dry-run "${reset_args[@]}")
+    reset_args=(--dry-run ${reset_args[@]+"${reset_args[@]}"})
   fi
 
   # Serialize values as Bash literals, then reconstruct a remote array. This
@@ -89,7 +89,7 @@ remote_reset() {
   {
     printf 'REPO_DIR=%q\n' "$REPO_DIR"
     printf 'RESET_ARGS=('
-    for arg in "${reset_args[@]}"; do
+    for arg in ${reset_args[@]+"${reset_args[@]}"}; do
       printf ' %q' "$arg"
     done
     printf ' )\n'
@@ -110,7 +110,7 @@ remote_python_script() {
     printf 'REPO_DIR=%q\n' "$REPO_DIR"
     printf 'SCRIPT_PATH=%q\n' "$script_path"
     printf 'SCRIPT_ARGS=('
-    for arg in "${script_args[@]}"; do
+    for arg in ${script_args[@]+"${script_args[@]}"}; do
       printf ' %q' "$arg"
     done
     printf ' )\n'
@@ -131,7 +131,7 @@ remote_python_module() {
     printf 'REPO_DIR=%q\n' "$REPO_DIR"
     printf 'MODULE=%q\n' "$module"
     printf 'MODULE_ARGS=('
-    for arg in "${module_args[@]}"; do
+    for arg in ${module_args[@]+"${module_args[@]}"}; do
       printf ' %q' "$arg"
     done
     printf ' )\n'
@@ -149,7 +149,7 @@ remote_operational_authority_issue() {
   {
     printf 'REPO_DIR=%q\n' "$REPO_DIR"
     printf 'AUTHORITY_ARGS=('
-    for arg in "${authority_args[@]}"; do
+    for arg in ${authority_args[@]+"${authority_args[@]}"}; do
       printf ' %q' "$arg"
     done
     printf ' )\n'

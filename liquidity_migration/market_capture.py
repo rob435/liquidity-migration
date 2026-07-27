@@ -1102,18 +1102,30 @@ class SequenceAwareMarketRecorder:
             if healthy and lateness_ns <= task.max_lateness_ns:
                 status = "observed_healthy"
                 missing_reason = ""
+                book_condition = ""
                 midpoint = bids[0][0] / 2.0 + asks[0][0] / 2.0
             else:
+                # The only route here is lateness overflow: an unhealthy book
+                # inside its lateness bound `continue`s above, waiting for a
+                # repaired book. The former crossed_book / no_snapshot / gap arms
+                # were unreachable and every missing markout got the generic
+                # reason anyway (2026-07-27 audit L4). Keep `missing_reason` as
+                # the one true cause and report WHY the book was unusable in its
+                # own field, so the diagnostic the dead arms were reaching for
+                # survives instead of being silently discarded.
                 status = "missing"
                 midpoint = None
-                if lateness_ns > task.max_lateness_ns:
-                    missing_reason = "healthy_book_not_observed_before_lateness_bound"
-                elif crossed:
-                    missing_reason = "crossed_book"
+                missing_reason = "healthy_book_not_observed_before_lateness_bound"
+                if crossed:
+                    book_condition = "crossed_book"
                 elif not state.has_snapshot:
-                    missing_reason = "no_snapshot"
+                    book_condition = "no_snapshot"
+                elif not state.healthy:
+                    book_condition = state.last_gap_reason or "sequence_unhealthy"
+                elif not (bids and asks):
+                    book_condition = "empty_book_side"
                 else:
-                    missing_reason = state.last_gap_reason or "sequence_unhealthy"
+                    book_condition = "no_book_update_before_bound"
             record = self._persist(
                 {
                     "kind": "post_fill_markout",
@@ -1141,6 +1153,7 @@ class SequenceAwareMarketRecorder:
                     "max_lateness_ns": task.max_lateness_ns,
                     "markout_status": status,
                     "missing_reason": missing_reason,
+                    "missing_book_condition": book_condition,
                     "markout_midpoint": midpoint,
                 },
                 persist_to_disk=True,
@@ -1484,6 +1497,8 @@ class BybitRawPublicMarketStream:
                 symbol = ""
                 prior_frame_at: float | None = None
                 observed_at: float | None = None
+                prior_frame_monotonic: float | None = None
+                prior_outage_warning: float | None = None
                 outage_recovered = False
                 with self._lock:
                     # The watchdog may retire a generation while JSON parsing
@@ -1502,6 +1517,8 @@ class BybitRawPublicMarketStream:
                         if symbol in self._symbols:
                             prior_frame_at = self._last_orderbook_message_monotonic.get(symbol)
                             observed_at = self._monotonic()
+                            prior_frame_monotonic = self._last_frame_monotonic
+                            prior_outage_warning = self._last_outage_warning_monotonic
                             self._last_orderbook_message_monotonic[symbol] = observed_at
                             self._last_frame_monotonic = observed_at
                             if self._last_outage_warning_monotonic is not None:
@@ -1517,8 +1534,13 @@ class BybitRawPublicMarketStream:
                     self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
                 except Exception:
                     # A callback failure did not produce usable market state.
-                    # Roll back only our own heartbeat; a later successful
-                    # frame (if callbacks ever become concurrent) wins.
+                    # Roll back the per-symbol clock AND the cumulative
+                    # transport-outage clock plus its warning latch: rolling back
+                    # only the per-symbol clock left `_last_frame_monotonic`
+                    # advancing on every failed frame, so under persistent
+                    # callback failure the "no accepted frame for Xs" warning
+                    # could never fire (2026-07-27 audit L1). A later successful
+                    # frame (if callbacks ever become concurrent) still wins.
                     if symbol and observed_at is not None:
                         with self._lock:
                             if (
@@ -1535,6 +1557,10 @@ class BybitRawPublicMarketStream:
                                     self._last_orderbook_message_monotonic.pop(symbol, None)
                                 else:
                                     self._last_orderbook_message_monotonic[symbol] = prior_frame_at
+                                if self._last_frame_monotonic == observed_at:
+                                    self._last_frame_monotonic = prior_frame_monotonic
+                                if outage_recovered and self._last_outage_warning_monotonic is None:
+                                    self._last_outage_warning_monotonic = prior_outage_warning
                     raise
         except Exception:  # noqa: BLE001 - malformed public frames must not kill reconnect loop
             _logger.exception("raw Bybit public message handling failed")

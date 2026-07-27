@@ -14,6 +14,7 @@ from liquidity_migration.cross_section import (
     MEASURED_ROUND_TRIP_BP,
     PASSIVE_FLOOR_ROUND_TRIP_BP,
     CrossSectionError,
+    lag_screen,
     long_short,
     summary,
     top_by,
@@ -174,3 +175,45 @@ class TestSummary:
     def test_accepts_a_polars_series(self) -> None:
         s = summary(pl.Series([1.0, 2.0, 3.0, 4.0, 5.0]), periods_per_year=365, cost_bp=0.0)
         assert s.mean_bp == pytest.approx(3.0)
+
+
+class TestLagScreen:
+    def _build(self, lag: int) -> pl.DataFrame:
+        """A signal whose edge decays one period per lag."""
+
+        rows: list[tuple[int, str, float, float]] = []
+        for period in range(40):
+            for name in range(20):
+                slope = -0.001 * max(0, 3 - lag)
+                rows.append((period, f"S{name}", float(name), slope * float(name)))
+        return frame(rows)
+
+    def test_screen_scores_every_lag_at_the_requested_annualisation(self) -> None:
+        """The previous `**kwargs` forwarded straight into `long_short`, which
+        takes no `**kwargs`: supplying `periods_per_year` — the one key the next
+        line read — raised TypeError, and omitting it silently scored at the
+        daily default (2026-07-27 audit L19)."""
+
+        out = lag_screen(
+            self._build,
+            signal="sig",
+            ret="ret",
+            lags=(0, 1, 4),
+            periods_per_year=365,
+            cost_bp=0.0,
+            cut=0.1,
+        )
+        assert sorted(out) == [0, 1, 4]
+        # A genuine edge decays with the delay; a lag past the horizon is flat.
+        assert out[0].mean_bp > out[1].mean_bp > 0.0
+        assert out[4].mean_bp == pytest.approx(0.0, abs=1e-9)
+
+    def test_annualisation_is_honoured_rather_than_silently_daily(self) -> None:
+        daily = lag_screen(
+            self._build, signal="sig", ret="ret", lags=(0,), periods_per_year=365, cost_bp=0.0
+        )
+        hourly = lag_screen(
+            self._build, signal="sig", ret="ret", lags=(0,), periods_per_year=365 * 24, cost_bp=0.0
+        )
+        # Zero-variance fixture: compare the annualisation directly.
+        assert hourly[0].ann_pct > daily[0].ann_pct

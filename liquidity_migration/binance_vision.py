@@ -1141,6 +1141,47 @@ def _rename_publication_tree(source: Path, destination: Path) -> None:
     source.rename(destination)
 
 
+ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS = 24 * 60 * 60
+
+
+def _sweep_orphaned_publication_trees(root: Path) -> None:
+    """Delete aged staging/backup trees that no publication marker references.
+
+    Cleanup is in-process only and the tokens are per-run, so a SIGKILL mid-build
+    orphaned multi-GB hidden trees that nothing ever swept (2026-07-27 audit L7).
+    A tree is removed only when it is older than
+    ``ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS`` (so a concurrent build's fresh
+    tree is never touched) and no incomplete-publication marker names it.
+    """
+
+    referenced: set[str] = set()
+    marker_path = root / _INCOMPLETE_PUBLICATION_MARKER
+    if marker_path.exists() or marker_path.is_symlink():
+        try:
+            payload = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # An unreadable marker means "operator recovery pending": refuse to
+            # sweep anything rather than guess which generation is canonical.
+            return
+        for key in ("staging_root", "backup_root"):
+            value = payload.get(key)
+            if value:
+                referenced.add(str(Path(str(value))))
+    cutoff = time.time() - ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS
+    for prefix in ("binance-oos-staging", "binance-oos-backup"):
+        for candidate in root.parent.glob(f".{root.name}.{prefix}-*"):
+            if not candidate.is_dir() or candidate.is_symlink():
+                continue
+            if str(candidate.resolve()) in referenced or str(candidate) in referenced:
+                continue
+            try:
+                if candidate.stat().st_mtime > cutoff:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
 def _publish_staged_binance_datasets(
     root: Path,
     staging_root: Path,
@@ -1455,6 +1496,7 @@ def build_binance_oos(
         )
 
     root.mkdir(parents=True, exist_ok=True)
+    _sweep_orphaned_publication_trees(root)
     token = secrets.token_hex(8)
     staging_root = root.parent / f".{root.name}.binance-oos-staging-{token}"
     backup_root = root.parent / f".{root.name}.binance-oos-backup-{token}"

@@ -423,3 +423,56 @@ def test_remote_clean_check_ignores_current_index_flags(
     assert result.returncode != 0
     assert "checkout is dirty before test-probe" in result.stderr
     assert list(index_root.iterdir()) == []
+
+
+def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
+    """`"${arr[@]}"` on an EMPTY array is an unbound-variable error under
+    `set -u` on Bash 3.2 (the operator laptops this repo deliberately supports),
+    which broke the documented no-argument `ops.sh reset` preview and bare
+    `clock-offset --execute`. The portable guard idiom was already used three
+    lines earlier in the same function (2026-07-27 audit L11)."""
+
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "ops.sh").read_text(encoding="utf-8")
+    for array in ("reset_args", "script_args", "module_args", "authority_args"):
+        assert f'"${{{array}[@]}}"' not in text.replace(f'${{{array}[@]+"${{{array}[@]}}"}}', "")
+        assert f'${{{array}[@]+"${{{array}[@]}}"}}' in text
+
+    # The guarded expansion really is empty-safe.
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\n'
+            'declare -a a=()\n'
+            'for x in ${a[@]+"${a[@]}"}; do echo "unexpected $x"; done\n'
+            'b=(--dry-run ${a[@]+"${a[@]}"})\n'
+            'printf "%s\\n" "${b[@]}"\n',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "--dry-run"
+
+
+def test_authenticated_fetch_keeps_the_github_token_off_argv() -> None:
+    """`GIT_ENV` begins with `/usr/bin/env -i`, so a `GIT_CONFIG_VALUE_0=...`
+    prefix is an argv word of env and is world-readable via /proc for the
+    fork-exec window — carrying the operator's long-lived `gh auth token` on a
+    local dispatch (2026-07-27 audit L16)."""
+
+    deploy = (
+        Path(__file__).resolve().parents[1] / "scripts" / "deploy_vps_live.sh"
+    ).read_text(encoding="utf-8")
+    fetch = deploy[deploy.index("git_fetch() {") : deploy.index("invalidate_operational_authorization() {")]
+    code = "\n".join(
+        line for line in fetch.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "GIT_CONFIG_VALUE_0=" not in code
+    assert "GIT_CONFIG_KEY_0=" not in code
+    assert "GIT_CONFIG_GLOBAL=" in fetch
+    assert 'chmod 0600 "$config_file"' in fetch
+    assert 'rm -f "$config_file"' in fetch
+    # The credential reaches the file through a shell builtin, never a process
+    # argument list.
+    assert 'printf \'[http "https://github.com/"]' in fetch
