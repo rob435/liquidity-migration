@@ -11,10 +11,31 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `13754d0be` (8-commit batch
-  `2c6703a..13754d0`)**, deployed from canonical `main`, profile
-  `operational`, on 2026-07-27 ~14:03 UTC, owner authorization: the "push
-  and deploy" chat instruction (Actions run 30270697928 — CI and the guarded
+- **Installed implementation commit: `f1626565f` (7-commit batch
+  `0ab8625..f162656`)**, deployed from canonical `main`, profile
+  `operational`, on 2026-07-27 ~18:26 UTC, owner authorization: the "deploy
+  all" chat instruction (Actions run 30293398218 — CI and the guarded VPS
+  rollout both green in one pass). This batch is the complete remediation of
+  `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` (all 53 findings).
+  Rollout evidence: every phase `phase-ok`, `deployment-plan class=routine
+  rule_maintenance=reuse reason=fresh`, `rmom-bootstrap path=reuse
+  reason=current-valid-gate`, `verify-ok commit=f1626565f… profile=operational`.
+  Post-deploy: 9/9 units active, 0 failed, 0 unit restarts, no journal errors,
+  demo owner healthy at 249,752.42 USDT equity; the transient
+  `ETHUSDT:no_snapshot` at first start cleared within a minute (normal L2
+  warm-up). Confirmed live from this batch: `PAPER_EQUITY_USDT=250000` (the
+  paper owner now refuses to start unless it equals the committed profile's
+  capital reference), `TimeoutStartSec` 2min/5min/15min on the three oneshot
+  units, RMOM `MemoryHigh=1G`/`MemoryMax=1536M`, and both routes bound to
+  profile `8e7cdffe…`. **Three approved change points ride in this batch —
+  CONTINUOUS crowding now counts on the engine's base (strictly more
+  crowd-skips, never fewer), Lane-2 financed-longs scoring reproduces its
+  registered table, and residual momentum uses the registered calendar
+  window** — see `docs/strategy_program.md` "2026-07-27 — recorded change
+  points". The rollout's own phase gates are no longer fail-open: a failing
+  pip/ruff/mypy/pytest phase now aborts instead of reporting `rollout-ok`.
+- Prior installed commit: `13754d0be` (8-commit batch
+  `2c6703a..13754d0`), deployed 2026-07-27 ~14:03 UTC (Actions run 30270697928 — CI and the guarded
   VPS rollout both green in one pass; no staged completion needed this
   time). What this batch turns on: paper-fleet Telegram (heading "Bybit
   paper", PAPER page label; first hourly digest lands at the next full
@@ -34,7 +55,7 @@ history is in Git and in the audit receipts indexed at the bottom.
   added; config hashes and kernel strategy identities are stable across
   this deploy). The 10:47 unadopted-execution and L2-stale root causes
   recorded under "Known benign alert shapes" shipped in the same batch.
-- Prior installed commit: `d16daf5a8` ("Align active docs with the
+- Earlier installed commit: `d16daf5a8` ("Align active docs with the
   single funding-gated CONTINUOUS shape", containing `1fe0e48` — the
   operator-ordered CONTINUOUS replacement), deployed from canonical `main`,
   profile `operational`, on 2026-07-26, owner authorization: the "align,
@@ -148,7 +169,7 @@ before expiry; reboot for the kernel updates only after the refreshed
 receipts are installed. The 14:03 UTC rollout exercised exactly that path:
 the current receipt is `demo-rules-20260727T133929Z`, expiring ~2026-08-03.
 
-2026-07-27 (committed, NOT deployed — owner dispatch pending): the repo-wide
+2026-07-27 (DEPLOYED ~18:26 UTC, Actions run 30293398218): the repo-wide
 audit remediation (`docs/audit/2026-07-27-repo-wide-multi-agent-audit.md`, all
 53 findings). Three items are change points rather than refactors and were
 owner-approved before landing; the full statements are in
@@ -161,10 +182,13 @@ scoring** now reproduces its registered full-calendar table directly (no verdict
 moved); and **residual momentum** now uses the registered calendar window, which
 rewrites values for gapped symbols — harmless on this fleet because
 `run_continuous_rmom_refresh.sh` already runs `--full-rewrite`. Two operational
-gates also changed and matter at rollout time: the rollout script's phase gates
-are no longer fail-open (a failing ruff/mypy/pytest/pip phase now aborts the
-rollout instead of reporting `rollout-ok`), and the paper owner refuses to start
-unless `PAPER_EQUITY_USDT` equals the committed profile's capital reference.
+gates also changed: the rollout script's phase gates are no longer fail-open (a
+failing ruff/mypy/pytest/pip phase now aborts the rollout instead of reporting
+`rollout-ok` — this rollout was the first to run the rewritten machinery, and
+every phase reported explicitly), and the paper owner refuses to start unless
+`PAPER_EQUITY_USDT` equals the committed profile's capital reference (verified
+live at 250000). The first CONTINUOUS entry decisions under the new crowding
+base are the deployment check for M2.
 
 The prior change point: the 2026-07-26 CONTINUOUS replacement
 (`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment
@@ -287,7 +311,7 @@ audit.
 
 | Date | Subject |
 | --- | --- |
-| 2026-07-27 | `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` — repo-wide ten-agent audit; 53 findings, all remediated on `main` the same day (not yet deployed) |
+| 2026-07-27 | `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` — repo-wide ten-agent audit; 53 findings, all remediated and deployed the same day (`f1626565f`, Actions run 30293398218) |
 | 2026-07-24 | `docs/audit/2026-07-24-repo-and-strategy-audit.md` — repository and strategy audit; measured tail geometry, funding inversion, data tiers |
 | 2026-07-22 | `docs/audit/2026-07-22-demo-journal-publication-race.md` — journal publication race behind delayed fills and protection adoption |
 | 2026-07-22 | `docs/audit/2026-07-22-deploy-workflow-and-runtime-followup.md` — rollout gate, expired-rule recovery, shell status defect |

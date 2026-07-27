@@ -599,5 +599,9 @@ summarised operationally in `STATE.md`. Follow-through:
   fires once by design; its message now distinguishes a deliberate definition
   change from source drift, and that behaviour is pinned by a test.
 
-Nothing in this remediation was deployed, no sleeve toggle moved, and
-`REAL_MONEY` is untouched. The rollout dispatch belongs to the owner.
+**Deployed 2026-07-27 ~18:26 UTC** on the owner's "deploy all" instruction:
+commit `f1626565f`, profile `operational`, Actions run 30293398218, every phase
+`phase-ok` and `verify-ok`. Post-deploy the fleet is 9/9 units active, 0 failed,
+0 restarts, no journal errors, demo owner healthy. No sleeve toggle moved and
+`REAL_MONEY` is untouched. The pending kernel-update reboot (O2) was NOT taken
+and remains an owner-directed maintenance window.
