@@ -24,6 +24,7 @@ from liquidity_migration.account_kernel import (
     OrderCommand,
     account_journal_path,
     account_transactions_path,
+    quantity_tolerance,
     read_account_journal,
     read_account_journal_head,
     verify_account_journal,
@@ -3262,3 +3263,115 @@ def test_duplicate_terminal_status_from_second_consumer_is_idempotent(
         local_receive_ts_ns=1_299_000_000,
     )
     assert second == ()
+
+
+def _sub_cent_book() -> L2BookSnapshot:
+    return L2BookSnapshot(
+        symbol="BUSDT",
+        sequence=100,
+        previous_sequence=99,
+        exchange_ts_ns=900_000_000,
+        local_receive_ts_ns=1_000_000_000,
+        bids=(BookLevel(0.00099, 5_000_000.0),),
+        asks=(BookLevel(0.00101, 5_000_000.0),),
+        sequence_gap=False,
+        clock_offset_estimate_ns=100_000_000,
+    )
+
+
+def test_large_multi_fill_order_reaches_filled_without_wedging_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """A five-figure USDT position in a sub-cent coin is 1e6 base units; filling
+    it in several partials accumulates ~1e-10 of float error. The terminal
+    ORDER_STATUS check used an absolute 1e-12 tolerance while fill
+    reconstruction used a quantity-scaled one, so the venue's own Filled row
+    raised inside the journal transaction on every 0.25s retry forever
+    (2026-07-27 audit H4)."""
+
+    kernel = _kernel(tmp_path)
+    rules = {
+        "BUSDT": InstrumentRules(
+            symbol="BUSDT",
+            qty_step=0.1,
+            min_qty=0.1,
+            min_notional=1.0,
+            tick_size=0.0,
+            max_order_qty=5_000_000.0,
+            max_leverage=20.0,
+        )
+    }
+    policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=5_000.0,
+        max_account_gross_notional_usdt=5_000.0,
+        max_symbol_notional_usdt=5_000.0,
+        max_initial_margin_usdt=1_000.0,
+        max_leverage=10.0,
+    )
+    market = _sub_cent_book().market_ref(input_key="sub-cent-book")
+    result = kernel.submit_targets(
+        batch_id="large-qty",
+        market_inputs=[market],
+        targets=[
+            _target(
+                decision="large-qty-d",
+                key="continuous/main/BUSDT",
+                sleeve="continuous",
+                qty=1_000_000.0,
+                price=0.001,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=policy,
+        instrument_rules=rules,
+    )
+    assert result.accepted and len(result.commands) == 1
+    command = result.commands[0]
+    assert command.signed_qty == 1_000_000.0
+    kernel.record_ack(
+        command_id=command.command_id,
+        accepted=True,
+        venue_order_id="venue-large-qty",
+        exchange_ts_ns=1_200_000_000,
+        local_ack_ts_ns=1_201_000_000,
+    )
+
+    # Partials whose float sum is 1e-10 short of the commanded quantity.
+    partials = (865_525.6, 63_572.2, 70_902.2)
+    naive_total = 0.0
+    for quantity in partials:
+        naive_total += quantity
+    assert naive_total != 1_000_000.0
+    for index, quantity in enumerate(partials):
+        kernel.record_fill(
+            command_id=command.command_id,
+            execution_id=f"fill-large-{index}",
+            signed_qty=quantity,
+            price=0.001,
+            fee_usdt=0.0,
+            exchange_ts_ns=1_202_000_000 + index,
+            local_receive_ts_ns=1_203_000_000 + index,
+        )
+
+    order = kernel._state_ref().orders[command.command_id]
+    assert order.status == "filled"
+    # Snapped, so no residual drift can reach a downstream comparison.
+    assert order.filled_signed_qty == command.signed_qty
+    assert order.remaining_signed_qty == 0.0
+
+    # The venue's terminal row must commit rather than raise inside the journal
+    # transaction; a raise here latches owner health BLOCKED forever.
+    kernel.record_order_status(
+        command_id=command.command_id,
+        status="filled",
+        cumulative_filled_qty=1_000_000.0,
+        exchange_ts_ns=1_204_000_000,
+        local_receive_ts_ns=1_205_000_000,
+    )
+    assert kernel._state_ref().orders[command.command_id].terminal_status_recorded
+
+
+def test_quantity_tolerance_scales_with_the_quantity_being_compared() -> None:
+    assert quantity_tolerance(0.0) == 1e-12
+    assert quantity_tolerance(1.0) == 1e-12
+    assert quantity_tolerance(-1_000_000.0) == pytest.approx(1e-6)

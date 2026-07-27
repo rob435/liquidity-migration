@@ -122,6 +122,24 @@ class InstrumentRules:
     observed_ts_ns: int = 0
 
 
+# Float error in a reconstructed cumulative quantity scales with the quantity
+# itself.  A routine order at the deployed capital reference is 1e5-1e7 base
+# units (a five-figure USDT position in a sub-cent coin) and filling it in
+# several partials accumulates a few ulps -- inside a relative tolerance, well
+# outside a fixed absolute one.  Every quantity comparison in the kernel, the
+# execution stream, the venue-protection path, and the adapters must therefore
+# use this one rule: a site that disagrees can raise inside the journal
+# transaction on every retry forever (2026-07-27 audit H4).
+QUANTITY_RELATIVE_TOLERANCE = 1e-12
+QUANTITY_ABSOLUTE_TOLERANCE = 1e-12
+
+
+def quantity_tolerance(signed_qty: float) -> float:
+    """Comparison tolerance for a base-unit quantity, scaled by its magnitude."""
+
+    return max(abs(signed_qty) * QUANTITY_RELATIVE_TOLERANCE, QUANTITY_ABSOLUTE_TOLERANCE)
+
+
 @dataclass(frozen=True, slots=True)
 class AccountRiskSnapshot:
     equity_usdt: float

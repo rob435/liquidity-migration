@@ -72,3 +72,43 @@ work of 2026-07-20; see `docs/forward_record_annotations.md`.)
   which a fade/chase edge of the hypothesized size is very unlikely to be
   alive. They are deliberately blunt; a rule we might argue with later is
   the point.
+
+## Amendment — 2026-07-27 (scale binding + LONG K2 gate)
+
+Two silent disagreements between this registration and its executable form
+(`liquidity_migration/sleeve_kill_criteria.py`) were found in the 2026-07-27
+repo-wide audit (items H3 and H2) and are resolved here. Neither changes what
+the criteria *mean*; both restore the meaning this document already states.
+
+1. **K1 binds to the capital reference, not to the two absolute numbers.**
+   The rules above state K1 as a percentage — "−500 USDT (−5% of capital
+   reference)" and "−400 USDT (−4% of capital reference)" — and the closing
+   annotation states the intent: K1 is "roughly a 10% loss of maximum deployed
+   gross". The absolutes were the arithmetic of those percentages at the
+   then-current 10,000 USDT reference. Commit `58c3432` scaled the operational
+   profile 25× (`capital_reference_usdt: 250000`) and touched neither, which
+   would have redefined K1 to ~0.4% of maximum deployed gross: at the deployed
+   sizing one ordinary 1.5-ATR stop-out (~1,100 USDT) exceeds −400. From this
+   amendment the executable form derives the limits from the **committed**
+   operational profile's `capital_reference_usdt`:
+   `continuous = −5%`, `long = −4%`. At the deployed 250,000 USDT reference
+   those are −12,500 and −10,000 USDT. The percentages themselves are
+   unchanged and are not re-openable by a sizing change; a future sizing change
+   carries them automatically and needs no further amendment.
+   The unattributed-P&L provisional flag (10% of the tightest limit) was
+   already relative and scales with it.
+
+2. **LONG K2 is not gated on epoch day 90.** The LONG K2 text is "once 40
+   completed round trips exist (whenever that occurs)"; the day-90 /
+   60-forward-day condition belongs to CONTINUOUS K2 only. The code required
+   both for both sleeves, which could let a dead LONG run trade for up to two
+   extra months. The executable form now gates day-90 per sleeve, and reports
+   LONG K2 expectancy per trade explicitly.
+
+Also implemented, without amendment (it was registered above and simply had no
+executable form): LONG K3's second leg — fewer than 30 completed round trips by
+day 180 retires the demo sleeve for capacity reasons, independent of sign.
+
+Nothing here creates real-money authority, changes the epoch, or resets any
+clock. Weekly checking is unchanged: `scripts/ops.sh kill-criteria`
+(exit 3 on any trip).

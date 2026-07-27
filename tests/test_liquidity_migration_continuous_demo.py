@@ -40,6 +40,7 @@ from liquidity_migration.continuous_demo import (
     _btc_risk_sizing_payload_fields,
     _btc_trend_gate_allows_value,
     _btc_trend_gate_payload_fields,
+    PRIOR_BAR_COLUMN_PREFIX,
     _continuous_age_eligible_symbols,
     _continuous_base_notional_pct_equity,
     _continuous_btc_risk_multiplier,
@@ -2129,3 +2130,180 @@ def test_breaker_counts_canonical_reduction_batches_not_component_rows() -> None
 
     assert count == 2
     assert tripped is True
+
+
+def _aged_universe(ages: dict[str, float]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": list(ages),
+            "listing_age_days": [float(value) for value in ages.values()],
+        }
+    )
+
+
+def test_crowding_counts_before_the_age_gate_like_the_engine() -> None:
+    """`_run_trades` counts crowding on every funding-admitted fresh entry sharing
+    a signal_ts and applies its per-entry age gate afterwards. Counting on the
+    age-filtered frame instead let the live book take entries the validated
+    engine crowd-skipped, in exactly the fresh-listing-squeeze hours the two
+    gates were designed around (2026-07-27 audit M2)."""
+
+    state = pl.DataFrame(
+        {
+            "symbol": ["OLD1USDT", "OLD2USDT", "YOUNGUSDT"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+            "rv_168h": [0.01, 0.02, 0.03],
+        }
+    )
+    signal_ts = 1_700_000_000_000
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=5,
+        entry_crowding_max_fresh=2,
+        ensemble_components=(("p3", "none", 240, 0.12, 1.0, 0.35, None),),
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=_aged_universe({"OLD1USDT": 900.0, "OLD2USDT": 800.0, "YOUNGUSDT": 10.0}),
+        klines=pl.DataFrame(),
+        reserved_components={},
+        cooldown_components={},
+        reservations_count=0,
+        entry_capacity=5,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"OLD1USDT": 1.0, "OLD2USDT": 2.0, "YOUNGUSDT": 3.0},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+    )
+
+    # Two age-qualified names would fit under crowd-2, but three fresh signals
+    # share the timestamp, so the engine skips the whole component stack.
+    assert observed.funnel_rows[0]["event"] == 3
+    assert observed.funnel_rows[0]["age"] == 2
+    assert observed.candidates == ()
+    assert {row["first_rejection_reason"] for row in observed.selection_rejections} == {"crowding"}
+
+
+def test_crowding_counts_only_fresh_entrants_when_prior_bar_state_is_present() -> None:
+    """The engine counts crowding on `_fresh_entries` — rows whose symbol was not
+    already in the (decile AND trigger) set one bar earlier. Carrying the prior
+    bar lets the live sleeve reproduce that instead of counting continuation
+    rows."""
+
+    state = pl.DataFrame(
+        {
+            "symbol": ["AUSDT", "BUSDT", "CUSDT"],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.8, 0.7],
+            "turnover_quote": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+            "rv_168h": [0.01, 0.02, 0.03],
+            # CUSDT was already in the decile last bar: a continuation, not a
+            # fresh entrant, so it does not count toward the crowd cap.
+            f"{PRIOR_BAR_COLUMN_PREFIX}decile": [3, None, 9],
+        }
+    )
+    signal_ts = 1_700_000_000_000
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=5,
+        entry_crowding_max_fresh=2,
+        ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35, None),),
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components={},
+        cooldown_components={},
+        reservations_count=0,
+        entry_capacity=5,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"AUSDT": 1.0, "BUSDT": 2.0, "CUSDT": 3.0},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+    )
+    assert observed.observed_crowding == 0
+    assert sorted(candidate["symbol"] for candidate in observed.candidates) == [
+        "AUSDT",
+        "BUSDT",
+        "CUSDT",
+    ]
+
+
+def test_funding_rejection_is_named_instead_of_being_reported_as_capacity() -> None:
+    """When every age-qualified candidate is funding-rejected the cascade used to
+    fall through to "capacity" while the funnel showed funding 0 — the two
+    operator channels contradicting each other for the signature rejection mode
+    of the deployed funding-gated profile (2026-07-27 audit M3)."""
+
+    state = pl.DataFrame(
+        {
+            "symbol": ["NEG1USDT", "NEG2USDT"],
+            "decile": [9, 9],
+            "composite": [0.9, 0.8],
+            "turnover_quote": [1_000_000.0, 1_000_000.0],
+            "rv_168h": [0.01, 0.02],
+        }
+    )
+    signal_ts = 1_700_000_000_000
+    cutoff = signal_ts + MS_PER_HOUR
+    config = ContinuousDemoCycleConfig(
+        max_active=5,
+        max_new_entries_per_cycle=5,
+        entry_crowding_max_fresh=2,
+        ensemble_components=(("p3", "none", 0, 0.12, 1.0, 0.35, 0.0),),
+    )
+    client = _FakeFundingHistoryClient(
+        {
+            symbol: [
+                {"fundingRateTimestamp": str(cutoff - MS_PER_HOUR), "fundingRate": "-0.0001"}
+            ]
+            for symbol in ("NEG1USDT", "NEG2USDT")
+        }
+    )
+    observed = _observe_continuous_component_selection(
+        state,
+        universe=pl.DataFrame(),
+        klines=pl.DataFrame(),
+        reserved_components={},
+        cooldown_components={},
+        reservations_count=0,
+        entry_capacity=5,
+        all_trades=pl.DataFrame(),
+        signal_ts=signal_ts,
+        strategy_id="continuous_fade_v2",
+        price_by_symbol={"NEG1USDT": 1.0, "NEG2USDT": 2.0},
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        config=config,
+        active_entries_enabled=True,
+        settled_funding_probe=_CycleSettledFundingProbe(client, cutoff_ts_ms=cutoff),
+    )
+
+    assert observed.funnel_rows[0]["age"] == 2
+    assert observed.funnel_rows[0]["funding"] == 0
+    assert observed.candidates == ()
+    assert {
+        (row["symbol"], row["first_rejection_reason"]) for row in observed.selection_rejections
+    } == {("NEG1USDT", "funding_admission"), ("NEG2USDT", "funding_admission")}
+    assert (
+        _first_entry_rejection_reason(
+            observed,
+            preselection_reason="",
+            btc_risk_reason="",
+            raw_entry_intent_count=0,
+            unresolved_suppressions=0,
+            terminal_suppressions=0,
+            publication_error_count=0,
+            published_entry_count=0,
+            blocked_rows=[],
+        )
+        == "funding_admission"
+    )

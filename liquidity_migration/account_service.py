@@ -38,7 +38,7 @@ from .account_kernel import (
 )
 from .account_route import AccountRoute, require_account_route
 from .artifact_snapshot import read_stable_file
-from .deterministic_serialization import canonical_json
+from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, SystemClock
 from .entry_attempts import entry_signal_expiry_rejection
 from .market_capture import MarketCaptureError
@@ -1101,6 +1101,47 @@ class PositionTruthProvider(Protocol):
     ) -> None: ...
 
 
+def _owner_batch_request_content_hash(*, batch_id: str, targets: Sequence[DesiredTarget]) -> str:
+    """Stable idempotency identity for an owner-generated (non-strategy) batch.
+
+    Without an explicit ``request_content_hash`` the kernel falls back to hashing
+    the whole derived-target payload, which includes ``reference_price``.
+    Convergence and entry-unwind batches take that price from a fresh L2 book on
+    every call, so the documented crash-replay path -- same batch id, recomputed
+    hash -- raised ``AccountJournalIntegrityError`` on any price movement between
+    commit and replay instead of resubmitting the commanded order, aborting the
+    whole plans loop and leaving the owner BLOCKED with an open venue position
+    (2026-07-27 audit H5).
+
+    Hash only the commanded content. The reference price is evaluation evidence
+    recorded by the first transaction, exactly like the market, wallet, policy,
+    and rule snapshots the kernel already excludes for the same reason.
+    """
+
+    material = {
+        "batch_id": batch_id,
+        "targets": sorted(
+            (
+                {
+                    "decision_key": target.decision_key,
+                    "target_key": target.target_key,
+                    "sleeve": target.sleeve,
+                    "strategy_id": target.strategy_id,
+                    "component_id": target.component_id,
+                    "symbol": target.symbol.upper(),
+                    "signed_qty": float(target.signed_qty),
+                    "leverage": float(target.leverage),
+                    "reason": target.reason,
+                    "metadata": json_safe(dict(target.metadata)),
+                }
+                for target in targets
+            ),
+            key=lambda row: (str(row["target_key"]), str(row["decision_key"])),
+        ),
+    }
+    return hashlib.sha256(canonical_json(material)).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class _ConvergencePlan:
     item: AccountConvergenceItem
@@ -1900,6 +1941,9 @@ class AccountExecutionService:
             native_protection_policy=self.native_protection_policy,
             command_symbols=requested_symbols,
             require_strict_risk_reduction=risk_reducing_only,
+            request_content_hash=_owner_batch_request_content_hash(
+                batch_id=batch_id, targets=targets
+            ),
         )
         if result.accepted and result.commands and self.execution_adapter is not None:
             self.runtime.driver.execute_batch(
@@ -1974,6 +2018,9 @@ class AccountExecutionService:
             native_protection_policy=self.native_protection_policy,
             command_symbols=requested_symbols,
             require_strict_risk_reduction=True,
+            request_content_hash=_owner_batch_request_content_hash(
+                batch_id=batch_id, targets=targets
+            ),
         )
         if result.accepted and result.commands and self.execution_adapter is not None:
             self.runtime.driver.execute_batch(

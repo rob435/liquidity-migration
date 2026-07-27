@@ -168,11 +168,54 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=%q\n' \
         "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
-set -euo pipefail
+# `-E` propagates the ERR trap into shell functions so a strict phase can still
+# report which phase died; see run_strict_phase below.
+set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-fail() { echo "deploy failed: $*" >&2; exit 1; }
+fail() { report_strict_phase_failure 1; echo "deploy failed: $*" >&2; exit 1; }
+
+# Bash disables `set -e` (and the ERR trap) for the entire dynamic extent of a
+# function invoked from a condition context (`if`, `&&`, `||`), and an explicit
+# `set -e` inside that extent has no effect until the enclosing command
+# finishes.  Nesting a whole mode inside `run_phase`'s `if "$@"` therefore
+# silently demoted every gate the mode runs — pip, ruff, mypy, the focused
+# tests, the demo-rule probe — to a non-fatal warning.  Two guards close that:
+#
+#   * `run_strict_phase` brackets a payload without ever putting it in a
+#     condition context, so errexit stays lethal for every command the payload
+#     and its callees run.  The ERR trap emits the same `phase-failed` line.
+#   * `run_phase` (leaf commands, which may legitimately run under a suppressed
+#     errexit) aborts explicitly on a non-zero payload; `exit` is honoured
+#     regardless of the errexit context.  `RUN_PHASE_COLLECT_STATUS=1` opts a
+#     caller into aggregating the status itself — only `run_phase_pair` does.
+RUN_PHASE_COLLECT_STATUS=0
+STRICT_PHASE_LABEL=""
+STRICT_PHASE_STARTED=0
+
+report_strict_phase_failure() {
+    local status="${1:-1}"
+    [ -n "$STRICT_PHASE_LABEL" ] || return 0
+    printf 'phase-failed name=%s elapsed_seconds=%s status=%s\n' \
+        "$STRICT_PHASE_LABEL" "$(( $(date +%s) - STRICT_PHASE_STARTED ))" "$status" >&2
+    STRICT_PHASE_LABEL=""
+    return 0
+}
+
+trap 'report_strict_phase_failure $?' ERR
+
+run_strict_phase() {
+    local label="$1"
+    shift
+    STRICT_PHASE_LABEL="$label"
+    STRICT_PHASE_STARTED="$(date +%s)"
+    printf 'phase-start name=%s utc=%s\n' "$label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    "$@"
+    printf 'phase-ok name=%s elapsed_seconds=%s\n' \
+        "$label" "$(( $(date +%s) - STRICT_PHASE_STARTED ))"
+    STRICT_PHASE_LABEL=""
+}
 
 run_phase() {
     local label="$1" started finished status
@@ -187,9 +230,12 @@ run_phase() {
     finished="$(date +%s)"
     if [ "$status" -eq 0 ]; then
         printf 'phase-ok name=%s elapsed_seconds=%s\n' "$label" "$((finished - started))"
-    else
-        printf 'phase-failed name=%s elapsed_seconds=%s status=%s\n' \
-            "$label" "$((finished - started))" "$status" >&2
+        return 0
+    fi
+    printf 'phase-failed name=%s elapsed_seconds=%s status=%s\n' \
+        "$label" "$((finished - started))" "$status" >&2
+    if [ "${RUN_PHASE_COLLECT_STATUS:-0}" -eq 0 ]; then
+        fail "phase $label failed with status $status"
     fi
     return "$status"
 }
@@ -201,9 +247,9 @@ run_phase_pair() {
     started="$(date +%s)"
     printf 'phase-group-start name=%s members=%s,%s utc=%s\n' \
         "$group" "$left_label" "$right_label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    run_phase "$left_label" "$left_function" &
+    RUN_PHASE_COLLECT_STATUS=1 run_phase "$left_label" "$left_function" &
     left_pid=$!
-    run_phase "$right_label" "$right_function" &
+    RUN_PHASE_COLLECT_STATUS=1 run_phase "$right_label" "$right_function" &
     right_pid=$!
     if wait "$left_pid"; then left_status=0; else left_status=$?; fi
     if wait "$right_pid"; then right_status=0; else right_status=$?; fi
@@ -947,12 +993,14 @@ PY
             --symbols-file "$refreshed_candidate" \
             --prior-rules-file "$demo_rules" \
             --output "$refreshed_rules" \
-            --confirm-demo-probe
+            --confirm-demo-probe \
+            || fail "demo-rule probe failed"
         ROLLOUT_DEMO_RULES_REFRESHED=1
     fi
 
     "$PYTHON" - /etc/liquidity-migration/account-execution.env \
-        "$refreshed_rules" "$refreshed_candidate" <<'PY'
+        "$refreshed_rules" "$refreshed_candidate" <<'PY' \
+        || fail "demo-rule rebind of the account execution environment failed"
 import os
 import shlex
 import sys
@@ -1274,7 +1322,7 @@ verify_topology() {
         timer_off liquidity-migration-continuous-rmom-refresh.timer || fail "RMOM timer is not off"
     fi
     if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        validate_hedge_model_prior
+        validate_hedge_model_prior || fail "hedge model prior validation failed"
         expected_downstream_on liquidity-migration-continuous-hedge.timer \
             || fail "hedge timer is not active"
     else
@@ -1298,7 +1346,8 @@ verify_topology() {
             fi
         fi
     done
-    check_demo_order_permissions verify
+    check_demo_order_permissions verify \
+        || fail "demo order permission verification failed"
     echo "verify-ok commit=$EXPECTED_COMMIT profile=$AUTH_PROFILE"
 }
 
@@ -1347,9 +1396,10 @@ seed_rmom() {
 activate_mode() {
     load_authorization
     require_quiescent
-    check_demo_order_permissions deploy
+    check_demo_order_permissions deploy \
+        || fail "demo order permission deploy check failed"
     if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        validate_hedge_model_prior
+        validate_hedge_model_prior || fail "hedge model prior validation failed"
     fi
 
     for unit in $(lm_expected_systemd_units); do
@@ -1427,13 +1477,13 @@ stop_all_rollout_units_best_effort() {
     local unit failed=0
     for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
         if ! systemctl stop "$unit"; then
-            printf 'failed-to-stop unit=%s\n' "$unit" >&2
+            cleanup_notice "failed-to-stop unit=$unit"
             failed=1
         fi
     done
     for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
         if systemctl is-active --quiet "$unit"; then
-            printf 'still-active unit=%s\n' "$unit" >&2
+            cleanup_notice "still-active unit=$unit"
             failed=1
         else
             # Leave the forced-stop end state clean for staged recovery: a
@@ -1445,28 +1495,42 @@ stop_all_rollout_units_best_effort() {
     return "$failed"
 }
 
+# Cleanup diagnostics must survive the transport dying underneath the rollout
+# (laptop sleep, network drop, Actions cancellation): sshd HUPs the remote
+# process group and every write to the dead pipe raises SIGPIPE. Mirror each
+# line into the host journal so the record outlives stdout/stderr, and never let
+# a failed write abort the stop sequence.
+cleanup_notice() {
+    logger -t liquidity-migration-deploy -p daemon.err -- "$*" 2>/dev/null || true
+    printf '%s\n' "$*" >&2 2>/dev/null || true
+}
+
 rollout_cleanup() {
     local status="$?"
-    trap - EXIT INT TERM
+    trap - EXIT INT TERM HUP
+    # A second signal, or a write to a dead stdout, must not interrupt the
+    # fail-closed handoff; SIGKILL remains inherently untrappable.
+    trap '' INT TERM HUP PIPE
+    set +e
     if [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
         && [ "$ROLLOUT_COMPLETE" -eq 0 ]; then
         if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]; then
-            printf '%s\n' \
-                'rollout failed before install; restoring the verified prior topology' >&2
+            cleanup_notice \
+                'rollout failed before install; restoring the verified prior topology'
             if stop_all_rollout_units_best_effort \
                 && (
                     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
                     activate_mode
                 ); then
-                printf 'rollout-restore-ok commit=%s\n' "$ROLLOUT_CURRENT_COMMIT" >&2
+                cleanup_notice "rollout-restore-ok commit=$ROLLOUT_CURRENT_COMMIT"
             else
-                printf '%s\n' \
-                    'CRITICAL: prior topology restore failed; forcing the managed fleet stopped' >&2
+                cleanup_notice \
+                    'CRITICAL: prior topology restore failed; forcing the managed fleet stopped'
                 stop_all_rollout_units_best_effort || true
             fi
         else
-            printf '%s\n' \
-                'rollout cannot safely restore prior authority; forcing the managed fleet stopped for explicit recovery' >&2
+            cleanup_notice \
+                'rollout cannot safely restore prior authority; forcing the managed fleet stopped for explicit recovery'
             stop_all_rollout_units_best_effort || true
         fi
     fi
@@ -1520,14 +1584,14 @@ rollout_mode() {
     ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
         || fail "cannot read installed checkout HEAD"
 
-    run_phase rollout-target-prefetch prefetch_rollout_target
+    run_strict_phase rollout-target-prefetch prefetch_rollout_target
 
     # Prove the current receipt/topology before changing any unit, using the
     # commit it actually authorizes rather than the incoming target commit.
     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
     load_authorization rollout-shutdown
-    run_phase current-topology-verification verify_topology
-    run_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
+    run_strict_phase current-topology-verification verify_topology
+    run_strict_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
     if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
         echo "deployment-plan class=exceptional rule_maintenance=full-probe reason=expired"
     else
@@ -1546,16 +1610,21 @@ rollout_mode() {
     trap rollout_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
+    # death (HUP on the remote process group, SIGPIPE on the next write) would
+    # otherwise leave the fleet half-stopped with no cleanup at all.
+    trap 'exit 129' HUP
+    trap 'exit 141' PIPE
 
     # Stop every producer/timer before either owner. A bounded exact-head
     # recheck closes the target/journal race while the owner is still alive;
     # only then are owners stopped and venue truth sampled once more.
-    run_phase stop-downstream-units \
+    run_strict_phase stop-downstream-units \
         stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
-    run_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
-    run_phase stop-account-owners \
+    run_strict_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
+    run_strict_phase stop-account-owners \
         stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
-    run_phase final-stopped-flat-account-proof rollout_flat_check none
+    run_strict_phase final-stopped-flat-account-proof rollout_flat_check none
     require_quiescent
 
     # From checkout mutation onward the old create-only receipt cannot be used
@@ -1563,13 +1632,13 @@ rollout_mode() {
     # stopped instead of guessing across commits.
     ROLLOUT_IRREVERSIBLE=1
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
-    run_phase stopped-install install_mode
+    run_strict_phase stopped-install install_mode
     if [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ]; then
-        run_phase post-rule-refresh-flat-account-proof \
+        run_strict_phase post-rule-refresh-flat-account-proof \
             rollout_flat_check stopped-maintenance
     fi
-    run_phase create-operational-authority issue_rollout_authorization
-    run_phase activate-and-verify activate_mode
+    run_strict_phase create-operational-authority issue_rollout_authorization
+    run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
@@ -1595,17 +1664,22 @@ recover_mode() {
     trap rollout_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
+    # death (HUP on the remote process group, SIGPIPE on the next write) would
+    # otherwise leave the fleet half-stopped with no cleanup at all.
+    trap 'exit 129' HUP
+    trap 'exit 141' PIPE
 
-    run_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
-    run_phase recovery-flat-account-proof \
+    run_strict_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
+    run_strict_phase recovery-flat-account-proof \
         rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
     echo "deployment-plan class=recovery rule_maintenance=auto candidate_refresh=required"
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
-    run_phase stopped-install install_mode
-    run_phase post-rule-maintenance-flat-account-proof \
+    run_strict_phase stopped-install install_mode
+    run_strict_phase post-rule-maintenance-flat-account-proof \
         rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
-    run_phase create-operational-authority issue_rollout_authorization
-    run_phase activate-and-verify activate_mode
+    run_strict_phase create-operational-authority issue_rollout_authorization
+    run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0
     printf 'recover-ok commit=%s profile=%s reset_receipt=%s\n' \

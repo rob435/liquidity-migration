@@ -614,34 +614,44 @@ def continuous_source_decile_panel(
     )
 
 
-def _entry_event_expr(trigger: str) -> pl.Expr:
+def _entry_event_expr(trigger: str, *, column_prefix: str = "") -> pl.Expr:
+    """Confirmed-hour event gate.
+
+    ``column_prefix`` evaluates the same trigger against a differently-prefixed
+    copy of the feature columns; the live sleeve uses it to test the *previous*
+    confirmed bar when reproducing the engine's fresh-entrant rule.
+    """
+
+    def column(name: str) -> pl.Expr:
+        return pl.col(f"{column_prefix}{name}")
+
     if trigger == "none":
         return pl.lit(True)
     if trigger.startswith("fresh_pop"):
         threshold = float(trigger.removeprefix("fresh_pop")) / 100.0
-        return (pl.col("ret1") >= threshold) & (pl.col("ret1") >= pl.col("max_ret168") - 1e-12)
+        return (column("ret1") >= threshold) & (column("ret1") >= column("max_ret168") - 1e-12)
     if trigger.startswith("pop") and "_gb" in trigger:
         left, right = trigger.split("_gb", 1)
         pop_min = float(left.removeprefix("pop")) / 100.0
         gb_min = float(right) / 100.0
         return (
-            (pl.col("prior6_ret1_max") >= pop_min)
-            & (pl.col("ret1") <= 0.0)
-            & (pl.col("giveback_from_prior6_high") <= -gb_min)
+            (column("prior6_ret1_max") >= pop_min)
+            & (column("ret1") <= 0.0)
+            & (column("giveback_from_prior6_high") <= -gb_min)
         )
     if trigger.startswith("turn") and "_pop" in trigger:
         left, right = trigger.split("_pop", 1)
         turn_min = float(left.removeprefix("turn"))
         pop_min = float(right) / 100.0
-        return (pl.col("turnover_spike_168h") >= turn_min) & (pl.col("ret1") >= pop_min)
+        return (column("turnover_spike_168h") >= turn_min) & (column("ret1") >= pop_min)
     if trigger.startswith("turn") and "_gb" in trigger:
         left, right = trigger.split("_gb", 1)
         turn_min = float(left.removeprefix("turn"))
         gb_min = float(right) / 100.0
         return (
-            (pl.col("turnover_spike_168h") >= turn_min)
-            & (pl.col("prior6_ret1_max") >= 0.05)
-            & (pl.col("giveback_from_prior6_high") <= -gb_min)
+            (column("turnover_spike_168h") >= turn_min)
+            & (column("prior6_ret1_max") >= 0.05)
+            & (column("giveback_from_prior6_high") <= -gb_min)
         )
     raise ValueError(f"unknown entry_event_trigger {trigger!r}")
 

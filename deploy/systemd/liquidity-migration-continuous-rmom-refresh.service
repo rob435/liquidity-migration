@@ -6,6 +6,10 @@ ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
+# A hung refresh must not stall a rollout indefinitely: `seed_rmom`'s bounded
+# retry deadline cannot fire while a synchronous `systemctl start` is still
+# activating, and the oneshot default is TimeoutStartSec=infinity.
+TimeoutStartSec=900
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
@@ -24,6 +28,13 @@ ProtectSystem=full
 ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
+# The full-rewrite refresh (POLARS_MAX_THREADS=8) is the heaviest managed
+# workload and was the only one without a ceiling, so it could pressure the
+# global OOM killer against the co-resident account owners on the 4 GiB host.
+# MemoryHigh throttles first; MemoryMax is a guard bound, not a target — retighten
+# it from `systemctl show ... -p MemoryPeak` once several refreshes are observed.
+MemoryHigh=1G
+MemoryMax=1536M
 
 [Install]
 WantedBy=multi-user.target

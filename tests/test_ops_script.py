@@ -396,7 +396,7 @@ def test_remote_clean_check_ignores_current_index_flags(
     helper.write_text(helper.read_text(encoding="utf-8") + "\n# hidden mutation\n", encoding="utf-8")
 
     deploy = (checkout / "scripts/deploy_vps_live.sh").read_text(encoding="utf-8")
-    remote_start = deploy.index("set -euo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'"))
+    remote_start = deploy.index("set -Eeuo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'"))
     remote_end = deploy.index("require_quiescent()", remote_start)
     probe_source = deploy[remote_start:remote_end]
     index_root = tmp_path / "deploy-index"

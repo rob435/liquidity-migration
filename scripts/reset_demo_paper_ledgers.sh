@@ -1198,30 +1198,41 @@ stop_all_managed_units_after_failed_handoff() {
   return "$failed"
 }
 
+# Cleanup diagnostics must survive the transport dying underneath the reset
+# (SSH client death HUPs the remote process group and turns every later write
+# into SIGPIPE). Mirror each line into the host journal and never let a failed
+# write abort the fail-closed handoff.
+cleanup_notice() {
+  logger -t liquidity-migration-reset -p daemon.err -- "$*" 2>/dev/null || true
+  printf '%s\n' "$*" >&2 2>/dev/null || true
+}
+
 cleanup() {
   local rc="$?"
   trap - EXIT
   # Once cleanup owns the handoff, a second interactive/service signal must
   # not interrupt the fail-closed stop sequence. SIGKILL remains inherently
-  # untrappable, but INT/TERM are deferred by ignoring them until exit.
-  trap '' INT TERM
+  # untrappable, but INT/TERM/HUP are deferred by ignoring them until exit, and
+  # PIPE is ignored so a dead stdout cannot kill the stop sequence mid-way.
+  trap '' INT TERM HUP PIPE
+  set +e
   [[ -z "$MANIFEST_DIR" ]] || rm -rf -- "$MANIFEST_DIR"
   if (( SERVICES_STOPPED )) && (( ! RESTART_COMPLETE )); then
     if (( FAILURE_RECOVERY_ALLOWED )) && (( ! LEAVE_STOPPED )); then
       release_paper_account_lease "failure recovery"
       release_demo_account_lease "failure recovery"
-      echo "Reset did not complete; attempting to restore pre-reset service state." >&2
+      cleanup_notice "Reset did not complete; attempting to restore pre-reset service state."
       if ! restart_previously_active "failure recovery"; then
-        echo "Failure recovery produced a partial topology; failing closed." >&2
+        cleanup_notice "Failure recovery produced a partial topology; failing closed."
         if ! stop_all_managed_units_after_failed_handoff; then
-          echo "CRITICAL: at least one managed unit could not be stopped." >&2
+          cleanup_notice "CRITICAL: at least one managed unit could not be stopped."
         fi
       fi
     else
       if stop_all_managed_units_after_failed_handoff; then
-        echo "Reset handoff did not complete; managed units are stopped and verified." >&2
+        cleanup_notice "Reset handoff did not complete; managed units are stopped and verified."
       else
-        echo "CRITICAL: reset handoff failed and at least one managed unit remains active." >&2
+        cleanup_notice "CRITICAL: reset handoff failed and at least one managed unit remains active."
       fi
       release_paper_account_lease "failed stopped handoff"
       release_demo_account_lease "failed stopped handoff"
@@ -1232,6 +1243,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# bash skips the EXIT trap on an untrapped fatal signal, so an SSH client death
+# (HUP on the remote process group, SIGPIPE on the next write) would otherwise
+# skip the fail-closed handoff entirely and leave a partially stopped fleet.
+trap 'exit 129' HUP
+trap 'exit 141' PIPE
 
 echo
 echo "Stopping shared-account writers and maintenance units ..."

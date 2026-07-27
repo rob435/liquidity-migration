@@ -7,6 +7,9 @@ ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
+# Bound the run below the 5-minute OnUnitActiveSec interval: a oneshot's
+# infinity default would let one hung hedge pass suppress every later one.
+TimeoutStartSec=300
 User=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env

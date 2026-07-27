@@ -1548,6 +1548,73 @@ def test_crash_after_convergence_commit_replays_the_same_command_id(tmp_path: Pa
     assert restarted.convergence_report().converged
 
 
+def test_crash_replay_resubmits_the_commanded_order_after_the_market_moved(
+    tmp_path: Path,
+) -> None:
+    """The crash-replay path recomputes the batch's request hash. Convergence
+    derives its targets from a *fresh* L2 book, so before the fix any price
+    movement between commit and replay turned the recomputed hash into an
+    ``AccountJournalIntegrityError`` -- the commanded reduce-only order was never
+    resubmitted and the raise aborted the whole plans loop (2026-07-27 audit
+    H5). The prior test passed only because its market returned a constant
+    price."""
+
+    root = tmp_path / "account"
+    adapter = ScriptedExecutionAdapter("reject", "crash", "fill")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(root, adapter, clock=clock, convergence_retry_backoff_ns=100)
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="moving-market",
+            batch_id="moving-market",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    clock.advance_ns(100)
+    with pytest.raises(RuntimeError, match="after command commit"):
+        service.converge_once()
+    crashed_command = adapter.submissions[1]
+    assert service.kernel.state().orders[crashed_command.command_id].status == "commanded"
+
+    moved = MarketInputRef(
+        input_key="book-moved",
+        symbol="BUSDT",
+        exchange_ts_ns=900_000_000,
+        local_receive_ts_ns=1_000_000_000,
+        reference_price=10.5,
+        bid_price=10.4,
+        ask_price=10.6,
+        book_sequence=2,
+        source="test",
+    )
+    restart_clock = VirtualClock(
+        current_wall_ns=clock.wall_time_ns(),
+        current_monotonic_ns=clock.monotonic_ns(),
+    )
+    restarted = _service(
+        root,
+        adapter,
+        market=moved,
+        clock=restart_clock,
+        convergence_retry_backoff_ns=100,
+    )
+    replayed = restarted.converge_once()
+    assert replayed is not None
+    assert adapter.submissions[2].command_id == crashed_command.command_id
+    assert adapter.submissions[2].batch_id == crashed_command.batch_id
+    convergence_orders = [
+        order
+        for order in restarted.kernel.state().orders.values()
+        if order.batch_id.startswith("account-convergence/")
+    ]
+    assert len(convergence_orders) == 1
+    assert restarted.convergence_report().converged
+
+
 def test_retry_limit_exhaustion_blocks_health_immediately_and_stays_bounded(tmp_path: Path) -> None:
     adapter = ScriptedExecutionAdapter("reject", "reject")
     clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)

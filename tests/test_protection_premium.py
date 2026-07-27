@@ -9,6 +9,7 @@ import polars as pl
 from liquidity_migration.account_contracts import AccountEvent
 from liquidity_migration.sleeve_kill_criteria import (
     EPOCH_START_UTC,
+    REGISTERED_CAPITAL_REFERENCE_USDT,
     evaluate_kill_criteria,
     protection_premium_section,
 )
@@ -117,6 +118,7 @@ class TestProtectionPremium:
             pnl_events=events,
             trades_by_group={"continuous": pl.DataFrame({"exit_pnl_key": ["p-close"]}), "long": pl.DataFrame()},
             now_utc=EPOCH_START_UTC + dt.timedelta(days=10),
+            capital_reference_usdt=REGISTERED_CAPITAL_REFERENCE_USDT,
         )
         line = report["protection_premium"]
         assert line["realized_premium_net_usdt"] == -7.25

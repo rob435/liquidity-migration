@@ -51,6 +51,7 @@ from .account_contracts import (
     OrderState,
     PositionState,
     TargetBatchResult,
+    quantity_tolerance,
     transaction_state_copy,
 )
 from .artifact_snapshot import read_stable_file
@@ -156,7 +157,7 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
     if signed_qty == 0.0 or price <= 0.0 or signed_qty * order.signed_qty <= 0.0:
         raise AccountTransitionError(f"invalid fill direction/price for command {command_id}")
     next_filled = order.filled_signed_qty + signed_qty
-    tolerance = max(abs(order.signed_qty) * 1e-12, 1e-12)
+    tolerance = quantity_tolerance(order.signed_qty)
     if abs(next_filled) > abs(order.signed_qty) + tolerance:
         raise AccountTransitionError(f"fill overstates command quantity for {command_id}")
     order.filled_signed_qty = next_filled
@@ -173,6 +174,9 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
             raise AccountTransitionError(f"invalid modeled terminal cumulative quantity for command {command_id}")
     if abs(next_filled - order.signed_qty) <= tolerance:
         order.status = "filled"
+        # Snap the reconstructed total to the commanded quantity so the ulps a
+        # multi-partial fill accumulates never reach a downstream comparison.
+        order.filled_signed_qty = order.signed_qty
     elif modeled_terminal_qty and abs(next_filled) >= modeled_terminal_qty - tolerance:
         order.status = "partially_filled_cancelled"
     elif not modeled_terminal_qty and bool(fill_metadata.get("terminal")):
@@ -434,8 +438,17 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             raise AccountTransitionError(f"unsupported terminal order status {status!r}")
         if status == "rejected" and abs(order.filled_signed_qty) > 1e-12:
             raise AccountTransitionError("an order with fills cannot become rejected")
-        if status == "filled" and abs(order.filled_signed_qty - order.signed_qty) > 1e-12:
-            raise AccountTransitionError("filled status precedes reconstructed executions")
+        if status == "filled":
+            # The scaled rule, matching _apply_fill and the WS/REST consumer
+            # gate. An absolute epsilon here rejected the venue's own Filled row
+            # for large multi-fill orders, and because the raise happens inside
+            # the journal transaction the 0.25s retry loop never converged:
+            # reconciliation, the position-truth report, and every reduce-only
+            # exit stayed wedged until manual intervention (audit H4).
+            if abs(order.filled_signed_qty - order.signed_qty) > quantity_tolerance(order.signed_qty):
+                raise AccountTransitionError("filled status precedes reconstructed executions")
+            # Snap so residual float error cannot accumulate across later reads.
+            order.filled_signed_qty = order.signed_qty
         order.status = status
         order.rejection_key = str(payload.get("rejection_key") or order.rejection_key)
         order.terminal_status_recorded = True
@@ -1173,6 +1186,13 @@ def _target_batch_request_hash(
     are evaluation evidence recorded by the first transaction, but a crash
     retry may observe fresher versions and must still recover that committed
     result instead of turning the same immutable target request into a conflict.
+
+    The ``request_content_hash is None`` fallback hashes the derived target
+    payloads, which still carry ``reference_price``. Any caller that rebuilds
+    its targets from a fresh book on replay -- every owner-generated
+    convergence/entry-unwind batch -- must therefore pass an explicit
+    ``request_content_hash`` (see ``_owner_batch_request_content_hash``) or the
+    replay conflicts with its own committed batch (2026-07-27 audit H5).
     """
 
     identity: Mapping[str, Any]
@@ -2623,7 +2643,7 @@ class AccountExecutionKernel:
             if not order.reduce_only:
                 return []
             position = state.positions.get(symbol, PositionState())
-            tolerance = max(abs(order.signed_qty) * 1e-12, 1e-12)
+            tolerance = quantity_tolerance(order.signed_qty)
             batch_orders = {
                 candidate.command_id: candidate
                 for candidate in state.orders.values()
@@ -2890,7 +2910,7 @@ class AccountExecutionKernel:
                     "metadata": {"symbol": symbol, "native_exchange": False},
                 }
             position = state.positions.get(symbol, PositionState())
-            tolerance = max(abs(position.signed_qty) * 1e-12, 1e-12)
+            tolerance = quantity_tolerance(position.signed_qty)
             if position.signed_qty == 0.0 or position.signed_qty * fill_qty >= 0.0:
                 raise AccountTransitionError("external protection fill is not position-reducing")
             if abs(fill_qty) > abs(position.signed_qty) + tolerance:

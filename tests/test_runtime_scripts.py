@@ -692,7 +692,7 @@ def test_remote_deploy_entrypoint_serializes_every_mode() -> None:
     assert "EXPECTED_COMMIT is not a local commit object" in transmission
     assert "MAINTENANCE_LOCK_HELPER_B64" in transmission
     assert "../liquidity_migration/maintenance_lock.py" not in transmission
-    remote = deploy[deploy.index("set -euo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'")) :]
+    remote = deploy[deploy.index("set -Eeuo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'")) :]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH" in remote[:200]
     assert "GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1" in remote
     assert "HOME=/nonexistent" in remote
@@ -768,3 +768,120 @@ def test_paper_owner_owns_paper_telegram_notifications() -> None:
     assert "--continuous-cycle-root" in script
     deploy = _read(DEPLOY)
     assert "paper Telegram credentials unavailable" in deploy
+
+
+def test_a_failing_nested_phase_aborts_the_rollout_instead_of_reporting_ok() -> None:
+    """Bash suppresses errexit for the whole dynamic extent of a function called
+    from a condition context.  Nesting a mode inside ``run_phase``'s ``if "$@"``
+    therefore used to demote every gate the mode runs (pip/ruff/mypy/pytest) to a
+    non-fatal warning: ``phase-failed name=ruff`` was followed by ``install-ok``
+    and ``rollout-ok``."""
+    text = _read(DEPLOY)
+    helpers = text[text.index("fail() {") : text.index("run_phase_pair() {")]
+    script = (
+        "set -Eeuo pipefail\n"
+        + helpers
+        + r'''
+install_mode() {
+    run_phase ruff false
+    echo "install-ok"
+}
+rollout_mode() {
+    run_strict_phase stopped-install install_mode
+    echo "rollout-ok"
+}
+rollout_mode
+'''
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "phase-failed name=ruff" in combined
+    assert "phase-failed name=stopped-install" in combined
+    assert "install-ok" not in combined
+    assert "rollout-ok" not in combined
+    assert "phase-ok name=stopped-install" not in combined
+
+
+def test_a_bare_failing_command_inside_a_strict_phase_aborts_the_rollout() -> None:
+    text = _read(DEPLOY)
+    helpers = text[text.index("fail() {") : text.index("run_phase_pair() {")]
+    script = (
+        "set -Eeuo pipefail\n"
+        + helpers
+        + r'''
+install_mode() {
+    false
+    echo "install-ok"
+}
+run_strict_phase stopped-install install_mode
+echo "rollout-ok"
+'''
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "phase-failed name=stopped-install" in combined
+    assert "install-ok" not in combined
+    assert "rollout-ok" not in combined
+
+
+def test_every_mode_level_phase_uses_the_strict_wrapper() -> None:
+    text = _read(DEPLOY)
+    for mode_function in ("install_mode", "activate_mode", "verify_topology"):
+        assert f"run_phase {mode_function}" not in text
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("run_phase ") and stripped.endswith(mode_function):
+                raise AssertionError(f"mode nested in a condition context: {stripped}")
+    assert "run_strict_phase stopped-install install_mode" in text
+    assert "run_strict_phase activate-and-verify activate_mode" in text
+    assert "run_strict_phase current-topology-verification verify_topology" in text
+
+
+def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> None:
+    text = _read(DEPLOY)
+    for gate in (
+        'check_demo_order_permissions verify \\\n        || fail',
+        'check_demo_order_permissions deploy \\\n        || fail',
+        'validate_hedge_model_prior || fail',
+        '--confirm-demo-probe \\\n            || fail',
+    ):
+        assert gate in text, gate
+
+
+def test_rollout_and_reset_survive_a_dying_ssh_transport() -> None:
+    for script in (DEPLOY, ROOT / "scripts" / "reset_demo_paper_ledgers.sh"):
+        text = _read(script)
+        assert "trap 'exit 129' HUP" in text
+        assert "trap 'exit 141' PIPE" in text
+        # Cleanup output must outlive a dead stdout.
+        assert "cleanup_notice()" in text
+        assert "logger -t liquidity-migration-" in text
+    deploy = _read(DEPLOY)
+    assert "trap '' INT TERM HUP PIPE" in deploy
+
+
+def test_oneshot_units_have_explicit_start_timeouts_and_memory_bounds() -> None:
+    # systemd's oneshot default is TimeoutStartSec=infinity and an
+    # OnUnitActiveSec timer cannot re-trigger while its unit is activating.
+    expected = {
+        "liquidity-migration-demo-liveness.service": 120,
+        "liquidity-migration-continuous-hedge.service": 300,
+        "liquidity-migration-continuous-rmom-refresh.service": 900,
+    }
+    for name, seconds in expected.items():
+        unit = _unit(name)
+        assert "Type=oneshot" in unit
+        assert f"TimeoutStartSec={seconds}" in unit
+        assert "MemoryMax=" in unit
+    rmom = _unit("liquidity-migration-continuous-rmom-refresh.service")
+    assert "MemoryHigh=1G" in rmom
+    assert "MemoryMax=1536M" in rmom
+
+
+def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> None:
+    workflow = _read(".github/workflows/vps-deploy.yml")
+    assert "ServerAliveInterval=15" in workflow
+    assert "ServerAliveCountMax=3" in workflow
+    assert "timeout-minutes:" in workflow

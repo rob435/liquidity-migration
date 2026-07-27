@@ -24,6 +24,7 @@ from liquidity_migration.continuous_btc_risk import (
     BtcRiskLiveSizer,
 )
 from liquidity_migration.continuous_demo import (
+    PRIOR_BAR_COLUMN_PREFIX,
     CONTINUOUS_DEMO_PROFILES,
     CONTINUOUS_V2_PROFILE,
     ContinuousDemoCycleConfig,
@@ -236,14 +237,36 @@ def test_active_profile_uses_confirmed_bar_one_hour_after_close() -> None:
         feature_set=profile.feature_set,
     )
     deciding_bar = current_hour - 2 * MS_PER_HOUR
-    expected = confirmed_panel.filter(pl.col("ts_ms") == deciding_bar).select(actual.columns).sort("symbol")
+    # The prior confirmed bar travels alongside the deciding bar so the live
+    # crowding gate can reproduce the engine's fresh-entrant rule (audit M2);
+    # the deciding-bar contract itself is the unprefixed columns.
+    deciding_columns = [
+        column for column in actual.columns if not column.startswith(PRIOR_BAR_COLUMN_PREFIX)
+    ]
+    deciding = actual.select(deciding_columns)
+    expected = confirmed_panel.filter(pl.col("ts_ms") == deciding_bar).select(deciding_columns).sort("symbol")
     one_bar_too_recent = (
-        confirmed_panel.filter(pl.col("ts_ms") == current_hour - MS_PER_HOUR).select(actual.columns).sort("symbol")
+        confirmed_panel.filter(pl.col("ts_ms") == current_hour - MS_PER_HOUR)
+        .select(deciding_columns)
+        .sort("symbol")
     )
 
     assert not actual.is_empty()
-    assert actual.equals(expected)
-    assert not actual.equals(one_bar_too_recent)
+    assert deciding.equals(expected)
+    assert not deciding.equals(one_bar_too_recent)
+
+    prior_bar = (
+        confirmed_panel.filter(pl.col("ts_ms") == deciding_bar - MS_PER_HOUR)
+        .select(["symbol", "decile"])
+        .sort("symbol")
+    )
+    carried = (
+        actual.select(["symbol", f"{PRIOR_BAR_COLUMN_PREFIX}decile"])
+        .rename({f"{PRIOR_BAR_COLUMN_PREFIX}decile": "decile"})
+        .drop_nulls()
+        .sort("symbol")
+    )
+    assert carried.equals(prior_bar.filter(pl.col("symbol").is_in(carried["symbol"].to_list())))
 
 
 @pytest.mark.parametrize(

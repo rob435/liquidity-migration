@@ -8,6 +8,12 @@ ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot
+# systemd's oneshot default is TimeoutStartSec=infinity, and an OnUnitActiveSec
+# timer cannot re-trigger while its unit is still activating: a single hung run
+# would silently stop this 3-minute position-safety watchdog forever. Bound the
+# run to well under the timer interval so a wedged run goes `failed` (which the
+# verify/reset paths already handle) instead of silencing the alarm.
+TimeoutStartSec=120
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration

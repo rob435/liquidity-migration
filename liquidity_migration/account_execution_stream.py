@@ -15,6 +15,7 @@ from .account_contracts import (
     AccountState,
     AccountTransitionError,
     PositionState,
+    quantity_tolerance,
 )
 from .account_kernel import AccountExecutionKernel
 from .bybit_execution_adapter import bybit_private_execution_metadata
@@ -460,7 +461,7 @@ class BybitAccountExecutionConsumer:
             self.pending_terminal.pop(command_id, None)
             return
         reconstructed = abs(order.filled_signed_qty)
-        tolerance = max(abs(order.signed_qty) * 1e-12, 1e-12)
+        tolerance = quantity_tolerance(order.signed_qty)
         if order.status == "commanded":
             # A terminal venue row is stronger evidence than a missing create
             # response. Infer the acknowledgement so an ambiguous submission

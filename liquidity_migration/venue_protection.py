@@ -17,6 +17,7 @@ from .account_contracts import (
     AccountTransitionError,
     InstrumentRules,
     PositionState,
+    quantity_tolerance,
 )
 from .account_kernel import AccountExecutionKernel
 from .account_strategy_state import component_execution_anchors_from_snapshot
@@ -355,7 +356,7 @@ class BybitNativeProtectionManager:
         active stop remains a hard failure.
         """
 
-        tolerance = max(abs(position.signed_qty) * 1e-12, 1e-12)
+        tolerance = quantity_tolerance(position.signed_qty)
         if symbol not in state.aggregate_targets:
             return None
         if abs(float(state.aggregate_targets[symbol])) > tolerance:

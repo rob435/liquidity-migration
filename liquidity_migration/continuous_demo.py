@@ -301,7 +301,8 @@ def build_live_continuous_state(
         start_ms=0,
         feature_set=config.feature_set,
     )
-    return _select_live_state_columns(panel.filter(pl.col("ts_ms") == cur_ts))
+    state = _select_live_state_columns(panel.filter(pl.col("ts_ms") == cur_ts))
+    return _attach_prior_bar_state(state, panel, prior_ts_ms=cur_ts - MS_PER_HOUR)
 
 
 def build_confirmed_entry_state(
@@ -339,7 +340,10 @@ def build_confirmed_entry_state(
         funnel_venue="bybit",
         funnel_signal_ts_ms=deciding_ts,
     )
-    return _select_live_state_columns(panel.filter(pl.col("ts_ms") == deciding_ts))
+    state = _select_live_state_columns(panel.filter(pl.col("ts_ms") == deciding_ts))
+    return _attach_prior_bar_state(
+        state, panel, prior_ts_ms=deciding_ts - MS_PER_HOUR
+    )
 
 
 def _empty_live_state() -> pl.DataFrame:
@@ -359,17 +363,79 @@ def _empty_live_state() -> pl.DataFrame:
     )
 
 
+_LIVE_STATE_EVENT_COLUMNS = (
+    "rv_168h",
+    "ret1",
+    "max_ret168",
+    "prior6_ret1_max",
+    "giveback_from_prior6_high",
+    "turnover_spike_168h",
+)
+# Prefix for the previous confirmed bar's copy of the same columns.
+PRIOR_BAR_COLUMN_PREFIX = "prior_bar_"
+
+
 def _select_live_state_columns(panel: pl.DataFrame) -> pl.DataFrame:
     base = ["symbol", "decile", "composite", "turnover_quote"]
-    event_cols = [
-        "rv_168h",
-        "ret1",
-        "max_ret168",
-        "prior6_ret1_max",
-        "giveback_from_prior6_high",
-        "turnover_spike_168h",
-    ]
-    return panel.select(base + [c for c in event_cols if c in panel.columns])
+    return panel.select(base + [c for c in _LIVE_STATE_EVENT_COLUMNS if c in panel.columns])
+
+
+def _attach_prior_bar_state(
+    state: pl.DataFrame, panel: pl.DataFrame, *, prior_ts_ms: int
+) -> pl.DataFrame:
+    """Carry the previous confirmed bar's decile/event columns onto each row.
+
+    The equity-evidence engine counts crowding on *fresh* decile entrants
+    (``_fresh_entries``: no qualifying appearance in the preceding hour). One
+    deciding-bar snapshot cannot express that, so the previous bar's state
+    travels with the current one and ``_fresh_entrant_expr`` reproduces the rule
+    exactly. Symbols absent from the previous bar get nulls, which read as fresh
+    — the same as the engine's ``fill_null(True)`` on the first appearance.
+    """
+
+    prior = panel.filter(pl.col("ts_ms") == int(prior_ts_ms))
+    columns = ["decile", *(c for c in _LIVE_STATE_EVENT_COLUMNS if c in panel.columns)]
+    if prior.is_empty():
+        return state.with_columns(
+            [
+                pl.lit(None, dtype=state.schema.get(name, pl.Float64)).alias(
+                    f"{PRIOR_BAR_COLUMN_PREFIX}{name}"
+                )
+                for name in columns
+            ]
+        )
+    prior = prior.select(["symbol", *columns]).rename(
+        {name: f"{PRIOR_BAR_COLUMN_PREFIX}{name}" for name in columns}
+    )
+    return state.join(prior, on="symbol", how="left")
+
+
+def _fresh_entrant_expr(component_config: ContinuousDemoCycleConfig) -> pl.Expr:
+    """Engine parity: a row is a fresh entrant only if the same symbol was not
+    already in this component's (decile AND event-trigger) set one bar earlier."""
+
+    prior_qualified = pl.col(f"{PRIOR_BAR_COLUMN_PREFIX}decile") == component_config.decile
+    if component_config.entry_event_trigger != "none":
+        prior_qualified = prior_qualified & _entry_event_expr(
+            component_config.entry_event_trigger, column_prefix=PRIOR_BAR_COLUMN_PREFIX
+        )
+    return ~prior_qualified.fill_null(False)
+
+
+def _fresh_entrants(
+    frame: pl.DataFrame, *, component_config: ContinuousDemoCycleConfig
+) -> pl.DataFrame:
+    """``frame`` restricted to fresh entrants, or unchanged when the previous
+    bar's state is unavailable.
+
+    Falling back to "every row is fresh" overstates the crowd count, which skips
+    more entries rather than fewer — the conservative direction for a gate whose
+    whole purpose is refusing fresh-listing-squeeze windows.
+    """
+
+    if frame.is_empty() or f"{PRIOR_BAR_COLUMN_PREFIX}decile" not in frame.columns:
+        return frame
+    return frame.filter(_fresh_entrant_expr(component_config))
 
 
 def _sha256_canonical(payload: dict[str, Any]) -> str:
@@ -1003,6 +1069,42 @@ class _CycleSettledFundingProbe:
         return {str(symbol): self._rates[str(symbol)] for symbol in symbols}
 
 
+def _funding_admitted(
+    frame: pl.DataFrame,
+    *,
+    funding_min_at_entry: float | None,
+    settled_funding_probe: "_CycleSettledFundingProbe | None",
+) -> tuple[pl.DataFrame, dict[str, float | None], int, int]:
+    """Apply the settled-funding floor, returning (admitted, rates, rejected, unknown).
+
+    Symbols with no settled print admit and are counted separately, matching
+    ``_funding_admission_filter`` in the engine.
+    """
+
+    rates: dict[str, float | None] = {}
+    if funding_min_at_entry is None or frame.is_empty():
+        return frame, rates, 0, 0
+    symbols = [str(symbol) for symbol in frame["symbol"].to_list()]
+    if settled_funding_probe is not None:
+        rates = settled_funding_probe.rates_for(sorted(set(symbols)))
+    floor = float(funding_min_at_entry)
+    admitted: list[str] = []
+    rejected = 0
+    unknown_admitted = 0
+    for symbol in symbols:
+        rate = rates.get(symbol)
+        if rate is None:
+            unknown_admitted += 1
+            admitted.append(symbol)
+        elif rate >= floor:
+            admitted.append(symbol)
+        else:
+            rejected += 1
+    if rejected:
+        frame = frame.filter(pl.col("symbol").is_in(admitted))
+    return frame, rates, rejected, unknown_admitted
+
+
 def _entry_stage_frames(
     entry_state: pl.DataFrame,
     *,
@@ -1047,6 +1149,7 @@ def _component_funnel_state(
     pl.DataFrame,
     pl.DataFrame,
     pl.DataFrame,
+    pl.DataFrame,
     int,
     int,
     dict[str, float | None],
@@ -1068,27 +1171,22 @@ def _component_funnel_state(
     # Settled-funding admission runs before the lifecycle guards so the
     # crowding count below sees only admitted candidates — the engine applies
     # the same filter on its fresh-entries frame before its crowd counts.
-    funded = age
-    funding_rates: dict[str, float | None] = {}
-    funding_rejected = 0
-    funding_unknown_admitted = 0
-    if funding_min_at_entry is not None and not age.is_empty():
-        symbols = [str(symbol) for symbol in age["symbol"].to_list()]
-        if settled_funding_probe is not None:
-            funding_rates = settled_funding_probe.rates_for(sorted(set(symbols)))
-        floor = float(funding_min_at_entry)
-        admitted: list[str] = []
-        for symbol in symbols:
-            rate = funding_rates.get(symbol)
-            if rate is None:
-                funding_unknown_admitted += 1
-                admitted.append(symbol)
-            elif rate >= floor:
-                admitted.append(symbol)
-            else:
-                funding_rejected += 1
-        if funding_rejected:
-            funded = age.filter(pl.col("symbol").is_in(admitted))
+    funded, funding_rates, funding_rejected, funding_unknown_admitted = _funding_admitted(
+        age,
+        funding_min_at_entry=funding_min_at_entry,
+        settled_funding_probe=settled_funding_probe,
+    )
+    # Crowding base (engine parity). `_run_trades` counts every funding-admitted
+    # FRESH entry sharing a signal_ts and skips the whole stack past the cap; its
+    # per-entry age gate runs AFTER that count. Counting on the age-filtered
+    # `funded` frame instead made the live book take entries the validated engine
+    # crowd-skipped, in exactly the fresh-listing-squeeze hours the two gates were
+    # designed around (2026-07-27 audit M2).
+    crowding_base, _, _, _ = _funding_admitted(
+        _fresh_entrants(event, component_config=component_config),
+        funding_min_at_entry=funding_min_at_entry,
+        settled_funding_probe=settled_funding_probe,
+    )
     fresh = funded
     if not fresh.is_empty() and reserved_symbols:
         fresh = fresh.filter(~pl.col("symbol").is_in(sorted(reserved_symbols)))
@@ -1117,6 +1215,7 @@ def _component_funnel_state(
         event,
         age,
         funded,
+        crowding_base,
         same_signal,
         available,
         reserved_count,
@@ -1196,6 +1295,7 @@ def _observe_continuous_component_selection(
                 event,
                 age,
                 funded,
+                crowding_base,
                 same_signal,
                 available,
                 reserved_count,
@@ -1242,12 +1342,29 @@ def _observe_continuous_component_selection(
         funding_admission_unknown_admitted += funding_unknown
         # Research parity (entry_crowding_max_fresh): more fresh qualifying
         # signals than the cap at one signal_ts skips the component's ENTIRE
-        # stack for the window, exactly like the equity-evidence engine — the
-        # engine counts crowding on its funding-admitted fresh entries, so the
-        # funded frame is the counting base here.
-        component_crowded = 0 < config.entry_crowding_max_fresh < funded.height
+        # stack for the window, exactly like the equity-evidence engine. The
+        # engine counts on its funding-admitted FRESH entries before its
+        # per-entry age gate, so `crowding_base` — not the age-filtered `funded`
+        # frame — is the counting base here (audit M2).
+        component_crowded = 0 < config.entry_crowding_max_fresh < crowding_base.height
         if component_crowded:
             observed_crowding += funded.height
+        if funding_rejected:
+            # Name the funding-rejected symbols. Without them the operator saw a
+            # funnel with funding=0 next to "first rejection capacity" — the two
+            # channels contradicting each other for the signature rejection mode
+            # of the deployed funding-gated profile (2026-07-27 audit M3).
+            admitted_symbols = set(funded["symbol"].to_list())
+            for symbol in age["symbol"].to_list():
+                if str(symbol) in admitted_symbols:
+                    continue
+                selection_rejections.append(
+                    {
+                        "component": component,
+                        "symbol": str(symbol),
+                        "first_rejection_reason": "funding_admission",
+                    }
+                )
         for row in funded.to_dicts():
             symbol = str(row["symbol"])
             opportunity = {"component": component, "symbol": symbol}
@@ -1437,7 +1554,17 @@ def _first_entry_rejection_reason(
         return preselection_reason
     totals = {
         field: sum(int(row[field]) for row in observation.funnel_rows)
-        for field in ("d9", "liquidity", "event", "age", "available", "capacity", "reserved", "same_signal_reentry")
+        for field in (
+            "d9",
+            "liquidity",
+            "event",
+            "age",
+            "funding",
+            "available",
+            "capacity",
+            "reserved",
+            "same_signal_reentry",
+        )
     }
     if totals["d9"] == 0:
         return "d9"
@@ -1447,6 +1574,11 @@ def _first_entry_rejection_reason(
         return "event"
     if totals["age"] == 0:
         return "age"
+    # The settled-funding floor sits between the age gate and the lifecycle
+    # guards. Omitting it let a cycle where every age-qualified candidate was
+    # funding-rejected fall through the cascade and report "capacity".
+    if totals["funding"] == 0:
+        return "funding_admission"
     if totals["available"] == 0:
         if observation.observed_crowding > 0:
             return "crowding"
