@@ -6,6 +6,9 @@ Research and demo/paper execution for crypto-perpetual strategies.
 
 ## Read By Purpose
 
+- Plain-English translation of the whole system, for owner conversations:
+  `docs/plain_english_guide.md` (talk plain-first; keep it fixed in the same
+  change that makes it stale).
 - Governance and evidence: `docs/governance.md`.
 - Active research evidence, direction, and next actions:
   `docs/strategy_program.md`.
