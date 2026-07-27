@@ -399,6 +399,10 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert "project_demo_rules_to_candidate.py" in refresh
     assert "classify_demo_rule_receipt_freshness" in refresh
     assert 'status == "expired"' in refresh
+    # Proactive renewal: a rollout in the receipt's back half must re-probe so
+    # freshness never depends on timing a dispatch against the expiry instant.
+    assert "REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS" in refresh
+    assert "refresh-due-past-half-life" in refresh
     assert 'stale or future-dated' not in refresh
     assert "fresh-candidate-subset" in refresh
     assert "candidate-addition-or-structural-drift" in refresh

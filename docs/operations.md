@@ -53,9 +53,11 @@ Use `--profile demo-operational` when paper integration is not intended. The
 profile, reference, and exact acknowledgement remain explicit inputs; rollout
 does not infer authority from the target commit or from an existing receipt.
 It never enables mainnet, flattens a position, cancels a pre-existing order, or
-widens a risk boundary. If the exact bound demo-rule evidence has expired,
-rollout may place and cancel its own bounded PostOnly demo probes only after the
-account has passed every stopped flatness gate. The explicit rollout
+widens a risk boundary. If the exact bound demo-rule evidence has expired —
+or has merely passed half of its 168-hour lifetime — rollout places and
+cancels its own bounded PostOnly demo probes only after the account has
+passed every stopped flatness gate, so freshness renewal is a side effect of
+ordinary deployment rather than an operator deadline. The explicit rollout
 acknowledgement authorizes that demo-only maintenance action; standalone
 `install` never probes.
 

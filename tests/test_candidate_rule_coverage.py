@@ -622,3 +622,56 @@ def test_coverage_rejects_legacy_boolean_only_acceptance_evidence(tmp_path: Path
             _rules(tmp_path, candidate, legacy_evidence=True),
             validation_now_ns=NOW_NS + 1,
         )
+
+
+def test_rollout_refresh_threshold_is_half_the_hard_bound_and_tightens_only(
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration.candidate_rule_coverage import (
+        REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
+        require_registered_rule_age,
+    )
+
+    assert (
+        REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS
+        == REGISTERED_MAX_RULE_AGE_SECONDS // 2
+    )
+    # The refresh threshold must be a legal (tighter) freshness bound.
+    assert (
+        require_registered_rule_age(REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS)
+        == REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS
+    )
+
+    candidate = _candidate(tmp_path)
+    rules = _rules(tmp_path, candidate)
+    just_before_half_life = (
+        NOW_NS + (REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS - 1) * 1_000_000_000
+    )
+    just_after_half_life = (
+        NOW_NS + (REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS + 1) * 1_000_000_000
+    )
+    assert (
+        classify_demo_rule_receipt_freshness(
+            rules,
+            validation_now_ns=just_before_half_life,
+            max_rule_age_seconds=REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
+        )
+        == "fresh"
+    )
+    # Past half-life the rollout classifier reads "expired" (refresh due)
+    # while the hard runtime bound still reads "fresh".
+    assert (
+        classify_demo_rule_receipt_freshness(
+            rules,
+            validation_now_ns=just_after_half_life,
+            max_rule_age_seconds=REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
+        )
+        == "expired"
+    )
+    assert (
+        classify_demo_rule_receipt_freshness(
+            rules,
+            validation_now_ns=just_after_half_life,
+        )
+        == "fresh"
+    )

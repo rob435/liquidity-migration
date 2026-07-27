@@ -853,6 +853,7 @@ refresh_stale_demo_rules_if_requested() {
 import sys
 from liquidity_migration.candidate_rule_coverage import (
     REGISTERED_MAX_RULE_AGE_SECONDS,
+    REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
     classify_demo_rule_receipt_freshness,
 )
 
@@ -862,13 +863,21 @@ status = classify_demo_rule_receipt_freshness(
 )
 if status == "expired":
     raise SystemExit(3)
+# Proactive renewal: any rollout in the receipt's back half re-probes, so
+# freshness never depends on an operator timing a dispatch against expiry.
+due = classify_demo_rule_receipt_freshness(
+    sys.argv[1],
+    max_rule_age_seconds=REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
+)
+if due == "expired":
+    raise SystemExit(4)
 PY
     then
         freshness_status=0
     else
         freshness_status=$?
     fi
-    [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] \
+    [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] || [ "$freshness_status" -eq 4 ] \
         || fail "configured demo-rule receipt failed validation for a reason other than age"
 
     if [ "$freshness_status" -eq 0 ] && [ -z "$DEPLOY_RESET_RECEIPT" ]; then
@@ -909,6 +918,9 @@ PY
                 ;;
             *) fail "fresh demo-rule candidate projection failed" ;;
         esac
+    elif [ "$freshness_status" -eq 4 ]; then
+        refresh_reason=refresh-due-past-half-life
+        echo "demo-rule-maintenance-plan path=probe reason=refresh-due-past-half-life"
     else
         refresh_reason=expired
         echo "demo-rule-maintenance-plan path=probe reason=expired"

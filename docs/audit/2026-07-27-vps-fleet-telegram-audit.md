@@ -65,16 +65,17 @@ Takes effect at the next owner-dispatched rollout.
 
 ## Open findings, ranked (all independently verified unless noted)
 
-1. **Demo-rule receipt expires 2026-07-29T21:57:44Z (~60 h)** — scheduled
-   fail-closed break: running units keep running, but any unit
-   (re)start after expiry fails closed, and the pending-reboot kernel
-   updates make an untimed reboot a fleet-down scenario. The rollout path
-   auto-refreshes rules only when the receipt is already expired
-   (`classify_demo_rule_receipt_freshness` returns `expired` strictly after
-   168 h). Watchdog warns from 24 h out. Cleanest play: dispatch the next
-   rollout shortly after expiry (it refreshes receipts, installs the pending
-   commits, and restarts the fleet in one pass), then reboot for the kernel
-   updates.
+1. **Demo-rule receipt expires 2026-07-29T21:57:44Z** — DEFUSED in the
+   follow-up pass: rollout now re-probes whenever the bound receipt is past
+   half of its 168-hour lifetime (`refresh-due-past-half-life`), not only
+   after expiry, so freshness renewal became a side effect of ordinary
+   deployment instead of a timed operator deadline. The hard runtime bound
+   and the stopped-flat probe gating are unchanged; the watchdog still
+   warns from 24 h out as the backstop for a week with no rollout at all.
+   The current receipt (age >3.5 d) triggers a probe on any rollout
+   dispatched from this code — dispatch whenever convenient, and reboot for
+   the pending kernel updates only after the refreshed receipts are
+   installed.
 2. **Host CPU/memory saturation** (load ~5–6 on 2 vCPU, swap in use) —
    upsize or shed load; the watchdog's 3-minute full-authorization
    revalidation (~13 s CPU per run) is the biggest sheddable cost. The

@@ -18,6 +18,12 @@ from .deterministic_serialization import canonical_json
 CANDIDATE_RULE_COVERAGE_SCHEMA_VERSION = 1
 CANDIDATE_RULE_COVERAGE_KIND = "account_candidate_demo_rule_coverage"
 REGISTERED_MAX_RULE_AGE_SECONDS = 7 * 24 * 60 * 60
+# Rollouts re-probe once a receipt is past this age, so freshness renewal is
+# a side effect of ordinary deployment instead of a timed operator deadline.
+# The hard runtime bound above is unchanged; this only schedules renewal
+# earlier. Half the hard bound keeps at least a full half-life of margin
+# between any refreshing rollout and the fail-closed cliff.
+REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS = REGISTERED_MAX_RULE_AGE_SECONDS // 2
 
 
 class CandidateRuleRefreshRequired(RuntimeError):

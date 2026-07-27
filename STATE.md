@@ -93,7 +93,18 @@ hedge sizing and BTC trend gate were independently verified
 legit-as-designed (bit-identical recomputation; see the audit follow-up
 section); the one open hedge item is the policy-due model-prior
 regeneration, which needs the next standard continuous equity refresh's
-component ledgers. Timing
+component ledgers.
+
+2026-07-27 (same batch): the demo-rule expiry deadline trap is removed —
+rollout now re-probes whenever the bound receipt is past half of its
+168-hour lifetime, not only after expiry
+(`REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS`, plan line
+`reason=refresh-due-past-half-life`). The hard runtime freshness bound is
+unchanged. Consequence: the earlier "dispatch shortly after Wed 21:57 UTC"
+advice is obsolete — the current receipt (age >3.5 d) triggers a probe on
+ANY rollout dispatched from this code, so dispatch whenever convenient,
+before expiry; reboot for the kernel updates only after the refreshed
+receipts are installed. Timing
 note: the demo-rule receipt expires 2026-07-29T21:57:44Z and the rollout
 path auto-refreshes rules only once the receipt is already expired, so
 dispatching shortly after that instant refreshes receipts and ships these
