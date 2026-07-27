@@ -1409,6 +1409,11 @@ class BybitRawPublicMarketStream:
             if callable(close):
                 close()
             return
+        _logger.info(
+            "raw Bybit public stream connected generation=%d symbols=%s",
+            generation if generation is not None else -1,
+            ",".join(symbols),
+        )
         self._send("subscribe", symbols, expected_socket=socket)
 
     def _on_message(
@@ -1559,10 +1564,43 @@ class BybitRawPublicMarketStream:
             ) -> None:
                 self._on_message(opened, raw, generation=_generation)
 
+            # websocket-client routes transport failures (ping timeout, reset,
+            # refused reconnect) through these callbacks and then RETURNS from
+            # run_forever without raising, so without them every disconnect and
+            # failed reconnect attempt is invisible in the journal.
+            def on_error(
+                opened: Any,
+                error: BaseException,
+                *,
+                _generation: int = generation,
+            ) -> None:
+                _logger.warning(
+                    "raw Bybit public stream error generation=%d: %s: %s",
+                    _generation,
+                    type(error).__name__,
+                    error,
+                )
+
+            def on_close(
+                opened: Any,
+                status_code: object,
+                reason: object,
+                *,
+                _generation: int = generation,
+            ) -> None:
+                _logger.warning(
+                    "raw Bybit public stream closed generation=%d status=%s reason=%s",
+                    _generation,
+                    status_code,
+                    reason,
+                )
+
             socket = self._factory(
                 self.url,
                 on_open=on_open,
                 on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
             )
             close_before_run = False
             with self._lock:

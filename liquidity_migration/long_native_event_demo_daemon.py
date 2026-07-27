@@ -22,6 +22,7 @@ from .deterministic_runtime import Clock, SystemClock
 from .event_demo_data import top_turnover_kline_universe
 from .kline_follower import FollowerKlineStreamManager, build_kline_follower
 from .kline_stream_manager import KlineStreamManager
+from .logging_setup import ensure_default_log_handler
 from .long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
 from .long_native_event_demo import (
     LongNativeDemoCycleConfig,
@@ -49,14 +50,7 @@ _logger = logging.getLogger("liquidity_migration.long_native_event_demo_daemon")
 
 def _ensure_default_log_handler() -> None:
     """Attach a package stderr handler when the process has no logging setup."""
-    package_logger = logging.getLogger("liquidity_migration")
-    if package_logger.handlers:
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    package_logger.addHandler(handler)
-    level_name = os.environ.get("LIQMIG_LOG_LEVEL", "INFO").upper()
-    package_logger.setLevel(getattr(logging, level_name, logging.INFO))
+    ensure_default_log_handler()
 
 
 def _validate_long_daemon_startup(config: LongNativeDemoCycleConfig) -> None:

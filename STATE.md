@@ -81,7 +81,15 @@ preserves operator-provided paper Telegram credentials or seeds them from
 `bybit-demo.env` (venue credentials remain forbidden in the paper
 environment); both paper producers still scrub Telegram variables. Takes
 effect only at the next owner-dispatched rollout (env content changes require
-authority reissue). Until then the paper fleet remains Telegram-silent.
+authority reissue). Until then the paper fleet remains Telegram-silent. The
+same rollout carries the 2026-07-27 observability fixes (public-stream
+transport logging, owner INFO logging, Telegram delivery audit trail) from
+the fleet audit (docs/audit/2026-07-27-vps-fleet-telegram-audit.md). Timing
+note: the demo-rule receipt expires 2026-07-29T21:57:44Z and the rollout
+path auto-refreshes rules only once the receipt is already expired, so
+dispatching shortly after that instant refreshes receipts and ships these
+commits in one pass; the pending kernel-update reboot should follow the
+refreshed receipts, never precede them.
 
 The prior change point: the 2026-07-26 CONTINUOUS replacement
 (`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment

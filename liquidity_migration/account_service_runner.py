@@ -40,6 +40,7 @@ from .account_reconcile import (
 )
 from .account_route import derive_account_route, ensure_account_route
 from .account_notifications import AccountNotificationEngine, deliver_notification_batch
+from .logging_setup import ensure_default_log_handler
 from .continuous_cycle_status import ContinuousCycleStatusReader
 from .account_owner_health import (
     AccountOwnerHealth,
@@ -285,6 +286,7 @@ def owner_health_publish_decision(
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_default_log_handler()
     parser = argparse.ArgumentParser(description="Run the demo-only account execution owner")
     parser.add_argument("--account-root", required=True)
     parser.add_argument("--inbox-root", required=True)

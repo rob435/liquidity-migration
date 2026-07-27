@@ -1149,3 +1149,49 @@ def test_capture_rotates_segments_before_size_limit(tmp_path: Path) -> None:
     paths = sorted(tmp_path.rglob("segment-*.jsonl"))
     assert len(paths) >= 2
     assert all(path.stat().st_size > 0 for path in paths)
+
+
+def test_raw_stream_registers_transport_callbacks_and_logs_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class Socket:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_kwargs.update(kwargs)
+            self.closed = False
+
+        def run_forever(self, **_kwargs: Any) -> bool:
+            # websocket-client returns (never raises) on transport failure.
+            return False
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = BybitRawPublicMarketStream(
+        testnet=True,
+        depth=50,
+        on_message=lambda _payload: None,
+        websocket_factory=lambda _url, **kwargs: Socket(**kwargs),
+    )
+    stream.update_symbols(["BUSDT"])
+    stream.start(["BUSDT"])
+    try:
+        for _ in range(200):
+            if "on_error" in captured_kwargs:
+                break
+            threading.Event().wait(0.01)
+        assert callable(captured_kwargs.get("on_open"))
+        assert callable(captured_kwargs.get("on_message"))
+        assert callable(captured_kwargs.get("on_error"))
+        assert callable(captured_kwargs.get("on_close"))
+        with caplog.at_level("WARNING", logger="liquidity_migration.market_capture"):
+            captured_kwargs["on_error"](None, RuntimeError("ping/pong timed out"))
+            captured_kwargs["on_close"](None, 1006, "abnormal closure")
+        rendered = "\n".join(record.getMessage() for record in caplog.records)
+        assert "raw Bybit public stream error" in rendered
+        assert "ping/pong timed out" in rendered
+        assert "raw Bybit public stream closed" in rendered
+        assert "1006" in rendered
+    finally:
+        stream.close()

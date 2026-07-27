@@ -1103,5 +1103,15 @@ def deliver_notification_batch(
                 len(batch.messages),
             )
             return False
+        # One-line audit trail of what the operator was actually told; the
+        # full page content lives only in the transport.
+        logger.info(
+            "%s Telegram delivered page=%d/%d chars=%d first_line=%s",
+            context,
+            page_number,
+            len(batch.messages),
+            len(page),
+            page.splitlines()[0][:120] if page else "",
+        )
     engine.commit(batch)
     return True

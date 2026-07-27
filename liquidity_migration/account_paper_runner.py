@@ -17,6 +17,7 @@ from .account_execution_config import (
     require_registered_demo_rule_max_age_hours,
 )
 from .account_notifications import AccountNotificationEngine, deliver_notification_batch
+from .logging_setup import ensure_default_log_handler
 from .account_contracts import AccountEventType, AccountRiskSnapshot, OrderCommand
 from .account_kernel import AccountExecutionKernel
 from .passive_execution import (
@@ -168,6 +169,7 @@ def publish_paper_owner_health(
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_default_log_handler()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--account-root", required=True)
     parser.add_argument("--inbox-root", required=True)
