@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import polars as pl
 
+from liquidity_migration._common import MS_PER_HOUR
 from liquidity_migration.ingestion import (
     aggregate_trade_klines_1h,
     densify_trade_klines_1h,
@@ -186,3 +189,42 @@ def test_funding_interval_zero_or_negative_is_clamped() -> None:
     assert math.isfinite(vals["AAA"]) and vals["AAA"] == 0.001  # 0 -> clamped to 480 -> *1
     assert math.isfinite(vals["BBB"]) and vals["BBB"] == 0.001  # negative -> clamped, no sign flip
     assert vals["CCC"] == 0.001
+
+
+def test_densify_forward_fills_in_timestamp_order_not_join_order() -> None:
+    """`forward_fill` is row-positional and polars does not specify left-join row
+    order, so filling on the raw join output and sorting afterwards could carry a
+    LATER hour's close backwards into an earlier gap hour -- look-ahead inside a
+    densified archive bar, hidden by the trailing sort (2026-07-27 audit L8)."""
+
+    day_ms = int(
+        datetime(2026, 7, 1, tzinfo=UTC).timestamp() * 1000
+    )
+    sparse = pl.DataFrame(
+        [
+            {
+                "ts_ms": day_ms + hour * MS_PER_HOUR,
+                "symbol": "AAAUSDT",
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume_base": 1.0,
+                "turnover_quote": price,
+            }
+            # Deliberately out of ascending order, and with hours 1..21 absent.
+            for hour, price in ((22, 500.0), (0, 100.0))
+        ]
+    )
+    dense = densify_trade_klines_1h(sparse, archive_date="2026-07-01", initial_price=None)
+
+    by_hour = {
+        (int(row["ts_ms"]) - day_ms) // MS_PER_HOUR: float(row["close"])
+        for row in dense.iter_rows(named=True)
+    }
+    assert by_hour[0] == 100.0
+    assert by_hour[22] == 500.0
+    # Every filled gap hour carries the PRIOR close, never the later one.
+    for hour in range(1, 22):
+        assert by_hour[hour] == 100.0
+    assert by_hour[23] == 500.0

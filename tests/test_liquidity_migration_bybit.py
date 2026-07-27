@@ -846,11 +846,19 @@ def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkey
     monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
     client = bybit_market_data.BybitMarketData()
-    rows = client.get_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
+    # `end` is exclusive: request one interval past the last wanted bar.
+    rows = client.get_klines("BTCUSDT", "60", timestamps[0], timestamps[-1] + interval_ms, limit=3)
 
     assert [int(row[0]) for row in rows] == timestamps
     assert len(client._client.calls) > 1
     assert max(int(call["end"]) - int(call["start"]) for call in client._client.calls) <= interval_ms * 2
+
+    # The excluded bound is genuinely excluded: the 00:00 bar of the end day
+    # must not be written into a date=<end> partition (audit M6).
+    exclusive = bybit_market_data.BybitMarketData()
+    kept = exclusive.get_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
+    assert [int(row[0]) for row in kept] == timestamps[:-1]
+    assert all(int(call["end"]) < timestamps[-1] for call in exclusive._client.calls)
 
 
 def test_bybit_market_data_records_retry_and_rate_limit_stats(monkeypatch) -> None:
@@ -900,8 +908,8 @@ def test_time_range_download_pages_backward_when_bybit_returns_newest_first(monk
     monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
 
     client = bybit_market_data.BybitMarketData()
-    funding = client.get_funding_history("BTCUSDT", timestamps[0], timestamps[-1], limit=3)
-    oi = client.get_open_interest("BTCUSDT", "1h", timestamps[0], timestamps[-1], limit=3)
+    funding = client.get_funding_history("BTCUSDT", timestamps[0], timestamps[-1] + 1000, limit=3)
+    oi = client.get_open_interest("BTCUSDT", "1h", timestamps[0], timestamps[-1] + 1000, limit=3)
 
     assert [int(row["fundingRateTimestamp"]) for row in funding] == timestamps
     assert [int(row["timestamp"]) for row in oi] == timestamps
@@ -2069,7 +2077,7 @@ def test_mid_range_empty_page_raises_instead_of_truncating(monkeypatch) -> None:
     client = _make_market_data(monkeypatch, responses)
 
     with pytest.raises(bybit.BybitDataError) as excinfo:
-        client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+        client.get_funding_history("BTCUSDT", start=0, end=11, limit=2)
 
     assert "mid-range" in str(excinfo.value)
     # Both pages were actually requested before the guard fired.
@@ -2082,7 +2090,7 @@ def test_first_page_empty_returns_cleanly_no_data_in_range(monkeypatch) -> None:
     responses = {10: []}
     client = _make_market_data(monkeypatch, responses)
 
-    rows = client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+    rows = client.get_funding_history("BTCUSDT", start=0, end=11, limit=2)
 
     assert rows == []
     # Only one request was made; no spurious retry/extra pagination.
@@ -2098,7 +2106,7 @@ def test_full_then_short_page_completes_normally(monkeypatch) -> None:
     }
     client = _make_market_data(monkeypatch, responses)
 
-    rows = client.get_funding_history("BTCUSDT", start=0, end=10, limit=2)
+    rows = client.get_funding_history("BTCUSDT", start=0, end=11, limit=2)
 
     assert [int(r["fundingRateTimestamp"]) for r in rows] == [5, 8, 9]
     assert len(client._client.calls) == 2
@@ -2379,3 +2387,90 @@ def test_bybit_private_client_still_rejects_other_trading_stop_errors(
     )
     with pytest.raises(bybit_errors.BybitRequestRejected, match="set_trading_stop failed"):
         client.set_trading_stop(symbol="TLMUSDT", stop_loss="0.0023054")
+
+
+def test_kline_window_pager_raises_on_a_bracketed_empty_window(monkeypatch) -> None:
+    """`get_klines`/`_get_price_index_klines` had no mid-range hole guard at all,
+    unlike `_paged_time_range` and every Binance pager: a transient retCode-0
+    empty window silently dropped up to limit x interval bars and the downloader
+    then sealed the gap with a full-range completeness marker (audit M7)."""
+
+    interval_ms = bybit_market_data.INTERVAL_MS["60"]
+    # The hole must be wider than one window span (limit-1 intervals) so at
+    # least one whole window comes back empty between two populated ones.
+    present = {0, 1, 2, 12, 13, 14}
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.calls: list[dict] = []
+
+        def get_kline(self, **params):
+            self.calls.append(params)
+            start, end = int(params["start"]), int(params["end"])
+            rows = [
+                [str(index * interval_ms), "1", "2", "0.5", "1.5", "10", "15"]
+                for index in sorted(present)
+                if start <= index * interval_ms <= end
+            ]
+            return {"retCode": 0, "result": {"list": list(reversed(rows))}}
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData()
+    with pytest.raises(bybit.BybitDataError) as excinfo:
+        client.get_klines("BTCUSDT", "60", 0, 15 * interval_ms, limit=3)
+    assert "empty window mid-range" in str(excinfo.value)
+
+
+def test_kline_window_pager_tolerates_leading_and_trailing_empty_windows(monkeypatch) -> None:
+    """A symbol listed after `start` (or delisted before `end`) legitimately has
+    empty windows at the edges; the guard must only fire on an interior hole."""
+
+    interval_ms = bybit_market_data.INTERVAL_MS["60"]
+    present = {3, 4, 5}
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.calls: list[dict] = []
+
+        def get_kline(self, **params):
+            self.calls.append(params)
+            start, end = int(params["start"]), int(params["end"])
+            rows = [
+                [str(index * interval_ms), "1", "2", "0.5", "1.5", "10", "15"]
+                for index in sorted(present)
+                if start <= index * interval_ms <= end
+            ]
+            return {"retCode": 0, "result": {"list": list(reversed(rows))}}
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData()
+    rows = client.get_klines("BTCUSDT", "60", 0, 9 * interval_ms, limit=3)
+    assert [int(row[0]) // interval_ms for row in rows] == [3, 4, 5]
+
+
+def test_kline_window_pager_reretries_a_transient_empty_window(monkeypatch) -> None:
+    interval_ms = bybit_market_data.INTERVAL_MS["60"]
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.calls: list[dict] = []
+            self.blanked = False
+
+        def get_kline(self, **params):
+            self.calls.append(params)
+            start, end = int(params["start"]), int(params["end"])
+            rows = [
+                [str(index * interval_ms), "1", "2", "0.5", "1.5", "10", "15"]
+                for index in range(9)
+                if start <= index * interval_ms <= end
+            ]
+            if start > 0 and not self.blanked:
+                # One transient retCode-0 empty response mid-range.
+                self.blanked = True
+                return {"retCode": 0, "result": {"list": []}}
+            return {"retCode": 0, "result": {"list": list(reversed(rows))}}
+
+    monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
+    client = bybit_market_data.BybitMarketData()
+    rows = client.get_klines("BTCUSDT", "60", 0, 9 * interval_ms, limit=3)
+    assert [int(row[0]) // interval_ms for row in rows] == list(range(9))

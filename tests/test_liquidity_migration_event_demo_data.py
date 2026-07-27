@@ -16,6 +16,7 @@ from liquidity_migration.event_demo_data import (
     _build_demo_universe,
     _demo_instruments,
     _demo_kline_fetch_ranges,
+    _window_incomplete_symbols,
     _download_recent_1h_klines,
     _resolve_ticker_snapshot,
 )
@@ -782,3 +783,53 @@ def test_build_demo_universe_leaves_age_filter_to_component_profile(monkeypatch)
         empty, empty, config=unlimited, snapshot_ts_ms=_hour_floor_now_ms(),
     )
     assert captured == [0]
+
+
+def test_demo_kline_fetch_ranges_backfills_a_missing_window_head() -> None:
+    """The hole check was interior-only and the fallback fetched tail-only from
+    the latest bar, so a symbol whose window HEAD is absent (widening
+    lookback_days past the pruned retention, or a partially bootstrapped WS
+    store) was never repaired and every warm-up-dependent feature silently
+    degraded (2026-07-27 audit M8)."""
+
+    cached = pl.DataFrame(
+        [{"symbol": "HEADUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(2, 4)]
+    )
+    ranges = _demo_kline_fetch_ranges(
+        ["HEADUSDT"], cached, start_ms=0, end_ms=3 * MS_PER_HOUR
+    )
+    assert ranges == {"HEADUSDT": (0, 2 * MS_PER_HOUR)}
+
+    # A head explained by the symbol's listing time is not a hole.
+    assert (
+        _demo_kline_fetch_ranges(
+            ["HEADUSDT"],
+            cached,
+            start_ms=0,
+            end_ms=3 * MS_PER_HOUR,
+            launch_time_ms_by_symbol={"HEADUSDT": 2 * MS_PER_HOUR},
+        )
+        == {}
+    )
+
+
+def test_window_incomplete_symbols_flags_a_missing_head() -> None:
+    frame = pl.DataFrame(
+        [{"symbol": "HEADUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(2, 4)]
+    )
+    assert _window_incomplete_symbols(frame, start_ms=0, end_ms=3 * MS_PER_HOUR) == {
+        "HEADUSDT"
+    }
+    assert (
+        _window_incomplete_symbols(
+            frame,
+            start_ms=0,
+            end_ms=3 * MS_PER_HOUR,
+            launch_time_ms_by_symbol={"HEADUSDT": 2 * MS_PER_HOUR},
+        )
+        == set()
+    )
+    complete = pl.DataFrame(
+        [{"symbol": "OKUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(4)]
+    )
+    assert _window_incomplete_symbols(complete, start_ms=0, end_ms=3 * MS_PER_HOUR) == set()

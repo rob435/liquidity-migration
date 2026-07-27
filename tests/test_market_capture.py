@@ -1291,3 +1291,68 @@ def test_cumulative_outage_counts_from_last_accepted_frame_and_clears_on_recover
     assert stream._last_outage_warning_monotonic is None
     now[0] = 399.9
     assert stream.check_stale_subscriptions() == ()
+
+
+def test_a_failed_segment_rollover_does_not_wedge_the_symbol_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rollover closed the live segment before opening its replacement and only
+    swapped the registry entry on success, so any raise in between (EIO, EACCES,
+    inode exhaustion — none covered by the free-disk floor) left the registry
+    pointing at a CLOSED file. Every later append then re-entered rollover and
+    raised "I/O operation on closed file" forever (2026-07-27 audit M4)."""
+
+    store = SegmentedCaptureStore(tmp_path, config=_config(segment_max_bytes=200))
+    for index in range(3):
+        store.append({"symbol": "BTCUSDT", "local_receive_ts_ns": 1_000_000_000 + index, "n": index})
+
+    real_open = os.open
+    failures = {"count": 0}
+
+    def failing_open(path, flags, mode=0o777, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(path).endswith(".jsonl") and failures["count"] == 0:
+            failures["count"] += 1
+            raise OSError(5, "simulated I/O error")
+        return real_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    with pytest.raises(OSError):
+        for index in range(200):
+            store.append(
+                {"symbol": "BTCUSDT", "local_receive_ts_ns": 1_000_000_100 + index, "payload": "x" * 64}
+            )
+    monkeypatch.undo()
+
+    # The store recovers on the next append rather than raising forever.
+    location = store.append({"symbol": "BTCUSDT", "local_receive_ts_ns": 2_000_000_000, "n": "after"})
+    assert location.byte_length > 0
+    store.close()
+
+
+def test_close_flushes_every_segment_even_when_one_descriptor_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`close()` iterated a dict and let the first failing descriptor abort the
+    loop, leaving every later segment open and unflushed (audit M4)."""
+
+    store = SegmentedCaptureStore(tmp_path, config=_config())
+    store.append({"symbol": "BTCUSDT", "local_receive_ts_ns": 1_000_000_000})
+    store.append({"symbol": "ETHUSDT", "local_receive_ts_ns": 1_000_000_001})
+
+    broken_fd = store._segments["BTCUSDT"].file.fileno()
+    healthy = store._segments["ETHUSDT"]
+    real_fsync = os.fsync
+
+    def failing_fsync(fd: int) -> None:
+        if fd == broken_fd:
+            raise OSError(5, "simulated fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    with pytest.raises(OSError):
+        store.close()
+    monkeypatch.undo()
+
+    # The sibling segment was still closed rather than left open and unflushed.
+    assert healthy.file.closed
+    assert store._segments == {}

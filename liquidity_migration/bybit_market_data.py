@@ -144,6 +144,36 @@ INTERVAL_MS = {
 }
 
 
+def _raise_on_bracketed_empty_window(
+    method_name: str,
+    symbol: str,
+    window_row_counts: list[int],
+    *,
+    start: int,
+    end: int,
+) -> None:
+    """Refuse a hole strictly inside the fetched range.
+
+    Windows before a symbol's listing and after its delisting are legitimately
+    empty; a window that returned nothing while both an earlier and a later
+    window returned rows is a dropped range, and the caller must fail rather than
+    let the downloader seal it with a completeness marker.
+    """
+
+    if not any(window_row_counts):
+        return
+    first = next(index for index, count in enumerate(window_row_counts) if count)
+    last = len(window_row_counts) - 1 - next(
+        index for index, count in enumerate(reversed(window_row_counts)) if count
+    )
+    if any(count == 0 for count in window_row_counts[first:last]):
+        raise BybitDataError(
+            f"Bybit {method_name} returned an empty window mid-range for {symbol} "
+            f"(startTime={start}, endTime={end}, windows={window_row_counts}); "
+            f"refusing to truncate the fetch silently"
+        )
+
+
 @dataclass(slots=True)
 class BybitMarketData:
     category: str = "linear"
@@ -231,32 +261,65 @@ class BybitMarketData:
         )
         return rows
 
-    def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[list[Any]]:
+    def _paged_window_klines(
+        self, method_name: str, symbol: str, interval: str, start: int, end: int, *, limit: int
+    ) -> list[Any]:
+        """Fetch ``[start, end)`` as a sequence of bounded time windows.
+
+        Two contracts the ad-hoc copies of this loop got wrong:
+
+        * ``end`` is EXCLUSIVE, matching ``--end`` in ``cli_parsers`` and the
+          ``[start..end)`` the downloader prints. Bybit's own ``end`` parameter is
+          inclusive, so the request is capped at ``end - 1`` and rows are filtered
+          ``start <= ts < end``. Writing the 00:00 bar of the excluded day into a
+          ``date=<end>`` partition made ``pit_coverage`` read kline coverage one
+          day fresher than reality and turned that single bar into a bogus daily
+          close at the panel tail (2026-07-27 audit M6).
+        * A window that comes back empty is re-requested once, and an empty
+          window BRACKETED by non-empty windows raises. Unlike the other pagers
+          in this file this loop had no mid-range hole guard at all, so a
+          transient retCode-0 empty response silently dropped up to
+          ``limit x interval`` bars and the downloader then sealed the hole with
+          a full-range completeness marker (audit M7). Bracketing keeps the guard
+          precise: leading windows before a listing and trailing windows after a
+          delisting are legitimately empty and never raise.
+        """
+
         interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
         rows_by_ts: dict[int, Any] = {}
-        cursor = start
         window_span_ms = interval_ms * max(limit - 1, 1)
-        while cursor <= end:
-            window_end = min(end, cursor + window_span_ms)
-            payload = self._get(
-                "get_kline",
-                category=self.category,
-                symbol=symbol,
-                interval=interval,
-                start=cursor,
-                end=window_end,
-                limit=limit,
-            )
-            batch = payload.get("result", {}).get("list", [])
+        window_row_counts: list[int] = []
+        cursor = start
+        while cursor < end:
+            window_end = min(end - 1, cursor + window_span_ms)
+            batch: list[Any] = []
+            for _attempt in range(2):
+                payload = self._get(
+                    method_name,
+                    category=self.category,
+                    symbol=symbol,
+                    interval=interval,
+                    start=cursor,
+                    end=window_end,
+                    limit=limit,
+                )
+                batch = payload.get("result", {}).get("list", [])
+                if batch:
+                    break
+            window_row_counts.append(len(batch))
             for item in batch:
                 ts = int(item[0])
-                if start <= ts <= end:
+                if start <= ts < end:
                     rows_by_ts[ts] = item
-            if window_end >= end:
+            if window_end >= end - 1:
                 break
             next_cursor = window_end
             cursor = next_cursor if next_cursor > cursor else cursor + interval_ms
+        _raise_on_bracketed_empty_window(method_name, symbol, window_row_counts, start=start, end=end)
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
+
+    def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[list[Any]]:
+        return self._paged_window_klines("get_kline", symbol, interval, start, end, limit=limit)
 
     def get_funding_history(self, symbol: str, start: int, end: int, limit: int = 200) -> list[dict[str, Any]]:
         return self._paged_time_range(
@@ -305,37 +368,16 @@ class BybitMarketData:
         *,
         limit: int,
     ) -> list[dict[str, Any]]:
-        interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
-        rows_by_ts: dict[int, Any] = {}
-        cursor = start
-        window_span_ms = interval_ms * max(limit - 1, 1)
-        while cursor <= end:
-            window_end = min(end, cursor + window_span_ms)
-            payload = self._get(
-                method_name,
-                category=self.category,
-                symbol=symbol,
-                interval=interval,
-                start=cursor,
-                end=window_end,
-                limit=limit,
-            )
-            batch = payload.get("result", {}).get("list", [])
-            for item in batch:
-                ts = int(item[0])
-                if start <= ts <= end:
-                    rows_by_ts[ts] = item
-            if window_end >= end:
-                break
-            next_cursor = window_end
-            cursor = next_cursor if next_cursor > cursor else cursor + interval_ms
-        return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
+        return self._paged_window_klines(method_name, symbol, interval, start, end, limit=limit)
 
     def _paged_time_range(self, method_name: str, timestamp_key: str, **params: Any) -> list[dict[str, Any]]:
         rows_by_ts: dict[int, dict[str, Any]] = {}
         start = int(params["startTime"])
+        # `endTime` is the caller's EXCLUSIVE bound; Bybit's own endTime is
+        # inclusive, so the request and the row filter both cap at end - 1
+        # (audit M6).
         end = int(params["endTime"])
-        cursor_end = end
+        cursor_end = end - 1
         limit = int(params.get("limit", 200))
         # An empty page after a full page is a mid-range hole, not end-of-data;
         # fail so the requested range is not marked complete. An empty first page
@@ -366,7 +408,7 @@ class BybitMarketData:
                 break
             for item in batch:
                 ts = int(item[timestamp_key])
-                if start <= ts <= end:
+                if start <= ts < end:
                     rows_by_ts[ts] = item
             oldest = min(timestamps)
             # Safe to exit on `oldest <= start`: rows_by_ts is keyed by ts, so

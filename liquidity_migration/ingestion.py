@@ -145,8 +145,14 @@ def densify_trade_klines_1h(
     carry_price = pl.col("close").forward_fill()
     if initial_price is not None and math.isfinite(float(initial_price)) and float(initial_price) > 0.0:
         carry_price = carry_price.fill_null(float(initial_price))
+    # Sort BEFORE the forward fill. `forward_fill` is row-positional and polars
+    # does not specify left-join row order, so filling on the join output and
+    # sorting afterwards could carry a LATER hour's close backwards into an
+    # earlier gap hour -- look-ahead inside a densified archive bar, invisible
+    # because the trailing sort put the rows back in order (2026-07-27 audit L8).
     dense = (
         grid.join(klines.drop("source") if "source" in klines.columns else klines, on=["ts_ms", "symbol"], how="left")
+        .sort(["symbol", "ts_ms"])
         .with_columns(carry_price.alias("_fill_price"))
         .with_columns(
             [

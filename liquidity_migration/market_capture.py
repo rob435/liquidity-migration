@@ -411,6 +411,24 @@ def _remove_owner_market_readiness(root: str | Path) -> None:
         os.close(directory_descriptor)
 
 
+def _close_segment_best_effort(segment: "_Segment") -> None:
+    """Flush/fsync/close a retiring segment without letting it wedge rollover.
+
+    The segment has already been removed from the registry, so a failure here is
+    reported and dropped: the replacement segment must still be installed.
+    """
+
+    try:
+        segment.file.flush()
+        os.fsync(segment.file.fileno())
+    except OSError:
+        _logger.exception("failed to flush retiring capture segment %s", segment.path)
+    try:
+        segment.file.close()
+    except OSError:
+        _logger.exception("failed to close retiring capture segment %s", segment.path)
+
+
 @dataclass(slots=True)
 class _Segment:
     day: str
@@ -443,9 +461,16 @@ class SegmentedCaptureStore:
         if current is not None and current.day == day and current.bytes_written < self.config.segment_max_bytes:
             return current
         if current is not None:
-            current.file.flush()
-            os.fsync(current.file.fileno())
-            current.file.close()
+            # Retire the old segment from the registry BEFORE closing it. A raise
+            # anywhere between the close and the successful install of the
+            # replacement (EIO, EACCES, inode exhaustion -- none covered by the
+            # free-disk floor) previously left the registry pointing at a CLOSED
+            # file, so every later append re-entered rollover and raised
+            # "I/O operation on closed file" forever for that symbol, and
+            # ``close()`` then raised mid-iteration and left sibling segments
+            # unflushed (2026-07-27 audit M4).
+            self._segments.pop(key, None)
+            _close_segment_best_effort(current)
         directory = self.root / day / key
         directory.mkdir(parents=True, exist_ok=True)
         indices: list[int] = []
@@ -537,12 +562,27 @@ class SegmentedCaptureStore:
         raise MarketCaptureError("capture append location is no longer active")
 
     def close(self) -> None:
+        """Flush and close every live segment.
+
+        Per-segment tolerant: one failing descriptor must not leave the
+        remaining segments unflushed. The first failure is re-raised after every
+        segment has had its chance.
+        """
+
         with self._lock:
-            for segment in self._segments.values():
+            segments = list(self._segments.values())
+            self._segments.clear()
+        first_error: BaseException | None = None
+        for segment in segments:
+            try:
                 segment.file.flush()
                 os.fsync(segment.file.fileno())
                 segment.file.close()
-            self._segments.clear()
+            except BaseException as error:  # noqa: BLE001 - re-raised below
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 @dataclass(slots=True)

@@ -51,7 +51,7 @@ from .archive_manifest import (
 )
 from .deterministic_serialization import canonical_json
 from . import storage as storage_module
-from .storage import read_dataset, write_dataset
+from .storage import read_dataset, replace_dataset, write_dataset
 from .symbol_codec import (
     SymbolIdentityError,
     decode_symbol_partition,
@@ -776,10 +776,12 @@ def rewrite_manifest_to_coverage(
         manifest = manifest.drop("__derived_first_archive_observed_date")
     manifest = manifest.sort(["date", "symbol"])
 
-    dst = root / "archive_trade_manifest"
-    if dst.exists():
-        shutil.rmtree(dst)
-    write_dataset(manifest, root, "archive_trade_manifest", partition_by=("date",))
+    # One locked, staged replacement. The previous rmtree ran outside the
+    # dataset lock that readers take for a consistent snapshot, so a concurrent
+    # reader could lose part files mid-collect and a kill between the rmtree and
+    # the write left the root's PIT membership dataset gone (audit M5). This
+    # routinely runs under topup_binance_daily_klines.
+    replace_dataset(manifest, root, "archive_trade_manifest", partition_by=("date",))
     return manifest.height
 
 

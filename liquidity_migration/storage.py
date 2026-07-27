@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import shutil
 import stat
 import threading
 import time
@@ -770,6 +771,67 @@ def write_dataset(
         return _write_dataset_unlocked(df, root, dataset, partition_by=partition_by, append=append)
 
 
+def replace_dataset(
+    df: pl.DataFrame,
+    data_root: str | Path,
+    dataset: str,
+    *,
+    partition_by: tuple[str, ...] = ("date", "symbol"),
+) -> Path:
+    """Replace a dataset's ENTIRE contents atomically, under its own lock.
+
+    ``write_dataset(append=False)`` still merges per surviving partition, so a
+    true replacement used to mean ``rmtree`` followed by ``write_dataset`` -- with
+    the ``rmtree`` outside the lock. A concurrent reader (which takes this lock
+    precisely so it sees a consistent snapshot) could then collect a half-deleted
+    dataset, and a kill between the two steps left the dataset gone or partial
+    (2026-07-27 audit M5).
+
+    Staging under the lock and swapping directories keeps every reader on either
+    the complete previous generation or the complete new one, and a kill at any
+    point leaves the previous generation intact plus a hidden staging directory.
+    """
+
+    root = ensure_data_root(data_root)
+    path = dataset_path(root, dataset)
+    token = f"{os.getpid()}-{os.urandom(8).hex()}"
+    staging = path.parent / f".{path.name}.replacing-{token}"
+    retired = path.parent / f".{path.name}.retired-{token}"
+    with exclusive_file_lock(dataset_lock_path(root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        try:
+            _write_dataset_unlocked(
+                df, root, dataset, partition_by=partition_by, append=False, target=staging
+            )
+            swapped = False
+            if path.exists():
+                os.rename(path, retired)
+                swapped = True
+            try:
+                os.rename(staging, path)
+            except BaseException:
+                if swapped:
+                    os.rename(retired, path)
+                raise
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        _fsync_dataset_parent(path)
+        shutil.rmtree(retired, ignore_errors=True)
+    return path
+
+
+def _fsync_dataset_parent(path: Path) -> None:
+    descriptor = os.open(
+        str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_dataset_unlocked(
     df: pl.DataFrame,
     root: Path,
@@ -777,8 +839,9 @@ def _write_dataset_unlocked(
     *,
     partition_by: tuple[str, ...],
     append: bool,
+    target: Path | None = None,
 ) -> Path:
-    path = dataset_path(root, dataset)
+    path = dataset_path(root, dataset) if target is None else target
     # storage-concurrency-4: opportunistically sweep orphaned `.*.tmp` part files
     # left by a prior crash before this write. Safe here because we hold the
     # dataset lock (no concurrent writer's in-flight temp can be clobbered).

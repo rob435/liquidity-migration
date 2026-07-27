@@ -121,11 +121,17 @@ class BinanceUSDMData:
         rows_by_ts: dict[int, list[Any]] = {}
         cursor = start
         prev_page_full = False
-        while cursor <= end:
+        # `end` is EXCLUSIVE (see --end in cli_parsers and the [start..end)
+        # the downloader prints); Binance's endTime is inclusive, so both the
+        # request and the row filter cap at end - 1. Writing the 00:00 bar of
+        # the excluded day made pit_coverage read kline coverage one day
+        # fresher than reality and turned that single bar into a bogus daily
+        # close at the panel tail (2026-07-27 audit M6).
+        while cursor < end:
             params: dict[str, Any] = {
                 "interval": interval,
                 "startTime": cursor,
-                "endTime": end,
+                "endTime": end - 1,
                 "limit": page_limit,
             }
             params["pair" if pair_param else "symbol"] = symbol
@@ -150,12 +156,12 @@ class BinanceUSDMData:
                 break
             for row in batch:
                 ts = int(row[0])
-                if start <= ts <= end:
+                if start <= ts < end:
                     rows_by_ts[ts] = row
             prev_page_full = len(batch) >= page_limit
             latest = max(int(row[0]) for row in batch)
             next_cursor = latest + interval_ms
-            if next_cursor <= cursor or next_cursor > end:
+            if next_cursor <= cursor or next_cursor >= end:
                 break
             cursor = next_cursor
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
@@ -175,11 +181,12 @@ class BinanceUSDMData:
         rows_by_ts: dict[int, dict[str, Any]] = {}
         cursor = start
         prev_page_full = False
-        while cursor <= end:
+        # `end` is EXCLUSIVE; see _paged_kline.
+        while cursor < end:
             params = {
                 "symbol": symbol,
                 "startTime": cursor,
-                "endTime": end,
+                "endTime": end - 1,
                 "limit": limit,
                 **extra_params,
             }
@@ -199,12 +206,12 @@ class BinanceUSDMData:
                 break
             for row in batch:
                 ts = int(row[timestamp_key])
-                if start <= ts <= end:
+                if start <= ts < end:
                     rows_by_ts[ts] = row
             prev_page_full = len(batch) >= limit
             latest = max(int(row[timestamp_key]) for row in batch)
             next_cursor = latest + (step_ms or 1)
-            if len(batch) < limit or next_cursor <= cursor or next_cursor > end:
+            if len(batch) < limit or next_cursor <= cursor or next_cursor >= end:
                 break
             cursor = next_cursor
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]

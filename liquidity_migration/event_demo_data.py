@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import polars as pl
 
@@ -456,6 +456,7 @@ def _download_recent_1h_klines(
     cache_root: Path | None = None,
     kline_store: Any | None = None,
     write_compact_cache: bool = True,
+    launch_time_ms_by_symbol: Mapping[str, int] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Return the (symbol, ts_ms) rectangular klines for the demo cycle.
 
@@ -512,7 +513,12 @@ def _download_recent_1h_klines(
                 # backfills the hole — otherwise the gappy day silently falls
                 # below the >=20-hourly-bar filter and that coin's daily features
                 # vanish for the day.
-                incomplete = _window_incomplete_symbols(store_frame, start_ms=start_ms, end_ms=end_ms)
+                incomplete = _window_incomplete_symbols(
+                    store_frame,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    launch_time_ms_by_symbol=launch_time_ms_by_symbol,
+                )
                 if incomplete:
                     store_frame = store_frame.filter(~pl.col("symbol").is_in(list(incomplete)))
                     covered_symbols = [s for s in covered_symbols if s not in incomplete]
@@ -552,7 +558,13 @@ def _download_recent_1h_klines(
 
     # Merge what we have so far so the REST fetch only fills genuine gaps.
     combined = _concat_recent_klines(store_frame, cached)
-    fetch_ranges = _demo_kline_fetch_ranges(symbols, combined, start_ms=start_ms, end_ms=end_ms)
+    fetch_ranges = _demo_kline_fetch_ranges(
+        symbols,
+        combined,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        launch_time_ms_by_symbol=launch_time_ms_by_symbol,
+    )
     stats["fetch_symbols"] = len(fetch_ranges)
     if not fetch_ranges:
         output = _dedupe_recent_klines(combined)
@@ -800,16 +812,65 @@ def _write_demo_kline_compact_cache(
         temp_parquet.unlink(missing_ok=True)
         temp_metadata.unlink(missing_ok=True)
 
+def _launch_time_ms_by_symbol(universe: pl.DataFrame) -> dict[str, int]:
+    """Listing time per symbol, for the kline head-completeness check.
+
+    Without it a symbol listed inside the lookback window looks permanently
+    head-incomplete and is refetched every cycle; with it the absent head is
+    explained and only genuine gaps are refetched (audit M8).
+    """
+
+    if universe.is_empty() or "symbol" not in universe.columns or "launch_time_ms" not in universe.columns:
+        return {}
+    return {
+        str(row["symbol"]): int(row["launch_time_ms"] or 0)
+        for row in universe.select("symbol", "launch_time_ms").iter_rows(named=True)
+        if row["launch_time_ms"] is not None
+    }
+
+
+def _expected_window_head_ms(
+    symbol: str,
+    *,
+    start_ms: int,
+    launch_time_ms_by_symbol: Mapping[str, int] | None,
+) -> int:
+    """Earliest hourly bar the window can legitimately start at for ``symbol``.
+
+    ``start_ms`` normally, or the symbol's listing hour when it is younger than
+    the window. A symbol with no known launch time is held to ``start_ms``: a
+    spurious head refetch is cheap, a permanently absent head is not.
+    """
+
+    launch_ms = int((launch_time_ms_by_symbol or {}).get(symbol) or 0)
+    if launch_ms <= start_ms:
+        return start_ms
+    # First hour boundary at or after the listing.
+    return ((launch_ms + MS_PER_HOUR - 1) // MS_PER_HOUR) * MS_PER_HOUR
+
+
 def _window_incomplete_symbols(
-    klines: pl.DataFrame, *, start_ms: int, end_ms: int
+    klines: pl.DataFrame,
+    *,
+    start_ms: int,
+    end_ms: int,
+    launch_time_ms_by_symbol: Mapping[str, int] | None = None,
 ) -> set[str]:
-    """Symbols in ``klines`` carrying a MID-WINDOW 1h hole inside ``[start, end]``.
+    """Symbols in ``klines`` whose ``[start, end]`` window has a 1h hole.
 
     1h bars are keyed uniquely on the hour grid, so a symbol's in-window bars are
     contiguous iff their count equals ``(max - min) / 1h + 1``. A WS reconnect
     drops confirmed bars that pybit never replays, leaving a hole BELOW the latest
     bar — invisible to a latest-bar coverage check. Returned symbols are forced
-    off the store fast path so REST backfills the hole."""
+    off the store fast path so REST backfills the hole.
+
+    The check is deliberately NOT interior-only. Widening ``lookback_days`` past
+    the pruned retention, or a partially-bootstrapped WS store, leaves the head of
+    the window absent while the interior is perfectly contiguous; the old
+    interior-only test read that as fully covered and nothing ever backfilled it,
+    silently degrading every warm-up-dependent feature (2026-07-27 audit M8). A
+    head that is explained by the symbol's listing time is not a hole.
+    """
     if klines.is_empty() or "symbol" not in klines.columns or "ts_ms" not in klines.columns:
         return set()
     windowed = klines.filter(pl.col("ts_ms").is_between(start_ms, end_ms))
@@ -820,8 +881,19 @@ def _window_incomplete_symbols(
         pl.col("ts_ms").max().alias("hi"),
         pl.len().alias("n"),
     )
-    incomplete = agg.filter(pl.col("n") < ((pl.col("hi") - pl.col("lo")) // MS_PER_HOUR + 1))
-    return {str(s) for s in incomplete["symbol"].to_list()}
+    incomplete: set[str] = set()
+    for row in agg.iter_rows(named=True):
+        symbol = str(row["symbol"])
+        lo, hi, n = int(row["lo"]), int(row["hi"]), int(row["n"])
+        if n < (hi - lo) // MS_PER_HOUR + 1:
+            incomplete.add(symbol)
+            continue
+        head = _expected_window_head_ms(
+            symbol, start_ms=start_ms, launch_time_ms_by_symbol=launch_time_ms_by_symbol
+        )
+        if lo > head + MS_PER_HOUR:
+            incomplete.add(symbol)
+    return incomplete
 
 
 def _demo_kline_fetch_ranges(
@@ -830,6 +902,7 @@ def _demo_kline_fetch_ranges(
     *,
     start_ms: int,
     end_ms: int,
+    launch_time_ms_by_symbol: Mapping[str, int] | None = None,
 ) -> dict[str, tuple[int, int]]:
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return {symbol: (start_ms, end_ms) for symbol in symbols}
@@ -859,6 +932,18 @@ def _demo_kline_fetch_ranges(
             # (max+1h..end) would leave the hole forever and the gappy day would
             # silently fail the >=20-hourly-bar filter.
             ranges[symbol] = (start_ms, end_ms)
+            continue
+        head = _expected_window_head_ms(
+            symbol, start_ms=start_ms, launch_time_ms_by_symbol=launch_time_ms_by_symbol
+        )
+        if lo > head + MS_PER_HOUR:
+            # Missing HEAD. The interior can be perfectly contiguous while the
+            # start of the window is simply absent — widening lookback_days past
+            # the pruned retention does exactly that, and a tail-only fetch from
+            # `hi` never repairs it (audit M8). Fetch the head explicitly; the
+            # dedupe merge drops the overlap, and a symbol whose head is
+            # explained by its listing time never reaches here.
+            ranges[symbol] = (start_ms, min(lo, end_ms))
             continue
         fetch_start = max(hi + MS_PER_HOUR, start_ms)
         if fetch_start <= end_ms:

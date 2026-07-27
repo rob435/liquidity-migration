@@ -994,3 +994,54 @@ def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, mon
 
     assert "file" in fsynced_kinds, "the temp part file must still be fsync'd"
     assert "dir" in fsynced_kinds, "the parent directory must be fsync'd after the rename"
+
+
+def test_replace_dataset_swaps_atomically_and_holds_the_reader_lock(tmp_path: Path) -> None:
+    """`rewrite_manifest_to_coverage` used to rmtree the dataset OUTSIDE the lock
+    readers take for a consistent snapshot, then write it back: a concurrent
+    reader could collect a half-deleted dataset and a kill between the two steps
+    left the PIT membership dataset gone (2026-07-27 audit M5)."""
+
+    old = pl.DataFrame({"date": ["2026-07-01", "2026-07-02"], "symbol": ["A", "B"], "value": [1, 2]})
+    write_dataset(old, tmp_path, "archive_trade_manifest", partition_by=("date",))
+    assert read_dataset(tmp_path, "archive_trade_manifest").height == 2
+
+    new = pl.DataFrame({"date": ["2026-07-03"], "symbol": ["C"], "value": [3]})
+    storage.replace_dataset(new, tmp_path, "archive_trade_manifest", partition_by=("date",))
+
+    replaced = read_dataset(tmp_path, "archive_trade_manifest")
+    # A true replacement, not a per-partition merge: the old dates are gone.
+    assert sorted(replaced["symbol"].to_list()) == ["C"]
+    # No staging or retired directory survives a successful swap.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith(".archive_trade_manifest")]
+    assert leftovers == []
+
+
+def test_replace_dataset_leaves_the_previous_generation_intact_on_failure(tmp_path: Path) -> None:
+    old = pl.DataFrame({"date": ["2026-07-01"], "symbol": ["A"], "value": [1]})
+    write_dataset(old, tmp_path, "archive_trade_manifest", partition_by=("date",))
+
+    class Boom(RuntimeError):
+        pass
+
+    original = storage._write_dataset_unlocked
+
+    def failing(*args: object, **kwargs: object) -> None:
+        raise Boom("simulated write failure")
+
+    storage._write_dataset_unlocked = failing  # type: ignore[assignment]
+    try:
+        with pytest.raises(Boom):
+            storage.replace_dataset(
+                pl.DataFrame({"date": ["2026-07-02"], "symbol": ["B"], "value": [2]}),
+                tmp_path,
+                "archive_trade_manifest",
+                partition_by=("date",),
+            )
+    finally:
+        storage._write_dataset_unlocked = original  # type: ignore[assignment]
+
+    survived = read_dataset(tmp_path, "archive_trade_manifest")
+    assert survived["symbol"].to_list() == ["A"]
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith(".archive_trade_manifest")]
+    assert leftovers == []
