@@ -19,8 +19,9 @@ deployment, or opens the separate real-money boundary.
   operational evidence surfaces. The prospective runtime-parity epoch and all its
   machinery were deleted on 2026-07-24; the forward stream is now just the
   rolling record under `docs/governance.md`.
-- The account-kernel remediation in the local worktree is independent of this
-  research reset and remains undeployed.
+- The account-kernel remediation was independent of this research reset and
+  deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
+  (Deployment) is the authority for what is installed.
 - **Phase 0 of `docs/roadmap_2026-07-25.md` is complete (2026-07-25); see
   `docs/anomaly_research_2026-07-24.md` §16.** Three results change the position:
   - **CONTINUOUS's Sharpe 2.73 is withdrawn as evidence about the deployed

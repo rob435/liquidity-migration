@@ -203,9 +203,15 @@ def _mtm_daily_curve(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame
     The engine books P&L on exit day only, which renders the sparse FC book as a
     step function (2026-06-09 finding). This marks every open trade daily off the
     symbol's daily close (entry day: close vs entry price; exit day: exit price vs
-    prior close, costs+funding booked there), so each trade's gross telescopes to
-    the same per-trade total. Flat days are zero. Columns: date, mtm_return,
-    equity, drawdown.
+    prior close, costs+funding booked there). Flat days are zero. Columns: date,
+    mtm_return, equity, drawdown.
+
+    NOTE: the daily marks do NOT telescope to the booked per-trade total once
+    ``notional_weight < 1``. The daily contributions are arithmetic returns scaled
+    by the weight, so they sum to the per-trade total only to O(nw*r^2) — material
+    for FC trades with 15-20% daily moves (2026-07-27 audit L20). The curve is
+    still the honest daily book path; it is not a per-trade reconciliation. Tie
+    the two out by distributing log-returns instead, if that is ever wanted.
     """
     if trades.is_empty():
         return pl.DataFrame(

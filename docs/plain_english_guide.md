@@ -183,14 +183,15 @@ anything beyond "the machinery works."
   leverage, 500,000 total position value, 125,000 in any one coin, 250,000
   of locked-up collateral. Leverage here does *not* make bets bigger — bet
   size is a percentage of the account balance; leverage only changes how
-  much cash each bet locks up. The old smaller caps still bind on the
-  server until you dispatch the next deployment.
+  much cash each bet locks up. These caps are the ones live on the server:
+  the deployment that installed them went out on 2026-07-27 at about 14:03
+  UTC.
 - **The hedge** is a scheduled job that computes small Bitcoin/Ethereum
   buy-side wishes sized against the pump-fade strategy's open shorts, so a
   market-wide jump hurts less. At the old 10k account size its computed
   orders were below the exchange's minimum order size and were never
-  placed; at the full 250k they finally become placeable — which is why
-  refreshing its frozen sizing dataset is now queued.
+  placed; at the funded 250k they are placeable — which is why refreshing
+  its frozen sizing dataset is now queued.
 - **Two parallel fleets**: the play-money exchange account (demo) tests
   real exchange behavior — real order handling, fees, crowd fees, outages —
   with zero money at risk; and a simulated copy (the paper twin) that
@@ -244,8 +245,13 @@ So the process (code name: Progressive Evidence Model, in
   system normally requires its forward record to earn it; every deployed
   strategy also carries pre-written shut-off conditions (kill criteria)
   agreed before results existed, so a failing strategy cannot be argued
-  back to life. You can order a change ahead of the evidence (an operator
-  override — as you did on 2026-07-26); the record just has to say so.
+  back to life. Those shut-off conditions are written as a *percentage* of
+  the account size (worst dip of 5% for the pump-fade book, 4% for the
+  momentum book), so funding the account 25× on 2026-07-27 did not quietly
+  turn one ordinary losing trade into a shutdown trigger — the check scales
+  with the account. You can order a change ahead of the evidence (an
+  operator override — as you did on 2026-07-26); the record just has to say
+  so.
 - **Every simulation must**: use only information knowable at each
   simulated moment (point-in-time / causal), include realistic costs
   (measured, ~0.16% per round trip — one entry plus its matching exit),

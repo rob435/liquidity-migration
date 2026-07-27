@@ -87,25 +87,27 @@ history is in Git and in the audit receipts indexed at the bottom.
 - Boundary: **`DEMO=true`, `REAL_MONEY=false`.** Mainnet, `REAL_MONEY`, and
   real-money credentials remain unauthorized.
 - Installed demo and paper operational-profile bytes are identical, SHA-256
-  `cf68369c587c4eb736b5e63f9524a15eb125daa820f09c4167de49aac9fcac18`. The
-  tracked editable source is `configs/operational.demo.json`.
+  `8e7cdffe6c6b6c775d9b8e887855def9d05ead614eef2c8eb2cf115a9bf2a443` (the 25×
+  profile; the pre-scale-up bytes hashed to `cf68369c…`). The tracked editable
+  source is `configs/operational.demo.json`.
 - Deployment status is authoritative only when tied to an exact pushed commit and
   a fresh authenticated rollout receipt.
 
-### Local candidate — paper-fleet Telegram notifications (committed locally, not deployed)
+### Deployed — paper-fleet Telegram notifications
 
-2026-07-27: the paper account owner gains its own Telegram notifications
-(`account_paper_runner` now drives the shared `AccountNotificationEngine`
+2026-07-27 (deployed ~14:03 UTC in the `2c6703a..13754d0` batch): the paper
+account owner has its own Telegram notifications
+(`account_paper_runner` drives the shared `AccountNotificationEngine`
 with a `Bybit paper` heading and a `🧪 PAPER · integration-only twin` label
 on every page; demo output is byte-identical to before). Wiring: the paper
 owner unit stops scrubbing `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, sets
 `TELEGRAM_ENABLED=1` and the paper CONTINUOUS cycle root; deploy provisioning
 preserves operator-provided paper Telegram credentials or seeds them from
 `bybit-demo.env` (venue credentials remain forbidden in the paper
-environment); both paper producers still scrub Telegram variables. Takes
-effect only at the next owner-dispatched rollout (env content changes require
-authority reissue). Until then the paper fleet remains Telegram-silent. The
-same rollout carries the 2026-07-27 observability and resilience fixes
+environment); both paper producers still scrub Telegram variables. The paper
+fleet is no longer Telegram-silent; the first hourly digest lands at the next
+full hour after the deploy. The same rollout carried the 2026-07-27
+observability and resilience fixes
 (public-stream transport logging + cumulative-outage watchdog, owner INFO
 logging, Telegram delivery audit trail, REST-timeout-tolerant periodic
 reconcile, watchdog disk/digest/hedge-runtime alerts and heartbeat
@@ -124,16 +126,15 @@ the stated target — possibly mid-top-up) and directed a scale-up with
 leverage unchanged at 2×. `configs/operational.demo.json` is scaled exactly
 25× (capital reference 250,000; account/component gross 500,000; symbol
 125,000; margin 250,000; every ratio, sizing fraction, and leverage
-untouched), and paper provisioning now derives `PAPER_EQUITY_USDT` from the
-profile's capital reference instead of a per-host tuning value. Until the
-rollout installs the new profile, the deployed 20k-gross/5k-symbol caps
-still bind: sizing already follows live wallet equity, so positions are
-~2% of live equity each and the old caps limit concurrency, which is safe.
-Once the full 250k lands, the BTC hedge crosses its venue-minimum
-threshold on a single open short (~$133 target vs ~$65–130 floor) — the
-policy-due hedge-prior regeneration (old-ensemble vintage) becomes
-material at that point and stays queued behind the next standard research
-refresh.
+untouched), and paper provisioning derives `PAPER_EQUITY_USDT` from the
+profile's capital reference instead of a per-host tuning value (the runner
+script and both authority paths now refuse a missing or mismatched value).
+The rollout later the same day installed that profile, so the old
+20k-gross/5k-symbol caps no longer bind — see Deployment above. With the full
+250k landed, the BTC hedge now crosses its venue-minimum threshold on a single
+open short (~$133 target vs ~$65–130 floor): the policy-due hedge-prior
+regeneration (old-ensemble vintage) is material from here and stays queued
+behind the next standard research refresh.
 
 2026-07-27 (same batch): the demo-rule expiry deadline trap is removed —
 rollout now re-probes whenever the bound receipt is past half of its
@@ -144,12 +145,8 @@ unchanged. Consequence: the earlier "dispatch shortly after Wed 21:57 UTC"
 advice is obsolete — the current receipt (age >3.5 d) triggers a probe on
 ANY rollout dispatched from this code, so dispatch whenever convenient,
 before expiry; reboot for the kernel updates only after the refreshed
-receipts are installed. Timing
-note: the demo-rule receipt expires 2026-07-29T21:57:44Z and the rollout
-path auto-refreshes rules only once the receipt is already expired, so
-dispatching shortly after that instant refreshes receipts and ships these
-commits in one pass; the pending kernel-update reboot should follow the
-refreshed receipts, never precede them.
+receipts are installed. The 14:03 UTC rollout exercised exactly that path:
+the current receipt is `demo-rules-20260727T133929Z`, expiring ~2026-08-03.
 
 The prior change point: the 2026-07-26 CONTINUOUS replacement
 (`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment
@@ -183,10 +180,11 @@ Six persistent services plus three timers:
 
 ## Risk envelope
 
-The account owner caps leverage at **2×**, symbol notional at **5,000 USDT**,
-component/account gross at **20,000 USDT**, and initial margin at **10,000
-USDT**. The bound operational profile retains 2× entry leverage, a 0.5 LONG
-notional multiplier, and a 1.0 CONTINUOUS multiplier. Startup and authorization
+The account owner caps leverage at **2×**, symbol notional at **125,000 USDT**,
+component/account gross at **500,000 USDT**, and initial margin at **250,000
+USDT**, against a capital reference of **250,000 USDT** (the 25× profile
+deployed 2026-07-27 ~14:03 UTC). The bound operational profile retains 2× entry
+leverage, a 0.5 LONG notional multiplier, and a 1.0 CONTINUOUS multiplier. Startup and authorization
 reject unknown profile fields, producer leverage above the owner cap, or
 registered exposure envelopes outside the same profile.
 
@@ -264,13 +262,14 @@ audit.
 | `latest cycle is 0.1 min future-dated` / `future_book` | Local read/update races sampling wall time before the snapshot. Ordering fixed; true future timestamps still page. |
 | `continuous-hedge.service FAILED` after an owner-health page | Duplicate of the owner-health root cause. A hedge run blocked by unhealthy owner health now exits 0 with a blocked receipt. |
 | Negative owner-health ages | Strategy event time reused after concurrent heartbeats. Operational freshness now samples adjacent wall time. |
-| `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Root-caused 2026-07-27: venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — socket stays up and answers pings (20s/10s keepalive active), Bybit stops pushing frames. Not the host (kernel clean, producers' busy 508-symbol feeds unaffected through every episode), not scheduled (14 episodes over Jul 19–27 spread across the whole clock), not load (32% of all 20-min windows have a >100 s LONG cycle; only 3/13 episodes do). A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by the old per-attempt clock reset (fixed in `d11db79`+`7af59f3`, pending rollout — post-deploy transport logs will show Bybit's verbatim close/error codes). Fails closed; zero trades lost. If quiet-stalls persist post-deploy, next lever is a second heartbeat topic or proactive resubscribe. |
+| `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Root-caused 2026-07-27: venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — socket stays up and answers pings (20s/10s keepalive active), Bybit stops pushing frames. Not the host (kernel clean, producers' busy 508-symbol feeds unaffected through every episode), not scheduled (14 episodes over Jul 19–27 spread across the whole clock), not load (32% of all 20-min windows have a >100 s LONG cycle; only 3/13 episodes do). A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by the old per-attempt clock reset (fixed in `d11db79`+`7af59f3`, **deployed 2026-07-27 ~14:03 UTC**; both owners logged `raw Bybit public stream connected generation=1` at first start — record Bybit's verbatim close/error codes here from the transport logs on the next episode). Fails closed; zero trades lost. If quiet-stalls persist post-deploy, next lever is a second heartbeat topic or proactive resubscribe. |
 | `unadopted external execution: external protection fill is not position-reducing` (2026-07-27 10:47:20, once) | A manual ~10 USDT spot BTCUSDT buy made in the demo account UI at 10:47:20.106 (venue execution `1784799743630817527`), three minutes before the owner's 250k top-up transfers (+90k 10:49:40, +100k 10:52:20, +50k 10:52:26). The kernel manages linear perps only and was flat, so it correctly refused adoption, surfaced the error once, and health returned to green. The ~0.000153 BTC sits in the unified wallet outside the managed book; no reconciliation drift. |
 
 ## Audit receipts
 
 | Date | Subject |
 | --- | --- |
+| 2026-07-27 | `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` — repo-wide ten-agent audit; 53 findings, all remediated on `main` the same day (not yet deployed) |
 | 2026-07-24 | `docs/audit/2026-07-24-repo-and-strategy-audit.md` — repository and strategy audit; measured tail geometry, funding inversion, data tiers |
 | 2026-07-22 | `docs/audit/2026-07-22-demo-journal-publication-race.md` — journal publication race behind delayed fills and protection adoption |
 | 2026-07-22 | `docs/audit/2026-07-22-deploy-workflow-and-runtime-followup.md` — rollout gate, expired-rule recovery, shell status defect |

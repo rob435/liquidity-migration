@@ -1,9 +1,11 @@
 # 2026-07-27 repo-wide multi-agent audit — findings register (no fixes applied)
 
-**Status: findings documented, remediation deliberately deferred by operator
-instruction ("document all the issues, don't fix yet").** Nothing in this
-report has been changed in code; the working tree at audit time was clean at
-`47406f3` (deployed batch `13754d0be` live on the VPS).
+**Status: REMEDIATED 2026-07-27.** The register below is preserved verbatim as
+the finding record; every one of the 53 unique items plus the four
+operator-observed items has since been fixed on `main` (see "Remediation" at the
+end of this file). At audit time the working tree was clean at `47406f3`
+(deployed batch `13754d0be` live on the VPS); the fixes are NOT yet deployed —
+the rollout dispatch belongs to the owner.
 
 ## Method and honesty label
 
@@ -518,3 +520,67 @@ Recorded so a future operator doesn't re-diagnose.
 Every item above should be re-verified against current source before its
 fix lands — the adversarial verification pass this audit planned was
 stopped, and single-finder claims occasionally dissolve under scrutiny.
+
+---
+
+## Remediation (2026-07-27, committed on `main`, not yet deployed)
+
+Every item above was re-verified against current source before its fix landed,
+as the closing note asked. No single-finder claim dissolved under scrutiny;
+three were narrowed while being fixed and are noted below. Each behavioural fix
+carries a regression test that fails on the pre-fix code.
+
+**High.** H1 replaced the fail-open nesting outright: mode-level phases now run
+through `run_strict_phase`, which never puts its payload in a condition context,
+so errexit stays lethal for every command a mode runs; `run_phase` additionally
+aborts via `fail` (`exit` is honoured regardless of errexit state), and the named
+gates carry `|| fail`. H2/H3 were resolved by amending the registration
+(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`, "Amendment —
+2026-07-27"): K1 binds to the committed profile's `capital_reference_usdt` at the
+registered −5%/−4%, and LONG K2 is no longer gated on epoch day 90. LONG K3's
+registered day-180 leg, which simply had no executable form, was implemented at
+the same time. H4 introduced one shared `quantity_tolerance()` rule across the
+kernel, the execution stream and the venue-protection path, and snaps
+`filled_signed_qty` on the filled transition. H5 gives owner-generated
+convergence/entry-unwind batches a stable `request_content_hash` that excludes
+`reference_price`. H6 and the whole docs cluster were rewritten to the deployed
+figures; the 25× profile's SHA-256 was recomputed locally rather than copied
+(`8e7cdffe…`).
+
+**Medium.** M2 was implemented as the audit specified — the crowd count now runs
+on the funding-admitted *fresh entrant* frame before the age gate — which
+required carrying the previous confirmed bar's decile/trigger columns alongside
+the deciding bar so the live sleeve can reproduce `_fresh_entries` exactly. When
+that prior-bar state is unavailable the fallback treats every row as fresh, which
+over-counts the crowd and therefore skips more entries: the conservative
+direction for a gate whose purpose is refusing fresh-listing-squeeze windows.
+This is an intended change in live entry behaviour, not a refactor. M5 added
+`storage.replace_dataset` (stage + swap under the dataset lock) rather than
+patching the one call site. M7 was narrowed while being fixed: raising on *any*
+mid-range empty window would false-positive on symbols listed or delisted inside
+the requested range, so the guard fires only on an empty window bracketed by
+populated ones, and an empty window is re-requested once first. M8 needed the
+symbol's listing time to avoid refetching a young symbol's absent head every
+cycle, so `launch_time_ms` is threaded from the cycle universe. M19's fix changes
+the reported cost of both Lane-2 financed-longs configs: turnover now spans every
+decision bar between the first and last weighted bar, so a flat gate-flip day
+charges its exit and re-entry and counts as a day.
+
+**Low.** L4 was fixed as "emit the book condition as a separate field" rather
+than by deleting the arms, so the diagnostic they were reaching for survives in
+`missing_book_condition`. L19 was fixed rather than deleted: `lag_screen` now
+takes explicit scoring parameters and has tests. L12 discovered that only
+`max_error_ns` had drifted; all five defaults now derive from the `REGISTERED_*`
+constants so the class of drift cannot recur.
+
+**Operator-observed.** O1 is fixed (`check_sortedness=False` with the reason
+stated); the suite now runs warning-free. O2 (kernel-update reboot) and O3
+(CPU capacity) remain owner decisions and are unchanged by this work; O4 needed
+no action.
+
+**Left for the owner.** Nothing in this remediation was deployed, no sleeve
+toggle moved, and `REAL_MONEY` is untouched. Two consequences need an owner
+decision before the next rollout: the M2 crowding change and the M19 cost
+change both alter numbers a promotion would be judged on, and the M21 calendar
+fix changes residual-momentum values for gapped symbols, so the next RMOM
+refresh rewrites history for those symbols rather than appending to it.

@@ -169,5 +169,5 @@ For the active repository:
 - Preserve every forward epoch and change point even when operational ledgers are
   reset; otherwise later evidence is selected on survival.
 
-Use the evidence card and validity rules in `docs/governance.md` to decide what a
-specific artifact can support.
+Use the short evidence note (`docs/governance.md` §4) and the validity rules
+there to decide what a specific artifact can support.

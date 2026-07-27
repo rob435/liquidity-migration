@@ -22,6 +22,7 @@ and require explicit task scope. Unknown safety-critical state fails closed.
 | `operational-authority` | Verify the current operational receipt. |
 | `operational-authority --execute issue` | Create one new operational receipt. |
 | `venue-accounting` | Read-only demo journal/venue accounting capture. |
+| `kill-criteria` | Weekly read-only sleeve K1/K2/K3 trip report; exit 3 on any trip. |
 | `test` | Run pytest with forwarded arguments. |
 | `deploy --execute install` | Install an exact commit while every project unit is stopped. |
 | `deploy --execute activate` | Start the fleet allowed by the current receipt and sleeve toggles. |
