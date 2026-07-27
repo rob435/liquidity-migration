@@ -35,6 +35,17 @@ from liquidity_migration.deterministic_serialization import canonical_json
 from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
 
 
+def _profile_capital_reference() -> str:
+    import json as _json
+
+    payload = _json.loads(
+        (Path(__file__).resolve().parents[1] / "configs" / "operational.demo.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return f"{float(payload['capital_reference_usdt']):g}"
+
+
 def _private(path: Path, text: str, *, mode: int = 0o600) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -291,7 +302,9 @@ def _fixture(
             f"ACCOUNT_SYMBOLS_FILE={paper_symbols}\n"
             f"CANDIDATE_UNIVERSE_FILE={paper_symbols}\n"
             f"ACCOUNT_DEMO_RULES_FILE={paper_rules}\n"
-            f"ACCOUNT_RISK_POLICY_FILE={paper_risk}\n",
+            f"ACCOUNT_RISK_POLICY_FILE={paper_risk}\n"
+            # Must equal the committed profile's capital_reference_usdt.
+            f"PAPER_EQUITY_USDT={_profile_capital_reference()}\n",
             mode=0o640,
         ),
         "bybit-demo.env": _private(
@@ -1479,3 +1492,37 @@ def test_production_guard_rejects_forged_inherited_lock_marker(
 
     with pytest.raises(RuntimeError, match="marker is invalid"):
         authority._production_maintenance_guard()
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        (None, "must declare PAPER_EQUITY_USDT"),
+        ("", "must declare PAPER_EQUITY_USDT"),
+        ("10000", "must equal the committed profile"),
+        ("not-a-number", "must be numeric"),
+    ],
+)
+def test_paper_authority_requires_the_committed_capital_reference_as_equity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declared: str | None,
+    expected: str,
+) -> None:
+    """A hand-edited env file that dropped or retuned PAPER_EQUITY_USDT silently
+    ran the twin at the runner script's old 10,000 fallback -- 25x under-scaled
+    against the deployed 250,000 reference (2026-07-27 audit M1)."""
+
+    repository, commit, machine_id, paths = _fixture(tmp_path, monkeypatch)
+    paper_env = paths["account-paper-execution.env"]
+    lines = [
+        line
+        for line in paper_env.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("PAPER_EQUITY_USDT=")
+    ]
+    if declared is not None:
+        lines.append(f"PAPER_EQUITY_USDT={declared}")
+    paper_env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected):
+        _issue(tmp_path, repository, commit, machine_id)

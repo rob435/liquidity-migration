@@ -425,3 +425,40 @@ def test_precompute_append_refuses_overlap_drift(monkeypatch: pytest.MonkeyPatch
 
     after = pl.read_parquet(tmp_path / "residual_momentum.parquet").sort(["symbol", "ts_ms"])
     assert after.equals(original)
+
+
+def test_residual_momentum_uses_the_registered_calendar_window_across_a_gap() -> None:
+    """`rolling_sum(7).shift(3)` is ROW-positional: for a gapped symbol it reached
+    the 10th present row rather than calendar D-9..D-3, so the value stopped
+    being the registered definition and a later backfill would change an already
+    "stable" number (2026-07-27 audit M21)."""
+
+    day = DAY_MS
+    # A contiguous symbol and a symbol missing three interior days, with the same
+    # residual on every day that is present.
+    contiguous = [(i, 1.0) for i in range(20)]
+    gapped = [(i, 1.0) for i in range(20) if i not in (5, 6, 7)]
+    frame = pl.DataFrame(
+        {
+            "symbol": ["AAAUSDT"] * len(contiguous) + ["BBBUSDT"] * len(gapped),
+            "ts_ms": [i * day for i, _ in contiguous] + [i * day for i, _ in gapped],
+            "residual_return": [value for _, value in contiguous]
+            + [value for _, value in gapped],
+        }
+    )
+    out = MOD.residual_momentum_from_residuals(frame, end="1970-01-20")
+    by_symbol = {
+        symbol: dict(zip(part["ts_ms"].to_list(), part["residual_momentum"].to_list()))
+        for symbol, part in (
+            (str(key[0] if isinstance(key, tuple) else key), value)
+            for key, value in out.partition_by("symbol", as_dict=True).items()
+        )
+    }
+    # Day 15 window is [D-9..D-3] = days 6..12. The gapped symbol is missing
+    # days 6 and 7, so it must report 5, not the contiguous symbol's 7 --- and
+    # certainly not a window silently stretched back to day 3.
+    assert by_symbol["AAAUSDT"][15 * day] == pytest.approx(7.0)
+    assert by_symbol["BBBUSDT"][15 * day] == pytest.approx(5.0)
+    # Day 12 window is days 3..9: two of the three missing days fall inside.
+    assert by_symbol["AAAUSDT"][12 * day] == pytest.approx(7.0)
+    assert by_symbol["BBBUSDT"][12 * day] == pytest.approx(4.0)

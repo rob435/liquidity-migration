@@ -18,7 +18,12 @@ RMOM_CAUSAL_SHIFT = 3
 
 
 def residual_momentum_expr() -> pl.Expr:
-    """Return the registered seven-observation, shift-three signal expression."""
+    """Return the registered seven-day, shift-three signal expression.
+
+    Row-positional by construction: the caller MUST supply a per-symbol
+    contiguous daily grid (``_densify_daily_grid``) so the ten rows the window
+    reaches are exactly the ten calendar days ``[D-9..D-3]``.
+    """
 
     return (
         pl.col("residual_return")
@@ -26,6 +31,39 @@ def residual_momentum_expr() -> pl.Expr:
         .shift(RMOM_CAUSAL_SHIFT)
         .over("symbol")
         .alias("residual_momentum")
+    )
+
+
+def _densify_daily_grid(resid: pl.DataFrame) -> pl.DataFrame:
+    """Insert null-residual rows for missing per-symbol calendar days.
+
+    ``residual_momentum_expr`` is ROW-positional: ``rolling_sum(7).shift(3)``
+    reaches the 10th *present* row, which spans more than ten calendar days for a
+    gapped symbol (delist/relist, archive hole, dropped factor day). Causality is
+    preserved either way, but the value stops being the registered
+    ``sum(residual_return[D-9..D-3])`` -- the BAC-1/BAC-7 failure class
+    ``_common.calendar_shift`` exists for (2026-07-27 audit M21).
+
+    Padding the grid restores the registered calendar window exactly, and
+    ``RMOM_MIN_SAMPLES`` already tolerates up to three missing observations
+    inside the window, so an ordinary short gap still produces a value.
+    """
+
+    if resid.is_empty():
+        return resid
+    grid = (
+        resid.group_by("symbol")
+        .agg(pl.col("ts_ms").min().alias("_first"), pl.col("ts_ms").max().alias("_last"))
+        .with_columns(
+            pl.int_ranges(pl.col("_first"), pl.col("_last") + MS_PER_DAY, MS_PER_DAY).alias("ts_ms")
+        )
+        .explode("ts_ms")
+        .select("symbol", "ts_ms")
+    )
+    return (
+        grid.join(resid, on=["symbol", "ts_ms"], how="left")
+        .select("symbol", "ts_ms", "residual_return")
+        .sort(["symbol", "ts_ms"])
     )
 
 
@@ -95,6 +133,7 @@ def residual_momentum_from_residuals(
         .group_by("symbol")
         .agg(pl.col("ts_ms").max().alias("_last_real_ts_ms"))
     )
+    resid = _densify_daily_grid(resid)
     resid = _append_trailing_pad(resid, end=end)
     return (
         resid.sort(["symbol", "ts_ms"])

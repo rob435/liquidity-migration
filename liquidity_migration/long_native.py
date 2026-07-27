@@ -1240,6 +1240,15 @@ def _run_long_pipeline(
                     del open_positions[symbol]
 
     if open_positions:
+        # Mirror `_scan_all_positions`: collect the scan exits, flush every
+        # recorded exit ONCE, and only then drop them from `open_positions`.
+        # Deleting a scan-exited position immediately violated the mark-source
+        # invariant `_scan_all_positions` documents and enforces -- two positions
+        # scan-exiting at different timestamps in this final sweep made the
+        # earlier batch lack prices for the later symbol and
+        # `HistoricalAccountSession.submit_decisions` raised, aborting the whole
+        # research run (2026-07-27 audit M20).
+        force_closed: list[str] = []
         for symbol, pos in list(open_positions.items()):
             bars = bars_by_symbol.get(symbol)
             if bars is None or len(bars["close"]) == 0:
@@ -1248,7 +1257,7 @@ def _run_long_pipeline(
                 window_end_ts_ms if window_end_ts_ms is not None else int(bars["bar_end_ts_ms"][-1])
             )
             if _scan_position_exit(symbol, pos, int(force_close_through_ts)):
-                del open_positions[symbol]
+                force_closed.append(symbol)
                 continue
             exit_idx = bisect_right(bars["ends"], int(force_close_through_ts)) - 1
             if exit_idx < 0 or int(bars["bar_end_ts_ms"][exit_idx]) < int(pos["entry_ts_ms"]):
@@ -1259,8 +1268,11 @@ def _run_long_pipeline(
                 exit_price=float(bars["close"][exit_idx]),
                 reason="data_end",
             )
+            force_closed.append(symbol)
             stats["exits_time"] += 1
         _flush_exits()
+        for symbol in force_closed:
+            open_positions.pop(symbol, None)
 
     trades = (
         pl.DataFrame(trade_rows, infer_schema_length=None).sort(["entry_ts_ms", "symbol"])

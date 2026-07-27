@@ -885,3 +885,15 @@ def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> No
     assert "ServerAliveInterval=15" in workflow
     assert "ServerAliveCountMax=3" in workflow
     assert "timeout-minutes:" in workflow
+
+
+def test_paper_runner_has_no_hidden_equity_fallback() -> None:
+    """A hidden 10,000 default silently ran the twin 25x under-scaled against the
+    deployed 250,000 capital reference after a hand-edited env file; every
+    sibling required input in this script already fails closed (audit M1)."""
+    script = _read("scripts/run_account_paper_execution_service.sh")
+    assert 'PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"' in script
+    assert "PAPER_EQUITY_USDT:-10000" not in script
+    assert 'if [[ -z "$PAPER_EQUITY_USDT" ]]; then' in script
+    required_check = script[script.index('if [[ -z "$PAPER_EQUITY_USDT" ]]; then') :]
+    assert "exit 2" in required_check.split("\nfi", 1)[0]

@@ -170,10 +170,40 @@ class TestAccounting:
         panel = _panel(funding_bp={"S01USDT": [1.0, -15.0, -15.0, 1.0, 1.0]})
         u = _universe(panel)
         w = carry_hold_weights(u, carry_cfg)
-        scores = daily_scores(w, u, carry_cfg.fee_side_bp)
+        scores = daily_scores(w, u, carry_cfg.fee_side_bp).sort("bar_ts_ms")
         # first held day pays entry on 0.10 notional
-        first = scores.sort("bar_ts_ms").head(1)
-        assert first["cost_bp"][0] == pytest.approx(0.10 * carry_cfg.fee_side_bp, rel=1e-6)
+        assert scores["cost_bp"][0] == pytest.approx(0.10 * carry_cfg.fee_side_bp, rel=1e-6)
+        # Total one-way turnover must be even: every entry has a matching exit.
+        # Turnover used to iterate only bars PRESENT in `weights`, so a flat
+        # decision day charged neither the exit into it nor the re-entry out of
+        # it while gross treated the book as liquidated (2026-07-27 audit M19).
+        held = {int(value) for value in w["bar_ts_ms"].unique().to_list()}
+        decision_bars = sorted(
+            value
+            for value in {int(item) for item in u["bar_ts_ms"].unique().to_list()}
+            if min(held) <= value <= max(held)
+        )
+        assert scores["bar_ts_ms"].to_list() == decision_bars
+        flat_days = [ts for ts in decision_bars if ts not in held]
+        assert flat_days, "fixture must contain at least one interior flat day"
+        by_ts = dict(zip(scores["bar_ts_ms"].to_list(), scores["oneway"].to_list()))
+        # Every held bar charges an entry; the FIRST flat bar after each held
+        # block charges the matching exit; a second consecutive flat bar charges
+        # nothing. The old behaviour charged only the 5 entries (0.50).
+        entries = [ts for ts in decision_bars if ts in held]
+        exits = [
+            ts
+            for index, ts in enumerate(decision_bars)
+            if ts not in held and index > 0 and decision_bars[index - 1] in held
+        ]
+        assert len(entries) == 5
+        assert len(exits) == 4
+        for ts in entries + exits:
+            assert by_ts[ts] == pytest.approx(0.10, rel=1e-6)
+        for ts in decision_bars:
+            if ts not in entries and ts not in exits:
+                assert by_ts[ts] == pytest.approx(0.0, abs=1e-12)
+        assert scores["oneway"].sum() == pytest.approx(0.10 * 9, rel=1e-9)
 
     def test_vol_scale_uses_strict_prior_window(self) -> None:
         rng = np.random.default_rng(7)

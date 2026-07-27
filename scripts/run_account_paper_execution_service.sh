@@ -14,7 +14,12 @@ ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"
 ACCOUNT_SYMBOLS_FILE="${ACCOUNT_SYMBOLS_FILE:-/etc/liquidity-migration/account-paper-execution/symbols.txt}"
 ACCOUNT_DEMO_RULES_FILE="${ACCOUNT_DEMO_RULES_FILE:-/etc/liquidity-migration/account-paper-execution/demo-rules.json}"
 ACCOUNT_RISK_POLICY_FILE="${ACCOUNT_RISK_POLICY_FILE:-/etc/liquidity-migration/account-paper-execution/risk-policy.json}"
-PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-10000}"
+# No fallback: the deploy path derives PAPER_EQUITY_USDT from the committed
+# operational profile's capital_reference_usdt (see prepare_paper_runtime_boundary),
+# and a hidden 10,000 default silently ran the twin 25x under-scaled against the
+# deployed 250,000 reference after a hand-edited env file (2026-07-27 audit M1).
+# Every sibling required input in this script fails closed the same way.
+PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"
 MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
@@ -25,6 +30,10 @@ if [[ "${ACCOUNT_PAPER_KERNEL_REQUIRED:-}" != "1" ]]; then
 fi
 if [[ -z "$ACCOUNT_ROOT" || -z "$ACCOUNT_INTENT_INBOX_ROOT" || -z "$ACCOUNT_CAPTURE_ROOT" ]]; then
     echo "ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_PAPER_CAPTURE_ROOT are required." >&2
+    exit 2
+fi
+if [[ -z "$PAPER_EQUITY_USDT" ]]; then
+    echo "PAPER_EQUITY_USDT is required; it is written from the committed operational profile's capital_reference_usdt." >&2
     exit 2
 fi
 for required in "$ACCOUNT_SYMBOLS_FILE" "$ACCOUNT_DEMO_RULES_FILE" "$ACCOUNT_RISK_POLICY_FILE"; do

@@ -536,6 +536,8 @@ def test_operational_authority_accepts_byte_exact_private_paper_mirrors(
             "CANDIDATE_UNIVERSE_FILE": str(paper_candidate),
             "ACCOUNT_DEMO_RULES_FILE": str(paper_rules),
             "ACCOUNT_RISK_POLICY_FILE": str(paper_risk),
+            # Must equal the committed profile's capital_reference_usdt.
+            "PAPER_EQUITY_USDT": f"{json.loads(risk.read_text(encoding='utf-8'))['capital_reference_usdt']:g}",
         },
         "bybit-demo.env": {
             "BYBIT_DEMO_API_KEY": "demo",

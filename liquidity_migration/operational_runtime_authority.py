@@ -13,6 +13,7 @@ import argparse
 import grp
 import hashlib
 import json
+import math
 import os
 import pwd
 import re
@@ -1113,7 +1114,7 @@ def _validate_environments(
     ]
     rules_snapshot = inputs["account-execution.env:ACCOUNT_DEMO_RULES_FILE"]
     risk_snapshot = inputs["account-execution.env:ACCOUNT_RISK_POLICY_FILE"]
-    load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
+    operational_profile = load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
     build_candidate_rule_coverage(
         demo_candidate_path,
         rules_snapshot.path,
@@ -1122,6 +1123,9 @@ def _validate_environments(
     )
     if profile == OPERATIONAL_PROFILE:
         assert paper is not None
+        _require_paper_equity_matches_capital_reference(
+            paper, capital_reference_usdt=operational_profile.capital_reference_usdt
+        )
         for key in (*_INPUT_KEYS["account-execution.env"], _CANDIDATE_UNIVERSE_KEY):
             demo_path = Path(demo.get(key, "")).expanduser()
             paper_path = Path(paper.get(key, "")).expanduser()
@@ -1212,8 +1216,35 @@ def _validate_paper_runtime_environments(
             "paper operational candidate universe must also be the owner symbols file"
         )
     risk_snapshot = inputs["account-paper-execution.env:ACCOUNT_RISK_POLICY_FILE"]
-    load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
+    operational_profile = load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
+    _require_paper_equity_matches_capital_reference(
+        paper, capital_reference_usdt=operational_profile.capital_reference_usdt
+    )
     return root_identities, inputs
+
+
+def _require_paper_equity_matches_capital_reference(
+    paper: Mapping[str, str], *, capital_reference_usdt: float
+) -> None:
+    """The paper twin's capital base must BE the committed capital reference.
+
+    Nothing verified the key was even present, so a hand-edited env file silently
+    ran the twin at the runner script's old hidden 10,000 fallback -- 25x
+    under-scaled against the deployed 250,000 reference (2026-07-27 audit M1).
+    """
+
+    declared = paper.get("PAPER_EQUITY_USDT", "").strip()
+    if not declared:
+        raise ValueError("paper operational environment must declare PAPER_EQUITY_USDT")
+    try:
+        equity_usdt = float(declared)
+    except ValueError as exc:
+        raise ValueError("paper operational PAPER_EQUITY_USDT must be numeric") from exc
+    if not math.isclose(equity_usdt, capital_reference_usdt, rel_tol=1e-9, abs_tol=1e-6):
+        raise ValueError(
+            "paper operational PAPER_EQUITY_USDT must equal the committed profile's "
+            f"capital_reference_usdt ({capital_reference_usdt:g}); got {declared}"
+        )
 
 
 def _validate_identity(

@@ -328,11 +328,25 @@ def daily_scores(
         int(k[0] if isinstance(k, tuple) else k): dict(zip(v["symbol"].to_list(), v["w"].to_list()))
         for k, v in weights.partition_by("bar_ts_ms", as_dict=True).items()
     }
-    ts_sorted = sorted(pivot)
+    # Iterate every DECISION bar in the record, not only the bars that produced
+    # weights. A gate-flip day selects nothing and so contributed no weight row:
+    # the exit into it and the re-entry out of it were both uncharged while
+    # gross correctly treated the book as liquidated, and the flat day vanished
+    # from the day count entirely (2026-07-27 audit M19). The record still spans
+    # first-weighted to last-weighted bar; only the interior is now complete.
+    weighted_bars = sorted(pivot)
+    ts_sorted: list[int] = []
+    if weighted_bars:
+        low, high = weighted_bars[0], weighted_bars[-1]
+        ts_sorted = [
+            int(value)
+            for value in sorted({int(item) for item in universe["bar_ts_ms"].unique().to_list()})
+            if low <= int(value) <= high
+        ]
     prev: dict[str, float] = {}
     rows: dict[str, list] = {"bar_ts_ms": [], "oneway": []}
     for t in ts_sorted:
-        cur = pivot[t]
+        cur = pivot.get(t, {})
         rows["bar_ts_ms"].append(t)
         rows["oneway"].append(
             sum(abs(cur.get(s, 0.0) - prev.get(s, 0.0)) for s in set(cur) | set(prev))
@@ -340,9 +354,11 @@ def daily_scores(
         prev = cur
     turn = pl.DataFrame(rows, schema={"bar_ts_ms": pl.Int64, "oneway": pl.Float64})
     return (
-        gross.join(turn, on="bar_ts_ms", how="left")
+        turn.join(gross, on="bar_ts_ms", how="left")
+        .with_columns(pl.col("gross_bp").fill_null(0.0).alias("gross_bp"))
         .with_columns((pl.col("oneway").fill_null(0.0) * fee_side_bp).alias("cost_bp"))
         .with_columns((pl.col("gross_bp") - pl.col("cost_bp")).alias("net_bp"))
+        .select("bar_ts_ms", "gross_bp", "oneway", "cost_bp", "net_bp")
         .sort("bar_ts_ms")
     )
 
