@@ -111,6 +111,57 @@ deployment, or opens the separate real-money boundary.
     passive floor is mechanically reachable, and only that. Blocked on demo
     credentials this box does not hold; run with the fleet stopped and flat.
 
+### 2026-07-27 — recorded change points from the repo-wide audit remediation
+
+Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
+numbers rather than only correctness, so they are change points, not refactors.
+All three were owner-approved on 2026-07-27 before landing. None is deployed;
+the rollout dispatch belongs to the owner.
+
+- **CONTINUOUS live entry behaviour — crowding counting base (audit M2).**
+  The live sleeve counted the `entry_crowding_max_fresh` cap on the
+  age-filtered, funding-admitted frame; the equity-evidence engine counts it on
+  its funding-admitted **fresh entrants**, *before* the per-entry age gate
+  (`_run_trades` checks crowding at the top of the loop and the age gate ~15
+  lines later). With crowd cap 2 and age floor 240 d, an hour where two old
+  pumps share a signal timestamp with one young pump was counted 3 by the engine
+  (skip the whole stack) and 2 live (enter both) — the live book took entries
+  the validated engine crowd-skipped, in exactly the fresh-listing-squeeze hours
+  both gates exist for. The live base now mirrors the engine, which required
+  carrying the previous confirmed bar's decile/trigger columns beside the
+  deciding bar so `_fresh_entries` can be reproduced. **This is a live
+  entry-behaviour change**: it can only ever skip *more* entries than before,
+  never fewer. Where the previous bar's state is unavailable the fallback treats
+  every row as fresh, which over-counts the crowd — the conservative direction
+  for a gate whose purpose is refusing squeeze windows. Change point: this
+  commit. The forward CONTINUOUS record is continuous across it; entry counts in
+  crowded hours are not comparable to days before it.
+- **Lane-2 financed-longs scoring — flat-day turnover (audit M19).** The
+  full-calendar correction recorded in `docs/research_2026-07-26_financed_longs.md`
+  on 2026-07-26 lived only in that note: `daily_scores` still iterated the bars
+  present in `weights`, so the documented reproduction command printed the
+  active-days-only view and contradicted the registered table, and a flat
+  gate-flip day charged neither the exit into it nor the re-entry out of it.
+  `daily_scores` now iterates every decision bar in the record. Re-scored on
+  today's panel: Sharpe raw 2.56 / 2.21 / 1.66 and t 4.69 / 4.04 / 3.03 on the
+  bench window — the registered table, reproduced by the registered script for
+  the first time. No verdict moves. The three full-sample t-values that were
+  still quoted on the old basis (4.88 / 4.04 / 2.79) are corrected to
+  4.87 / 4.01 / 2.77. Change point: this commit, for the *scorer*; the three
+  registrations and their commit dates are untouched.
+- **Residual momentum — registered calendar window (audit M21).**
+  `residual_momentum_expr` is row-positional, so `rolling_sum(7).shift(3)`
+  reached the 10th *present* row and spanned more than ten calendar days for a
+  gapped symbol (delist/relist, archive hole, dropped factor day) — no
+  causality violation, but not the registered `sum(residual_return[D-9..D-3])`.
+  The residual frame is now densified to a per-symbol contiguous daily grid
+  first. **This rewrites history for gapped symbols rather than appending to
+  it.** The deployed daily refresh is unaffected: `run_continuous_rmom_refresh.sh`
+  already passes `--full-rewrite` because live roots are rolling stores. On a
+  stable research root the append overlap verify fires once, by design, with a
+  message that now distinguishes a deliberate definition change from source
+  drift; rerun that root with `--full-rewrite`. Change point: this commit.
+
 ### 2026-07-26 — the financed-longs program
 
 An owner-directed one-day program (goal: three alphas that beat the deployed
@@ -561,10 +612,14 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       that commit on days it never saw.
 - [x] **2026-07-26 financed-longs program**: three Lane-2 registrations
       (`lane2_carry_hold_v1`, `lane2_financed_leaders_v1`,
-      `lane2_financed_leaders_binance_v1`) that beat the regenerated CONTINUOUS
-      sl35 benchmark (Sharpe 1.84, +15.85%) on both return and Sharpe at
-      measured costs; module `liquidity_migration/financed_longs.py`,
-      reproduction `scripts/screen_financed_longs.py`, evidence
+      `lane2_financed_leaders_binance_v1`) against the regenerated CONTINUOUS
+      sl35 benchmark (Sharpe 1.84, +15.85%) at measured costs. On the
+      full-calendar basis the two Bybit books beat it on return AND Sharpe; the
+      Binance replication arm beats on return only (Sharpe 1.66 vs 1.84) — see
+      the registration block above, which has said so since the same-day
+      correction. Module `liquidity_migration/financed_longs.py`, reproduction
+      `scripts/screen_financed_longs.py` (reproduces the registered table
+      directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research_2026-07-26_financed_longs.md` with the 22-row
       negative-results ledger.
 - [ ] Score the three financed-longs configs on each new completed UTC day

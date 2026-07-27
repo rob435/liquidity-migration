@@ -462,3 +462,49 @@ def test_residual_momentum_uses_the_registered_calendar_window_across_a_gap() ->
     # Day 12 window is days 3..9: two of the three missing days fall inside.
     assert by_symbol["AAAUSDT"][12 * day] == pytest.approx(7.0)
     assert by_symbol["BBBUSDT"][12 * day] == pytest.approx(4.0)
+
+
+def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
+    """The 2026-07-27 calendar-window correction (audit M21) changes stable
+    residual-momentum values for GAPPED symbols. The append path must fail closed
+    on that rather than silently mixing two definitions in one artifact; the
+    deployed daily refresh is unaffected because it already runs --full-rewrite.
+    """
+
+    import liquidity_migration.residual_momentum as rm
+
+    gapped = [(index, 1.0) for index in range(30) if index not in (5, 6, 7)]
+    resid = pl.DataFrame(
+        {
+            "symbol": ["BBBUSDT"] * len(gapped),
+            "ts_ms": [index * DAY_MS for index, _ in gapped],
+            "residual_return": [value for _, value in gapped],
+        }
+    )
+    rebuilt = MOD.residual_momentum_from_residuals(resid, end="1970-02-05")
+
+    # The pre-fix, row-positional definition.
+    original = rm._densify_daily_grid
+    rm._densify_daily_grid = lambda frame: frame
+    try:
+        existing = MOD.residual_momentum_from_residuals(resid, end="1970-02-05")
+    finally:
+        rm._densify_daily_grid = original
+
+    assert not existing.equals(rebuilt), "fixture must exercise a real definition change"
+    with pytest.raises(RuntimeError, match="append overlap values changed") as excinfo:
+        MOD._assert_append_overlap_matches(
+            existing, rebuilt, overlap_start_ms=0, overlap_end_ms=30 * DAY_MS
+        )
+    message = str(excinfo.value)
+    # The message must distinguish a deliberate definition change from source drift.
+    assert "--full-rewrite" in message
+    assert "DELIBERATE" in message
+    assert "run_continuous_rmom_refresh.sh" in message
+
+
+def test_deployed_rmom_refresh_uses_full_rewrite() -> None:
+    """Pins the reason M21 cannot break the operational path."""
+
+    script = (REPO / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
+    assert "--full-rewrite" in script

@@ -58,13 +58,26 @@ it **changed one verdict** — the Binance arm no longer beats on Sharpe.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | **benchmark (CONTINUOUS sl35)** | **1.84** | — | **+15.85%** | — | −2.85% | — | — |
 | `lane2_carry_hold_v1` (Bybit) | **2.57** | 2.41 | +21,943% | +342% | 23.7% | 4.69 | **yes, both metrics, both bases** |
-| `lane2_financed_leaders_v1` (Bybit) | **2.21** | 1.87 | +3,070% | +264% | 24.1% | 4.05 | **yes, both metrics, both bases** (vt margin thin) |
-| `lane2_financed_leaders_binance_v1` | 1.66 | 1.30 | +993% | +165% | 30.4% | 3.04 | **return only — NOT Sharpe** |
+| `lane2_financed_leaders_v1` (Bybit) | **2.21** | 1.87 | +3,070% | +264% | 24.1% | 4.04 | **yes, both metrics, both bases** (vt margin thin) |
+| `lane2_financed_leaders_binance_v1` | 1.66 | 1.30 | +993% | +165% | 30.4% | 3.03 | **return only — NOT Sharpe** |
 
 Slippage sensitivity: +2 bp/side beyond the measured fee moves the Bybit
 books to 2.53 / 2.18 — negligible, because turnover is ~0.35 units/day.
 Active-days-only figures (2.76 / 2.87 / 2.12) are retained in the configs as
 the per-deployed-capital view, labelled not-comparable-to-benchmark.
+
+**Reproduction parity (2026-07-27).** Until today the full-calendar correction
+above lived only in this note: `daily_scores` still iterated the bars present in
+`weights`, so the documented reproduction command printed the *active-days-only*
+view (2.76 / 2.87 / 2.12) and silently contradicted this table, and a flat
+gate-flip day charged neither the exit into it nor the re-entry out of it
+(2026-07-27 audit M19). `daily_scores` now iterates every decision bar between
+the first and last weighted bar, so the script reproduces this table directly.
+Re-run on today's panel: Sharpe raw **2.56 / 2.21 / 1.66**, t **4.69 / 4.04 /
+3.03**, n = 1221 days for all three — matching the table within the drift from a
+panel that has been refreshed since 2026-07-26. Every verdict in this note is
+unchanged; the total turnover actually charged rose 1–3%, which is small here
+because gate flips are infrequent.
 
 Reproduce with `scripts/screen_financed_longs.py`. The raw compounded totals
 assume full reinvestment at book scale and are shown for the accounting, not
@@ -169,9 +182,14 @@ correlations, not assume diversification.
 
 Multiple-testing position: this program tested ~18 new mechanism families
 (~45 constructions) on top of the repository's ~45 prior mechanisms;
-Bonferroni at α=0.05 is ≈ t 3.4. Carry-hold (t 4.88) and financed-leaders
-(t 4.04) clear it; the Binance arm (t 2.79) is a replication, not an
-independent discovery, and is not claimed against the threshold.
+Bonferroni at α=0.05 is ≈ t 3.4. On the full-calendar basis (these three
+full-sample t-values were the last figures still quoted on the active-days-only
+basis; corrected 2026-07-27 with the M19 turnover fix) carry-hold (t 4.87) and
+financed-leaders (t 4.01) clear it; the Binance arm (t 2.77) is a replication,
+not an independent discovery, and is not claimed against the threshold. Adding
+the flat days moves these t-values by <0.04 — the day count and the standard
+error grow together — so no significance verdict changes; what the full-calendar
+basis materially changes is Sharpe and mean bp/day, as §2 records.
 
 ## 3. Everything that died today (the no-retread ledger)
 

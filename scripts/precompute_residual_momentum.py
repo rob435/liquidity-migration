@@ -200,7 +200,16 @@ def _assert_append_overlap_matches(
         diffs = np.abs(old_vals[finite] - new_vals[finite])
         raise RuntimeError(
             "residual_momentum append overlap values changed: "
-            f"max_abs_diff={float(diffs.max()):.12g}; use --full-rewrite after inspection"
+            f"max_abs_diff={float(diffs.max()):.12g}. Two causes, and they need "
+            "opposite responses: (a) a DELIBERATE change to the signal definition "
+            "(RMOM_WINDOW / RMOM_MIN_SAMPLES / RMOM_CAUSAL_SHIFT, or the per-symbol "
+            "calendar grid in liquidity_migration/residual_momentum.py) makes exactly "
+            "this raise fire once per root — confirm the recorded change point, then "
+            "rerun with --full-rewrite; (b) no definition change means the SOURCE "
+            "residuals moved under a stable row, which is drift to investigate before "
+            "rewriting anything. The deployed daily refresh is unaffected either way: "
+            "run_continuous_rmom_refresh.sh already passes --full-rewrite because live "
+            "roots are rolling stores, not stable archives."
         )
     return joined.height
 

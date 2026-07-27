@@ -148,6 +148,24 @@ before expiry; reboot for the kernel updates only after the refreshed
 receipts are installed. The 14:03 UTC rollout exercised exactly that path:
 the current receipt is `demo-rules-20260727T133929Z`, expiring ~2026-08-03.
 
+2026-07-27 (committed, NOT deployed — owner dispatch pending): the repo-wide
+audit remediation (`docs/audit/2026-07-27-repo-wide-multi-agent-audit.md`, all
+53 findings). Three items are change points rather than refactors and were
+owner-approved before landing; the full statements are in
+`docs/strategy_program.md` under "2026-07-27 — recorded change points":
+**CONTINUOUS crowding now counts on the engine's base** (funding-admitted fresh
+entrants, before the age gate), which can only skip more entries than the
+current live shape, never fewer — expect fewer entries in hours where a young
+listing shares a signal timestamp with older pumps; **Lane-2 financed-longs
+scoring** now reproduces its registered full-calendar table directly (no verdict
+moved); and **residual momentum** now uses the registered calendar window, which
+rewrites values for gapped symbols — harmless on this fleet because
+`run_continuous_rmom_refresh.sh` already runs `--full-rewrite`. Two operational
+gates also changed and matter at rollout time: the rollout script's phase gates
+are no longer fail-open (a failing ruff/mypy/pytest/pip phase now aborts the
+rollout instead of reporting `rollout-ok`), and the paper owner refuses to start
+unless `PAPER_EQUITY_USDT` equals the committed profile's capital reference.
+
 The prior change point: the 2026-07-26 CONTINUOUS replacement
 (`1fe0e48`, docs alignment `d16daf5`) deployed the same day — see Deployment
 above. Expected first-cycle shapes after that change point, not incidents:

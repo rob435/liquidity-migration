@@ -578,9 +578,26 @@ stated); the suite now runs warning-free. O2 (kernel-update reboot) and O3
 (CPU capacity) remain owner decisions and are unchanged by this work; O4 needed
 no action.
 
-**Left for the owner.** Nothing in this remediation was deployed, no sleeve
-toggle moved, and `REAL_MONEY` is untouched. Two consequences need an owner
-decision before the next rollout: the M2 crowding change and the M19 cost
-change both alter numbers a promotion would be judged on, and the M21 calendar
-fix changes residual-momentum values for gapped symbols, so the next RMOM
-refresh rewrites history for those symbols rather than appending to it.
+**Owner decision (2026-07-27): M2, M19 and M21 approved.** Recorded as change
+points in `docs/strategy_program.md` ("2026-07-27 — recorded change points") and
+summarised operationally in `STATE.md`. Follow-through:
+
+- M2 is a live entry-behaviour change (strictly more crowd-skips, never fewer);
+  the forward CONTINUOUS record is continuous across it but entry counts in
+  crowded hours are not comparable to earlier days.
+- M19 turned out to *restore* reproduction parity rather than invalidate
+  anything: the full-calendar correction had been recorded in
+  `docs/research_2026-07-26_financed_longs.md` on 2026-07-26 but never reached
+  `daily_scores`, so the documented reproduction command had been printing the
+  superseded active-days-only view. Re-scored on the current panel the
+  registered bench-window table reproduces exactly (Sharpe 2.56 / 2.21 / 1.66,
+  t 4.69 / 4.04 / 3.03); the three full-sample t-values still quoted on the old
+  basis are corrected to 4.87 / 4.01 / 2.77 and no verdict moves. Total turnover
+  actually charged rose 1–3%.
+- M21 cannot break the deployed path: `run_continuous_rmom_refresh.sh` already
+  passes `--full-rewrite`. On a stable research root the append overlap verify
+  fires once by design; its message now distinguishes a deliberate definition
+  change from source drift, and that behaviour is pinned by a test.
+
+Nothing in this remediation was deployed, no sleeve toggle moved, and
+`REAL_MONEY` is untouched. The rollout dispatch belongs to the owner.

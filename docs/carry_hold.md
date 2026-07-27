@@ -119,8 +119,9 @@ grind-downs where shorts are not paying.
    2.26–2.61; knife-filter variants change little. No spike-fitting.
 6. **Slippage sensitivity**: +2 bp/side beyond the measured fee → bench Sharpe
    2.57 → 2.53.
-7. **Multiple testing**: t 4.88 (full sample) against the ≈3.4 Bonferroni
-   threshold for the ~63 mechanisms this program has tested.
+7. **Multiple testing**: t 4.87 (full sample, full-calendar basis; 4.88 on the
+   superseded active-days-only basis) against the ≈3.4 Bonferroni threshold for
+   the ~63 mechanisms this program has tested.
 8. **Funding-sign accounting** is covered by unit tests
    (`tests/test_financed_longs.py`): a long receives negative funding
    settlement-exactly; hysteresis state uses only past prints; the gross cap
