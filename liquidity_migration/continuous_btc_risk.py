@@ -6,6 +6,7 @@ BTC-risk score is in ``[0.70, 0.90)``.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import math
@@ -258,9 +259,17 @@ def _finite(value: Any) -> float | None:
 
 
 def percentile_from_prior(prior: list[float], value: float) -> float:
+    """Share of prior observations at or below ``value``.
+
+    ``prior`` is maintained SORTED (see ``ExpandingBtcRiskState.score``), so the
+    count is a bisect rather than a full scan: the authoritative replay calls
+    this once per component per receipt and the linear scan made the whole
+    reconciliation quadratic in chain length (2026-07-27 audit L15).
+    """
+
     if not prior:
         return 0.5
-    return sum(1 for item in prior if item <= value) / len(prior)
+    return bisect.bisect_right(prior, value) / len(prior)
 
 
 def mean_present(values: Iterable[float | None], *, default: float = 0.5) -> float:
@@ -357,7 +366,9 @@ class ExpandingBtcRiskState:
         for name in BTC_RISK_COMPONENTS:
             value = raw_values.get(name)
             if value is not None:
-                self.raw_history.setdefault(name, []).append(float(value))
+                # Insert in order: `percentile_from_prior` bisects, and history
+                # order carries no meaning beyond the empirical distribution.
+                bisect.insort(self.raw_history.setdefault(name, []), float(value))
         self.seen_keys.add(decision_key)
         self.decision_count += 1
         return {
@@ -402,6 +413,8 @@ class BtcRiskLiveSizer:
         self._dirty = False
         self._authoritative_reconciliation_error: str | None = None
         self._epoch_orphaned_rows = 0
+        self._last_reconciled_signature: str | None = None
+        self._last_reconciled_orphaned_links = 0
         self.load()
 
     @property
@@ -708,19 +721,23 @@ class BtcRiskLiveSizer:
         orphaned_links = 0
         linked_state_hash = candidate_state_hash
         remaining = dict(evidence_by_key)
+        # Index by predecessor once. Rebuilding the candidate list by scanning
+        # every remaining receipt on each iteration made the replay quadratic in
+        # chain length, on a path that runs every 60 s forever (audit L15).
+        by_predecessor: dict[str, list[str]] = {}
+        for key, evidence in remaining.items():
+            by_predecessor.setdefault(str(evidence["predecessor_state_hash"]), []).append(key)
+
+        def successors(predecessor_state_hash: str) -> list[dict[str, Any]]:
+            keys = [key for key in by_predecessor.get(predecessor_state_hash, ()) if key in remaining]
+            by_predecessor[predecessor_state_hash] = keys
+            return [remaining[key] for key in keys]
+
         while remaining:
             rebased = False
-            next_receipts = [
-                evidence
-                for evidence in remaining.values()
-                if evidence["predecessor_state_hash"] == candidate_state_hash
-            ]
+            next_receipts = successors(candidate_state_hash)
             if not next_receipts and linked_state_hash != candidate_state_hash:
-                next_receipts = [
-                    evidence
-                    for evidence in remaining.values()
-                    if evidence["predecessor_state_hash"] == linked_state_hash
-                ]
+                next_receipts = successors(linked_state_hash)
                 rebased = True
             if len(next_receipts) > 1:
                 raise ValueError("accepted BTC-risk evidence contains a forked predecessor")
@@ -918,6 +935,38 @@ class BtcRiskLiveSizer:
         self._authoritative_reconciliation_error = "authoritative reconciliation did not complete"
         try:
             evidence_by_key, ignored, epoch_ignored, duplicate_rows = self._normalize_accepted_evidence_rows(rows)
+            # Short-circuit an unchanged authority. The replay below re-hashes
+            # every receipt from genesis; on a chain that has not moved since the
+            # last successful reconciliation there is nothing to learn, and this
+            # runs every 60 s forever (2026-07-27 audit L15). The signature
+            # covers the exact authoritative evidence AND the persisted state, so
+            # any real drift still forces the full replay, and the cheap
+            # steady-state recount below is an extra guard: anything left to
+            # ingest, drop, or rebase falls through to the full path.
+            signature = self._authority_signature(
+                self._persisted_evidence_by_key(),
+                evidence_by_key,
+                epoch_orphaned_rows=self._epoch_orphaned_rows,
+            )
+            if self._last_reconciled_signature is not None and signature == self._last_reconciled_signature:
+                steady_persisted = self._persisted_evidence_by_key()
+                steady_missing = set(steady_persisted) - set(evidence_by_key)
+                steady_retained = len(steady_persisted) - len(steady_missing)
+                if (
+                    not steady_missing
+                    and len(evidence_by_key) - steady_retained == 0
+                    and self._epoch_orphaned_rows == 0
+                ):
+                    self._authoritative_reconciliation_error = None
+                    return {
+                        "ingested": 0,
+                        "duplicates": duplicate_rows + steady_retained,
+                        "ignored": ignored,
+                        "epoch_ignored": epoch_ignored,
+                        "orphaned_dropped": 0,
+                        "orphaned_links": self._last_reconciled_orphaned_links,
+                        "authoritative_rows": len(evidence_by_key),
+                    }
             candidate_state, candidate_state_hash, authoritative_rows, orphaned_links = self._replay_evidence_chain(
                 evidence_by_key,
                 candidate_state=ExpandingBtcRiskState(min_prior=self.state.min_prior),
@@ -948,7 +997,7 @@ class BtcRiskLiveSizer:
             raise
         self._authoritative_reconciliation_error = None
         self._epoch_orphaned_rows = 0
-        return {
+        stats = {
             "ingested": ingested,
             "duplicates": duplicate_rows + retained,
             "ignored": ignored,
@@ -957,6 +1006,32 @@ class BtcRiskLiveSizer:
             "orphaned_links": orphaned_links,
             "authoritative_rows": len(evidence_by_key),
         }
+        self._last_reconciled_signature = self._authority_signature(
+            self._persisted_evidence_by_key(), evidence_by_key, epoch_orphaned_rows=0
+        )
+        self._last_reconciled_orphaned_links = orphaned_links
+        return stats
+
+    def _authority_signature(
+        self,
+        persisted_by_key: Mapping[str, Mapping[str, Any]],
+        evidence_by_key: Mapping[str, Mapping[str, Any]],
+        *,
+        epoch_orphaned_rows: int,
+    ) -> str:
+        """Cheap fingerprint of "which receipts are authoritative, over which state"."""
+
+        material = {
+            "arm_id": self.arm_id,
+            "epoch_orphaned_rows": int(epoch_orphaned_rows),
+            "persisted": sorted(
+                f"{key}:{row['evidence_hash']}" for key, row in persisted_by_key.items()
+            ),
+            "authoritative": sorted(
+                f"{key}:{evidence['evidence_hash']}" for key, evidence in evidence_by_key.items()
+            ),
+        }
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
     def save(self) -> None:
         if not self._dirty:

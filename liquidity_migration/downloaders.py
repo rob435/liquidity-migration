@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,9 +167,13 @@ def download_binance_usdm_proxy_data(
                     # Record transport or parsing failures for the completeness gate.
                     failed.append((symbol, ""))
                     print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
+        # Always pass the artifact path (the binance_vision path already does):
+        # writing it only when THIS run failed left a stale failed-jobs file
+        # surviving a later clean re-run, so an operator read yesterday's
+        # failures as today's (2026-07-27 audit L6).
         _assert_download_completeness(
             failed, len(symbols), max_failure_ratio=max_failure_ratio,
-            artifact_path=_failed_artifact if failed else None,
+            artifact_path=_failed_artifact,
         )
         return outputs
 
@@ -195,7 +200,7 @@ def download_binance_usdm_proxy_data(
             print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
     _assert_download_completeness(
         failed, len(symbols), max_failure_ratio=max_failure_ratio,
-        artifact_path=_failed_artifact if failed else None,
+        artifact_path=_failed_artifact,
     )
     return outputs
 
@@ -570,17 +575,13 @@ def _marker_coverage_end_ms(
         return None
     safe_symbol = _safe_token(symbol)
     safe_suffix = _safe_token(suffix)
-    pattern = f"{safe_symbol}_*_*{safe_suffix}.done"
     best: int | None = None
     prefix = f"{safe_symbol}_"
     suffix_full = f"{safe_suffix}.done"
-    for marker in marker_dir.glob(pattern):
-        name = marker.name
-        if not name.startswith(prefix) or not name.endswith(suffix_full):
-            continue
+    for marker in _iter_marker_files(marker_dir, prefix=prefix, suffix_full=suffix_full):
         if marker.stat().st_size == 0:
             continue
-        middle = name[len(prefix) : len(name) - len(suffix_full)]
+        middle = marker.name[len(prefix) : len(marker.name) - len(suffix_full)]
         parts = middle.split("_")
         if len(parts) != 2:
             continue
@@ -603,6 +604,64 @@ def _mark_complete(marker: Path) -> None:
     # guarantee for the affected dataset.
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(datetime.now(tz=UTC).isoformat(), encoding="utf-8")
+    _unlink_superseded_markers(marker)
+
+
+def _unlink_superseded_markers(marker: Path) -> None:
+    """Drop markers whose coverage the just-written one strictly contains.
+
+    Each daily refresh wrote a NEW marker per (symbol, dataset, suffix) and never
+    removed the one it supersedes: ~3.6k files a day, forever, every one of them
+    re-scanned by every later coverage lookup (2026-07-27 audit L5). A marker
+    whose [start, end] is inside the new marker's range carries no information
+    the new one does not.
+    """
+
+    parsed = _parse_marker_name(marker.name)
+    if parsed is None:
+        return
+    prefix, suffix_full, start_ms, end_ms = parsed
+    for candidate in _iter_marker_files(marker.parent, prefix=prefix, suffix_full=suffix_full):
+        if candidate.name == marker.name:
+            continue
+        other = _parse_marker_name(candidate.name)
+        if other is None:
+            continue
+        _, _, other_start_ms, other_end_ms = other
+        if other_start_ms >= start_ms and other_end_ms <= end_ms:
+            candidate.unlink(missing_ok=True)
+
+
+def _parse_marker_name(name: str) -> tuple[str, str, int, int] | None:
+    """Split ``{symbol}_{start_ms}_{end_ms}{suffix}.done`` into its parts."""
+
+    if not name.endswith(".done"):
+        return None
+    body = name[: -len(".done")]
+    parts = body.split("_")
+    for index in range(len(parts) - 1):
+        try:
+            start_ms = int(parts[index])
+            end_ms = int(parts[index + 1])
+        except ValueError:
+            continue
+        prefix = "_".join(parts[:index]) + "_"
+        suffix_full = "_".join(parts[index + 2 :])
+        suffix_full = (("_" + suffix_full) if suffix_full else "") + ".done"
+        return prefix, suffix_full, start_ms, end_ms
+    return None
+
+
+def _iter_marker_files(marker_dir: Path, *, prefix: str, suffix_full: str) -> list[Path]:
+    """Marker files for one (symbol, suffix), listed with a single scandir."""
+
+    if not marker_dir.exists():
+        return []
+    return [
+        marker_dir / entry.name
+        for entry in os.scandir(marker_dir)
+        if entry.is_file() and entry.name.startswith(prefix) and entry.name.endswith(suffix_full)
+    ]
 
 
 def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict]:

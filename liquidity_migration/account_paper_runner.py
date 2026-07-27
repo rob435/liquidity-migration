@@ -18,7 +18,7 @@ from .account_execution_config import (
 )
 from .account_notifications import AccountNotificationEngine, deliver_notification_batch
 from .logging_setup import ensure_default_log_handler
-from .account_contracts import AccountEventType, AccountRiskSnapshot, OrderCommand
+from .account_contracts import AccountRiskSnapshot, OrderCommand
 from .account_kernel import AccountExecutionKernel
 from .passive_execution import (
     PassivePaperExecutionAdapter,
@@ -293,20 +293,36 @@ def main(argv: list[str] | None = None) -> int:
         id_seed=f"{route.account_id}:paper-execution",
     )
 
+    component_identity_cache: dict[tuple[str, str], tuple[str, str]] = {}
+
     def _component_for_command(command: OrderCommand) -> tuple[str, str]:
-        """Resolve the registered A/B identity (trade id, sleeve) for a command."""
-        for event in reversed(kernel.journal.events()):
-            if (
-                event.event_type == AccountEventType.TARGET.value
-                and event.correlation_id == command.batch_id
-                and event.symbol == command.symbol.upper()
-            ):
-                payload = event.payload
-                return (
-                    str(payload.get("component_id") or ""),
-                    str(payload.get("sleeve") or ""),
-                )
-        return "", ""
+        """Resolve the registered A/B identity (trade id, sleeve) for a command.
+
+        Read from the REDUCED state, not the raw journal. ``journal.events()``
+        returns a full copy and the scan was O(journal) per order submission,
+        inside the 250 ms decision window, growing for the epoch's whole life
+        (2026-07-27 audit L13). ``target_proposals`` is the reducer's own index
+        of exactly these rows, and the answer is immutable per (batch, symbol),
+        so it is memoized.
+        """
+
+        key = (command.batch_id, command.symbol.upper())
+        cached = component_identity_cache.get(key)
+        if cached is not None:
+            return cached
+        identity = ("", "")
+        for target_key, payload in kernel._state_ref().target_proposals.items():
+            if not target_key.startswith(f"{command.batch_id}:"):
+                continue
+            if str(payload.get("symbol") or "").upper() != key[1]:
+                continue
+            identity = (
+                str(payload.get("component_id") or ""),
+                str(payload.get("sleeve") or ""),
+            )
+            break
+        component_identity_cache[key] = identity
+        return identity
 
     execution_adapter = PassivePaperExecutionAdapter(
         market_provider=market_provider,

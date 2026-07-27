@@ -91,11 +91,32 @@ def _read_window(
     """Load ``dataset`` from ``data_root`` and filter to [start_ms, end_ms).
 
     ``end_ms`` is end-exclusive to match the repo's data_root boundary convention.
+
+    The read is pruned at the DIRECTORY level to ``start_ms``'s date before any
+    parquet is opened. ``read_dataset_columns`` grew ``since_date`` precisely for
+    this (a full ``**/*.parquet`` walk of a (date, symbol)-partitioned root is
+    ~500k files / tens of seconds), but nothing on the panel path passed it, so
+    every windowed build -- including the live residual-momentum refresh -- read
+    the whole multi-year history of four datasets and then filtered it away
+    (2026-07-27 audit M9).
     """
-    df = read_dataset_columns(data_root, dataset, columns=columns)
+    df = read_dataset_columns(
+        data_root,
+        dataset,
+        columns=columns,
+        since_date=_ms_to_date_str(start_ms),
+    )
     if df.is_empty() or "ts_ms" not in df.columns:
         return df
     return df.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+
+
+def _ms_to_date_str(ms: int) -> str:
+    """UTC ms epoch -> 'YYYY-MM-DD', the `date=` partition key used for pruning."""
+
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 def _date_str_to_ms(date_str: str) -> int:

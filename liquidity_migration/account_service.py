@@ -1541,11 +1541,25 @@ class AccountExecutionService:
         )
 
     def _convergence_plans(self) -> tuple[_ConvergencePlan, ...]:
-        state = self.kernel._state_ref()
-        events = self.kernel.journal.events()
+        # `journal.events()` returns a full copy and the sequence->event dict was
+        # an O(journal) rebuild whose only consumer was a single lookup. On a
+        # long-lived journal at the deployed sizing that was two full scans per
+        # ~0.1s pass of the single-owner hot path (2026-07-27 audit M22). Journal
+        # verification already guarantees contiguous 1-based sequences, so the
+        # coherent owner-internal snapshot plus a bounds-checked direct index
+        # replaces both.
+        events, state = self.kernel._snapshot_ref()
         now_ns = self.clock.wall_time_ns()
         tolerance = self.risk_policy.quantity_tolerance
-        event_by_sequence = {event.sequence: event for event in events}
+
+        def event_at_sequence(sequence: int) -> Any | None:
+            index = sequence - 1
+            if not 0 <= index < len(events):
+                return None
+            candidate = events[index]
+            # Cheap invariant check: a journal whose sequences are not contiguous
+            # would silently mis-anchor every convergence retry clock.
+            return candidate if candidate.sequence == sequence else None
         desires_by_symbol: dict[str, list[tuple[str, Mapping[str, Any], int]]] = {}
         for target_key, payload in state.component_target_desires.items():
             symbol = str(payload.get("symbol") or "").upper()
@@ -1642,7 +1656,7 @@ class AccountExecutionService:
             prefix = f"account-convergence/{symbol}/{generation}/"
             retry_batches = sorted(batch_id for batch_id in state.processed_batches if batch_id.startswith(prefix))
             attempts = len(retry_batches)
-            desired_event = event_by_sequence.get(revision_sequence)
+            desired_event = event_at_sequence(revision_sequence)
             desired_since_ns = (
                 desired_event.wall_ts_ns
                 if desired_event is not None

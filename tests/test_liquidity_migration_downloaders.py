@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+
+from liquidity_migration import downloaders
 
 import pytest
 
@@ -863,3 +866,52 @@ def test_normalize_funding_zero_interval_does_not_emit_zero_minutes() -> None:
     out = _normalize_funding("BTCUSDT", rows)
     assert out[0]["funding_interval_min"] == 8 * 60  # not 0 -> no inf downstream
     assert out[0]["funding_interval_min"] > 0
+
+
+def test_markers_supersede_instead_of_accumulating_forever(tmp_path: Path) -> None:
+    """Each daily refresh wrote a new marker per (symbol, dataset, suffix) and
+    never removed the one it supersedes: ~3.6k files a day, forever, all of them
+    re-scanned by every later coverage lookup (2026-07-27 audit L5)."""
+
+    marker_dir = tmp_path / downloaders.MARKER_DIR / "klines_1h"
+    for end_ms in (200, 300, 400):
+        downloaders._mark_complete(
+            downloaders._marker_path(
+                tmp_path, dataset="klines_1h", symbol="BTCUSDT", start_ms=100, end_ms=end_ms
+            )
+        )
+    assert sorted(p.name for p in marker_dir.iterdir()) == ["BTCUSDT_100_400.done"]
+    assert (
+        downloaders._marker_coverage_end_ms(
+            tmp_path, dataset="klines_1h", symbol="BTCUSDT", requested_start_ms=100
+        )
+        == 400
+    )
+
+    # A marker that is NOT contained by the new one survives.
+    downloaders._mark_complete(
+        downloaders._marker_path(
+            tmp_path, dataset="klines_1h", symbol="BTCUSDT", start_ms=50, end_ms=150
+        )
+    )
+    assert sorted(p.name for p in marker_dir.iterdir()) == [
+        "BTCUSDT_100_400.done",
+        "BTCUSDT_50_150.done",
+    ]
+    # A different symbol and a suffixed marker are never touched.
+    downloaders._mark_complete(
+        downloaders._marker_path(
+            tmp_path, dataset="klines_1h", symbol="BTCUSDT", start_ms=100, end_ms=400, suffix="mark"
+        )
+    )
+    downloaders._mark_complete(
+        downloaders._marker_path(
+            tmp_path, dataset="klines_1h", symbol="ETHUSDT", start_ms=100, end_ms=400
+        )
+    )
+    assert sorted(p.name for p in marker_dir.iterdir()) == [
+        "BTCUSDT_100_400.done",
+        "BTCUSDT_100_400mark.done",
+        "BTCUSDT_50_150.done",
+        "ETHUSDT_100_400.done",
+    ]

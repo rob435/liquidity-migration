@@ -120,11 +120,34 @@ class BybitAccountExecutionConsumer:
         self._thread: threading.Thread | None = None
         self._stream_lock = threading.RLock()
         self._closed = False
-        self._terminal_recorded = {
-            str(event.payload.get("command_id") or "") + ":" + str(event.payload.get("status") or "")
-            for event in kernel.journal.events()
-            if event.event_type == AccountEventType.ORDER_STATUS.value
-        }
+        self._terminal_recorded: set[str] = set()
+        # Highest journal sequence already folded into `_terminal_recorded`.
+        # Rescanning the whole journal on every new terminal AND on every 0.25 s
+        # blocked retry was O(journal) per pass on the owner hot path
+        # (2026-07-27 audit L14); only the delta since this mark can contain a
+        # row we have not seen.
+        self._terminal_scanned_sequence = 0
+        self._absorb_recorded_terminals()
+
+    def _absorb_recorded_terminals(self) -> None:
+        """Fold ORDER_STATUS rows committed since the last scan into the index.
+
+        Journal verification guarantees contiguous 1-based sequences, so the
+        already-scanned prefix can be skipped by slicing the owner-internal
+        snapshot rather than re-walking a full copy of the journal.
+        """
+
+        events, _state = self.kernel._snapshot_ref()
+        if len(events) <= self._terminal_scanned_sequence:
+            return
+        for event in events[self._terminal_scanned_sequence :]:
+            if event.event_type == AccountEventType.ORDER_STATUS.value:
+                self._terminal_recorded.add(
+                    str(event.payload.get("command_id") or "")
+                    + ":"
+                    + str(event.payload.get("status") or "")
+                )
+        self._terminal_scanned_sequence = len(events)
 
     def _notify_committed_fill(self, execution_id: str) -> None:
         if self.fill_observer is None or not execution_id:
@@ -489,11 +512,7 @@ class BybitAccountExecutionConsumer:
             return
         key = f"{command_id}:{terminal.status}"
         if key not in self._terminal_recorded:
-            self._terminal_recorded.update(
-                str(event.payload.get("command_id") or "") + ":" + str(event.payload.get("status") or "")
-                for event in self.kernel.journal.events()
-                if event.event_type == AccountEventType.ORDER_STATUS.value
-            )
+            self._absorb_recorded_terminals()
         if key in self._terminal_recorded:
             self.pending_terminal.pop(command_id, None)
             return

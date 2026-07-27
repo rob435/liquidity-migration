@@ -404,6 +404,13 @@ def build_panel(spec: PanelSpec) -> tuple[pl.DataFrame, dict[str, Any]]:
                 right_on=stamp,
                 by="symbol",
                 strategy="backward",
+                # Both sides are globally sorted ts-first (`panel` by
+                # [decision_ts_ms, symbol]; `funding` by [ts_ms, symbol]), which
+                # implies per-`by`-group order. polars cannot verify sortedness
+                # once `by` groups are given and emits a UserWarning; asserting
+                # what the sorts above already guarantee keeps the output
+                # byte-identical and the test suite warning-free.
+                check_sortedness=False,
             )
             .with_columns(
                 ((pl.col("decision_ts_ms") - pl.col(stamp)) / HOUR_MS).alias(f"{prefix}_funding_age_h")
