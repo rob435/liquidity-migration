@@ -28,8 +28,25 @@ Sections below preserve the registration-era text; funding-dependent numbers
 in them are superseded by this section. Also relevant: Bybit shortened
 funding intervals through 2025-26 (52% of 2025 settlements are 4h, 21% 1h) —
 73–80% of this book's 2025-26 held name-days are on sub-8h names, so the
-per-print −10/−3 bp thresholds mean different daily carry per symbol; a
-successor should normalize thresholds to a daily-equivalent rate.
+per-print −10/−3 bp thresholds mean different daily carry per symbol.
+~~A successor should normalize thresholds to a daily-equivalent rate~~ —
+tested and refuted in the 2026-07-28 quant review (the variant collapses;
+per-print acuteness is load-bearing).
+
+**2026-07-28 quant review** (`docs/research_2026-07-28_carry_hold_quant_review.md`):
+
+- The §5 validation battery's **Binance replication is withdrawn** — on the
+  corrected scorer it is t 0.4 / Sharpe 0.18. The doubled funding leg was
+  the replication. Single-venue (Bybit) evidence until shown otherwise.
+- The vol-target overlay hurts on corrected accounting (vt 1.05 < raw 1.21
+  here; worse for v2) — raw is the primary basis.
+- **`configs/lane2_carry_hold_v2.json` is registered** as a sizing
+  refinement: same state machine, each held name's weight scaled by
+  `clip(|trailing 24h settled funding| / 120 bp-per-day, 0.25, 1.0)` — bet
+  size follows the premium being paid. Seen-data effect: same mean (17.0 vs
+  18.0 bp/day, paired t −0.4), max DD −60.0% → −48.6%, Sharpe 1.02 → 1.11,
+  MAR 0.97 → 1.25, turnover −27%. v1 keeps scoring; the paired daily
+  differential is the primary forward comparison.
 
 ## 1. The trade in one paragraph
 

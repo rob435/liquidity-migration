@@ -151,7 +151,9 @@ Consequences:
   scorer from this commit; the per-print enter/exit thresholds' interval
   sensitivity (a −10 bp print is −30 bp/day on an 8h name but −60 bp/day on
   a 4h name) is a design gap for any successor config, not a defect in the
-  registered ones.
+  registered ones. *(Same-day follow-up: the quant review below TESTED the
+  daily-rate normalization and it collapses — the per-print gate is
+  load-bearing, not a gap to fix.)*
 
 ### 2026-07-28 — canonical baselines after the correction (artifact cleanse)
 
@@ -190,6 +192,34 @@ otherwise.
   cross-venue panel is non-citable unless re-derived on the corrected
   scorer. Historical evidence notes stand as receipts with their correction
   sections; they are not comparison surfaces.
+
+### 2026-07-28 — carry-hold quant review; `lane2_carry_hold_v2` registered
+
+Full review: `docs/research_2026-07-28_carry_hold_quant_review.md`
+(mechanism, six declared theses, all grid cells, robustness). Change point:
+this commit. Five-line summary:
+
+1. **What**: `configs/lane2_carry_hold_v2.json` — v1's exact state machine,
+   but each held name's weight follows the premium being paid:
+   `w = 0.10 × clip(|trailing 24h settled funding| / 120 bp-per-day, 0.25, 1.0)`.
+2. **Why**: the review's depth-monotonicity test — deepest-carry name-days
+   earn ~230 bp/day while decayed-carry holdings (≥ −12 bp/day) bleed
+   −67 bp/day; sizing by depth was the only lever of four that survived
+   its declared grid (exit-tighten flat; breadth tilt and daily-rate entry
+   actively hurt).
+3. **Seen-data effect** (module path, 2021-01..2026-07): same mean (17.0 vs
+   18.0 bp/day, paired t −0.4), max DD −60.0% → −48.6%, Sharpe 1.02 → 1.11,
+   MAR 0.97 → 1.25, turnover −27%. Cost: shallow-carry years pay about half
+   of v1's era mean (2023: 14.4 vs 26.0 bp/day) — a stated regime bet.
+4. **Evidence status**: Lane-1 selection on seen data (t 2.53, below the
+   ~3.4 new-mechanism bar; this is a sizing refinement, not a discovery).
+   v1 keeps scoring untouched; the paired daily differential v2−v1 is the
+   primary forward comparison.
+5. **Also from the review**: the v1 **Binance replication is withdrawn**
+   (corrected scorer: t 0.4, Sharpe 0.18 — the doubled funding leg was the
+   replication; carry-hold is single-venue evidence), and the registered
+   recipe's vol-target overlay hurts both versions on corrected accounting
+   (raw is the primary basis).
 
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
@@ -709,9 +739,11 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research_2026-07-26_financed_longs.md` with the 22-row
       negative-results ledger.
-- [ ] Score the three financed-longs configs on each new completed UTC day
+- [ ] Score the four financed-longs configs on each new completed UTC day
       (rolling forward record; the registration commit is the change point;
-      since 2026-07-28 the scorer charges each settlement exactly once).
+      since 2026-07-28 the scorer charges each settlement exactly once, and
+      `lane2_carry_hold_v2` scores beside v1 with the paired daily
+      differential as the primary comparison).
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
       funding-leg numbers (leg-attribution reversal, dispersion-gate

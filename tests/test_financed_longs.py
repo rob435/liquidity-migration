@@ -9,6 +9,7 @@ synthetic frames.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,84 @@ class TestCarryHoldState:
         # 13 names at cap 0.10 exceeds 1.0, so per-name weight must be scaled down
         per_name = w.filter(pl.col("bar_ts_ms") == w["bar_ts_ms"].max())["w"]
         assert float(per_name.max()) < carry_cfg.per_name_cap
+
+
+class TestDepthScaling:
+    """v2 sizing: w = cap * clip(|trail_fund_24h| / ref, floor, 1.0).
+
+    The state machine is v1's; only the size of a held name changes. v1
+    configs carry no depth block and must keep the flat cap bit-for-bit.
+    """
+
+    def test_v1_config_has_no_depth_scaling_and_keeps_flat_cap(
+        self, carry_cfg: CarryHoldConfig
+    ) -> None:
+        assert carry_cfg.depth_ref_bp_per_day is None
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        w = carry_hold_weights(_universe(panel), carry_cfg)
+        assert set(w["w"].to_list()) == {carry_cfg.per_name_cap}
+
+    def test_v2_config_round_trip(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v2.json")
+        assert cfg.config_id == "lane2_carry_hold_v2"
+        assert cfg.venue == "bybit"
+        # state machine identical to v1 by construction
+        assert (cfg.enter_bp, cfg.exit_bp) == (10.0, 3.0)
+        assert (cfg.per_name_cap, cfg.gross_cap) == (0.1, 1.0)
+        assert cfg.depth_ref_bp_per_day == 120.0
+        assert cfg.depth_floor == 0.25
+
+    def test_weight_scales_with_trailing_daily_rate(self, carry_cfg: CarryHoldConfig) -> None:
+        # Constant per-print rates on 8h settlements give trailing daily rates
+        # of exactly 3x the print: -150, -60, -36 bp/day -> scales 1.0, 0.5, 0.3.
+        cfg = dataclasses.replace(carry_cfg, depth_ref_bp_per_day=120.0, depth_floor=0.25)
+        panel = _panel(
+            funding_bp={"S01USDT": [-50.0], "S02USDT": [-20.0], "S03USDT": [-12.0]}
+        )
+        w = carry_hold_weights(_universe(panel), cfg)
+        last = w.filter(pl.col("bar_ts_ms") == w["bar_ts_ms"].max())
+        by_sym = dict(zip(last["symbol"].to_list(), last["w"].to_list()))
+        assert by_sym["S01USDT"] == pytest.approx(0.10, rel=1e-9)
+        assert by_sym["S02USDT"] == pytest.approx(0.05, rel=1e-9)
+        assert by_sym["S03USDT"] == pytest.approx(0.03, rel=1e-9)
+
+    def test_floor_binds_on_shallow_trailing_rate(self, carry_cfg: CarryHoldConfig) -> None:
+        # One acute print (-15 bp) on the first decision bar, then -4 bp prints:
+        # the hysteresis keeps the state (-4 < -3 exit bound) while the trailing
+        # rate sits at -12..-23 bp/day, far under ref -> every held bar sizes at
+        # the floor, INCLUDING the entry bar itself (shallow history at entry).
+        cfg = dataclasses.replace(carry_cfg, depth_ref_bp_per_day=120.0, depth_floor=0.25)
+        pattern = [-4.0] * 21 + [-15.0] + [-4.0] * 38
+        panel = _panel(funding_bp={"S01USDT": pattern})
+        w = carry_hold_weights(_universe(panel), cfg).filter(pl.col("symbol") == "S01USDT")
+        assert w.height > 1
+        assert set(round(v, 12) for v in w["w"].to_list()) == {
+            round(cfg.per_name_cap * cfg.depth_floor, 12)
+        }
+
+    def test_missing_trail_column_fails_closed(self, carry_cfg: CarryHoldConfig) -> None:
+        cfg = dataclasses.replace(carry_cfg, depth_ref_bp_per_day=120.0)
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        u = _universe(panel).drop("trail_fund_24h")
+        with pytest.raises(FinancedLongsError, match="trail_fund_24h"):
+            carry_hold_weights(u, cfg)
+
+    def test_unsupported_basis_rejected(self, tmp_path: Path) -> None:
+        import json
+
+        payload = json.loads((CONFIG_DIR / "lane2_carry_hold_v2.json").read_text())
+        payload["rule"]["sizing"]["depth_scaling"]["basis"] = "last_print"
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(payload))
+        with pytest.raises(FinancedLongsError, match="basis"):
+            CarryHoldConfig.from_json(bad)
+
+    def test_score_carry_hold_v2_end_to_end(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v2.json")
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        out = score_carry_hold(panel, cfg)
+        assert out["config_id"] == "lane2_carry_hold_v2"
+        assert out["days"] > 0
 
 
 class TestFinancedLeaders:
@@ -252,8 +331,10 @@ class TestResearchEquityChart:
 
         panel = _panel(funding_bp={"S01USDT": [-15.0]})
         _, _, carry_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v1.json")
+        _, _, carry2_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v2.json")
         _, _, leaders_id, _ = config_scores(panel, CONFIG_DIR / "lane2_financed_leaders_v1.json")
         assert carry_id == "lane2_carry_hold_v1"
+        assert carry2_id == "lane2_carry_hold_v2"
         assert leaders_id == "lane2_financed_leaders_v1"
 
 

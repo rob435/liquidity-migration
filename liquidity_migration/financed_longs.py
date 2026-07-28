@@ -75,7 +75,13 @@ class FinancedLongsError(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class CarryHoldConfig:
-    """Committed carry-hold rule. Field names mirror the JSON."""
+    """Committed carry-hold rule. Field names mirror the JSON.
+
+    ``depth_ref_bp_per_day`` is the v2 sizing refinement (2026-07-28 review):
+    when set, a held name's weight is ``per_name_cap * clip(|trailing 24h
+    settled funding| / ref, depth_floor, 1.0)`` — bet size proportional to the
+    premium currently being paid. ``None`` (v1) keeps the flat per-name cap.
+    """
 
     config_id: str
     venue: str
@@ -88,11 +94,19 @@ class CarryHoldConfig:
     vol_target_annual: float
     vol_lookback_days: int
     max_leverage: float
+    depth_ref_bp_per_day: float | None = None
+    depth_floor: float = 0.25
 
     @classmethod
     def from_json(cls, path: str | Path) -> "CarryHoldConfig":
         payload: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
         rule = payload["rule"]
+        depth = rule["sizing"].get("depth_scaling")
+        if depth is not None and depth.get("basis") != "trail_fund_24h":
+            raise FinancedLongsError(
+                f"unsupported depth_scaling basis {depth.get('basis')!r}; "
+                "only 'trail_fund_24h' is implemented"
+            )
         return cls(
             config_id=payload["config_id"],
             venue=rule["universe"]["venue"],
@@ -105,6 +119,10 @@ class CarryHoldConfig:
             vol_target_annual=float(rule["risk"]["vol_target_annual"]),
             vol_lookback_days=int(rule["risk"]["vol_lookback_days"]),
             max_leverage=float(rule["risk"]["max_leverage"]),
+            depth_ref_bp_per_day=(
+                float(depth["ref_bp_per_day"]) if depth is not None else None
+            ),
+            depth_floor=float(depth["floor"]) if depth is not None else 0.25,
         )
 
 
@@ -162,8 +180,8 @@ def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
     return panel.select(keep).rename(BINANCE_VIEW)
 
 
-def settlement_exact_funding(hold_hours: int) -> pl.Expr:
-    """Funding a LONG pays over ``(t, t + hold_hours]``; settlements only.
+def _settlement_flag() -> pl.Expr:
+    """True on bars whose funding print settled at this bar's close.
 
     A bar carries a settlement iff the print's age just reset: either the age
     is ~0 (settlement at this bar's close — ages are exact 0.0 on-hour) or it
@@ -176,8 +194,12 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     bar).
     """
     age = pl.col("by_funding_age_h")
-    is_settlement = (age < 0.5) | (age < age.shift(1).over("symbol")).fill_null(False)
-    fresh = pl.when(is_settlement).then(pl.col("by_funding")).otherwise(0.0)
+    return (age < 0.5) | (age < age.shift(1).over("symbol")).fill_null(False)
+
+
+def settlement_exact_funding(hold_hours: int) -> pl.Expr:
+    """Funding a LONG pays over ``(t, t + hold_hours]``; settlements only."""
+    fresh = pl.when(_settlement_flag()).then(pl.col("by_funding")).otherwise(0.0)
     return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
 
 
@@ -192,6 +214,11 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
         [
             pl.col("by_turnover_quote").rolling_sum(24).over("symbol").alias("adv24"),
             settlement_exact_funding(24).alias("funding_paid"),
+            # PIT trailing settled funding over (t-24h, t]: the daily premium
+            # currently being paid; v2's sizing basis. Settlements at bars
+            # <= t only — same convention as the by_funding decision signal.
+            pl.when(_settlement_flag()).then(pl.col("by_funding")).otherwise(0.0)
+            .rolling_sum(24).over("symbol").alias("trail_fund_24h"),
             (close.shift(-24).over("symbol") / close - 1.0).alias("price_return"),
             (close / close.shift(momentum_lookback_hours).over("symbol") - 1.0).alias("momentum"),
             (
@@ -266,20 +293,33 @@ def _apply_gross_cap(weights: pl.DataFrame, gross_cap: float) -> pl.DataFrame:
 
 
 def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataFrame:
-    """Hysteresis long state per name; fixed per-name cap, total gross cap.
+    """Hysteresis long state per name; per-name cap (optionally depth-scaled),
+    total gross cap.
 
     The loop is deliberately explicit: the state at bar ``i`` depends only on
-    settled funding at bars ``<= i``, which is the entire PIT argument.
+    settled funding at bars ``<= i``, which is the entire PIT argument. With
+    ``depth_ref_bp_per_day`` set (v2), a held name's weight is scaled by
+    ``clip(|trail_fund_24h| / ref, depth_floor, 1.0)`` — size follows the
+    premium being paid; a missing trailing value fails to the floor, never up.
     """
     enter, exit_ = cfg.enter_bp / 1e4, cfg.exit_bp / 1e4
+    sized = cfg.depth_ref_bp_per_day is not None
+    if sized and "trail_fund_24h" not in universe.columns:
+        raise FinancedLongsError(
+            f"{cfg.config_id}: depth_scaling requires the prepared "
+            "trail_fund_24h column"
+        )
+    cols = ["bar_ts_ms", "symbol", "by_funding"] + (["trail_fund_24h"] if sized else [])
     d = (
-        universe.select("bar_ts_ms", "symbol", "by_funding")
-        .drop_nulls()
+        universe.select(cols)
+        .drop_nulls(subset=["by_funding"])
         .sort(["symbol", "bar_ts_ms"])
     )
+    ref = (cfg.depth_ref_bp_per_day or 0.0) / 1e4
     rows: dict[str, list] = {"bar_ts_ms": [], "symbol": [], "w": []}
     for (sym,), g in d.group_by("symbol", maintain_order=True):
         fv = g["by_funding"].to_numpy()
+        tr = g["trail_fund_24h"].to_numpy() if sized else None
         ts = g["bar_ts_ms"].to_numpy()
         state = False
         for i in range(len(ts)):
@@ -288,9 +328,13 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
             if fv[i] < -enter:
                 state = True
             if state:
+                w = cfg.per_name_cap
+                if sized and tr is not None:
+                    depth = abs(tr[i]) if math.isfinite(tr[i]) else 0.0
+                    w *= min(1.0, max(cfg.depth_floor, depth / ref))
                 rows["bar_ts_ms"].append(int(ts[i]))
                 rows["symbol"].append(str(sym))
-                rows["w"].append(cfg.per_name_cap)
+                rows["w"].append(w)
     weights = pl.DataFrame(
         rows, schema={"bar_ts_ms": pl.Int64, "symbol": pl.String, "w": pl.Float64}
     )

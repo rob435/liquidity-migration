@@ -35,9 +35,13 @@ Discovered from the owner's question about Bybit's shortened funding
 intervals; those are real (2025 settlements: 52% 4h, 21% 1h, 7% 2h, ~20%
 8h; 2021 was 100% 8h) and 73–80% of carry-hold's 2025-26 held name-days are
 on sub-8h names, so the per-print −10/−3 bp thresholds mean different DAILY
-carry per symbol — a successor config should normalize to a daily-equivalent
-rate. The corrected accounting charges each settlement exactly once at any
-cadence.
+carry per symbol. The corrected accounting charges each settlement exactly
+once at any cadence. ~~A successor config should normalize to a
+daily-equivalent rate~~ — **tested and refuted 2026-07-28**: the
+daily-rate-entry variant collapses (Sharpe 0.62; the deep-daily-carry names
+its threshold admits are chronic decliners whose shorts are right), while
+the per-print gate's acuteness selection is load-bearing. See
+`docs/research_2026-07-28_carry_hold_quant_review.md`.
 
 **Corrected verdicts** (`scripts/screen_financed_longs.py` on the
 2026-07-28 panel; output `reports/financed_longs_corrected_2026-07-28/`):
@@ -68,6 +72,17 @@ cadence.
   intraday, replication discipline) are unaffected in kind. Cross-venue
   replication ratios carried the same defect on both venues — directionally
   intact, numerically stale.
+
+**2026-07-28 addendum (carry-hold quant review).** Re-deriving the §2.1
+validation battery on the corrected scorer **kills the carry-hold Binance
+replication**: the same construction on Binance's own funding/prices/universe
+is +2.7 bp/day, t 0.4, Sharpe 0.18, max DD −85% (registered claim: +25.0
+bp/day, t 2.73, Sharpe 1.38, ratio 0.50). The doubled funding leg WAS the
+replication. "First positive mechanism to survive cross-venue replication"
+is withdrawn; carry-hold is single-venue (Bybit) evidence until shown
+otherwise. The same review registered `lane2_carry_hold_v2` (depth-scaled
+sizing, same state machine; v1 keeps scoring) — full tables in
+`docs/research_2026-07-28_carry_hold_quant_review.md`.
 
 ---
 

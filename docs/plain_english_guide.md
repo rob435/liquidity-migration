@@ -139,6 +139,16 @@ Two consequences run the whole project:
   strategy in simulation (the payment stream is real, about half the
   claimed size). They stay on trial on live days. The live system was
   never affected — it counts fees through a separate, verified path.*
+  *Later the same day, a full review of the buy-when-shorts-pay idea added
+  a sibling version on trial (`carry_hold_v2`): identical buys and sells,
+  but each position's SIZE now follows how much the crowd is currently
+  paying — full size when the payment is fat, quarter size when it has
+  thinned. In simulation that kept the same profit while cutting the worst
+  dip from −60% to −49%. Two honesty notes from the same review: the idea
+  only works on Bybit (the corrected numbers show it never worked on
+  Binance — the earlier "works on both venues" claim came from the
+  counting bug), and it earns most when the market is fearful — so a
+  "switch off when markets fall" safety rule would gut it.*
 
 We always read the last fee actually charged, never a forecast.
 
@@ -452,6 +462,7 @@ appears when we need to point at code, files, or records.
 | a number that failed an honesty check, kept for ideas only | diagnostic |
 | bookkeeping of which data shaped which idea | provenance |
 | the buy-when-shorts-pay-heavily idea on trial | carry_hold, lane2_carry_hold_v1 |
+| same idea, position size follows the crowd's payment | lane2_carry_hold_v2, depth scaling |
 | the buy-winners-only-while-holding-is-free idea on trial | financed_leaders |
 | the loosen-fee-rule-for-Bybit-only-coins refinement on trial | venue-scoped admission |
 | market moves cancelled out of a performance number | hedged |

@@ -1,0 +1,96 @@
+{
+  "config_id": "lane2_carry_hold_v2",
+  "registered": "2026-07-28",
+  "lane": 2,
+  "surface": "research-only",
+  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
+  "descends_from": "lane2_carry_hold_v1 (which stays registered and keeps scoring; v2 changes SIZING only)",
+  "claim": "Same book as lane2_carry_hold_v1 (long top-100 Bybit names while their settled funding print is below -10 bp, hysteresis exit above -3 bp), but each held name's weight follows the premium actually being paid: w = 0.10 x clip(|trailing 24h settled funding| / 120 bp-per-day, 0.25, 1.0). Bet size proportional to edge. On corrected settlement-exact accounting over 2021-01..2026-07 this keeps v1's mean (17.0 vs 18.0 bp/day, paired daily differential -1.0 bp/day, t -0.4) while cutting max drawdown -60.0% -> -48.6%, raising Sharpe 1.02 -> 1.11, MAR 0.97 -> 1.25, and cutting turnover 27% (0.197 vs 0.271 one-way/day). This is a risk reallocation, not a mean claim.",
+  "rule": {
+    "universe": {
+      "venue": "bybit",
+      "rank_by": "trailing_24h_quote_turnover",
+      "top_n": 100,
+      "note": "identical to v1; ranked within each decision bar, 168h price history required"
+    },
+    "state": {
+      "type": "per_name_hysteresis_long",
+      "enter_below_funding_bp": 10.0,
+      "exit_above_funding_bp": 3.0,
+      "signal": "last settled funding rate at the decision bar (by_funding)",
+      "note": "identical to v1. The per-PRINT entry is deliberately retained: the 2026-07-28 review's daily-rate entry variant (enter when trailing rate < -30 bp/day) collapsed to Sharpe 0.62 because distributed deep carry marks chronic decliners while a single deep print marks acute crowding; acuteness is load-bearing."
+    },
+    "sizing": {
+      "per_name_cap": 0.1,
+      "gross_cap": 1.0,
+      "depth_scaling": {
+        "basis": "trail_fund_24h",
+        "ref_bp_per_day": 120.0,
+        "floor": 0.25,
+        "note": "w = cap x clip(|PIT trailing 24h settled funding| / ref, floor, 1.0). A name paying -120 bp/day or deeper holds full cap; carry decay shrinks the position smoothly instead of the v1 exit-or-full-size cliff; a missing trailing value sizes at the floor, never up. ref=120 is the middle of the flat region {100,120,160} (Sharpe 1.12/1.13/1.16), not the argmax; floor is flat across {0.15,0.25,0.35}."
+      },
+      "gross_cap_note": "unchanged from v1; the cap dilutes cascades instead of levering into them"
+    },
+    "risk": {
+      "vol_target_annual": 0.15,
+      "vol_lookback_days": 30,
+      "max_leverage": 3.0,
+      "note": "kept only for recipe comparability with v1. On corrected accounting the vol-target overlay HURTS both versions (v1 vt Sharpe 0.64 vs raw 1.02; v2 vt 0.52 vs raw 1.11; the backward-looking scale levers up after quiet stretches into crashes). RAW is the primary basis."
+    }
+  },
+  "cost_model": {
+    "measured_fee_side_bp": 7.78,
+    "charging": "measured one-way turnover x fee per side, per day, identical to v1",
+    "funding": "settlement_exact (corrected 2026-07-28 detector)",
+    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"],
+    "provenance": "7.78 bp/side measured 2026-07-25 from 85 forward demo fills (all taker)"
+  },
+  "scoring_recipe": {
+    "metric": "mean net bp per day and annualised Sharpe on the raw daily series (vol-targeted reported for recipe comparability, see risk.note)",
+    "secondary": ["compounded total return", "compounded max drawdown", "MAR", "mean one-way turnover", "paired daily differential net_bp(v2) - net_bp(v1) on shared days"],
+    "comparator": "lane2_carry_hold_v1's own forward rows on the same days (the paired differential isolates the sizing change), plus the deployed CONTINUOUS render and zero",
+    "grid": "none; single committed configuration",
+    "cadence": "one row per completed UTC day after the registration commit",
+    "eligibility": "only days strictly after the registration commit date count as forward evidence",
+    "reproduce_with": "liquidity_migration.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
+  },
+  "measured_at_registration": {
+    "basis": "CORRECTED settlement-exact scorer (2026-07-28), module path score_carry_hold; all numbers are seen-data Lane-1 selection, not evidence",
+    "window": "2021-01-01 to 2026-07-17",
+    "days": 1883,
+    "mean_net_bp_per_day": 17.0,
+    "t_stat": 2.53,
+    "sharpe_raw": 1.11,
+    "total_return_raw_pct": 1052,
+    "max_drawdown_raw_pct": -48.6,
+    "mar_raw": 1.25,
+    "mean_oneway_turnover": 0.197,
+    "era_net_bp_per_day": {"2021": 0.3, "2022": 5.1, "2023": 14.4, "2024": 12.7, "2025": 32.6, "2026": 42.4},
+    "v1_same_basis": {"mean_net_bp_per_day": 18.0, "t_stat": 2.31, "sharpe_raw": 1.02, "max_drawdown_raw_pct": -60.0, "mar_raw": 0.97, "mean_oneway_turnover": 0.271, "era_net_bp_per_day": {"2021": 3.8, "2022": 3.0, "2023": 26.0, "2024": 13.8, "2025": 30.3, "2026": 32.5}},
+    "benchmark_window_2023_03_13_to_2026_07_16": {
+      "sharpe_raw": 1.36,
+      "mar_raw": 1.98,
+      "max_drawdown_raw_pct": -48.6,
+      "v1_same_basis": {"sharpe_raw": 1.21, "mar_raw": 1.43, "max_drawdown_raw_pct": -60.0}
+    },
+    "robustness": {
+      "basis_note": "grid/robustness cells below were computed with the review scripts, whose trailing-rate windowing differs from the module on 50/1883 gap-adjacent days (module Sharpe 1.11 vs script 1.13 for this config); orderings are unaffected and the headline numbers above are module-path",
+      "declared_grid": "ref {40,60,80} bp/day all improve v1 monotonically; POST-HOC extension {100,120,160} is flat (Sharpe 1.12/1.13/1.16) — no cliff",
+      "floor_sensitivity": "{0.15, 0.25, 0.35} at ref 80: Sharpe 1.12/1.11/1.09 — not load-bearing",
+      "fee_stress_9.78bp": "Sharpe 1.08 (v1 same stress: 0.99); degrades gracefully",
+      "stale_entry_plus_1d": "both books lose ~40% of mean (v1 18.0->10.4, v2 17.2->9.6 bp/day); v2 keeps its relative edge (Sharpe 0.82 vs 0.77). The first day after the signal carries the fat; +1h/+4h delays measured at v1 registration were free, +24h is not.",
+      "rejected_levers_same_review": "trailing-rate EXIT tighten (flat), lagged-breadth gross tilt (hurts, DD window is itself high-breadth), daily-rate ENTRY (collapses, Sharpe 0.62), print-depth sizing (inferior to trail-depth: best cell Sharpe 1.02/MAR 1.16)"
+    },
+    "binance_replication": "FAILS on the corrected scorer: same construction on Binance = +2.7 bp/day, t 0.4, Sharpe 0.18, MAR negative; depth sizing does not rescue it (0.16). v1's registered replication claim (Sharpe 1.38, effect ratio 0.50) was an artifact of the funding double-count. The mechanism is currently SINGLE-VENUE (Bybit) evidence.",
+    "multiple_testing": "this review ran ~19 seen-data cells on top of the program's prior ~90 constructions; t 2.6 does NOT clear the program's historical Bonferroni-style bar (~3.4). v2 is a sizing refinement of an already-registered mechanism, not a new discovery; its evidence is the forward run and the paired differential vs v1.",
+    "provenance": "Selected 2026-07-28 by the carry_hold quant review (docs/research_2026-07-28_carry_hold_quant_review.md) on the corrected scorer over cross_venue_panel_v1 2021-01-01..2026-07-17 (seen data). Thesis tests T1-T6 preceded the grid; the grid was declared before any cell ran; the ref extension past 80 and the print-depth family are labelled post-hoc in the review."
+  },
+  "known_weaknesses": [
+    "inherits every v1 weakness: ~3.8 concentrated names when active, +0.75 correlation with financed_leaders, long-only market beta (contemporaneous BTC beta 0.44 on active days), capitulation entries can catch death spirals, capacity limited to the deep-negative-funding subset",
+    "REGIME BET vs v1: in shallow-carry grind years the smaller sizing gives up roughly half of v1's era mean (2023: 14.3 vs 26.0 bp/day) in exchange for the drawdown cut concentrated in deep-carry regimes (2025-26). If funding microstructure normalizes to 2023 shape, expect v2 to trail v1 while both stay positive",
+    "single-venue mechanism: the corrected Binance replication is ~zero; treat this as a Bybit-microstructure trade and re-examine if Bybit's funding interval mix or fee schedule changes",
+    "the vol-target overlay in the recipe is reported but harmful on corrected accounting (see risk.note); raw is primary",
+    "edge decays with signal staleness: +24h-stale entries lose ~40% of the mean; the daily decision cadence is the operating point, do not let scoring drift later",
+    "the -60% -> -44.6% drawdown cut is still a brutal drawdown for a raw book; nothing here makes the book deployable at full gross without separate owner-level sizing decisions"
+  ]
+}
