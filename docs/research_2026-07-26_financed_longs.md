@@ -76,7 +76,11 @@ cadence.
 The deployed CONTINUOUS sleeve's honest render was regenerated rather than
 quoted: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
 --end 2026-07-17`, profile revision `active_tp12_sl35_v1`, output
-`~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26`.
+`~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26`
+*(2026-07-28: renders the RETIRED 3-cell shape — no longer a citable
+baseline; the dir stays in place only as a frozen input of
+`scripts/render_continuous_admission_variants.py`. Current baselines:
+`reports/equity_curves_2026-07-28/`.)*
 
 > **Benchmark: Sharpe 1.84, total +15.85% (+4.49%/yr), max DD −2.85%, worst
 > day −0.70%, window 2023-03-13 → 2026-07-16.**
@@ -325,7 +329,9 @@ Structural findings worth more than the individual results:
   registration).
 - Executable: `liquidity_migration/financed_longs.py`; reproduction:
   `scripts/screen_financed_longs.py`; tests: `tests/test_financed_longs.py`.
-- Benchmark render: `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26/`.
+- Benchmark render: `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26/`
+  *(2026-07-28: superseded as a baseline — retained in place only as a
+  frozen input of the registered admission-variant scorer)*.
 - Panel: `~/SHARED_DATA/cross_venue_panel_v1` (six shards, manifest per shard,
   panel commit `a9ac75d`).
 - External sources consulted (mechanism priors, not parameters): Robot Wealth

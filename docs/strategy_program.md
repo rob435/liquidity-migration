@@ -11,9 +11,11 @@ deployment, or opens the separate real-money boundary.
 
 ## Current truth
 
-- The active profiles remain `continuous_ensemble_v2` and
-  `LongV11aDivWeekendVol`. They are demo/paper runtime configurations, not
-  validated alpha claims.
+- The active profiles are `continuous_ensemble_v2` at revision
+  `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the
+  profile id predates the 2026-07-26 replacement and no longer implies an
+  ensemble) and `LongV11aDivWeekendVol`. They are demo/paper runtime
+  configurations, not validated alpha claims.
 - No researched replacement currently qualifies for implementation.
 - Sleeve kill criteria and the paper passive-execution experiment remain active
   operational evidence surfaces. The prospective runtime-parity epoch and all its
@@ -150,6 +152,44 @@ Consequences:
   sensitivity (a −10 bp print is −30 bp/day on an 8h name but −60 bp/day on
   a 4h name) is a design gap for any successor config, not a defect in the
   registered ones.
+
+### 2026-07-28 — canonical baselines after the correction (artifact cleanse)
+
+Owner-directed cleanse: old comparison baselines are retired, and the
+following are **the** citable truths until a recorded change point says
+otherwise.
+
+- **Deployed-sleeve baselines** — the comparison surface for any challenger:
+  `reports/equity_curves_2026-07-28/` (standard render, window 2023-03-13 →
+  2026-07-16, root `bybit_full_pit`, engine accounting — exact-stamp
+  settlements, single-count verified in `trade_lifecycle._funding_lookup` /
+  `_perp_funding_return` on 2026-07-28; handles 1h/2h/4h cadences by
+  construction).
+  - **CONTINUOUS** (deployed `active_single_fund0_tp12_sl35_v1`, hedged, 1×
+    modeled): **+11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80**, worst day
+    −0.81%, 655 trades — reproduces the promotion-note render exactly.
+  - **LONG** (`LongV11aDivWeekendVol`, research 1× sizing; the deployed
+    account runs the same signal at the 0.5 dial): **+30.98% / maxDD −3.66%
+    / Sharpe 1.84 / MAR 2.53**, worst day −1.50%, 205 trades. Tail-dependent
+    as always documented (2023-10 alone is +11.4%).
+- **Registered-config truth table**:
+  `reports/financed_longs_corrected_2026-07-28/` plus §0 of
+  `docs/research_2026-07-26_financed_longs.md` — the only citable
+  financed-longs numbers. Corrected carry_hold artifacts:
+  `reports/carry_hold_equity_2026-07-28/`,
+  `reports/carry_hold_trade_diagnostics_2026-07-28/`.
+- **Superseded snapshots** moved to `reports/_superseded_2026-07-28/`
+  (defect-era financed-longs outputs, the single_fund0 parity decomposition,
+  the ladder-mechanism snapshot, and the entire pre-reset ≤2026-06 sweep
+  layer); the README inside maps each to its replacement. Two dirs are
+  deliberately retained in place as **frozen inputs of the registered
+  admission-variant scorer**, not as baselines:
+  `equity_curves_sl35_2026-07-26/` (the retired 3-cell render) and
+  `continuous_redesign_2026-07-26/`.
+- **Rule**: any pre-2026-07-28 number whose funding leg came through the
+  cross-venue panel is non-citable unless re-derived on the corrected
+  scorer. Historical evidence notes stand as receipts with their correction
+  sections; they are not comparison surfaces.
 
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
