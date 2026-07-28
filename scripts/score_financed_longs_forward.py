@@ -43,10 +43,15 @@ DEFAULT_LEDGER = (
 DEFAULT_CONFIGS = (
     "lane2_carry_hold_v1.json",
     "lane2_carry_hold_v2.json",
+    "lane2_carry_hold_v3.json",
     "lane2_financed_leaders_v1.json",
     "lane2_financed_leaders_binance_v1.json",
 )
 DIFF_ID = "carry_hold_v2_minus_v1"
+DIFF_PAIRS = (
+    ("carry_hold_v2_minus_v1", "lane2_carry_hold_v2", "lane2_carry_hold_v1"),
+    ("carry_hold_v3_minus_v2", "lane2_carry_hold_v3", "lane2_carry_hold_v2"),
+)
 PANEL_COLS = [
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
     "by_funding_age_h", "bn_close", "bn_turnover_quote", "bn_funding", "bn_funding_age_h",
@@ -97,26 +102,35 @@ def config_rows(
 
 
 def diff_rows(rows: pl.DataFrame) -> pl.DataFrame:
-    """Paired daily differential carry_hold v2 - v1 on shared dates."""
-    v2 = rows.filter(pl.col("config_id") == "lane2_carry_hold_v2")
-    v1 = rows.filter(pl.col("config_id") == "lane2_carry_hold_v1").select(
-        "date",
-        pl.col("gross_bp").alias("_g"),
-        pl.col("oneway").alias("_o"),
-        pl.col("cost_bp").alias("_c"),
-        pl.col("net_bp").alias("_n"),
-    )
-    return v2.join(v1, on="date", how="inner").select(
-        "date",
-        pl.lit(DIFF_ID).alias("config_id"),
-        "venue",
-        (pl.col("gross_bp") - pl.col("_g")).round(6).alias("gross_bp"),
-        (pl.col("oneway") - pl.col("_o")).round(8).alias("oneway"),
-        (pl.col("cost_bp") - pl.col("_c")).round(6).alias("cost_bp"),
-        (pl.col("net_bp") - pl.col("_n")).round(6).alias("net_bp"),
-        "forward_eligible",
-        "scored_at",
-    )
+    """Paired daily differentials (v2-v1, v3-v2) on shared dates."""
+    out: list[pl.DataFrame] = []
+    for diff_id, a_id, b_id in DIFF_PAIRS:
+        a = rows.filter(pl.col("config_id") == a_id)
+        b = rows.filter(pl.col("config_id") == b_id).select(
+            "date",
+            pl.col("gross_bp").alias("_g"),
+            pl.col("oneway").alias("_o"),
+            pl.col("cost_bp").alias("_c"),
+            pl.col("net_bp").alias("_n"),
+        )
+        if a.is_empty() or b.is_empty():
+            continue
+        out.append(
+            a.join(b, on="date", how="inner").select(
+                "date",
+                pl.lit(diff_id).alias("config_id"),
+                "venue",
+                (pl.col("gross_bp") - pl.col("_g")).round(6).alias("gross_bp"),
+                (pl.col("oneway") - pl.col("_o")).round(8).alias("oneway"),
+                (pl.col("cost_bp") - pl.col("_c")).round(6).alias("cost_bp"),
+                (pl.col("net_bp") - pl.col("_n")).round(6).alias("net_bp"),
+                "forward_eligible",
+                "scored_at",
+            )
+        )
+    if not out:
+        return rows.clear()
+    return pl.concat(out, how="vertical")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -206,6 +206,97 @@ class TestDepthScaling:
         assert out["days"] > 0
 
 
+class TestV3Filters:
+    """v3: toxic-band block/suspend, dead-name vol floor, recovery-velocity exit.
+
+    Each feature is exercised in isolation via dataclasses.replace so a failure
+    names its filter; the committed JSON is round-tripped and run end-to-end.
+    v1/v2 behaviour is pinned unchanged by the existing classes (all v3 fields
+    default off).
+    """
+
+    def test_v3_config_round_trip(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v3.json")
+        assert cfg.config_id == "lane2_carry_hold_v3"
+        assert cfg.toxic_band_ret3d == (-0.30, -0.05)
+        assert cfg.min_vol30_daily == 0.05
+        assert cfg.trail_recovery_exit_bp_2d == 30.0
+        assert cfg.depth_ref_bp_per_day == 120.0  # v2 sizing carried forward
+
+    def test_toxic_band_blocks_entry(self, carry_cfg: CarryHoldConfig) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(carry_cfg, toxic_band_ret3d=(-0.30, -0.05))
+        # S01 grinds down ~-10% per 3d (in band); S02 flat (out of band).
+        panel = _panel(
+            hours=1100,
+            funding_bp={"S01USDT": [-15.0], "S02USDT": [-15.0]},
+            drift={"S01USDT": -0.0015},
+        )
+        w = carry_hold_weights(_universe(panel), cfg)
+        assert w.filter(pl.col("symbol") == "S01USDT").height == 0
+        assert w.filter(pl.col("symbol") == "S02USDT").height > 0
+
+    def test_capitulation_below_band_still_enters(self, carry_cfg: CarryHoldConfig) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(carry_cfg, toxic_band_ret3d=(-0.30, -0.05))
+        # -0.006/h -> 3d return ~-35%, BELOW the band: the U-shape keeps it.
+        panel = _panel(hours=1100, funding_bp={"S01USDT": [-15.0]}, drift={"S01USDT": -0.006})
+        w = carry_hold_weights(_universe(panel), cfg)
+        assert w.filter(pl.col("symbol") == "S01USDT").height > 0
+
+    def test_vol_floor_blocks_dead_names(self, carry_cfg: CarryHoldConfig) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(carry_cfg, min_vol30_daily=0.05)
+        # Funding turns deep only AFTER the ~744h vol warm-up, so the entry
+        # attempt happens with a KNOWN zero vol (flat price): blocked under the
+        # v3 floor (entry-only; a null vol fails open by design), held by v1.
+        pattern = [1.0] * 95 + [-15.0] * 43
+        panel = _panel(hours=1100, funding_bp={"S01USDT": pattern})
+        u = _universe(panel)
+        deep = u.filter((pl.col("symbol") == "S01USDT") & (pl.col("by_funding") < -10.0 / 1e4))
+        assert deep.height > 0 and deep["vol_30d_daily"].is_not_null().all(), (
+            "fixture must attempt entry only after the vol warm-up"
+        )
+        assert carry_hold_weights(u, cfg).filter(pl.col("symbol") == "S01USDT").height == 0
+        assert carry_hold_weights(u, carry_cfg).filter(pl.col("symbol") == "S01USDT").height > 0
+
+    def test_recovery_velocity_exits_the_state(self, carry_cfg: CarryHoldConfig) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(carry_cfg, trail_recovery_exit_bp_2d=30.0)
+        # Deep -15 bp prints, then -4 bp prints: -4 < -3 keeps the v1 state
+        # forever, but the trailing daily rate recovers -45 -> -12 bp/day
+        # (+33 bp over 2d) and the velocity exit ends it; -4 bp never
+        # re-qualifies (-4 > -10).
+        n = 1100 // 8
+        pattern = [-15.0] * (n // 2) + [-4.0] * (n - n // 2)
+        panel = _panel(hours=1100, funding_bp={"S01USDT": pattern})
+        u = _universe(panel)
+        with_vel = carry_hold_weights(u, cfg).filter(pl.col("symbol") == "S01USDT")
+        without = carry_hold_weights(u, carry_cfg).filter(pl.col("symbol") == "S01USDT")
+        assert with_vel.height > 0
+        assert with_vel["bar_ts_ms"].max() < without["bar_ts_ms"].max()
+
+    def test_enabled_features_fail_closed_without_columns(self, carry_cfg: CarryHoldConfig) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(carry_cfg, toxic_band_ret3d=(-0.30, -0.05))
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        u = _universe(panel).drop("ret_3d")
+        with pytest.raises(FinancedLongsError, match="ret_3d"):
+            carry_hold_weights(u, cfg)
+
+    def test_score_carry_hold_v3_end_to_end(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v3.json")
+        panel = _panel(hours=1100, funding_bp={"S01USDT": [-15.0]})
+        out = score_carry_hold(panel, cfg)
+        assert out["config_id"] == "lane2_carry_hold_v3"
+        assert "days" in out
+
+
 class TestFinancedLeaders:
     def test_funding_cap_excludes_paying_longs(self, leaders_cfg: FinancedLeadersConfig) -> None:
         # S01 rallies with negative funding (financed); S02 rallies with positive.

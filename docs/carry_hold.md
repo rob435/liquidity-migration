@@ -47,6 +47,17 @@ per-print acuteness is load-bearing).
   18.0 bp/day, paired t −0.4), max DD −60.0% → −48.6%, Sharpe 1.02 → 1.11,
   MAR 0.97 → 1.25, turnover −27%. v1 keeps scoring; the paired daily
   differential is the primary forward comparison.
+- **`configs/lane2_carry_hold_v3.json` is registered** (same-day wave 2):
+  v2 plus a toxic-band filter (no entries, holds suspended, while the 3d
+  return sits in [−30%, −5%) — the shorts-slowly-winning cohort), a 5%/day
+  minimum-vol entry floor (pinned prices have no squeeze fuel), and a
+  +30 bp/2d trail-recovery exit (squeeze over). Seen-data: Sharpe 1.38 /
+  MAR 2.84 / DD −28.7% vs v2's 1.09 / 1.21 / −48.6%. Read its
+  `honesty_notes` before quoting any number: the single-clock level rides
+  midnight decision-hour luck (12-offset sweep 0.30–1.52; ensemble ~1.2),
+  the daily frame carries a terminal-day look-ahead (~+0.13), and the
+  owner's unconditional Sharpe-2 target was NOT reached — the supportable
+  version is conditional (2.15–2.35 on the PIT deep-funding half of days).
 
 ## 1. The trade in one paragraph
 

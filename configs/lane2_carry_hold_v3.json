@@ -1,0 +1,91 @@
+{
+  "config_id": "lane2_carry_hold_v3",
+  "registered": "2026-07-28",
+  "lane": 2,
+  "surface": "research-only",
+  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
+  "descends_from": "lane2_carry_hold_v2 (which keeps scoring; v3 adds three filters selected in the same-day wave-2 review)",
+  "claim": "v2's book (enter on a settled print < -10 bp, hysteresis exit above -3 bp, weight = 0.10 x clip(|trailing 24h settled funding|/120bp-day, 0.25, 1)) plus three mechanism-grounded filters: (1) no entry, and holds suspend to zero weight, while the trailing 3d return sits in [-30%, -5%) — the moderate-grind-down cohort where shorts are slowly RIGHT (-114 bp/name-day at Sharpe -2.1; capitulation below and stabilization above both stay, the relationship is U-shaped); (2) no entry while trailing 30d daily vol < 5% — a pinned price has no squeeze fuel (-77 bp/nd); (3) exit when the trailing daily funding rate recovers by > 30 bp over 2 days — the squeeze is over (-54 bp/nd from there). Corrected module-path, 2021-01..2026-07-27: 19.8 bp/day, t 3.13, Sharpe 1.38 (v2: 1.09), max DD -28.7% (v2 -48.6%), MAR 2.84 (v2 1.21), turnover 0.156 (v2 0.198); bench window Sharpe 1.71 / MAR 4.84 (v2 1.35/1.95). Paired differential vs v2 +3.1 bp/day (t 1.6).",
+  "honesty_notes": {
+    "sharpe_2_goal": "The owner's target of unconditional Sharpe >= 2 was NOT reached and is judged not honestly reachable for this mechanism family at measured costs: ~95 wave-2 cells across entry/exit/sizing/signal/clock levers plateau at ~1.4-1.55 single-clock full-window. The supportable Sharpe-2 statement is CONDITIONAL: on the PIT deep-funding-regime half of days (30d rolling median of universe funding prints below ~0.6 bp), the book runs at conditional Sharpe 2.15-2.35; on the shallow half it is EV-noise (1-5 bp/day). The strategy IS a Sharpe-2 strategy when its premium regime is on, and a no-trade otherwise; regime-scaling overlays do NOT rescue the pooled number (tested, reported).",
+    "decision_clock_fragility": "Single-clock numbers ride decision-hour luck: the same construction swept over 12 daily-grid offsets spans Sharpe 0.30-1.52 (midnight — the clock every registered financed-longs number uses — is the best cell; settlement-aligned offsets 8h/16h score 0.73/1.04, refuting a freshness explanation). The offset-ensemble honest level for this construction is ~1.2 full / ~1.5 bench. The FILTERS' improvement over v2 is clock-robust (better at 2 of 3 stale offsets tested, tied with better DD on the third), which is exactly what the paired forward differential v3-v2 measures.",
+    "frame_caveat": "The registered daily frame structurally exits every name 24h before its final panel bar (prepare()'s forward-return requirement) — an implicit look-ahead terminal-dump dodge measured at roughly +0.13 Sharpe (hourly-frame check; flips 2022's sign). It affects every financed-longs number equally, v1 through v3 and the seen-data/benchmark comparisons alike.",
+    "print_clock": "An hourly print-clock variant (decide within the hour of each funding print) was tested and FAILS catastrophically in 2026 (-94 bp/day era): entering within the hour of a deep print during a cascade catches knives; the daily clock's staleness is partially an implicit survived-to-the-bar filter. Do not rebuild without a persistence mechanism."
+  },
+  "rule": {
+    "universe": {
+      "venue": "bybit",
+      "rank_by": "trailing_24h_quote_turnover",
+      "top_n": 100,
+      "note": "identical to v1/v2"
+    },
+    "state": {
+      "type": "per_name_hysteresis_long",
+      "enter_below_funding_bp": 10.0,
+      "exit_above_funding_bp": 3.0,
+      "exit_on_trail_recovery_bp_2d": 30.0,
+      "signal": "last settled funding rate at the decision bar (by_funding); trailing daily rate for the recovery exit",
+      "note": "entry/exit prints identical to v1/v2; the recovery exit ends the state, and a fresh qualifying print that passes the filters re-enters. Sensitivity {20,30,40} bp is flat."
+    },
+    "filters": {
+      "toxic_band_ret_3d": {
+        "lo": -0.30,
+        "hi": -0.05,
+        "note": "blocks entries AND suspends holds to zero weight inside the band. Direction era-consistent (mid-band minus rest: -175/-18/-273/-314 bp across 21-22/23-24/25/26); boundary sensitivity {(-25,-5),(-30,-10),(-35,-5)} flat. A null ret_3d (young history) fails open."
+      },
+      "min_vol_30d_daily": 0.05,
+      "min_vol_note": "trailing 30d std of 24h returns; entry-only; null fails open"
+    },
+    "sizing": {
+      "per_name_cap": 0.1,
+      "gross_cap": 1.0,
+      "depth_scaling": {"basis": "trail_fund_24h", "ref_bp_per_day": 120.0, "floor": 0.25, "note": "identical to v2"},
+      "rejected_in_review": "per-name vol normalization (premium scales with vol; Sharpe falls), shallower entries at -5 bp (adds junk even filtered), per-name cap 0.15/0.20 (scales mean AND vol, Sharpe pinned; MAR rises — a sizing decision for an owner, not a Sharpe fix), spell-loss floors (no effect), regime-scaling overlays (pooled-variance arithmetic defeats them)"
+    },
+    "risk": {
+      "vol_target_annual": 0.15,
+      "vol_lookback_days": 30,
+      "max_leverage": 3.0,
+      "note": "recipe comparability only; the vol-target overlay is harmful on corrected accounting for all versions. RAW is primary."
+    }
+  },
+  "cost_model": {
+    "measured_fee_side_bp": 7.78,
+    "charging": "measured one-way turnover x fee per side, per day, identical to v1/v2",
+    "funding": "settlement_exact (2026-07-28 corrected detector)",
+    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"]
+  },
+  "scoring_recipe": {
+    "metric": "mean net bp per day and annualised Sharpe on the raw daily series",
+    "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "paired daily differentials vs lane2_carry_hold_v2 AND lane2_carry_hold_v1 on shared days"],
+    "comparator": "lane2_carry_hold_v2's forward rows (the paired differential isolates the filters, which is the clock-robust claim), plus v1, the deployed CONTINUOUS render, and zero",
+    "grid": "none; single committed configuration",
+    "cadence": "one row per completed UTC day after the registration commit (scripts/score_financed_longs_forward.py)",
+    "eligibility": "only days strictly after the registration commit date count as forward evidence",
+    "reproduce_with": "liquidity_migration.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
+  },
+  "measured_at_registration": {
+    "basis": "CORRECTED settlement-exact scorer, module path, panel 2021-01-01..2026-07-28 (seen data; Lane-1 selection, not evidence)",
+    "days": 1894,
+    "mean_net_bp_per_day": 19.83,
+    "t_stat": 3.13,
+    "sharpe_raw": 1.38,
+    "total_return_raw_pct": 2097,
+    "max_drawdown_raw_pct": -28.7,
+    "mar_raw": 2.84,
+    "mean_oneway_turnover": 0.156,
+    "era_net_bp_per_day": {"2021": 1.4, "2022": 4.5, "2023": 10.8, "2024": 8.4, "2025": 41.7, "2026": 64.7},
+    "v2_same_basis": {"mean_net_bp_per_day": 16.74, "t_stat": 2.47, "sharpe_raw": 1.09, "max_drawdown_raw_pct": -48.6, "mar_raw": 1.21, "mean_oneway_turnover": 0.198},
+    "benchmark_window_2023_03_13_to_2026_07_16": {"sharpe_raw": 1.71, "mar_raw": 4.84, "max_drawdown_raw_pct": -28.7, "v2_same_basis": {"sharpe_raw": 1.35, "mar_raw": 1.95}},
+    "paired_differential_vs_v2": {"mean_bp_per_day": 3.09, "t_stat": 1.64, "note": "the registered forward experiment"},
+    "multiple_testing": "wave-2 ran ~95 seen-data cells (all reported in docs/research_2026-07-28_carry_hold_quant_review.md §9); t 3.13 sits at the program's ~3.4 historical bar, and the filters are refinements of a registered mechanism with declared-before-tested diagnostics and era-consistent direction — the forward differential grades them",
+    "provenance": "Selected 2026-07-28 by wave-2 of the carry-hold quant review on seen data. Diagnostics (U-shape, dead-name, recovery-velocity) were declared with mechanisms before their conditional tables ran; the offset sweep and hourly engine were robustness probes whose adverse findings are recorded above rather than hidden."
+  },
+  "known_weaknesses": [
+    "inherits every v1/v2 weakness: concentrated (~3-4 names when active), long-only crash beta, single-venue (Bybit) evidence, capacity ~$1M at 1% participation",
+    "REGIME BET deepened vs v2: 2023-24 era means fall to 10.8/8.4 bp/day (v2: 14.4/12.7) while 2025-26 rise to 41.7/64.7 (v2: 32.6/38.5); if funding microstructure normalizes to 2023 shape the filters cost more than they save",
+    "single-clock level is decision-hour-lucky (see honesty_notes); trust the paired differentials and the offset-ensemble level, not the midnight level",
+    "the three filters were selected from in-sample conditional tables in the same review that registered them; their t-stats individually are modest and their joint selection is exactly what the forward record must grade",
+    "the terminal-day frame caveat applies to every number above"
+  ]
+}

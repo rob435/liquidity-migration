@@ -96,6 +96,16 @@ class CarryHoldConfig:
     max_leverage: float
     depth_ref_bp_per_day: float | None = None
     depth_floor: float = 0.25
+    #: v3 filters (2026-07-28 wave-2 review). All default OFF so v1/v2 are
+    #: bit-identical. toxic_band: no entry, and holds suspend to zero weight,
+    #: while the trailing 3d return sits in [lo, hi) — the moderate-grind-down
+    #: cohort where shorts are slowly right. min_vol30: no entry while the
+    #: trailing 30d daily vol is below the floor (pinned price, no squeeze
+    #: fuel). trail_recovery_exit: state ends when the trailing daily funding
+    #: rate has RECOVERED by more than this many bp over 2 days (squeeze over).
+    toxic_band_ret3d: tuple[float, float] | None = None
+    min_vol30_daily: float | None = None
+    trail_recovery_exit_bp_2d: float | None = None
 
     @classmethod
     def from_json(cls, path: str | Path) -> "CarryHoldConfig":
@@ -107,6 +117,9 @@ class CarryHoldConfig:
                 f"unsupported depth_scaling basis {depth.get('basis')!r}; "
                 "only 'trail_fund_24h' is implemented"
             )
+        filters = rule.get("filters") or {}
+        band = filters.get("toxic_band_ret_3d")
+        exit_vel = rule["state"].get("exit_on_trail_recovery_bp_2d")
         return cls(
             config_id=payload["config_id"],
             venue=rule["universe"]["venue"],
@@ -123,6 +136,17 @@ class CarryHoldConfig:
                 float(depth["ref_bp_per_day"]) if depth is not None else None
             ),
             depth_floor=float(depth["floor"]) if depth is not None else 0.25,
+            toxic_band_ret3d=(
+                (float(band["lo"]), float(band["hi"])) if band is not None else None
+            ),
+            min_vol30_daily=(
+                float(filters["min_vol_30d_daily"])
+                if filters.get("min_vol_30d_daily") is not None
+                else None
+            ),
+            trail_recovery_exit_bp_2d=(
+                float(exit_vel) if exit_vel is not None else None
+            ),
         )
 
 
@@ -221,11 +245,22 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
             .rolling_sum(24).over("symbol").alias("trail_fund_24h"),
             (close.shift(-24).over("symbol") / close - 1.0).alias("price_return"),
             (close / close.shift(momentum_lookback_hours).over("symbol") - 1.0).alias("momentum"),
+            # v3 conditioning variables, all PIT at bars <= t: trailing 3d
+            # return, trailing 30d vol of 24h returns (shifted a bar), and the
+            # 2d change in the trailing daily funding rate.
+            (close / close.shift(72).over("symbol") - 1.0).alias("ret_3d"),
+            (close / close.shift(24).over("symbol") - 1.0).alias("_r24"),
             (
                 pl.col("bar_ts_ms").shift(-24).over("symbol") - pl.col("bar_ts_ms") == 24 * HOUR_MS
             ).alias("contiguous"),
         ]
     )
+    frame = frame.with_columns(
+        pl.col("_r24").rolling_std(720).shift(1).over("symbol").alias("vol_30d_daily"),
+        (pl.col("trail_fund_24h") - pl.col("trail_fund_24h").shift(48).over("symbol")).alias(
+            "dtrail_2d"
+        ),
+    ).drop("_r24")
     frame = frame.filter(
         pl.col("contiguous")
         & pl.col("price_return").is_finite()
@@ -304,30 +339,49 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
     """
     enter, exit_ = cfg.enter_bp / 1e4, cfg.exit_bp / 1e4
     sized = cfg.depth_ref_bp_per_day is not None
-    if sized and "trail_fund_24h" not in universe.columns:
+    banded = cfg.toxic_band_ret3d is not None
+    volfloored = cfg.min_vol30_daily is not None
+    veled = cfg.trail_recovery_exit_bp_2d is not None
+    need = ["trail_fund_24h"] * sized + ["ret_3d"] * banded + ["vol_30d_daily"] * volfloored + ["dtrail_2d"] * veled
+    missing = [c for c in dict.fromkeys(need) if c not in universe.columns]
+    if missing:
         raise FinancedLongsError(
-            f"{cfg.config_id}: depth_scaling requires the prepared "
-            "trail_fund_24h column"
+            f"{cfg.config_id}: enabled features require prepared columns {missing}"
         )
-    cols = ["bar_ts_ms", "symbol", "by_funding"] + (["trail_fund_24h"] if sized else [])
+    cols = ["bar_ts_ms", "symbol", "by_funding", *dict.fromkeys(need)]
     d = (
         universe.select(cols)
         .drop_nulls(subset=["by_funding"])
         .sort(["symbol", "bar_ts_ms"])
     )
     ref = (cfg.depth_ref_bp_per_day or 0.0) / 1e4
+    band_lo, band_hi = cfg.toxic_band_ret3d or (0.0, 0.0)
+    vel_thr = (cfg.trail_recovery_exit_bp_2d or 0.0) / 1e4
     rows: dict[str, list] = {"bar_ts_ms": [], "symbol": [], "w": []}
     for (sym,), g in d.group_by("symbol", maintain_order=True):
         fv = g["by_funding"].to_numpy()
         tr = g["trail_fund_24h"].to_numpy() if sized else None
+        bd = g["ret_3d"].to_numpy() if banded else None
+        vf = g["vol_30d_daily"].to_numpy() if volfloored else None
+        vl = g["dtrail_2d"].to_numpy() if veled else None
         ts = g["bar_ts_ms"].to_numpy()
         state = False
         for i in range(len(ts)):
             if state and not (fv[i] < -exit_):
                 state = False
+            if state and veled and vl is not None and math.isfinite(vl[i]) and vl[i] > vel_thr:
+                state = False
             if fv[i] < -enter:
-                state = True
+                # Filters block ENTRY only on known-bad values; a null
+                # conditioning value fails open (young history), documented in
+                # the v3 registration.
+                in_band = bd is not None and math.isfinite(bd[i]) and band_lo <= bd[i] < band_hi
+                dead = vf is not None and math.isfinite(vf[i]) and vf[i] < (cfg.min_vol30_daily or 0.0)
+                if not ((banded and in_band) or (volfloored and dead)):
+                    state = True
             if state:
+                if banded and bd is not None and math.isfinite(bd[i]) and band_lo <= bd[i] < band_hi:
+                    continue  # hold suspends to zero weight while in the band
                 w = cfg.per_name_cap
                 if sized and tr is not None:
                     depth = abs(tr[i]) if math.isfinite(tr[i]) else 0.0

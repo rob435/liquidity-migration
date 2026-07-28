@@ -221,6 +221,40 @@ this commit. Five-line summary:
    recipe's vol-target overlay hurts both versions on corrected accounting
    (raw is the primary basis).
 
+### 2026-07-28 — wave 2 (owner Sharpe-2 goal): `lane2_carry_hold_v3`; two integrity findings; data refreshed
+
+Full tables: `docs/research_2026-07-28_carry_hold_quant_review.md` §9.
+Change point: this commit. Summary:
+
+1. **Registered `lane2_carry_hold_v3`** — v2 plus three filters with
+   declared mechanisms (toxic-band [−30%,−5%) 3d-return block/suspend;
+   min 5%/day 30d-vol entry floor; +30 bp/2d trail-recovery exit).
+   Module path: 19.8 bp/day, t 3.13, Sharpe 1.38 / MAR 2.84 / DD −28.7%
+   (v2: 1.09 / 1.21 / −48.6%); bench window 1.71 / 4.84. The paired daily
+   differential vs v2 (+3.1 bp/day seen-data) is the forward experiment;
+   v1 and v2 keep scoring.
+2. **The owner's unconditional Sharpe ≥ 2 target was NOT reached** — ~95
+   cells plateau at ~1.4–1.55 single-clock; the honest supportable
+   statement is CONDITIONAL: Sharpe 2.15–2.35 on the PIT deep-funding
+   half of days, EV-noise on the shallow half. Every refuted lever is
+   tabled in the review doc.
+3. **Integrity findings that apply program-wide**: (a) single-clock
+   financed-longs numbers ride midnight decision-hour luck (12-offset
+   sweep spans 0.30–1.52; ensemble level ~1.2 full / ~1.5 bench); the v3
+   filters' improvement is clock-robust, the LEVEL is not; (b) the daily
+   frame's forward-return requirement is an implicit look-ahead that
+   exits names 24h before their final bar (~+0.13 Sharpe, flips 2022);
+   (c) a print-clock variant knife-catches in 2026 (−94 bp/day era) —
+   parked without a persistence mechanism.
+4. **Data**: research refresh completed (both venues through 2026-07-27);
+   the Binance rmom append-overlap guard fired and was run to ground —
+   stored artifact irreproducible from byte-identical inputs by any code
+   vintage (pre-M9 duplicate-sweeping read at write time is the leading
+   explanation); both rmom artifacts force-rewritten per the guard's own
+   instructions (496,685 / 467,525 rows), unifying on the post-M21
+   definition. Panel rebuilt 2021→2026-07-27; ledger history verified
+   byte-stable; forward ledger live with v3 and both paired differentials.
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
@@ -739,15 +773,17 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research_2026-07-26_financed_longs.md` with the 22-row
       negative-results ledger.
-- [ ] Score the four financed-longs configs on each new completed UTC day
+- [ ] Score the five financed-longs configs on each new completed UTC day
       (rolling forward record; the registration commit is the change point;
-      since 2026-07-28 the scorer charges each settlement exactly once, and
-      `lane2_carry_hold_v2` scores beside v1 with the paired daily
-      differential as the primary comparison). Tooling exists since
-      2026-07-28: `scripts/score_financed_longs_forward.py` appends
+      since 2026-07-28 the scorer charges each settlement exactly once;
+      `lane2_carry_hold_v2`/`v3` score beside v1 with the paired daily
+      differentials v2−v1 and v3−v2 as the primary comparisons). Tooling:
+      `scripts/score_financed_longs_forward.py` appends
       `reports/financed_longs_forward/ledger.csv` (append-first, idempotent,
-      `forward_eligible` flagged); the remaining work is refreshing the
-      panel past 2026-07-17 and running it each day.
+      `forward_eligible` flagged). Panel refreshed through 2026-07-27 on
+      2026-07-28; the daily sequence is research-refresh → panel 2026
+      rebuild (`scripts/build_cross_venue_panel.py --start 2021-01-01`,
+      full rebuild — the index is whole-file) → ledger append.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
       funding-leg numbers (leg-attribution reversal, dispersion-gate

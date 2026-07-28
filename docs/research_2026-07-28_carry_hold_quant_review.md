@@ -228,3 +228,99 @@ Post-2025, p95 entry participation crosses 1% of a name's daily volume at a
 defensible at the current envelope and stops being conservative well before
 $5M. This is a small-book premium stream; the config's "not a large-book
 claim" now has numbers.
+
+## 9. Wave 2 — owner goal "Sharpe ≥ 2"; `lane2_carry_hold_v3` registered
+
+Same-day second wave against the owner's explicit target of unconditional
+Sharpe ≥ 2 on this book. ~95 cells across entry / exit / sizing / signal /
+clock levers; every batch's full table is in the review dir
+(`wave2_*.txt/json`, `ensemble_output.txt`, `hourly_engine_output.txt`).
+**The target was NOT reached and is judged not honestly reachable for this
+mechanism family at measured costs.** What was reached, and what was learned:
+
+### 9.1 Levers that survived (→ v3)
+
+Declared with mechanisms before their conditional tables ran; direction
+era-consistent (adverse only in 2023-24, the same regime bet v2 makes):
+
+- **Toxic-band filter**: the forward net of qualifying names is U-shaped in
+  the trailing 3d return — capitulation (<−30%) pays +266 bp/nd and
+  stabilized (>−5%) pays +161, but the moderate-grind-down middle
+  ([−30%,−5%)) loses −114 bp/nd at Sharpe −2.1 (30% of qualifying
+  name-days): shorts pressing and slowly *winning*. v3 blocks entries and
+  suspends holds there.
+- **Dead-name floor**: deep-funding names with trailing 30d vol < 5%/day
+  lose −77 bp/nd — a pinned price has no squeeze fuel. Entry-only floor.
+- **Recovery-velocity exit**: once the trailing daily rate recovers by
+  >30 bp over 2d, remaining hold loses −54 bp/nd — the squeeze is over.
+
+Module-path v3 (panel through 2026-07-27): **19.8 bp/day, t 3.13, Sharpe
+1.38, max DD −28.7%, MAR 2.84, turnover 0.156** (v2 same basis: 1.09,
+−48.6%, 1.21, 0.198); bench window **1.71 / MAR 4.84** (v2 1.35/1.95).
+Paired differential vs v2: +3.1 bp/day (t 1.6) — the registered forward
+experiment.
+
+### 9.2 Levers refuted (all cells reported)
+
+Print-trend at entry (dead); spell-age/spell-loss exits and floors (dead);
+per-name vol normalization (the premium scales WITH vol — Sharpe falls);
+shallower −5 bp entries (junk even filtered); per-name caps 0.15/0.20
+(mean and vol scale together — Sharpe pinned at ~1.5 while MAR rises to
+~4: a sizing decision for an owner, not a Sharpe fix); breadth tilts and
+every regime-scaling overlay (the pooled-variance arithmetic defeats them —
+the deep-regime variance dominates the pool at any scaling); band-only-when-
+shallow (worse); X1/band boundary grids (flat plateaus).
+
+### 9.3 The conditional Sharpe-2 statement (the honest version of the goal)
+
+On the PIT deep-funding regime (30d rolling median of universe funding
+prints, lagged; the deeper HALF of days): the improved book runs at
+**conditional Sharpe 2.15–2.35** (49.1 and 28.7 bp/day on the two deep
+quartiles). On the shallow half it is EV-noise (1.4–5.0 bp/day at 0.24–
+0.64). The strategy IS a Sharpe-2 strategy while its premium regime is on
+— which is a deployment-sizing fact, not a pooled-Sharpe fact.
+
+### 9.4 Program-level integrity findings (apply to v1/v2/v3 and the
+benchmark comparisons alike)
+
+- **Decision-clock fragility**: the identical construction swept over 12
+  daily-grid offsets spans Sharpe **0.30–1.52**; midnight — the clock every
+  registered financed-longs number uses — is the best cell. Settlement-
+  aligned offsets (8h/16h, where the 00/08/16 cohort's prints are age-zero)
+  score 0.73/1.04, refuting a freshness explanation: midnight is
+  substantially luck. The offset-ensemble (8 offsets, equal capital) is the
+  honest level: **~1.2 full / ~1.5 bench** for the v3 construction. The
+  FILTERS' improvement over v2 is clock-robust (better at 2 of 3 stale
+  offsets, tied with better DD on the third) — which is what the registered
+  paired differential measures.
+- **Terminal-day dodge**: `prepare()`'s forward-return requirement makes
+  every daily-frame book exit each name 24h before its final panel bar —
+  an implicit look-ahead that dodges terminal delisting dumps, measured at
+  roughly **+0.13 Sharpe** (hourly-frame check; flips 2022's sign). All
+  published financed-longs numbers share it; cross-config comparisons
+  remain fair.
+- **Print-clock knife-catching**: deciding within the hour of each funding
+  print (the "natural clock") collapses in 2026 (−94 bp/day era): an
+  intraday deep print during a cascade is an invitation to catch a knife,
+  and the daily clock's staleness doubles as a survived-to-the-bar filter.
+  An hourly variant needs a persistence mechanism; parked.
+
+### 9.5 Same-day operational receipt — refresh + rmom overlap incident
+
+The append-first research refresh (both venues, tail mode) ran to
+completion after two instructive failures: (1) it refuses a dirty tree
+(by design); (2) `features.binance.residual_momentum` tripped its
+append-overlap guard (values moved, max 0.019). Investigation: population
+identical, end-window and pre-M21-code rebuilds identical, and even the
+full Jul-17 package on today's byte-identical inputs cannot reproduce the
+stored artifact — the artifact's own last-refresh window is the
+irreproducible side, most plausibly the since-fixed pre-M9 full-directory
+read sweeping duplicate files at write time. Today's store passed the
+mandatory all-root validation. Remediation per the guard's own taxonomy:
+forced `--full-rewrite` of BOTH research rmom artifacts (bybit 496,685
+rows, binance 467,525 rows, through 2026-07-28), which also unifies them
+on the post-M21 calendar-grid definition. Deployed path unaffected (live
+roots always full-rewrite). Panel rebuilt 2021→2026-07-27 (11.73M rows;
+score-level history verified byte-stable against the ledger). Forward
+ledger live: `reports/financed_longs_forward/ledger.csv`, first eligible
+days land as the calendar delivers them.
