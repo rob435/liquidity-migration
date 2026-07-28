@@ -211,15 +211,17 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     assert "FALLBACK_OK" in proc.stdout
 
 
-def test_committed_sleeves_env_long_and_continuous_on() -> None:
-    # The committed file is the source of truth. LONG runs alongside continuous
-    # demo + paper. Each line must be systemd-EnvironmentFile-safe (plain KEY=value,
-    # no inline comment).
+def test_committed_sleeves_env_continuous_retired() -> None:
+    # The committed file is the source of truth. The CONTINUOUS sleeve was
+    # retired from demo AND paper by owner override on 2026-07-29 (see
+    # docs/preregistration/sleeve_kill_criteria_2026-07-20.md, retirement
+    # note); LONG stays on. Each line must be systemd-EnvironmentFile-safe
+    # (plain KEY=value, no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
         "LONG_SLEEVE": "on",
-        "CONTINUOUS_SLEEVE": "on",
-        "CONTINUOUS_PAPER_SLEEVE": "on",
+        "CONTINUOUS_SLEEVE": "off",
+        "CONTINUOUS_PAPER_SLEEVE": "off",
     }
     for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))

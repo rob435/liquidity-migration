@@ -112,3 +112,34 @@ day 180 retires the demo sleeve for capacity reasons, independent of sign.
 Nothing here creates real-money authority, changes the epoch, or resets any
 clock. Weekly checking is unchanged: `scripts/ops.sh kill-criteria`
 (exit 3 on any trip).
+
+## 2026-07-29 — CONTINUOUS retired from demo AND paper by owner override
+
+Five lines, per this document's own Process section:
+
+1. **What**: the CONTINUOUS sleeve (revision `active_single_fund0_tp12_sl35_v1`)
+   is retired from BOTH the demo and paper fleets — `deploy/sleeves.env`
+   `CONTINUOUS_SLEEVE=off`, `CONTINUOUS_PAPER_SLEEVE=off` — and replaced as
+   the deployed non-LONG sleeve by the CARRY sleeve (registered config
+   `lane2_carry_hold_v3`), which arrives in the immediately following change
+   with its own kill-criteria registration.
+2. **Why**: explicit owner instruction on 2026-07-28/29 ("depromote the
+   continuous strat from demo and paper, and replace it with this one"),
+   recorded as an operator override — not a K1/K2/K3 trip. No kill criterion
+   fired; the sleeve's last honest same-window render was Sharpe 1.45 /
+   +11.06% / max DD −1.84%.
+3. **Scope**: stronger than any registered trip (a trip prescribes demo-off,
+   paper-unchanged). Both toggles go off; existing CONTINUOUS/HEDGE exposure
+   is flattened through the account owner before the rollout, per the
+   standing flatness constraint. Unit files stay installed-but-disabled.
+4. **Clock consequences**: this document's CONTINUOUS K1/K2/K3 clauses stop
+   accruing at this change point — the frozen journal after retirement is a
+   retirement artifact, NOT a K2/K3 dead-run trip at epoch day 90. LONG
+   clauses are untouched and keep their clocks.
+5. **Evidence status**: the CONTINUOUS forward record through this change
+   point remains valid history under the Progressive Evidence Model;
+   re-promotion of any CONTINUOUS revision would be a fresh five-line note
+   plus change point, and would need a fresh universe/rule receipt pass.
+
+Nothing here creates real-money authority. `REAL_MONEY=false` and mainnet
+remain out of scope.
