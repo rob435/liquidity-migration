@@ -255,6 +255,26 @@ Change point: this commit. Summary:
    definition. Panel rebuilt 2021→2026-07-27; ledger history verified
    byte-stable; forward ledger live with v3 and both paired differentials.
 
+### 2026-07-28 — owner promotion: `lane2_carry_hold_v3` is the carry-family lead
+
+Owner decision, same day as registration. Change point: this commit. Five lines:
+
+1. **What**: `lane2_carry_hold_v3` is promoted to LEAD config of the
+   carry-hold family — the reference configuration for any future
+   implementation work (runtime design per `docs/carry_hold.md` §7).
+2. **Why**: owner selection after the 2026-07-28 quant review; seen-data
+   basis Sharpe 1.38 / MAR 2.84 / max DD −28.7% vs v1's 1.02/0.97/−60.0%,
+   with the review's honesty notes attached (clock luck, terminal-day
+   frame, conditional-regime characterization).
+3. **What changes operationally**: nothing live — the book has NO runtime,
+   no venue access, and this promotion creates none. v1/v2 keep scoring;
+   the ledger and paired differentials continue unchanged.
+4. **Evidence**: full trade diagnostics at
+   `reports/carry_hold_v3_trade_diagnostics_2026-07-28/` (1,670 trades,
+   replica validated bar-identical to the registered scorer).
+5. **Boundary**: demo/paper would require the §7 runtime build and its own
+   owner dispatch; REAL_MONEY remains a separate, narrow owner door.
+
 ### 2026-07-28 — wave 3: `lane2_funding_spread_v1`; the funding-carry program
 
 Review §10. Change point: this commit. Five lines:

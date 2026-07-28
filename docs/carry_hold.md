@@ -9,6 +9,10 @@ executable: `liquidity_migration/financed_longs.py`.
 
 Status: **Lane-2 registered, accruing a forward record since the registration
 commit. Not deployed. No runtime, no venue access, no real-money implication.**
+*(2026-07-28: the owner promoted `lane2_carry_hold_v3` to lead config of the
+family — the reference for any §7 implementation work. Research-only status
+unchanged; v1/v2 keep scoring. Trade diagnostics:
+`reports/carry_hold_v3_trade_diagnostics_2026-07-28/`.)*
 
 ## 0. 2026-07-28 correction — read this before any number below
 
