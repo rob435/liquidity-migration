@@ -380,3 +380,100 @@ would additionally need two-venue margin and leg-execution engineering
 
 Frame caveats from §9.4 (midnight clock for the directional leg,
 terminal-day dodge for both) still apply to every number above.
+
+## 11. Loser identification and the intraday stop grid (owner follow-up, same day)
+
+Owner question: most of the alpha is loss-avoidance — can losers be
+identified early? Two Lane-1 seen-data artifacts in
+`reports/carry_hold_v3_trade_diagnostics_2026-07-28/`:
+`losers_early_id_diagnostics.txt` and `intraday_stop_grid.txt`.
+
+### 11.1 Anatomy: the loss is one candle
+
+Of 1,670 v3 trades, 60.1% lose (mean loser −10.4%, mean winner +20.4% —
+the book is a right-skew harvest; the worst decile costs −361% book against
++375% total). But the losses are not processes, they are events:
+
+- median losing trade lasts 2 days; in 98% of losers a single daily candle
+  carries ≥ 50% of the loss (median worst-day share: 100%);
+- 88% of losers hit their maximum adverse excursion within 2 days of entry;
+- the median loser still RECEIVED +0.64% funding — price does the damage
+  (median −9.3%); only 71/1,003 losers had negative funding receipts.
+
+Early pain does not predict later pain: conditional on being ≥ 10%
+underwater after day 1 (n=136) the remainder of the trade still averages
+**+1.26%**; after day 2 (n=77) **+2.07%**. Only after day 3 does the deep
+bucket turn negative (−2.50%, n=49 — noise-sized). This is why every daily
+spell-floor cell (§9) was flat: cutting early losers forfeits EV.
+
+### 11.2 Entry screening cannot separate them
+
+The worst decile's entry fingerprint (deeper print −34 vs −22 bp, deeper
+trail −124 vs −97 bp/day, higher vol 10.4 vs 8.0%/day, MORE pumped: ret3d
++27% vs +14%) is the same fingerprint as the biggest winners. Entry ret3d
+buckets: the ≥ +50% "pumped" bucket has median **−6.4%** but mean **+8.2%**
+and the largest book contribution of any bucket (+187%). Losers and monster
+squeeze-winners are the same names at entry; blocking the fingerprint
+deletes the strategy. (The [−5%, 0) sliver just above the toxic band is
+mildly negative: mean −1.05%, −11% book — a possible small band extension.
+Cohorts that ARE structurally lossy: suspension-touched trades −6.5%
+(n=168), `open_at_series_end` −4.0% (n=70, −16% book over 5.5y).)
+
+### 11.3 The intraday stop grid — the last untested stop-family cell
+
+Design (declared first): trigger on cumulative held-path price return from
+entry, evaluated on hourly closes (panel has no highs/lows — detection
+conservative); thresholds −10/−15/−20/−25/−30%; fills at trigger-bar close
+(A) and next-bar close (B, primary); stop kills the spell (no re-entry
+until the original spell would have ended); settlement-exact funding
+credited up to the fill bar; stop fee 7.78 bp × w. Counterfactual built as
+exact per-day deltas on the registered `scores_v3_module` series (baseline
+mean/t/Sharpe reproduce 19.83/3.13/1.376 to the digit). Alignment: 3,314
+held-day starts checked against hourly bars — 0 missing, 0 price
+mismatches. DD/MAR in this table are on this script's arithmetic-cumsum
+basis (baseline −31.1%/2.32; the §8 quote −28.7%/2.84 is the review's
+earlier DD basis — within-table comparisons are like-for-like).
+
+| cell (fill B) | mean bp/d | Sharpe | max DD | MAR | stops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline (no stop) | 19.83 | 1.376 | −31.1% | 2.32 | — |
+| stop −10% | 16.09 | 1.290 | −47.9% | 1.23 | 652 |
+| stop −15% | 14.78 | 1.149 | −52.9% | 1.02 | 410 |
+| stop −20% | 14.68 | 1.118 | −63.6% | 0.84 | 251 |
+| stop −25% | 16.98 | 1.263 | −51.7% | 1.20 | 146 |
+| stop −30% | 17.38 | 1.279 | −55.5% | 1.14 | 88 |
+
+Fill A (trigger-bar close, optimistic) is within a few tenths of B on every
+cell — the conclusion does not hinge on fill assumptions. Every cell is
+worse on mean AND Sharpe AND max DD AND MAR.
+
+Mechanism, measured at −15% B: the stop wins the **median** stopped trade
+(+0.5 bp book) and loses the **mean** (−23.3 bp; p10 −153, p90 +132) — it
+sells the right tail. The DD paradox is the deep finding: max DD *worsens*
+from −31% to −48…−66% because the book's drawdown is made of the same
+trades that later pay; excising recoveries converts a drawdown into a
+realized hole. Era split says the same: stops help slightly in the
+shallow-carry years (2022–24, Sharpe 0.42→0.53, 1.48→1.61, 1.18→1.47 at
+−25%) and destroy the paying eras (2025: 41.7→33.7 bp/d; 2026:
+64.7→35.7 bp/d at −15%). Slip beyond threshold at the next-bar fill:
+median 1.5%, p90 9.4% — the dump is fast even at hourly resolution.
+Triggers are ~uniform across UTC hours (mild peak at 00:00): no
+time-of-day structure to exploit.
+
+Because post-touch EV is positive (+1.3%/+2.1% after a day-1/day-2 −10%
+touch), a stop-and-re-enter variant is bounded between this grid and
+baseline minus round-trip fees and whipsaw — it cannot beat baseline
+either. Limitation stated: hourly closes only; real mark-price stops would
+trigger earlier and fill worse.
+
+### 11.4 Verdict
+
+The stop family is now closed at both clocks (daily spell floors §9,
+intraday MAE stops §11.3): in this book, reaction-based loser
+identification is structurally impossible — the loss is one candle, early
+pain predicts recovery, and the losers' entry fingerprint is the winners'.
+Remaining untested loser-identification doors, in mechanism order:
+same-symbol cross-venue funding confirmation at entry (consensus short vs
+venue-local liquidation), suspend→hard-exit, toxic-band hi → 0 extension,
+turnover-rank-decay dropout warning. OI remains banned
+(survivorship-contaminated); spot-basis needs data the roots don't have.

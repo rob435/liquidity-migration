@@ -300,6 +300,35 @@ Review §10. Change point: this commit. Five lines:
    unit), leg-execution asynchrony unmodelled, 2023-24 eras ~zero (the
    book goes dormant when funding normalizes).
 
+### 2026-07-28 — loser anatomy on the v3 ledger; the stop family is closed
+
+Review §11 (owner follow-up; no config change; Lane-1 seen data on the
+registered v3 record). Five lines:
+
+1. **What**: 60.1% of v3 trades lose, but losses are events, not
+   processes — one daily candle carries ≥ half the loss in 98% of losers,
+   and conditional on a ≥10% day-1/day-2 drawdown the REST of the trade
+   still earns +1.3%/+2.1%. Losers' entry fingerprint (deep print, high
+   vol, pumped ret3d) is the winners' fingerprint; the ret3d ≥ +50% bucket
+   is median −6.4% but the largest profit pool (+187% book).
+2. **Intraday stop grid** (hourly closes, −10…−30%, both fill
+   conventions, spell-dead, settlement-exact partial funding, exact deltas
+   on the registered series): EVERY cell worse on mean, Sharpe, max DD and
+   MAR — e.g. −15% next-bar: 19.83→14.78 bp/d, Sharpe 1.376→1.149, DD
+   −31%→−53%. Stops win the median stopped trade (+0.5 bp) and lose the
+   mean (−23 bp): they sell the right tail, and they bleed worst exactly
+   in the paying eras (2026: 64.7→35.7 bp/d).
+3. **Durable negative**: reaction-based loser identification (any
+   price-drawdown stop, daily or hourly, with or without re-entry) is
+   refuted for this book. Do not re-propose without a new mechanism.
+4. **Still-open doors**: same-symbol cross-venue funding confirmation at
+   entry; suspend→hard-exit (suspension-touched trades average −6.5%);
+   toxic-band hi→0 sliver (−11% book); turnover-rank-decay dropout
+   warning (`open_at_series_end` cohort −16% book). OI stays banned.
+5. **Artifacts**: `losers_early_id_diagnostics.txt`,
+   `intraday_stop_grid.txt` in
+   `reports/carry_hold_v3_trade_diagnostics_2026-07-28/`.
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
