@@ -161,6 +161,17 @@ Two consequences run the whole project:
   measured and written down: the midnight decision hour happens to be the
   luckiest of twelve we tested, and the bookkeeping frame quietly steps
   out of dying coins a day before their end.*
+  *The path that finally reached your smoothness-2 bar honestly was a
+  PAIR of ideas, not one: alongside the buy-the-hated-coins book, a new
+  hedged sibling (`funding_spread_v1`) buys the coin on the exchange
+  where the crowd pays more and sells the same coin on the other
+  exchange — price moves cancel, the fee difference is kept. The two
+  books barely move together, and splitting money between them (about
+  20/80) scores 2.3 on our standard three-year comparison window — above
+  your bar on every decision hour but one (1.9) — while the strictest
+  cut (all 5.5 years, worst hour) is 1.6. Worst dip of the pair: −11%.
+  All of it is still simulation on seen data, on trial like everything
+  else.*
 
 We always read the last fee actually charged, never a forecast.
 

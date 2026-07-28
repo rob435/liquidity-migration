@@ -44,6 +44,7 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v1.json",
     "lane2_carry_hold_v2.json",
     "lane2_carry_hold_v3.json",
+    "lane2_funding_spread_v1.json",
     "lane2_financed_leaders_v1.json",
     "lane2_financed_leaders_binance_v1.json",
 )

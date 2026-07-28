@@ -484,7 +484,9 @@ def volatility_scale(
     return scale
 
 
-def summarize(scores: pl.DataFrame, cfg: CarryHoldConfig | FinancedLeadersConfig) -> dict[str, float]:
+def summarize(
+    scores: pl.DataFrame, cfg: "CarryHoldConfig | FinancedLeadersConfig | FundingSpreadConfig"
+) -> dict[str, float]:
     """Scoring recipe: raw and vol-targeted Sharpe, compounded return/drawdown."""
     net = scores["net_bp"].to_numpy()
     if len(net) < 2:
@@ -540,15 +542,164 @@ def score_financed_leaders(panel: pl.DataFrame, cfg: FinancedLeadersConfig) -> d
     return out
 
 
+@dataclasses.dataclass(frozen=True)
+class FundingSpreadConfig:
+    """Committed cross-venue neutral funding-spread rule (2026-07-28 wave 3).
+
+    Long the perp on the venue whose funding is more negative, short the same
+    symbol's perp on the other venue: the price legs cancel to basis noise and
+    the P&L identity keeps the funding DIFFERENTIAL. Hysteresis on the
+    trailing 24h settled spread (bybit minus binance, bp/day); costs are
+    charged on BOTH legs (2x the per-side fee per unit one-way).
+    """
+
+    config_id: str
+    universe_top_n: int
+    enter_bp_per_day: float
+    exit_bp_per_day: float
+    per_name_cap: float
+    gross_cap: float
+    fee_side_bp: float
+    vol_target_annual: float
+    vol_lookback_days: int
+    max_leverage: float
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "FundingSpreadConfig":
+        payload: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
+        rule = payload["rule"]
+        return cls(
+            config_id=payload["config_id"],
+            universe_top_n=int(rule["universe"]["top_n"]),
+            enter_bp_per_day=float(rule["spread"]["enter_abs_bp_per_day"]),
+            exit_bp_per_day=float(rule["spread"]["exit_abs_bp_per_day"]),
+            per_name_cap=float(rule["sizing"]["per_name_cap"]),
+            gross_cap=float(rule["sizing"]["gross_cap"]),
+            fee_side_bp=float(payload["cost_model"]["measured_fee_side_bp"]),
+            vol_target_annual=float(rule["risk"]["vol_target_annual"]),
+            vol_lookback_days=int(rule["risk"]["vol_lookback_days"]),
+            max_leverage=float(rule["risk"]["max_leverage"]),
+        )
+
+
+SPREAD_REQUIRED_COLUMNS = (
+    "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
+    "by_funding_age_h", "bn_close", "bn_funding", "bn_funding_age_h",
+)
+
+
+def prepare_spread(panel: pl.DataFrame) -> pl.DataFrame:
+    """Both-venue daily-grid universe for the neutral spread book.
+
+    One row per (decision bar, both-venue mature name) with ``spread_bpd``
+    (trailing 24h settled funding, bybit minus binance, bp/day) and
+    ``net_return`` = the fwd-24h NEUTRAL P&L of being long the
+    more-negative-funding venue (price legs netted, both venues' settled
+    funding applied). ``net_return``'s name lets ``daily_scores`` reuse the
+    registered cost machinery verbatim; the fee must be passed DOUBLED.
+    """
+    missing = [c for c in SPREAD_REQUIRED_COLUMNS if c not in panel.columns]
+    if missing:
+        raise FinancedLongsError(f"panel is missing spread columns: {missing}")
+
+    def settle(age_col: str) -> pl.Expr:
+        a = pl.col(age_col)
+        return (a < 0.5) | (a < a.shift(1).over("symbol")).fill_null(False)
+
+    byc, bnc = pl.col("by_close"), pl.col("bn_close")
+    frame = panel.filter(byc > 0).sort(["symbol", "bar_ts_ms"]).with_columns(
+        pl.when(settle("by_funding_age_h")).then(pl.col("by_funding")).otherwise(0.0)
+        .rolling_sum(24).over("symbol").alias("trail_by"),
+        pl.when(settle("bn_funding_age_h")).then(pl.col("bn_funding")).otherwise(0.0)
+        .rolling_sum(24).over("symbol").alias("trail_bn"),
+        pl.when(settle("by_funding_age_h")).then(pl.col("by_funding")).otherwise(0.0)
+        .rolling_sum(24).over("symbol").shift(-24).alias("paid_by"),
+        pl.when(settle("bn_funding_age_h")).then(pl.col("bn_funding")).otherwise(0.0)
+        .rolling_sum(24).over("symbol").shift(-24).alias("paid_bn"),
+        (byc.shift(-24).over("symbol") / byc - 1.0).alias("ret_by"),
+        (bnc.shift(-24).over("symbol") / bnc - 1.0).alias("ret_bn"),
+        pl.col("by_turnover_quote").rolling_sum(24).over("symbol").alias("adv24"),
+        byc.shift(168).over("symbol").is_not_null().alias("_mby"),
+        bnc.shift(168).over("symbol").is_not_null().alias("_mbn"),
+        (
+            pl.col("bar_ts_ms").shift(-24).over("symbol") - pl.col("bar_ts_ms") == 24 * HOUR_MS
+        ).alias("contiguous"),
+    )
+    frame = frame.filter(
+        pl.col("contiguous") & pl.col("_mby") & pl.col("_mbn")
+        & pl.col("trail_by").is_finite() & pl.col("trail_bn").is_finite()
+        & pl.col("ret_by").is_finite() & pl.col("ret_bn").is_finite()
+        & pl.col("paid_by").is_finite() & pl.col("paid_bn").is_finite()
+    )
+    sgn = pl.when(pl.col("trail_by") <= pl.col("trail_bn")).then(1.0).otherwise(-1.0)
+    return frame.with_columns(
+        ((pl.col("trail_by") - pl.col("trail_bn")) * 1e4).alias("spread_bpd"),
+        (
+            sgn
+            * ((pl.col("ret_by") - pl.col("ret_bn")) - pl.col("paid_by") + pl.col("paid_bn"))
+        ).alias("net_return"),
+    ).drop("_mby", "_mbn")
+
+
+def funding_spread_weights(universe: pl.DataFrame, cfg: FundingSpreadConfig) -> pl.DataFrame:
+    """Signed hysteresis on |spread|; the emitted weight is the (positive)
+    one-side notional — direction is embedded in ``net_return``'s sign
+    convention, and a direction flip forces an exit before any re-entry."""
+    d = (
+        universe.select("bar_ts_ms", "symbol", "spread_bpd")
+        .drop_nulls()
+        .sort(["symbol", "bar_ts_ms"])
+    )
+    rows: dict[str, list] = {"bar_ts_ms": [], "symbol": [], "w": []}
+    for (sym,), g in d.group_by("symbol", maintain_order=True):
+        sp = g["spread_bpd"].to_numpy()
+        ts = g["bar_ts_ms"].to_numpy()
+        state = 0
+        for i in range(len(ts)):
+            if state != 0 and (
+                abs(sp[i]) < cfg.exit_bp_per_day or (1.0 if sp[i] < 0 else -1.0) != state
+            ):
+                state = 0
+            if sp[i] < -cfg.enter_bp_per_day:
+                state = 1
+            elif sp[i] > cfg.enter_bp_per_day:
+                state = -1
+            if state != 0:
+                rows["bar_ts_ms"].append(int(ts[i]))
+                rows["symbol"].append(str(sym))
+                rows["w"].append(cfg.per_name_cap)
+    weights = pl.DataFrame(
+        rows, schema={"bar_ts_ms": pl.Int64, "symbol": pl.String, "w": pl.Float64}
+    )
+    return _apply_gross_cap(weights, cfg.gross_cap)
+
+
+def score_funding_spread(panel: pl.DataFrame, cfg: FundingSpreadConfig) -> dict[str, Any]:
+    universe = top_n_universe(daily_grid(prepare_spread(panel)), cfg.universe_top_n)
+    weights = funding_spread_weights(universe, cfg)
+    # BOTH legs trade: the per-side fee is charged twice per unit one-way.
+    scores = daily_scores(weights, universe, 2.0 * cfg.fee_side_bp)
+    out: dict[str, Any] = {"config_id": cfg.config_id, "venue": "bybit+binance"}
+    out.update(summarize(scores, cfg))
+    return out
+
+
 def config_scores(panel: pl.DataFrame, config_path: str | Path) -> tuple[pl.DataFrame, pl.DataFrame, str, str]:
     """Daily score rows for any registered financed-longs config JSON.
 
     Returns ``(scores, venue_view_frame, config_id, venue)``. Dispatches on the
     committed rule shape: a ``rule.state`` block is carry-hold's hysteresis; a
-    ``rule.signal`` block is financed-leaders.
+    ``rule.signal`` block is financed-leaders; a ``rule.spread`` block is the
+    cross-venue neutral funding-spread book.
     """
     payload: dict[str, Any] = json.loads(Path(config_path).read_text(encoding="utf-8"))
     rule = payload.get("rule") or {}
+    if "spread" in rule:
+        spread_cfg = FundingSpreadConfig.from_json(config_path)
+        universe = top_n_universe(daily_grid(prepare_spread(panel)), spread_cfg.universe_top_n)
+        weights = funding_spread_weights(universe, spread_cfg)
+        scores = daily_scores(weights, universe, 2.0 * spread_cfg.fee_side_bp)
+        return scores, panel, spread_cfg.config_id, "bybit+binance"
     if "state" in rule:
         carry = CarryHoldConfig.from_json(config_path)
         view = venue_view(panel, carry.venue)

@@ -305,6 +305,8 @@ benchmark comparisons alike)
   and the daily clock's staleness doubles as a survived-to-the-bar filter.
   An hourly variant needs a persistence mechanism; parked.
 
+### 9.6 → continued in §10: the neutral leg and the funding-carry program
+
 ### 9.5 Same-day operational receipt — refresh + rmom overlap incident
 
 The append-first research refresh (both venues, tail mode) ran to
@@ -324,3 +326,57 @@ roots always full-rewrite). Panel rebuilt 2021→2026-07-27 (11.73M rows;
 score-level history verified byte-stable against the ledger). Forward
 ledger live: `reports/financed_longs_forward/ledger.csv`, first eligible
 days land as the calendar delivers them.
+
+## 10. Wave 3 — the neutral leg; the funding-carry program reaches Sharpe 2 on the standard basis
+
+The pooled-Sharpe plateau of §9 is structural: a conditional-2.25 stream
+active half the time pools to ~1.6, and per-day scaling cannot change that
+(§9.2). The desk answer is to change the P&L identity, not the thresholds:
+capture the SAME premium market-neutrally as a cross-venue spread and run
+both expressions as a portfolio.
+
+### 10.1 `lane2_funding_spread_v1` (registered)
+
+Long the perp on the venue where funding is more negative, short the same
+symbol's perp on the other venue; hysteresis on the trailing settled spread
+(enter |80| bp/day, exit |20|); both legs' taker fees charged. Checked
+against both negative ledgers first — the prior cross-venue items were
+price-premium signals and the directional Binance replication; neither is
+this trade. Module path: **5.1 bp/day, t 2.92, Sharpe 1.34 full / 1.61
+bench, max DD −16.7%, one-way 0.087/day**. Honest properties, measured:
+
+- **Offset-STABLE** (unlike the directional family): clocks {0,6,12,18}h
+  give 1.10–1.28 full / 1.36–1.61 bench.
+- **Basis risk is why it isn't Sharpe 3**: the cross-venue price difference
+  runs 40 bp/day sd normally but **677 bp/day when |spread| > 50** — the
+  "neutral" book is riskiest exactly when active.
+- 2023-24 eras ~zero/slightly negative (the spread barely existed before
+  the inversion); depth-sizing the spread REJECTED (deeper spread = more
+  basis vol; Sharpe falls); grid {30,50,80}×{10,20} all reported.
+- corr(spread book, carry_hold_v3 daily nets) = **+0.09**.
+
+### 10.2 The two-book program
+
+PIT 60d rolling vol-parity weights (no full-sample optimization; mean
+weights ~20/80 directional/neutral), both books' own costs:
+
+| basis | Sharpe | max DD | MAR |
+| --- | ---: | ---: | ---: |
+| bench window, standard clock | **2.34** | −11.2% | 5.07 |
+| bench window, clocks {0,6,12,18} | 2.34 / 1.93 / 2.09 / 2.29 | | |
+| full window (2021-inc), standard clock | 1.87 | −11.2% | 3.03 |
+| full window, worst clock | 1.55 | | |
+| fixed non-optimized 25/75 split | 2.22 bench / 1.79 full | −10.8% | 5.06 / 3.15 |
+
+**Verdict on the owner's Sharpe ≥ 2 target**: met on the program's standard
+quote basis — the bench window every published comparison in this
+repository uses — at the standard clock (2.34) and at 3 of 4 clocks
+(ensemble ≈ 2.2); NOT met on the strictest basis (full 5.5y window, worst
+clock: 1.55). Both numbers are the claim. The portfolio is a documented
+construction over two registered configs — the forward ledger scores both
+daily and the combination is reconstructable forward; any live expression
+would additionally need two-venue margin and leg-execution engineering
+(config `known_weaknesses`).
+
+Frame caveats from §9.4 (midnight clock for the directional leg,
+terminal-day dodge for both) still apply to every number above.

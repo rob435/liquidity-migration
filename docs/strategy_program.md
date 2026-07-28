@@ -255,6 +255,31 @@ Change point: this commit. Summary:
    definition. Panel rebuilt 2021→2026-07-27; ledger history verified
    byte-stable; forward ledger live with v3 and both paired differentials.
 
+### 2026-07-28 — wave 3: `lane2_funding_spread_v1`; the funding-carry program
+
+Review §10. Change point: this commit. Five lines:
+
+1. **What**: the same crowded-short premium captured market-neutrally —
+   long the perp where funding is more negative, short the same symbol's
+   perp on the other venue; hysteresis on the trailing settled spread
+   (enter |80| bp/day, exit |20|), both legs' fees charged. New mechanism,
+   absent from both negative ledgers.
+2. **Seen-data**: 5.1 bp/day, t 2.92, Sharpe 1.34 full / 1.61 bench, max
+   DD −16.7%, one-way 0.087/day; offset-STABLE (1.10–1.28 across clocks);
+   corr +0.09 with carry_hold_v3. Basis risk measured honestly: the price
+   legs' difference runs 677 bp/day sd exactly when the spread is wide.
+3. **The program**: PIT 60d vol-parity over {carry_hold_v3, funding_spread}
+   measures bench-window Sharpe 2.34 / DD −11.2% / MAR 5.07 at the
+   standard clock, 1.93–2.34 across clocks; full-window 1.55–1.87. The
+   owner's Sharpe ≥ 2 target is met on the program's standard quote basis
+   robustly across clocks, NOT met on the strictest basis (full window,
+   worst clock). Both numbers are the claim.
+4. **Evidence status**: Lane-1 selection; the spread book's forward run
+   plus the reconstructable combination grade it. Ledger scores it daily.
+5. **Feasibility notes for any future sizing**: two-venue margin (~2× per
+   unit), leg-execution asynchrony unmodelled, 2023-24 eras ~zero (the
+   book goes dormant when funding normalizes).
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
