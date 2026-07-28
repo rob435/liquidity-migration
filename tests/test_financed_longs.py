@@ -217,6 +217,46 @@ class TestSettlementDetector:
         assert out["paid"][0] == pytest.approx(1 * (-10.0 / 1e4), abs=1e-15)
 
 
+class TestResearchEquityChart:
+    """The wrapper-supported standard-format render for registered configs.
+
+    Exists so a Lane-2 config never needs a hand-built lookalike chart (the
+    equity-curve skill forbids second formats; 2026-07-28).
+    """
+
+    def test_renders_standard_chart_with_research_label(self, tmp_path: Path) -> None:
+        from liquidity_migration.financed_longs import research_equity_chart
+
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        payload = research_equity_chart(
+            panel,
+            CONFIG_DIR / "lane2_carry_hold_v1.json",
+            tmp_path,
+            start="1970-01-01",
+            end="1970-02-01",
+        )
+        assert payload["config_id"] == "lane2_carry_hold_v1"
+        assert payload["run_label"] == "lane2_carry_hold_v1_research_seen_data_corrected_scorer"
+        png = tmp_path / "lane2_carry_hold_v1_equity_btc.png"
+        assert png.exists() and png.stat().st_size > 0
+        assert payload["png"] == str(png)
+        assert (tmp_path / "lane2_carry_hold_v1_daily_equity.csv").exists()
+        assert (tmp_path / "lane2_carry_hold_v1_summary.json").exists()
+        # The chart must carry the full standard metric tile set.
+        assert {"total_return_pct", "max_drawdown_pct", "sharpe_daily_ann", "mar", "years"} <= set(
+            payload["metrics"]
+        )
+
+    def test_config_scores_dispatches_both_rule_shapes(self) -> None:
+        from liquidity_migration.financed_longs import config_scores
+
+        panel = _panel(funding_bp={"S01USDT": [-15.0]})
+        _, _, carry_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v1.json")
+        _, _, leaders_id, _ = config_scores(panel, CONFIG_DIR / "lane2_financed_leaders_v1.json")
+        assert carry_id == "lane2_carry_hold_v1"
+        assert leaders_id == "lane2_financed_leaders_v1"
+
+
 class TestAccounting:
     def test_long_receives_negative_funding(self) -> None:
         # price flat, funding -10 bp/8h: net_return over 24h = +30 bp of funding

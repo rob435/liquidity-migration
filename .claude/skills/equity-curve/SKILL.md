@@ -67,6 +67,18 @@ State:
 - modeled versus presentation leverage;
 - validity, study mode, and justified conclusion under `docs/governance.md`.
 
-Ad hoc plots are allowed for diagnostics when clearly labelled non-standard and
-not compared as standard outputs. If a recurring citable need is missing, add a
-tested option to the wrapper rather than creating a second format.
+Ad hoc plots are allowed for diagnostics only when they are visually DISTINCT
+from the standard layout, clearly labelled non-standard, and never compared as
+standard outputs. **Never hand-build a chart that imitates the standard format**
+(strategy-vs-BTC overlay, metric tiles, monthly table) in matplotlib or any
+other tool — a lookalike is a second format even when labelled, and this exact
+mistake was made and reverted on 2026-07-28. If a series needs the standard
+format, the wrapper is the only path:
+
+- Registered Lane-2 financed-longs configs render through the SAME standard
+  chart via `--research-config configs/lane2_*.json` (repeatable; output under
+  `<out>/research/<config_id>/`, labelled RESEARCH / simulation-on-seen-data;
+  added 2026-07-28 with `liquidity_migration.financed_longs.research_equity_chart`).
+
+If the wrapper still lacks an option for a recurring citable need, add a tested
+option to the wrapper rather than creating a second format.

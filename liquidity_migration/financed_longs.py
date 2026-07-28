@@ -33,6 +33,7 @@ Accounting conventions shared with the rest of the research surface:
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import json
 import math
 from pathlib import Path
@@ -439,3 +440,125 @@ def score_financed_leaders(panel: pl.DataFrame, cfg: FinancedLeadersConfig) -> d
     out: dict[str, Any] = {"config_id": cfg.config_id, "venue": cfg.venue}
     out.update(summarize(scores, cfg))
     return out
+
+
+def config_scores(panel: pl.DataFrame, config_path: str | Path) -> tuple[pl.DataFrame, pl.DataFrame, str, str]:
+    """Daily score rows for any registered financed-longs config JSON.
+
+    Returns ``(scores, venue_view_frame, config_id, venue)``. Dispatches on the
+    committed rule shape: a ``rule.state`` block is carry-hold's hysteresis; a
+    ``rule.signal`` block is financed-leaders.
+    """
+    payload: dict[str, Any] = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    rule = payload.get("rule") or {}
+    if "state" in rule:
+        carry = CarryHoldConfig.from_json(config_path)
+        view = venue_view(panel, carry.venue)
+        universe = top_n_universe(daily_grid(prepare(view)), carry.universe_top_n)
+        weights = carry_hold_weights(universe, carry)
+        return daily_scores(weights, universe, carry.fee_side_bp), view, carry.config_id, carry.venue
+    if "signal" in rule:
+        leaders = FinancedLeadersConfig.from_json(config_path)
+        view = venue_view(panel, leaders.venue)
+        grid = daily_grid(prepare(view, leaders.momentum_lookback_hours))
+        universe = top_n_universe(grid, leaders.universe_top_n)
+        weights = financed_leaders_weights(universe, btc_gate(grid, leaders.btc_gate_lookback_days), leaders)
+        return daily_scores(weights, universe, leaders.fee_side_bp), view, leaders.config_id, leaders.venue
+    raise FinancedLongsError(f"unrecognized financed-longs rule shape in {config_path}")
+
+
+def research_equity_chart(
+    panel: pl.DataFrame,
+    config_path: str | Path,
+    output_dir: str | Path,
+    *,
+    start: str,
+    end: str,
+) -> dict[str, Any]:
+    """Render a registered financed-longs config through the STANDARD equity
+    chart (the same renderer the deployed sleeves use), labelled as research.
+
+    This is the wrapper-supported path for putting a Lane-2 research config in
+    the standard format. Never hand-build a lookalike of the standard layout:
+    the equity-curve skill's rule is to add a tested wrapper option instead of
+    creating a second format (this function, 2026-07-28). ``end`` is
+    exclusive; the daily series is the corrected settlement-exact scorer's
+    full-calendar record clipped to ``[start, end)`` and compounded at native
+    raw-book size (no presentation leverage).
+    """
+    from .volume_events_charts import _write_equity_benchmark_chart
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    scores, view, config_id, venue = config_scores(panel, config_path)
+    start_ms = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.UTC).timestamp() * 1000)
+    end_ms = int(dt.datetime.fromisoformat(end).replace(tzinfo=dt.UTC).timestamp() * 1000)
+    window = scores.filter((pl.col("bar_ts_ms") >= start_ms) & (pl.col("bar_ts_ms") < end_ms)).sort("bar_ts_ms")
+    if window.height < 2:
+        raise FinancedLongsError(f"{config_id}: fewer than 2 scored days in [{start}, {end})")
+
+    returns = window["net_bp"].to_numpy() / 1e4
+    equity_values = np.cumprod(1.0 + returns)
+    days = [
+        dt.datetime.fromtimestamp(int(ts) / 1000, dt.UTC).date().isoformat()
+        for ts in window["bar_ts_ms"].to_list()
+    ]
+    equity = pl.DataFrame({"date": days, "equity": equity_values})
+    equity.write_csv(out / f"{config_id}_daily_equity.csv")
+
+    years = max((dt.date.fromisoformat(days[-1]) - dt.date.fromisoformat(days[0])).days, 1) / 365.25
+    total = float(equity_values[-1] - 1.0)
+    annualized = float(equity_values[-1] ** (1.0 / years) - 1.0)
+    drawdown = float((equity_values / np.maximum.accumulate(equity_values) - 1.0).min())
+    deviation = float(returns.std(ddof=1))
+    metrics = {
+        "total_return_pct": total * 100.0,
+        "annualized_pct": annualized * 100.0,
+        "max_drawdown_pct": drawdown * 100.0,
+        "worst_day_pct": float(returns.min()) * 100.0,
+        "sharpe_daily_ann": float(returns.mean() / deviation * math.sqrt(365.0)) if deviation > 0 else 0.0,
+        "mar": (annualized / abs(drawdown)) if drawdown < 0 else None,
+        "years": years,
+    }
+
+    raw_klines = (
+        view.filter(pl.col("symbol") == "BTCUSDT")
+        .select("symbol", "bar_ts_ms", "by_close")
+        .rename({"bar_ts_ms": "ts_ms", "by_close": "close"})
+        .with_columns(
+            pl.from_epoch("ts_ms", time_unit="ms").dt.date().cast(pl.String).alias("date")
+        )
+    )
+    chart = _write_equity_benchmark_chart(
+        out,
+        equity=equity,
+        raw_klines=raw_klines,
+        monthly=None,
+        png_name=f"{config_id}_equity_btc.png",
+        title=f"RESEARCH {config_id} [{venue}] - registered Lane-2 config",
+        subtitle=(
+            "SIMULATION ON SEEN DATA - opinion, not evidence. Corrected settlement-exact scorer; "
+            f"native raw-book size (no presentation leverage); window {start} -> {end} (end exclusive)."
+        ),
+        step=False,
+        strategy_name=config_id,
+        metrics=metrics,
+    )
+    run_label = f"{config_id}_research_seen_data_corrected_scorer"
+    payload = {
+        "run_label": run_label,
+        "summary": {
+            "total_return": total,
+            "max_drawdown": drawdown,
+            "sharpe_like": metrics["sharpe_daily_ann"],
+            "mar": metrics["mar"],
+        },
+        "metrics": metrics,
+        "png": chart.get("png"),
+        "config_id": config_id,
+        "venue": venue,
+    }
+    (out / f"{config_id}_summary.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return payload

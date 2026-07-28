@@ -37,7 +37,14 @@ from liquidity_migration.symbol_codec import (  # noqa: E402
 
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
+DEFAULT_PANEL_ROOT = "~/SHARED_DATA/cross_venue_panel_v1"
 VALID_CONTINUOUS_VENUES = {"bybit", "binance"}
+
+#: Columns a registered financed-longs config needs from the cross-venue panel.
+RESEARCH_PANEL_COLUMNS = (
+    "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
+    "by_funding_age_h", "bn_close", "bn_turnover_quote", "bn_funding", "bn_funding_age_h",
+)
 
 
 def _today() -> dt.date:
@@ -334,6 +341,23 @@ def main() -> int:
             "Use for isolated research-run outputs; raw market data is never removed."
         ),
     )
+    p.add_argument(
+        "--research-config",
+        action="append",
+        default=None,
+        metavar="CONFIG_JSON",
+        help=(
+            "Registered financed-longs config JSON (repeatable) to render through the "
+            "SAME standard chart, labelled RESEARCH / simulation-on-seen-data. This is "
+            "the supported way to put a Lane-2 research config in the standard format; "
+            "never hand-build a lookalike chart. Reads the cross-venue panel."
+        ),
+    )
+    p.add_argument(
+        "--panel-root",
+        default=DEFAULT_PANEL_ROOT,
+        help="Cross-venue panel root for --research-config renders.",
+    )
     args = p.parse_args()
 
     sleeves = [s.strip() for s in args.sleeves.split(",") if s.strip()]
@@ -399,9 +423,49 @@ def main() -> int:
         print(f"  PNG: {png or '(none - no equity csv/png emitted)'}\n", flush=True)
         results[s] = {"png": str(png) if png else None, "run_label": label}
 
+    panel = None
+    if args.research_config:
+        try:
+            import polars as pl
+
+            panel_root = Path(args.panel_root).expanduser()
+            shards = sorted(str(x) for x in panel_root.glob("*/panel.parquet"))
+            if not shards:
+                raise RuntimeError(f"no cross-venue panel shards under {panel_root}")
+            panel = (
+                pl.scan_parquet(shards)
+                .select(list(RESEARCH_PANEL_COLUMNS))
+                .collect()
+                .sort(["symbol", "bar_ts_ms"])
+            )
+        except Exception as exc:  # noqa: BLE001 - every research render fails together
+            for raw_path in args.research_config:
+                results[f"research:{Path(raw_path).stem}"] = {"error": str(exc)}
+            print(f"  [X] research panel load failed: {type(exc).__name__}: {exc}\n", flush=True)
+    research_paths = list(args.research_config or []) if panel is not None else []
+    for raw_path in research_paths:
+        cfg_path = Path(raw_path).expanduser()
+        name = cfg_path.stem
+        key = f"research:{name}"
+        out = out_root / "research" / name
+        _prepare_sleeve_output(out, fresh=args.fresh_output)
+        print(f"=== RESEARCH ({name}) ===", flush=True)
+        try:
+            from liquidity_migration.financed_longs import research_equity_chart
+
+            payload = research_equity_chart(panel, cfg_path, out, start=start, end=end)
+        except Exception as exc:  # noqa: BLE001 - report per-config, keep going
+            print(f"  [X] {name} failed: {type(exc).__name__}: {exc}\n", flush=True)
+            results[key] = {"error": str(exc)}
+            continue
+        print(f"  run_label = {payload['run_label']}")
+        print(f"  {_headline(payload)}")
+        print(f"  PNG: {payload.get('png') or '(none)'}\n", flush=True)
+        results[key] = {"png": payload.get("png"), "run_label": payload["run_label"]}
+
     print("=" * 64)
     print("EQUITY CURVES - SUMMARY")
-    for s in sleeves:
+    for s in [*sleeves, *(k for k in results if k.startswith("research:"))]:
         r = results.get(s, {})
         if r.get("error"):
             print(f"  {s:11} [X] {r['error'][:80]}")
