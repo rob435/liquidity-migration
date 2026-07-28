@@ -743,7 +743,11 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       (rolling forward record; the registration commit is the change point;
       since 2026-07-28 the scorer charges each settlement exactly once, and
       `lane2_carry_hold_v2` scores beside v1 with the paired daily
-      differential as the primary comparison).
+      differential as the primary comparison). Tooling exists since
+      2026-07-28: `scripts/score_financed_longs_forward.py` appends
+      `reports/financed_longs_forward/ledger.csv` (append-first, idempotent,
+      `forward_eligible` flagged); the remaining work is refreshing the
+      panel past 2026-07-17 and running it each day.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
       funding-leg numbers (leg-attribution reversal, dispersion-gate

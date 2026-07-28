@@ -168,9 +168,13 @@ turnover down 27%).
 
 ## 6. Open follow-ups
 
-1. Wire `lane2_carry_hold_v2` into the same forward-scoring cadence as v1
-   (one row per completed UTC day; paired differential is the primary
-   comparison).
+1. ~~Wire `lane2_carry_hold_v2` into the same forward-scoring cadence as
+   v1~~ — done same day: `scripts/score_financed_longs_forward.py` appends
+   the ledger (`reports/financed_longs_forward/ledger.csv` on the bybit
+   root) with one row per config-day for all four registered configs plus
+   the derived `carry_hold_v2_minus_v1` paired differential;
+   `forward_eligible` marks days strictly after each registration.
+   Append-first and idempotent (`tests/test_score_financed_longs_forward.py`).
 2. The financed-longs forward record still needs the data refresh past
    2026-07-17 (pre-existing queue item; now covers both configs).
 3. Re-derive the stale negative-ledger rows (1, 2, 13–17, 20) on the
@@ -179,3 +183,30 @@ turnover down 27%).
 4. If Bybit's interval mix shifts materially again (e.g. majority-1h), rerun
    §2's T3/T6 tables — the acuteness/chronic split is microstructure-shaped
    and could invert.
+
+## 7. Portfolio context (same-day follow-up, seen data)
+
+Full-calendar daily returns 2023-03-14..2026-07-16 (canonical baselines;
+flat days = 0; artifact `portfolio_fit_output.txt` in the review dir):
+
+- **carry-hold is uncorrelated with the deployed book**: corr(v2, CONT) =
+  −0.08, corr(v2, LONG) = +0.01. Annualized vols: CONT 2.2%, LONG 5.6%, v2
+  63.7% (raw book).
+- **Crash-day complementarity with a mechanism**: on CONTINUOUS's 20 worst
+  days (its shorts getting squeezed), v2 averages **+173 bp** — the same
+  squeeze that hurts a pump-fade short pays a crowded-short long. On v2's
+  own 20 worst days the sleeves are flat (+2.3 / +2.7 bp): the tails did
+  not coincide on seen data.
+- **Overlay thought experiment** (research accounting, margin NOT modeled):
+  base book = CONT 1× + LONG 0.5 → Sharpe 2.02, max DD −2.1%, +7.4%/yr. A
+  3–5% equity slice of raw v2 lifts it to Sharpe ~2.47, +10.2–12.1%/yr at
+  −2.1/−2.4% max DD. The same slice of v1 is consistently worse (2.35 at
+  its best). Honest framing: at α=0.03 the slice already contributes ~48%
+  of portfolio volatility — the "free" return rests on tail non-coincidence
+  continuing, and a v2-style −49% stretch costs a 3% slice ~1.5% of the
+  account.
+- **Program framing consequence**: the 2026-07-26 goal ("beat CONTINUOUS to
+  replace it") was the wrong question for this book. Carry-hold is not a
+  replacement candidate; it is a small diversifying premium stream, and its
+  forward record should eventually be judged in that role. Any live sizing
+  is an owner decision on a book that today has no runtime.
