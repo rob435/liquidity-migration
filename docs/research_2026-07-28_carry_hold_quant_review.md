@@ -210,3 +210,21 @@ flat days = 0; artifact `portfolio_fit_output.txt` in the review dir):
   replacement candidate; it is a small diversifying premium stream, and its
   forward record should eventually be judged in that role. Any live sizing
   is an owner decision on a book that today has no runtime.
+
+## 8. Capacity (same-day follow-up, seen data)
+
+v2 held name-days vs each name's own trailing-24h quote turnover
+(`capacity_output.txt`; 5,590 name-days, 3,052 post-2025). Held names have
+median $33M adv24 with a thin tail ($3.2M at p05). Participation:
+
+| book | holdings p95 | entry-day p95 | entry max |
+| --- | ---: | ---: | ---: |
+| $250k (current envelope) | 0.34% | 0.27% | 3.0% |
+| $1M | 1.37% | 1.09% | 12.1% |
+| $5M | 6.9% | 5.5% | 60.6% |
+
+Post-2025, p95 entry participation crosses 1% of a name's daily volume at a
+**~$1.1M book** and 5% at ~$5.5M. The measured taker-fee cost model is
+defensible at the current envelope and stops being conservative well before
+$5M. This is a small-book premium stream; the config's "not a large-book
+claim" now has numbers.
