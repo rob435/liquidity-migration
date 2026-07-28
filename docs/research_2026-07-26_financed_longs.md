@@ -16,6 +16,61 @@ commit. Nothing here authorizes a deployment or touches the real-money door.
 
 ---
 
+## 0. 2026-07-28 correction — every sub-daily settlement was charged twice
+
+The panel's funding-age column carries float epsilon (one hour after a
+settlement `by_funding_age_h` reads `0.9999999999999999`, not 1.0), so this
+program's `settlement_exact_funding` predicate `age < 1.0` marked two bars
+per 8h/4h/2h settlement and charged each print **twice**; 1h-interval
+symbols were counted once because the next print overwrites the epsilon bar.
+Weights, entries, exits, price legs, and turnover costs are unchanged —
+decisions read funding *levels* — but every funding P&L leg below is
+inflated (~×1.5–2 blended, largest where funding was deepest). Fixed
+2026-07-28 in `financed_longs.settlement_exact_funding` and
+`lane2_blend.settlement_exact_funding` (age-reset detector; regression tests
+on the real age shapes in `tests/test_financed_longs.py` and
+`tests/test_lane2_blend.py`). The registrations and their commit dates are
+untouched — the scorer is corrected, the receipts stand (M19 precedent).
+Discovered from the owner's question about Bybit's shortened funding
+intervals; those are real (2025 settlements: 52% 4h, 21% 1h, 7% 2h, ~20%
+8h; 2021 was 100% 8h) and 73–80% of carry-hold's 2025-26 held name-days are
+on sub-8h names, so the per-print −10/−3 bp thresholds mean different DAILY
+carry per symbol — a successor config should normalize to a daily-equivalent
+rate. The corrected accounting charges each settlement exactly once at any
+cadence.
+
+**Corrected verdicts** (`scripts/screen_financed_longs.py` on the
+2026-07-28 panel; output `reports/financed_longs_corrected_2026-07-28/`):
+
+| bench window 2023-03-13..2026-07-16, full calendar | Sharpe raw | Sharpe vt | mean bp/d | beats bench? |
+| --- | ---: | ---: | ---: | --- |
+| **benchmark (CONTINUOUS sl35)** | **1.84** | — | — | — |
+| `lane2_carry_hold_v1` | **1.21** | 1.05 | 23.6 | **return only — NOT Sharpe** |
+| `lane2_financed_leaders_v1` | **1.44** | 1.11 | 20.5 | **return only — NOT Sharpe** |
+| `lane2_financed_leaders_binance_v1` | **1.01** | 0.67 | 13.8 | **return only — NOT Sharpe** |
+
+- **The program goal (beat on return AND Sharpe) is met by none of the
+  three.** The §2 headline table and its verdict column are superseded.
+- carry-hold corrected attribution: **funding +7.2 units vs price −3.4**
+  (2.1:1, not 3.4:1). The mechanism's sign survives; its size does not
+  clear the bar.
+- Corrected full-sample t: carry-hold **2.31**, financed-leaders **2.58** —
+  below the ≈3.4 multiple-testing threshold this note applies. The §2
+  Bonferroni claims are withdrawn.
+- Corrected carry-hold eras (bp/day, full calendar): 2021 +3.8 · 2022 +3.0 ·
+  2023 +26.0 · 2024 +13.7 · 2025 +30.3 · 2026 +32.5. **The "positive
+  through the 2022 bear" robustness claim is withdrawn** — the doubled
+  prints were concentrated exactly in deep-funding capitulations.
+  financed-leaders 2022 is now −4.0 bp/day.
+- §3's negative ledger: rows whose verdicts rest on funding magnitude
+  (1, 2, 13, 14, 15, 16, 17, 20) are numerically stale pending
+  re-derivation; the structural findings (short-side failure, nothing
+  intraday, replication discipline) are unaffected in kind. Cross-venue
+  replication ratios carried the same defect on both venues — directionally
+  intact, numerically stale.
+
+---
+
 ## 1. The benchmark, pinned from primary artifacts
 
 The deployed CONTINUOUS sleeve's honest render was regenerated rather than
@@ -45,6 +100,9 @@ entries at the decision bar close (house convention; every surviving book was
 also delay-stressed), disjoint 24h decision grid, era splits reported.
 
 ## 2. The three registered books
+
+**Superseded 2026-07-28 — the funding leg in every row below is
+double-counted; the corrected verdicts are in §0.**
 
 **Full-calendar basis (corrected 2026-07-26, same day as registration).** The
 first-pass series counted only days with positions; a strategy's capital is

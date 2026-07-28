@@ -109,11 +109,16 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     evaluated at ``t + h`` covers rows ``t+1 .. t+h``, which is exactly the open
     interval we want, so the shift is by a full ``h`` rather than ``h - 1``.
     """
-    fresh = (
-        pl.when(pl.col("by_funding_age_h") < FRESH_FUNDING_MAX_AGE_H)
-        .then(pl.col("by_funding"))
-        .otherwise(0.0)
-    )
+    age = pl.col("by_funding_age_h")
+    # A settlement bar has age ~0 (exact 0.0 on-hour prints), or an age DROP
+    # versus the prior bar when the settlement bar itself is missing. The old
+    # ``age < FRESH_FUNDING_MAX_AGE_H`` predicate also matched the next bar's
+    # float-epsilon age (0.9999999999999999) and charged every 8h/4h/2h
+    # settlement twice (2026-07-28 correction).
+    is_settlement = (age < FRESH_FUNDING_MAX_AGE_H / 2.0) | (
+        age < age.shift(1).over("symbol")
+    ).fill_null(False)
+    fresh = pl.when(is_settlement).then(pl.col("by_funding")).otherwise(0.0)
     return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
 
 

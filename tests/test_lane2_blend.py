@@ -113,6 +113,34 @@ class TestCostBasis:
 
 
 class TestFundingCausality:
+    def test_epsilon_age_bar_is_not_a_second_settlement(self) -> None:
+        """Regression on REAL panel age shapes (2026-07-28 correction).
+
+        One hour after a settlement the production panel's age reads
+        0.9999999999999999, not 1.0; the old ``age < 1.0`` predicate counted
+        that bar as a second settlement and charged every 8h/4h/2h print
+        twice.
+        """
+        from liquidity_migration.lane2_blend import settlement_exact_funding
+
+        cycle = [
+            0.0, 0.9999999999999999, 1.9999999999999998, 3.0,
+            3.9999999999999996, 5.0, 6.0, 6.999999999999999,
+        ]
+        ages = (cycle * 5)[:33]
+        rate = -10.0 / 1e4
+        frame = pl.DataFrame(
+            {
+                "symbol": ["XUSDT"] * len(ages),
+                "bar_ts_ms": [h * 3_600_000 for h in range(len(ages))],
+                "by_funding": [rate] * len(ages),
+                "by_funding_age_h": ages,
+            }
+        ).sort(["symbol", "bar_ts_ms"])
+        out = frame.with_columns(settlement_exact_funding(24).alias("paid"))
+        # Settlements land at h=8,16,24 inside the 24h window: 3 prints, not 6.
+        assert out["paid"][0] == pytest.approx(3 * rate, abs=1e-15)
+
     def test_funding_charged_only_at_settlements(self, cfg: BlendConfig) -> None:
         """A stale rate carried forward must not be charged again."""
         out = prepare(_panel(), cfg)

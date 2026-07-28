@@ -133,7 +133,12 @@ Two consequences run the whole project:
   on trial (buy coins whose shorts are paying heavily — `carry_hold`; buy
   recent winners only while holding them is free or paid —
   `financed_leaders`), plus one refinement of the pump-fade fee rule
-  itself (§7).
+  itself (§7). *Update 2026-07-28: a bookkeeping bug — every crowd-fee
+  payment was counted twice in the research simulations — was found and
+  fixed; corrected, those two ideas no longer beat the live pump-fade
+  strategy in simulation (the payment stream is real, about half the
+  claimed size). They stay on trial on live days. The live system was
+  never affected — it counts fees through a separate, verified path.*
 
 We always read the last fee actually charged, never a forecast.
 
@@ -230,6 +235,10 @@ Why we are this strict — the burns are from our own July 2026 history:
    second, larger exchange we use as an independent check).
 4. One idea looked statistically convincing until split by year: all of its
    profit came from 2021.
+5. A fee-counting bug (caught 2026-07-28 by one owner question) doubled
+   every crowd-fee payment in the research simulations, inflating a whole
+   program's results; the rule that nothing deploys on simulation numbers
+   alone is why it cost documents, not money.
 
 So the process (code name: Progressive Evidence Model, in
 `docs/governance.md`) is:

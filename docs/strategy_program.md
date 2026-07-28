@@ -111,6 +111,46 @@ deployment, or opens the separate real-money boundary.
     passive floor is mechanically reachable, and only that. Blocked on demo
     credentials this box does not hold; run with the fleet stopped and flat.
 
+### 2026-07-28 — research funding accounting corrected: settlements were charged twice
+
+Found while answering the owner's question about Bybit's shortened funding
+intervals. The cross-venue panel's funding-age column carries float epsilon
+(`0.9999999999999999` one hour after a settlement), so the `age < 1.0`
+settlement detector in **both** `financed_longs.settlement_exact_funding`
+and `lane2_blend.settlement_exact_funding` charged every 8h/4h/2h
+settlement **twice** (1h-interval symbols once — the next print overwrites
+the epsilon bar). Fixed with an age-reset detector plus regression tests on
+the real age shapes. **Change point: this commit, for both scorers;
+registrations untouched** (M19 precedent). The deployed fleet is unaffected
+— verified: no engine module consumes the panel or its age columns, and the
+engine reads venue funding-history settlements by exact stamp
+(`continuous_events`), which also handles Bybit's real 2025-26 cadence
+shortening (2025 settlements: 52% 4h, 21% 1h, 7% 2h, ~20% 8h; 2021 was 100%
+8h) by construction.
+
+Consequences:
+
+- **The 2026-07-26 financed-longs verdicts are withdrawn.** Corrected
+  bench-window Sharpe: carry_hold **1.21** (was 2.56), financed_leaders
+  **1.44** (was 2.21), Binance arm **1.01** (was 1.66) vs benchmark 1.84 —
+  all three now beat on return only; **none meets the owner goal (return
+  AND Sharpe)**. Corrected full-sample t 2.31 / 2.58 — below the ≈3.4
+  multiple-testing bar. carry_hold's corrected attribution is funding +7.2
+  vs price −3.4 (2.1:1): the premium is real, roughly half the registered
+  size, and its 2021-22 bear-robustness (now +3.8/+3.0 bp/day) is
+  withdrawn. Corrected table and scope:
+  `docs/research_2026-07-26_financed_longs.md` §0; reproduction output
+  `reports/financed_longs_corrected_2026-07-28/`.
+- **`lane2_premium_momentum_blend_v1` and the anomaly-research
+  settlement-exact numbers** (the leg-attribution reversal, the
+  dispersion-gate withdrawal, funding-magnitude ledger rows) **are stale**
+  pending re-derivation on the corrected scorer (queued below).
+- Lane-2 forward scoring of every registered config inherits the corrected
+  scorer from this commit; the per-print enter/exit thresholds' interval
+  sensitivity (a −10 bp print is −30 bp/day on an 8h name but −60 bp/day on
+  a 4h name) is a design gap for any successor config, not a defect in the
+  registered ones.
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
@@ -148,7 +188,9 @@ the rollout dispatch belongs to the owner.
   the first time. No verdict moves. The three full-sample t-values that were
   still quoted on the old basis (4.88 / 4.04 / 2.79) are corrected to
   4.87 / 4.01 / 2.77. Change point: this commit, for the *scorer*; the three
-  registrations and their commit dates are untouched.
+  registrations and their commit dates are untouched. *(2026-07-28: these
+  reproduced values themselves carried the settlement double-count — see the
+  2026-07-28 correction section above; corrected verdicts supersede them.)*
 - **Residual momentum — registered calendar window (audit M21).**
   `residual_momentum_expr` is row-positional, so `rolling_sum(7).shift(3)`
   reached the 10th *present* row and spanned more than ten calendar days for a
@@ -163,6 +205,11 @@ the rollout dispatch belongs to the owner.
   drift; rerun that root with `--full-rewrite`. Change point: this commit.
 
 ### 2026-07-26 — the financed-longs program
+
+**Superseded 2026-07-28: the scorer double-counted every sub-daily funding
+settlement; corrected, no config beats the benchmark on Sharpe — see the
+2026-07-28 correction section above. The registration receipts below stand
+as written; their funding-dependent numbers are inflated.**
 
 An owner-directed one-day program (goal: three alphas that beat the deployed
 CONTINUOUS system on return and Sharpe at full measured costs) ran ~18 new
@@ -623,7 +670,13 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       `docs/research_2026-07-26_financed_longs.md` with the 22-row
       negative-results ledger.
 - [ ] Score the three financed-longs configs on each new completed UTC day
-      (rolling forward record; the registration commit is the change point).
+      (rolling forward record; the registration commit is the change point;
+      since 2026-07-28 the scorer charges each settlement exactly once).
+- [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
+      the `lane2_premium_momentum_blend_v1` table, the anomaly-research
+      funding-leg numbers (leg-attribution reversal, dispersion-gate
+      withdrawal), and financed-longs negative-ledger rows 1/2/13–17/20
+      (2026-07-28 double-count correction).
 - [ ] Score the venue-scoped CONTINUOUS admission variant beside the shipped
       shape on post-2026-07-27 days
       (`scripts/render_continuous_admission_variants.py admission --end-date …`;

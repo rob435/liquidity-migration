@@ -162,12 +162,21 @@ def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
 
 
 def settlement_exact_funding(hold_hours: int) -> pl.Expr:
-    """Funding a LONG pays over ``(t, t + hold_hours]``; settlements only."""
-    fresh = (
-        pl.when(pl.col("by_funding_age_h") < 1.0)
-        .then(pl.col("by_funding"))
-        .otherwise(0.0)
-    )
+    """Funding a LONG pays over ``(t, t + hold_hours]``; settlements only.
+
+    A bar carries a settlement iff the print's age just reset: either the age
+    is ~0 (settlement at this bar's close — ages are exact 0.0 on-hour) or it
+    dropped versus the prior bar (the settlement bar itself is missing from
+    the panel). The panel's age values carry float-epsilon noise — one hour
+    after a settlement the age is 0.9999999999999999, not 1.0 — so the old
+    ``age < 1.0`` predicate marked TWO bars per 8h/4h/2h settlement and
+    charged every such print twice (2026-07-28 correction; 1h-interval
+    symbols were counted once because the next print overwrote the epsilon
+    bar).
+    """
+    age = pl.col("by_funding_age_h")
+    is_settlement = (age < 0.5) | (age < age.shift(1).over("symbol")).fill_null(False)
+    fresh = pl.when(is_settlement).then(pl.col("by_funding")).otherwise(0.0)
     return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
 
 

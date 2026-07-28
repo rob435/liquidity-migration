@@ -27,6 +27,7 @@ from liquidity_migration.financed_longs import (
     financed_leaders_weights,
     prepare,
     score_carry_hold,
+    settlement_exact_funding,
     top_n_universe,
     venue_view,
     volatility_scale,
@@ -72,11 +73,11 @@ def _panel(
                     "by_close": price,
                     "by_turnover_quote": 1_000_000.0 * (symbols - s),
                     "by_funding": rate,
-                    "by_funding_age_h": 0.5 if settle else float((h % 8)),
+                    "by_funding_age_h": 0.0 if settle else float((h % 8)),
                     "bn_close": price * 1.001,
                     "bn_turnover_quote": 900_000.0 * (symbols - s),
                     "bn_funding": rate / 2.0,
-                    "bn_funding_age_h": 0.5 if settle else float((h % 8)),
+                    "bn_funding_age_h": 0.0 if settle else float((h % 8)),
                 }
             )
     return pl.DataFrame(rows)
@@ -156,6 +157,64 @@ class TestFinancedLeaders:
         assert leaders_cfg.funding_cap_bp == 0.0
         assert leaders_cfg.btc_gate_threshold == -0.05
         assert leaders_cfg.venue == "bybit"
+
+
+#: The exact age sequence the production panel carries across one 8h funding
+#: cycle (captured from cross_venue_panel_v1, BTCUSDT): float-ms arithmetic
+#: leaves epsilon on several steps, and the bar after a settlement reads
+#: 0.9999999999999999 — which `age < 1.0` wrongly counted as a second
+#: settlement, charging every 8h/4h/2h print twice (2026-07-28 correction).
+PRODUCTION_AGE_CYCLE = [
+    0.0,
+    0.9999999999999999,
+    1.9999999999999998,
+    3.0,
+    3.9999999999999996,
+    5.0,
+    6.0,
+    6.999999999999999,
+]
+
+
+def _funding_frame(ages: list[float], rate: float = -10.0 / 1e4) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": ["XUSDT"] * len(ages),
+            "bar_ts_ms": [h * HOUR_MS for h in range(len(ages))],
+            "by_funding": [rate] * len(ages),
+            "by_funding_age_h": ages,
+        }
+    ).sort(["symbol", "bar_ts_ms"])
+
+
+class TestSettlementDetector:
+    """Regression contracts on REAL panel age shapes, not idealized ones."""
+
+    def test_epsilon_age_bar_is_not_a_second_settlement(self) -> None:
+        # 33 hourly bars = 4 settlements (h=0,8,16,24,32) with the production
+        # epsilon pattern in between. The 24h window after bar 0 contains the
+        # settlements at h=8,16,24 and nothing else: exactly 3 prints.
+        ages = (PRODUCTION_AGE_CYCLE * 5)[:33]
+        frame = _funding_frame(ages)
+        out = frame.with_columns(settlement_exact_funding(24).alias("paid"))
+        assert out["paid"][0] == pytest.approx(3 * (-10.0 / 1e4), abs=1e-15)
+
+    def test_one_hour_interval_charges_every_print_once(self) -> None:
+        # A 1h-interval symbol settles at every bar close: age is 0.0 on every
+        # row and the 24h window charges 24 prints, each exactly once.
+        frame = _funding_frame([0.0] * 25)
+        out = frame.with_columns(settlement_exact_funding(24).alias("paid"))
+        assert out["paid"][0] == pytest.approx(24 * (-10.0 / 1e4), abs=1e-15)
+
+    def test_age_drop_after_gap_counts_the_missed_settlement_once(self) -> None:
+        # The settlement bar itself is missing from the panel (data gap): the
+        # next visible bar shows the new print aged 1.5h. The age DROP marks
+        # one settlement; the stale continuation rows after it mark none.
+        ages = [0.0, 0.9999999999999999, 1.9999999999999998, 1.5, 2.5, 3.5]
+        frame = _funding_frame(ages)
+        out = frame.with_columns(settlement_exact_funding(5).alias("paid"))
+        # Window after bar 0 covers bars 1..5: only the age-drop bar (1.5).
+        assert out["paid"][0] == pytest.approx(1 * (-10.0 / 1e4), abs=1e-15)
 
 
 class TestAccounting:

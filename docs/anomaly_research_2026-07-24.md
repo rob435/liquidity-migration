@@ -11,6 +11,15 @@ grade them. Nothing here is a validated alpha claim, authorizes a deployment, or
 touches the real-money boundary. A Lane-2 verdict needs a committed config and
 scorer graded on days that postdate the commit.
 
+**2026-07-28 correction notice.** The settlement-exact funding accounting
+this document uses (`lane2_blend.settlement_exact_funding`) charged every
+8h/4h/2h settlement **twice** (float-epsilon age bug, fixed 2026-07-28 with
+regression tests — see `docs/strategy_program.md`, 2026-07-28 section).
+Funding-magnitude results here — the settlement-exact leg-attribution
+reversal, the dispersion-gate withdrawal, and every net-of-funding table —
+are numerically stale pending re-derivation on the corrected scorer.
+Sign-based and price-only results are unaffected.
+
 Three claims in the working documents were **wrong and are corrected here**
 (§6). Two of the three were my own leads, and both corrections weaken them.
 

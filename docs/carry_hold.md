@@ -10,6 +10,27 @@ executable: `liquidity_migration/financed_longs.py`.
 Status: **Lane-2 registered, accruing a forward record since the registration
 commit. Not deployed. No runtime, no venue access, no real-money implication.**
 
+## 0. 2026-07-28 correction — read this before any number below
+
+The registration-era scorer **charged every 8h/4h/2h funding settlement
+twice** (float-epsilon age bug; fixed 2026-07-28 with regression tests —
+full statement in `docs/research_2026-07-26_financed_longs.md` §0). Trades,
+entries, exits, price legs, and costs are unchanged; the funding P&L leg was
+inflated. Corrected, on the benchmark window: **Sharpe 1.21 raw / 1.05 vt vs
+the benchmark's 1.84** — carry-hold **no longer beats the deployed sleeve on
+Sharpe** (return still beats; the owner goal was both). Corrected full-sample
+t 2.31 (below the ≈3.4 multiple-testing bar); corrected attribution
+**funding +7.2 units vs price −3.4** (2.1:1, not 3.4:1); corrected eras
+(bp/day): 2021 +3.8 · 2022 +3.0 · 2023 +26.0 · 2024 +13.7 · 2025 +30.3 ·
+2026 +32.5 — the 2021-22 bear-robustness claim is withdrawn. The mechanism
+(crowded shorts pay longs) is real but roughly half the registered size.
+Sections below preserve the registration-era text; funding-dependent numbers
+in them are superseded by this section. Also relevant: Bybit shortened
+funding intervals through 2025-26 (52% of 2025 settlements are 4h, 21% 1h) —
+73–80% of this book's 2025-26 held name-days are on sub-8h names, so the
+per-print −10/−3 bp thresholds mean different daily carry per symbol; a
+successor should normalize thresholds to a daily-equivalent rate.
+
 ## 1. The trade in one paragraph
 
 Hold long, with perpetual futures, the handful of liquid names whose funding
