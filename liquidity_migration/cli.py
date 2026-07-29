@@ -33,6 +33,7 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_archive_download_klines_1h_api_parser,
     _add_archive_download_klines_1h_parser,
     _add_archive_manifest_parser,
+    _add_carry_demo_cycle_parser,
     _add_continuous_event_demo_cycle_parser,
     _add_discover_universe_parser,
     _add_download_binance_proxy_parser,
@@ -88,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_continuous_event_demo_cycle_parser(subparsers)
+    _add_carry_demo_cycle_parser(subparsers)
 
     return parser
 
@@ -107,6 +109,7 @@ _COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
     {
         "long-native-event-demo-cycle",
         "continuous-event-demo-cycle",
+        "carry-demo-cycle",
     }
 )
 
@@ -458,6 +461,56 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
     return 0
 
 
+def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
+    from liquidity_migration.carry_demo import (
+        CarryDemoCycleConfig,
+        format_carry_demo_cycle_summary,
+        run_carry_demo_cycle,
+    )
+    from liquidity_migration.operational_profile import load_operational_profile
+
+    # The carry rule's parameters are an immutable Lane-2 registration; the
+    # shared operational profile's carry block is the ONLY runtime sizing
+    # source, so the profile is required rather than optional here.
+    operational_profile = load_operational_profile(args.risk_policy_file)
+    carry_settings = operational_profile.carry
+    carry_demo_config = CarryDemoCycleConfig(
+        execution_environment=args.execution_environment,
+        account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
+        account_execution_root=getattr(args, "account_execution_root", None),
+        candidate_universe_file=getattr(args, "candidate_universe_file", ""),
+        market_follow_root=getattr(args, "market_follow_root", ""),
+        notional_multiplier=carry_settings.notional_multiplier,
+        entry_leverage=carry_settings.entry_leverage,
+        declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
+        max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
+        operational_profile_sha256=operational_profile.source_sha256,
+        replay_days=args.replay_days,
+        workers=args.workers,
+    )
+    if getattr(args, "daemon", False):
+        from liquidity_migration.carry_demo_daemon import CarryDemoDaemon
+
+        carry_daemon = CarryDemoDaemon(
+            data_root,
+            config=config,
+            demo_config=carry_demo_config,
+            interval_seconds=args.interval_seconds,
+            strategy_target_capture_path=getattr(args, "strategy_target_capture_path", None),
+        )
+        carry_daemon.install_signal_handlers()
+        stats = carry_daemon.run()
+        print(
+            "carry target producer daemon stopped "
+            f"cycles_run={stats.get('cycles_run')} cycle_errors={stats.get('cycle_errors')}",
+            flush=True,
+        )
+        return 0
+    payload = run_carry_demo_cycle(data_root, config=config, demo_config=carry_demo_config)
+    print(format_carry_demo_cycle_summary(payload), flush=True)
+    return 0
+
+
 _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Path], int]] = {
     "download-data": _cmd_download_data,
     "download-binance-proxy": _cmd_download_binance_proxy,
@@ -467,6 +520,7 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
     "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
     "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
+    "carry-demo-cycle": _cmd_carry_demo_cycle,
 }
 
 

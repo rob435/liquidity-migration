@@ -433,3 +433,88 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         default=None,
         help=("Optional shared hash-chained post-callback target/scheduling capture."),
     )
+
+
+def _add_carry_demo_cycle_parser(subparsers) -> None:
+    """CLI for the daily-decision carry target producer.
+
+    Unlike the other sleeves, the operational profile is REQUIRED here: the
+    carry rule's parameters live in an immutable Lane-2 registration, so the
+    only runtime dials are the profile's ``carry`` sizing block — there are
+    deliberately no per-flag sizing overrides that could drift from it.
+    """
+    from .carry_demo import CarryDemoCycleConfig
+
+    d = CarryDemoCycleConfig()
+    p = subparsers.add_parser(
+        "carry-demo-cycle",
+        help="Run one carry target-producer cycle (--daemon for the 60s diff loop).",
+    )
+    p.add_argument(
+        "--replay-days",
+        type=int,
+        default=d.replay_days,
+        help="Stateless hysteresis replay window; the engine floor is 45 days.",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=d.workers,
+        help="Kline REST workers (used only when no shared market client is injected).",
+    )
+    p.add_argument(
+        "--risk-policy-file",
+        required=True,
+        help=(
+            "REQUIRED shared producer/account operational profile; the carry "
+            "sizing block (notional multiplier, leverage, declared stop, entry "
+            "throttle) is injected from it."
+        ),
+    )
+    p.add_argument(
+        "--execution-environment",
+        required=True,
+        choices=("demo", "paper"),
+        help="Select exactly one account target owner; producers never submit orders.",
+    )
+    p.add_argument(
+        "--account-intent-inbox-root",
+        default=None,
+        help="Publish DesiredTarget batches to the single account execution owner.",
+    )
+    p.add_argument(
+        "--account-execution-root",
+        default=None,
+        help="Read canonical accepted targets for CARRY planning; required with the inbox.",
+    )
+    p.add_argument(
+        "--candidate-universe-file",
+        default="",
+        help="Optional frozen operational candidate-universe artifact.",
+    )
+    p.add_argument(
+        "--market-follow-root",
+        default="",
+        help=(
+            "Paper follower mode: read this leader (demo) root's kline and "
+            "carry_funding_events caches READ-ONLY instead of fetching from "
+            "REST. Empty (default) = demo REST path."
+        ),
+    )
+    run_mode = p.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run the long-lived 60s diff loop (daily decision, idempotent publication).",
+    )
+    run_mode.add_argument(
+        "--once",
+        action="store_true",
+        help="Run exactly one cycle (the default when --daemon is not set).",
+    )
+    p.add_argument("--interval-seconds", type=float, default=60.0, help="Daemon heartbeat cadence.")
+    p.add_argument(
+        "--strategy-target-capture-path",
+        default=None,
+        help=("Optional shared hash-chained post-callback target/scheduling capture."),
+    )

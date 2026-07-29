@@ -50,6 +50,7 @@ DEMO_OPERATIONAL_PROFILE = "demo-operational"
 OPERATIONAL_PROFILE = "operational"
 DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
+    "liquidity-migration-bybit-carry-demo.service",
     "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-long-demo.service",
     "liquidity-migration-continuous-hedge.service",
@@ -59,6 +60,8 @@ DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
 AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
     "liquidity-migration-account-paper-execution.service",
+    "liquidity-migration-bybit-carry-demo.service",
+    "liquidity-migration-bybit-carry-paper.service",
     "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-continuous-paper.service",
     "liquidity-migration-bybit-long-demo.service",
@@ -70,6 +73,7 @@ AUTHORIZED_UNITS = (
 PAPER_RUNTIME_UNITS = frozenset(
     {
         "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-bybit-carry-paper.service",
         "liquidity-migration-bybit-continuous-paper.service",
         "liquidity-migration-bybit-long-paper.service",
     }
@@ -1017,6 +1021,8 @@ def _validate_environments(
         "LONG_SLEEVE",
         "CONTINUOUS_SLEEVE",
         "CONTINUOUS_PAPER_SLEEVE",
+        "CARRY_SLEEVE",
+        "CARRY_PAPER_SLEEVE",
         "CONTINUOUS_HEDGE_TIMER",
     ):
         if sleeves.get(key, "").strip().lower() not in {"on", "off"}:
@@ -1027,6 +1033,13 @@ def _validate_environments(
     ):
         raise ValueError(
             "demo-operational profile requires CONTINUOUS_PAPER_SLEEVE=off"
+        )
+    if (
+        profile == DEMO_OPERATIONAL_PROFILE
+        and sleeves.get("CARRY_PAPER_SLEEVE", "").strip().lower() != "off"
+    ):
+        raise ValueError(
+            "demo-operational profile requires CARRY_PAPER_SLEEVE=off"
         )
 
     _validate_strategy_target_capture_path(
@@ -1175,6 +1188,8 @@ def _validate_paper_runtime_environments(
         "LONG_SLEEVE",
         "CONTINUOUS_SLEEVE",
         "CONTINUOUS_PAPER_SLEEVE",
+        "CARRY_SLEEVE",
+        "CARRY_PAPER_SLEEVE",
         "CONTINUOUS_HEDGE_TIMER",
     ):
         if sleeves.get(key, "").strip().lower() not in {"on", "off"}:

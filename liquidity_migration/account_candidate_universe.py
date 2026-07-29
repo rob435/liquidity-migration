@@ -30,9 +30,12 @@ from .universe import CRYPTO_LINEAR_SYMBOL_TYPES, build_current_universe_table
 
 _LOGGER = logging.getLogger(__name__)
 
-CANDIDATE_UNIVERSE_SCHEMA_VERSION = 3
+# Schema 4 (2026-07-29): the artifact gains the required "carry" profile
+# beside "long" and "continuous" (CARRY sleeve wiring). Older two-profile
+# artifacts are a different contract and must be re-frozen, not reinterpreted.
+CANDIDATE_UNIVERSE_SCHEMA_VERSION = 4
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
-_PROFILE_NAMES = ("long", "continuous")
+_PROFILE_NAMES = ("long", "continuous", "carry")
 _RETIREMENT_REGISTRY_SCHEMA_VERSION = 1
 _RETIREMENT_REGISTRY_KIND = "candidate_retirement_registry"
 
@@ -211,6 +214,7 @@ def profile_universe_inputs(
     return {
         "long": long_profile_universe_inputs(long_config),
         "continuous": continuous_profile_universe_inputs(continuous_config),
+        "carry": carry_profile_universe_inputs(continuous_config),
     }
 
 
@@ -263,6 +267,31 @@ def continuous_profile_universe_inputs(continuous_config: object) -> dict[str, A
     }
 
 
+def carry_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
+    """Pre-signal population for the CARRY sleeve (lane2_carry_hold_v3).
+
+    The registered runtime universe is the top 100 names by trailing 24h
+    turnover; the enforcement population is a top-150 turnover-ranked superset
+    so routine rank churn cannot starve the deployed book between freezes.
+    The maturity floor is 7 days (the engine needs 168h of settled-funding
+    history before a name is decidable), the turnover floor is shared with the
+    continuous profile's effective config, and the standard stablecoin
+    exclusions apply as they do for both sibling profiles.
+    """
+
+    return {
+        "min_turnover_24h": float(
+            getattr(continuous_config, "universe_min_turnover_24h")
+        ),
+        "min_age_days": 7,
+        "max_age_days": 0,
+        "rank_start": 1,
+        "rank_end": 150,
+        "max_symbols": 150,
+        "exclude_symbols": sorted({_symbol(value) for value in DEFAULT_EXCLUDED_SYMBOLS}),
+    }
+
+
 def _universe_config(payload: Mapping[str, Any]) -> UniverseConfig:
     expected = {
         "min_turnover_24h",
@@ -301,7 +330,7 @@ def build_profile_universe_tables(
     if snapshot_ts_ms <= 0:
         raise ValueError("snapshot_ts_ms must be positive")
     if set(profile_inputs) != set(_PROFILE_NAMES):
-        raise ValueError("candidate profile inputs must contain long and continuous")
+        raise ValueError("candidate profile inputs must contain long, continuous, and carry")
     instrument_map, strategy_instrument_map, _ = _partition_strategy_instrument_rows(
         instrument_rows,
         label="instrument_rows",
@@ -333,7 +362,7 @@ def build_profile_universe_tables_from_frames(
     if snapshot_ts_ms <= 0:
         raise ValueError("snapshot_ts_ms must be positive")
     if set(profile_inputs) != set(_PROFILE_NAMES):
-        raise ValueError("candidate profile inputs must contain long and continuous")
+        raise ValueError("candidate profile inputs must contain long, continuous, and carry")
     return {
         profile: build_current_universe_table(
             instruments,
@@ -413,7 +442,7 @@ def _decision_rows(
     profile_inputs: Mapping[str, Mapping[str, Any]],
     snapshot_ts_ms: int,
 ) -> list[dict[str, Any]]:
-    union = eligible["long"] | eligible["continuous"]
+    union = eligible["long"] | eligible["continuous"] | eligible["carry"]
     decisions: list[dict[str, Any]] = []
     for symbol in sorted(set(instruments) | set(tickers)):
         profile_rows: dict[str, Any] = {}
@@ -478,7 +507,7 @@ def build_candidate_universe_artifact(
         profile: set(table["symbol"].to_list()) if not table.is_empty() else set()
         for profile, table in tables.items()
     }
-    symbols = sorted(eligible["long"] | eligible["continuous"])
+    symbols = sorted(eligible["long"] | eligible["continuous"] | eligible["carry"])
     decisions = _decision_rows(
         instruments,
         tickers,

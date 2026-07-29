@@ -27,6 +27,7 @@ from liquidity_migration.financed_longs import (
     daily_scores,
     financed_leaders_weights,
     prepare,
+    prepare_decision,
     score_carry_hold,
     settlement_exact_funding,
     top_n_universe,
@@ -295,6 +296,59 @@ class TestV3Filters:
         out = score_carry_hold(panel, cfg)
         assert out["config_id"] == "lane2_carry_hold_v3"
         assert "days" in out
+
+
+class TestPrepareDecision:
+    """The live frame: same signals as ``prepare``, no forward-return gate."""
+
+    SIGNALS = [
+        "by_funding",
+        "adv24",
+        "trail_fund_24h",
+        "momentum",
+        "ret_3d",
+        "vol_30d_daily",
+        "dtrail_2d",
+    ]
+
+    def test_shared_rows_are_bit_identical_to_research_frame(self) -> None:
+        panel = _panel(funding_bp={"S01USDT": [1.0, -15.0, -5.0, 1.0]})
+        view = venue_view(panel, "bybit")
+        research = prepare(view)
+        live = prepare_decision(view)
+        assert live.height > research.height
+        joined = research.select(["symbol", "bar_ts_ms", *self.SIGNALS]).join(
+            live.select(["symbol", "bar_ts_ms", *self.SIGNALS]),
+            on=["symbol", "bar_ts_ms"],
+            how="inner",
+            suffix="_live",
+        )
+        assert joined.height == research.height
+        for col in self.SIGNALS:
+            a, b = joined[col], joined[f"{col}_live"]
+            assert (a.is_null() == b.is_null()).all(), col
+            fa, fb = a.drop_nulls(), b.drop_nulls()
+            assert (fa == fb).all(), col
+
+    def test_live_frame_keeps_the_terminal_bars(self) -> None:
+        panel = _panel(hours=480)
+        view = venue_view(panel, "bybit")
+        last_panel_bar = int(view["bar_ts_ms"].max())  # type: ignore[arg-type]
+        research = prepare(view)
+        live = prepare_decision(view)
+        # prepare()'s forward-return gate drops each symbol's final 24 bars
+        # (the registered terminal-day frame caveat); a live decision cannot
+        # know the next 24h exists, so the decision frame keeps them.
+        assert int(live["bar_ts_ms"].max()) == last_panel_bar  # type: ignore[arg-type]
+        assert int(research["bar_ts_ms"].max()) < last_panel_bar  # type: ignore[arg-type]
+
+    def test_live_frame_still_requires_maturity(self) -> None:
+        panel = _panel(hours=480)
+        view = venue_view(panel, "bybit")
+        live = prepare_decision(view)
+        # momentum needs 168h of history: bar 167 is the first with a full
+        # lookback, so nothing younger may appear in the live frame either.
+        assert int(live["bar_ts_ms"].min()) >= 168 * HOUR_MS  # type: ignore[arg-type]
 
 
 class TestFundingSpread:

@@ -329,6 +329,35 @@ registered v3 record). Five lines:
    `intraday_stop_grid.txt` in
    `reports/carry_hold_v3_trade_diagnostics_2026-07-28/`.
 
+### 2026-07-29 — owner override: CONTINUOUS retired; CARRY sleeve deployed
+
+Change points: commit `6331222` (retirement) and the CARRY build commit that
+follows it; two guarded rollouts, receipts in `STATE.md`. Five lines:
+
+1. **What**: by explicit owner instruction ("depromote the continuous strat
+   from demo and paper, and replace it with this one"), the CONTINUOUS
+   sleeve is retired from BOTH fleets (`sleeves.env` off/off; retirement
+   note in `docs/preregistration/sleeve_kill_criteria_2026-07-20.md` — an
+   operator override, not a K-trip) and a new CARRY sleeve deploys the
+   promoted `lane2_carry_hold_v3` on demo + paper.
+2. **How**: the producer replays the registered scorer's own functions on a
+   90-day live frame (`prepare_decision`; parity vs the research frame over
+   the last 90 days: identical on every shared bar, differing only at the
+   decision bar the research frame cannot see); daily decision at 00:00
+   UTC computed ~00:20; declared stop 0.35, no TP; sizing w × equity × 1.0
+   under unchanged account caps. Details: `docs/carry_hold.md` §7.
+3. **Envelope**: the retired CONTINUOUS profile block is shrunk to minimum
+   (`max_active` 1) so the freed envelope funds CARRY's full registered
+   shape (gross cap 1.0 × capital reference); any CONTINUOUS re-promotion
+   must re-size explicitly.
+4. **Evidence**: the Lane-2 forward scorer keeps grading the registered
+   config independently; the live book is graded by
+   `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md` (K1–K4
+   armed at deployment). The known live-vs-scored divergence is the
+   registered terminal-day frame caveat, stated in both places.
+5. **Boundary**: demo + paper only; `REAL_MONEY=false`; mainnet untouched.
+   Real money remains a separate, narrow owner door.
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change

@@ -209,22 +209,51 @@ grind-downs where shorts are not paying.
   scale. Fees are measured at small notional; no impact model. This is not a
   large-book claim.
 
-## 7. Implementation path (when/if promoted)
+## 7. Implementation path — BUILT AND DEPLOYED 2026-07-29 (owner override)
 
-Not deployed today. The path, in order, per `docs/governance.md`:
+The owner ordered on 2026-07-28/29: retire CONTINUOUS from demo and paper
+and deploy this strategy in its place. The runtime now exists:
 
-1. **Forward record** accrues from commit `6584b00`; score one row per
-   completed UTC day (`scripts/screen_financed_longs.py` reproduces; the
-   scorer belongs in the research-refresh cadence).
-2. **Runtime design** when the record earns it: a target producer that reads
-   settled funding (the account owner already consumes funding for
-   reconciliation), maintains the per-name state machine, and publishes
-   targets through the normal account-kernel path — TP/SL declared like the
-   sl35 pattern (a declared wide stop, e.g. −35%, so the 2% account fallback
-   never becomes the exit; the funding-normalization exit is the strategy
-   exit). Chase-then-cross entries; exits are unhurried by construction.
-3. **Demo first**, paper in parallel; promotion needs the five-line note and
-   a recorded change point. Real money remains a separate owner door.
+1. **Sleeve**: `carry` — target producer `liquidity_migration/carry_demo.py`
+   (+ `carry_demo_daemon.py`), demo + paper units, publishing absolute
+   component targets through the normal account-kernel inbox. The deployed
+   decision logic is NOT a reimplementation: the producer calls the exact
+   registered-scorer functions (`financed_longs.carry_hold_weights`) on the
+   live frame (`financed_longs.prepare_decision`) over a stateless 90-day
+   replay window (longest-ever state spell: 19 days).
+2. **Decision cadence**: once per UTC day at 00:00 close, computed from
+   ~00:20 (kline availability lag, same offset as the rmom timer). Diff-based
+   idempotent publication; quiet cycles between decisions. Data: pure REST
+   (settled funding history + 1h klines, kline-derived turnover ranking);
+   paper follows the demo market-data plane read-only.
+3. **Protection**: declared `stop_loss_pct` 0.35 per target (the sl35
+   pattern — replaces the 2% account fallback so the funding-normalization
+   exit is always the real exit), NO take-profit (the book's right tail is
+   the P&L; the 2026-07-28 stop grid in the review §11 is why nothing
+   tighter is declared). Sizing: weight × owner equity × profile multiplier
+   (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
+   owner's unchanged risk caps.
+4. **Live-vs-scored divergence, stated up front**: the research frame drops
+   each symbol's terminal 24h (the registered frame caveat, ~+0.13 Sharpe
+   in research's favor); the live sleeve cannot and does not dodge — it
+   holds through bars the scorer never sees. Forward research rows and the
+   live journal are two records; neither substitutes for the other.
+5. **Kill criteria**: §8 armed at deployment as
+   `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md`.
+6. **Known sharp edges at deployment** (from the build review): (a) entry
+   attempt keys are per-symbol-stable, so one terminal kernel-side
+   rejection suppresses that symbol's entries for the journal's life — the
+   producer avoids the self-inflicted cases (expired-on-arrival validity,
+   dust orders), and a bricked symbol surfaces in the cycles dataset's
+   suppression counts; kernel-side attempt versioning is queued. (b) The
+   live bar keying is close-time (decision at 00:00 close, computed 00:20)
+   — knowledge-content identical to the research row, one grid-phase
+   convention apart, inside the registered decision-clock caveat. (c) The
+   cycles datasets grow as single part files (~1.4k rows/day) until a
+   month-bucket registration lands; queued.
+
+Real money remains a separate owner door; the sleeve runs `DEMO=true`,
+`REAL_MONEY=false`, and nothing in this deployment changes that boundary.
 
 ## 8. Proposed kill criteria (pre-registered before the evidence arrives)
 

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Freeze the pre-signal LONG/CONT population from public Bybit demo data."""
+"""Freeze the pre-signal LONG/CONT/CARRY population from public Bybit demo data.
+
+The CARRY profile (top-150 by 24h turnover, 7-day maturity floor) is derived
+inside ``profile_universe_inputs`` from the same effective continuous config,
+so every artifact carries all three profiles.
+"""
 
 from __future__ import annotations
 

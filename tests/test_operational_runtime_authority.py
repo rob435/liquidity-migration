@@ -15,6 +15,7 @@ import pytest
 
 import liquidity_migration.operational_runtime_authority as authority
 from liquidity_migration.account_candidate_universe import (
+    CANDIDATE_UNIVERSE_SCHEMA_VERSION,
     build_candidate_universe_artifact,
     load_candidate_universe,
     write_candidate_universe,
@@ -242,6 +243,7 @@ def _fixture(
     raw_persistence: str = "0",
     liveness_scope: str = "demo-paper",
     continuous_paper_sleeve: str = "on",
+    carry_paper_sleeve: str = "on",
     real_candidate_rule_coverage: bool = False,
 ) -> tuple[Path, str, Path, dict[str, Path]]:
     repository, commit = _git_repository(tmp_path / "repo")
@@ -318,6 +320,8 @@ def _fixture(
             "LONG_SLEEVE=on\n"
             "CONTINUOUS_SLEEVE=on\n"
             f"CONTINUOUS_PAPER_SLEEVE={continuous_paper_sleeve}\n"
+            "CARRY_SLEEVE=on\n"
+            f"CARRY_PAPER_SLEEVE={carry_paper_sleeve}\n"
             "CONTINUOUS_HEDGE_TIMER=on\n",
             mode=0o640,
         ),
@@ -416,7 +420,12 @@ def test_issue_validates_schema_v3_sources_and_byte_exact_paper_mirrors(
 
     _receipt, payload = _issue(tmp_path, repository, commit, machine_id)
 
-    assert json.loads(paths["symbols"].read_bytes())["schema_version"] == 3
+    # Candidate schema 4 (2026-07-29) added the required carry profile; the
+    # demo-rules probe contract remains schema 3.
+    assert (
+        json.loads(paths["symbols"].read_bytes())["schema_version"]
+        == CANDIDATE_UNIVERSE_SCHEMA_VERSION
+    )
     assert json.loads(paths["rules"].read_bytes())["schema_version"] == 3
     assert paths["paper-symbols"].read_bytes() == paths["symbols"].read_bytes()
     assert paths["paper-rules"].read_bytes() == paths["rules"].read_bytes()
@@ -500,6 +509,7 @@ def test_demo_operational_profile_runs_demo_fleet_without_paper_twin(
         raw_persistence="0",
         liveness_scope="demo",
         continuous_paper_sleeve="off",
+        carry_paper_sleeve="off",
     )
     paths["account-paper-execution.env"].unlink()
     receipt, payload = _issue(
@@ -539,6 +549,7 @@ def test_demo_operational_profile_runs_demo_fleet_without_paper_twin(
         "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-paper.service",
+        "liquidity-migration-bybit-carry-paper.service",
     ):
         with pytest.raises(ValueError, match="not authorized"):
             authority.verify_operational_authorization(
@@ -578,10 +589,33 @@ def test_demo_operational_profile_rejects_paper_scope_and_paper_sleeve(
         monkeypatch,
         liveness_scope="demo",
         continuous_paper_sleeve="on",
+        carry_paper_sleeve="off",
     )
     receipt = second / "etc" / "ready"
     receipt.parent.mkdir()
     with pytest.raises(ValueError, match="CONTINUOUS_PAPER_SLEEVE=off"):
+        authority.issue_operational_authorization(
+            receipt_path=receipt,
+            expected_commit=commit,
+            repo_root=repository,
+            machine_id_path=machine_id,
+            authorization_reference="owner authorization",
+            owner_acknowledgement=authority.OWNER_ACKNOWLEDGEMENT,
+            profile=authority.DEMO_OPERATIONAL_PROFILE,
+        )
+
+    third = tmp_path / "third"
+    third.mkdir()
+    repository, commit, machine_id, _paths = _fixture(
+        third,
+        monkeypatch,
+        liveness_scope="demo",
+        continuous_paper_sleeve="off",
+        carry_paper_sleeve="on",
+    )
+    receipt = third / "etc" / "ready"
+    receipt.parent.mkdir()
+    with pytest.raises(ValueError, match="CARRY_PAPER_SLEEVE=off"):
         authority.issue_operational_authorization(
             receipt_path=receipt,
             expected_commit=commit,
@@ -666,6 +700,7 @@ def test_demo_operational_profile_requires_one_source_bound_candidate_population
         monkeypatch,
         liveness_scope="demo",
         continuous_paper_sleeve="off",
+        carry_paper_sleeve="off",
     )
     alternate = _private(tmp_path / "alternate-symbols.txt", "BTCUSDT\n")
     environment = paths["account-execution.env"].read_text(encoding="utf-8")
@@ -1316,7 +1351,7 @@ def test_managed_unit_inactivity_observer_checks_exact_manifest(
     authority.require_managed_units_inactive(systemctl_path=systemctl)
 
     assert observed == list(authority.ISSUANCE_QUIESCENCE_UNITS)
-    assert len(observed) == 12
+    assert len(observed) == 14
     assert set(authority.AUTHORIZED_UNITS).issubset(observed)
     assert set(observed) - set(authority.AUTHORIZED_UNITS) == {
         "liquidity-migration-demo-liveness.timer",

@@ -53,6 +53,18 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-bybit-continuous-paper.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/run_bybit_continuous_demo_event_engine.sh)
         ;;
+    liquidity-migration-bybit-carry-demo.service:main | \
+    liquidity-migration-bybit-carry-paper.service:main)
+        # The sleeve contract names the paper follow root CARRY_MARKET_FOLLOW_ROOT
+        # (sleeve-scoped, greppable beside KLINES_FOLLOW_ROOT); the carry runner
+        # consumes the generic MARKET_FOLLOW_ROOT. Map it here so the authorized
+        # commit owns the translation; the demo unit sets neither.
+        if [ -n "${CARRY_MARKET_FOLLOW_ROOT:-}" ]; then
+            MARKET_FOLLOW_ROOT="$CARRY_MARKET_FOLLOW_ROOT"
+            export MARKET_FOLLOW_ROOT
+        fi
+        COMMAND=(/opt/liquidity-migration/scripts/run_bybit_carry_demo_event_engine.sh)
+        ;;
     liquidity-migration-continuous-hedge.service:main)
         COMMAND=(/bin/bash /opt/liquidity-migration/scripts/run_continuous_hedge.sh)
         ;;

@@ -548,6 +548,8 @@ def test_operational_authority_accepts_byte_exact_private_paper_mirrors(
             "LONG_SLEEVE": "on",
             "CONTINUOUS_SLEEVE": "on",
             "CONTINUOUS_PAPER_SLEEVE": "on",
+            "CARRY_SLEEVE": "on",
+            "CARRY_PAPER_SLEEVE": "on",
             "CONTINUOUS_HEDGE_TIMER": "on",
         },
     }

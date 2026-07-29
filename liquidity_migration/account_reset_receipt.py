@@ -45,6 +45,8 @@ MANAGED_UNITS = (
     "liquidity-migration-bybit-long-paper.service",
     "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-continuous-paper.service",
+    "liquidity-migration-bybit-carry-demo.service",
+    "liquidity-migration-bybit-carry-paper.service",
     "liquidity-migration-continuous-hedge.service",
     "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
@@ -1130,9 +1132,15 @@ def _validate_sequences(
     if not sleeve_list or len(sleeve_list) != len(set(sleeve_list)):
         raise ValueError("reset sleeves must be nonempty and unique")
     if tuple(sleeve_list) not in {
+        # Every non-empty subset of the managed strategy ledgers, in the
+        # canonical long -> continuous -> carry order the reset script emits.
         ("long",),
         ("continuous",),
+        ("carry",),
         ("long", "continuous"),
+        ("long", "carry"),
+        ("continuous", "carry"),
+        ("long", "continuous", "carry"),
         # Schema-v1 receipts written before the shared compatibility sleeve
         # was retired remain historical evidence and must stay readable.
         ("long", "continuous", "retire-shared-compat"),

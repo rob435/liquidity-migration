@@ -108,6 +108,7 @@ def test_build_records_union_and_exact_exclusion_reasons() -> None:
     assert payload["profile_eligible_symbols"] == {
         "long": ["AAAUSDT"],
         "continuous": ["AAAUSDT", "BBBUSDT"],
+        "carry": ["AAAUSDT", "BBBUSDT"],
     }
     decisions = {row["symbol"]: row for row in payload["decisions"]}
     assert decisions["BBBUSDT"]["profiles"]["long"] == {
@@ -156,13 +157,14 @@ def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
         continuous_config=ContinuousDemoCycleConfig(),
     )
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["strategy_domain"] == "crypto_perpetuals"
     assert payload["strategy_symbol_types"] == ["", "innovation"]
     assert payload["symbols"] == ["AAAUSDT", "INNOVUSDT"]
     assert payload["profile_eligible_symbols"] == {
         "long": ["INNOVUSDT"],
         "continuous": ["AAAUSDT", "INNOVUSDT"],
+        "carry": ["AAAUSDT", "INNOVUSDT"],
     }
     assert payload["raw_source"]["instrument_rows"] == 6
     assert payload["raw_source"]["strategy_instrument_rows"] == 2
@@ -245,6 +247,7 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
     assert frozen.profile_symbols == {
         "long": ("AAAUSDT",),
         "continuous": ("AAAUSDT", "BBBUSDT"),
+        "carry": ("AAAUSDT", "BBBUSDT"),
     }
     now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
     delivery_ms = now_ms + 3 * 24 * 60 * 60 * 1_000
@@ -581,7 +584,7 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
         continuous_config=ContinuousDemoCycleConfig(),
     )
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["symbols"] == ["AAAUSDT"]
     assert payload["raw_source"]["ticker_rows"] == 2
     assert payload["raw_snapshot"]["ticker_rows"][1] == synthetic

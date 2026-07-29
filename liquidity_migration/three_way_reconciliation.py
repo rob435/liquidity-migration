@@ -162,6 +162,10 @@ def normalize_component(sleeve: str, component_id: object) -> str:
     normalized_sleeve = str(sleeve).strip().lower()
     if normalized_sleeve == "long":
         return "long"
+    if normalized_sleeve == "carry":
+        # CARRY is a single registered rule (lane2_carry_hold_v3); it has no
+        # component ensemble to alias.
+        return "carry"
     raw = str(component_id or "").strip()
     if normalized_sleeve != "continuous":
         return raw or "unknown"
@@ -224,7 +228,7 @@ def extract_account_entry_records(
         reference_price = _finite_or_none(payload.get("reference_price"))
         sleeve = str(payload.get("sleeve") or event.sleeve).strip().lower()
         if (
-            sleeve not in {"long", "continuous"}
+            sleeve not in {"long", "continuous", "carry"}
             or signal_ts_ms is None
             or signal_ts_ms <= 0
             or signed_qty is None
@@ -364,7 +368,7 @@ def load_backtest_entry_records(
     report_root: str | Path,
     *,
     venue: str,
-    sleeves: Sequence[str] = ("long", "continuous"),
+    sleeves: Sequence[str] = ("long", "continuous", "carry"),
 ) -> tuple[tuple[BacktestEntryRecord, ...], tuple[str, ...], dict[str, Any]]:
     """Load entry identities from one standard equity-curve report root."""
 
@@ -418,6 +422,32 @@ def load_backtest_entry_records(
             else:
                 warnings.append(f"missing CONTINUOUS {profile.key} report: {report_path}")
         metadata["reports"]["continuous_components"] = component_reports
+
+    if "carry" in selected:
+        # The carry research render (equity_curves --sleeves carry / the
+        # --research-config path) produces a daily score series, not a
+        # per-entry trade export, so entry-level carry reconciliation has no
+        # model side yet. Report the absence loudly instead of silently
+        # treating the carry model book as empty.
+        trades_path = root / "carry" / "carry_hold_trades.csv"
+        report_path = root / "carry" / "lane2_carry_hold_v3_summary.json"
+        if not trades_path.is_file():
+            warnings.append(f"missing CARRY backtest trades: {trades_path}")
+        else:
+            for row in _read_csv(trades_path):
+                record = _backtest_row(
+                    row,
+                    sleeve="carry",
+                    component="carry",
+                    venue=venue,
+                    path=trades_path,
+                )
+                if record is not None:
+                    records.append(record)
+        if report_path.is_file():
+            metadata["reports"]["carry"] = json.loads(report_path.read_text(encoding="utf-8"))
+        else:
+            warnings.append(f"missing CARRY backtest report: {report_path}")
 
     return tuple(records), tuple(warnings), metadata
 
@@ -513,7 +543,7 @@ def compare_three_way_entries(
         warnings.append("demo/paper account snapshot commit does not match the backtest commit")
 
     sleeve_summaries: dict[str, Any] = {}
-    for sleeve in ("long", "continuous"):
+    for sleeve in ("long", "continuous", "carry"):
         d = {key for key in demo_accepted if key.sleeve == sleeve}
         p = {key for key in paper_accepted if key.sleeve == sleeve}
         b = {key for key in model if key.sleeve == sleeve}
@@ -613,7 +643,7 @@ def reconcile_account_roots_to_backtest(
     code_commit: str,
     start_ms: int | None = None,
     account_snapshot_commit: str | None = None,
-    sleeves: Sequence[str] = ("long", "continuous"),
+    sleeves: Sequence[str] = ("long", "continuous", "carry"),
 ) -> dict[str, Any]:
     demo = load_account_evidence(demo_account_root, environment="demo")
     paper = load_account_evidence(paper_account_root, environment="paper")
@@ -665,7 +695,7 @@ def format_three_way_markdown(report: Mapping[str, Any]) -> str:
         "| sleeve | demo | paper | backtest | all three | exact | vacuous |",
         "| --- | ---: | ---: | ---: | ---: | --- | --- |",
     ]
-    for sleeve in ("long", "continuous"):
+    for sleeve in ("long", "continuous", "carry"):
         summary = _mapping(_mapping(report.get("sleeves")).get(sleeve))
         lines.append(
             "| {sleeve} | {demo} | {paper} | {backtest} | {overlap} | {exact} | {vacuous} |".format(

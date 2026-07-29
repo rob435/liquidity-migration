@@ -79,12 +79,20 @@ def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path
     assert "reset-failed liquidity-migration-stale-alpha.service" in calls
 
 
-def test_loaded_toggles_long_continuous_and_paper_on(tmp_path: Path) -> None:
-    # Loaded toggles: LONG re-enabled 2026-06-16 by operator (demo diversifier, shares the
-    # netted demo account with continuous); continuous demo + paper stay on.
+def test_loaded_toggles_match_committed_sleeve_state(tmp_path: Path) -> None:
+    # Loaded toggles must equal the committed deploy/sleeves.env: LONG on,
+    # CONTINUOUS retired from demo AND paper (2026-07-29 owner override),
+    # CARRY on for demo AND paper as its replacement. One `test` per toggle:
+    # a failing inner member of one `&&` chain is ignored by `set -e` (only
+    # the LAST member's status escapes), which previously made this test
+    # vacuous for every toggle but the final one.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = on             && test "$CONTINUOUS_PAPER_SLEEVE" = on
+        test "$LONG_SLEEVE" = on
+        test "$CONTINUOUS_SLEEVE" = off
+        test "$CONTINUOUS_PAPER_SLEEVE" = off
+        test "$CARRY_SLEEVE" = on
+        test "$CARRY_PAPER_SLEEVE" = on
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
@@ -100,11 +108,15 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
         "LONG_SLEEVE=off\n"
         "CONTINUOUS_SLEEVE=off\n"
         "CONTINUOUS_PAPER_SLEEVE=on\n"
+        "CARRY_SLEEVE=off\n"
+        "CARRY_PAPER_SLEEVE=on\n"
     )
     host_env.write_text(
         "LONG_SLEEVE=on\n"
         "CONTINUOUS_SLEEVE=on\n"
         "CONTINUOUS_PAPER_SLEEVE=off\n"
+        "CARRY_SLEEVE=on\n"
+        "CARRY_PAPER_SLEEVE=off\n"
     )
     script = textwrap.dedent(f"""
         set -euo pipefail
@@ -114,11 +126,15 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
         test "$LONG_SLEEVE" = off
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = off
+        test "$CARRY_SLEEVE" = off
+        test "$CARRY_PAPER_SLEEVE" = off
         lm_write_resolved_sleeve_toggles
         lm_verify_resolved_sleeve_toggles
         grep -Fx LONG_SLEEVE=off "{resolved_env}"
         grep -Fx CONTINUOUS_SLEEVE=off "{resolved_env}"
         grep -Fx CONTINUOUS_PAPER_SLEEVE=off "{resolved_env}"
+        grep -Fx CARRY_SLEEVE=off "{resolved_env}"
+        grep -Fx CARRY_PAPER_SLEEVE=off "{resolved_env}"
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
@@ -133,8 +149,10 @@ def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> N
         "LONG_SLEEVE=on\n"
         "CONTINUOUS_SLEEVE=on\n"
         "CONTINUOUS_PAPER_SLEEVE=on\n"
+        "CARRY_SLEEVE=on\n"
+        "CARRY_PAPER_SLEEVE=on\n"
     )
-    host_env.write_text("LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=off\n")
+    host_env.write_text("LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=off\nCARRY_PAPER_SLEEVE=off\n")
     script = textwrap.dedent(f"""
         set -euo pipefail
         export LM_HOST_SLEEVES_ENV="{host_env}"
@@ -143,6 +161,8 @@ def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> N
         test "$LONG_SLEEVE" = on
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = on
+        test "$CARRY_SLEEVE" = on
+        test "$CARRY_PAPER_SLEEVE" = off
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
@@ -158,7 +178,8 @@ def test_host_override_is_parsed_as_data_not_shell_source(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     (lib_dir / "sleeves.env").write_text(
-        "LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=on\nCONTINUOUS_PAPER_SLEEVE=on\n",
+        "LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=on\nCONTINUOUS_PAPER_SLEEVE=on\n"
+        "CARRY_SLEEVE=on\nCARRY_PAPER_SLEEVE=on\n",
         encoding="utf-8",
     )
     host_env.write_text(
@@ -198,12 +219,15 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     script = textwrap.dedent(f"""
         set -euo pipefail
         export LM_HOST_SLEEVES_ENV="{host_env}"
-        unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE 2>/dev/null || true
+        unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
+            CARRY_SLEEVE CARRY_PAPER_SLEEVE 2>/dev/null || true
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = off
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = off
+        test "$CARRY_SLEEVE" = off
+        test "$CARRY_PAPER_SLEEVE" = off
         echo "FALLBACK_OK"
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
@@ -215,14 +239,46 @@ def test_committed_sleeves_env_continuous_retired() -> None:
     # The committed file is the source of truth. The CONTINUOUS sleeve was
     # retired from demo AND paper by owner override on 2026-07-29 (see
     # docs/preregistration/sleeve_kill_criteria_2026-07-20.md, retirement
-    # note); LONG stays on. Each line must be systemd-EnvironmentFile-safe
-    # (plain KEY=value, no inline comment).
+    # note); LONG stays on, and CARRY (lane2_carry_hold_v3, registered
+    # 2026-07-29) replaces CONTINUOUS on demo AND paper. Each line must be
+    # systemd-EnvironmentFile-safe (plain KEY=value, no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
         "LONG_SLEEVE": "on",
         "CONTINUOUS_SLEEVE": "off",
         "CONTINUOUS_PAPER_SLEEVE": "off",
+        "CARRY_SLEEVE": "on",
+        "CARRY_PAPER_SLEEVE": "on",
     }
     for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))
         assert line == f"{flag}={value}", f"{flag} must be plain KEY={value} (no inline comment): {line!r}"
+    # Exactly the five registered keys — no stray toggles the parser would reject.
+    keys = [ln.split("=", 1)[0] for ln in env.splitlines() if ln and not ln.startswith("#")]
+    assert keys == list(expected)
+
+
+def test_parser_rejects_duplicate_carry_toggles(tmp_path: Path) -> None:
+    duplicate = tmp_path / "dup-sleeves.env"
+    duplicate.write_text("CARRY_SLEEVE=on\nCARRY_SLEEVE=off\n", encoding="utf-8")
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        cd "{REPO}"
+        . deploy/lib_sleeves.sh
+        lm_parse_sleeve_environment "{duplicate}"
+    """)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert proc.returncode != 0
+    assert "duplicate CARRY_SLEEVE" in proc.stderr
+
+    duplicate_paper = tmp_path / "dup-paper-sleeves.env"
+    duplicate_paper.write_text("CARRY_PAPER_SLEEVE=on\nCARRY_PAPER_SLEEVE=on\n", encoding="utf-8")
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        cd "{REPO}"
+        . deploy/lib_sleeves.sh
+        lm_parse_sleeve_environment "{duplicate_paper}"
+    """)
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert proc.returncode != 0
+    assert "duplicate CARRY_PAPER_SLEEVE" in proc.stderr

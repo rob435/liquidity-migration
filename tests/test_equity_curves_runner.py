@@ -14,8 +14,8 @@ equity_curves = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(equity_curves)
 
 
-def test_continuous_is_runner_sleeve() -> None:
-    assert set(equity_curves.RUNNERS) == {"long", "continuous"}
+def test_deployed_sleeves_are_runner_sleeves() -> None:
+    assert set(equity_curves.RUNNERS) == {"long", "continuous", "carry"}
 
 
 def test_continuous_venue_inference_from_root() -> None:

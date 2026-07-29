@@ -6,6 +6,7 @@ import polars as pl
 
 from liquidity_migration.account_contracts import AccountEvent
 from liquidity_migration.sleeve_kill_criteria import (
+    CARRY_EPOCH_START_UTC,
     EPOCH_DAY90_UTC,
     EPOCH_START_UTC,
     K3_EXTENSION_DAYS,
@@ -185,9 +186,13 @@ def test_k1_limits_are_the_registered_percentage_of_the_committed_capital_refere
     making a false trip on one routine stop-out near-certain (audit H3)."""
 
     at_registration = k1_drawdown_limits(REGISTERED_CAPITAL_REFERENCE_USDT)
-    assert at_registration == {"continuous": -500.0, "long": -400.0}
+    assert at_registration == {"continuous": -500.0, "long": -400.0, "carry": -3_000.0}
     deployed = k1_drawdown_limits(250_000.0)
-    assert deployed == {"continuous": -12_500.0, "long": -10_000.0}
+    assert deployed == {"continuous": -12_500.0, "long": -10_000.0, "carry": -75_000.0}
+    # The carry registration scales its 30% by the committed carry notional
+    # multiplier (the deployed carry book size), and ONLY the carry limit.
+    half_sized = k1_drawdown_limits(250_000.0, carry_notional_multiplier=0.5)
+    assert half_sized == {"continuous": -12_500.0, "long": -10_000.0, "carry": -37_500.0}
 
     # A routine 1.5-ATR stop-out at the deployed sizing must not trip K1.
     events = [_pnl_event(1, pnl_key="p1", net=-1_100.0, ts_ns=_epoch_ns(1))]
@@ -207,6 +212,118 @@ def test_k1_limits_are_the_registered_percentage_of_the_committed_capital_refere
         pnl_events=events, trades_by_group=trades, now_utc=_mid_epoch_now()
     )
     assert at_original["sleeves"]["long"]["k1"]["tripped"] is True  # type: ignore[index]
+
+
+def _carry_ns(days_in: float) -> int:
+    return int((CARRY_EPOCH_START_UTC + dt.timedelta(days=days_in)).timestamp() * 1e9)
+
+
+def test_carry_k1_trips_at_thirty_percent_of_scaled_reference() -> None:
+    """Carry K1: forward drawdown beyond 30% of capital reference x carry
+    notional multiplier (docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md)."""
+
+    events = [
+        _pnl_event(1, pnl_key="c1", net=100.0, ts_ns=_carry_ns(1)),
+        _pnl_event(2, pnl_key="c2", net=-3_050.0, ts_ns=_carry_ns(2)),
+    ]
+    trades = {"carry": _trades(["c1", "c2"])}
+    report = _evaluate(
+        pnl_events=events,
+        trades_by_group=trades,
+        now_utc=CARRY_EPOCH_START_UTC + dt.timedelta(days=10),
+    )
+    carry = report["sleeves"]["carry"]  # type: ignore[index]
+    assert carry["k1"]["limit_usdt"] == -3_000.0
+    assert carry["k1"]["tripped"] is True
+    assert "carry:K1" in report["tripped"]  # type: ignore[operator]
+
+    # The same loss under a half-sized carry book (multiplier 0.5) is judged
+    # against -1,500 and still trips; a loss inside the scaled limit does not.
+    inside = [
+        _pnl_event(1, pnl_key="c1", net=100.0, ts_ns=_carry_ns(1)),
+        _pnl_event(2, pnl_key="c2", net=-1_400.0, ts_ns=_carry_ns(2)),
+    ]
+    ok_report = evaluate_kill_criteria(
+        pnl_events=inside,
+        trades_by_group={"carry": _trades(["c1", "c2"])},
+        now_utc=CARRY_EPOCH_START_UTC + dt.timedelta(days=10),
+        capital_reference_usdt=REGISTERED_CAPITAL_REFERENCE_USDT,
+        carry_notional_multiplier=0.5,
+    )
+    assert ok_report["sleeves"]["carry"]["k1"]["limit_usdt"] == -1_500.0
+    assert ok_report["sleeves"]["carry"]["k1"]["tripped"] is False
+
+
+def test_carry_forward_clock_starts_at_the_carry_deployment_epoch() -> None:
+    """A carry-attributed PNL row before the carry change point is not forward
+    evidence, even though it postdates the 2026-07-19 LONG/CONTINUOUS epoch."""
+
+    before_carry = int((CARRY_EPOCH_START_UTC - dt.timedelta(days=2)).timestamp() * 1e9)
+    assert before_carry > int(EPOCH_START_UTC.timestamp() * 1e9)
+    events = [_pnl_event(1, pnl_key="c1", net=-9_999.0, ts_ns=before_carry)]
+    report = _evaluate(
+        pnl_events=events,
+        trades_by_group={"carry": _trades(["c1"])},
+        now_utc=CARRY_EPOCH_START_UTC + dt.timedelta(days=5),
+    )
+    carry = report["sleeves"]["carry"]  # type: ignore[index]
+    assert carry["attributed_round_trips_in_epoch"] == 0
+    assert carry["k1"]["tripped"] is False
+    assert carry["epoch_start_utc"] == "2026-07-29T00:00:00Z"
+
+
+def test_carry_k2_rides_the_120_forward_day_clock_without_day90_gate() -> None:
+    """Carry K2's executable subset: >= 120 forward days from the carry epoch
+    and cumulative net <= 0 with at least one attributed round trip. The
+    deployed-share and consecutiveness clauses stay manual and are named in
+    the report."""
+
+    events = [_pnl_event(1, pnl_key="c1", net=-10.0, ts_ns=_carry_ns(3))]
+    trades = {"carry": _trades(["c1"])}
+
+    early = _evaluate(
+        pnl_events=events,
+        trades_by_group=trades,
+        now_utc=CARRY_EPOCH_START_UTC + dt.timedelta(days=119),
+    )
+    carry_early = early["sleeves"]["carry"]  # type: ignore[index]
+    assert carry_early["k2"]["requires_day90"] is False
+    assert carry_early["k2"]["applicable"] is False
+    assert carry_early["k2"]["tripped"] is False
+
+    late = _evaluate(
+        pnl_events=events,
+        trades_by_group=trades,
+        now_utc=CARRY_EPOCH_START_UTC + dt.timedelta(days=121),
+    )
+    carry_late = late["sleeves"]["carry"]  # type: ignore[index]
+    assert carry_late["k2"]["applicable"] is True
+    assert carry_late["k2"]["tripped"] is True
+    assert "carry:K2" in late["tripped"]  # type: ignore[operator]
+    assert any("deployed-share" in item for item in carry_late["manual_criteria"])
+
+
+def test_carry_has_no_day90_sample_criterion_and_names_manual_checks() -> None:
+    """Carry's insufficient-sample clause (K4, deployed days) is manual-only:
+    day 90 of the shared epoch must NOT trip a carry K3, and the manual K3/K4
+    clauses are named in the weekly report instead of silently absent."""
+
+    report = _evaluate(
+        pnl_events=[],
+        trades_by_group={"carry": pl.DataFrame()},
+        now_utc=EPOCH_DAY90_UTC + dt.timedelta(days=1),
+    )
+    carry = report["sleeves"]["carry"]  # type: ignore[index]
+    assert carry["k3"]["evaluates"] == "manual_only"
+    assert carry["k3"]["min_round_trips_at_day90"] is None
+    assert carry["k3"]["tripped"] is False
+    assert "carry:K3" not in report["tripped"]  # type: ignore[operator]
+    manual = "\n".join(carry["manual_criteria"])
+    assert "K3 mechanism break" in manual
+    assert "K4 insufficient sample" in manual
+    # The LONG/CONTINUOUS day-90 semantics are untouched by the carry entry.
+    assert report["sleeves"]["long"]["k3"]["tripped"] is True  # type: ignore[index]
+    assert report["sleeves"]["continuous"]["k3"]["tripped"] is True  # type: ignore[index]
 
 
 def test_long_k3_extension_retires_on_an_insufficient_extended_sample() -> None:

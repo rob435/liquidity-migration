@@ -45,12 +45,13 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
         ROOT / "scripts" / "run_account_paper_execution_service.sh",
         ROOT / "scripts" / "run_bybit_long_demo_event_engine.sh",
         ROOT / "scripts" / "run_bybit_continuous_demo_event_engine.sh",
+        ROOT / "scripts" / "run_bybit_carry_demo_event_engine.sh",
         ROOT / "scripts" / "run_continuous_hedge.sh",
         ROOT / "scripts" / "run_continuous_rmom_refresh.sh",
         ROOT / "scripts" / "reset_demo_paper_ledgers.sh",
     ]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
-    for path in scripts[:6] + scripts[8:]:
+    for path in scripts[:7] + scripts[9:]:
         assert path.stat().st_mode & stat.S_IXUSR
     assert (ROOT / "scripts" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
     assert (
@@ -103,6 +104,7 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
         "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-paper.service",
+        "liquidity-migration-bybit-carry-paper.service",
     ):
         fragment = _unit(unit)
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in fragment
@@ -120,8 +122,10 @@ def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> Non
         "liquidity-migration-account-paper-execution.service": ("256M", "384M", "256M"),
         "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
         "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),
+        "liquidity-migration-bybit-carry-demo.service": ("768M", "896M", "384M"),
         "liquidity-migration-bybit-continuous-paper.service": ("640M", "768M", "384M"),
         "liquidity-migration-bybit-long-paper.service": ("640M", "768M", "384M"),
+        "liquidity-migration-bybit-carry-paper.service": ("640M", "768M", "384M"),
     }
     for unit, (high, maximum, swap) in expected.items():
         fragment = _unit(unit)
@@ -142,9 +146,11 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
     pairs = {
         "liquidity-migration-bybit-long-demo.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-bybit-continuous-demo.service": "liquidity-migration-account-execution.service",
+        "liquidity-migration-bybit-carry-demo.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-continuous-hedge.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-bybit-long-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-continuous-paper.service": "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-bybit-carry-paper.service": "liquidity-migration-account-paper-execution.service",
     }
     for producer, owner in pairs.items():
         fragment = _unit(producer)
@@ -197,7 +203,16 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
     )
     continuous_demo = _environment("liquidity-migration-bybit-continuous-demo.service")
     continuous_paper = _environment("liquidity-migration-bybit-continuous-paper.service")
-    for environment in (long_demo, long_paper, continuous_demo, continuous_paper):
+    carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
+    carry_paper = _environment("liquidity-migration-bybit-carry-paper.service")
+    for environment in (
+        long_demo,
+        long_paper,
+        continuous_demo,
+        continuous_paper,
+        carry_demo,
+        carry_paper,
+    ):
         assert set(environment).isdisjoint(sizing_keys)
     for key in (
         "LOOKBACK_DAYS",
@@ -206,6 +221,10 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
         assert continuous_demo[key] == continuous_paper[key]
     for key in ("LOOKBACK_DAYS", "WORKERS", "WS_KLINES_ENABLED", "WS_KLINES_BOOTSTRAP_WORKERS"):
         assert long_demo[key] == long_paper[key]
+    for key in ("LOOKBACK_DAYS", "WORKERS", "WS_KLINES_ENABLED"):
+        assert carry_demo[key] == carry_paper[key]
+    # Carry has no WS kline plane in either environment.
+    assert carry_demo["WS_KLINES_ENABLED"] == "0"
     long_runner = _read("scripts/run_bybit_long_demo_event_engine.sh")
     continuous_runner = _read("scripts/run_bybit_continuous_demo_event_engine.sh")
     hedge_runner = _read("scripts/run_continuous_hedge.sh")
@@ -216,6 +235,8 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
     assert long_paper["EXECUTION_ENVIRONMENT"] == "paper"
     assert continuous_demo["EXECUTION_ENVIRONMENT"] == "demo"
     assert continuous_paper["EXECUTION_ENVIRONMENT"] == "paper"
+    assert carry_demo["EXECUTION_ENVIRONMENT"] == "demo"
+    assert carry_paper["EXECUTION_ENVIRONMENT"] == "paper"
 
 
 def test_demo_account_notification_reads_the_explicit_continuous_status_root() -> None:
@@ -238,6 +259,14 @@ def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots()
     assert continuous_paper["DATA_ROOT"] != continuous_demo["DATA_ROOT"]
     assert continuous_paper["KLINES_FOLLOW_ROOT"] == continuous_demo["DATA_ROOT"]
 
+    # Carry follows the demo market plane through its own follow variable
+    # (no WS kline store; the follower reads the demo public REST store).
+    carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
+    carry_paper = _environment("liquidity-migration-bybit-carry-paper.service")
+    assert carry_paper["DATA_ROOT"] != carry_demo["DATA_ROOT"]
+    assert carry_paper["CARRY_MARKET_FOLLOW_ROOT"] == carry_demo["DATA_ROOT"]
+    assert "KLINES_FOLLOW_ROOT" not in carry_paper
+
     rmom = _read("scripts/run_continuous_rmom_refresh.sh")
     assert "CONTINUOUS_PAPER_DATA_ROOT" not in rmom
     assert rmom.count("precompute_residual_momentum.py") == 1
@@ -255,6 +284,9 @@ def test_paper_producer_sandboxes_include_the_authorized_shared_capture_root() -
         ),
         "liquidity-migration-bybit-continuous-paper.service": (
             "/opt/liquidity-migration/data/bybit-continuous-paper-event"
+        ),
+        "liquidity-migration-bybit-carry-paper.service": (
+            "/opt/liquidity-migration/data/bybit-carry-paper-event"
         ),
     }
     for unit, strategy_root in strategy_roots.items():
@@ -443,7 +475,7 @@ def test_reset_recovery_reopens_exact_fresh_roots_before_rule_maintenance() -> N
     assert "expected_roots=expected_roots" in validate
     assert "require_leave_stopped=True" in validate
     assert "require_fresh_roots=True" in validate
-    assert '{"long", "continuous"}' in validate
+    assert '{"long", "continuous", "carry"}' in validate
     assert "load_private_systemd_environment(demo_env_path)" in validate
     assert "load_group_systemd_environment(" in validate
     assert 'group_name="liquidity-migration-paper"' in validate

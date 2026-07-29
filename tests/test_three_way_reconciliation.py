@@ -246,13 +246,23 @@ def test_backtest_loader_attaches_active_continuous_component(tmp_path: Path) ->
         )
         (component / "continuous_report.json").write_text("{}\n", encoding="utf-8")
 
-    records, warnings, _metadata = load_backtest_entry_records(tmp_path, venue="bybit")
+    records, warnings, _metadata = load_backtest_entry_records(
+        tmp_path,
+        venue="bybit",
+        sleeves=("long", "continuous"),
+    )
 
     assert warnings == ()
     assert {record.key for record in records} == {
         EntryKey("long", "long", "BTCUSDT", 1_000),
         EntryKey("continuous", "turn3p3", "ETHUSDT", 1_200),
     }
+
+    # The default selection now includes carry; an absent carry model book is
+    # a loud warning (no daemon-replay trades export exists yet), never a
+    # silently-empty model side.
+    _records, default_warnings, _meta = load_backtest_entry_records(tmp_path, venue="bybit")
+    assert any("missing CARRY backtest trades" in warning for warning in default_warnings)
 
 
 def test_artifacts_are_idempotent_but_never_overwritten(tmp_path: Path) -> None:

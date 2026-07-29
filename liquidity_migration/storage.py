@@ -102,6 +102,9 @@ DATASETS = {
     "long_native_paper_cycles",
     "continuous_fade_demo_cycles",
     "continuous_fade_paper_cycles",
+    "carry_hold_demo_cycles",
+    "carry_hold_paper_cycles",
+    "carry_funding_events",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
     "binance_usdm_index_price_1h",
@@ -127,6 +130,12 @@ DATASET_KEYS = {
     "long_native_paper_cycles": ("cycle_id",),
     "continuous_fade_demo_cycles": ("cycle_id",),
     "continuous_fade_paper_cycles": ("cycle_id",),
+    "carry_hold_demo_cycles": ("cycle_id",),
+    "carry_hold_paper_cycles": ("cycle_id",),
+    # Settled prints are naturally keyed by their settlement instant; the
+    # dedup makes the carry sleeve's overlap-window incremental appends
+    # idempotent at the storage layer too.
+    "carry_funding_events": ("symbol", "funding_ts_ms"),
     "binance_usdm_klines_1h": ("ts_ms", "symbol"),
     "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
     "binance_usdm_index_price_1h": ("ts_ms", "symbol"),
@@ -665,6 +674,8 @@ _LEDGER_MONTH_COL = "_ledger_month"
 LEDGER_BUCKET_SOURCE: dict[str, str] = {
     "continuous_fade_demo_cycles": "ts_ms",
     "continuous_fade_paper_cycles": "ts_ms",
+    "carry_hold_demo_cycles": "ts_ms",
+    "carry_hold_paper_cycles": "ts_ms",
 }
 
 

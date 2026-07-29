@@ -227,8 +227,13 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
 
 
-def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataFrame:
-    """Attach adv24, forward 24h net return, momentum, and contiguity."""
+def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataFrame:
+    """Shared signal construction for the research and live frames.
+
+    Attaches every column both frames use; callers apply their own row
+    filter. Extracted so ``prepare`` (research, forward-return-gated) and
+    ``prepare_decision`` (live, backward-only) can never drift apart.
+    """
     missing = [c for c in REQUIRED_COLUMNS if c not in panel.columns]
     if missing:
         raise FinancedLongsError(f"panel is missing required columns: {missing}")
@@ -255,12 +260,17 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
             ).alias("contiguous"),
         ]
     )
-    frame = frame.with_columns(
+    return frame.with_columns(
         pl.col("_r24").rolling_std(720).shift(1).over("symbol").alias("vol_30d_daily"),
         (pl.col("trail_fund_24h") - pl.col("trail_fund_24h").shift(48).over("symbol")).alias(
             "dtrail_2d"
         ),
     ).drop("_r24")
+
+
+def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataFrame:
+    """Attach adv24, forward 24h net return, momentum, and contiguity."""
+    frame = _signal_frame(panel, momentum_lookback_hours)
     frame = frame.filter(
         pl.col("contiguous")
         & pl.col("price_return").is_finite()
@@ -270,6 +280,25 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
     return frame.with_columns(
         (pl.col("price_return") - pl.col("funding_paid")).alias("net_return")
     )
+
+
+def prepare_decision(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataFrame:
+    """The LIVE frame: every bar whose backward-looking signals are mature.
+
+    Identical signal construction to :func:`prepare` (shared expressions),
+    but rows are kept whenever the 168h momentum lookback is satisfied —
+    forward-looking columns (``price_return``, ``funding_paid``,
+    ``contiguous``) may be null/non-finite and carry no meaning here. A live
+    decision cannot condition on the next 24h existing, so this frame keeps
+    the bars the research frame drops: each symbol's terminal 24h and bars
+    ahead of data holes. That difference IS the registered terminal-day
+    frame caveat (v3 registration ``honesty_notes.frame_caveat``, ~+0.13
+    Sharpe in the research frame's favor); the runtime trades without the
+    dodge, and scored-vs-live divergence around symbol deaths is expected,
+    documented behavior — not drift.
+    """
+    frame = _signal_frame(panel, momentum_lookback_hours)
+    return frame.filter(pl.col("momentum").is_finite())
 
 
 def daily_grid(frame: pl.DataFrame) -> pl.DataFrame:

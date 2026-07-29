@@ -115,6 +115,13 @@ class ContinuousTargetAdapter(_SignedNotionalAdapter):
         super().__init__(sleeve="continuous", allowed_sign=-1)
 
 
+class CarryTargetAdapter(_SignedNotionalAdapter):
+    """Long-only funding-carry sleeve (registered config lane2_carry_hold_v3)."""
+
+    def __init__(self) -> None:
+        super().__init__(sleeve="carry", allowed_sign=1)
+
+
 class HedgeTargetAdapter(_SignedNotionalAdapter):
     def __init__(self) -> None:
         super().__init__(sleeve="hedge", allowed_sign=None)

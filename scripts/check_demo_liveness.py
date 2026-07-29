@@ -85,6 +85,8 @@ _LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
 _LONG_PAPER_UNIT = "liquidity-migration-bybit-long-paper.service"
 _CONTINUOUS_DEMO_UNIT = "liquidity-migration-bybit-continuous-demo.service"
 _CONTINUOUS_PAPER_UNIT = "liquidity-migration-bybit-continuous-paper.service"
+_CARRY_DEMO_UNIT = "liquidity-migration-bybit-carry-demo.service"
+_CARRY_PAPER_UNIT = "liquidity-migration-bybit-carry-paper.service"
 def _default_root(rel: str) -> str:
     """Anchor a default data root at the repo dir (NOT the CWD).
 
@@ -769,6 +771,11 @@ def _default_units_for_toggles() -> list[str]:
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         units.append(_CONTINUOUS_PAPER_UNIT)
+    if _sleeve_on("CARRY_SLEEVE"):
+        units.append(_CARRY_DEMO_UNIT)
+    # Unlike LONG, carry has a dedicated paper toggle in the sleeve contract.
+    if _sleeve_on("CARRY_PAPER_SLEEVE"):
+        units.append(_CARRY_PAPER_UNIT)
     return units
 
 
@@ -789,6 +796,7 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
         _PAPER_ACCOUNT_OWNER_UNIT,
         _LONG_PAPER_UNIT,
         _CONTINUOUS_PAPER_UNIT,
+        _CARRY_PAPER_UNIT,
     }
     if not _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         paper_units.update(
@@ -1073,6 +1081,102 @@ def gather_long_alerts(
     return alerts
 
 
+def gather_carry_alerts(
+    *,
+    carry_root: Path,
+    now_ms: int | None = None,
+    args: argparse.Namespace,
+    cycle_checks: bool = True,
+    cycles_dataset: str = "carry_hold_demo_cycles",
+    environment: str = "demo",
+    unit_runtime: UnitRuntime | None = None,
+) -> list[Alert]:
+    """Check the CARRY strategy scheduler's cycle heartbeat and decision health.
+
+    Carry has no WS kline plane; its market inputs arrive via bounded public
+    REST inside the cycle, so freshness is the cycle heartbeat itself. Cycle
+    rows carry ``decision_error`` / ``decision_stale`` from the daemon's
+    fail-closed hold-previous-targets policy: a stale decision means the book
+    is riding old targets and must page rather than look like a quiet market.
+    """
+    if not carry_root.exists():
+        return []
+    label = carry_root.name
+    alerts: list[Alert] = []
+    if cycle_checks:
+        row: dict[str, Any] | None
+        liveness_ts_ms: int | None
+        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
+        if generation_bound:
+            assert unit_runtime is not None
+            observation, detail = _observe_completed_cycle(
+                root=carry_root,
+                cycles_dataset=cycles_dataset,
+                runtime=unit_runtime,
+                sleeve="carry",
+                environment=environment,
+            )
+            if observation is None:
+                if _within_startup_grace(
+                    unit_runtime,
+                    max_age_minutes=args.max_cycle_age_min,
+                ):
+                    return alerts
+                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
+                return alerts
+            row = observation.row
+            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
+        else:
+            try:
+                cyc = read_dataset(carry_root, cycles_dataset)
+            except Exception:  # noqa: BLE001 — watchdog never crashes
+                cyc = pl.DataFrame()
+            latest_row = (
+                cyc.sort("ts_ms").tail(1).to_dicts()[0]
+                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
+                else None
+            )
+            row = latest_row
+            liveness_ts_ms = (
+                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
+            )
+        observed_now_ms = _now_ms() if now_ms is None else now_ms
+        live = evaluate_cycle_liveness(
+            latest_cycle_ts_ms=liveness_ts_ms,
+            now_ms=observed_now_ms,
+            max_age_minutes=args.max_cycle_age_min,
+            label=label,
+        )
+        if live:
+            alerts.append(live)
+        if row is not None:
+            if bool(row.get("decision_stale")):
+                detail = str(row.get("decision_error") or "").strip()
+                suffix = f" (decision_error: {detail[:200]})" if detail else ""
+                alerts.append(
+                    Alert(
+                        key=f"carry_decision_stale:{label}",
+                        severity=CRITICAL,
+                        message=(
+                            f"{label}: carry sleeve is holding PREVIOUS targets — the latest "
+                            f"cycle could not produce a fresh decision{suffix}."
+                        ),
+                    )
+                )
+            elif str(row.get("decision_error") or "").strip():
+                alerts.append(
+                    Alert(
+                        key=f"carry_decision_error:{label}",
+                        severity=WARNING,
+                        message=(
+                            f"{label}: carry cycle reported a decision error: "
+                            f"{str(row.get('decision_error'))[:300]}"
+                        ),
+                    )
+                )
+    return alerts
+
+
 def gather_account_capture_alerts(
     *,
     capture_root: Path,
@@ -1324,6 +1428,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="long-native paper sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
+        "--carry-root",
+        default=os.environ.get("CARRY_DEMO_DATA_ROOT") or _default_root("data/bybit-carry-demo-event"),
+        help="carry-hold sleeve root for cycle/decision freshness ('' to skip)",
+    )
+    p.add_argument(
+        "--carry-paper-root",
+        default=os.environ.get("CARRY_PAPER_DATA_ROOT") or _default_root("data/bybit-carry-paper-event"),
+        help="carry-hold paper root for cycle/decision freshness ('' to skip)",
+    )
+    p.add_argument(
         "--account-root",
         default=os.environ.get("ACCOUNT_EXECUTION_ROOT") or _default_root("data/bybit-account-execution"),
         help="canonical demo account journal root for reconciliation health",
@@ -1428,6 +1542,8 @@ def main() -> int:
     continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     long_paper_root = Path(args.long_paper_root) if str(args.long_paper_root).strip() else None
+    carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
+    carry_paper_root = Path(args.carry_paper_root) if str(args.carry_paper_root).strip() else None
     paper_account_root = Path(args.account_paper_root)
     paper_capture_root = Path(args.account_paper_capture_root)
     paper_owner_uid: int | None = None
@@ -1573,6 +1689,30 @@ def main() -> int:
                 cycles_dataset="long_native_paper_cycles",
                 environment="paper",
                 unit_runtime=unit_runtime.get(_LONG_PAPER_UNIT),
+            )
+        )
+    if carry_root is not None:
+        alerts.extend(
+            gather_carry_alerts(
+                carry_root=carry_root,
+                args=args,
+                cycle_checks=_sleeve_on("CARRY_SLEEVE"),
+                environment="demo",
+                unit_runtime=unit_runtime.get(_CARRY_DEMO_UNIT),
+            )
+        )
+    if (
+        args.account_scope == "demo-paper"
+        and carry_paper_root is not None
+        and _sleeve_on("CARRY_PAPER_SLEEVE")
+    ):
+        alerts.extend(
+            gather_carry_alerts(
+                carry_root=carry_paper_root,
+                args=args,
+                cycles_dataset="carry_hold_paper_cycles",
+                environment="paper",
+                unit_runtime=unit_runtime.get(_CARRY_PAPER_UNIT),
             )
         )
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))

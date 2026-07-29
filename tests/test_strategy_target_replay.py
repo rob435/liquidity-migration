@@ -102,7 +102,10 @@ def _event(sequence: int, *, sleeve: str = "long", timestamp: int | None = None)
         kind="startup" if sequence == 1 else "timer",
         payload={
             "execution_environment": "demo",
-            "strategy_profile": ("LongV11aDivWeekendVol" if sleeve == "long" else "continuous_ensemble_v2"),
+            "strategy_profile": {
+                "long": "LongV11aDivWeekendVol",
+                "carry": "lane2_carry_hold_v3",
+            }.get(sleeve, "continuous_ensemble_v2"),
         },
     )
 
@@ -142,6 +145,29 @@ def test_capture_is_built_from_verified_durable_requests_and_explicit_empty_cycl
 
     with pytest.raises(ValueError, match="duplicate"):
         tape.append_from_cycle(_event(1), _published_cycle(route), sleeve="long")
+
+
+def test_capture_accepts_the_carry_sleeve(tmp_path: Path) -> None:
+    """The capture sleeve set includes carry, so carry producer cycles are
+    first-class capture evidence rather than a validation reject."""
+
+    route = _route(tmp_path)
+    capture_path = tmp_path / "carry-target-capture.jsonl"
+    tape = JsonlTargetSchedulingCaptureTape(capture_path)
+    payload = _published_cycle(route, sleeve=SleeveAdapterKind.CARRY)
+    claimed = AccountIntentInbox(route).claim_next()
+    assert claimed is not None
+
+    outcome = tape.append_from_cycle(
+        _event(1, sleeve="carry"),
+        payload,
+        sleeve="carry",
+    )
+
+    assert outcome.sleeve == "carry"
+    assert outcome.decision_keys == ("carry-target/cycle/entry/a",)
+    loaded, _chain_hash = load_target_scheduling_capture(capture_path)
+    assert loaded == (outcome,)
 
 
 def test_strategy_outcome_tape_is_owner_only(tmp_path: Path) -> None:

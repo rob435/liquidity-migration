@@ -46,6 +46,7 @@ from .storage import exclusive_file_lock
 from .strategy_runtime import (
     AccountKernelRuntime,
     AdaptedIntent,
+    CarryTargetAdapter,
     ContinuousTargetAdapter,
     HedgeTargetAdapter,
     LongTargetAdapter,
@@ -78,6 +79,7 @@ _SLEEVE_TARGET_INTENT_FIELDS = frozenset(SleeveTargetIntent.__dataclass_fields__
 class SleeveAdapterKind(StrEnum):
     LONG = "long"
     CONTINUOUS = "continuous"
+    CARRY = "carry"
     HEDGE = "hedge"
     RISK = "risk"
 
@@ -85,6 +87,7 @@ class SleeveAdapterKind(StrEnum):
 _ADAPTERS: dict[SleeveAdapterKind, type[Any]] = {
     SleeveAdapterKind.LONG: LongTargetAdapter,
     SleeveAdapterKind.CONTINUOUS: ContinuousTargetAdapter,
+    SleeveAdapterKind.CARRY: CarryTargetAdapter,
     SleeveAdapterKind.HEDGE: HedgeTargetAdapter,
     SleeveAdapterKind.RISK: RiskTargetAdapter,
 }

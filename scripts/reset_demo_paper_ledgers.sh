@@ -52,7 +52,7 @@ Options:
   --leave-stopped           execute the reset but leave every managed unit stopped;
                             required before explicit paper-owner/demo-owner staging
   --dry-run                 explicit preview (the default)
-  --sleeves LIST            all (default), long, continuous, or comma-separated list
+  --sleeves LIST            all (default), long, continuous, carry, or comma-separated list
   --archive-dir DIR         archive destination (default: data/_archive)
   --label LABEL             optional safe suffix added after the UTC timestamp
   --include-reports         also archive/reset reports/ in selected roots
@@ -532,6 +532,8 @@ reserved = [
         "data/bybit-long-paper-event",
         "data/bybit-continuous-demo-event",
         "data/bybit-continuous-paper-event",
+        "data/bybit-carry-demo-event",
+        "data/bybit-carry-paper-event",
     )
 ]
 
@@ -554,6 +556,7 @@ PY
 # Parse and canonicalise sleeve selection.
 SELECT_LONG=0
 SELECT_CONTINUOUS=0
+SELECT_CARRY=0
 normalised_sleeves="$(printf '%s' "$SLEEVES_RAW" | tr ',' ' ')"
 [[ -n "${normalised_sleeves//[[:space:]]/}" ]] || die "--sleeves must not be empty"
 for sleeve in $normalised_sleeves; do
@@ -561,6 +564,7 @@ for sleeve in $normalised_sleeves; do
     all)
       SELECT_LONG=1
       SELECT_CONTINUOUS=1
+      SELECT_CARRY=1
       ;;
     long)
       SELECT_LONG=1
@@ -568,9 +572,12 @@ for sleeve in $normalised_sleeves; do
     continuous)
       SELECT_CONTINUOUS=1
       ;;
+    carry)
+      SELECT_CARRY=1
+      ;;
     *)
       echo "unknown sleeve: $sleeve" >&2
-      echo "expected: all, long, continuous, or a comma-separated combination" >&2
+      echo "expected: all, long, continuous, carry, or a comma-separated combination" >&2
       exit 2
       ;;
   esac
@@ -579,6 +586,7 @@ done
 SELECTED_SLEEVES=()
 (( SELECT_LONG )) && SELECTED_SLEEVES+=("long")
 (( SELECT_CONTINUOUS )) && SELECTED_SLEEVES+=("continuous")
+(( SELECT_CARRY )) && SELECTED_SLEEVES+=("carry")
 
 # Static allowlist of generated projections/epoch telemetry. The canonical
 # journal is intentionally absent: no caller-supplied path can delete it.
@@ -602,10 +610,24 @@ CONTINUOUS_LEDGER_TARGETS=(
   data/bybit-continuous-paper-event/strategy_event_decision_tape.jsonl
   data/bybit-continuous-paper-event/strategy_target_scheduling_capture.jsonl
 )
+CARRY_LEDGER_TARGETS=(
+  data/bybit-carry-demo-event/carry_hold_demo_cycles
+  data/bybit-carry-demo-event/strategy_event_tape.jsonl
+  data/bybit-carry-demo-event/strategy_event_decision_tape.jsonl
+  data/bybit-carry-demo-event/strategy_target_scheduling_capture.jsonl
+  data/bybit-carry-paper-event/carry_hold_paper_cycles
+  data/bybit-carry-paper-event/strategy_event_tape.jsonl
+  data/bybit-carry-paper-event/strategy_event_decision_tape.jsonl
+  data/bybit-carry-paper-event/strategy_target_scheduling_capture.jsonl
+)
 LONG_ROOTS=(data/bybit-long-demo-event data/bybit-long-paper-event)
 CONTINUOUS_ROOTS=(
   data/bybit-continuous-demo-event
   data/bybit-continuous-paper-event
+)
+CARRY_ROOTS=(
+  data/bybit-carry-demo-event
+  data/bybit-carry-paper-event
 )
 
 OUT=()
@@ -613,12 +635,16 @@ OUT=()
 if (( SELECT_CONTINUOUS )); then
   append_unique "${CONTINUOUS_LEDGER_TARGETS[@]}"
 fi
+if (( SELECT_CARRY )); then
+  append_unique "${CARRY_LEDGER_TARGETS[@]}"
+fi
 append_unique "${ACCOUNT_STATE_TARGETS[@]}"
 TARGETS=("${OUT[@]}")
 
 OUT=()
 (( SELECT_LONG )) && append_unique "${LONG_ROOTS[@]}"
 (( SELECT_CONTINUOUS )) && append_unique "${CONTINUOUS_ROOTS[@]}"
+(( SELECT_CARRY )) && append_unique "${CARRY_ROOTS[@]}"
 SELECTED_ROOTS=("${OUT[@]}")
 
 if (( INCLUDE_REPORTS )); then
@@ -692,6 +718,8 @@ STOP_UNITS=(
   liquidity-migration-bybit-long-paper.service
   liquidity-migration-bybit-continuous-demo.service
   liquidity-migration-bybit-continuous-paper.service
+  liquidity-migration-bybit-carry-demo.service
+  liquidity-migration-bybit-carry-paper.service
   liquidity-migration-continuous-hedge.service
   liquidity-migration-continuous-rmom-refresh.service
   liquidity-migration-demo-liveness.service
@@ -717,6 +745,8 @@ DOWNSTREAM_RESTART_UNITS=(
   liquidity-migration-bybit-long-paper.service
   liquidity-migration-bybit-continuous-demo.service
   liquidity-migration-bybit-continuous-paper.service
+  liquidity-migration-bybit-carry-demo.service
+  liquidity-migration-bybit-carry-paper.service
   liquidity-migration-continuous-rmom-refresh.timer
   liquidity-migration-continuous-hedge.timer
   liquidity-migration-demo-liveness.timer
@@ -1316,7 +1346,8 @@ done
 paper_preflight_args=(preflight-paper --anchor "$PWD/data")
 for root in \
   "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
-  data/bybit-long-paper-event data/bybit-continuous-paper-event; do
+  data/bybit-long-paper-event data/bybit-continuous-paper-event \
+  data/bybit-carry-paper-event; do
   paper_preflight_args+=(--root "$PWD/$root")
 done
 "$PYTHON" -m liquidity_migration.reset_path_safety \
@@ -1327,6 +1358,7 @@ done
   --anchor "$PWD/data" \
   --root "$PWD/data/bybit-long-demo-event" \
   --root "$PWD/data/bybit-continuous-demo-event" \
+  --root "$PWD/data/bybit-carry-demo-event" \
   --continuous-root "$PWD/data/bybit-continuous-demo-event" \
   || die "demo runtime descriptor/mount preflight failed before owner leases"
 
@@ -1659,7 +1691,8 @@ paper_normalize_args=(
 )
 for root in \
   "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
-  data/bybit-long-paper-event data/bybit-continuous-paper-event; do
+  data/bybit-long-paper-event data/bybit-continuous-paper-event \
+  data/bybit-carry-paper-event; do
   paper_normalize_args+=(--root "$PWD/$root")
 done
 "$PYTHON" -m liquidity_migration.reset_path_safety \
@@ -1670,6 +1703,7 @@ done
   --anchor "$PWD/data" \
   --root "$PWD/data/bybit-long-demo-event" \
   --root "$PWD/data/bybit-continuous-demo-event" \
+  --root "$PWD/data/bybit-carry-demo-event" \
   --continuous-root "$PWD/data/bybit-continuous-demo-event" \
   --uid "$ROOT_RUNTIME_UID" \
   --gid "$PAPER_RUNTIME_GID" \

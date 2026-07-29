@@ -59,6 +59,8 @@ def test_reset_stops_producers_before_both_account_owners() -> None:
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-continuous-paper.service",
+        "liquidity-migration-bybit-carry-demo.service",
+        "liquidity-migration-bybit-carry-paper.service",
         "liquidity-migration-continuous-hedge.service",
     ):
         assert units.index(producer) < demo_owner

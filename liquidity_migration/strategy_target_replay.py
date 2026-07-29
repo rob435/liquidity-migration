@@ -23,7 +23,7 @@ CAPTURE_KIND = "account_target_scheduling_capture"
 _CAPTURE_GENESIS_HASH = hashlib.sha256(
     b"liquidity-migration-account-target-scheduling-capture-v1"
 ).hexdigest()
-_SLEEVES = frozenset({"long", "continuous"})
+_SLEEVES = frozenset({"long", "continuous", "carry"})
 _QUEUE_STATES = frozenset({"pending", "processing", "completed", "failed"})
 
 
@@ -209,7 +209,7 @@ class TargetSchedulingCaptureEvent:
         if environment not in {"demo", "paper"}:
             raise ValueError("capture source environment must be demo or paper")
         if self.sleeve not in _SLEEVES:
-            raise ValueError("capture sleeve must be long or continuous")
+            raise ValueError("capture sleeve must be long, continuous, or carry")
         _strict_text(self.strategy_profile, label="capture strategy profile")
         expected_source = f"{self.sleeve}:{environment}"
         if self.source_event.source != expected_source:

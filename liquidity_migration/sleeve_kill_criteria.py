@@ -1,10 +1,21 @@
 """Weekly kill-criteria evaluation for the deployed sleeves.
 
-Executable form of ``docs/preregistration/sleeve_kill_criteria_2026-07-20.md``:
-read-only over the verified canonical journal, computes K1 (drawdown), K2
-(dead run), and K3 (insufficient sample) per sleeve group and prints
-trip/no-trip. It has no operational authority — a trip is executed by the
-operator as the registered five-line note + sleeve toggle + change point.
+Executable form of ``docs/preregistration/sleeve_kill_criteria_2026-07-20.md``
+(LONG/CONTINUOUS) and ``docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md``
+(CARRY): read-only over the verified canonical journal, computes K1
+(drawdown), K2 (dead run), and K3 (insufficient sample) per sleeve group and
+prints trip/no-trip. It has no operational authority — a trip is executed by
+the operator as the registered five-line note + sleeve toggle + change point.
+
+CARRY registers the expressible subset only: K1 (journal drawdown vs 30% of
+capital reference x carry notional multiplier) and the forward-days +
+cumulative-net core of K2 are computed here; K2's deployed-share (>= 30% of
+days) and consecutiveness conditions, K3 (funding received minus price bleed
+over any 90-day deployed stretch), and K4 (fewer than 25 deployed days in 180
+calendar days) need the venue funding ledger and position history beside the
+PNL journal, so they are checked manually at the weekly cadence (see
+``MANUAL_CRITERIA``). An uncompleted manual check is "unknown", and unknown
+safety-critical state fails closed.
 
 Attribution: per-sleeve realized P&L joins component close rows
 (``exit_pnl_key`` from the canonical trade projection) to journal PNL rows.
@@ -26,10 +37,20 @@ from .account_contracts import AccountEvent, AccountEventType
 EPOCH_START_UTC = dt.datetime(2026, 7, 19, 14, 0, tzinfo=dt.timezone.utc)
 EPOCH_DAY90_UTC = dt.datetime(2026, 10, 17, 14, 0, tzinfo=dt.timezone.utc)
 
-# Sleeve groups per the registration: CONTINUOUS is judged with its hedge.
+# CARRY forward clock: the 2026-07-29 registration starts the carry window at
+# the CARRY deployment change point, not at the 2026-07-19 LONG/CONTINUOUS
+# epoch. The rollout receipt's exact commit time lands after this code is
+# registered, so the registered calendar day is the executable constant and
+# the weekly manual check pins the precise change point.
+CARRY_EPOCH_START_UTC = dt.datetime(2026, 7, 29, 0, 0, tzinfo=dt.timezone.utc)
+GROUP_EPOCH_START_UTC: dict[str, dt.datetime] = {"carry": CARRY_EPOCH_START_UTC}
+
+# Sleeve groups per the registrations: CONTINUOUS is judged with its hedge;
+# CARRY stands alone.
 SLEEVE_GROUPS: dict[str, tuple[str, ...]] = {
     "continuous": ("continuous", "hedge"),
     "long": ("long",),
+    "carry": ("carry",),
 }
 
 # The registration states K1 as a percentage of the operational capital
@@ -44,9 +65,23 @@ SLEEVE_GROUPS: dict[str, tuple[str, ...]] = {
 # registered meaning across any future sizing change; see the amendment note in
 # docs/preregistration/sleeve_kill_criteria_2026-07-20.md.
 REGISTERED_CAPITAL_REFERENCE_USDT = 10_000.0
-K1_DRAWDOWN_LIMIT_FRACTION = {"continuous": -0.05, "long": -0.04}
-K2_MIN_FORWARD_DAYS = {"continuous": 60, "long": 60}
-K2_MIN_ROUND_TRIPS = {"continuous": 30, "long": 40}
+# CARRY K1 (2026-07-29 registration): forward drawdown > 30% of the
+# operational capital reference x the carry notional multiplier, from the
+# forward peak on the canonical journal. Same encoding as the 2026-07-20
+# criteria — a registered fraction of the committed reference — with the
+# multiplier applied through ``k1_drawdown_limits``.
+K1_DRAWDOWN_LIMIT_FRACTION = {"continuous": -0.05, "long": -0.04, "carry": -0.30}
+# CARRY K2 (dead run): 120 consecutive forward days with the book deployed on
+# >= 30% of days and cumulative net <= 0. The executable subset is the
+# 120-forward-day clock (from the carry epoch) + cumulative net <= 0 with at
+# least one attributed round trip; deployed-share and consecutiveness are
+# manual (see MANUAL_CRITERIA).
+K2_MIN_FORWARD_DAYS = {"continuous": 60, "long": 60, "carry": 120}
+K2_MIN_ROUND_TRIPS = {"continuous": 30, "long": 40, "carry": 1}
+# CARRY has no day-90 sample criterion: its insufficient-sample clause (K4:
+# fewer than 25 deployed days in 180 calendar days) is stated in deployed
+# days, which the PNL journal alone cannot count, so it is manual-only and
+# the group deliberately has NO entry here.
 K3_MIN_ROUND_TRIPS_AT_DAY90 = {"continuous": 30, "long": 15}
 # LONG only: "fewer than 30 by day 180 retires the demo sleeve for capacity
 # reasons, independent of sign".
@@ -55,7 +90,24 @@ K3_MIN_ROUND_TRIPS_AT_EXTENSION = {"long": 30}
 # CONTINUOUS only: K2/K3 are gated on epoch day 90. LONG K2 evaluates "once 40
 # completed round trips exist (whenever that occurs)" -- gating it on day 90
 # too let a dead LONG run keep trading for up to two extra months (audit H2).
-K2_REQUIRES_DAY90 = {"continuous": True, "long": False}
+# CARRY has NO epoch-day-90 gate; its K2 rides the forward-day clock alone.
+K2_REQUIRES_DAY90 = {"continuous": True, "long": False, "carry": False}
+K2_REQUIRES_MIN_FORWARD_DAYS = {"continuous": False, "long": False, "carry": True}
+
+# Registered clauses the shared journal evaluator cannot express; checked
+# manually at the weekly cadence per
+# docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md. An
+# uncompleted manual check is "unknown", and unknown fails closed.
+MANUAL_CRITERIA: dict[str, tuple[str, ...]] = {
+    "carry": (
+        "K2 deployed-share: >= 30% of days deployed across the 120-day window,"
+        " and the window's day-consecutiveness",
+        "K3 mechanism break: funding received minus price bleed (carry_hold.md"
+        " s2 attribution) negative over any 90-day deployed stretch",
+        "K4 insufficient sample: fewer than 25 deployed days in 180 calendar"
+        " days -> no verdict; keep accruing, do not promote",
+    ),
+}
 
 
 # The K1 read is provisional while unattributed netted-reduction P&L exceeds
@@ -68,15 +120,29 @@ UNATTRIBUTED_PROVISIONAL_FRACTION = 0.10
 NATIVE_STOP_MATCH_WINDOW_NS = 180 * 1_000_000_000
 
 
-def k1_drawdown_limits(capital_reference_usdt: float) -> dict[str, float]:
-    """Registered K1 drawdown limits at a given operational capital reference."""
+def k1_drawdown_limits(
+    capital_reference_usdt: float,
+    *,
+    carry_notional_multiplier: float = 1.0,
+) -> dict[str, float]:
+    """Registered K1 drawdown limits at a given operational capital reference.
+
+    The carry registration states its 30% against the capital reference
+    scaled by the committed carry ``notional_multiplier`` (the sleeve's
+    deployed book size), so a sizing change carries the registered meaning
+    exactly as the audit-H3 amendment did for the 2026-07-20 criteria.
+    """
 
     if not capital_reference_usdt > 0.0:
         raise ValueError("capital_reference_usdt must be positive")
-    return {
+    if not carry_notional_multiplier > 0.0:
+        raise ValueError("carry_notional_multiplier must be positive")
+    limits = {
         group: fraction * float(capital_reference_usdt)
         for group, fraction in K1_DRAWDOWN_LIMIT_FRACTION.items()
     }
+    limits["carry"] *= float(carry_notional_multiplier)
+    return limits
 
 
 def _native_stop_fills(events: Sequence[AccountEvent]) -> list[dict[str, Any]]:
@@ -196,11 +262,13 @@ def evaluate_kill_criteria(
     trades_by_group: Mapping[str, pl.DataFrame],
     now_utc: dt.datetime,
     capital_reference_usdt: float,
+    carry_notional_multiplier: float = 1.0,
 ) -> dict[str, Any]:
     """Evaluate K1/K2/K3 for each sleeve group from pre-assembled inputs.
 
     ``capital_reference_usdt`` is the committed operational profile's capital
-    reference; K1 limits are the registered percentages of it.
+    reference; K1 limits are the registered percentages of it (the carry limit
+    additionally scales by the committed carry ``notional_multiplier``).
     """
 
     pnl_by_key = _pnl_rows_by_key(pnl_events)
@@ -208,7 +276,10 @@ def evaluate_kill_criteria(
     forward_days = max((now_utc - EPOCH_START_UTC).total_seconds() / 86_400.0, 0.0)
     day90_reached = now_utc >= EPOCH_DAY90_UTC
     extension_reached = forward_days >= 90 + K3_EXTENSION_DAYS
-    limits = k1_drawdown_limits(capital_reference_usdt)
+    limits = k1_drawdown_limits(
+        capital_reference_usdt,
+        carry_notional_multiplier=carry_notional_multiplier,
+    )
 
     attributed_keys: set[str] = set()
     report: dict[str, Any] = {
@@ -217,12 +288,20 @@ def evaluate_kill_criteria(
         "epoch_day90_utc": EPOCH_DAY90_UTC.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "forward_days": round(forward_days, 2),
         "capital_reference_usdt": round(float(capital_reference_usdt), 2),
+        "carry_notional_multiplier": round(float(carry_notional_multiplier), 6),
         "k1_limit_fraction_of_capital_reference": dict(K1_DRAWDOWN_LIMIT_FRACTION),
         "sleeves": {},
     }
     tripped: list[str] = []
 
     for group, _sleeves in SLEEVE_GROUPS.items():
+        # CARRY's forward clock starts at its own deployment epoch; the other
+        # groups keep the shared 2026-07-19 epoch (identical behavior).
+        group_epoch_start = GROUP_EPOCH_START_UTC.get(group, EPOCH_START_UTC)
+        group_epoch_start_ns = int(group_epoch_start.timestamp() * 1e9)
+        group_forward_days = max(
+            (now_utc - group_epoch_start).total_seconds() / 86_400.0, 0.0
+        )
         trades = trades_by_group.get(group, pl.DataFrame())
         series: list[tuple[int, float]] = []
         closed_in_epoch = 0
@@ -235,7 +314,7 @@ def evaluate_kill_criteria(
                 if pnl_row is None:
                     continue
                 attributed_keys.add(key)
-                if pnl_row["ts_ns"] >= epoch_start_ns:
+                if pnl_row["ts_ns"] >= group_epoch_start_ns:
                     series.append((pnl_row["ts_ns"], pnl_row["net_pnl_usdt"]))
                     closed_in_epoch += 1
         cumulative_net = sum(net for _ts, net in series)
@@ -243,15 +322,25 @@ def evaluate_kill_criteria(
         k1_limit = limits[group]
         k1_tripped = drawdown < k1_limit
         # CONTINUOUS K2 is registered "at epoch day 90"; LONG K2 is registered
-        # "once 40 completed round trips exist (whenever that occurs)".
+        # "once 40 completed round trips exist (whenever that occurs)"; CARRY
+        # K2 is registered on 120 forward days from the carry change point.
         k2_applicable = closed_in_epoch >= K2_MIN_ROUND_TRIPS[group]
         if K2_REQUIRES_DAY90[group]:
             k2_applicable = (
                 k2_applicable and day90_reached and forward_days >= K2_MIN_FORWARD_DAYS[group]
             )
+        elif K2_REQUIRES_MIN_FORWARD_DAYS[group]:
+            k2_applicable = (
+                k2_applicable and group_forward_days >= K2_MIN_FORWARD_DAYS[group]
+            )
         expectancy_per_trade = cumulative_net / closed_in_epoch if closed_in_epoch else 0.0
         k2_tripped = k2_applicable and cumulative_net <= 0.0
-        k3_tripped = day90_reached and closed_in_epoch < K3_MIN_ROUND_TRIPS_AT_DAY90[group]
+        k3_day90_minimum = K3_MIN_ROUND_TRIPS_AT_DAY90.get(group)
+        k3_tripped = bool(
+            k3_day90_minimum is not None
+            and day90_reached
+            and closed_in_epoch < k3_day90_minimum
+        )
         k3_extension_minimum = K3_MIN_ROUND_TRIPS_AT_EXTENSION.get(group)
         k3_extension_tripped = bool(
             k3_extension_minimum is not None
@@ -266,11 +355,13 @@ def evaluate_kill_criteria(
             tripped.append(f"{group}:K3")
         if k3_extension_tripped:
             tripped.append(f"{group}:K3-extension")
-        report["sleeves"][group] = {
+        section: dict[str, Any] = {
             "attributed_round_trips_in_epoch": closed_in_epoch,
             "cumulative_net_usdt": round(cumulative_net, 2),
             "expectancy_per_trade_usdt": round(expectancy_per_trade, 4),
             "peak_to_trough_usdt": round(drawdown, 2),
+            "epoch_start_utc": group_epoch_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "forward_days": round(group_forward_days, 2),
             "k1": {
                 "limit_usdt": round(k1_limit, 2),
                 "limit_fraction_of_capital_reference": K1_DRAWDOWN_LIMIT_FRACTION[group],
@@ -283,7 +374,11 @@ def evaluate_kill_criteria(
                     else (
                         EPOCH_DAY90_UTC.strftime("%Y-%m-%d")
                         if K2_REQUIRES_DAY90[group]
-                        else f"at {K2_MIN_ROUND_TRIPS[group]} round trips"
+                        else (
+                            f"at {K2_MIN_FORWARD_DAYS[group]} forward days"
+                            if K2_REQUIRES_MIN_FORWARD_DAYS[group]
+                            else f"at {K2_MIN_ROUND_TRIPS[group]} round trips"
+                        )
                     )
                 ),
                 "requires_day90": K2_REQUIRES_DAY90[group],
@@ -292,13 +387,21 @@ def evaluate_kill_criteria(
                 "tripped": k2_tripped,
             },
             "k3": {
-                "evaluates": "now" if day90_reached else EPOCH_DAY90_UTC.strftime("%Y-%m-%d"),
-                "min_round_trips_at_day90": K3_MIN_ROUND_TRIPS_AT_DAY90[group],
+                "evaluates": (
+                    "manual_only"
+                    if k3_day90_minimum is None
+                    else ("now" if day90_reached else EPOCH_DAY90_UTC.strftime("%Y-%m-%d"))
+                ),
+                "min_round_trips_at_day90": k3_day90_minimum,
                 "tripped": k3_tripped,
                 "extension_min_round_trips": k3_extension_minimum,
                 "extension_tripped": k3_extension_tripped,
             },
         }
+        manual = MANUAL_CRITERIA.get(group)
+        if manual:
+            section["manual_criteria"] = list(manual)
+        report["sleeves"][group] = section
 
     unattributed = [
         row for key, row in pnl_by_key.items()
@@ -360,6 +463,7 @@ def evaluate_kill_criteria_for_root(
         trades_by_group=trades_by_group,
         now_utc=now_utc or dt.datetime.now(tz=dt.timezone.utc),
         capital_reference_usdt=profile.capital_reference_usdt,
+        carry_notional_multiplier=profile.carry.notional_multiplier,
     )
     report["operational_profile"] = str(profile.source_path)
     return report

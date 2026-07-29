@@ -99,11 +99,30 @@ class HedgeOperationalSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class CarryOperationalSettings:
+    """Operational envelope for the CARRY sleeve.
+
+    Rule parameters (entry/exit prints, filters, per-name cap, gross cap)
+    come from the immutable registered config the producer loads; this block
+    carries only the deployment dials: sizing multiplier, entry leverage,
+    the declared disaster-stop fraction (the sl35 pattern — wide enough that
+    the strategy's funding-normalization exit is always the real exit), and
+    the per-cycle entry throttle.
+    """
+
+    notional_multiplier: float
+    entry_leverage: float
+    declared_stop_loss_fraction: float
+    max_new_entries_per_cycle: int
+
+
+@dataclass(frozen=True, slots=True)
 class OperationalProfile:
     capital_reference_usdt: float
     account_risk: AccountRiskSettings
     long: LongOperationalSettings
     continuous: ContinuousOperationalSettings
+    carry: CarryOperationalSettings
     hedge: HedgeOperationalSettings
     source_sha256: str
     source_path: Path | None = None
@@ -227,6 +246,34 @@ def _parse_continuous(value: object) -> ContinuousOperationalSettings:
     )
 
 
+def _parse_carry(value: object) -> CarryOperationalSettings:
+    fields = {
+        "notional_multiplier",
+        "entry_leverage",
+        "declared_stop_loss_fraction",
+        "max_new_entries_per_cycle",
+    }
+    row = _object(value, label="operational profile carry", fields=fields)
+    stop_fraction = _positive_float(
+        row["declared_stop_loss_fraction"], label="carry.declared_stop_loss_fraction"
+    )
+    if not (0.0 < stop_fraction < 1.0):
+        raise ValueError("carry.declared_stop_loss_fraction must sit in (0, 1)")
+    return CarryOperationalSettings(
+        notional_multiplier=_positive_float(
+            row["notional_multiplier"], label="carry.notional_multiplier"
+        ),
+        entry_leverage=_positive_float(
+            row["entry_leverage"], label="carry.entry_leverage"
+        ),
+        declared_stop_loss_fraction=stop_fraction,
+        max_new_entries_per_cycle=_positive_int(
+            row["max_new_entries_per_cycle"],
+            label="carry.max_new_entries_per_cycle",
+        ),
+    )
+
+
 def _parse_hedge(value: object) -> HedgeOperationalSettings:
     row = _object(
         value,
@@ -247,6 +294,7 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     leverage_requests = {
         "long": profile.long.entry_leverage,
         "continuous": profile.continuous.entry_leverage,
+        "carry": profile.carry.entry_leverage,
         "hedge": profile.hedge.entry_leverage,
     }
     excessive = sorted(
@@ -343,15 +391,36 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     )
     continuous_margin = continuous_gross / profile.continuous.entry_leverage
 
+    # CARRY worst case from the registered rule constants, not parallel magic
+    # numbers: per-name cap and gross cap come from the immutable Lane-2
+    # registration the producer itself loads.
+    from .carry_demo import load_carry_config  # noqa: PLC0415
+
+    carry_rule = load_carry_config()
+    carry_single = (
+        profile.capital_reference_usdt
+        * float(carry_rule.per_name_cap)
+        * profile.carry.notional_multiplier
+    )
+    carry_gross = (
+        profile.capital_reference_usdt
+        * float(carry_rule.gross_cap)
+        * profile.carry.notional_multiplier
+    )
+    carry_margin = carry_gross / profile.carry.entry_leverage
+
     tolerance = max(1e-9, profile.capital_reference_usdt * 1e-12)
-    if max(long_single, continuous_single_symbol) > risk.max_symbol_notional_usdt + tolerance:
+    if (
+        max(long_single, continuous_single_symbol, carry_single)
+        > risk.max_symbol_notional_usdt + tolerance
+    ):
         raise ValueError("producer symbol envelope exceeds account_risk symbol cap")
-    combined_gross = long_gross + continuous_gross
+    combined_gross = long_gross + continuous_gross + carry_gross
     if combined_gross > risk.max_component_gross_notional_usdt + tolerance:
         raise ValueError("combined producer envelope exceeds account_risk component cap")
     if combined_gross > risk.max_account_gross_notional_usdt + tolerance:
         raise ValueError("combined producer envelope exceeds account_risk account cap")
-    if long_margin + continuous_margin > risk.max_initial_margin_usdt + tolerance:
+    if long_margin + continuous_margin + carry_margin > risk.max_initial_margin_usdt + tolerance:
         raise ValueError("combined producer margin envelope exceeds account_risk margin cap")
 
 
@@ -371,6 +440,7 @@ def load_operational_profile_bytes(
         "account_risk",
         "long",
         "continuous",
+        "carry",
         "hedge",
     }
     row = _object(payload, label="operational profile", fields=fields)
@@ -385,6 +455,7 @@ def load_operational_profile_bytes(
         account_risk=_parse_account_risk(row["account_risk"]),
         long=_parse_long(row["long"]),
         continuous=_parse_continuous(row["continuous"]),
+        carry=_parse_carry(row["carry"]),
         hedge=_parse_hedge(row["hedge"]),
         source_sha256=hashlib.sha256(data).hexdigest(),
         source_path=source_path,

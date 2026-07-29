@@ -374,8 +374,10 @@ PAPER_RULES_FILE=$PAPER_CONFIG_DIR/demo-rules.json
 PAPER_RISK_FILE=$PAPER_CONFIG_DIR/risk-policy.json
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
 CONTINUOUS_DEMO_ROOT=/opt/liquidity-migration/data/bybit-continuous-demo-event
+CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
 LONG_PAPER_ROOT=/opt/liquidity-migration/data/bybit-long-paper-event
 CONTINUOUS_PAPER_ROOT=/opt/liquidity-migration/data/bybit-continuous-paper-event
+CARRY_PAPER_ROOT=/opt/liquidity-migration/data/bybit-carry-paper-event
 
 ensure_paper_runtime_identity() {
     command -v getent >/dev/null 2>&1 || fail "getent is unavailable"
@@ -632,7 +634,7 @@ PY
     paper_path_args=()
     for root in \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
+        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
         paper_path_args+=(--root "$root")
     done
     paper_tree_preflight_phase() {
@@ -643,6 +645,7 @@ PY
         "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+            --root "$CARRY_DEMO_ROOT" \
             --continuous-root "$CONTINUOUS_DEMO_ROOT"
     }
     paper_tree_normalize_phase() {
@@ -654,6 +657,7 @@ PY
         "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+            --root "$CARRY_DEMO_ROOT" \
             --continuous-root "$CONTINUOUS_DEMO_ROOT" \
             --uid "$root_uid" --gid "$paper_gid" --create-missing
     }
@@ -693,13 +697,16 @@ verify_paper_runtime_boundary() {
     done
     for root in \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT"; do
+        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
         runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root" \
             || fail "paper runtime cannot write its explicit state root: $root"
         runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root/.locks" \
             || fail "paper runtime cannot write its persistent lock directory: $root/.locks"
     done
-    for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT"; do
+    # The carry paper producer follows the carry demo market plane read-only
+    # (CARRY_MARKET_FOLLOW_ROOT). Carry has no WS kline plane, but the shared
+    # normalize-demo contract still provisions the traversable cache tree.
+    for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
         runuser -u "$PAPER_RUNTIME_USER" -- \
             test -x "$root/.cache/ws_klines" \
             || fail "paper runtime cannot traverse demo kline cache: $root"
@@ -888,7 +895,11 @@ receipt = load_account_reset_receipt(
     require_fresh_roots=True,
 )
 sleeves = receipt["reset"]["sleeves"]
-if len(sleeves) != 2 or set(sleeves) != {"long", "continuous"}:
+# Recovery rebuilds the whole box, so the reset must have covered EVERY
+# managed strategy ledger the deployed commit runs (exact set, not subset):
+# a receipt from a narrower reset would leave a stale ledger alive under a
+# fresh account epoch.
+if len(sleeves) != 3 or set(sleeves) != {"long", "continuous", "carry"}:
     raise SystemExit("recovery receipt must cover all managed strategy ledgers")
 print(json.dumps({
     "status": "recovery_reset_receipt_valid",
@@ -909,7 +920,7 @@ refresh_stale_demo_rules_if_requested() {
         BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_DEMO_RULES_FILE
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     if "$PYTHON" - "$demo_rules" <<'PY'
 import sys
@@ -942,9 +953,27 @@ PY
     [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] || [ "$freshness_status" -eq 4 ] \
         || fail "configured demo-rule receipt failed validation for a reason other than age"
 
-    if [ "$freshness_status" -eq 0 ] && [ -z "$DEPLOY_RESET_RECEIPT" ]; then
+    # A candidate-universe schema bump makes the installed artifact unreadable
+    # by the code being deployed; reusing it would fail closed later at
+    # preflight with the fleet already stopped. Detect that here and force the
+    # freeze+projection path instead (a candidate addition then exits 3 and
+    # falls through to the complete fresh probe, exactly like a stale receipt).
+    candidate_readable=1
+    "$PYTHON" - "$ACCOUNT_SYMBOLS_FILE" <<'PY' || candidate_readable=0
+import sys
+
+from liquidity_migration.account_candidate_universe import load_candidate_universe
+
+load_candidate_universe(sys.argv[1])
+PY
+
+    if [ "$freshness_status" -eq 0 ] && [ -z "$DEPLOY_RESET_RECEIPT" ] \
+        && [ "$candidate_readable" -eq 1 ]; then
         echo "demo-rule-maintenance-plan path=reuse reason=fresh"
         return 0
+    fi
+    if [ "$candidate_readable" -eq 0 ]; then
+        echo "demo-rule-maintenance-plan path=refreeze reason=candidate-universe-unreadable-by-target-code"
     fi
 
     candidate_dir=/var/lib/liquidity-migration/candidate-universe-receipts
@@ -1194,12 +1223,17 @@ load_authorization() {
     . deploy/lib_systemd_environment.sh
     lm_load_group_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/sleeves.resolved.env "$PAPER_RUNTIME_GROUP" \
-        LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE CONTINUOUS_HEDGE_TIMER
-    for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CONTINUOUS_PAPER_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
+        LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
+        CARRY_SLEEVE CARRY_PAPER_SLEEVE CONTINUOUS_HEDGE_TIMER
+    for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CONTINUOUS_PAPER_SLEEVE" \
+        "$CARRY_SLEEVE" "$CARRY_PAPER_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
     if [ "$AUTH_PROFILE" = demo-operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
         fail "demo-operational authorization cannot run the paper continuous sleeve"
+    fi
+    if [ "$AUTH_PROFILE" = demo-operational ] && sleeve_on "$CARRY_PAPER_SLEEVE"; then
+        fail "demo-operational authorization cannot run the paper carry sleeve"
     fi
     lm_verify_resolved_sleeve_toggles
     lm_verify_no_unknown_liqmig_units
@@ -1324,6 +1358,18 @@ verify_topology() {
     else
         unit_off liquidity-migration-bybit-continuous-paper.service || fail "continuous paper producer is not off"
     fi
+    if sleeve_on "$CARRY_SLEEVE"; then
+        expected_downstream_on liquidity-migration-bybit-carry-demo.service \
+            || fail "carry demo producer is not active"
+    else
+        unit_off liquidity-migration-bybit-carry-demo.service || fail "carry demo producer is not off"
+    fi
+    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CARRY_PAPER_SLEEVE"; then
+        expected_downstream_on liquidity-migration-bybit-carry-paper.service \
+            || fail "carry paper producer is not active"
+    else
+        unit_off liquidity-migration-bybit-carry-paper.service || fail "carry paper producer is not off"
+    fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
@@ -1431,6 +1477,10 @@ activate_mode() {
     if [ "$AUTH_PROFILE" = operational ]; then
         start_if "$CONTINUOUS_PAPER_SLEEVE" liquidity-migration-bybit-continuous-paper.service
     fi
+    start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
+    if [ "$AUTH_PROFILE" = operational ]; then
+        start_if "$CARRY_PAPER_SLEEVE" liquidity-migration-bybit-carry-paper.service
+    fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
@@ -1452,6 +1502,8 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-bybit-long-paper.service
     liquidity-migration-bybit-continuous-demo.service
     liquidity-migration-bybit-continuous-paper.service
+    liquidity-migration-bybit-carry-demo.service
+    liquidity-migration-bybit-carry-paper.service
     liquidity-migration-continuous-hedge.service
     liquidity-migration-continuous-rmom-refresh.service
     liquidity-migration-demo-liveness.service

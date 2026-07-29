@@ -11,8 +11,57 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
-- **Installed implementation commit: `f1626565f` (7-commit batch
-  `0ab8625..f162656`)**, deployed from canonical `main`, profile
+- **2026-07-29 — CONTINUOUS retired; CARRY sleeve deployed (owner override,
+  two rollouts).** Owner authorization: the "depromote the continuous strat
+  from demo and paper, and replace it with this one. just do it. properly.
+  push and deploy" chat instruction (2026-07-28/29).
+  - **Rollout 1 of 2 (COMPLETE)**: commit `6331222` (CONTINUOUS retirement),
+    Actions run 30407493748 — CI and the guarded rollout green in one pass;
+    every phase `phase-ok`, `install-ok units_started=0`,
+    `verify-ok commit=6331222f… profile=operational`,
+    `rollout-ok` at 23:26 UTC 2026-07-28. The account was venue-flat at
+    dispatch (`rollout-flat-ok journal_sequence=30210 positions=0 targets=0
+    working_orders=0 venue_positions=0 venue_orders=0`), so no flatten step
+    was needed; the interval fleet ran LONG + owners only. Independent
+    read-only verify re-confirmed post-activation.
+  - **Rollout 2 of 2**: the commit carrying this STATE entry (CARRY build)
+    — dispatched immediately after push; its Actions run ID and receipts
+    are appended in the follow-up docs commit after verification.
+  - What the CARRY build turns on: the **crowd-fee collector** (registered
+    config `lane2_carry_hold_v3`, promoted 2026-07-28) as the CONTINUOUS
+    replacement on BOTH fleets: units
+    `liquidity-migration-bybit-carry-demo.service` / `-carry-paper.service`,
+    daily decision at the 00:00 UTC close computed ~00:20, pure-REST market
+    data (settled funding history + 1h klines; kline-derived turnover
+    ranking; paper follows the demo market-data plane read-only), stateless
+    90-day replay of the registered scorer's own functions
+    (`prepare_decision` — live-vs-research parity: identical on every
+    shared bar over the last 90 days, differing only at the decision bar
+    the research frame cannot see), declared stop 0.35 / no take-profit,
+    sizing w × owner equity × multiplier 1.0 under the unchanged 25×
+    account risk caps. Kill criteria armed at deployment:
+    `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md`.
+  - CONTINUOUS: retired by owner override (not a K-trip; retirement note in
+    `docs/preregistration/sleeve_kill_criteria_2026-07-20.md`; K clocks
+    stop at the change point). Unit files stay installed-but-disabled; the
+    hedge and rmom timers are off (hedge book flat at retirement); the
+    profile's `continuous` block is shrunk to minimum envelope
+    (`max_active` 1) so the freed envelope funds CARRY — re-promotion must
+    re-size explicitly. The candidate-universe artifact schema bumped 3→4
+    (a third `carry` profile: top-150 by 24h turnover, min age 7d); the
+    rollout re-freezes and re-probes demo rules when the installed
+    artifact is unreadable by the target code
+    (`demo-rule-maintenance-plan path=refreeze`).
+  - Known sharp edges recorded at deployment (`docs/carry_hold.md` §7.6):
+    per-symbol-stable entry-attempt keys mean one terminal kernel-side
+    rejection suppresses that symbol's entries until addressed (producer
+    avoids the self-inflicted cases; kernel-side attempt versioning
+    queued); the live bar keying is close-time, one grid-phase convention
+    from the research panel, inside the registered decision-clock caveat.
+  - Boundary unchanged: **`DEMO=true`, `REAL_MONEY=false`**; mainnet and
+    real-money credentials remain unauthorized.
+- Prior installed implementation commit: `f1626565f` (7-commit batch
+  `0ab8625..f162656`), deployed from canonical `main`, profile
   `operational`, on 2026-07-27 ~18:26 UTC, owner authorization: the "deploy
   all" chat instruction (Actions run 30293398218 — CI and the guarded VPS
   rollout both green in one pass). This batch is the complete remediation of
@@ -204,13 +253,15 @@ govern the sleeve; the new revision's forward evidence run restarts at
 
 ## Topology
 
-Six persistent services plus three timers:
+Six persistent services plus one active timer (2026-07-29; the hedge and
+residual-momentum timers remain installed but disabled with the retired
+CONTINUOUS sleeve, and the CONTINUOUS producer units are installed-but-off):
 
 | Kind | Units |
 | --- | --- |
 | Account owners | demo, isolated-paper |
-| Target producers | demo/paper × LONG/CONTINUOUS |
-| Timers | continuous hedge, residual-momentum refresh, demo-paper liveness |
+| Target producers | demo/paper × LONG/CARRY |
+| Timers | demo-paper liveness (active); continuous hedge + rmom refresh (off) |
 
 - Paper runs as the non-login `liquidity-migration-paper` user with private
   state, no demo/mainnet credentials, and byte-identical isolated candidate,
@@ -226,9 +277,12 @@ The account owner caps leverage at **2×**, symbol notional at **125,000 USDT**,
 component/account gross at **500,000 USDT**, and initial margin at **250,000
 USDT**, against a capital reference of **250,000 USDT** (the 25× profile
 deployed 2026-07-27 ~14:03 UTC). The bound operational profile retains 2× entry
-leverage, a 0.5 LONG notional multiplier, and a 1.0 CONTINUOUS multiplier. Startup and authorization
-reject unknown profile fields, producer leverage above the owner cap, or
-registered exposure envelopes outside the same profile.
+leverage, a 0.5 LONG notional multiplier, and (2026-07-29) a **1.0 CARRY
+multiplier** — per-name 0.10 and gross cap 1.0 come from the registered rule,
+so the CARRY book tops out at 1.0× the capital reference, unlevered; the
+retired CONTINUOUS block is shrunk to minimum envelope. Startup and
+authorization reject unknown profile fields, producer leverage above the owner
+cap, or registered exposure envelopes outside the same profile.
 
 LONG, CONTINUOUS, and hedge leverage plus exposure/risk knobs come from one
 strict operational profile; independent systemd sizing variables were removed.

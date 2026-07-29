@@ -379,7 +379,9 @@ class LongNativeDemoDaemon:
             # systemd runtime always supplies INVOCATION_ID and is the only path
             # consumed by the VPS watchdog.
             return
-        cycle_payload: Any = payload if self._sleeve_label == "continuous" else payload.get("cycle")
+        cycle_payload: Any = (
+            payload if self._sleeve_label in {"continuous", "carry"} else payload.get("cycle")
+        )
         if not isinstance(cycle_payload, dict):
             raise ValueError("completed cycle payload is missing its cycle object")
         cycle_id = cycle_payload.get("cycle_id")

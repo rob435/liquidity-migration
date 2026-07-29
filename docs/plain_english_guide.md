@@ -17,26 +17,35 @@ simplifications are deliberate, distortions are bugs — report them.
    exchange Bybit, using **play money only** — a hard switch keeps real money
    off, and nothing can flip it except a separate, explicit instruction from
    you naming exactly what is authorized.
-2. The first strategy (code name **CONTINUOUS**) bets against small coins
-   that just spiked upward, expecting the spike to deflate within a day.
-3. It only takes that bet when Bitcoin has been rising over the past month,
-   and — since 2026-07-26 — only when the coin's crowd fee (see §3) shows
-   the spike-buyers are at least not being paid to stay in; measured over
-   history this cut the strategy's fee bill by more than half.
+2. The first strategy (code name **CARRY**, deployed 2026-07-29 on your
+   instruction, replacing the retired pump-fade strategy) collects the
+   **crowd fee** (see §3): when the crowd betting *against* a small coin is
+   so large and so desperate that they are paying more than 10 cents per
+   $100 every 8 hours to whoever holds the coin, it buys the coin and
+   collects that payment until the crowd calms down.
+3. It refuses the trap versions of that trade: coins grinding steadily down
+   (where the short-sellers are simply right), coins with a pinned, dead
+   price (no squeeze fuel), and it leaves as soon as the fee starts
+   normalizing quickly — those three filters, tested on five years of
+   history, are most of its edge.
 4. The second strategy (code name **LONG**) does roughly the opposite trade:
    it buys large, heavily-traded coins right after a strong breakout and
    rides the strength for up to three days.
 5. The strategy programs never touch the exchange — they only write down
    what they wish to hold, and one separate program (the account manager)
    places the real orders, enforces every risk cap, and keeps the records.
-6. Every position gets an automatic profit-taking exit, a loss exit stored
-   on the exchange itself so it works even if our server dies (deliberately
-   wide for the pump-fade strategy, the normal loss exit for the breakout
-   strategy), and a hard time limit.
-7. A small side position in Bitcoin and Ethereum (the hedge) is computed to
-   lean against the pump-fade strategy's bets — though at the account's old
-   size its orders were below the exchange's minimum and never actually
-   placed; they become real once the account runs at its new 250k size.
+6. Every position gets a disaster loss exit stored on the exchange itself
+   so it works even if our server dies — deliberately wide (35%) for the
+   crowd-fee strategy, because its real exit is the fee normalizing, and we
+   proved on five years of trades that tighter stops only sell its best
+   trades at the bottom; the breakout strategy keeps its normal exits.
+   The crowd-fee strategy takes no profit-taking exit at all: its few big
+   winners pay for its many small losers, so capping them would gut it.
+7. The old Bitcoin/Ethereum side position (the hedge) belonged to the
+   retired pump-fade strategy and is flat and dormant with it; nothing
+   currently hedges the crowd-fee book — it is long-only by design, sized
+   small enough that its worst historical month is survivable, which is a
+   risk you accepted in deploying it.
 8. Everything runs on one rented Linux server; the account manager sends
    you the hourly Telegram digest and trade notices, and a separate
    independent checker — which holds no exchange password and cannot trade
@@ -49,7 +58,57 @@ simplifications are deliberate, distortions are bugs — report them.
     that live track record, occasionally ordered by you ahead of it — and
     real money is a separate locked door this project has never opened.
 
-## 2. The pump-fade strategy (code name: CONTINUOUS)
+## 2. The crowd-fee collector (code name: CARRY) — deployed 2026-07-29
+
+What it believes: when the crowd betting against a coin becomes desperate,
+the fee they pay to stay in that bet (§3 explains the fee) overshoots — and
+whoever is willing to hold the coin and collect that fee gets paid for
+absorbing the crowd's panic. It is the mirror image of the strategy it
+replaced: instead of fading pumps, it gets paid for standing under dumps.
+
+The checklist it runs once per day, just after midnight UTC:
+
+1. **Rank the market.** Take the 100 most-traded coins on the exchange (by
+   real traded value over the past day, computed from price bars we can
+   audit — not the exchange's headline number).
+2. **Find the desperate crowds.** A coin qualifies when its last settled
+   crowd fee is deeper than 10 cents per $100 per 8 hours — paid BY the
+   short-sellers TO the holders. Only fees that were actually paid count;
+   never a predicted fee.
+3. **Refuse the traps.** No entry when the coin has drifted down 5–30% over
+   three days (grinding decline = the shorts are right and the fee doesn't
+   cover the bleed — 5 years of history says this band loses), or when the
+   coin's price barely moves any more (a pinned price has no squeeze left).
+4. **Size by desperation.** Each position is up to 10% of the book, scaled
+   by how much the crowd is actually paying per day; the whole book never
+   exceeds 1× the account, with no leverage on the book itself.
+5. **Hold while paid.** Keep the coin while the fee stays meaningfully
+   negative; step aside (without selling the slot) if the price drifts into
+   the trap band; sell when the fee normalizes — or the moment it snaps
+   back unusually fast over two days, which historically means the panic is
+   over and the payment is gone.
+6. **The seatbelt, not the exit.** Each position carries a 35% disaster
+   stop on the exchange itself. That is deliberately far away: we tested
+   every tighter stop on 1,670 historical trades and every single one made
+   the strategy worse — the losses are one-day events you cannot outrun,
+   and the trades that look worst early are the ones that pay for
+   everything. The strategy's real exit is the fee normalizing.
+
+What we honestly told you when you promoted it: on five years of replayed
+history it earned about 20 cents per $100 per day with a smoothness score
+around 1.4, its worst dip was −29%, and the day-to-day ride is genuinely
+rough — roughly 6 losing trades in 10, paid for by a few big squeezes. The
+number only starts counting for real from the day it went live.
+
+## 2-old. The retired pump-fade strategy (code name: CONTINUOUS)
+
+**Retired from both the play-money account and the paper twin on
+2026-07-29, on your instruction, and replaced by the crowd-fee collector
+above.** It was not killed by its own rules — its last honest render showed
+it healthy but modest (about +11% with a −1.8% worst dip on its window).
+Its description below is kept for the record; its positions were flat at
+retirement and its Bitcoin trend-check and hedge machinery are dormant with
+it. Bringing it back would be a fresh recorded decision.
 
 What it believes: when a small coin suddenly spikes upward in one hour, the
 spike usually partly deflates over the next day — *if* the overall market is
@@ -194,7 +253,7 @@ six-hour mark while the signal is still fresh, it buys then anyway.
 Sizing: the account is treated as ten slots of about 10% each, shrunk for
 jumpy coins, capped at 30% per position, scaled 0.30×–1.25× by how calm
 Bitcoin is, made 1.5× bigger on weekends — then the whole book is halved by
-LONG's own size dial (0.5; the pump-fade strategy's dial is 1.0 — the dial
+LONG's own size dial (0.5; the crowd-fee collector's dial is 1.0 — the dial
 is per-strategy, set in the same shared config file). Exits: sell
 automatically 1.5 typical-daily-swings below the actual entry price (loss)
 or 4 above (profit), always out by 3 days, and no re-buying the same coin
@@ -224,7 +283,8 @@ anything beyond "the machinery works."
   much cash each bet locks up. These caps are the ones live on the server:
   the deployment that installed them went out on 2026-07-27 at about 14:03
   UTC.
-- **The hedge** is a scheduled job that computes small Bitcoin/Ethereum
+- **The hedge** (dormant since the pump-fade retirement, 2026-07-29) was a
+  scheduled job computing small Bitcoin/Ethereum
   buy-side wishes sized against the pump-fade strategy's open shorts, so a
   market-wide jump hurts less. At the old 10k account size its computed
   orders were below the exchange's minimum order size and were never
@@ -288,8 +348,9 @@ So the process (code name: Progressive Evidence Model, in
   strategy also carries pre-written shut-off conditions (kill criteria)
   agreed before results existed, so a failing strategy cannot be argued
   back to life. Those shut-off conditions are written as a *percentage* of
-  the account size (worst dip of 5% for the pump-fade book, 4% for the
-  momentum book), so funding the account 25× on 2026-07-27 did not quietly
+  the account size (worst dip of 5% for the now-retired pump-fade book, 4%
+  for the momentum book; the crowd-fee collector has its own registered
+  shut-off rules dated 2026-07-29), so funding the account 25× on 2026-07-27 did not quietly
   turn one ordinary losing trade into a shutdown trigger — the check scales
   with the account. You can order a change ahead of the evidence (an
   operator override — as you did on 2026-07-26); the record just has to say

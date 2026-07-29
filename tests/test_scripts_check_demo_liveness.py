@@ -352,6 +352,122 @@ def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
     assert M.gather_long_alerts(long_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
 
 
+def test_gather_carry_alerts_covers_cycle_freshness_and_decision_staleness(tmp_path) -> None:
+    """CARRY liveness is strategy-only; a stale held-over decision must page."""
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    carry_root = tmp_path / "bybit-carry-demo-event"
+    carry_root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "c1",
+                    "ts_ms": now - 60 * MIN,
+                    "decision_stale": True,
+                    "decision_error": "panel build failed: empty decision bar",
+                }
+            ]
+        ),
+        carry_root,
+        "carry_hold_demo_cycles",
+        partition_by=(),
+    )
+    alerts = M.gather_carry_alerts(carry_root=carry_root, now_ms=now, args=args)
+    keys = {a.key for a in alerts}
+    assert keys == {
+        "liveness:bybit-carry-demo-event",
+        "carry_decision_stale:bybit-carry-demo-event",
+    }
+    stale = next(a for a in alerts if a.key.startswith("carry_decision_stale"))
+    assert stale.severity == M.CRITICAL
+    assert "PREVIOUS targets" in stale.message
+    assert "empty decision bar" in stale.message
+
+
+def test_gather_carry_alerts_fresh_healthy_cycle_is_clean(tmp_path) -> None:
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    carry_root = tmp_path / "bybit-carry-demo-event"
+    carry_root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "c1",
+                    "ts_ms": now - 2 * MIN,
+                    "decision_stale": False,
+                    "decision_error": "",
+                }
+            ]
+        ),
+        carry_root,
+        "carry_hold_demo_cycles",
+        partition_by=(),
+    )
+    assert M.gather_carry_alerts(carry_root=carry_root, now_ms=now, args=args) == []
+
+
+def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    carry_root = tmp_path / "carry-paper"
+    carry_root.mkdir()
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "cycle_id": "paper-c1",
+                    "ts_ms": now - 60 * MIN,
+                    "decision_stale": False,
+                    "decision_error": "",
+                }
+            ]
+        ),
+        carry_root,
+        "carry_hold_paper_cycles",
+        partition_by=(),
+    )
+
+    keys = {
+        alert.key
+        for alert in M.gather_carry_alerts(
+            carry_root=carry_root,
+            now_ms=now,
+            args=args,
+            cycles_dataset="carry_hold_paper_cycles",
+        )
+    }
+    assert keys == {"liveness:carry-paper"}
+
+
+def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
+    import argparse
+
+    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    assert (
+        M.gather_carry_alerts(carry_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
+    )
+
+
 def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     from liquidity_migration.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
 
@@ -1215,12 +1331,18 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     assert M._sleeve_on("LONG_SLEEVE") is False
     monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
     assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is False
+    monkeypatch.delenv("CARRY_SLEEVE", raising=False)
+    assert M._sleeve_on("CARRY_SLEEVE") is False
+    monkeypatch.delenv("CARRY_PAPER_SLEEVE", raising=False)
+    assert M._sleeve_on("CARRY_PAPER_SLEEVE") is False
 
 
 def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
+    monkeypatch.setenv("CARRY_SLEEVE", "on")
+    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "off")
 
     units = M._default_units_for_toggles()
 
@@ -1232,6 +1354,15 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert "liquidity-migration-continuous-hedge.timer" in units
     assert "liquidity-migration-continuous-hedge.service" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
+    assert "liquidity-migration-bybit-carry-demo.service" in units
+    # Carry paper follows CARRY_PAPER_SLEEVE directly (dedicated toggle).
+    assert "liquidity-migration-bybit-carry-paper.service" not in units
+
+    monkeypatch.setenv("CARRY_SLEEVE", "off")
+    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "on")
+    units = M._default_units_for_toggles()
+    assert "liquidity-migration-bybit-carry-demo.service" not in units
+    assert "liquidity-migration-bybit-carry-paper.service" in units
 
 
 def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
@@ -1297,6 +1428,8 @@ def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch)
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "on")
+    monkeypatch.setenv("CARRY_SLEEVE", "on")
+    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "on")
 
     units = M._default_units_for_scope("demo")
 
@@ -1306,6 +1439,8 @@ def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch)
     assert "liquidity-migration-bybit-long-paper.service" not in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-bybit-continuous-paper.service" not in units
+    assert "liquidity-migration-bybit-carry-demo.service" in units
+    assert "liquidity-migration-bybit-carry-paper.service" not in units
     assert "liquidity-migration-continuous-rmom-refresh.timer" in units
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
     assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))

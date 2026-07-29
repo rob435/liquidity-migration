@@ -6,7 +6,8 @@ policy lives in `docs/governance.md`.
 
 | Surface | Contract | Status |
 | --- | --- | --- |
-| Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG and CONTINUOUS, executable as `liquidity_migration/sleeve_kill_criteria.py` and checkable via `scripts/check_kill_criteria.py`. Amended 2026-07-27: K1 binds to the committed profile's capital reference (−5%/−4%) instead of two absolutes, and LONG K2 is not gated on day 90. |
+| Sleeve retirement | `sleeve_kill_criteria_2026-07-20.md` | Active weekly demotion/retirement rules for LONG (and historically CONTINUOUS), executable as `liquidity_migration/sleeve_kill_criteria.py` and checkable via `scripts/check_kill_criteria.py`. Amended 2026-07-27: K1 binds to the committed profile's capital reference (−5%/−4%) instead of two absolutes, and LONG K2 is not gated on day 90. **2026-07-29: CONTINUOUS retired from demo AND paper by owner override (retirement note appended in-file); its K clocks stop at that change point.** |
+| CARRY kill criteria | `carry_sleeve_kill_criteria_2026-07-29.md` | K1–K4 for the CARRY sleeve (deployed 2026-07-29 as the CONTINUOUS replacement), armed at deployment; forward clock starts at the rollout receipt's commit. |
 | Passive execution | `passive_execution_experiment_2026-07-20.md` | Active paper A/B, implemented in `liquidity_migration/passive_execution.py`; target is 100 fills per arm before an economics conclusion. Auxiliary standalone demo probe (2026-07-25): `scripts/probe_passive_fill_ab.py`, protocol in `liquidity_migration/passive_fill_probe.py` — bounds the mechanism fast; does not conclude H. |
 
 Both remaining contracts have a live executable form. A contract with no verifier

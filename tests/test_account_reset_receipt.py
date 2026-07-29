@@ -287,6 +287,30 @@ def test_schema_v1_legacy_shared_compat_selection_remains_readable(tmp_path: Pat
         write_account_reset_receipt(output, payload)
 
 
+def test_carry_sleeve_selections_are_canonical(tmp_path: Path) -> None:
+    """Every reset-script-producible carry selection round-trips; the canonical
+    long -> continuous -> carry order is enforced, so a shuffled selection can
+    never masquerade as a different reset scope."""
+
+    for index, sleeves in enumerate(
+        (
+            ("carry",),
+            ("long", "carry"),
+            ("continuous", "carry"),
+            ("long", "continuous", "carry"),
+        )
+    ):
+        arguments = _fixture(tmp_path / f"selection-{index}", sleeves=sleeves)
+        payload = build_account_reset_receipt(**arguments)
+        output = tmp_path / f"carry-selection-{index}.json"
+        write_account_reset_receipt(output, payload)
+        assert load_account_reset_receipt(output)["reset"]["sleeves"] == list(sleeves)
+
+    disordered = _fixture(tmp_path / "disordered", sleeves=("carry", "long"))
+    with pytest.raises(ValueError, match="canonical reset selection"):
+        build_account_reset_receipt(**disordered)
+
+
 def test_load_rejects_archive_mutation(tmp_path: Path) -> None:
     arguments = _fixture(tmp_path)
     output = tmp_path / "reset-receipt.json"

@@ -64,7 +64,7 @@ BINANCE_ANCILLARY = (
     "binance_usdm_taker_flow_1h",
 )
 VALID_VENUES = tuple(DEFAULT_ROOTS)
-VALID_SLEEVES = ("long", "continuous")
+VALID_SLEEVES = ("long", "continuous", "carry")
 
 
 def _utc_now() -> dt.datetime:
@@ -818,6 +818,10 @@ def _backtest_step(
     )
     if sleeve == "long":
         expected = report_root / "long" / "long_native_research_report.json"
+    elif sleeve == "carry":
+        # equity_curves --sleeves carry renders the registered research config
+        # through the shared --research-config path (see scripts/equity_curves.py).
+        expected = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
     else:
         expected = report_root / "continuous" / venue / "continuous_equity_summary.json"
     return CommandStep(
@@ -848,6 +852,17 @@ def _validate_backtest_report(
         if config.get("start_date") != start.isoformat() or config.get("end_date") != end.isoformat():
             raise RuntimeError(f"LONG report window mismatch under {path}")
         return
+    if sleeve == "carry":
+        # The research-config summary carries identity but no window keys
+        # (financed_longs.research_equity_chart); the window is validated by
+        # the step arguments, so pin the registered config identity here.
+        path = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("config_id") != "lane2_carry_hold_v3":
+            raise RuntimeError(f"CARRY report is not the registered config under {path}")
+        if "research_seen_data" not in str(payload.get("run_label") or ""):
+            raise RuntimeError(f"CARRY report is missing its research label under {path}")
+        return
     summary_path = report_root / "continuous" / venue / "continuous_equity_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if summary.get("start_date") != start.isoformat() or summary.get("end_date") != end.isoformat():
@@ -865,6 +880,8 @@ def _artifact_files(report_root: Path, *, venue: str) -> list[Path]:
         "continuous/*/*.csv",
         "continuous/*/*.json",
         "continuous/*/*.md",
+        "carry/*.csv",
+        "carry/*.json",
         f"continuous/components/{venue}/*/continuous_*.csv",
         f"continuous/components/{venue}/*/continuous_*.json",
     )
@@ -904,6 +921,17 @@ def _run_summary(
                     "date_range": payload.get("date_range"),
                     "pit_manifest": payload.get("pit_manifest"),
                     "account_journal": payload.get("account_journal"),
+                    "report": str(path),
+                }
+            elif sleeve == "carry":
+                path = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                cells[key] = {
+                    "run_label": payload.get("run_label"),
+                    "config_id": payload.get("config_id"),
+                    "summary": payload.get("summary"),
+                    "metrics": payload.get("metrics"),
+                    "venue": payload.get("venue"),
                     "report": str(path),
                 }
             else:
@@ -1255,7 +1283,7 @@ def _add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", type=_date, default=None, help="benchmark start; default end minus --years")
     parser.add_argument("--years", type=int, default=3, help="benchmark window when --start is absent")
     parser.add_argument("--venues", default="bybit,binance", help="comma list: bybit,binance")
-    parser.add_argument("--sleeves", default="long,continuous", help="comma list: long,continuous")
+    parser.add_argument("--sleeves", default="long,continuous", help="comma list: long,continuous,carry")
     parser.add_argument("--bybit-root", default=str(DEFAULT_ROOTS["bybit"]))
     parser.add_argument("--binance-root", default=str(DEFAULT_ROOTS["binance"]))
     parser.add_argument(

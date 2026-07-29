@@ -6,10 +6,14 @@ CONTINUOUS is reconstructed from the continuous entry book
 (`continuous_ensemble_v2`, code-defined TP12 components, 2f hedge, BTC-vol
 regime) via the continuous refresh runner. Its output is descriptive historical
 evidence, not runtime parity or deployment authorization.
+CARRY renders the registered research config ``configs/lane2_carry_hold_v3.json``
+through the same --research-config path (cross-venue panel, corrected
+settlement-exact scorer), clearly labelled as the registered research shape —
+it is NOT a demo/paper daemon replay.
 
     bash scripts/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/equity_curves.sh --sleeves continuous # active continuous profile
-    bash scripts/equity_curves.sh --sleeves long,continuous
+    bash scripts/equity_curves.sh --sleeves long,continuous,carry
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 
 The strategy modules own their active configurations. Forward demo provides
@@ -149,7 +153,45 @@ def _run_continuous(
     return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
 
 
-RUNNERS = {"long": _run_long, "continuous": _run_continuous}
+def _load_research_panel(panel_root: str | Path) -> Any:
+    """Load the cross-venue panel columns every research-config render needs."""
+    import polars as pl
+
+    root = Path(panel_root).expanduser()
+    shards = sorted(str(x) for x in root.glob("*/panel.parquet"))
+    if not shards:
+        raise RuntimeError(f"no cross-venue panel shards under {root}")
+    return (
+        pl.scan_parquet(shards)
+        .select(list(RESEARCH_PANEL_COLUMNS))
+        .collect()
+        .sort(["symbol", "bar_ts_ms"])
+    )
+
+
+def _run_carry(
+    panel_root: str,
+    start: str,
+    end: str,
+    out: Path,
+) -> dict[str, Any]:
+    """Render the deployed CARRY sleeve's registered research shape.
+
+    The carry runtime replays the immutable Lane-2 registration
+    ``configs/lane2_carry_hold_v3.json`` (see liquidity_migration.carry_demo),
+    so its standard curve IS that config rendered through the SAME
+    --research-config path, labelled RESEARCH / simulation-on-seen-data. This
+    is a registered-research render, NOT a daemon replay: it reads the
+    cross-venue panel, not the demo/paper cycle record.
+    """
+    from liquidity_migration.carry_demo import CARRY_CONFIG_PATH
+    from liquidity_migration.financed_longs import research_equity_chart
+
+    panel = _load_research_panel(panel_root)
+    return research_equity_chart(panel, CARRY_CONFIG_PATH, out, start=start, end=end)
+
+
+RUNNERS = {"long": _run_long, "continuous": _run_continuous, "carry": _run_carry}
 
 
 def _find_png(out: Path) -> Path | None:
@@ -281,7 +323,15 @@ def main() -> int:
         description="Standard equity curves for the active LONG and CONTINUOUS profiles.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--sleeves", default="long", help="Comma list: long, continuous.")
+    p.add_argument(
+        "--sleeves",
+        default="long",
+        help=(
+            "Comma list: long, continuous, carry. 'carry' renders the registered "
+            "research config (lane2_carry_hold_v3) from the cross-venue panel — "
+            "a research-shape simulation, not a daemon replay."
+        ),
+    )
     p.add_argument(
         "--long-notional-multiplier",
         type=float,
@@ -382,7 +432,10 @@ def main() -> int:
     for s in sleeves:
         out = out_root / s
         _prepare_sleeve_output(out, fresh=args.fresh_output)
-        heading = "active LONG profile" if s == "long" else "active CONTINUOUS profile"
+        heading = {
+            "long": "active LONG profile",
+            "carry": "registered CARRY research config, simulation on seen data",
+        }.get(s, "active CONTINUOUS profile")
         print(f"=== {s.upper()} ({heading}) ===", flush=True)
         try:
             if s == "long":
@@ -395,6 +448,8 @@ def main() -> int:
                     0.0,
                     long_notional=args.long_notional_multiplier,
                 )
+            elif s == "carry":
+                payload = _run_carry(args.panel_root, start, end, out)
             else:
                 # Pass a start only when the user explicitly requests a window.
                 payload = _run_continuous(
@@ -426,18 +481,7 @@ def main() -> int:
     panel = None
     if args.research_config:
         try:
-            import polars as pl
-
-            panel_root = Path(args.panel_root).expanduser()
-            shards = sorted(str(x) for x in panel_root.glob("*/panel.parquet"))
-            if not shards:
-                raise RuntimeError(f"no cross-venue panel shards under {panel_root}")
-            panel = (
-                pl.scan_parquet(shards)
-                .select(list(RESEARCH_PANEL_COLUMNS))
-                .collect()
-                .sort(["symbol", "bar_ts_ms"])
-            )
+            panel = _load_research_panel(args.panel_root)
         except Exception as exc:  # noqa: BLE001 - every research render fails together
             for raw_path in args.research_config:
                 results[f"research:{Path(raw_path).stem}"] = {"error": str(exc)}
