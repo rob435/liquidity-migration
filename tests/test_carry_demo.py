@@ -719,3 +719,26 @@ def test_summary_formatter_renders_flat_payload() -> None:
     assert "decision_day=2024-10-04" in line
     assert "pub exit/entry/resize=1/2/1" in line
     assert "err=none" in line
+
+
+def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
+    # A cold-started cache begins at the bootstrap hour; the first cycle's
+    # view then opens mid-day and decide_book's phase guard refuses it
+    # (observed live 2026-07-29: window starting 03:00 UTC). The cycle layer
+    # must trim to the first 00:00 UTC key so the daily grid keeps the
+    # registered decision clock. Replicates the trim expression directly.
+    day_ms = 86_400_000
+    hour_ms = 3_600_000
+    start = 40 * day_ms + 3 * hour_ms  # 03:00 UTC cache start
+    bars = pl.DataFrame(
+        {
+            "bar_ts_ms": list(range(start, start + 3 * day_ms, hour_ms)),
+        }
+    )
+    first_ts = int(bars.get_column("bar_ts_ms").min())
+    assert first_ts % day_ms != 0
+    aligned_start = ((first_ts // day_ms) + 1) * day_ms
+    trimmed = bars.filter(pl.col("bar_ts_ms") >= aligned_start)
+    assert int(trimmed.get_column("bar_ts_ms").min()) % day_ms == 0
+    # nothing beyond the partial day is lost
+    assert trimmed.height == bars.height - (24 - 3)

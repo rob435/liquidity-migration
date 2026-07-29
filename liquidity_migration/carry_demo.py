@@ -1072,7 +1072,10 @@ def _read_leader_klines(follow_root: Path) -> pl.DataFrame:
             return compact
     except (OSError, pl.exceptions.PolarsError):
         pass
-    return read_dataset(follow_root, "event_demo_klines_1h")
+    # lock=False: the sandboxed follower must not (and cannot) create lock
+    # files under the leader's root; a rename-straddled read raises and the
+    # follower's next 60s cycle retries.
+    return read_dataset(follow_root, "event_demo_klines_1h", lock=False)
 
 
 def _read_follower_market_data(
@@ -1107,7 +1110,9 @@ def _read_follower_market_data(
         before = fetched_symbols
         klines = klines.filter(pl.col("symbol").is_in(sorted(allowed)))
         candidate_skipped = before - klines.get_column("symbol").n_unique()
-    funding = _normalized_funding_events(read_dataset(follow_root, CARRY_FUNDING_DATASET))
+    funding = _normalized_funding_events(
+        read_dataset(follow_root, CARRY_FUNDING_DATASET, lock=False)
+    )
     if funding.is_empty():
         raise CarrySleeveError(f"leader funding cache under {follow_root} is empty")
     stats: dict[str, Any] = {
@@ -1266,6 +1271,17 @@ def run_carry_demo_cycle(
                 window_start_ms=window_start_ms,
                 max_bar_ts_ms=decision_ts_ms,
             )
+            if not view.is_empty():
+                # A cold-started cache begins at the bootstrap hour, so the
+                # view's earliest KEYED bar can sit mid-day and the engine's
+                # daily-grid phase guard would rightly refuse it. Trim the
+                # leading partial day to the first 00:00 UTC key; once the
+                # cache spans the full replay window the trim is a no-op
+                # (window_start_ms is midnight-aligned by construction).
+                first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
+                if first_ts % DAY_MS != 0:
+                    aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
+                    view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
             universe_eligible = int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
             _validate_carry_view_health(
                 view,

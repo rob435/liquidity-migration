@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
 import shutil
@@ -891,8 +892,8 @@ def _write_dataset_unlocked(
     return path
 
 
-def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
-    return read_dataset_columns(data_root, dataset)
+def read_dataset(data_root: str | Path, dataset: str, *, lock: bool = True) -> pl.DataFrame:
+    return read_dataset_columns(data_root, dataset, lock=lock)
 
 
 def _partition_date_ge(file: Path, since: str) -> bool:
@@ -911,6 +912,7 @@ def read_dataset_columns(
     *,
     columns: list[str] | None = None,
     since_date: str | None = None,
+    lock: bool = True,
 ) -> pl.DataFrame:
     """Eagerly read a dataset, optionally projecting only ``columns``.
 
@@ -941,7 +943,22 @@ def read_dataset_columns(
     # writers cheaply (<10ms typical) and guarantees readers see a consistent
     # snapshot of the dataset. The collect() below MUST stay inside the lock so
     # the actual file reads complete before a writer can rename underneath us.
-    with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+    #
+    # ``lock=False`` is for cross-boundary FOLLOWERS ONLY: a reader of a
+    # leader root it must not (and cannot) write — taking the lock would
+    # create a lock file under the leader's ``.locks``, which a sandboxed
+    # follower user is rightly forbidden to do (2026-07-29: the carry paper
+    # producer reading the carry demo market plane). The torn-read race is
+    # accepted and self-limiting there: a straddled rename raises, the
+    # follower's cycle holds its standing book, and the next cycle retries.
+    lock_ctx = (
+        exclusive_file_lock(
+            dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01
+        )
+        if lock
+        else contextlib.nullcontext()
+    )
+    with lock_ctx:
         # When since_date is set and the dataset is top-level `date=`-partitioned,
         # prune at the DIRECTORY level before globbing: a full `**/*.parquet` walk of
         # a (date,symbol)-partitioned root is ~500k files / tens of seconds, almost
