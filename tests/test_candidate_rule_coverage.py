@@ -679,3 +679,40 @@ def test_rollout_refresh_threshold_is_half_the_hard_bound_and_tightens_only(
         )
         == "fresh"
     )
+
+
+def test_prior_receipt_bound_to_older_candidate_schema_requires_fresh_probe(
+    tmp_path: Path,
+) -> None:
+    # The 2026-07-29 carry rollout: the prior rules receipt binds a candidate
+    # artifact frozen under an older schema. The projection cannot validate
+    # the subset relationship against evidence it can no longer load — that
+    # is structural drift and must fall through to the full probe (exit 3),
+    # never crash the rollout.
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="source-candidate.json",
+    )
+    target_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="target-candidate.json",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    stale = json.loads(source_candidate.read_text(encoding="utf-8"))
+    stale["schema_version"] = stale["schema_version"] - 1
+    source_candidate.write_text(json.dumps(stale), encoding="utf-8")
+    source_candidate.chmod(0o600)
+
+    with pytest.raises(CandidateRuleRefreshRequired, match="structural drift"):
+        project_demo_rules_to_candidate_subset(
+            target_candidate,
+            source_rules,
+            tmp_path / "projected-rules.json",
+            validation_now_ns=NOW_NS + 1,
+        )

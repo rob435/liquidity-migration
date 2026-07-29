@@ -215,24 +215,36 @@ def project_demo_rules_to_candidate_subset(
     source_candidate_raw = source_binding.get("path")
     if type(source_candidate_raw) is not str or not source_candidate_raw:
         raise ValueError("source demo-rule receipt candidate path is invalid")
-    source_candidate_snapshot = _read_regular(
-        source_candidate_raw,
-        label="source candidate-universe artifact",
-        require_private=True,
-    )
-    source_candidate = load_candidate_universe(
-        source_candidate_snapshot.path,
-        snapshot=source_candidate_snapshot,
-    )
-    build_candidate_rule_coverage(
-        source_candidate.path,
-        rules_snapshot.path,
-        created_ts_ns=now_ns,
-        validation_now_ns=now_ns,
-        max_rule_age_seconds=max_rule_age_seconds,
-        candidate_snapshot=source_candidate_snapshot,
-        demo_rules_snapshot=rules_snapshot,
-    )
+    # The prior receipt's evidence is only projectable when its bound
+    # candidate artifact still validates under the code doing the
+    # projection. A candidate schema bump (or a vanished/corrupt source
+    # artifact) is structural drift, not an operator error: the projection
+    # cannot prove the subset relationship, so the caller must fall through
+    # to a complete fresh probe — exactly the exit-3 contract.
+    try:
+        source_candidate_snapshot = _read_regular(
+            source_candidate_raw,
+            label="source candidate-universe artifact",
+            require_private=True,
+        )
+        source_candidate = load_candidate_universe(
+            source_candidate_snapshot.path,
+            snapshot=source_candidate_snapshot,
+        )
+        build_candidate_rule_coverage(
+            source_candidate.path,
+            rules_snapshot.path,
+            created_ts_ns=now_ns,
+            validation_now_ns=now_ns,
+            max_rule_age_seconds=max_rule_age_seconds,
+            candidate_snapshot=source_candidate_snapshot,
+            demo_rules_snapshot=rules_snapshot,
+        )
+    except (OSError, ValueError) as exc:
+        raise CandidateRuleRefreshRequired(
+            "prior receipt's bound candidate artifact does not validate under "
+            f"this code (structural drift; fresh probe required): {exc}"
+        ) from exc
 
     source_symbols = set(loaded_rules)
     target_symbols = set(target.symbols)
