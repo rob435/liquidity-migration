@@ -698,6 +698,13 @@ verify_paper_runtime_boundary() {
     for root in \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
+        if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
+            # A root introduced by the commit being deployed does not exist
+            # before its own install phase creates it; the post-install
+            # boundary check enforces it strictly.
+            echo "paper-boundary-pending root=$root reason=created-by-this-install"
+            continue
+        fi
         runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root" \
             || fail "paper runtime cannot write its explicit state root: $root"
         runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root/.locks" \
@@ -707,6 +714,10 @@ verify_paper_runtime_boundary() {
     # (CARRY_MARKET_FOLLOW_ROOT). Carry has no WS kline plane, but the shared
     # normalize-demo contract still provisions the traversable cache tree.
     for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
+        if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
+            echo "paper-boundary-pending root=$root reason=created-by-this-install"
+            continue
+        fi
         runuser -u "$PAPER_RUNTIME_USER" -- \
             test -x "$root/.cache/ws_klines" \
             || fail "paper runtime cannot traverse demo kline cache: $root"
@@ -1216,7 +1227,9 @@ load_authorization() {
     [ "$AUTH_COMMIT" = "$EXPECTED_COMMIT" ] || fail "authorization is for another commit"
     case "$AUTH_PROFILE" in demo-operational|operational) ;; *) fail "unsupported profile $AUTH_PROFILE" ;; esac
     if [ "$AUTH_PROFILE" = operational ]; then
-        verify_paper_runtime_boundary
+        # Pre-install: state roots introduced by the commit being deployed do
+        # not exist yet; the strict boundary check re-runs after install.
+        PAPER_BOUNDARY_PRE_INSTALL=1 verify_paper_runtime_boundary
     fi
 
     . deploy/lib_sleeves.sh
@@ -1225,6 +1238,15 @@ load_authorization() {
         /etc/liquidity-migration/sleeves.resolved.env "$PAPER_RUNTIME_GROUP" \
         LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
         CARRY_SLEEVE CARRY_PAPER_SLEEVE CONTINUOUS_HEDGE_TIMER
+    # Transition tolerance: a resolved file written by a pre-carry install
+    # legitimately lacks the carry keys — absent means the sleeve was never
+    # deployed, i.e. off. This only bridges the rollout that introduces the
+    # keys; the post-install resolved-file verifier requires them present.
+    if [ -z "${CARRY_SLEEVE:-}" ] || [ -z "${CARRY_PAPER_SLEEVE:-}" ]; then
+        echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
+        CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
+        CARRY_PAPER_SLEEVE="${CARRY_PAPER_SLEEVE:-off}"
+    fi
     for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CONTINUOUS_PAPER_SLEEVE" \
         "$CARRY_SLEEVE" "$CARRY_PAPER_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
@@ -1521,8 +1543,15 @@ ROLLOUT_TARGET_COMMIT=""
 stop_rollout_units() {
     local unit
     for unit in "$@"; do
-        systemctl stop "$unit"
-        printf 'stopped unit=%s\n' "$unit"
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            systemctl stop "$unit"
+            printf 'stopped unit=%s\n' "$unit"
+        else
+            # A unit introduced by the commit being deployed is not installed
+            # yet and cannot be running; the systemd manifest install adds it
+            # before anything could ever start it.
+            printf 'stop-skipped unit=%s reason=not-installed\n' "$unit"
+        fi
     done
     for unit in "$@"; do
         ! systemctl is-active --quiet "$unit" \
