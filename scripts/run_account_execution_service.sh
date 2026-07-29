@@ -19,7 +19,7 @@ MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
-CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-$REPO_ROOT/data/bybit-continuous-demo-event}"
+CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
 CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
 if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
@@ -63,6 +63,17 @@ if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
     telegram_args+=(--telegram)
 fi
 
+# A sleeve with no configured cycle root is not running (CONTINUOUS retired
+# 2026-07-29). Pass nothing rather than a stale root, so the hourly Telegram
+# digest carries no permanently STALE gate line for a retired sleeve.
+continuous_cycle_args=()
+if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then
+    continuous_cycle_args+=(
+        --continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"
+        --continuous-cycle-max-age-minutes "$CONTINUOUS_CYCLE_MAX_AGE_MINUTES"
+    )
+fi
+
 exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
     --account-root "$ACCOUNT_ROOT" \
     --inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
@@ -73,8 +84,7 @@ exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
     --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
     --private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS" \
-    --continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT" \
-    --continuous-cycle-max-age-minutes "$CONTINUOUS_CYCLE_MAX_AGE_MINUTES" \
+    "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     --confirm-demo-orders \

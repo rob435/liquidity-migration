@@ -26,10 +26,14 @@ The account journal is authoritative. Parquet, reports, notifications, and
 strategy read models are projections or telemetry. See `docs/account_journal.md`.
 
 The demo hourly account notification labels owner/reconciliation state as
-`Account execution health`. Separately, it displays the latest completed
-CONTINUOUS BTC gate and entry funnel from a small receipt-bound projection.
-The owner never scans the growing strategy-cycle ledger, and unavailable or
-stale strategy telemetry changes only the message—not account admission.
+`Account execution health`. Separately, it can display the latest completed
+CONTINUOUS BTC gate and entry funnel from a small receipt-bound projection —
+only when `CONTINUOUS_CYCLE_ROOT` is configured. CONTINUOUS was retired on
+2026-07-29 and the owners no longer set it, so the digest carries no gate line
+at all; a retired sleeve must not leave a permanently `STALE` fault in an
+hourly operator page. Re-promotion sets the root explicitly again. The owner
+never scans the growing strategy-cycle ledger, and unavailable or stale
+strategy telemetry changes only the message—not account admission.
 
 Each owner derives its requested route without filesystem mutation, acquires
 its persistent account-owner lease, and only then ensures or creates the paired

@@ -37,6 +37,29 @@ TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS = 3
 QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX = "waiting for queue-head market data:"
+# The paper twin prefixes every health detail with its execution-model scope
+# annotation, which is not a blocking reason. Strip that leading annotation
+# before classifying the first real reason, or the bounded warmup transition
+# pages CRITICAL on paper and self-resolves minutes later, every time
+# (observed hourly on 2026-07-29: "execution_model_scope=…; waiting for
+# queue-head market data: TLMUSDT:stale_book").
+_HEALTH_DETAIL_ANNOTATION_PREFIXES = ("execution_model_scope=",)
+
+
+def first_blocking_health_reason(detail: str) -> str:
+    """Return the health detail without its leading non-blocking annotations."""
+
+    remaining = str(detail).strip()
+    while True:
+        for annotation in _HEALTH_DETAIL_ANNOTATION_PREFIXES:
+            if remaining.startswith(annotation):
+                head, separator, tail = remaining.partition(";")
+                if not separator:
+                    return ""
+                remaining = tail.strip()
+                break
+        else:
+            return remaining
 
 
 class AccountOwnerHealthStatus(StrEnum):
@@ -363,7 +386,7 @@ def require_recent_account_owner_health(
         if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
             detail = health.detail or "no detail"
             error = f"account owner is blocked: {detail}"
-            if detail.startswith(QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX):
+            if first_blocking_health_reason(detail).startswith(QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX):
                 raise AccountOwnerMarketWarmupPending(error)
             raise RuntimeError(error)
         if not health.requested_symbols_ready:

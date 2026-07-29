@@ -556,8 +556,11 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
-    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-$REPO_ROOT/data/bybit-continuous-demo-event}"' in wrapper
+    # CONTINUOUS retired 2026-07-29: the cycle root is unset by default and the
+    # flag is only passed when an operator configures a running sleeve again.
+    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in wrapper
     assert '--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"' in wrapper
+    assert '"${continuous_cycle_args[@]}"' in wrapper
 
 
 def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:

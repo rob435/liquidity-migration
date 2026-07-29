@@ -239,12 +239,13 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
     assert carry_paper["EXECUTION_ENVIRONMENT"] == "paper"
 
 
-def test_demo_account_notification_reads_the_explicit_continuous_status_root() -> None:
+def test_demo_account_notification_reads_no_retired_continuous_status_root() -> None:
+    # CONTINUOUS retired 2026-07-29. The status root is now deliberately unset,
+    # which is what removes the retired sleeve's line from the hourly digest;
+    # re-promotion must set it explicitly again.
     demo_owner = _environment("liquidity-migration-account-execution.service")
-    assert demo_owner["CONTINUOUS_CYCLE_ROOT"] == (
-        "/opt/liquidity-migration/data/bybit-continuous-demo-event"
-    )
-    assert demo_owner["CONTINUOUS_CYCLE_MAX_AGE_MINUTES"] == "15"
+    assert "CONTINUOUS_CYCLE_ROOT" not in demo_owner
+    assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in demo_owner
 
 
 def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots() -> None:
@@ -779,11 +780,8 @@ def test_paper_owner_owns_paper_telegram_notifications() -> None:
     assert "TELEGRAM_CHAT_ID" not in owner_unset
     environment = _environment("liquidity-migration-account-paper-execution.service")
     assert environment["TELEGRAM_ENABLED"] == "1"
-    assert (
-        environment["CONTINUOUS_CYCLE_ROOT"]
-        == "/opt/liquidity-migration/data/bybit-continuous-paper-event"
-    )
-    assert environment["CONTINUOUS_CYCLE_MAX_AGE_MINUTES"] == "15"
+    assert "CONTINUOUS_CYCLE_ROOT" not in environment
+    assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in environment
     for producer in (
         "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-paper.service",
@@ -929,3 +927,26 @@ def test_paper_runner_has_no_hidden_equity_fallback() -> None:
     assert 'if [[ -z "$PAPER_EQUITY_USDT" ]]; then' in script
     required_check = script[script.index('if [[ -z "$PAPER_EQUITY_USDT" ]]; then') :]
     assert "exit 2" in required_check.split("\nfi", 1)[0]
+
+
+def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
+    """A retired sleeve must leave no cycle root behind.
+
+    Otherwise the owners keep reading a dead sleeve's completion receipt and
+    every hourly Telegram digest carries a permanently growing
+    "CONTINUOUS BTC gate: STALE" line (observed 2026-07-29).
+    """
+
+    for unit in (
+        "liquidity-migration-account-execution.service",
+        "liquidity-migration-account-paper-execution.service",
+    ):
+        text = (ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=CONTINUOUS_CYCLE_ROOT=" not in text, unit
+
+
+def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
+    runner = (ROOT / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
+    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in runner
+    assert "data/bybit-continuous-demo-event" not in runner
+    assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner

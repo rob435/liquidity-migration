@@ -989,3 +989,75 @@ def test_exact_binding_remains_the_default_for_sizing_consumers(tmp_path: Path) 
             now_ns=12_500,
             expected_account_id="demo-account",
         )
+
+
+def test_paper_scope_annotation_does_not_hide_queue_head_warmup(tmp_path: Path) -> None:
+    """The paper twin's scope annotation must not turn warmup into a CRITICAL page.
+
+    Observed live 2026-07-29: the paper owner's detail always begins with
+    ``execution_model_scope=integration_only_uncalibrated;``, so the strict
+    prefix test never matched and the bounded queue-head warmup paged CRITICAL
+    every hour and self-resolved minutes later.
+    """
+
+    waiting = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "status": AccountOwnerHealthStatus.BLOCKED,
+            "requested_symbols_ready": False,
+            "detail": (
+                "execution_model_scope=integration_only_uncalibrated; "
+                "waiting for queue-head market data: TLMUSDT:stale_book; "
+                "target convergence pending: LAUSDT:converged_within_venue_minimum"
+            ),
+        }
+    )
+    write_account_owner_health(tmp_path, waiting)
+
+    with pytest.raises(AccountOwnerMarketWarmupPending):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
+
+
+def test_scope_annotation_never_masks_a_real_blocking_reason(tmp_path: Path) -> None:
+    blocked = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "status": AccountOwnerHealthStatus.BLOCKED,
+            "detail": "execution_model_scope=integration_only_uncalibrated; paper loop failed",
+        }
+    )
+    write_account_owner_health(tmp_path, blocked)
+
+    with pytest.raises(RuntimeError, match="paper loop failed") as blocked_error:
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
+    assert not isinstance(blocked_error.value, AccountOwnerMarketWarmupPending)
+
+
+def test_annotation_only_detail_is_not_treated_as_warmup(tmp_path: Path) -> None:
+    blocked = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "status": AccountOwnerHealthStatus.BLOCKED,
+            "detail": "execution_model_scope=integration_only_uncalibrated",
+        }
+    )
+    write_account_owner_health(tmp_path, blocked)
+
+    with pytest.raises(RuntimeError) as blocked_error:
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="paper",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
+    assert not isinstance(blocked_error.value, AccountOwnerMarketWarmupPending)

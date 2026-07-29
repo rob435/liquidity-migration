@@ -1289,3 +1289,33 @@ def test_deliver_notification_batch_commits_empty_batches_without_transport(
     assert account_notifications_module.deliver_notification_batch(
         notifier, quiet, context="paper account", logger=logging.getLogger("test")
     )
+
+
+def test_retired_sleeve_contributes_no_digest_line(tmp_path: Path) -> None:
+    """An empty sleeve status renders nothing at all.
+
+    CONTINUOUS was retired 2026-07-29; the owners previously passed a
+    placeholder string, so every hourly digest carried either
+    "CONTINUOUS BTC gate: unavailable · cycle root not configured" or an
+    ever-growing "STALE · last completed cycle is N min old" for a sleeve that
+    nobody runs.
+    """
+
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+
+    report = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health="healthy",
+        venue_positions={"BUSDT": 2.0},
+        continuous_status="",
+    )
+
+    assert report.hourly_included
+    assert "CONTINUOUS" not in report.message
+    assert "cycle root not configured" not in report.message
+    assert "Account execution health: healthy" in report.message

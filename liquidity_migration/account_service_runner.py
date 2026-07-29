@@ -911,7 +911,11 @@ def main(argv: list[str] | None = None) -> int:
                     continuous_status=(
                         continuous_status_reader.render(now_ns=notification_now_ns)
                         if continuous_status_reader is not None
-                        else "CONTINUOUS BTC gate: unavailable · cycle root not configured"
+                        # No configured cycle root means the sleeve is not
+                        # running (CONTINUOUS retired 2026-07-29). Render no
+                        # line at all rather than a permanent "unavailable" or
+                        # ever-growing "STALE" fault for a sleeve nobody runs.
+                        else ""
                     ),
                     now_ns=notification_now_ns,
                 )

@@ -585,7 +585,9 @@ def main(argv: list[str] | None = None) -> int:
                     continuous_status=(
                         continuous_status_reader.render(now_ns=notification_now_ns)
                         if continuous_status_reader is not None
-                        else "CONTINUOUS BTC gate: unavailable · cycle root not configured"
+                        # See the demo owner: an unconfigured cycle root means
+                        # the sleeve is retired, so the digest carries no line.
+                        else ""
                     ),
                     now_ns=notification_now_ns,
                 )
