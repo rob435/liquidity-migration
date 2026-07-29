@@ -859,7 +859,15 @@ invalidate_operational_authorization() {
     echo "invalidated prior operational authorization: $archive"
 }
 
-ROLLOUT_REFRESH_STALE_DEMO_RULES=0
+# Rollout and recover set this themselves. A staged `install` completing a
+# failed rollout may request the same maintenance explicitly via the
+# environment — without it, a recovery whose failure happened inside rule
+# maintenance can never rebind the candidate/rules and authority issuance
+# stays impossible (2026-07-29 carry rollout 30411203410).
+ROLLOUT_REFRESH_STALE_DEMO_RULES="${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
+case "$ROLLOUT_REFRESH_STALE_DEMO_RULES" in 0|1) ;; *)
+    echo "ROLLOUT_REFRESH_STALE_DEMO_RULES must be 0 or 1" >&2; exit 2 ;;
+esac
 ROLLOUT_DEMO_RULES_REFRESHED=0
 ROLLOUT_DEMO_RULES_PROJECTED=0
 
