@@ -11,6 +11,60 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
+- **2026-07-29 18:24 UTC — installed commit `63f32765b` (Telegram observability
+  and alert-noise fixes), deployed through the STAGED path with an open
+  position.** Owner authorization: the "check telegram logs for errors and fix
+  them robustly" / "fix these" chat instruction, with the owner explicitly
+  choosing the staged `install` → authority → `activate` path over flattening
+  the open CARRY book. Receipt: `install-ok commit=63f32765b units_started=0`,
+  authority `90566b86…` (profile `operational`, scope
+  `demo_paper_operational_only_no_real_money`), `verify-ok commit=63f32765b
+  profile=operational`. Post-activation: 9/9 expected units up, 0 failed.
+  - **Why staged, not `rollout`:** the guarded rollout proves a locally and
+    directly venue-flat account and refuses otherwise (standing constraint
+    below). The CARRY book held `LAUSDT` throughout. `install_mode` and
+    `activate_mode` require only a quiescent fleet, so the staged path deploys
+    without a flatten. This deliberately skips the flat-account proof; it was
+    an explicit owner decision, taken to avoid injecting an operator-forced
+    exit and re-entry into `lane2_carry_hold_v3`'s Lane-2 forward record,
+    which began accruing the previous day.
+  - **Exposure during the ~22-minute stopped window (18:01–18:24 UTC):**
+    `LAUSDT` long 458723 held under its venue-native stop only
+    (`StopLoss` market order, full size @ 0.03769, verified armed at Bybit
+    before the first unit stopped). No owner reconciliation, no producer
+    resizes, no notifications during the window. Position size and entry were
+    identical before and after: no trade was forced and nothing was injected
+    into the sleeve's forward record.
+  - What this build fixes, all three observed live in the operator's Telegram
+    feed against the journal: (1) **entrypoint logging** — every service runs
+    as `python -m liquidity_migration.<module>`, so its module logger is
+    `__main__` and sat outside the package logger the default handler
+    configured; every INFO record the entrypoints emit was dropped and their
+    WARNING/ERROR records rendered through `logging.lastResort` unformatted.
+    The owners had delivered hourly digests for days with ZERO
+    `Telegram delivered` audit lines. Confirmed fixed at 19:00 UTC —
+    `[INFO] __main__: account Telegram delivered page=1/1 chars=646`, the
+    first such line in the journal's history. (2) **retired-sleeve digest
+    line** — `CONTINUOUS_CYCLE_ROOT` is removed from both owner units and the
+    demo runner no longer defaults it, so the digest carries no
+    `CONTINUOUS BTC gate: STALE · N min old` line for a sleeve retired the
+    previous day; re-promotion must set the root explicitly. (3) **paper
+    warmup alert flap** — the bounded queue-head warmup suppression tested
+    the health detail with a strict prefix, which the paper twin's
+    `execution_model_scope=…;` annotation could never match, so paper paged
+    CRITICAL hourly and self-resolved minutes later. Zero CRITICAL pages and
+    zero warmup blocks in the 40 minutes after activation.
+  - Known defect NOT fixed in this build: the LONG **paper** producer's
+    shutdown drain overruns `TimeoutStopSec=180`, so a clean stop is SIGKILLed
+    and the unit lands in `failed` (cleared with `systemctl reset-failed`; the
+    demo twin stops in ~2s). Same signature as the CONTINUOUS demo unit on
+    2026-07-26. The drain is not bounded by the stop timeout it must finish
+    inside.
+  - Operational note: the staged `install` has no resumable receipt. A local
+    client killed at a timeout (this deploy hit the 10-minute cap on the first
+    attempt) leaves the remote checkout advanced with no success line; inspect
+    remote `HEAD`, unit state, and the retired-authority archive before
+    re-running. Re-running the install is otherwise safe and was clean here.
 - **2026-07-29 — CONTINUOUS retired; CARRY sleeve deployed (owner override,
   two rollouts).** Owner authorization: the "depromote the continuous strat
   from demo and paper, and replace it with this one. just do it. properly.
