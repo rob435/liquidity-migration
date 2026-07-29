@@ -24,9 +24,26 @@ history is in Git and in the audit receipts indexed at the bottom.
     working_orders=0 venue_positions=0 venue_orders=0`), so no flatten step
     was needed; the interval fleet ran LONG + owners only. Independent
     read-only verify re-confirmed post-activation.
-  - **Rollout 2 of 2**: the commit carrying this STATE entry (CARRY build)
-    — dispatched immediately after push; its Actions run ID and receipts
-    are appended in the follow-up docs commit after verification.
+  - **Rollout 2 of 2 (COMPLETE via the staged path)**: installed commit
+    `a224afd8812cbb25d63c8370717cab62a80a70b7`, activated ~01:17 UTC
+    2026-07-29, `verify-ok commit=a224afd… profile=operational`. The path:
+    Actions run 30410327411 (CARRY build `bd4737b`) failed pre-stop at a
+    read-only gate with the fleet untouched; the retry run 30411203410
+    (bridges `55299fb`) cleared every pre-stop phase, then failed closed
+    inside stopped-install at the demo-rule projection and force-stopped
+    the fleet per design; the documented staged completion finished it —
+    `install` (with the newly supported explicit rule-maintenance request)
+    → fresh authority `2c92ad1a…` → `activate` → `verify-ok`. The
+    maintenance step re-froze the candidate universe under schema 4
+    (508 symbols, `candidate-universe-20260729T005224Z`) and ran the full
+    authenticated demo-rule probe (508/508,
+    `demo-rules-20260729T005229Z`, reason
+    `candidate-addition-or-structural-drift`). Three transition fixes
+    landed en route and are now permanent machinery: pre-install phases
+    tolerate state their own install creates (`55299fb`), an unloadable
+    prior-bound candidate artifact is structural drift → fresh probe, not
+    a crash (`c93fdfd`), and a staged install can request rule maintenance
+    explicitly across the SSH boundary (`a5af4c6`, `a224afd`).
   - What the CARRY build turns on: the **crowd-fee collector** (registered
     config `lane2_carry_hold_v3`, promoted 2026-07-28) as the CONTINUOUS
     replacement on BOTH fleets: units
