@@ -15,18 +15,47 @@ envelope section of `STATE.md`.
 ## 1. What the owner asked for, and what is missing
 
 The instruction was "real money on the carry and long sleeves ... take full
-authority". Two of the three inputs a real-money boundary needs were not named:
+authority". `AGENTS.md` requires "a separate, narrow owner instruction naming
+the deployment and risk boundary", and "full authority" is the opposite of a
+boundary, so the three parameters were requested explicitly and supplied
+2026-07-30:
 
-| Input | Given | Needed |
-| --- | --- | --- |
-| Which sleeves | CARRY and LONG | — |
-| Which account | not named | a dedicated mainnet subaccount, funded only to the ceiling |
-| Max capital at risk | not named | an absolute USDT number, bound into the authority receipt |
+| Input | Owner decision |
+| --- | --- |
+| Sleeve | **CARRY first** (LONG deferred; two sleeves sharing one envelope is B3) |
+| Account | **existing main account** (a dedicated subaccount was recommended and declined) |
+| Max capital at risk | **$1,000 – $2,500** |
 
-`AGENTS.md` requires "a separate, narrow owner instruction naming the deployment
-and risk boundary". "Full authority" is the opposite of a boundary, so this
-document treats the capital ceiling as a **mandatory parameter with no default**.
-Nothing arms until it is supplied.
+### 1.1 What the main-account choice costs, on the record
+
+A dedicated subaccount funded to the ceiling makes the *venue* the outermost
+control: you cannot lose more than you funded, and that is the one control in
+this entire stack that cannot fail open — it does not depend on any code in this
+repository being correct. Declining it means the $2,500 ceiling is enforced
+**solely by the software layer**, which is the layer §3 documents as carrying
+sixteen open blockers, four of which are ways the system loses the ability to
+act while believing it is fine.
+
+That inverts the reasoning that makes a small Tier 1 safe. The argument for
+starting at $2,500 was "if everything fails at once, the loss is bounded by the
+venue". On the main account the argument becomes "if everything fails at once,
+the loss is bounded by the software that failed". Those are not the same claim.
+
+Two concrete consequences:
+
+1. **`require_bybit_demo_order_ownership` (`account_service_bybit.py:280`) will
+   refuse to start** the owner on an account carrying any manual or legacy
+   orders. A main account also traded by hand cannot run this system at all.
+2. **The capital clamp becomes load-bearing rather than belt-and-braces.**
+   Setting `capital_reference_usdt = 2500` makes CARRY size off
+   `min(equity, 2500)` regardless of the true balance — this is what permits a
+   small real allocation on a large account, and it is the change committed in
+   `a577cc7`. Before that change there was no mechanism that could have held a
+   producer to a fraction of the account it can see.
+
+The recommendation stands unchanged: a dedicated subaccount costs nothing and is
+the only control immune to every defect listed below. It remains the owner's
+call.
 
 ---
 
@@ -528,18 +557,34 @@ These steps involve mainnet credentials and real-capital enablement. **They are
 executed by the owner. Claude does not perform any of them and does not handle
 the credential values.**
 
-1. Create a **dedicated Bybit mainnet subaccount** and fund it with the ceiling
-   amount and no more. This is the outermost control and the only one that
-   cannot fail open: the venue itself caps the loss at what was funded.
-2. Create an API key on that subaccount, scoped to contract trading only, with
-   withdrawal permission **disabled** and IP-allowlisted to the VPS.
-3. Write the credentials to a root-owned `0600` env file on the VPS by hand.
+As configured: CARRY only, existing main account, $2,500 ceiling.
+
+0. **Confirm the main account carries no manual or open orders**, or the owner
+   will refuse to start (`account_service_bybit.py:280`). If the account is also
+   traded by hand, this configuration is not runnable and a subaccount is not
+   optional but required.
+1. Create an API key on that account, scoped to contract trading only, with
+   withdrawal permission **disabled** and IP-allowlisted to the VPS. Withdrawal
+   scope is the one permission that turns a software defect into an
+   unrecoverable loss.
+2. Write the credentials to a root-owned `0600` env file on the VPS by hand.
    Never via a tool, never through argv, never pasted into a chat.
-4. Set the capital ceiling and daily-loss limit in the real-money risk policy.
+3. Set `capital_reference_usdt = 2500` and recalibrate the six absolute caps
+   against it, not against the demo profile's $250,000. Leaving the demo caps in
+   place would put every limit 100× above anything reachable — B4 in its most
+   extreme form.
+4. Set the daily-loss limit. At a $2,500 ceiling a limit above roughly $250
+   (10%) is not a control, and CARRY holds a correlated basket that can move
+   that far in a day.
 5. Issue a real-money authority receipt naming the ceiling and an expiry.
 6. Run the staged install, then activate at Tier 1.
 
-Step 6 is the only one that resembles the deploy path already in use.
+Step 6 is the only one that resembles the deploy path already in use. Steps 1
+and 2 involve mainnet credentials and are the owner's alone.
+
+**Do not run step 6 while B17 is open** — `deploy_vps_live.sh:1052` places live
+venue orders during rollout whenever instrument rules pass half-life, so the
+deploy itself would trade the real account before any strategy decision existed.
 
 ---
 
