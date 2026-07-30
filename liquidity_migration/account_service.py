@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 from dataclasses import asdict, dataclass, replace
@@ -54,7 +55,10 @@ from .strategy_runtime import (
     SleeveTargetIntent,
     TargetAdapter,
 )
+from .wedged_command_watch import wedged_commands
 
+
+_logger = logging.getLogger(__name__)
 
 REQUEST_SCHEMA_VERSION = 2
 ARRIVAL_SCHEMA_VERSION = 1
@@ -2051,6 +2055,7 @@ class AccountExecutionService:
         """Replay or create at most one deterministic convergence batch."""
 
         plans = self._convergence_plans()
+        now_ns = self.clock.wall_time_ns()
         # Crash after journal commit but before ACK: replay the exact batch and
         # command id. The execution driver resubmits only work that is provably
         # safe: reductions may retry, while a prior ambiguous entry attempt or
@@ -2060,18 +2065,40 @@ class AccountExecutionService:
             if item.retry_attempts <= 0:
                 continue
             batch_id = f"account-convergence/{item.symbol}/{item.generation}/{item.retry_attempts:04d}"
-            commanded = any(
-                order.batch_id == batch_id and order.status == "commanded"
+            commanded_orders = [
+                order
                 for order in self.kernel._state_ref().orders.values()
-            )
-            if commanded:
-                return self._submit_convergence_plan(
-                    plan,
-                    batch_id=batch_id,
-                    attempt=item.retry_attempts,
+                if order.batch_id == batch_id and order.status == "commanded"
+            ]
+            if not commanded_orders:
+                continue
+            unresendable = [
+                wedge
+                for wedge in wedged_commands(commanded_orders, now_ns=now_ns)
+                # Reduce-only work stays retryable by design and must never be
+                # stepped over: the driver resends it deliberately.
+                if not wedge.reduce_only
+            ]
+            if unresendable:
+                # B15b. Replaying this plan raises AmbiguousExposureSubmission
+                # every pass, and because this loop returns on the first
+                # commanded plan, one wedged early-alphabet symbol starved
+                # convergence for every other symbol in the book. The wedge is
+                # not resolvable here — only an operator-authorized transition
+                # can terminalize it — so step over it and keep converging.
+                _logger.error(
+                    "convergence skipped wedged batch %s (%s); it needs "
+                    "`ops.sh wedged-command` to leave the commanded state",
+                    batch_id,
+                    "; ".join(wedge.describe() for wedge in unresendable),
                 )
+                continue
+            return self._submit_convergence_plan(
+                plan,
+                batch_id=batch_id,
+                attempt=item.retry_attempts,
+            )
 
-        now_ns = self.clock.wall_time_ns()
         due = [
             plan
             for plan in plans

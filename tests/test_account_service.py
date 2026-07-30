@@ -47,6 +47,7 @@ from liquidity_migration.execution_adapters import (
 from liquidity_migration.market_capture import MarketCaptureError
 from liquidity_migration.protection_engine import AccountProtectionEngine
 from liquidity_migration.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
 from liquidity_migration.venue_protection import (
     NativeProtectionBreach,
     NativeProtectionPlan,
@@ -1546,6 +1547,52 @@ def test_crash_after_convergence_commit_replays_the_same_command_id(tmp_path: Pa
     assert len(convergence_orders) == 1
     assert restarted.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
     assert restarted.convergence_report().converged
+
+
+def test_convergence_steps_over_a_wedged_batch_instead_of_starving(tmp_path: Path) -> None:
+    """B15b: converge_once returns on the first commanded plan, so one wedged
+    early-alphabet symbol starved convergence for every other symbol."""
+
+    root = tmp_path / "account"
+    adapter = ScriptedExecutionAdapter("reject", "crash", "fill")
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(root, adapter, clock=clock, convergence_retry_backoff_ns=100)
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="wedged-convergence",
+            batch_id="wedged-convergence",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    clock.advance_ns(100)
+    with pytest.raises(RuntimeError, match="after command commit"):
+        service.converge_once()
+    crashed = adapter.submissions[1]
+    assert not crashed.reduce_only
+    assert service.kernel.state().orders[crashed.command_id].status == "commanded"
+
+    # Minutes later it is not "in flight", it is wedged, and replaying it only
+    # repeats the same failure forever.
+    clock.advance_ns(DEFAULT_WEDGE_AFTER_NS + 1_000_000_000)
+    restarted = _service(
+        root,
+        adapter,
+        clock=VirtualClock(
+            current_wall_ns=clock.wall_time_ns(),
+            current_monotonic_ns=clock.monotonic_ns(),
+        ),
+        convergence_retry_backoff_ns=100,
+    )
+    submissions_before = adapter.submit_calls
+
+    assert restarted.converge_once() is None
+    assert adapter.submit_calls == submissions_before
+    # Untouched: only an operator-authorized transition may terminalize it.
+    assert restarted.kernel.state().orders[crashed.command_id].status == "commanded"
 
 
 def test_crash_replay_resubmits_the_commanded_order_after_the_market_moved(

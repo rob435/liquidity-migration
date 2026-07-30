@@ -59,6 +59,7 @@ from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, DeterministicIds, SystemClock
 from .native_protection_math import round_native_stop
 from .storage import exclusive_file_lock
+from .wedged_command_watch import wedged_commands
 
 
 ACCOUNT_JOURNAL_DIRECTORY = "account_journal"
@@ -1417,6 +1418,41 @@ def _opposite_nonzero_sides(
     return (left > tolerance and right < -tolerance) or (left < -tolerance and right > tolerance)
 
 
+def _wedged_working_symbols(
+    state: AccountState,
+    *,
+    now_ns: int,
+    tolerance: float,
+) -> frozenset[str]:
+    """Symbols whose *every* working order has stopped being in flight (B15b).
+
+    A symbol qualifies only when nothing genuinely live remains for it. One
+    healthy in-flight submission alongside a wedged one still freezes the
+    symbol, because the live order's fills are still coming and a reduction
+    sized against the current position would race them.
+    """
+
+    working = {
+        command_id: state.orders[command_id]
+        for command_id in state.working_order_ids
+        if abs(state.orders[command_id].remaining_signed_qty) > tolerance
+    }
+    if not working:
+        return frozenset()
+    wedged_ids = {
+        wedge.command_id
+        for wedge in wedged_commands(working.values(), now_ns=int(now_ns))
+    }
+    by_symbol: dict[str, list[str]] = {}
+    for command_id, order in working.items():
+        by_symbol.setdefault(order.symbol, []).append(command_id)
+    return frozenset(
+        symbol
+        for symbol, command_ids in by_symbol.items()
+        if all(command_id in wedged_ids for command_id in command_ids)
+    )
+
+
 def _exposure_clamped_component_flat_targets(
     state: AccountState,
     target_payloads: Sequence[Mapping[str, Any]],
@@ -2095,6 +2131,11 @@ class AccountExecutionKernel:
         commands: list[OrderCommand] = []
         if not rejections:
             working_symbols = state.working_symbols(tolerance=risk_policy.quantity_tolerance)
+            wedged_symbols = _wedged_working_symbols(
+                state,
+                now_ns=command_created_ts_ns,
+                tolerance=risk_policy.quantity_tolerance,
+            )
             for symbol, target_qty in sorted(aggregates.items()):
                 if risk_reducing_only and symbol not in requested_symbols:
                     continue
@@ -2103,7 +2144,8 @@ class AccountExecutionKernel:
                 position_qty = state.positions.get(symbol, PositionState()).signed_qty
                 projected_qty = position_qty + state.working_signed_qty(symbol)
                 tolerance = risk_policy.quantity_tolerance
-                if symbol in working_symbols:
+                symbol_wedged = symbol in wedged_symbols
+                if symbol in working_symbols and not symbol_wedged:
                     # A newer target supersedes the desired state immediately,
                     # but must not create an offsetting market order while an
                     # older submission is still ambiguous/live. Reconciliation
@@ -2113,6 +2155,22 @@ class AccountExecutionKernel:
                     # reduce-only offset while venue position is still zero is
                     # both unsafe and the source of Bybit 110017 reject loops.
                     continue
+                if symbol_wedged:
+                    # B15b. Every working order for this symbol is wedged: it has
+                    # sat in ``commanded`` far past any plausible flight time and
+                    # nothing in the runtime expires it, so the rule above froze
+                    # the symbol permanently — exits included — while the real
+                    # position sat at the venue behind only its native stop.
+                    #
+                    # Size the reduction against the reconstructed position
+                    # ALONE. The wedged quantity may or may not exist at the
+                    # venue, and counting it would ask to sell more than is
+                    # provably open, which is what produced the 110017 loops.
+                    # Only reduce-only commands are unblocked below, and a
+                    # reduce-only order cannot create exposure, so this can never
+                    # do more than close what is already there. If the wedged
+                    # order later fills, the next pass closes that too.
+                    projected_qty = position_qty
                 execution_target_qty = (
                     component_flat_targets[symbol]
                     if component_flat_targets is not None and symbol in component_flat_targets
@@ -2142,6 +2200,11 @@ class AccountExecutionKernel:
                 reduce_only = symbol in staged_component_flat_symbols or abs(target_qty) + tolerance < abs(
                     projected_qty
                 )
+                if symbol_wedged and not reduce_only:
+                    # A wedge unblocks the exit, never a fresh entry. Adding
+                    # exposure while an older submission may still be live at
+                    # the venue is the doubling this rule exists to prevent.
+                    continue
                 if qty + tolerance < rules.min_qty:
                     rejections.append(_risk_rejection_key(batch_id, "below_min_qty", symbol))
                     continue
