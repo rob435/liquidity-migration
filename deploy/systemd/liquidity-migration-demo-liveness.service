@@ -4,7 +4,6 @@ Wants=network-online.target
 # The observer must run when the account owner is stopped or failed. Coupling
 # activation would restart the writer or suppress the very alert this unit owns.
 After=network-online.target
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot

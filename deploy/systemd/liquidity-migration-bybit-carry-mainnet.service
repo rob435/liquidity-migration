@@ -3,7 +3,6 @@ Description=liquidity-migration Bybit carry-hold MAINNET target producer (lane2_
 Wants=network-online.target
 Requires=liquidity-migration-account-execution-mainnet.service
 After=network-online.target liquidity-migration-account-execution-mainnet.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple

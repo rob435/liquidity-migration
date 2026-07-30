@@ -29,10 +29,6 @@ Safe operator commands:
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   clock-offset --execute [...] capture VPS-vs-Bybit public clock evidence
-  operational-authority [ARGS...]
-                               verify exact demo/paper operational authority
-  operational-authority --execute issue [ARGS...]
-                               issue narrow demo or demo+paper authority
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
   wedged-command [ARGS...]     report/probe wedged order commands (read-only)
@@ -58,10 +54,6 @@ Safety contract:
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
   * clock-offset requires --execute and runs on the VPS clock.
   * deploy requires --execute and MODE=install|activate|rollout|recover.
-  * rollout additionally requires an explicit profile, authorization reference,
-    and the exact demo/paper-only owner acknowledgement; it refuses non-flat state.
-  * recover additionally requires the same authority inputs plus one exact,
-    full-scope, leave-stopped reset receipt; it refuses any active managed unit.
   * Research runs remain research artifacts and are never auto-promoted.
 
 Details: docs/operations.md
@@ -152,75 +144,6 @@ REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
 
-remote_operational_authority_issue() {
-  local -a authority_args=("$@")
-  local arg
-  {
-    printf 'REPO_DIR=%q\n' "$REPO_DIR"
-    printf 'AUTHORITY_ARGS=('
-    for arg in ${authority_args[@]+"${authority_args[@]}"}; do
-      printf ' %q' "$arg"
-    done
-    printf ' )\n'
-    cat <<'REMOTE_SCRIPT'
-set -euo pipefail
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-umask 077
-
-MAINTENANCE_LOCK=/run/liquidity-migration/maintenance.lock
-LEGACY_DEPLOY_LOCK=/run/liquidity-migration/deploy.lock
-LEGACY_RESET_LOCK=/run/lock/liquidity-migration-ledger-reset.lock
-[[ -x /usr/bin/flock && ! -L /usr/bin/flock ]] \
-  || { echo "operational authority requires trusted /usr/bin/flock" >&2; exit 1; }
-
-# Acquire before opening the checkout or its Python environment. This prevents
-# a concurrent install from changing the module while Python imports it and
-# bridges deployed reset/deploy versions that still use either legacy leaf.
-exec 9<"$MAINTENANCE_LOCK" \
-  || { echo "cannot open canonical maintenance lock" >&2; exit 1; }
-/usr/bin/flock -n 9 \
-  || { echo "another maintenance operation is active" >&2; exit 1; }
-exec 8<"$LEGACY_DEPLOY_LOCK" \
-  || { echo "cannot open legacy deploy lock" >&2; exit 1; }
-/usr/bin/flock -n 8 \
-  || { echo "a legacy deploy operation is active" >&2; exit 1; }
-exec 7<"$LEGACY_RESET_LOCK" \
-  || { echo "cannot open legacy reset lock" >&2; exit 1; }
-/usr/bin/flock -n 7 \
-  || { echo "a legacy reset operation is active" >&2; exit 1; }
-
-cd "$REPO_DIR"
-PYTHON="$REPO_DIR/.venv/bin/python"
-HELPER="$REPO_DIR/liquidity_migration/maintenance_lock.py"
-[[ -x "$PYTHON" ]] \
-  || { echo "deployed Python is unavailable" >&2; exit 1; }
-[[ -f "$HELPER" && ! -L "$HELPER" ]] \
-  || { echo "maintenance lock helper is unavailable or unsafe" >&2; exit 1; }
-
-helper_output="$(/usr/bin/python3 "$HELPER" prepare-host)" \
-  || { echo "cannot validate prepared maintenance locks" >&2; exit 1; }
-IFS=$'\t' read -r \
-  maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode \
-  <<< "$helper_output"
-for value in \
-  "$maintenance_device" "$maintenance_inode" "$deploy_device" \
-  "$deploy_inode" "$reset_device" "$reset_inode"; do
-  [[ "$value" =~ ^[0-9]+$ ]] \
-    || { echo "maintenance helper returned invalid identity metadata" >&2; exit 1; }
-done
-/usr/bin/python3 "$HELPER" acquire-inherited \
-  --lock 9 "$MAINTENANCE_LOCK" "$maintenance_device" "$maintenance_inode" \
-  --lock 8 "$LEGACY_DEPLOY_LOCK" "$deploy_device" "$deploy_inode" \
-  --lock 7 "$LEGACY_RESET_LOCK" "$reset_device" "$reset_inode" \
-  || { echo "maintenance lock identity changed" >&2; exit 1; }
-
-export LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7
-exec "$PYTHON" -m liquidity_migration.operational_runtime_authority "${AUTHORITY_ARGS[@]}"
-REMOTE_SCRIPT
-  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
-}
-
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -247,21 +170,6 @@ case "$command" in
       || die_usage "clock-offset writes a VPS-bound receipt; its first argument must be --execute"
     shift
     remote_python_script scripts/capture_bybit_clock_offset.py "$@"
-    ;;
-  operational-authority)
-    if [[ "${1:-}" == "--execute" ]]; then
-      shift
-      [[ "${1:-}" == "issue" ]] \
-        || die_usage "operational-authority --execute is valid only before the issue subcommand"
-      remote_operational_authority_issue "$@"
-    elif [[ "${1:-}" == "issue" ]]; then
-      die_usage "operational-authority issue mutates the VPS; prefix it with --execute"
-    else
-      if [[ "$#" -eq 0 ]]; then
-        set -- verify --repo-root "$REPO_DIR"
-      fi
-      remote_python_module liquidity_migration.operational_runtime_authority "$@"
-    fi
     ;;
   venue-accounting)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"

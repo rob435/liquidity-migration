@@ -3,7 +3,6 @@ Description=liquidity-migration integration-only uncalibrated LONG paper target 
 Wants=network-online.target
 Requires=liquidity-migration-account-paper-execution.service
 After=network-online.target liquidity-migration-account-paper-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple

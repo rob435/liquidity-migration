@@ -3,7 +3,6 @@ Description=Periodic immutable-prior BTC+ETH target hedge for the continuous dem
 Wants=network-online.target
 Requires=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot

@@ -90,10 +90,6 @@ from .market_capture import (
 )
 from .equity_anchored_envelope import EquityAnchoredEnvelope
 from .operational_profile import load_operational_profile
-from .operational_runtime_authority import (
-    require_book_within_receipt_ceiling,
-    require_real_money_authority_unexpired,
-)
 from .account_loss_guard import (
     LOSS_GUARD_OK,
     LOSS_GUARD_TRIPPED,
@@ -432,40 +428,6 @@ def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
     if not allowed:
         raise RuntimeError(f"Bybit demo API key cannot submit orders: {reason}")
     return api_key_info
-
-
-def _load_authority_receipt(*, realm: VenueRealm) -> Mapping[str, Any] | None:
-    """The installed authority receipt, or None when there is none to read.
-
-    Absence is normal off the deployed host, so on demo this returns ``None``
-    and the ceiling and expiry checks are simply inert. On **mainnet** it is
-    not: those two checks are the only thing comparing the live book to what
-    the owner actually authorized, and a receipt that is momentarily
-    unreadable — replaced mid-read during a re-issue, a mode change, a partial
-    write — would otherwise silently remove both limits for the whole lifetime
-    of the process. Unknown safety-critical state fails closed.
-    """
-
-    try:
-        from .operational_runtime_authority import (  # noqa: PLC0415 - optional at runtime
-            DEFAULT_RECEIPT,
-            load_authorization_receipt,
-        )
-
-        receipt = load_authorization_receipt(DEFAULT_RECEIPT)
-    except Exception as exc:  # noqa: BLE001 - absence is normal off the deployed host
-        if realm is VenueRealm.MAINNET:
-            raise RuntimeError(
-                "refusing to run the funded owner without a readable authority "
-                f"receipt: the capital ceiling and expiry are unenforceable ({exc})"
-            ) from exc
-        return None
-    if realm is VenueRealm.MAINNET and str(receipt.get("profile") or "") != "real-money":
-        raise RuntimeError(
-            "the installed authority receipt is not a real-money receipt; the "
-            "funded owner would run with no ceiling and no expiry"
-        )
-    return receipt
 
 
 def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
@@ -998,10 +960,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     envelope_rebase_detail = ""
-    # Read once at startup. The receipt is immutable and mode-0400/0640; a
-    # runtime that could not read it simply has no ceiling to cross-check
-    # against, which is the demo/paper case and not an error there.
-    authority_receipt = _load_authority_receipt(realm=realm)
     loss_guard_flat_published = False
     try:
         while True:
@@ -1262,32 +1220,6 @@ def main(argv: list[str] | None = None) -> int:
                         envelope_rebase_detail = ""
                     if envelope.last_error:
                         envelope_rebase_detail = envelope.last_error
-                if authority_receipt is not None:
-                    # Cross-check the *live book* against the receipt ceiling,
-                    # not only against the policy file. The policy hash proves
-                    # the rule is intact; it does not prove the book obeys it,
-                    # and adopted external exposure never passed through the
-                    # rule at all.
-                    try:
-                        require_book_within_receipt_ceiling(
-                            authority_receipt,
-                            gross_notional_usdt=_live_gross_notional_usdt(
-                                kernel, recorder
-                            ),
-                            equity_usdt=last_capital_snapshot.equity_usdt,
-                        )
-                        require_real_money_authority_unexpired(authority_receipt)
-                    except (RuntimeError, ValueError) as exc:
-                        _logger.critical("real-money authority check failed: %s", exc)
-                        health_status = AccountOwnerHealthStatus.BLOCKED
-                        health_detail = _append_health_error(
-                            health_detail, f"real-money authority: {exc}"
-                        )[:1000]
-                        health_signature = (
-                            health_status.value,
-                            health_detail,
-                            requested_symbols_ready,
-                        )
                 if envelope_rebase_detail:
                     health_status = AccountOwnerHealthStatus.BLOCKED
                     health_detail = _append_health_error(

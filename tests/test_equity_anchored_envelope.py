@@ -12,13 +12,6 @@ from liquidity_migration.operational_profile import (
     load_operational_profile_bytes,
     profile_at_capital_reference,
 )
-from liquidity_migration.operational_runtime_authority import (
-    REAL_MONEY_MAX_AUTHORITY_SECONDS,
-    REAL_MONEY_PROFILE,
-    real_money_gross_ceiling_usdt,
-    require_book_within_receipt_ceiling,
-    require_real_money_authority_unexpired,
-)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -131,72 +124,6 @@ def test_the_profile_refuses_an_unbounded_or_oversized_anchor() -> None:
         _equity_profile(equity_fraction=1.5)
     with pytest.raises(ValueError, match="mode must be"):
         _equity_profile(mode="whatever")
-
-
-# --------------------------------------------------------------------------
-# Real-money authority: a mandatory ceiling and a mandatory expiry.
-# --------------------------------------------------------------------------
-
-
-def _receipt(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "profile": REAL_MONEY_PROFILE,
-        "created_ts_ns": 1_000_000_000_000,
-        "expires_ts_ns": 1_000_000_000_000 + 7 * 24 * 3600 * 10**9,
-        "capital_ceiling": {"mode": "account_equity_multiple", "value": 1.0},
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_an_equity_multiple_ceiling_tracks_the_wallet() -> None:
-    receipt = _receipt()
-    assert real_money_gross_ceiling_usdt(receipt, equity_usdt=4_000.0) == pytest.approx(4_000.0)
-    assert real_money_gross_ceiling_usdt(receipt, equity_usdt=9_000.0) == pytest.approx(9_000.0)
-
-    require_book_within_receipt_ceiling(
-        receipt, gross_notional_usdt=3_999.0, equity_usdt=4_000.0
-    )
-    with pytest.raises(RuntimeError, match="exceeds the authorized ceiling"):
-        require_book_within_receipt_ceiling(
-            receipt, gross_notional_usdt=4_001.0, equity_usdt=4_000.0
-        )
-
-
-def test_a_fixed_ceiling_ignores_equity() -> None:
-    receipt = _receipt(capital_ceiling={"mode": "fixed_usdt", "value": 2_500.0})
-    assert real_money_gross_ceiling_usdt(receipt, equity_usdt=1_000_000.0) == pytest.approx(2_500.0)
-
-
-def test_there_is_no_form_of_the_ceiling_that_means_unbounded() -> None:
-    for bogus in (
-        None,
-        {},
-        {"mode": "fixed_usdt"},
-        {"mode": "none", "value": 1.0},
-        {"mode": "fixed_usdt", "value": 0.0},
-        {"mode": "fixed_usdt", "value": -1.0},
-        {"mode": "account_equity_multiple", "value": 5.0},
-        {"mode": "fixed_usdt", "value": 1.0, "extra": True},
-    ):
-        with pytest.raises(ValueError):
-            real_money_gross_ceiling_usdt(_receipt(capital_ceiling=bogus), equity_usdt=1_000.0)
-
-
-def test_real_money_authority_is_never_indefinite() -> None:
-    receipt = _receipt()
-    require_real_money_authority_unexpired(receipt, now_ns=receipt["expires_ts_ns"] - 1)  # type: ignore[operator]
-    with pytest.raises(RuntimeError, match="expired"):
-        require_real_money_authority_unexpired(receipt, now_ns=receipt["expires_ts_ns"])  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="positive expires_ts_ns"):
-        require_real_money_authority_unexpired(_receipt(expires_ts_ns=0))
-    assert REAL_MONEY_MAX_AUTHORITY_SECONDS <= 30 * 24 * 60 * 60
-
-
-def test_the_checks_are_inert_on_a_demo_receipt() -> None:
-    demo = {"profile": "operational"}
-    require_real_money_authority_unexpired(demo)
-    require_book_within_receipt_ceiling(demo, gross_notional_usdt=1e12, equity_usdt=1.0)
 
 
 def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:

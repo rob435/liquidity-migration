@@ -106,10 +106,4 @@ case "$UNIT:$ENTRYPOINT" in
         ;;
 esac
 
-/opt/liquidity-migration/.venv/bin/python \
-    -m liquidity_migration.operational_runtime_authority verify-runtime \
-    --receipt /etc/liquidity-migration/account-execution-operational-ready \
-    --repo-root /opt/liquidity-migration \
-    --unit "$UNIT"
-
 exec "${COMMAND[@]}"

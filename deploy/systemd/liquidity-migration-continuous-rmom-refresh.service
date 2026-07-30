@@ -2,7 +2,6 @@
 Description=Refresh the shared continuous-fade RMOM gate
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=oneshot

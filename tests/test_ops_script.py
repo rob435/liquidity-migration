@@ -33,7 +33,6 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
         Path("scripts/check_deploy_rollout_readiness.py"),
-        Path("scripts/verify_rollout_shutdown_authority.py"),
         Path("liquidity_migration/maintenance_lock.py"),
     ):
         target = checkout / relative
@@ -71,7 +70,6 @@ def test_help_lists_only_current_operator_routes() -> None:
         "research-refresh",
         "reset",
         "clock-offset",
-        "operational-authority",
         "venue-accounting",
         "test",
         "deploy",
@@ -125,66 +123,10 @@ def test_reset_execute_is_forwarded_without_added_dry_run(tmp_path: Path) -> Non
 
 def test_mutating_remote_routes_require_explicit_handshake() -> None:
     assert _run("clock-offset").returncode == 2
-    assert _run("operational-authority", "issue").returncode == 2
     assert _run("deploy", "install").returncode == 2
     assert _run("deploy", "--execute", "verify").returncode == 2
     assert _run("deploy", "--execute", "rollout").returncode == 2
     assert _run("deploy", "--execute", "recover").returncode == 2
-
-
-def test_operational_authority_defaults_to_remote_verification(tmp_path: Path) -> None:
-    capture = tmp_path / "capture"
-    ssh = tmp_path / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
-
-    result = _run(
-        "operational-authority",
-        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)},
-    )
-
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "MODULE_ARGS=( verify --repo-root /opt/liquidity-migration )" in payload
-
-
-def test_operational_authority_issue_locks_before_opening_remote_checkout(
-    tmp_path: Path,
-) -> None:
-    capture = tmp_path / "capture"
-    ssh = tmp_path / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
-
-    result = _run(
-        "operational-authority",
-        "--execute",
-        "issue",
-        "--expected-commit",
-        "a" * 40,
-        "--repo-root",
-        "/opt/liquidity-migration",
-        "--authorization-reference",
-        "owner task",
-        "--owner-acknowledgement",
-        "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION",
-        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)},
-    )
-
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    canonical_lock = payload.index("/usr/bin/flock -n 9")
-    checkout_open = payload.index('cd "$REPO_DIR"')
-    module_exec = payload.index(
-        'exec "$PYTHON" -m liquidity_migration.operational_runtime_authority'
-    )
-    assert canonical_lock < checkout_open < module_exec
-    assert "/usr/bin/flock -n 8" in payload
-    assert "/usr/bin/flock -n 7" in payload
-    assert "prepare-host" in payload
-    assert "acquire-inherited" in payload
-    assert "LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7" in payload
-    assert "AUTHORITY_ARGS=( issue --expected-commit" in payload
 
 
 def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Path) -> None:
@@ -217,7 +159,7 @@ def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Pa
         assert f"MODE={mode}" in capture.read_text(encoding="utf-8")
 
 
-def test_rollout_requires_and_serializes_explicit_operational_authority(
+def test_rollout_requires_and_serializes_an_explicit_profile(
     tmp_path: Path,
 ) -> None:
     checkout, commit = _isolated_deploy_checkout(tmp_path)
@@ -243,7 +185,7 @@ def test_rollout_requires_and_serializes_explicit_operational_authority(
     }
 
     incomplete = subprocess.run(
-        [*base, "--profile", "operational"],
+        base,
         cwd=checkout,
         env=environment,
         text=True,
@@ -251,7 +193,7 @@ def test_rollout_requires_and_serializes_explicit_operational_authority(
         check=False,
     )
     assert incomplete.returncode == 2
-    assert "authorization-reference" in incomplete.stderr
+    assert "--profile" in incomplete.stderr
     assert not capture.exists()
 
     complete = subprocess.run(
@@ -259,10 +201,6 @@ def test_rollout_requires_and_serializes_explicit_operational_authority(
             *base,
             "--profile",
             "operational",
-            "--authorization-reference",
-            "owner task: bounded rollout",
-            "--owner-acknowledgement",
-            "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION",
         ],
         cwd=checkout,
         env=environment,
@@ -275,11 +213,6 @@ def test_rollout_requires_and_serializes_explicit_operational_authority(
     payload = capture.read_text(encoding="utf-8")
     assert "MODE=rollout" in payload
     assert "DEPLOY_PROFILE=operational" in payload
-    assert "DEPLOY_AUTHORIZATION_REFERENCE=owner\\ task:\\ bounded\\ rollout" in payload
-    assert (
-        "DEPLOY_OWNER_ACKNOWLEDGEMENT="
-        "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION"
-    ) in payload
 
 
 def test_recovery_requires_and_serializes_exact_reset_receipt(
@@ -300,10 +233,6 @@ def test_recovery_requires_and_serializes_exact_reset_receipt(
         "recover",
         "--profile",
         "operational",
-        "--authorization-reference",
-        "owner task: reset recovery",
-        "--owner-acknowledgement",
-        "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION",
     ]
     environment = {
         **os.environ,
@@ -433,7 +362,7 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
     lines earlier in the same function (2026-07-27 audit L11)."""
 
     text = (Path(__file__).resolve().parents[1] / "scripts" / "ops.sh").read_text(encoding="utf-8")
-    for array in ("reset_args", "script_args", "module_args", "authority_args"):
+    for array in ("reset_args", "script_args", "module_args"):
         assert f'"${{{array}[@]}}"' not in text.replace(f'${{{array}[@]+"${{{array}[@]}}"}}', "")
         assert f'${{{array}[@]+"${{{array}[@]}}"}}' in text
 

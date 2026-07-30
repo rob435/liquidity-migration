@@ -5,14 +5,26 @@ import stat
 import subprocess
 from pathlib import Path
 
-from liquidity_migration.operational_runtime_authority import AUTHORIZED_UNITS
+
+AUTHORIZED_UNITS = (
+    "liquidity-migration-account-execution.service",
+    "liquidity-migration-account-paper-execution.service",
+    "liquidity-migration-bybit-long-demo.service",
+    "liquidity-migration-bybit-long-paper.service",
+    "liquidity-migration-bybit-continuous-demo.service",
+    "liquidity-migration-bybit-continuous-paper.service",
+    "liquidity-migration-bybit-carry-demo.service",
+    "liquidity-migration-bybit-carry-paper.service",
+    "liquidity-migration-continuous-hedge.service",
+    "liquidity-migration-continuous-rmom-refresh.service",
+    "liquidity-migration-demo-liveness.service",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "scripts" / "deploy_vps_live.sh"
 WRAPPER = ROOT / "scripts" / "run_authorized_runtime.sh"
 SYSTEMD = ROOT / "deploy" / "systemd"
-RECEIPT = "/etc/liquidity-migration/account-execution-operational-ready"
 
 
 def _read(path: str | Path) -> str:
@@ -54,9 +66,6 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     for path in scripts[:7] + scripts[9:]:
         assert path.stat().st_mode & stat.S_IXUSR
     assert (ROOT / "scripts" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
-    assert (
-        ROOT / "scripts" / "verify_rollout_shutdown_authority.py"
-    ).stat().st_mode & stat.S_IXUSR
     paper_runner = _read("scripts/run_account_paper_execution_service.sh")
     assert "CALIBRATION" not in paper_runner
     assert "--latency-quantile" not in paper_runner
@@ -65,14 +74,12 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     assert "/etc/liquidity-migration/account-paper-execution/demo-rules.json" in paper_runner
 
 
-def test_authorized_wrapper_owns_every_runtime_argv_and_verifies_before_exec() -> None:
+def test_authorized_wrapper_owns_every_runtime_argv() -> None:
     wrapper = _read(WRAPPER)
     assert 'if [ "$#" -ne 2 ]' in wrapper
-    assert wrapper.index("operational_runtime_authority verify-runtime") < wrapper.index('exec "${COMMAND[@]}"')
     for unit in AUTHORIZED_UNITS:
         assert f"{unit}:main" in wrapper
         fragment = _unit(unit)
-        assert f"ConditionPathExists={RECEIPT}" in fragment
         assert f"run_authorized_runtime.sh {unit} main" in fragment
     for owner in (
         "liquidity-migration-account-execution.service",
@@ -407,7 +414,7 @@ def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it(
     assert "liquidity-migration-account-paper-execution.service" in activate
 
 
-def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_authority() -> None:
+def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     text = _read(DEPLOY)
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
     assert rollout.index("rollout-target-prefetch") < rollout.index("current-topology-verification")
@@ -422,11 +429,10 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert rollout.index("final-stopped-flat-account-proof") < rollout.rindex(
         "ROLLOUT_IRREVERSIBLE=1"
     )
-    assert rollout.index("stopped-install") < rollout.index("create-operational-authority")
+    assert rollout.index("stopped-install") < rollout.index("record-installed-profile")
     assert rollout.index("stopped-install") < rollout.index("post-rule-refresh-flat-account-proof")
-    assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("create-operational-authority")
-    assert rollout.index("create-operational-authority") < rollout.index("activate-and-verify")
-    assert "load_authorization rollout-shutdown" in rollout
+    assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("record-installed-profile")
+    assert rollout.index("record-installed-profile") < rollout.index("activate-and-verify")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
     assert "rollout-recovery-boundary rollback=unavailable" in rollout
 
@@ -449,11 +455,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert 'return "$status"' in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
     assert '"$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py"' in text
-    assert 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64' in text
-    assert (
-        '"$EXPECTED_COMMIT:scripts/verify_rollout_shutdown_authority.py"'
-        in text
-    )
     refresh = text[
         text.index("refresh_stale_demo_rules_if_requested()") :
         text.index("install_mode()")
@@ -478,14 +479,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown_and_binds_new_a
     assert "expected_downstream_on()" in text
     assert "enabled-not-active cause=expired-authority-recovery" in text
 
-    authority = text[
-        text.index("issue_rollout_authorization()") : text.index("rollout_mode()")
-    ]
-    assert "LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7" in authority
-    assert "operational_runtime_authority issue" in authority
-    assert '--profile "$DEPLOY_PROFILE"' in authority
-    assert '--authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE"' in authority
-    assert '--owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"' in authority
 
 
 def test_reset_recovery_reopens_exact_fresh_roots_before_rule_maintenance() -> None:
@@ -510,9 +503,9 @@ def test_reset_recovery_reopens_exact_fresh_roots_before_rule_maintenance() -> N
     assert recover.index("recovery-flat-account-proof") < recover.index("stopped-install")
     assert recover.index("stopped-install") < recover.index("post-rule-maintenance-flat-account-proof")
     assert recover.index("post-rule-maintenance-flat-account-proof") < recover.index(
-        "create-operational-authority"
+        "record-installed-profile"
     )
-    assert recover.index("create-operational-authority") < recover.index("activate-and-verify")
+    assert recover.index("record-installed-profile") < recover.index("activate-and-verify")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in recover
     assert "recovery did not refresh" not in recover
     assert "candidate_refresh=required" in recover

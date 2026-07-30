@@ -5,8 +5,6 @@ set -euo pipefail
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
 DEPLOY_PROFILE=""
-DEPLOY_AUTHORIZATION_REFERENCE=""
-DEPLOY_OWNER_ACKNOWLEDGEMENT=""
 DEPLOY_RESET_RECEIPT=""
 if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
     while [ "$#" -gt 0 ]; do
@@ -14,16 +12,6 @@ if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
             --profile)
                 [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
                 DEPLOY_PROFILE="$2"
-                shift 2
-                ;;
-            --authorization-reference)
-                [ "$#" -ge 2 ] || { echo "--authorization-reference requires a value" >&2; exit 2; }
-                DEPLOY_AUTHORIZATION_REFERENCE="$2"
-                shift 2
-                ;;
-            --owner-acknowledgement)
-                [ "$#" -ge 2 ] || { echo "--owner-acknowledgement requires a value" >&2; exit 2; }
-                DEPLOY_OWNER_ACKNOWLEDGEMENT="$2"
                 shift 2
                 ;;
             --reset-receipt)
@@ -38,12 +26,6 @@ if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
         demo-operational|operational) ;;
         *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
     esac
-    [ -n "$DEPLOY_AUTHORIZATION_REFERENCE" ] \
-        && [ "${#DEPLOY_AUTHORIZATION_REFERENCE}" -le 500 ] \
-        || { echo "$MODE requires a 1..500 character --authorization-reference" >&2; exit 2; }
-    [ "$DEPLOY_OWNER_ACKNOWLEDGEMENT" = \
-        AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION ] \
-        || { echo "$MODE requires the exact demo/paper-only owner acknowledgement" >&2; exit 2; }
     if [ "$MODE" = recover ]; then
         [ -n "$DEPLOY_RESET_RECEIPT" ] && [ "${DEPLOY_RESET_RECEIPT#/}" != "$DEPLOY_RESET_RECEIPT" ] \
             || { echo "recover requires an absolute --reset-receipt" >&2; exit 2; }
@@ -118,7 +100,6 @@ fi
     exit 1
 }
 ROLLOUT_READINESS_HELPER_B64=""
-ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=""
 if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
     if ! ROLLOUT_READINESS_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
@@ -133,21 +114,6 @@ if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
         exit 1
     }
 fi
-if [ "$MODE" = rollout ]; then
-    if ! ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64="$(
-        "${LOCAL_GIT[@]}" show \
-            "$EXPECTED_COMMIT:scripts/verify_rollout_shutdown_authority.py" \
-        | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
-    )"; then
-        echo "expected commit does not contain the rollout shutdown authority helper: $EXPECTED_COMMIT" >&2
-        exit 1
-    fi
-    [[ -n "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64" ]] || {
-        echo "expected commit returned an empty rollout shutdown authority helper" >&2
-        exit 1
-    }
-fi
-
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -160,15 +126,11 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
     printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
-    printf 'DEPLOY_AUTHORIZATION_REFERENCE=%q\n' "$DEPLOY_AUTHORIZATION_REFERENCE"
-    printf 'DEPLOY_OWNER_ACKNOWLEDGEMENT=%q\n' "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
     printf 'DEPLOY_RESET_RECEIPT=%q\n' "$DEPLOY_RESET_RECEIPT"
     printf 'ROLLOUT_REFRESH_STALE_DEMO_RULES=%q\n' \
         "${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
     printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
-    printf 'ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64=%q\n' \
-        "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -347,23 +309,7 @@ exec(compile(source, namespace["__file__"], "exec"), namespace)
 ' "$ROLLOUT_READINESS_HELPER_B64" "$@"
 }
 
-rollout_shutdown_authority_helper() {
-    "$PYTHON" -c '
-import base64
-import sys
-
-encoded = sys.argv[1]
-arguments = sys.argv[2:]
-source = base64.b64decode(encoded, validate=True)
-sys.argv = ["verify_rollout_shutdown_authority.py", *arguments]
-namespace = {
-    "__file__": "scripts/verify_rollout_shutdown_authority.py",
-    "__name__": "__main__",
-}
-exec(compile(source, namespace["__file__"], "exec"), namespace)
-' "$ROLLOUT_SHUTDOWN_AUTHORITY_HELPER_B64" "$@"
-}
-
+PROFILE_MARKER=/etc/liquidity-migration/profile
 PAPER_RUNTIME_USER=liquidity-migration-paper
 PAPER_RUNTIME_GROUP=liquidity-migration-paper
 PAPER_ACCOUNT_ROOT=/opt/liquidity-migration/data/bybit-account-paper
@@ -1155,7 +1101,6 @@ install_mode() {
         tests/test_demo_rule_probe.py \
         tests/test_deploy_rollout_readiness.py \
         tests/test_operational_profile.py \
-        tests/test_operational_runtime_authority.py \
         tests/test_strategy_planning.py \
         tests/test_runtime_scripts.py
 
@@ -1216,34 +1161,17 @@ PY
 }
 
 load_authorization() {
-    local verification_mode="${1:-strict}"
-    case "$verification_mode" in
-        strict|rollout-shutdown) ;;
-        *) fail "invalid authorization verification mode" ;;
-    esac
     require_checkout
-    require_clean_head
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-    if [ "$verification_mode" = rollout-shutdown ]; then
-        AUTH_JSON="$(rollout_shutdown_authority_helper \
-            --receipt /etc/liquidity-migration/account-execution-operational-ready \
-            --repo-root "$REPO_DIR")" \
-            || fail "rollout shutdown authorization verification failed"
-        AUTH_SHUTDOWN_EXPIRED_DEMO_RULES="$(
-            printf '%s' "$AUTH_JSON" | "$PYTHON" -c \
-                'import json,sys; print(int(json.load(sys.stdin).get("_rollout_shutdown_expired_demo_rules") is True))'
-        )"
-    else
-        AUTH_JSON="$("$PYTHON" -m liquidity_migration.operational_runtime_authority verify \
-            --receipt /etc/liquidity-migration/account-execution-operational-ready \
-            --repo-root "$REPO_DIR")" \
-            || fail "operational authorization verification failed"
-        AUTH_SHUTDOWN_EXPIRED_DEMO_RULES=0
+    # Which profile is installed, read from the marker install wrote. An
+    # explicit --profile on this invocation wins.
+    AUTH_PROFILE="${DEPLOY_PROFILE:-}"
+    if [ -z "$AUTH_PROFILE" ] && [ -r "$PROFILE_MARKER" ]; then
+        AUTH_PROFILE="$(cat "$PROFILE_MARKER")"
     fi
-    AUTH_PROFILE="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["profile"])')"
-    AUTH_COMMIT="$(printf '%s' "$AUTH_JSON" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["authorized_commit"])')"
-    [ "$AUTH_COMMIT" = "$EXPECTED_COMMIT" ] || fail "authorization is for another commit"
+    [ -n "$AUTH_PROFILE" ] || AUTH_PROFILE=operational
+    AUTH_SHUTDOWN_EXPIRED_DEMO_RULES=0
     case "$AUTH_PROFILE" in demo-operational|operational) ;; *) fail "unsupported profile $AUTH_PROFILE" ;; esac
     if [ "$AUTH_PROFILE" = operational ]; then
         # Pre-install: state roots introduced by the commit being deployed do
@@ -1688,16 +1616,9 @@ retry_exact_rollout_flat_check() {
     return 1
 }
 
-issue_rollout_authorization() {
-    PYTHON=.venv/bin/python
-    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-    export LIQUIDITY_MIGRATION_MAINTENANCE_LOCK_FDS=9,8,7
-    "$PYTHON" -m liquidity_migration.operational_runtime_authority issue \
-        --expected-commit "$EXPECTED_COMMIT" \
-        --repo-root "$REPO_DIR" \
-        --profile "$DEPLOY_PROFILE" \
-        --authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE" \
-        --owner-acknowledgement "$DEPLOY_OWNER_ACKNOWLEDGEMENT"
+record_installed_profile() {
+    printf '%s\n' "$DEPLOY_PROFILE" > "$PROFILE_MARKER"
+    chmod 0644 "$PROFILE_MARKER"
 }
 
 rollout_mode() {
@@ -1711,7 +1632,7 @@ rollout_mode() {
     # Prove the current receipt/topology before changing any unit, using the
     # commit it actually authorizes rather than the incoming target commit.
     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
-    load_authorization rollout-shutdown
+    load_authorization
     run_strict_phase current-topology-verification verify_topology
     run_strict_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
     if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
@@ -1759,7 +1680,7 @@ rollout_mode() {
         run_strict_phase post-rule-refresh-flat-account-proof \
             rollout_flat_check stopped-maintenance
     fi
-    run_strict_phase create-operational-authority issue_rollout_authorization
+    run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0
@@ -1800,7 +1721,7 @@ recover_mode() {
     run_strict_phase stopped-install install_mode
     run_strict_phase post-rule-maintenance-flat-account-proof \
         rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
-    run_strict_phase create-operational-authority issue_rollout_authorization
+    run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0

@@ -4,13 +4,11 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
-import liquidity_migration.operational_runtime_authority as runtime_authority
 from liquidity_migration.account_candidate_universe import (
     build_candidate_universe_artifact,
     load_candidate_universe,
@@ -476,98 +474,6 @@ def test_candidate_projection_cannot_retimestamp_stale_evidence(
         )
 
     assert not output.exists()
-
-
-def test_operational_authority_accepts_byte_exact_private_paper_mirrors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    candidate = _candidate(tmp_path)
-    rules = _rules(tmp_path, candidate)
-    risk = tmp_path / "risk.json"
-    risk.write_text(
-        (
-            Path(__file__).resolve().parents[1]
-            / "configs"
-            / "operational.demo.json"
-        ).read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    risk.chmod(0o600)
-    paper_config = tmp_path / "paper-config"
-    paper_config.mkdir()
-    paper_candidate = paper_config / "candidate.json"
-    paper_rules = paper_config / "rules.json"
-    paper_risk = paper_config / "risk.json"
-    for source, destination in (
-        (candidate, paper_candidate),
-        (rules, paper_rules),
-        (risk, paper_risk),
-    ):
-        shutil.copyfile(source, destination)
-        destination.chmod(0o600)
-    roots = {index: tmp_path / f"root-{index}" for index in range(6)}
-    for index, root in roots.items():
-        root.mkdir()
-        if index >= 3:
-            root.chmod(0o700)
-    values = {
-        "account-execution.env": {
-            "ACCOUNT_EXECUTION_KERNEL_REQUIRED": "1",
-            "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
-            "ACCOUNT_LIVENESS_SCOPE": "demo-paper",
-            "ACCOUNT_EXECUTION_ROOT": str(roots[0]),
-            "ACCOUNT_INTENT_INBOX_ROOT": str(roots[1]),
-            "ACCOUNT_CAPTURE_ROOT": str(roots[2]),
-            "STRATEGY_TARGET_CAPTURE_PATH": str(roots[2] / "strategy-targets.jsonl"),
-            "ACCOUNT_SYMBOLS_FILE": str(candidate),
-            "CANDIDATE_UNIVERSE_FILE": str(candidate),
-            "ACCOUNT_DEMO_RULES_FILE": str(rules),
-            "ACCOUNT_RISK_POLICY_FILE": str(risk),
-        },
-        "account-paper-execution.env": {
-            "ACCOUNT_PAPER_KERNEL_REQUIRED": "1",
-            "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
-            "ACCOUNT_EXECUTION_ROOT": str(roots[3]),
-            "ACCOUNT_INTENT_INBOX_ROOT": str(roots[4]),
-            "ACCOUNT_PAPER_CAPTURE_ROOT": str(roots[5]),
-            "STRATEGY_TARGET_CAPTURE_PATH": str(roots[5] / "strategy-targets.jsonl"),
-            "ACCOUNT_SYMBOLS_FILE": str(paper_candidate),
-            "CANDIDATE_UNIVERSE_FILE": str(paper_candidate),
-            "ACCOUNT_DEMO_RULES_FILE": str(paper_rules),
-            "ACCOUNT_RISK_POLICY_FILE": str(paper_risk),
-            # Must equal the committed profile's capital_reference_usdt.
-            "PAPER_EQUITY_USDT": f"{json.loads(risk.read_text(encoding='utf-8'))['capital_reference_usdt']:g}",
-        },
-        "bybit-demo.env": {
-            "BYBIT_DEMO_API_KEY": "demo",
-            "BYBIT_DEMO_API_SECRET": "secret",
-            "REAL_MONEY": "false",
-        },
-        "sleeves.resolved.env": {
-            "LONG_SLEEVE": "on",
-            "CONTINUOUS_SLEEVE": "on",
-            "CONTINUOUS_PAPER_SLEEVE": "on",
-            "CARRY_SLEEVE": "on",
-            "CARRY_PAPER_SLEEVE": "on",
-            "CONTINUOUS_HEDGE_TIMER": "on",
-        },
-    }
-    monkeypatch.setattr(runtime_authority, "_paper_user_id", os.geteuid)
-    monkeypatch.setattr(
-        "liquidity_migration.candidate_rule_coverage.time.time_ns",
-        lambda: NOW_NS + 1,
-    )
-
-    root_identities, input_snapshots = runtime_authority._validate_environments(
-        values,
-        profile=runtime_authority.OPERATIONAL_PROFILE,
-    )
-
-    assert len(root_identities) == 6
-    assert input_snapshots[
-        "account-paper-execution.env:ACCOUNT_DEMO_RULES_FILE"
-    ].data == rules.read_bytes()
 
 
 def test_coverage_rejects_weakened_rule_freshness_before_sources(

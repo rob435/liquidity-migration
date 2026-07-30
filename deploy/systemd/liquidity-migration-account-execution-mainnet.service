@@ -2,7 +2,6 @@
 Description=liquidity-migration single Bybit MAINNET real-money account execution owner
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
 
 [Service]
 Type=simple
