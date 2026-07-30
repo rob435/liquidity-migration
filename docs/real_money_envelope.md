@@ -413,8 +413,16 @@ software protection, no exits — for as long as the mismatch persists.
 
 ### 3.3 Built so far
 
-Three changes, all safety-increasing and all active on demo — where they get
+Four changes, all safety-increasing and all active on demo — where they get
 exercised long before they guard anything real.
+
+**Closes B8 — the realm is now verified, not assumed.** `bybit.py` asserts the
+host the transport actually resolved to (`DEMO_REST_ENDPOINT`) after
+construction, instead of trusting the `demo=` flag it passed in. The check is
+scoped to real pybit transports by module so the suite's 61 hand-rolled doubles
+still work, and a paired test pins the other half of the contract — that a
+genuine pybit `HTTP` still carries `endpoint` at all — so a silent removal fails
+the suite rather than disarming the guard in production. Two tests.
 
 **Closes B4 — the caps now actually bind.** `carry_demo.py` clamps sizing to
 `min(decision_anchored_equity, capital_reference_usdt)`, injected from the
