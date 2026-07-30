@@ -35,6 +35,9 @@ from .deterministic_serialization import canonical_json
 SCHEMA_VERSION = 1
 KIND = "demo_paper_account_epoch_reset"
 VALIDATOR = "account_reset_receipt_v1"
+# Deliberately NOT every ExecutionEnvironment. This constant drives a
+# destructive ledger reset, and the mainnet journal must not be reachable
+# by a tool whose whole job is erasing account history.
 ROOT_ENVIRONMENTS = ("demo", "paper")
 ROOT_KINDS = ("account", "inbox", "capture")
 MANAGED_UNITS = (

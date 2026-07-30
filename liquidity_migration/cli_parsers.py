@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .archive_manifest import DEFAULT_BYBIT_V5_KLINE_URL
+from .execution_environment import EXECUTION_ENVIRONMENT_CHOICES
 from .downloaders import BINANCE_PROXY_DATASET_MAP
 
 
@@ -474,7 +475,11 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--execution-environment",
         required=True,
-        choices=("demo", "paper"),
+        # CARRY is the only sleeve cleared for the mainnet owner. LONG stays
+        # demo|paper behind B3 (no per-sleeve capital partition) and
+        # CONTINUOUS is retired: neither can be pointed at real capital by
+        # a flag, which is a stronger gate than a comment.
+        choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )
     p.add_argument(

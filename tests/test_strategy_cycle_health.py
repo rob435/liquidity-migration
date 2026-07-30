@@ -74,7 +74,7 @@ def test_reader_rejects_noncanonical_and_hardlinked_artifacts(tmp_path: Path) ->
         ({"completed_ts_ns": 0}, "positive integer"),
         ({"completed_ts_ns": 999_999_999}, "cannot predate"),
         ({"ws_kline_store_rows": -1}, "non-negative integer"),
-        ({"environment": "mainnet"}, "demo.*paper"),
+        ({"environment": "live"}, "environment"),
         ({"schema_version": True}, "unsupported"),
     ],
 )

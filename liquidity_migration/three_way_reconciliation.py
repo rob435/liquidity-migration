@@ -33,6 +33,7 @@ from .account_kernel import (
 )
 from .continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS
 from .deterministic_serialization import canonical_json
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
 
 _CONTINUOUS_COMPONENT_ALIASES = {
@@ -188,7 +189,7 @@ def extract_account_entry_records(
     """Extract proposed entry targets and their account-level execution state."""
 
     normalized_environment = str(environment).strip().lower()
-    if normalized_environment not in {"demo", "paper"}:
+    if normalized_environment not in EXECUTION_ENVIRONMENT_VALUES:
         raise ValueError("account evidence environment must be demo or paper")
 
     risk_by_batch: dict[str, bool] = {}

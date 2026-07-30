@@ -20,6 +20,7 @@ from typing import Any, Mapping
 from .account_owner_health import validate_systemd_invocation_id
 from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
 
 STRATEGY_CYCLE_HEALTH_SCHEMA_VERSION = 1
@@ -45,7 +46,7 @@ class StrategyCycleHealth:
             raise ValueError(f"unsupported strategy-cycle health schema {self.schema_version}")
         if type(self.sleeve) is not str or self.sleeve not in {"long", "continuous", "carry"}:
             raise ValueError("strategy-cycle health sleeve must be 'long', 'continuous', or 'carry'")
-        if type(self.environment) is not str or self.environment not in {"demo", "paper"}:
+        if type(self.environment) is not str or self.environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("strategy-cycle health environment must be 'demo' or 'paper'")
         if type(self.cycle_id) is not str or not self.cycle_id or len(self.cycle_id) > 500:
             raise ValueError("strategy-cycle health cycle_id must be 1..500 characters")

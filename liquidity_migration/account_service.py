@@ -42,6 +42,7 @@ from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json, json_safe
 from .deterministic_runtime import Clock, SystemClock
 from .entry_attempts import entry_signal_expiry_rejection
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from .market_capture import MarketCaptureError
 from .storage import exclusive_file_lock
 from .strategy_runtime import (
@@ -136,7 +137,7 @@ class AccountTargetRequest:
             raise ValueError("target request route_id is required")
         if type(self.account_id) is not str or not self.account_id:
             raise ValueError("target request account_id is required")
-        if type(self.environment) is not str or self.environment not in {"demo", "paper"}:
+        if type(self.environment) is not str or self.environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("target request environment must be exactly 'demo' or 'paper'")
         if self.batch_id.startswith("account-convergence/"):
             raise ValueError("target request batch_id uses the reserved convergence namespace")

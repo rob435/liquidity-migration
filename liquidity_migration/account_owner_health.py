@@ -24,6 +24,7 @@ from .account_contracts import (
 )
 from .account_kernel import read_account_journal_head
 from .deterministic_serialization import canonical_json
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
 
 ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 2
@@ -180,8 +181,11 @@ class AccountOwnerHealth:
             raise ValueError(f"unsupported account-owner health schema {self.schema_version}")
         if self.owner != "account_execution":
             raise ValueError("account-owner health owner must be 'account_execution'")
-        if self.environment not in {"paper", "demo"}:
-            raise ValueError("account-owner health environment must be 'paper' or 'demo'")
+        if self.environment not in EXECUTION_ENVIRONMENT_VALUES:
+            raise ValueError(
+                "account-owner health environment must be one of "
+                + ", ".join(sorted(EXECUTION_ENVIRONMENT_VALUES))
+            )
         if not self.account_id:
             raise ValueError("account-owner health account_id is required")
         AccountOwnerHealthStatus(self.status)
@@ -347,8 +351,11 @@ def require_recent_account_owner_health(
     ``max_age_ns`` and a health *ahead* of the journal still fails closed.
     """
 
-    if environment not in {"demo", "paper"}:
-        raise ValueError("expected owner environment must be 'demo' or 'paper'")
+    if environment not in EXECUTION_ENVIRONMENT_VALUES:
+        raise ValueError(
+            "expected owner environment must be one of "
+            + ", ".join(sorted(EXECUTION_ENVIRONMENT_VALUES))
+        )
     if head_binding not in {"exact", "allow_behind"}:
         raise ValueError("head_binding must be 'exact' or 'allow_behind'")
     if max_age_ns <= 0:

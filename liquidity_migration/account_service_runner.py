@@ -1,4 +1,11 @@
-"""Demo-only process runner for the single-owner account execution service."""
+"""Process runner for the single-owner account execution service.
+
+One owner per venue realm. ``--realm`` selects it, defaults to demo, and
+never reaches mainnet by omission; the realm is then carried through the
+durable route identity, the credential pair, the mutation lease, both
+transports, and the instrument-rule environment, so a single flag cannot
+leave any one of them pointing at the other account.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +47,11 @@ from .account_reconcile import (
     BybitAccountReconciler,
 )
 from .account_route import derive_account_route, ensure_account_route
+from .execution_environment import (
+    ExecutionEnvironment,
+    account_id_for_environment,
+    execution_environment,
+)
 from .account_notifications import AccountNotificationEngine, deliver_notification_batch
 from .logging_setup import ensure_default_log_handler
 from .continuous_cycle_status import ContinuousCycleStatusReader
@@ -63,8 +75,8 @@ from .bybit import (
     BybitPrivateClient,
     BybitPrivateWebSocketStream,
     api_key_allows_order_submit,
-    resolve_demo_credentials,
-    validate_demo_order_permission,
+    resolve_private_credentials,
+    validate_private_order_permission,
 )
 from .bybit_execution_adapter import BybitDemoExecutionAdapter
 from .market_capture import (
@@ -83,6 +95,7 @@ from .account_loss_guard import (
 from .protection_engine import AccountProtectionEngine
 from .post_fill_markouts import PostFillMarkoutObserver
 from .venue_protection import AccountHealthChain, BybitNativeProtectionManager
+from .venue_realm import REALM_CREDENTIAL_VARIABLES, VenueRealm, venue_realm
 
 _logger = logging.getLogger(__name__)
 
@@ -424,15 +437,22 @@ def publish_demo_owner_health(
     loop_sequence: int,
     requested_symbols_ready: bool,
     invocation_id: str,
+    environment: str = ExecutionEnvironment.DEMO.value,
     last_batch_id: str = "",
     detail: str = "",
 ) -> AccountOwnerHealth:
-    """Publish demo-owner health bound to canonical state and wallet capital."""
+    """Publish owner health bound to canonical state and wallet capital.
+
+    ``environment`` labels which owner this is. It defaults to demo — the same
+    direction every other fallback in the realm plumbing takes — but a mainnet
+    owner must pass its own, or its health would be published, read, and
+    alerted on as if it were the demo fleet's.
+    """
 
     state = kernel._state_ref()
     health = AccountOwnerHealth(
         owner="account_execution",
-        environment="demo",
+        environment=execution_environment(environment).value,
         account_id=account_id,
         status=status,
         observed_ts_ns=observed_ts_ns,
@@ -484,7 +504,17 @@ def owner_health_publish_decision(
 
 def main(argv: list[str] | None = None) -> int:
     ensure_default_log_handler()
-    parser = argparse.ArgumentParser(description="Run the demo-only account execution owner")
+    parser = argparse.ArgumentParser(description="Run one account execution owner")
+    parser.add_argument(
+        "--realm",
+        choices=tuple(realm.value for realm in VenueRealm),
+        default=VenueRealm.DEMO.value,
+        help=(
+            "Venue realm this owner authenticates against. Omitting it selects "
+            "demo and never mainnet; selecting mainnet additionally requires "
+            "REAL_MONEY to be explicitly armed by the owner."
+        ),
+    )
     parser.add_argument("--account-root", required=True)
     parser.add_argument("--inbox-root", required=True)
     parser.add_argument("--capture-root", required=True)
@@ -563,21 +593,35 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     invocation_id = require_systemd_invocation_id()
 
+    realm = venue_realm(args.realm)
+    # The realm is baked into the durable on-disk route identity and
+    # ensure_account_route refuses to rewrite an existing one, so the mainnet
+    # owner necessarily gets its own journal root. There is no adoption or
+    # migration path from the demo journal, by construction rather than policy.
     requested_route = derive_account_route(
         account_id=args.account_id,
-        environment="demo",
+        environment=realm.value,
         account_root=args.account_root,
         inbox_root=args.inbox_root,
     )
+    if requested_route.account_id != account_id_for_environment(realm.value):
+        parser.error(
+            f"--account-id {args.account_id!r} does not belong to realm {realm.value!r}"
+        )
 
-    validate_demo_order_permission(confirm_demo_orders=args.confirm_demo_orders)
-    api_key, api_secret = resolve_demo_credentials()
+    validate_private_order_permission(
+        confirm_orders=args.confirm_demo_orders,
+        realm=realm,
+    )
+    api_key, api_secret = resolve_private_credentials(realm=realm)
     if not api_key or not api_secret:
-        raise RuntimeError("BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required")
+        key_variable, secret_variable = REALM_CREDENTIAL_VARIABLES[realm]
+        raise RuntimeError(f"{key_variable} and {secret_variable} are required")
     credential_client = BybitPrivateClient(
         category="linear",
         testnet=False,
-        demo=True,
+        demo=realm is VenueRealm.DEMO,
+        realm=realm,
         api_key=api_key,
         api_secret=api_secret,
     )
@@ -585,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
     demo_identity = DemoAccountIdentity.from_api_key_info(
         api_key=api_key,
         api_key_info=api_key_info,
+        environment=realm.value,
     )
     owner_lease = DemoAccountMutationLease(demo_identity)
     owner_lease.acquire()
@@ -615,7 +660,8 @@ def main(argv: list[str] | None = None) -> int:
     private_client = BybitPrivateClient(
         category="linear",
         testnet=False,
-        demo=True,
+        demo=realm is VenueRealm.DEMO,
+        realm=realm,
         api_key=api_key,
         api_secret=api_secret,
         mutation_lease=owner_lease,
@@ -654,7 +700,8 @@ def main(argv: list[str] | None = None) -> int:
         return BybitPrivateWebSocketStream(
             category="linear",
             testnet=False,
-            demo=True,
+            demo=realm is VenueRealm.DEMO,
+            realm=realm,
             api_key=api_key,
             api_secret=api_secret,
         )
@@ -774,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
             entry_stop_verifier=native_protection.verify_entry_attached_stop,
         ),
         native_protection_policy=native_protection_policy,
-        required_rules_environment="demo",
+        required_rules_environment=realm.value,
         health_provider=health_chain,
         position_truth_provider=reconciler,
         max_health_age_ns=max(int(args.reconcile_seconds * 2 * 1_000_000_000), 1),
@@ -799,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
     continuous_status_reader = (
         ContinuousCycleStatusReader(
             args.continuous_cycle_root,
-            environment="demo",
+            environment=realm.value,
             max_age_minutes=args.continuous_cycle_max_age_minutes,
         )
         if notifier is not None and str(args.continuous_cycle_root).strip()
@@ -1115,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
                     kernel=kernel,
                     account_root=route.account_path,
                     account_id=route.account_id,
+                    environment=realm.value,
                     risk_snapshot=last_capital_snapshot,
                     status=health_status,
                     observed_ts_ns=time.time_ns(),

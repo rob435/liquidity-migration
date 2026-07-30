@@ -88,8 +88,10 @@ def test_owner_acquires_lease_before_route_initialization(
             def close(self) -> None:
                 calls.append("lease-closed")
 
-        monkeypatch.setattr(runner, "validate_demo_order_permission", lambda **_kwargs: None)
-        monkeypatch.setattr(runner, "resolve_demo_credentials", lambda: ("demo-key", "demo-secret"))
+        monkeypatch.setattr(runner, "validate_private_order_permission", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            runner, "resolve_private_credentials", lambda **_kwargs: ("demo-key", "demo-secret")
+        )
         monkeypatch.setattr(runner, "BybitPrivateClient", lambda **_kwargs: object())
         monkeypatch.setattr(
             runner,
@@ -867,7 +869,7 @@ def test_manifest_creation_fsyncs_files_and_directories(
     ("account_id", "environment", "same_root", "message"),
     [
         (" bybit-demo-unified", "demo", False, "without surrounding whitespace"),
-        ("bybit-demo-unified", "live", False, "exactly 'demo' or 'paper'"),
+        ("bybit-demo-unified", "live", False, "exactly one of"),
         ("bybit-demo-unified", "demo", True, "must be distinct"),
     ],
 )

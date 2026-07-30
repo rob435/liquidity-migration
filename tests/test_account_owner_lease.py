@@ -876,12 +876,23 @@ def test_demo_identity_requires_authenticated_matching_key_and_user_id() -> None
             api_key="demo-key",
             api_key_info={"apiKey": "demo-key"},
         )
-    with pytest.raises(RuntimeError, match="environment='demo'"):
-        DemoAccountIdentity.from_api_key_info(
-            api_key="demo-key",
-            api_key_info={"apiKey": "demo-key", "userID": 12345},
-            environment="mainnet",
-        )
+    # Both venue realms are legitimate identities, and the realm is baked into
+    # the canonical lease path so the two owners can never share a lock.
+    mainnet = DemoAccountIdentity.from_api_key_info(
+        api_key="demo-key",
+        api_key_info={"apiKey": "demo-key", "userID": 12345},
+        environment="mainnet",
+    )
+    assert mainnet.environment == "mainnet"
+    assert canonical_demo_account_lease_path(mainnet) != canonical_demo_account_lease_path(identity)
+    # ``paper`` is not a venue and must not produce a credential identity.
+    for bogus in ("paper", "live", ""):
+        with pytest.raises(ValueError, match="explicitly set to 'demo' or 'mainnet'"):
+            DemoAccountIdentity.from_api_key_info(
+                api_key="demo-key",
+                api_key_info={"apiKey": "demo-key", "userID": 12345},
+                environment=bogus,
+            )
     with pytest.raises(TypeError, match="authenticated DemoAccountIdentity"):
         DemoAccountMutationLease(
             SimpleNamespace(

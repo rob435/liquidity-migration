@@ -13,6 +13,12 @@ from typing import Any
 
 from .account_owner_lease import DemoAccountMutationLease
 from .env_flags import env_flag, reject_ambiguous_flag
+from .venue_realm import (
+    REALM_CREDENTIAL_VARIABLES,
+    REALM_REST_ENDPOINTS,
+    VenueRealm,
+    venue_realm,
+)
 from .bybit_errors import (
     BybitDataError,
     BybitRequestRejected,
@@ -42,28 +48,37 @@ __all__ = [
     "BybitSubmissionUncertain",
     "api_key_allows_order_submit",
     "resolve_demo_credentials",
+    "resolve_private_credentials",
     "validate_demo_order_permission",
+    "validate_private_order_permission",
 ]
 
-#: The only REST host this repository may address with private credentials.
-DEMO_REST_ENDPOINT = "https://api-demo.bybit.com"
+#: The only REST host this repository may address with demo credentials.
+#: Retained as a name because five demo-enforcement layers cite it.
+DEMO_REST_ENDPOINT = REALM_REST_ENDPOINTS[VenueRealm.DEMO]
 
 
-def _require_demo_endpoint(client: Any, what: str) -> None:
+def _require_realm_endpoint(client: Any, what: str, *, realm: VenueRealm) -> None:
     """Assert the realm we actually resolved to, rather than the one we asked for.
 
-    Every demo assertion elsewhere checks ``self.demo``/``self.testnet`` — the
-    flags we *pass in*. The host is then chosen entirely inside pybit's ``demo=``
+    Every realm assertion elsewhere checks ``self.realm``/``self.testnet`` — the
+    values we *pass in*. The host is then chosen entirely inside pybit's ``demo=``
     kwarg contract, and nothing here has ever read back the result. That makes
-    the demo realm a third-party promise rather than an invariant this code
-    enforces: a pybit upgrade that renamed or dropped the kwarg, or a shim that
-    replaced ``HTTP``, would silently address mainnet while every local guard
-    still read "demo".
+    the realm a third-party promise rather than an invariant this code enforces:
+    a pybit upgrade that renamed or dropped the kwarg, or a shim that replaced
+    ``HTTP``, would silently address the wrong host while every local guard still
+    read what it asked for.
 
-    Today that fails closed only by luck — demo keys do not authenticate against
-    mainnet, so the exchange rejects it. The last line of defence should not be
-    someone else's auth error, and if mainnet credentials ever exist on this host
-    that luck runs in the wrong direction.
+    For demo that used to fail closed only by luck — demo keys do not
+    authenticate against mainnet, so the exchange rejects it. The last line of
+    defence should not be someone else's auth error, and now that mainnet
+    credentials can exist on the host that luck runs in the wrong direction: a
+    dropped kwarg would send a *mainnet-authenticated* client wherever pybit
+    defaults, or a demo-intended run to the funded account.
+
+    So the check is symmetric. Whichever realm was explicitly selected is the
+    one the resolved endpoint must equal — this never skips, and there is no
+    realm for which it is a no-op.
 
     The check is scoped to real pybit transports by module, so the suite's many
     hand-rolled doubles stay usable. ``test_pybit_still_exposes_the_demo_endpoint``
@@ -74,31 +89,69 @@ def _require_demo_endpoint(client: Any, what: str) -> None:
 
     if not type(client).__module__.startswith("pybit"):
         return
+    expected = REALM_REST_ENDPOINTS[realm]
     endpoint = str(getattr(client, "endpoint", "") or "").rstrip("/")
-    if endpoint != DEMO_REST_ENDPOINT:
+    if endpoint != expected:
         raise RuntimeError(
-            f"{what} resolved to {endpoint or 'an unknown host'}; "
-            f"only {DEMO_REST_ENDPOINT} is permitted for private Bybit access"
+            f"{what} selected realm {realm.value!r} but resolved to "
+            f"{endpoint or 'an unknown host'}; only {expected} is permitted for "
+            f"private Bybit access in that realm"
         )
+
+
+def resolve_private_credentials(*, realm: VenueRealm | str) -> tuple[str | None, str | None]:
+    """Resolve the credential pair for one explicitly named realm.
+
+    ``realm`` is keyword-only and has no default, so no caller reaches a venue
+    without naming which one. The two realms read *different* environment
+    variables, so a stale demo key can never authenticate a mainnet run.
+
+    ``REAL_MONEY`` remains the arming switch, with ``reject_ambiguous_flag``
+    semantics intact on both realms: a typo'd value fails startup rather than
+    coercing to a default in either direction. Demo refuses to run while it is
+    armed; mainnet refuses to run unless it is.
+    """
+
+    selected = venue_realm(realm)
+    reject_ambiguous_flag("REAL_MONEY")
+    reject_ambiguous_flag("DEMO")
+    real_money = env_flag("REAL_MONEY")
+    key_variable, secret_variable = REALM_CREDENTIAL_VARIABLES[selected]
+    if selected is VenueRealm.DEMO:
+        if real_money:
+            raise RuntimeError(
+                "Bybit demo access refuses to run with REAL_MONEY armed; "
+                "unset it or select the mainnet realm explicitly"
+            )
+    elif not real_money:
+        raise RuntimeError(
+            "Bybit mainnet credentials require REAL_MONEY to be explicitly armed; "
+            "naming the mainnet realm is not on its own authorization to trade real capital"
+        )
+    _logger_account.info("resolved account realm: %s", selected.value)
+    return (os.environ.get(key_variable), os.environ.get(secret_variable))
 
 
 def resolve_demo_credentials() -> tuple[str | None, str | None]:
     """Resolve only the Bybit demo credential pair.
 
-    Cutover code has no mainnet credential-selection branch.  ``REAL_MONEY`` is
-    still parsed so a stale or ambiguous operator setting fails closed, but this
-    function never reads ``BYBIT_REAL_API_KEY`` or ``BYBIT_REAL_API_SECRET``.
+    Retained because the demo owner, the rule probe, and the accounting tools
+    all name demo unconditionally and should not be able to name anything else.
     """
 
-    reject_ambiguous_flag("REAL_MONEY")
-    reject_ambiguous_flag("DEMO")
-    if env_flag("REAL_MONEY"):
-        raise RuntimeError("Bybit account cutover is demo/paper only; REAL_MONEY must be unset or false")
-    _logger_account.info("resolved account: demo")
-    return (
-        os.environ.get("BYBIT_DEMO_API_KEY"),
-        os.environ.get("BYBIT_DEMO_API_SECRET"),
-    )
+    return resolve_private_credentials(realm=VenueRealm.DEMO)
+
+
+def validate_private_order_permission(
+    *,
+    confirm_orders: bool,
+    realm: VenueRealm | str,
+) -> None:
+    """Guard an order-submitting owner: explicit confirmation plus a named realm."""
+
+    if not confirm_orders:
+        raise RuntimeError("Refusing to submit orders without explicit order confirmation")
+    resolve_private_credentials(realm=realm)
 
 
 def validate_demo_order_permission(*, confirm_demo_orders: bool) -> None:
@@ -144,22 +197,40 @@ def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, 
 class BybitPrivateClient:
     category: str = "linear"
     testnet: bool = False
+    # ``demo`` is the pybit transport kwarg and stays the field five existing
+    # enforcement layers read via ``getattr(client, "demo")``. ``realm`` is the
+    # authority. Omitting ``realm`` resolves to DEMO and never to MAINNET, which
+    # is the whole point: reaching the funded account requires someone to have
+    # typed it, and REAL_MONEY to be armed on top of that.
     demo: bool = True
+    realm: VenueRealm | str | None = None
     api_key: str | None = None
     api_secret: str | None = None
     retries: int = 2
     retry_sleep_seconds: float = 0.5
     rate_limiter: _BybitRestRateLimiter | None = None
     # Read-only clients need no lease. Every state-changing call must carry a
-    # currently held canonical lease bound to the authenticated demo account
-    # and API credential. Mainnet mutation is categorically absent.
+    # currently held canonical lease bound to the authenticated account and API
+    # credential, in the same realm.
     mutation_lease: DemoAccountMutationLease | None = None
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.demo or self.testnet:
+        self.realm = VenueRealm.DEMO if self.realm is None else venue_realm(self.realm)
+        if self.testnet:
+            raise RuntimeError("BybitPrivateClient does not support testnet")
+        expected_demo = self.realm is VenueRealm.DEMO
+        if bool(self.demo) is not expected_demo:
             raise RuntimeError(
-                "BybitPrivateClient is api-demo-only; testnet and mainnet private access are not part of the account cutover"
+                f"BybitPrivateClient realm {self.realm.value!r} contradicts demo={self.demo!r}"
+            )
+        if self.realm is VenueRealm.MAINNET and not env_flag("REAL_MONEY"):
+            # Constructing a mainnet transport is itself a real-money act: it
+            # signs requests against the funded account. Naming the realm is not
+            # authorization; REAL_MONEY is, and it is the owner's switch alone.
+            reject_ambiguous_flag("REAL_MONEY")
+            raise RuntimeError(
+                "Refusing to build a mainnet BybitPrivateClient while REAL_MONEY is unset or false"
             )
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitPrivateClient")
@@ -171,23 +242,24 @@ class BybitPrivateClient:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
-        _require_demo_endpoint(self._client, "BybitPrivateClient")
+        _require_realm_endpoint(self._client, "BybitPrivateClient", realm=self.realm)
 
     def _assert_submit_allowed(self, action: str) -> None:
         """Require live canonical authority at the request-signing boundary."""
 
-        if not self.demo or self.testnet:
+        realm = venue_realm(self.realm)
+        if self.testnet or (realm is VenueRealm.DEMO) is not bool(self.demo):
             raise RuntimeError(
-                f"Refusing to {action}: only the Bybit api-demo mutation realm is supported"
+                f"Refusing to {action}: the client's realm and transport flags disagree"
             )
         lease = self.mutation_lease
         if type(lease) is not DemoAccountMutationLease:
             raise RuntimeError(
-                f"Refusing to {action}: no canonical Bybit demo account mutation lease capability was provided"
+                f"Refusing to {action}: no canonical Bybit account mutation lease capability was provided"
             )
         lease.require_held_for(
             api_key=str(self.api_key or ""),
-            environment="demo",
+            environment=realm.value,
             action=action,
         )
 
@@ -821,6 +893,7 @@ class BybitPrivateWebSocketStream:
     category: str = "linear"
     testnet: bool = False
     demo: bool = True
+    realm: VenueRealm | str | None = None
     api_key: str | None = None
     api_secret: str | None = None
     _client: Any = field(init=False, repr=False)
@@ -831,9 +904,17 @@ class BybitPrivateWebSocketStream:
     _EXPECTED_TOPICS = frozenset({"execution", "order"})
 
     def __post_init__(self) -> None:
-        if not self.demo or self.testnet:
+        self.realm = VenueRealm.DEMO if self.realm is None else venue_realm(self.realm)
+        if self.testnet:
+            raise RuntimeError("BybitPrivateWebSocketStream does not support testnet")
+        if bool(self.demo) is not (self.realm is VenueRealm.DEMO):
             raise RuntimeError(
-                "BybitPrivateWebSocketStream is api-demo-only; testnet and mainnet private access are not part of the account cutover"
+                f"BybitPrivateWebSocketStream realm {self.realm.value!r} contradicts demo={self.demo!r}"
+            )
+        if self.realm is VenueRealm.MAINNET and not env_flag("REAL_MONEY"):
+            reject_ambiguous_flag("REAL_MONEY")
+            raise RuntimeError(
+                "Refusing to open a mainnet private websocket while REAL_MONEY is unset or false"
             )
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPrivateWebSocketStream")

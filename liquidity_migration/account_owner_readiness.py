@@ -26,7 +26,11 @@ from .account_owner_health import (
 )
 from .account_route import require_account_route
 from .deterministic_serialization import canonical_json
-from .execution_environment import account_id_for_environment, execution_environment
+from .execution_environment import (
+    EXECUTION_ENVIRONMENT_CHOICES,
+    account_id_for_environment,
+    execution_environment,
+)
 from .market_capture import (
     MAX_OWNER_CAPTURE_RECORD_BYTES,
     OwnerCaptureReadinessSidecar,
@@ -593,7 +597,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Wait for an exact healthy account owner and fresh usable live L2"
     )
-    parser.add_argument("--environment", required=True, choices=("demo", "paper"))
+    parser.add_argument(
+        "--environment", required=True, choices=EXECUTION_ENVIRONMENT_CHOICES
+    )
     parser.add_argument("--account-root", type=Path, required=True)
     parser.add_argument("--inbox-root", type=Path, required=True)
     parser.add_argument("--capture-root", type=Path, required=True)

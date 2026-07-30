@@ -383,16 +383,64 @@ def test_resolve_demo_credentials_has_no_mainnet_branch(monkeypatch) -> None:
     # A stale real-money selection fails closed; real credentials are never read.
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.setenv("REAL_MONEY", "true")
-    with pytest.raises(RuntimeError, match="demo/paper only"):
+    with pytest.raises(RuntimeError, match="refuses to run with REAL_MONEY armed"):
         bybit.resolve_demo_credentials()
 
 
-@pytest.mark.parametrize(("testnet", "demo"), [(False, False), (True, True)])
-def test_bybit_private_client_rejects_non_api_demo_realms(
+def test_private_credentials_require_an_explicitly_named_realm(monkeypatch) -> None:
+    """The realm is an argument with no default; mainnet is never a fallback."""
+
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "real-k")
+    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "real-s")
+    monkeypatch.delenv("DEMO", raising=False)
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+
+    with pytest.raises(TypeError):
+        bybit.resolve_private_credentials()  # type: ignore[call-arg]
+    for bogus in ("", None, "live", "real", "prod", "paper"):
+        with pytest.raises(ValueError, match="explicitly set to 'demo' or 'mainnet'"):
+            bybit.resolve_private_credentials(realm=bogus)
+
+    assert bybit.resolve_private_credentials(realm="demo") == ("demo-k", "demo-s")
+    # Naming mainnet is not on its own authorization.
+    with pytest.raises(RuntimeError, match="require REAL_MONEY to be explicitly armed"):
+        bybit.resolve_private_credentials(realm="mainnet")
+
+    monkeypatch.setenv("REAL_MONEY", "true")
+    assert bybit.resolve_private_credentials(realm="mainnet") == ("real-k", "real-s")
+    # The two realms read different variables, so a stale demo key in the
+    # environment can never authenticate a mainnet run.
+    monkeypatch.delenv("BYBIT_REAL_API_KEY", raising=False)
+    assert bybit.resolve_private_credentials(realm="mainnet") == (None, "real-s")
+
+
+def test_ambiguous_real_money_still_fails_startup_in_both_realms(monkeypatch) -> None:
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.setenv("REAL_MONEY", "yeah-ok")
+    for realm in ("demo", "mainnet"):
+        with pytest.raises(RuntimeError, match="not a recognised boolean"):
+            bybit.resolve_private_credentials(realm=realm)
+
+
+@pytest.mark.parametrize(
+    ("testnet", "demo", "message"),
+    [
+        (False, False, "contradicts demo=False"),
+        (True, True, "does not support testnet"),
+        (True, False, "does not support testnet"),
+    ],
+)
+def test_bybit_private_client_rejects_transport_flags_that_contradict_the_realm(
     monkeypatch,
     testnet: bool,
     demo: bool,
+    message: str,
 ) -> None:
+    """Flipping ``demo`` can never reach mainnet; only naming the realm can."""
+
     constructed: dict = {}
 
     class FakeHTTP:
@@ -400,7 +448,8 @@ def test_bybit_private_client_rejects_non_api_demo_realms(
             constructed.update(kwargs)
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    with pytest.raises(RuntimeError, match="demo-only"):
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with pytest.raises(RuntimeError, match=message):
         bybit.BybitPrivateClient(
             api_key="k",
             api_secret="s",
@@ -408,6 +457,66 @@ def test_bybit_private_client_rejects_non_api_demo_realms(
             demo=demo,
         )
     assert constructed == {}
+
+
+def test_bybit_private_client_defaults_to_demo_and_never_to_mainnet(monkeypatch) -> None:
+    constructed: dict = {}
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            constructed.update(kwargs)
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    client = bybit.BybitPrivateClient(api_key="k", api_secret="s")
+
+    assert client.realm is bybit.VenueRealm.DEMO
+    assert constructed["demo"] is True
+
+
+def test_mainnet_client_requires_real_money_to_be_armed(monkeypatch) -> None:
+    constructed: dict = {}
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            constructed.update(kwargs)
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with pytest.raises(RuntimeError, match="while REAL_MONEY is unset or false"):
+        bybit.BybitPrivateClient(
+            api_key="k", api_secret="s", demo=False, realm="mainnet"
+        )
+    assert constructed == {}
+
+    monkeypatch.setenv("REAL_MONEY", "true")
+    client = bybit.BybitPrivateClient(
+        api_key="k", api_secret="s", demo=False, realm="mainnet"
+    )
+    assert client.realm is bybit.VenueRealm.MAINNET
+    assert constructed["demo"] is False
+
+
+def test_endpoint_assertion_is_symmetric_across_realms(monkeypatch) -> None:
+    """The post-construction check asserts whichever realm was selected."""
+
+    class FakePybitHTTP:
+        __module__ = "pybit.unified_trading"
+
+        def __init__(self, **kwargs):
+            self.endpoint = "https://api.bybit.com" if kwargs["demo"] else "https://api-demo.bybit.com"
+
+    monkeypatch.setattr(bybit, "HTTP", FakePybitHTTP)
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    # A transport that silently resolves demo to the funded host is refused...
+    with pytest.raises(RuntimeError, match="selected realm 'demo' but resolved to"):
+        bybit.BybitPrivateClient(api_key="k", api_secret="s")
+    # ...and so is the mirror image, which is the case that costs money.
+    monkeypatch.setenv("REAL_MONEY", "true")
+    with pytest.raises(RuntimeError, match="selected realm 'mainnet' but resolved to"):
+        bybit.BybitPrivateClient(
+            api_key="k", api_secret="s", demo=False, realm="mainnet"
+        )
 
 
 def test_bybit_private_websocket_rejects_testnet_demo_mix(monkeypatch) -> None:
@@ -418,12 +527,19 @@ def test_bybit_private_websocket_rejects_testnet_demo_mix(monkeypatch) -> None:
             constructed.update(kwargs)
 
     monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
-    with pytest.raises(RuntimeError, match="api-demo-only"):
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with pytest.raises(RuntimeError, match="does not support testnet"):
         bybit.BybitPrivateWebSocketStream(
             api_key="k",
             api_secret="s",
             testnet=True,
             demo=True,
+        )
+    with pytest.raises(RuntimeError, match="contradicts demo=False"):
+        bybit.BybitPrivateWebSocketStream(api_key="k", api_secret="s", demo=False)
+    with pytest.raises(RuntimeError, match="while REAL_MONEY is unset or false"):
+        bybit.BybitPrivateWebSocketStream(
+            api_key="k", api_secret="s", demo=False, realm="mainnet"
         )
     assert constructed == {}
 
@@ -1762,7 +1878,8 @@ def test_private_client_refuses_every_real_money_mutation(monkeypatch) -> None:
             raise AssertionError("real-money stop should have been blocked")
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    with pytest.raises(RuntimeError, match="demo-only"):
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with pytest.raises(RuntimeError, match="contradicts demo=False"):
         bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
 
 
@@ -1777,7 +1894,8 @@ def test_private_client_real_money_reads_are_removed(monkeypatch) -> None:
             return {"retCode": 0, "result": {"list": [{"coin": "USDT"}]}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    with pytest.raises(RuntimeError, match="demo-only"):
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    with pytest.raises(RuntimeError, match="contradicts demo=False"):
         bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
 
 
@@ -1794,13 +1912,16 @@ def test_private_client_real_money_mutation_rejects_demo_lease(
             return {"retCode": 0, "result": {"orderId": "rm-ok"}}
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
-    with pytest.raises(RuntimeError, match="demo-only"):
-        bybit.BybitPrivateClient(
-            api_key="k",
-            api_secret="s",
-            demo=False,
-            mutation_lease=held_demo_mutation_lease("k"),
-        )
+    monkeypatch.setenv("REAL_MONEY", "true")
+    client = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=False,
+        realm="mainnet",
+        mutation_lease=held_demo_mutation_lease("k"),
+    )
+    with pytest.raises(RuntimeError, match="belongs to a different environment"):
+        client.place_order(symbol="BTCUSDT", side="Buy", qty="1", orderLinkId="rm-1")
 
 
 def test_private_client_demo_submit_requires_held_capability(
@@ -1869,7 +1990,7 @@ def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
     monkeypatch.delenv("REAL_MONEY", raising=False)
     with caplog.at_level("INFO", logger="liquidity_migration.bybit.account"):
         bybit.resolve_demo_credentials()
-    assert any("resolved account: demo" in r.getMessage() for r in caplog.records)
+    assert any("resolved account realm: demo" in r.getMessage() for r in caplog.records)
 
 
 # --------------------------------------------------------------------------
@@ -2155,7 +2276,7 @@ def test_demo_mutation_guard_requires_live_credential_bound_lease(
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
     unleased = bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
-    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
+    with pytest.raises(RuntimeError, match="no canonical Bybit account mutation lease"):
         unleased.place_order(orderLinkId="unleased-1", symbol="BUSDT", side="Buy", orderType="Market", qty="1")
     assert unleased._client.calls == []
 
@@ -2195,7 +2316,7 @@ def test_demo_mutation_guard_rejects_capability_lookalike(monkeypatch) -> None:
         demo=True,
         mutation_lease=LeaseLookalike(),  # type: ignore[arg-type]
     )
-    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
+    with pytest.raises(RuntimeError, match="no canonical Bybit account mutation lease"):
         client.place_order(
             orderLinkId="lookalike-1",
             symbol="BUSDT",
@@ -2252,7 +2373,7 @@ def test_private_transport_fails_unknown_methods_into_mutation_boundary(
         api_secret="s",
         demo=True,
     )
-    with pytest.raises(RuntimeError, match="no canonical Bybit demo account mutation lease"):
+    with pytest.raises(RuntimeError, match="no canonical Bybit account mutation lease"):
         read_only._call("amend_order", orderId="o1")
     assert read_only._client.calls == []
 

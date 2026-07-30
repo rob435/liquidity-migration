@@ -21,6 +21,7 @@ from typing import Any, Mapping
 
 from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from .strategy_cycle_health import read_strategy_cycle_health
 
 
@@ -84,7 +85,7 @@ class ContinuousCycleStatus:
             raise ValueError("cycle_id is required")
         if type(self.cycle_ts_ms) is not int or self.cycle_ts_ms <= 0:
             raise ValueError("cycle_ts_ms must be a positive integer")
-        if self.environment not in {"demo", "paper"}:
+        if self.environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("environment must be exactly 'demo' or 'paper'")
         if self.btc_trend_gate not in {"off", "uptrend", "downtrend"}:
             raise ValueError("btc_trend_gate must be off, uptrend, or downtrend")
@@ -335,7 +336,7 @@ class ContinuousCycleStatusReader:
         environment: str = "demo",
         max_age_minutes: float = 15.0,
     ) -> None:
-        if environment not in {"demo", "paper"}:
+        if environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("CONTINUOUS status environment must be demo or paper")
         if not math.isfinite(max_age_minutes) or max_age_minutes <= 0.0:
             raise ValueError("CONTINUOUS status max age must be positive and finite")

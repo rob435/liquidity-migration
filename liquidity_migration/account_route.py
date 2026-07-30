@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .artifact_snapshot import read_stable_file, rename_noreplace
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from .deterministic_serialization import canonical_json
 from .storage import exclusive_file_lock
 
@@ -613,8 +614,11 @@ def _validate_environment(
     *,
     error_type: type[AccountRouteError],
 ) -> str:
-    if type(value) is not str or value not in {"demo", "paper"}:
-        raise error_type("account route environment must be exactly 'demo' or 'paper'")
+    if type(value) is not str or value not in EXECUTION_ENVIRONMENT_VALUES:
+        raise error_type(
+            "account route environment must be exactly one of "
+            + ", ".join(sorted(EXECUTION_ENVIRONMENT_VALUES))
+        )
     return value
 
 

@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .execution_environment import (
+    EXECUTION_ENVIRONMENT_CHOICES,
+    EXECUTION_ENVIRONMENT_VALUES,
+)
+from .venue_realm import VenueRealm, venue_realm
+
 
 _LINUX_FDINFO_ROOT = Path("/proc/self/fdinfo") if sys.platform.startswith("linux") else None
 _CANONICAL_DEMO_LEASE_DIRECTORY = Path("/run/lock/liquidity-migration")
@@ -70,11 +76,12 @@ class DemoAccountIdentity:
         without writing the credential itself to disk.
         """
 
-        normalized_environment = str(environment).strip().lower()
-        if normalized_environment != "demo":
-            raise RuntimeError(
-                "Bybit account mutation identity requires environment='demo'"
-            )
+        # ``environment`` here names a venue *realm*, not an execution
+        # environment: ``paper`` holds no credentials and can never reach this
+        # code. Both realms are accepted, and the value is baked into the
+        # canonical lease path so a demo and a mainnet owner can never share a
+        # lock — or mistake one another's held capability for their own.
+        normalized_environment = venue_realm(environment).value
         normalized_api_key = str(api_key).strip()
         reported_api_key = str(api_key_info.get("apiKey") or "").strip()
         if not reported_api_key or not hmac.compare_digest(
@@ -122,13 +129,16 @@ def canonical_demo_account_lease_path(identity: DemoAccountIdentity) -> Path:
 
 
 def _is_canonical_demo_account_lease_path(path: Path) -> bool:
-    prefix = "bybit-demo-user-"
     suffix = ".lock"
-    if path.parent != _CANONICAL_DEMO_LEASE_DIRECTORY:
+    if path.parent != _CANONICAL_DEMO_LEASE_DIRECTORY or not path.name.endswith(suffix):
         return False
-    name = path.name
-    user_id = name[len(prefix) : -len(suffix)] if name.startswith(prefix) and name.endswith(suffix) else ""
-    return user_id.isdigit() and int(user_id) > 0
+    for realm in VenueRealm:
+        prefix = f"bybit-{realm.value}-user-"
+        if not path.name.startswith(prefix):
+            continue
+        user_id = path.name[len(prefix) : -len(suffix)]
+        return user_id.isdigit() and int(user_id) > 0
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,8 +594,11 @@ def acquire_inherited_account_owner_lease(
     if descriptor < 0 or expected_device < 0 or expected_inode <= 0:
         raise ValueError("inherited account owner lease descriptor and identity must be positive")
     normalized_environment = str(environment).strip().lower()
-    if normalized_environment not in {"demo", "paper"}:
-        raise ValueError("account owner lease environment must be demo or paper")
+    if normalized_environment not in EXECUTION_ENVIRONMENT_VALUES:
+        raise ValueError(
+            "account owner lease environment must be one of "
+            + ", ".join(sorted(EXECUTION_ENVIRONMENT_VALUES))
+        )
     if normalized_environment == "demo" and not _is_canonical_demo_account_lease_path(normalized):
         raise ValueError("demo account owner lease must use its canonical Bybit /run/lock identity path")
     normalized_role = str(role).strip()
@@ -1008,7 +1021,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     acquire.add_argument("fd", type=int)
     acquire.add_argument("path")
     _add_prepared_receipt_arguments(acquire)
-    acquire.add_argument("environment", choices=("demo", "paper"))
+    acquire.add_argument("environment", choices=EXECUTION_ENVIRONMENT_CHOICES)
     acquire.add_argument("role")
     revalidate = subparsers.add_parser(
         "revalidate-inherited",

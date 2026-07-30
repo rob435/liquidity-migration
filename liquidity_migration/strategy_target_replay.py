@@ -14,6 +14,7 @@ from .account_route import AccountRoute
 from .account_service import AccountIntentInbox, AccountTargetRequest
 from .artifact_snapshot import read_stable_file
 from .deterministic_serialization import canonical_json
+from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from .storage import exclusive_file_lock
 from .strategy_event_clock import StrategyEvent
 
@@ -206,7 +207,7 @@ class TargetSchedulingCaptureEvent:
         if type(self.source_event) is not StrategyEvent:
             raise ValueError("target scheduling capture lacks a StrategyEvent")
         environment = _strict_text(self.source_environment, label="capture source environment")
-        if environment not in {"demo", "paper"}:
+        if environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("capture source environment must be demo or paper")
         if self.sleeve not in _SLEEVES:
             raise ValueError("capture sleeve must be long, continuous, or carry")
