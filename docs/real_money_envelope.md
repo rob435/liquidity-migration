@@ -255,7 +255,19 @@ cap.** The second, independent leverage check applies only when
 downgrades it to a no-op rather than failing closed. *Close it:* require the
 field to be present and positive for real-money instruments.
 
-**B17. The deploy pipeline places live venue orders by itself.**
+**B17 — downgraded on inspection, 2026-07-30.** The audit ranked this a hard
+blocker. It is not one *today*: `probe_demo_instrument_rule` is only ever handed
+a `BybitPrivateClient`, and that class cannot be constructed with `demo=False`
+— `__post_init__` raises, and since `47bf5b5` the resolved endpoint is asserted
+too. So the order-placing probe is already gated by the same constructor guard
+as everything else, and an added realm check inside the probe was redundant and
+was reverted rather than shipped.
+
+What remains true is the *prospective* risk, and it is still the one to fix
+before a mainnet path exists, because the trigger is deploying rather than
+trading. Recorded in full below.
+
+**B17 (prospective). The deploy pipeline places live venue orders by itself.**
 `deploy_vps_live.sh:1052` runs `probe_bybit_demo_rules.py --confirm-demo-probe`
 automatically whenever instrument rules are past half-life during an ordinary
 rollout — including one dispatched from the GitHub Actions dropdown. The probe
