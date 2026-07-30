@@ -149,11 +149,22 @@ def require_startup_reconciliation_safe(
         report.require_healthy()
 
 
+#: Freshness bound for the book a software stop/take-profit is decided against.
+#: Deliberately looser than the order-placement bound: placing an order against
+#: a stale mark mis-prices a fill, while evaluating a stop against one merely
+#: delays a decision that the venue-native stop still backstops. It has to sit
+#: well above ordinary reconnect jitter and far below the multi-minute scale of
+#: a real outage. Tune it on observed gap durations rather than by taste.
+PROTECTION_MAX_BOOK_AGE_NS = 15 * 1_000_000_000
+
+
 def protection_market_refs(
     recorder: Any,
     symbols: Iterable[str],
+    *,
+    max_book_age_ns: int = PROTECTION_MAX_BOOK_AGE_NS,
 ) -> tuple[dict[str, MarketInputRef], dict[str, str]]:
-    """Build component-protection market refs, skipping unusable books.
+    """Build component-protection market refs, skipping unusable or stale books.
 
     ``L2BookSnapshot.market_ref`` fails closed (ValueError) for gapped,
     crossed, empty, or otherwise invalid books. The protection loop must
@@ -161,14 +172,36 @@ def protection_market_refs(
     armed independently — instead of letting the exception kill the owner
     process, which would stop execution, reconciliation, health publishing,
     and every protection at once.
+
+    Age is checked here because **a frozen book passes every structural check**.
+    A dropped WebSocket delivers no deltas at all, so ``BookReconstruction``
+    stays healthy and ``sequence_gap`` stays false while the real price walks
+    away from the last snapshot. The public stream times out on ping/pong
+    roughly every five minutes in normal operation (observed 2026-07-30), so
+    without a bound the stop and take-profit engine repeatedly decides against a
+    mark minutes old — silently failing to fire while price runs through the
+    level, with no error, no health change, and no alert. Every other consumer
+    in the owner loop already applies a freshness bound; this one did not.
+
+    Age is measured as ``observed_wall_ns - book.local_receive_ts_ns`` under the
+    recorder's lock, so a negative value is a real clock regression rather than
+    a read/update race, and is treated as unusable.
     """
 
     refs: dict[str, MarketInputRef] = {}
     skipped: dict[str, str] = {}
+    bound = max(int(max_book_age_ns), 0)
     for symbol in symbols:
-        book = recorder.current_book(symbol)
+        book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
         if book is None:
             skipped[symbol] = "no_book"
+            continue
+        age_ns = int(observed_wall_ns) - int(book.local_receive_ts_ns)
+        if age_ns < 0:
+            skipped[symbol] = "future_book"
+            continue
+        if age_ns > bound:
+            skipped[symbol] = f"stale_book:{age_ns / 1_000_000_000:.1f}s"
             continue
         try:
             refs[symbol] = book.market_ref(
@@ -736,12 +769,25 @@ def main(argv: list[str] | None = None) -> int:
                     if target.get("symbol") and float(target.get("signed_qty") or 0.0) != 0.0
                 },
             )
+            protection_evaluation_error = ""
             if protection_skipped:
+                skipped_detail = "; ".join(
+                    f"{symbol}={reason}" for symbol, reason in sorted(protection_skipped.items())
+                )
                 _logger.warning(
                     "component protection skipped unusable books this cycle: %s",
-                    "; ".join(f"{symbol}={reason}" for symbol, reason in sorted(protection_skipped.items())),
+                    skipped_detail,
                 )
-            protection_evaluation_error = ""
+                # A skipped symbol means its software stop and take-profit did
+                # not run. That is exactly the state in which no new exposure
+                # should be opened, so it has to reach health rather than only
+                # journald — the owner previously published HEALTHY while a
+                # symbol's component protection was inoperative, cycle after
+                # cycle. The venue-native stop is unaffected either way.
+                protection_evaluation_error = _append_health_error(
+                    protection_evaluation_error,
+                    f"component protection did not evaluate: {skipped_detail}",
+                )
             try:
                 protection_engine.evaluate_native_breaches(native_protection.breaches())
             except Exception as exc:  # noqa: BLE001 - safety publication blocks health

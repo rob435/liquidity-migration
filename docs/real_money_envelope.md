@@ -226,6 +226,27 @@ cap.** The second, independent leverage check applies only when
 downgrades it to a no-op rather than failing closed. *Close it:* require the
 field to be present and positive for real-money instruments.
 
+**B17. The deploy pipeline places live venue orders by itself.**
+`deploy_vps_live.sh:1052` runs `probe_bybit_demo_rules.py --confirm-demo-probe`
+automatically whenever instrument rules are past half-life during an ordinary
+rollout — including one dispatched from the GitHub Actions dropdown. The probe
+**places and cancels real orders** (`demo_rule_probe.py:637`/`:714`) at up to
+`REGISTERED_MAX_PROBE_NOTIONAL_USDT = 200.0`, `REGISTERED_PROBE_DISTANCE_BPS =
+100.0`, across the candidate universe. **Some fill.** On a real account that is
+CI spending your money as a side effect of deploying, with no trading decision
+behind it and no line in any strategy's record.
+
+Compounding it: rules are pinned to `environment == "demo"` with a 168h max age
+(`account_execution_config.py:63`, `candidate_rule_coverage.py:20`) and a stale
+receipt is a *hard owner startup failure* — another route into the B16 crash
+loop. `account_candidate_universe.py:632` pins the tradeable universe to
+`api-demo.bybit.com`. So real orders would be sized, rounded, and
+min-notional-checked against **demo** instrument rules for a **demo-listed**
+universe: a tick/lot/min-notional divergence gives venue rejects at best and
+mis-sized positions at worst. *Close it:* derive rules from the read-only
+`get_instruments_info` rather than by order probing, hard-refuse the
+order-placing probe outside demo, and re-freeze the universe from mainnet.
+
 ### 3.1b Silent-wrong-realm blockers
 
 These are different in kind from the above. Nothing is missing — the code would
@@ -361,9 +382,41 @@ software protection, no exits — for as long as the mismatch persists.
   maintenance margin at higher notional. At real size the projection understates
   the requirement.
 
-### 3.3 Built in this change
+### 3.3 Built so far
 
-`liquidity_migration/account_loss_guard.py` + 14 tests. Closes **B2**.
+Three changes, all safety-increasing and all active on demo — where they get
+exercised long before they guard anything real.
+
+**Closes B4 — the caps now actually bind.** `carry_demo.py` clamps sizing to
+`min(decision_anchored_equity, capital_reference_usdt)`, injected from the
+profile through `cli.py`. Before this, producers sized off live venue equity
+while the owner's six absolute caps were calibrated against a fixed $250,000
+reference, so the two drifted apart in both directions: fund below the reference
+and every cap sits far above anything reachable, leaving the pre-trade layer
+decorative; grow above it — by funding *or simply by profit* — and the load-time
+envelope proof in `operational_profile.py:290-424` silently stops being true.
+The clamp is a ceiling and never a floor: a smaller account still sizes off its
+own equity. Applied after the decision anchor, so a profitable day cannot ratchet
+the book up. Three tests, including that the ceiling does not become a floor.
+
+**Closes B14 — software stops can no longer read a frozen book.**
+`protection_market_refs` now uses `current_book_with_observed_wall_ns()` and
+rejects books older than `PROTECTION_MAX_BOOK_AGE_NS` (15s), and every skipped
+symbol now reaches owner health instead of only journald. The defect it closes:
+a dropped WebSocket delivers no deltas at all, so the reconstruction stays
+healthy and `sequence_gap` stays false while the real price walks away — a
+frozen book passed every structural check. Three tests, including a backwards
+clock treated as unusable.
+
+*Operational consequence, stated because it is a real behaviour change:* owner
+health will now degrade during feed outages instead of publishing `HEALTHY`
+while a symbol's protection is inoperative. That blocks new entries during
+outages. This is intended — it is the correct response to being blind — but it
+will be visible, and the 15s bound should be tuned against observed gap
+durations rather than left at a guess.
+
+**Closes B2 — the account-level daily loss halt.**
+`liquidity_migration/account_loss_guard.py` + 14 tests.
 
 Account-level rather than per-sleeve, because the failure that matters is the
 whole book moving together — precisely what per-position stops cannot see, and

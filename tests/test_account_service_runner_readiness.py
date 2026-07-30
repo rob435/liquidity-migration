@@ -595,14 +595,93 @@ def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
     )
 
     class Recorder:
-        def current_book(self, symbol: str):
-            return {"BTCUSDT": healthy, "BUSDT": gapped, "TLMUSDT": None}[symbol]
+        def current_book_with_observed_wall_ns(self, symbol: str):
+            book = {"BTCUSDT": healthy, "BUSDT": gapped, "TLMUSDT": None}[symbol]
+            return book, 1_000
 
     refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT", "BUSDT", "TLMUSDT"])
 
     assert set(refs) == {"BTCUSDT"}
     assert "book_sequence_gap" in skipped["BUSDT"]
     assert skipped["TLMUSDT"] == "no_book"
+
+
+def _protection_book(symbol: str, local_receive_ts_ns: int):
+    from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
+
+    return L2BookSnapshot(
+        symbol=symbol,
+        sequence=100,
+        previous_sequence=99,
+        exchange_ts_ns=local_receive_ts_ns - 100,
+        local_receive_ts_ns=local_receive_ts_ns,
+        bids=(BookLevel(9.9, 1.0),),
+        asks=(BookLevel(10.1, 1.0),),
+        sequence_gap=False,
+        clock_offset_estimate_ns=None,
+    )
+
+
+def test_protection_market_refs_rejects_a_frozen_book() -> None:
+    """The defect this closes: a dropped WebSocket delivers no deltas at all, so
+    the reconstruction stays healthy and sequence_gap stays false while the real
+    price walks away. A frozen book passes every structural check, and the stop
+    engine would decide against a mark minutes old without firing."""
+
+    from liquidity_migration.account_service_runner import (
+        PROTECTION_MAX_BOOK_AGE_NS,
+        protection_market_refs,
+    )
+
+    fresh = _protection_book("BTCUSDT", 1_000_000_000_000)
+    frozen = _protection_book("BUSDT", 1_000_000_000_000)
+    observed = 1_000_000_000_000 + PROTECTION_MAX_BOOK_AGE_NS + 1
+
+    class Recorder:
+        def current_book_with_observed_wall_ns(self, symbol: str):
+            if symbol == "BTCUSDT":
+                return fresh, fresh.local_receive_ts_ns + 1_000_000
+            return frozen, observed
+
+    refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT", "BUSDT"])
+
+    assert set(refs) == {"BTCUSDT"}
+    assert skipped["BUSDT"].startswith("stale_book:")
+
+
+def test_protection_market_refs_accepts_a_book_inside_the_bound() -> None:
+    from liquidity_migration.account_service_runner import (
+        PROTECTION_MAX_BOOK_AGE_NS,
+        protection_market_refs,
+    )
+
+    book = _protection_book("BTCUSDT", 5_000_000_000_000)
+
+    class Recorder:
+        def current_book_with_observed_wall_ns(self, symbol: str):
+            return book, book.local_receive_ts_ns + PROTECTION_MAX_BOOK_AGE_NS
+
+    refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT"])
+    assert set(refs) == {"BTCUSDT"}
+    assert skipped == {}
+
+
+def test_protection_market_refs_treats_a_backwards_clock_as_unusable() -> None:
+    """Age is measured under the recorder's lock, so a negative age cannot be a
+    read/update race — it is a real wall-clock regression, and an unknown
+    safety-critical state fails closed."""
+
+    from liquidity_migration.account_service_runner import protection_market_refs
+
+    book = _protection_book("BTCUSDT", 5_000_000_000_000)
+
+    class Recorder:
+        def current_book_with_observed_wall_ns(self, symbol: str):
+            return book, book.local_receive_ts_ns - 1
+
+    refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT"])
+    assert refs == {}
+    assert skipped["BTCUSDT"] == "future_book"
 
 
 def test_periodic_reconciliation_survives_transient_venue_read_failure(

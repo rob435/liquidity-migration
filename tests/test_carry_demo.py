@@ -431,6 +431,58 @@ class TestCarryTargetPlan:
             )
             assert plan.resize_intents == [], f"drift {drift} published a resize"
 
+    def test_sizing_is_clamped_to_the_capital_reference(self) -> None:
+        """The owner's six pre-trade caps are absolute USDT numbers calibrated
+        against capital_reference_usdt, but sizing reads live venue equity.
+        Without this clamp the two drift apart and the load-time envelope proof
+        -- that worst-case producer notional fits inside those caps -- silently
+        stops being true the moment the account grows past the reference.
+        """
+
+        demo = CarryDemoCycleConfig(
+            max_new_entries_per_cycle=2, capital_reference_usdt=EQUITY
+        )
+        rich = _carry_target_plan(
+            **_plan_kwargs(demo=demo, equity_usdt=EQUITY * 2.0, cycle_state=CarryCycleState())
+        )
+        at_reference = _carry_target_plan(
+            **_plan_kwargs(demo=demo, equity_usdt=EQUITY, cycle_state=CarryCycleState())
+        )
+
+        assert [i.intent.signed_notional_usdt for i in rich.entry_intents] == pytest.approx(
+            [i.intent.signed_notional_usdt for i in at_reference.entry_intents]
+        )
+
+    def test_the_clamp_is_a_ceiling_not_a_floor(self) -> None:
+        """A smaller account must keep sizing off its own equity, never be
+        levelled up to a reference it has not funded."""
+
+        demo = CarryDemoCycleConfig(
+            max_new_entries_per_cycle=2, capital_reference_usdt=EQUITY
+        )
+        small = _carry_target_plan(
+            **_plan_kwargs(demo=demo, equity_usdt=EQUITY * 0.1, cycle_state=CarryCycleState())
+        )
+
+        assert small.entry_intents
+        for item in small.entry_intents:
+            assert abs(item.intent.signed_notional_usdt) < 0.2 * EQUITY
+
+    def test_an_unset_capital_reference_leaves_sizing_unclamped(self) -> None:
+        demo = CarryDemoCycleConfig(
+            max_new_entries_per_cycle=2, capital_reference_usdt=0.0
+        )
+        rich = _carry_target_plan(
+            **_plan_kwargs(demo=demo, equity_usdt=EQUITY * 2.0, cycle_state=CarryCycleState())
+        )
+        base = _carry_target_plan(
+            **_plan_kwargs(demo=demo, equity_usdt=EQUITY, cycle_state=CarryCycleState())
+        )
+
+        assert abs(rich.entry_intents[0].intent.signed_notional_usdt) > abs(
+            base.entry_intents[0].intent.signed_notional_usdt
+        )
+
     def test_a_new_decision_re_anchors_the_sizing_equity(self) -> None:
         """Anchoring must not freeze the book: tomorrow sizes off tomorrow."""
 

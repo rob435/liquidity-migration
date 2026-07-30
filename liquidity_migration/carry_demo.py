@@ -371,6 +371,16 @@ class CarryDemoCycleConfig:
     entry_leverage: float = 2.0
     declared_stop_loss_fraction: float = 0.35
     max_new_entries_per_cycle: int = 10
+    #: Ceiling on the equity this producer may size against, from the profile's
+    #: top-level ``capital_reference_usdt``. The owner's six pre-trade caps are
+    #: absolute USDT numbers calibrated against that reference, but sizing reads
+    #: *live venue equity*, so without a clamp the two drift apart in both
+    #: directions: fund below the reference and every cap sits far above
+    #: anything reachable, leaving the pre-trade risk layer decorative; grow
+    #: above it — by funding or simply by profit — and the load-time envelope
+    #: proof in ``operational_profile`` silently stops being true. Clamping here
+    #: makes that proof hold at every equity level. 0.0 disables the clamp.
+    capital_reference_usdt: float = 0.0
     operational_profile_sha256: str = ""
     # --- data build ---
     replay_days: int = REPLAY_DAYS
@@ -767,6 +777,14 @@ def _carry_target_plan(
         if cycle_state is not None
         else equity_usdt
     )
+    # Clamp to the profile's capital reference. The owner's absolute caps are
+    # calibrated against that number while sizing reads live equity, so an
+    # unclamped producer silently invalidates the load-time envelope proof as
+    # soon as equity leaves the reference in either direction. Applied after the
+    # decision anchor so a profitable day cannot ratchet the book up, and never
+    # applied upward: a smaller account still sizes off its own equity.
+    if demo.capital_reference_usdt > 0.0:
+        sizing_equity_usdt = min(sizing_equity_usdt, float(demo.capital_reference_usdt))
 
     exit_symbols = sorted(set(standing_notional) - set(desired))
     exit_intents = [

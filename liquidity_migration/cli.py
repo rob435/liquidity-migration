@@ -484,6 +484,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
+        capital_reference_usdt=operational_profile.capital_reference_usdt,
         operational_profile_sha256=operational_profile.source_sha256,
         replay_days=args.replay_days,
         workers=args.workers,
