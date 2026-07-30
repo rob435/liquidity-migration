@@ -455,6 +455,21 @@ durations rather than left at a guess.
 **Closes B2 — the account-level daily loss halt.**
 `liquidity_migration/account_loss_guard.py` + 14 tests.
 
+**Partially closes B15 — the escalation half.**
+`liquidity_migration/wedged_command_watch.py` + 9 tests. A `commanded` order
+older than its bound becomes a named, aging, ranked fact, with a frozen *open*
+position ordered ahead of a merely stuck exit. Age runs from the submission
+attempt where there was one, so queue time is not held against a command.
+
+It deliberately does **not** resolve the wedge. Resolving it requires an
+operator-authorized journal transition recording what actually happened at the
+venue, and inventing that silently is precisely the blind resend the design
+refuses — a command that lost its answer may correspond to a live venue order.
+The no-blind-resend rule is untouched; what was missing was an exit from the
+state, not the refusal to resend. **The remaining half of B15 is the transition
+itself, and it needs owner review before it is built** — it is the one change in
+this document that can retire a record of real exposure.
+
 Account-level rather than per-sleeve, because the failure that matters is the
 whole book moving together — precisely what per-position stops cannot see, and
 CARRY holds a basket selected *because* their funding is extreme, so their price
