@@ -484,7 +484,15 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
-        capital_reference_usdt=operational_profile.capital_reference_usdt,
+        # In account_equity mode the ceiling IS the wallet, so the producer's
+        # fixed clamp has nothing to clamp to and is disabled (0.0). The owner's
+        # equity-anchored caps are what bind the book, and they are re-proved at
+        # every rebase — which is the half of B4 a fixed reference could not do.
+        capital_reference_usdt=(
+            0.0
+            if operational_profile.capital_reference.tracks_equity
+            else operational_profile.capital_reference_usdt
+        ),
         operational_profile_sha256=operational_profile.source_sha256,
         replay_days=args.replay_days,
         workers=args.workers,

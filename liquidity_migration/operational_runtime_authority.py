@@ -46,8 +46,21 @@ DEFAULT_RECEIPT = Path(
     "/etc/liquidity-migration/account-execution-operational-ready"
 )
 OWNER_ACKNOWLEDGEMENT = "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION"
+#: A distinct constant on purpose. Reusing the demo/paper acknowledgement for
+#: real money would let an operator authorize the funded account with a phrase
+#: they have typed dozens of times on a fleet where the worst case is a log
+#: line. This one has to be typed knowing what it says.
+REAL_MONEY_OWNER_ACKNOWLEDGEMENT = (
+    "AUTHORIZE_BYBIT_MAINNET_REAL_MONEY_CARRY_WITHIN_THE_RECORDED_CEILING_AND_EXPIRY"
+)
 DEMO_OPERATIONAL_PROFILE = "demo-operational"
 OPERATIONAL_PROFILE = "operational"
+REAL_MONEY_PROFILE = "real-money"
+
+#: Real-money authority is never indefinite. An operator who armed the account
+#: and moved on should find it disarmed, not still running months later on a
+#: decision nobody has revisited.
+REAL_MONEY_MAX_AUTHORITY_SECONDS = 30 * 24 * 60 * 60
 DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
     "liquidity-migration-bybit-carry-demo.service",
@@ -56,6 +69,12 @@ DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-continuous-hedge.service",
     "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
+)
+#: CARRY only, on its own owner. LONG is deferred behind B3 and CONTINUOUS is
+#: retired, so neither has a mainnet unit to authorize.
+REAL_MONEY_AUTHORIZED_UNITS = (
+    "liquidity-migration-account-execution-mainnet.service",
+    "liquidity-migration-bybit-carry-mainnet.service",
 )
 AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
@@ -740,6 +759,11 @@ _PROFILE_ENVIRONMENT_NAMES = {
         "bybit-demo.env",
         "sleeves.resolved.env",
     ),
+    REAL_MONEY_PROFILE: (
+        "account-execution-mainnet.env",
+        "bybit-mainnet.env",
+        "sleeves.resolved.env",
+    ),
 }
 _PROFILE_FIELDS: dict[str, dict[str, Any]] = {
     DEMO_OPERATIONAL_PROFILE: {
@@ -760,7 +784,119 @@ _PROFILE_FIELDS: dict[str, dict[str, Any]] = {
         "liveness_scope": "demo-paper",
         "paper_execution_model_scope": INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
     },
+    REAL_MONEY_PROFILE: {
+        "scope": "bybit_mainnet_real_money_carry_only",
+        "raw_market_persistence": "disabled",
+        "research_evidence_status": "not_claimed_or_authorized",
+        "authorized_units": REAL_MONEY_AUTHORIZED_UNITS,
+        "demo_raw_value": None,
+        "liveness_scope": "mainnet",
+        "paper_execution_model_scope": "not_applicable_no_paper",
+    },
 }
+
+
+#: Fields only the real-money receipt carries. Both are mandatory there and
+#: forbidden elsewhere, so neither can be quietly omitted or quietly added.
+REAL_MONEY_RECEIPT_FIELDS = ("capital_ceiling", "expires_ts_ns")
+
+
+def _validate_real_money_ceiling(value: object) -> dict[str, Any]:
+    """A mandatory ceiling, expressible as a fixed sum or a share of equity.
+
+    The owner's ceiling for this deployment is "whatever the account holds", so
+    an absolute USDT figure would be stale the first time they deposit. Both
+    forms are accepted; exactly one must be present, and there is no form that
+    means "no ceiling".
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError("real-money authorization requires a capital_ceiling object")
+    mode = str(value.get("mode") or "")
+    if mode not in {"fixed_usdt", "account_equity_multiple"}:
+        raise ValueError(
+            "capital_ceiling.mode must be 'fixed_usdt' or 'account_equity_multiple'"
+        )
+    if set(value) != {"mode", "value"}:
+        raise ValueError("capital_ceiling must carry exactly 'mode' and 'value'")
+    try:
+        amount = float(value["value"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("capital_ceiling.value must be numeric") from exc
+    if not math.isfinite(amount) or amount <= 0.0:
+        raise ValueError("capital_ceiling.value must be finite and positive")
+    if mode == "account_equity_multiple" and amount > 2.0:
+        # Above 2x the wallet the venue's own margin engine, not this receipt,
+        # is what stops the book; recording such a ceiling would be theatre.
+        raise ValueError("capital_ceiling.value cannot exceed 2 in equity-multiple mode")
+    return {"mode": mode, "value": amount}
+
+
+def real_money_gross_ceiling_usdt(
+    receipt: Mapping[str, Any],
+    *,
+    equity_usdt: float,
+) -> float:
+    """Resolve the receipt's ceiling into USDT against observed equity."""
+
+    ceiling = _validate_real_money_ceiling(receipt.get("capital_ceiling"))
+    if ceiling["mode"] == "fixed_usdt":
+        return float(ceiling["value"])
+    observed = float(equity_usdt)
+    if not math.isfinite(observed) or observed <= 0.0:
+        raise ValueError(
+            "an equity-multiple ceiling cannot be resolved without positive observed equity"
+        )
+    return observed * float(ceiling["value"])
+
+
+def require_book_within_receipt_ceiling(
+    receipt: Mapping[str, Any],
+    *,
+    gross_notional_usdt: float,
+    equity_usdt: float,
+) -> None:
+    """Cross-check the live book against the receipt, not only the policy file.
+
+    The risk policy is hashed into the receipt, so its limits cannot change
+    without invalidating authority — but that proves the *rule* is intact, not
+    that the book obeys it. Adopted external exposure, a venue-side position
+    this process did not open, or a rescaled envelope can all put real notional
+    outside what the owner actually authorized while every local limit still
+    reads correct. This compares the two directly.
+    """
+
+    if str(receipt.get("profile") or "") != REAL_MONEY_PROFILE:
+        return
+    limit = real_money_gross_ceiling_usdt(receipt, equity_usdt=equity_usdt)
+    observed = float(gross_notional_usdt)
+    if not math.isfinite(observed) or observed < 0.0:
+        raise ValueError("live gross notional must be finite and non-negative")
+    if observed > limit:
+        raise RuntimeError(
+            f"live book gross {observed:,.2f} USDT exceeds the authorized ceiling "
+            f"{limit:,.2f} USDT recorded in the real-money authority receipt"
+        )
+
+
+def require_real_money_authority_unexpired(
+    receipt: Mapping[str, Any],
+    *,
+    now_ns: int | None = None,
+) -> None:
+    """Real-money authority is never indefinite."""
+
+    if str(receipt.get("profile") or "") != REAL_MONEY_PROFILE:
+        return
+    expires_ts_ns = int(receipt.get("expires_ts_ns") or 0)
+    if expires_ts_ns <= 0:
+        raise ValueError("real-money authorization requires a positive expires_ts_ns")
+    current = time.time_ns() if now_ns is None else int(now_ns)
+    if current >= expires_ts_ns:
+        raise RuntimeError(
+            "real-money authorization expired; re-issue it deliberately rather "
+            "than extending a decision nobody has revisited"
+        )
 
 
 def _profile_fields(profile: str) -> Mapping[str, Any]:
@@ -1306,13 +1442,28 @@ def _validate_receipt_snapshot(
         "runtime_inputs",
         "artifact_sha256",
     }
+    profile = str(payload.get("profile") or "")
+    if profile == REAL_MONEY_PROFILE:
+        # Mandatory here and forbidden elsewhere, so neither field can be
+        # quietly omitted from a real-money receipt nor quietly added to a
+        # demo one to make it look bounded.
+        expected = expected | set(REAL_MONEY_RECEIPT_FIELDS)
     if set(payload) != expected:
         raise ValueError("operational runtime authorization fields are invalid")
-    profile = str(payload.get("profile") or "")
     try:
         profile_fields = _profile_fields(profile)
     except ValueError as exc:
         raise ValueError("operational runtime authorization is invalid") from exc
+    if profile == REAL_MONEY_PROFILE:
+        _validate_real_money_ceiling(payload.get("capital_ceiling"))
+        created_ts_ns = int(payload.get("created_ts_ns") or 0)
+        receipt_expires_ts_ns = int(payload.get("expires_ts_ns") or 0)
+        if (
+            receipt_expires_ts_ns <= created_ts_ns
+            or receipt_expires_ts_ns - created_ts_ns
+            > REAL_MONEY_MAX_AUTHORITY_SECONDS * 1_000_000_000
+        ):
+            raise ValueError("real-money authorization expiry is missing or out of range")
     units = payload.get("authorized_units")
     committed_mode = 0o640 if profile == OPERATIONAL_PROFILE else 0o600
     required_mode = committed_mode if expected_mode is None else expected_mode
@@ -1338,6 +1489,18 @@ def _validate_receipt_snapshot(
         or payload.get("artifact_sha256") != _self_hash(payload)
     ):
         raise ValueError("operational runtime authorization is invalid")
+    return payload
+
+
+def load_authorization_receipt(path: str | Path) -> dict[str, Any]:
+    """Read and validate one installed authority receipt, without runtime checks.
+
+    Used by the account owner to learn the ceiling and expiry it must hold the
+    live book to. It deliberately performs no environment or source binding —
+    that is ``verify_operational_authorization``'s job at a different moment.
+    """
+
+    _snapshot, payload = _load_receipt(path)
     return payload
 
 
@@ -1436,11 +1599,42 @@ def issue_operational_authorization(
     owner_acknowledgement: str,
     profile: str = OPERATIONAL_PROFILE,
     final_publication_check: Callable[[], None] | None = None,
+    capital_ceiling: Mapping[str, Any] | None = None,
+    authority_seconds: int | None = None,
 ) -> dict[str, Any]:
     if os.geteuid() != _authorization_owner_uid():
         raise RuntimeError("operational authorization issuance requires root")
-    if owner_acknowledgement != OWNER_ACKNOWLEDGEMENT:
-        raise ValueError("exact demo/paper-only owner acknowledgement is required")
+    real_money = profile == REAL_MONEY_PROFILE
+    expected_acknowledgement = (
+        REAL_MONEY_OWNER_ACKNOWLEDGEMENT if real_money else OWNER_ACKNOWLEDGEMENT
+    )
+    if owner_acknowledgement != expected_acknowledgement:
+        raise ValueError(
+            "exact real-money owner acknowledgement is required"
+            if real_money
+            else "exact demo/paper-only owner acknowledgement is required"
+        )
+    if not real_money and (capital_ceiling is not None or authority_seconds is not None):
+        raise ValueError(
+            "capital_ceiling and authority_seconds belong only to the real-money profile"
+        )
+    ceiling: dict[str, Any] | None = None
+    expires_ts_ns = 0
+    if real_money:
+        # Both mandatory. An unbounded ceiling or an indefinite authority is
+        # not a weaker authorization, it is the absence of one.
+        ceiling = _validate_real_money_ceiling(capital_ceiling)
+        if authority_seconds is None:
+            raise ValueError("real-money authorization requires an explicit expiry")
+        if (
+            type(authority_seconds) is not int
+            or authority_seconds <= 0
+            or authority_seconds > REAL_MONEY_MAX_AUTHORITY_SECONDS
+        ):
+            raise ValueError(
+                "real-money authority_seconds must be a positive integer no greater "
+                f"than {REAL_MONEY_MAX_AUTHORITY_SECONDS}"
+            )
     if not authorization_reference.strip() or len(authorization_reference) > 500:
         raise ValueError("authorization reference must be non-empty and at most 500 characters")
     candidate = expected_commit.lower()
@@ -1484,6 +1678,11 @@ def issue_operational_authorization(
         },
         "artifact_sha256": "",
     }
+    if real_money:
+        assert ceiling is not None  # narrowed by the guard above
+        expires_ts_ns = int(payload["created_ts_ns"]) + int(authority_seconds or 0) * 1_000_000_000
+        payload["capital_ceiling"] = ceiling
+        payload["expires_ts_ns"] = expires_ts_ns
     payload["artifact_sha256"] = _self_hash(payload)
 
     def validate_uncommitted(snapshot: StableFileSnapshot) -> None:
@@ -1530,6 +1729,22 @@ def verify_operational_authorization(
         machine_id_path=machine_id_path,
         unit=unit,
     )
+    real_money = str(payload.get("profile") or "") == REAL_MONEY_PROFILE
+    # Time is checked at every verification, not only at issuance: a receipt
+    # that was valid when written is not evidence that it is valid now.
+    require_real_money_authority_unexpired(payload)
+    if real_money:
+        if explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
+            raise ValueError(
+                "real-money authorization requires REAL_MONEY to be explicitly armed"
+            )
+        if not (
+            os.environ.get("BYBIT_REAL_API_KEY") and os.environ.get("BYBIT_REAL_API_SECRET")
+        ):
+            raise ValueError("real-money runtime is missing its mainnet credentials")
+        if os.environ.get("BYBIT_DEMO_API_KEY") or os.environ.get("BYBIT_DEMO_API_SECRET"):
+            raise ValueError("real-money runtime environment contains demo credentials")
+        return payload
     if not explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
         raise ValueError("runtime environment enables or ambiguously sets REAL_MONEY")
     if os.environ.get("BYBIT_REAL_API_KEY") or os.environ.get("BYBIT_REAL_API_SECRET"):
@@ -1660,8 +1875,23 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             DEMO_OPERATIONAL_PROFILE,
             OPERATIONAL_PROFILE,
+            REAL_MONEY_PROFILE,
         ),
         default=OPERATIONAL_PROFILE,
+    )
+    issue.add_argument(
+        "--capital-ceiling-mode",
+        choices=("fixed_usdt", "account_equity_multiple"),
+        help="Real-money profile only. Mandatory there; there is no unbounded form.",
+    )
+    issue.add_argument("--capital-ceiling-value", type=float)
+    issue.add_argument(
+        "--authority-seconds",
+        type=int,
+        help=(
+            "Real-money profile only. Mandatory there; real-money authority is "
+            f"never indefinite and cannot exceed {REAL_MONEY_MAX_AUTHORITY_SECONDS} seconds."
+        ),
     )
     for name in ("verify", "verify-runtime"):
         command = commands.add_parser(name)
@@ -1682,6 +1912,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if os.geteuid() != 0:
                 raise RuntimeError("operational authorization issuance requires root")
             with _production_maintenance_guard():
+                ceiling = (
+                    {
+                        "mode": args.capital_ceiling_mode,
+                        "value": args.capital_ceiling_value,
+                    }
+                    if args.capital_ceiling_mode is not None
+                    or args.capital_ceiling_value is not None
+                    else None
+                )
                 result = issue_operational_authorization(
                     receipt_path=args.receipt,
                     expected_commit=args.expected_commit,
@@ -1691,6 +1930,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     owner_acknowledgement=args.owner_acknowledgement,
                     profile=args.profile,
                     final_publication_check=require_managed_units_inactive,
+                    capital_ceiling=ceiling,
+                    authority_seconds=args.authority_seconds,
                 )
         else:
             result = verify_operational_authorization(
@@ -1717,6 +1958,15 @@ __all__ = [
     "DEFAULT_RECEIPT",
     "OPERATIONAL_PROFILE",
     "OWNER_ACKNOWLEDGEMENT",
+    "REAL_MONEY_AUTHORIZED_UNITS",
+    "REAL_MONEY_MAX_AUTHORITY_SECONDS",
+    "REAL_MONEY_OWNER_ACKNOWLEDGEMENT",
+    "REAL_MONEY_PROFILE",
+    "REAL_MONEY_RECEIPT_FIELDS",
     "issue_operational_authorization",
+    "load_authorization_receipt",
+    "real_money_gross_ceiling_usdt",
+    "require_book_within_receipt_ceiling",
+    "require_real_money_authority_unexpired",
     "verify_operational_authorization",
 ]

@@ -88,6 +88,12 @@ from .market_capture import (
     recorder_callback,
     symbols_from_file,
 )
+from .equity_anchored_envelope import EquityAnchoredEnvelope
+from .operational_profile import load_operational_profile
+from .operational_runtime_authority import (
+    require_book_within_receipt_ceiling,
+    require_real_money_authority_unexpired,
+)
 from .account_loss_guard import (
     LOSS_GUARD_OK,
     LOSS_GUARD_TRIPPED,
@@ -428,6 +434,69 @@ def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
     return api_key_info
 
 
+def _load_authority_receipt() -> Mapping[str, Any] | None:
+    """The installed authority receipt, or None when there is none to read."""
+
+    try:
+        from .operational_runtime_authority import (  # noqa: PLC0415 - optional at runtime
+            DEFAULT_RECEIPT,
+            load_authorization_receipt,
+        )
+
+        return load_authorization_receipt(DEFAULT_RECEIPT)
+    except Exception:  # noqa: BLE001 - absence is normal off the deployed host
+        return None
+
+
+def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
+    """Gross notional of the reconstructed book at the freshest observed marks.
+
+    Deliberately computed from *positions*, not from target quantities: the
+    hardening note in docs/real_money_envelope.md flags that account_gross is
+    derived from targets, which cannot see exposure the book acquired outside
+    the kernel's own commands.
+    """
+
+    total = 0.0
+    for symbol, position in kernel._state_ref().positions.items():
+        if position.signed_qty == 0.0:
+            continue
+        price = 0.0
+        book, _observed_ns = recorder.current_book_with_observed_wall_ns(symbol)
+        if book is not None:
+            try:
+                price = float(
+                    book.market_ref(
+                        input_key=f"ceiling:{symbol}:{book.sequence}",
+                        source="bybit_raw_l2",
+                    ).reference_price
+                )
+            except ValueError:
+                price = 0.0
+        if price <= 0.0:
+            # No usable mark: fall back to the position's own entry basis
+            # rather than silently valuing an open position at zero.
+            price = abs(float(position.average_price or 0.0))
+        total = math.fsum((total, abs(position.signed_qty) * price))
+    return total
+
+
+def _load_equity_anchored_envelope(path: str) -> EquityAnchoredEnvelope | None:
+    """Build the envelope when the risk policy is a full operational profile.
+
+    Isolated tools and tests still pass the legacy flat policy shape, which has
+    no ratios to anchor and keeps the historical fixed caps.
+    """
+
+    try:
+        profile = load_operational_profile(path)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    if not profile.capital_reference.tracks_equity:
+        return None
+    return EquityAnchoredEnvelope(profile)
+
+
 def publish_demo_owner_health(
     *,
     kernel: AccountExecutionKernel,
@@ -664,6 +733,13 @@ def main(argv: list[str] | None = None) -> int:
             max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
         )
     policy = load_risk_policy(args.risk_policy_file)
+    # In ``account_equity`` mode the six absolute caps are a fraction of the
+    # observed wallet rather than a number someone has to remember to update
+    # after a deposit. The envelope owns the rebase discipline; the policy the
+    # kernel enforces is re-read from it after every capital refresh.
+    envelope = _load_equity_anchored_envelope(args.risk_policy_file)
+    if envelope is not None:
+        policy = envelope.policy()
     symbols_path = Path(args.symbols_file).expanduser()
     symbols = symbols_from_file(symbols_path)
     if not symbols:
@@ -901,6 +977,11 @@ def main(argv: list[str] | None = None) -> int:
             policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
         )
     )
+    envelope_rebase_detail = ""
+    # Read once at startup. The receipt is immutable and mode-0400/0640; a
+    # runtime that could not read it simply has no ceiling to cross-check
+    # against, which is the demo/paper case and not an error there.
+    authority_receipt = _load_authority_receipt()
     loss_guard_flat_published = False
     try:
         while True:
@@ -1145,6 +1226,58 @@ def main(argv: list[str] | None = None) -> int:
                             health_detail,
                             requested_symbols_ready,
                         )
+                if envelope is not None:
+                    rebase = envelope.observe_equity(last_capital_snapshot.equity_usdt)
+                    if rebase is not None:
+                        service.risk_policy = envelope.policy()
+                        policy = service.risk_policy
+                        # The daily ceiling scales with the envelope, but the
+                        # guard keeps its own day anchor: rebasing must not
+                        # refresh a loss budget that is already partly spent.
+                        loss_guard.max_daily_loss_usdt = (
+                            policy.max_daily_loss_usdt
+                            if policy.max_daily_loss_usdt > 0.0
+                            else None
+                        )
+                        envelope_rebase_detail = ""
+                    if envelope.last_error:
+                        envelope_rebase_detail = envelope.last_error
+                if authority_receipt is not None:
+                    # Cross-check the *live book* against the receipt ceiling,
+                    # not only against the policy file. The policy hash proves
+                    # the rule is intact; it does not prove the book obeys it,
+                    # and adopted external exposure never passed through the
+                    # rule at all.
+                    try:
+                        require_book_within_receipt_ceiling(
+                            authority_receipt,
+                            gross_notional_usdt=_live_gross_notional_usdt(
+                                kernel, recorder
+                            ),
+                            equity_usdt=last_capital_snapshot.equity_usdt,
+                        )
+                        require_real_money_authority_unexpired(authority_receipt)
+                    except (RuntimeError, ValueError) as exc:
+                        _logger.critical("real-money authority check failed: %s", exc)
+                        health_status = AccountOwnerHealthStatus.BLOCKED
+                        health_detail = _append_health_error(
+                            health_detail, f"real-money authority: {exc}"
+                        )[:1000]
+                        health_signature = (
+                            health_status.value,
+                            health_detail,
+                            requested_symbols_ready,
+                        )
+                if envelope_rebase_detail:
+                    health_status = AccountOwnerHealthStatus.BLOCKED
+                    health_detail = _append_health_error(
+                        health_detail, envelope_rebase_detail
+                    )[:1000]
+                    health_signature = (
+                        health_status.value,
+                        health_detail,
+                        requested_symbols_ready,
+                    )
                 loss_state, loss_detail = loss_guard.evaluate(
                     equity_usdt=last_capital_snapshot.equity_usdt,
                     equity_ts_ns=last_capital_snapshot.snapshot_ts_ns,

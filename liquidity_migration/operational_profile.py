@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -133,6 +133,41 @@ class CarryOperationalSettings:
     max_new_entries_per_cycle: int
 
 
+CAPITAL_REFERENCE_FIXED = "fixed"
+CAPITAL_REFERENCE_ACCOUNT_EQUITY = "account_equity"
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalReferenceSettings:
+    """How the profile's capital reference is chosen at runtime.
+
+    ``fixed``
+        The declared ``capital_reference_usdt`` is the reference forever. This
+        is the historical behaviour and stays the default.
+    ``account_equity``
+        The reference tracks observed venue equity. Every producer envelope and
+        every account cap in this profile is *linear* in the reference, so the
+        whole structure is a set of ratios and the load-time envelope proof is
+        scale-invariant — but it is re-run at each rebase rather than argued,
+        because ``max_leverage`` and ``quantity_tolerance`` are not.
+
+    ``floor_usdt`` bounds the reference from below so a momentarily unreadable
+    or near-zero balance cannot produce a degenerate envelope. The dead band
+    applies to *expansion only*: contraction follows equity down immediately,
+    because that is the safe direction, while expansion waits for a material
+    move so ordinary equity wander cannot re-scale the caps every cycle.
+    """
+
+    mode: str = CAPITAL_REFERENCE_FIXED
+    equity_fraction: float = 1.0
+    floor_usdt: float = 0.0
+    expand_dead_band_fraction: float = 0.05
+
+    @property
+    def tracks_equity(self) -> bool:
+        return self.mode == CAPITAL_REFERENCE_ACCOUNT_EQUITY
+
+
 @dataclass(frozen=True, slots=True)
 class OperationalProfile:
     capital_reference_usdt: float
@@ -145,6 +180,9 @@ class OperationalProfile:
     source_path: Path | None = None
     schema_version: int = OPERATIONAL_PROFILE_SCHEMA_VERSION
     kind: str = OPERATIONAL_PROFILE_KIND
+    capital_reference: CapitalReferenceSettings = field(
+        default_factory=CapitalReferenceSettings
+    )
 
 
 def _parse_account_risk(value: object) -> AccountRiskSettings:
@@ -456,6 +494,89 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
         raise ValueError("combined producer margin envelope exceeds account_risk margin cap")
 
 
+def _parse_capital_reference(value: object) -> CapitalReferenceSettings:
+    row = _object(
+        value,
+        label="operational profile capital_reference",
+        fields={"mode"},
+        optional=frozenset({"equity_fraction", "floor_usdt", "expand_dead_band_fraction"}),
+    )
+    mode = str(row["mode"])
+    if mode not in {CAPITAL_REFERENCE_FIXED, CAPITAL_REFERENCE_ACCOUNT_EQUITY}:
+        raise ValueError(
+            "capital_reference.mode must be "
+            f"{CAPITAL_REFERENCE_FIXED!r} or {CAPITAL_REFERENCE_ACCOUNT_EQUITY!r}"
+        )
+    equity_fraction = _positive_float(
+        row.get("equity_fraction", 1.0), label="capital_reference.equity_fraction"
+    )
+    if equity_fraction > 1.0:
+        # The reference is a ceiling on the book, so a fraction above 1 would
+        # authorize an envelope larger than the wallet backing it.
+        raise ValueError("capital_reference.equity_fraction cannot exceed 1")
+    dead_band = _positive_float(
+        row.get("expand_dead_band_fraction", 0.05),
+        label="capital_reference.expand_dead_band_fraction",
+        allow_zero=True,
+    )
+    if dead_band >= 1.0:
+        raise ValueError("capital_reference.expand_dead_band_fraction must be below 1")
+    floor = _positive_float(
+        row.get("floor_usdt", 0.0),
+        label="capital_reference.floor_usdt",
+        allow_zero=True,
+    )
+    if mode == CAPITAL_REFERENCE_ACCOUNT_EQUITY and floor <= 0.0:
+        # Without a floor, an unreadable or near-zero balance produces a
+        # degenerate envelope rather than a refusal.
+        raise ValueError("capital_reference.floor_usdt must be positive in account_equity mode")
+    return CapitalReferenceSettings(
+        mode=mode,
+        equity_fraction=equity_fraction,
+        floor_usdt=floor,
+        expand_dead_band_fraction=dead_band,
+    )
+
+
+def profile_at_capital_reference(
+    profile: OperationalProfile,
+    reference_usdt: float,
+) -> OperationalProfile:
+    """Rescale every absolute limit to a new capital reference, and re-prove it.
+
+    Every producer envelope and every account cap is linear in the reference,
+    so this is a pure rescale of the ratios the profile already encodes — the
+    *rule* for the limits is unchanged, which is what the authority receipt's
+    profile hash binds. ``max_leverage`` and ``quantity_tolerance`` are
+    scale-free and deliberately untouched.
+
+    The envelope proof is re-run at the new reference rather than argued from
+    linearity, because the non-linear fields above are exactly the ones an
+    argument from linearity would miss.
+    """
+
+    target = float(reference_usdt)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("capital reference must be finite and positive")
+    scale = target / profile.capital_reference_usdt
+    risk = profile.account_risk
+    rescaled = replace(
+        profile,
+        capital_reference_usdt=target,
+        account_risk=AccountRiskSettings(
+            max_component_gross_notional_usdt=risk.max_component_gross_notional_usdt * scale,
+            max_account_gross_notional_usdt=risk.max_account_gross_notional_usdt * scale,
+            max_symbol_notional_usdt=risk.max_symbol_notional_usdt * scale,
+            max_initial_margin_usdt=risk.max_initial_margin_usdt * scale,
+            max_leverage=risk.max_leverage,
+            quantity_tolerance=risk.quantity_tolerance,
+            max_daily_loss_usdt=risk.max_daily_loss_usdt * scale,
+        ),
+    )
+    _validate_profile_envelopes(rescaled)
+    return rescaled
+
+
 def load_operational_profile_bytes(
     data: bytes,
     *,
@@ -475,7 +596,14 @@ def load_operational_profile_bytes(
         "carry",
         "hedge",
     }
-    row = _object(payload, label="operational profile", fields=fields)
+    row = _object(
+        payload,
+        label="operational profile",
+        fields=fields,
+        # Optional so adding equity anchoring cannot brick a deployed profile
+        # that predates it. Absent means the historical fixed reference.
+        optional=frozenset({"capital_reference"}),
+    )
     if row["schema_version"] != OPERATIONAL_PROFILE_SCHEMA_VERSION:
         raise ValueError("operational profile schema_version is unsupported")
     if row["kind"] != OPERATIONAL_PROFILE_KIND:
@@ -491,8 +619,18 @@ def load_operational_profile_bytes(
         hedge=_parse_hedge(row["hedge"]),
         source_sha256=hashlib.sha256(data).hexdigest(),
         source_path=source_path,
+        capital_reference=(
+            _parse_capital_reference(row["capital_reference"])
+            if row.get("capital_reference") is not None
+            else CapitalReferenceSettings()
+        ),
     )
     _validate_profile_envelopes(profile)
+    if (
+        profile.capital_reference.tracks_equity
+        and profile.capital_reference.floor_usdt > profile.capital_reference_usdt
+    ):
+        raise ValueError("capital_reference.floor_usdt cannot exceed capital_reference_usdt")
     return profile
 
 
