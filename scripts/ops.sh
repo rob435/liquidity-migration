@@ -28,7 +28,6 @@ Safe operator commands:
   equity [ARGS...]             standard descriptive equity curves
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
-  clock-offset --execute [...] capture VPS-vs-Bybit public clock evidence
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
   wedged-command [ARGS...]     report/probe wedged order commands (read-only)
@@ -52,7 +51,6 @@ Safety contract:
     preflight only reports what is missing and never prints a secret;
     render-profile writes one non-secret profile artifact and nothing else.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
-  * clock-offset requires --execute and runs on the VPS clock.
   * deploy requires --execute and MODE=install|activate|rollout|recover.
   * Research runs remain research artifacts and are never auto-promoted.
 
@@ -164,12 +162,6 @@ case "$command" in
     ;;
   reset)
     remote_reset "$@"
-    ;;
-  clock-offset)
-    [[ "${1:-}" == "--execute" ]] \
-      || die_usage "clock-offset writes a VPS-bound receipt; its first argument must be --execute"
-    shift
-    remote_python_script scripts/capture_bybit_clock_offset.py "$@"
     ;;
   venue-accounting)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"

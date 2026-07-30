@@ -69,7 +69,6 @@ def test_help_lists_only_current_operator_routes() -> None:
         "equity",
         "research-refresh",
         "reset",
-        "clock-offset",
         "venue-accounting",
         "test",
         "deploy",
@@ -122,7 +121,6 @@ def test_reset_execute_is_forwarded_without_added_dry_run(tmp_path: Path) -> Non
 
 
 def test_mutating_remote_routes_require_explicit_handshake() -> None:
-    assert _run("clock-offset").returncode == 2
     assert _run("deploy", "install").returncode == 2
     assert _run("deploy", "--execute", "verify").returncode == 2
     assert _run("deploy", "--execute", "rollout").returncode == 2
