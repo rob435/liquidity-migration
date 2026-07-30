@@ -11,6 +11,52 @@ history is in Git and in the audit receipts indexed at the bottom.
 
 ## Deployment
 
+- **2026-07-30 13:45 UTC — installed commit `b13cbfac3` (CARRY sizing anchored
+  to the decision; resize alert no longer double-sent), deployed through the
+  STAGED path with three open positions.** Owner authorization: the "check up on
+  the vps ... fix this permanently please" chat instruction, then "go" on the
+  staged plan. Receipt: `install-ok commit=b13cbfac38838caa8b9850a3890948dc627b1e28
+  units_started=0`, authority artifact `cf0dce0e…` (profile `operational`, scope
+  `demo_paper_operational_only_no_real_money`), `verify-ok
+  commit=b13cbfac38838caa8b9850a3890948dc627b1e28 profile=operational`. Prior
+  authorization retired to `/var/lib/liquidity-migration/retired-authority/20260730T134120Z`.
+  Post-activation: 6 services plus the liveness timer up, 0 failed.
+  - **Why staged, not `rollout`:** unchanged from the entry below — the guarded
+    rollout requires a venue-flat account and the CARRY book held `VANRYUSDT`,
+    `LAUSDT`, and `ESPUSDT` throughout. Staging again avoided injecting an
+    operator-forced exit and re-entry into `lane2_carry_hold_v3`'s Lane-2
+    forward record.
+  - **Exposure during the 6m52s stopped window (13:38:54–13:45:46 UTC):** all
+    three positions held under their venue-native stops only, each verified
+    armed at Bybit before the first unit stopped — `VANRYUSDT` @ `0.002831`,
+    `LAUSDT` @ `0.03769`, `ESPUSDT` @ `0.04097`. Sizes and entries were
+    identical before and after (`2312823 @ 0.00432417`, `497331.9 @ 0.05586281`,
+    `329720 @ 0.06847431`): no trade was forced and nothing was injected into
+    the sleeve's forward record. The known LONG-paper drain overrun did not
+    recur; the fleet quiesced cleanly in 97s.
+  - What this build fixes, both observed live in the journal before the deploy:
+    (1) **the sleeve was rebalancing to its own P&L.** `_carry_target_plan`
+    recomputed `weight × live_equity × multiplier` every cycle against a 0.1%
+    dead-band, so with `book`, `gross`, and `standing` all constant, equity was
+    the only mover — and its ±0.155% per-cycle wander cleared that band almost
+    every time. Measured 2026-07-30 00:00–13:37 UTC: 208 `carry resize: depth
+    rescale` notifications, zero strategy exits, against a daily history of 1
+    (07-28) → 23 (07-29). At the measured 15.56bp round trip that is ≈9%/yr of
+    the account paid for tracking error a daily-rebalance sleeve cannot use.
+    Sizing now anchors to the equity as of the decision and the dead-band is 5%
+    of standing notional. (2) **the same reduction was announced twice.** The
+    notification path reused the reduction *admission* predicate, which compares
+    current kernel state against the last venue snapshot and therefore trips
+    after every fill by construction; a `settling` state now debounces the
+    report. Ruled out a genuine problem first: 1,556 of 1,556 journaled venue
+    snapshots were clean, and every ⚠️→✅ gap was under 14s.
+  - Known defects NOT fixed in this build, all pre-existing: the CARRY cycle
+    overruns its 60s interval by 120–175s every cycle (overrun #437 by 13:36
+    UTC), logged under the misleading `long_native_event_demo_daemon` logger
+    because the daemons share a base class — this is why cycles land ~3 min
+    apart rather than every 60s. The public linear WebSocket logs `ping/pong
+    timed out` roughly every 5 minutes. A single `native protection health is
+    stale` RuntimeError at 11:05 UTC returned one request to pending.
 - **2026-07-29 18:24 UTC — installed commit `63f32765b` (Telegram observability
   and alert-noise fixes), deployed through the STAGED path with an open
   position.** Owner authorization: the "check telegram logs for errors and fix
