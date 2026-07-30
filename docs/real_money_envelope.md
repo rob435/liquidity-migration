@@ -464,8 +464,18 @@ outages. This is intended — it is the correct response to being blind — but 
 will be visible, and the 15s bound should be tuned against observed gap
 durations rather than left at a guess.
 
-**Closes B2 — the account-level daily loss halt.**
-`liquidity_migration/account_loss_guard.py` + 14 tests.
+**Closes B2 and B13 — the account-level daily loss halt, wired to a flatten.**
+`liquidity_migration/account_loss_guard.py` + 14 tests, with
+`max_daily_loss_usdt` on `AccountRiskPolicy` so the ceiling is bound into the
+operational profile and hashed into the authority receipt — it cannot be raised
+without invalidating the deploy authority. The owner loop evaluates the guard on
+each capital refresh and, on `TRIPPED`, publishes one `run_safety_flat_once`:
+the same durable all-flat path a native-protection breach uses, where reductions
+bypass every notional cap and the health chain, so a `BLOCKED` owner can still
+close. Published once rather than per cycle, or redundant flats queue behind the
+first. `_object` gained optional-field support so adding the knob cannot brick a
+profile that predates it — a required field would have stopped the deployed
+owner from starting.
 
 **Partially closes B15 — the escalation half.**
 `liquidity_migration/wedged_command_watch.py` + 9 tests. A `commanded` order
