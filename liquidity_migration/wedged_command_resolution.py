@@ -57,6 +57,8 @@ __all__ = [
     "RESOLUTION_REJECTION_KEY",
     "WedgeEvidence",
     "WedgedCommandResolutionRefused",
+    "describe_wedges",
+    "main",
     "probe_wedged_command",
     "resolve_wedged_command",
 ]
@@ -380,3 +382,111 @@ _KIND_ADVICE = {
         "journal-proven never dispatched; still probed before any resolution"
     ),
 }
+
+
+# --------------------------------------------------------------------------
+# Operator entry point
+# --------------------------------------------------------------------------
+
+
+def _parser() -> Any:
+    import argparse  # noqa: PLC0415 - only the CLI path needs it
+
+    from .venue_realm import VenueRealm  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--account-root", required=True)
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument(
+        "--realm",
+        default=VenueRealm.DEMO.value,
+        choices=tuple(realm.value for realm in VenueRealm),
+        help="Realm to probe. Omitting it selects demo and never mainnet.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("report", help="List wedged commands. Reads only.")
+    probe = commands.add_parser("probe", help="Read venue truth for one command. Reads only.")
+    probe.add_argument("--command-id", required=True)
+    resolve = commands.add_parser(
+        "resolve", help="Terminalize one wedged command on evidence."
+    )
+    resolve.add_argument("--command-id", required=True)
+    resolve.add_argument("--operator", required=True, help="Who is authorizing this.")
+    resolve.add_argument("--reason", required=True, help="What they checked, and what they saw.")
+    resolve.add_argument(
+        "--authorize-absent-order",
+        action="store_true",
+        help=(
+            "Required only when the venue reports nothing at all under this id. "
+            "Absence is strong evidence, not proof: confirm the account by hand first."
+        ),
+    )
+    return parser
+
+
+def main(argv: Any = None) -> int:
+    import json  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    from .account_kernel import AccountExecutionKernel  # noqa: PLC0415
+    from .bybit import BybitPrivateClient, resolve_private_credentials  # noqa: PLC0415
+    from .logging_setup import ensure_default_log_handler  # noqa: PLC0415
+    from .venue_realm import VenueRealm, venue_realm  # noqa: PLC0415
+
+    ensure_default_log_handler()
+    args = _parser().parse_args(argv)
+    realm = venue_realm(args.realm)
+    kernel = AccountExecutionKernel(args.account_root, account_id=args.account_id)
+    now_ns = time.time_ns()
+
+    if args.command == "report":
+        lines = describe_wedges(list(kernel._state_ref().orders.values()), now_ns=now_ns)
+        print(json.dumps({"wedged": list(lines)}, indent=2, sort_keys=True))
+        return 0
+
+    api_key, api_secret = resolve_private_credentials(realm=realm)
+    if not api_key or not api_secret:
+        print("realm credentials are not present in this environment", file=sys.stderr)
+        return 2
+    # Read-only: no mutation lease is passed, so this client cannot place,
+    # cancel, or amend anything even if a later edit tried to.
+    client = BybitPrivateClient(
+        category="linear",
+        testnet=False,
+        demo=realm is VenueRealm.DEMO,
+        realm=realm,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+
+    if args.command == "probe":
+        order = kernel._state_ref().orders.get(args.command_id)
+        if order is None:
+            print(f"unknown command {args.command_id!r}", file=sys.stderr)
+            return 2
+        evidence = probe_wedged_command(
+            client=client, command_id=args.command_id, symbol=order.symbol
+        )
+        print(json.dumps(evidence.as_metadata(), indent=2, sort_keys=True))
+        return 0
+
+    try:
+        evidence = resolve_wedged_command(
+            kernel=kernel,
+            client=client,
+            command_id=args.command_id,
+            operator=args.operator,
+            reason=args.reason,
+            authorize_absent=args.authorize_absent_order,
+            now_ns=now_ns,
+        )
+    except WedgedCommandResolutionRefused as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps({"resolved": args.command_id, **evidence.as_metadata()}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

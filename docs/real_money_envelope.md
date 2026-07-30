@@ -1,10 +1,18 @@
 # Real-Money Envelope
 
 Blocker list and controls for putting real capital behind CARRY. Written
-2026-07-30 from a five-way subsystem audit. No mainnet code path exists yet.
+2026-07-30 from a five-way subsystem audit; the code path was built the same
+day and this file updated with it.
 
 **Config:** CARRY only (LONG deferred behind B3), existing main account,
-$2,500 ceiling, $250 daily loss limit.
+**ceiling anchored to account equity** — initial margin ≤ equity, gross ≤ 2×
+equity, daily loss 10% of equity. No hard money amount binds anything: the
+`2500.0` in `configs/operational.mainnet.json` is the declared reference the
+load-time envelope proof runs against, and every cap is a ratio of it.
+
+**Built, not armed.** The path exists and is tested; `REAL_MONEY` is unset,
+no credentials have been written, and nothing is deployed. §6 is the owner's
+remaining work.
 
 ---
 
@@ -91,18 +99,64 @@ Bybit demo prices are real, fills are not.
 | | What | Where |
 | --- | --- | --- |
 | B2/B13 | Account-level daily loss halt, wired to `run_safety_flat_once` | `account_loss_guard.py` |
-| B4 | Sizing clamped to `min(anchored_equity, capital_reference_usdt)` | `carry_demo.py` |
+| B4 | Envelope anchored to observed equity; caps re-proved at each rebase | `equity_anchored_envelope.py`, `operational_profile.py` |
+| B5 | Post-create stop assertion; repair on the spot, else latch and flatten | `venue_protection.py`, `bybit_execution_adapter.py` |
+| B6 | Protection re-verification is per-symbol, not account-gated | `account_reconcile.py`, `venue_protection.py` |
+| B7 | A void `max_leverage` is refused at rule-freeze time | `venue_instrument_rules.py` |
+| B8 | Endpoint asserted post-construction, now for **both** realms | `bybit.py` |
+| B9/B10/B12 | `VenueRealm`, explicit resolver, third `ExecutionEnvironment` member | `venue_realm.py`, `execution_environment.py` |
+| B11 | Universe and accounting receipts carry the realm they were read from | `account_candidate_universe.py`, `account_venue_accounting.py` |
 | B14 | 15s book freshness bound; skips reach health | `account_service_runner.py` |
-| B8 | Endpoint asserted post-construction | `bybit.py` |
 | B15a | Wedged-command detection | `wedged_command_watch.py` |
-| B17 | Downgraded — probe already gated by `BybitPrivateClient.__post_init__` | — |
+| B15b | Exits unblocked for a wedged symbol; operator-authorized terminalization | `account_kernel.py`, `account_service.py`, `wedged_command_resolution.py` |
+| B16 | Degraded-but-alive startup over open exposure | `account_service_runner.py` |
+| B17 | Rules from the read-only endpoint; the order probe refuses off demo | `venue_instrument_rules.py`, `demo_rule_probe.py`, `deploy_vps_live.sh` |
 
-**B4 detail:** producers size off live venue equity; the six caps are calibrated
-against a fixed `capital_reference_usdt`. Unclamped, fund below the reference and
+**B4 detail:** producers size off live venue equity while the six caps were
+calibrated against a fixed `capital_reference_usdt`. Fund below the reference and
 every cap sits above anything reachable; grow above it and the load-time envelope
-proof (`operational_profile.py:290-424`) silently stops being true. Setting
-`capital_reference_usdt = 2500` is what holds the producer to $2,500 on a larger
-balance.
+proof silently stops being true. The profile was always a set of *ratios* with
+the reference as its scale, so `capital_reference.mode = "account_equity"` lets
+the reference track observed equity and rescales every absolute cap with it —
+re-running the proof at each new reference rather than arguing from linearity,
+because `max_leverage` and `quantity_tolerance` are exactly what such an argument
+would miss. Contraction is immediate, expansion is dead-banded at 5%, unknown
+equity moves nothing, and a floor keeps a near-zero balance from producing a
+degenerate envelope. The producer's own clamp is disabled in this mode: the
+owner's equity-anchored caps are what bind the book.
+
+**B5 detail:** atomic arming is a Bybit behaviour, not a system guarantee. The
+adapter now reads position truth back at the create boundary. A dropped stop is
+installed on the spot at the exact price the command already carried; when it
+cannot be installed the symbol is latched, new exposure stops immediately, and
+the next reconciliation converts the latch into the existing breach →
+software-flat path. Verification never raises into the ACK — losing the
+acknowledgement of a live order is worse than holding an unverified one.
+
+**B15b detail:** three independent parts, none of which resends anything. A
+symbol whose every working order is wedged admits reduce-only commands sized
+against the *reconstructed position alone* (counting the wedged quantity is what
+produced the 110017 reject loops); `converge_once` steps over an unresendable
+wedge instead of starving every other symbol; and `ops.sh wedged-command`
+terminalizes one on venue evidence. A live order at the venue refuses outright,
+an unreadable venue refuses, unreconstructed fills refuse, the venue's own
+terminal status resolves on its own evidence, and total absence resolves only
+under an explicit operator authorization naming who checked and why.
+
+**B16 detail:** `Restart=always` plus a strict startup check was a 2-second crash
+loop during which nothing ran — no reconciliation, no protection, no exits — with
+the position at the venue behind only its native stop. Five startup checks now
+degrade instead of exiting, latching the failure into published health (which
+already refuses exposure-increasing batches) while exits and the safety flat stay
+available. A **flat** account with a broken startup check still exits loudly.
+
+**B17 detail:** the demo probe places live PostOnly orders up to 200 USDT per
+symbol and the rollout triggers it past half the receipt's lifetime. Off demo,
+rules come from `get_instruments_info` — read-only, no lease, no exposure — and
+the artifact records `venue_declared` rather than `probe_verified`, because that
+is a genuinely weaker evidence standard. Undersized entries are rejected by the
+venue at submit rather than pre-empted locally: a rejected order, not a surprise
+position.
 
 **B14 behaviour change:** owner health now degrades during feed outages instead
 of publishing `HEALTHY` while protection is inoperative. Blocks new entries for
@@ -112,41 +166,11 @@ the duration. The 15s bound is a guess — tune on observed gap durations.
 
 **B3 — no per-sleeve capital partition.** `max_component_gross_notional_usdt` is
 account-wide despite the name (`account_kernel.py:2049`). One sleeve can consume
-the whole envelope. Blocks running CARRY and LONG together.
-
-**B5 — stop atomicity unverified against mainnet.** A venue behaviour, not a
-system guarantee. If mainnet accepts the market order but drops the attached
-TP/SL, the position opens naked. Assert post-create; flatten if absent.
-
-**B6 — protection re-verification suspends on any mismatch.**
-`reconcile_venue_positions` runs only `if not mismatches`
-(`account_reconcile.py:255`), so verification stops exactly when the account is
-least understood. Compounding: scale-in trusts a *journal* record, not a venue
-read (`account_kernel.py:1371`). Run per-symbol for every legible venue row.
-
-**B15b — no exit from a wedged command.** `if symbol in working_symbols:
-continue` (`account_kernel.py:2106`) suppresses all command generation for a
-symbol, including exits. Wedges permanently via `BybitSubmissionUncertain`
-(`execution_adapters.py:739`) or `StaleUnsubmittedExposureCommand`
-(`execution_adapters.py:763`, reachable from OOM at `MemoryMax=512M`, a deploy,
-or a reboot). `converge_once` returns on the first commanded plan
-(`account_service.py:2060`), so one wedged early-alphabet symbol starves
-convergence for all others. Needs an operator-authorized journal transition —
-**do not relax no-blind-resend**; the command may correspond to a live order.
-
-**B16 — startup strictness plus `Restart=always` is a crash loop.**
-`require_startup_reconciliation_safe` (`account_service_runner.py:584`) aborts on
-any mismatch; during the loop nothing runs — no reconciliation, no protection, no
-exits. Needs a degraded-but-alive mode.
-
-**B7** — `rules.max_leverage <= 0` silently voids the venue leverage cap
-(`account_kernel.py:2006`). **B9** — credential realm never verified, only
-presence (`operational_runtime_authority.py:1012`). **B10** —
-`ExecutionEnvironment` is two-valued, ~12 assuming call sites. **B11** —
-universe pinned to `api-demo` (`account_candidate_universe.py:632`);
-`account_venue_accounting.py:693` hardcodes `"environment": "demo"` into the
-reconciliation receipt. **B12** — `BybitPrivateClient.demo` defaults `True`,
-`BybitMarketData.demo` defaults `False`.
+the whole envelope. Blocks running CARRY and LONG together — which is why the
+CARRY producer is the only one whose `--execution-environment` accepts
+`mainnet`, and why the real-money authority profile authorizes only the mainnet
+owner and the mainnet CARRY unit. LONG cannot be pointed at real capital by a
+flag, which is a stronger gate than this note.
 
 ### Hardening
 
@@ -161,17 +185,23 @@ reconciliation receipt. **B12** — `BybitPrivateClient.demo` defaults `True`,
 
 ## 4. Readiness
 
-Fail-closed for *new* exposure. Fail-open on managing existing exposure: B15b
-can strand a position, B14's underlying data path and B16 can leave the owner
-blind or absent, and B3/B5/B6 remain.
+Fail-closed for *new* exposure, and no longer fail-open on managing existing
+exposure: B5, B6, B15b and B16 are closed, so a stranded position, a suspended
+stop proof, a frozen symbol, and an absent owner each have a named answer. B3
+remains, which is why only CARRY may address the mainnet owner.
 
 The venue-native stop is unaffected by any local failure, bounding the tail at
 `declared_stop_loss_fraction` (0.35) per position. That makes a bounded Tier-1
 stake survivable; it does not make a sized allocation safe.
 
-Close B5, B6, B15b, B16 before capital. A dedicated subaccount would put the
-ceiling at the venue rather than in software — declined, so the clamp in B4 is
-the only thing holding size.
+**Still unproven, and unprovable before capital:** every fill in the record is
+simulated. Bybit demo prices are real, its fills are not. B5's post-create
+assertion has never run against a mainnet key, and neither has anything else
+here — the code path is tested, the *venue behaviour* it asserts is not. That is
+what Tier 1 buys.
+
+A dedicated subaccount would put the ceiling at the venue rather than in
+software — declined, so the equity-anchored caps in B4 are what hold size.
 
 ---
 
@@ -190,17 +220,34 @@ Tier 1 buys real fills, not returns. Any breach drops to 0, not one tier down.
 
 ## 6. Arming (owner-executed)
 
-1. Confirm the account has no manual or open orders —
-   `require_bybit_demo_order_ownership` (`account_service_bybit.py:280`) refuses
-   to start otherwise.
+Every step below is the owner's. Nothing in this repository sets `REAL_MONEY`,
+writes a credential, or activates a mainnet unit.
+
+1. Confirm the account has no manual position or open order.
+   `require_bybit_demo_order_ownership` refuses to start otherwise — and under
+   B16 it now degrades rather than crash-loops if it fails over open exposure,
+   which is a worse thing to discover than a clean refusal.
 2. API key: contract trading only, **withdrawal disabled**, IP-allowlisted to
    the VPS.
-3. Write credentials to the VPS by hand, root-owned `0600`.
-4. `capital_reference_usdt = 2500`; recalibrate all six caps against it.
-5. `max_daily_loss_usdt = 250`.
-6. Issue a real-money authority receipt with ceiling and expiry.
-7. Staged install, then activate at Tier 1.
+3. Write `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` and `REAL_MONEY=true`
+   to `/etc/liquidity-migration/bybit-mainnet.env` by hand, root-owned `0600`.
+   These are deliberately *different variables* from the demo pair, so a stale
+   demo key cannot authenticate a mainnet run.
+4. Install `configs/operational.mainnet.json`. Nothing to recalibrate: every cap
+   is a ratio of observed equity.
+5. Freeze mainnet instrument rules read-only:
+   `scripts/freeze_venue_instrument_rules.py --realm mainnet`. Do **not** run
+   the demo order probe; it refuses off demo by name.
+6. Freeze the candidate universe from the mainnet endpoint (`--realm mainnet`),
+   so it is not labelled — or later loaded as — demo evidence.
+7. Issue the real-money authority receipt:
+   `--profile real-money`, the distinct acknowledgement constant
+   `REAL_MONEY_OWNER_ACKNOWLEDGEMENT`, `--capital-ceiling-mode
+   account_equity_multiple --capital-ceiling-value 1.0`, and an explicit
+   `--authority-seconds` no greater than 30 days. All three are mandatory;
+   there is no unbounded ceiling and no indefinite authority.
+8. Staged install, then activate at Tier 1.
 
-Step 7 only after B17's deploy-time rule probe is confirmed inert for the realm —
-it places live orders up to 200 USDT when rules pass half-life
-(`deploy_vps_live.sh:1052`).
+The deploy-time order probe is already refused for a non-demo realm
+(`DEPLOY_VENUE_REALM`), so step 8 cannot spend money as a side effect of
+shipping code.

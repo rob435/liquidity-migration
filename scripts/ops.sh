@@ -35,6 +35,9 @@ Safe operator commands:
                                issue narrow demo or demo+paper authority
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
+  wedged-command [ARGS...]     report/probe wedged order commands (read-only)
+  wedged-command --execute resolve [ARGS...]
+                               terminalize one wedged command on venue evidence
   test [PYTEST_ARGS...]        run pytest
   deploy --execute MODE        run install, activation, guarded rollout, or reset recovery
   help                         show this help and do nothing else
@@ -264,6 +267,19 @@ case "$command" in
       set -- --account-root "$REPO_DIR/data/bybit-account-execution"
     fi
     remote_python_script scripts/check_kill_criteria.py "$@"
+    ;;
+  wedged-command)
+    # B15b. `report` and `probe` read only. `resolve` writes one journal
+    # transition and never resends an order; it refuses outright when the
+    # venue still holds the order or cannot be read.
+    if [[ "${1:-}" == "--execute" ]]; then
+      shift
+      [[ "${1:-}" == "resolve" ]] \
+        || die_usage "wedged-command --execute is valid only before the resolve subcommand"
+    elif [[ "${1:-}" == "resolve" ]]; then
+      die_usage "wedged-command resolve writes a journal transition; prefix it with --execute"
+    fi
+    remote_python_module liquidity_migration.wedged_command_resolution "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"
