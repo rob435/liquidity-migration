@@ -63,8 +63,8 @@ case "${EXECUTION_ENVIRONMENT:-}" in
             echo "A target producer must not receive venue credentials." >&2
             exit 2
         fi
-        case "${REAL_MONEY:-}" in
-            ""|0|false|FALSE|no|NO|off|OFF) ;;
+        case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
+            ""|0|false|no|off) ;;
             *)
                 echo "A target producer must not receive REAL_MONEY; it submits no orders." >&2
                 exit 2

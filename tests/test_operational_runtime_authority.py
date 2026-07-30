@@ -1351,9 +1351,17 @@ def test_managed_unit_inactivity_observer_checks_exact_manifest(
     authority.require_managed_units_inactive(systemctl_path=systemctl)
 
     assert observed == list(authority.ISSUANCE_QUIESCENCE_UNITS)
-    assert len(observed) == 14
+    assert len(observed) == 17
     assert set(authority.AUTHORIZED_UNITS).issubset(observed)
-    assert set(observed) - set(authority.AUTHORIZED_UNITS) == {
+    # The mainnet fleet must be here too. Re-rendering a dial and re-issuing is
+    # the documented workflow; doing it while the funded owner holds positions
+    # would publish new limits the running process never adopts. The reset
+    # tool's own inventory still excludes them on purpose -- its job is erasing
+    # account history and the funded journal must stay unreachable from it.
+    assert set(authority.REAL_MONEY_AUTHORIZED_UNITS).issubset(observed)
+    assert set(observed) - set(authority.AUTHORIZED_UNITS) - set(
+        authority.REAL_MONEY_AUTHORIZED_UNITS
+    ) == {
         "liquidity-migration-demo-liveness.timer",
         "liquidity-migration-continuous-hedge.timer",
         "liquidity-migration-continuous-rmom-refresh.timer",

@@ -376,3 +376,83 @@ def test_the_demo_profile_stays_unpartitioned() -> None:
     )
     assert profile.account_risk.sleeve_limits == ()
     assert profile.account_risk.to_policy().sleeve_limits == ()
+
+
+def test_a_sleeve_over_its_share_cannot_veto_another_sleeve_shrinking(
+    tmp_path: Path,
+) -> None:
+    """The partition must never be the reason a book cannot come down.
+
+    Found by adversarial review. The check judged every sleeve in the projected
+    book, so a sleeve already over its share rejected *another* sleeve's
+    de-risking batch whenever strict risk reduction could not be proven -- and
+    it cannot be proven while a submission is live, because the aggregate then
+    sits above the reconstructed position. A partial exit was blocked by a
+    limit that exists to bound entries.
+    """
+
+    kernel = _kernel(tmp_path)
+    opened = _submit(
+        kernel,
+        "batch-1",
+        [_target(sleeve="carry", qty=55.0), _target(sleeve="long", qty=10.0, symbol="CUSDT")],
+        _policy(),
+    )
+    assert opened.accepted, opened.rejection_keys
+
+    # Equity contracts and the envelope rebases the partition down under the
+    # book CARRY already holds: 550 USDT against a share that is now 400.
+    contracted = AccountRiskPolicy(
+        max_component_gross_notional_usdt=1_000.0,
+        max_account_gross_notional_usdt=1_000.0,
+        max_symbol_notional_usdt=1_000.0,
+        max_initial_margin_usdt=500.0,
+        max_leverage=10.0,
+        sleeve_limits=(
+            SleeveCapitalLimit("carry", 400.0, 200.0),
+            SleeveCapitalLimit("long", 200.0, 100.0),
+        ),
+    )
+
+    # LONG halves its own component. It touches nothing CARRY owns.
+    reduced = _submit(
+        kernel,
+        "batch-2",
+        [_target(sleeve="long", qty=5.0, symbol="CUSDT", revision="2")],
+        contracted,
+    )
+    assert reduced.accepted, reduced.rejection_keys
+    assert not any("carry" in key for key in reduced.rejection_keys)
+
+
+def test_a_sleeve_over_its_share_still_cannot_grow(tmp_path: Path) -> None:
+    """The other half of the same rule: relief is not permission."""
+
+    kernel = _kernel(tmp_path)
+    assert _submit(kernel, "batch-1", [_target(sleeve="carry", qty=55.0)], _policy()).accepted
+
+    contracted = AccountRiskPolicy(
+        max_component_gross_notional_usdt=1_000.0,
+        max_account_gross_notional_usdt=1_000.0,
+        max_symbol_notional_usdt=1_000.0,
+        max_initial_margin_usdt=500.0,
+        max_leverage=10.0,
+        sleeve_limits=(SleeveCapitalLimit("carry", 400.0, 200.0),),
+    )
+    grown = _submit(
+        kernel,
+        "batch-2",
+        [_target(sleeve="carry", qty=56.0, revision="2")],
+        contracted,
+    )
+    assert not grown.accepted
+    assert any(key.endswith("sleeve_gross_limit:carry") for key in grown.rejection_keys)
+
+    # Coming down toward the share is allowed even while still above it.
+    toward = _submit(
+        kernel,
+        "batch-3",
+        [_target(sleeve="carry", qty=50.0, revision="3")],
+        contracted,
+    )
+    assert toward.accepted, toward.rejection_keys

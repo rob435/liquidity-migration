@@ -434,8 +434,17 @@ def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
     return api_key_info
 
 
-def _load_authority_receipt() -> Mapping[str, Any] | None:
-    """The installed authority receipt, or None when there is none to read."""
+def _load_authority_receipt(*, realm: VenueRealm) -> Mapping[str, Any] | None:
+    """The installed authority receipt, or None when there is none to read.
+
+    Absence is normal off the deployed host, so on demo this returns ``None``
+    and the ceiling and expiry checks are simply inert. On **mainnet** it is
+    not: those two checks are the only thing comparing the live book to what
+    the owner actually authorized, and a receipt that is momentarily
+    unreadable — replaced mid-read during a re-issue, a mode change, a partial
+    write — would otherwise silently remove both limits for the whole lifetime
+    of the process. Unknown safety-critical state fails closed.
+    """
 
     try:
         from .operational_runtime_authority import (  # noqa: PLC0415 - optional at runtime
@@ -443,9 +452,20 @@ def _load_authority_receipt() -> Mapping[str, Any] | None:
             load_authorization_receipt,
         )
 
-        return load_authorization_receipt(DEFAULT_RECEIPT)
-    except Exception:  # noqa: BLE001 - absence is normal off the deployed host
+        receipt = load_authorization_receipt(DEFAULT_RECEIPT)
+    except Exception as exc:  # noqa: BLE001 - absence is normal off the deployed host
+        if realm is VenueRealm.MAINNET:
+            raise RuntimeError(
+                "refusing to run the funded owner without a readable authority "
+                f"receipt: the capital ceiling and expiry are unenforceable ({exc})"
+            ) from exc
         return None
+    if realm is VenueRealm.MAINNET and str(receipt.get("profile") or "") != "real-money":
+        raise RuntimeError(
+            "the installed authority receipt is not a real-money receipt; the "
+            "funded owner would run with no ceiling and no expiry"
+        )
+    return receipt
 
 
 def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
@@ -981,7 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
     # Read once at startup. The receipt is immutable and mode-0400/0640; a
     # runtime that could not read it simply has no ceiling to cross-check
     # against, which is the demo/paper case and not an error there.
-    authority_receipt = _load_authority_receipt()
+    authority_receipt = _load_authority_receipt(realm=realm)
     loss_guard_flat_published = False
     try:
         while True:

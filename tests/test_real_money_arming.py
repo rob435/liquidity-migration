@@ -102,18 +102,20 @@ def test_the_template_parses_as_a_strict_systemd_environment_file() -> None:
 def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
     dials = parse_real_money_dials(
         {
-            "RM_MAX_LEVERAGE": "3.0",
-            "RM_ENTRY_LEVERAGE": "3.0",
-            "RM_ACCOUNT_GROSS_MULTIPLE": "3.0",
+            "RM_MAX_LEVERAGE": "2.0",
+            "RM_ENTRY_LEVERAGE": "1.6",
+            "RM_ACCOUNT_GROSS_MULTIPLE": "1.6",
             "RM_CARRY_GROSS_SHARE": "0.5",
+            "RM_CARRY_NOTIONAL_MULTIPLIER": "0.7",
+            "RM_LONG_NOTIONAL_MULTIPLIER": "0.3",
         }
     )
-    assert dials.max_leverage == 3.0
+    assert dials.max_leverage == 2.0
     _data, profile = render_real_money_profile(dials)
-    assert profile.account_risk.max_leverage == 3.0
-    assert profile.carry.entry_leverage == 3.0
+    assert profile.account_risk.max_leverage == 2.0
+    assert profile.carry.entry_leverage == 1.6
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(
-        3.0 * profile.capital_reference_usdt
+        1.6 * profile.capital_reference_usdt
     )
     carry = next(
         limit for limit in profile.account_risk.sleeve_limits if limit.sleeve == "carry"
@@ -129,20 +131,19 @@ def test_lowering_leverage_without_lowering_gross_names_the_dial_to_move() -> No
     with pytest.raises(
         ValueError, match="RM_ACCOUNT_GROSS_MULTIPLE .* cannot exceed RM_ENTRY_LEVERAGE"
     ):
-        render_real_money_profile(RealMoneyDials(max_leverage=3.0, entry_leverage=1.5))
+        render_real_money_profile(RealMoneyDials(entry_leverage=1.5))
     # Lowering gross to match is what the message asks for. The producers have
     # to come down with it -- less gross is less book -- and the proof says so
     # by naming the sleeve that no longer fits.
     _data, profile = render_real_money_profile(
         RealMoneyDials(
-            max_leverage=3.0,
             entry_leverage=1.5,
             account_gross_multiple=1.5,
             carry_notional_multiplier=0.7,
             long_notional_multiplier=0.3,
         )
     )
-    assert profile.account_risk.max_leverage == 3.0
+    assert profile.account_risk.max_leverage == 2.0
 
 
 #: (gross multiple, entry leverage, carry multiplier, long multiplier). Each is
@@ -151,8 +152,8 @@ _COHERENT_DIALS = (
     (1.0, 1.0, 0.5, 0.2),
     (1.0, 2.0, 0.5, 0.2),
     (1.5, 1.5, 0.7, 0.3),
+    (1.8, 1.8, 0.9, 0.35),
     (2.0, 2.0, 1.0, 0.4),
-    (3.0, 3.0, 1.6, 0.6),
 )
 
 
@@ -201,6 +202,7 @@ def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
         ({"carry_gross_share": 0.9}, "must leave room for the"),
         ({"carry_stop_loss_fraction": 1.0}, "must sit in \\(0, 1\\)"),
         ({"max_leverage": 0.0}, "RM_MAX_LEVERAGE must be finite and positive"),
+        ({"max_leverage": 5.0}, "RM_MAX_LEVERAGE cannot exceed 2"),
         ({"carry_max_new_entries_per_cycle": 0}, "must be a positive integer"),
     ],
 )
@@ -225,7 +227,8 @@ def test_every_render_is_reloadable_and_proved() -> None:
         RealMoneyDials(
             carry_gross_share=0.7, long_gross_share=0.2, long_notional_multiplier=0.2
         ),
-        RealMoneyDials(max_leverage=3.0, entry_leverage=3.0, account_gross_multiple=3.0),
+        RealMoneyDials(entry_leverage=1.8, account_gross_multiple=1.8,
+                       carry_notional_multiplier=0.9, long_notional_multiplier=0.35),
         RealMoneyDials(equity_fraction=0.25, long_notional_multiplier=0.1),
         RealMoneyDials(daily_loss_fraction=0.02, expand_dead_band_fraction=0.0),
         RealMoneyDials(equity_floor_usdt=1.0, carry_max_new_entries_per_cycle=1),
@@ -419,3 +422,100 @@ def test_the_scratch_environment_is_untouched_by_the_module_import() -> None:
     """Importing an arming tool must not arm anything."""
 
     assert os.environ.get("REAL_MONEY") is None
+
+
+def test_preflight_catches_an_empty_telegram_pair_before_arming(tmp_path: Path) -> None:
+    """The owner unit enables Telegram; an empty token is a start-up failure."""
+
+    body = TEMPLATE.read_text(encoding="utf-8")
+    credential = _env_file(tmp_path, "bybit-mainnet.env", body)
+    owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
+
+    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    row = next(check for check in results if check.name == "notifications")
+    assert not row.ok
+    assert "TELEGRAM_BOT_TOKEN" in row.detail
+
+    filled = _env_file(
+        tmp_path,
+        "bybit-mainnet-2.env",
+        body.replace("TELEGRAM_BOT_TOKEN=", "TELEGRAM_BOT_TOKEN=x").replace(
+            "TELEGRAM_CHAT_ID=", "TELEGRAM_CHAT_ID=1"
+        ),
+    )
+    results = preflight(credential_env=filled, owner_env=owner, check_sleeves=False)
+    assert next(check for check in results if check.name == "notifications").ok
+
+
+def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
+    tmp_path: Path,
+) -> None:
+    """Found by adversarial review: the likeliest arming mistake was invisible.
+
+    preflight printed the dial-derived envelope as a PASS row and separately
+    checked only that the installed profile *existed*, so editing a dial and
+    forgetting to re-render produced a green report describing an envelope
+    nothing enforced. The receipt does not catch it either: it hashes the env
+    file and the profile independently and never checks that one is the render
+    of the other.
+    """
+
+    from liquidity_migration.real_money_arming import main
+
+    installed = tmp_path / "risk-policy.json"
+    stale = _filled_credential_env(
+        tmp_path,
+        **{"RM_CARRY_GROSS_SHARE": "0.70", "RM_LONG_GROSS_SHARE": "0.20",
+           "RM_LONG_NOTIONAL_MULTIPLIER": "0.2"},
+    )
+    assert main(["render-profile", "--from-env", str(stale), "--execute",
+                 "--output", str(installed)]) == 0
+
+    owner = _env_file(
+        tmp_path,
+        "owner.env",
+        OWNER_TEMPLATE.read_text(encoding="utf-8").replace(
+            "ACCOUNT_RISK_POLICY_FILE=/etc/liquidity-migration/account-execution-mainnet/risk-policy.json",
+            f"ACCOUNT_RISK_POLICY_FILE={installed}",
+        ),
+    )
+    current_dir = tmp_path / "current"
+    current_dir.mkdir()
+    current = _filled_credential_env(current_dir)
+
+    results = preflight(credential_env=current, owner_env=owner, check_sleeves=False)
+    drift = next(row for row in results if row.name == "profile matches dials")
+    assert not drift.ok
+    assert "is not the one that would be enforced" in drift.detail
+
+    # Re-rendering from the current dials clears it.
+    assert main(["render-profile", "--from-env", str(current), "--execute",
+                 "--output", str(installed), "--overwrite"]) == 0
+    results = preflight(credential_env=current, owner_env=owner, check_sleeves=False)
+    assert next(row for row in results if row.name == "profile matches dials").ok
+
+
+def test_preflight_checks_the_state_roots_exist(tmp_path: Path) -> None:
+    """Issuance hard-requires them and nothing in the repository creates them."""
+
+    credential = _filled_credential_env(tmp_path)
+    roots = tmp_path / "state"
+    owner_body = OWNER_TEMPLATE.read_text(encoding="utf-8")
+    for key, name in (
+        ("ACCOUNT_EXECUTION_ROOT", "account"),
+        ("ACCOUNT_INTENT_INBOX_ROOT", "inbox"),
+        ("ACCOUNT_CAPTURE_ROOT", "capture"),
+    ):
+        line = next(ln for ln in owner_body.splitlines() if ln.startswith(f"{key}="))
+        owner_body = owner_body.replace(line, f"{key}={roots / name}")
+    owner = _env_file(tmp_path, "owner.env", owner_body)
+
+    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    row = next(check for check in results if check.name == "state roots")
+    assert not row.ok
+    assert "mkdir -p" in row.fix
+
+    for name in ("account", "inbox", "capture"):
+        (roots / name).mkdir(parents=True)
+    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    assert next(check for check in results if check.name == "state roots").ok

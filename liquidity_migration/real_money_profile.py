@@ -59,6 +59,12 @@ REAL_MONEY_DIAL_PREFIX = "RM_"
 _CONTINUOUS_NOTIONAL_MULTIPLIER = 0.001
 _CONTINUOUS_GROSS_SHARE = 0.01
 
+#: Hard ceiling on the leverage dial. Matches the real-money authority
+#: receipt's own ``account_equity_multiple`` bound: above 2x the wallet, what
+#: stops the book is the venue's margin engine rather than anything recorded
+#: here, and a limit that does not bind is theatre.
+MAX_REAL_MONEY_LEVERAGE = 2.0
+
 
 @dataclass(frozen=True, slots=True)
 class RealMoneyDials:
@@ -190,6 +196,14 @@ def _validate_dials(dials: RealMoneyDials) -> None:
             )
     if dials.equity_fraction > 1.0:
         raise ValueError("RM_EQUITY_FRACTION cannot exceed 1: the wallet is the envelope")
+    if dials.max_leverage > MAX_REAL_MONEY_LEVERAGE:
+        # Every other cap is expressed as a multiple of the reference and
+        # bounded by this one, so an unbounded leverage dial is an unbounded
+        # notional envelope wearing ratios. Above this the venue's liquidation
+        # engine, not the profile, is what stops the book.
+        raise ValueError(
+            f"RM_MAX_LEVERAGE cannot exceed {MAX_REAL_MONEY_LEVERAGE:g} on a funded account"
+        )
     if dials.expand_dead_band_fraction < 0.0 or dials.expand_dead_band_fraction >= 1.0:
         raise ValueError("RM_EXPAND_DEAD_BAND_FRACTION must sit in [0, 1)")
     if dials.entry_leverage > dials.max_leverage:

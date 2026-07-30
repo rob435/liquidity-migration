@@ -384,3 +384,145 @@ def test_issuance_still_requires_a_ceiling_and_an_expiry() -> None:
             {"mode": "account_equity_multiple", "value": 3.0}
         )
     assert runtime_authority.REAL_MONEY_MAX_AUTHORITY_SECONDS <= 30 * 24 * 60 * 60
+
+
+# --------------------------------------------------------------------------
+# Runtime verification is the UNIT's contract, not the profile's
+# --------------------------------------------------------------------------
+
+
+def _verify_runtime_environment(unit: str, environment: dict[str, str], monkeypatch) -> None:
+    """Call the runtime gate with a real-money receipt and one unit's env."""
+
+    payload = {
+        "profile": runtime_authority.REAL_MONEY_PROFILE,
+        "authorized_units": list(runtime_authority.REAL_MONEY_AUTHORIZED_UNITS),
+        "capital_ceiling": {"mode": "account_equity_multiple", "value": 1.0},
+        "created_ts_ns": 1,
+        "expires_ts_ns": 2**62,
+    }
+    monkeypatch.setattr(runtime_authority, "_load_receipt", lambda _p: (None, payload))
+    monkeypatch.setattr(
+        runtime_authority,
+        "_verify_bound_authorization_sources",
+        lambda *a, **k: (
+            runtime_authority._PROFILE_FIELDS[runtime_authority.REAL_MONEY_PROFILE],
+            False,
+        ),
+    )
+    for key in (
+        "REAL_MONEY",
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_REAL_API_SECRET",
+        "BYBIT_DEMO_API_KEY",
+        "BYBIT_DEMO_API_SECRET",
+        "ACCOUNT_RAW_MARKET_PERSISTENCE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    runtime_authority.verify_operational_authorization(
+        receipt_path="/unused",
+        repo_root="/unused",
+        machine_id_path="/unused",
+        unit=unit,
+    )
+
+
+_OWNER_ENV = {
+    "REAL_MONEY": "true",
+    "BYBIT_REAL_API_KEY": "placeholder",
+    "BYBIT_REAL_API_SECRET": "placeholder",
+    "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
+}
+_PRODUCER_ENV = {"ACCOUNT_RAW_MARKET_PERSISTENCE": "0"}
+
+
+def test_the_funded_owner_must_hold_the_switch_and_the_keys(monkeypatch) -> None:
+    _verify_runtime_environment(
+        runtime_authority.REAL_MONEY_OWNER_UNIT, _OWNER_ENV, monkeypatch
+    )
+    with pytest.raises(ValueError, match="REAL_MONEY to be explicitly armed"):
+        _verify_runtime_environment(
+            runtime_authority.REAL_MONEY_OWNER_UNIT,
+            {**_OWNER_ENV, "REAL_MONEY": "false"},
+            monkeypatch,
+        )
+    with pytest.raises(ValueError, match="missing its mainnet credentials"):
+        _verify_runtime_environment(
+            runtime_authority.REAL_MONEY_OWNER_UNIT,
+            {"REAL_MONEY": "true", "ACCOUNT_RAW_MARKET_PERSISTENCE": "0"},
+            monkeypatch,
+        )
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+    ],
+)
+def test_a_real_money_producer_starts_without_the_switch_or_the_keys(
+    unit: str, monkeypatch
+) -> None:
+    """Found by adversarial review: this used to be impossible.
+
+    The gate branched on the receipt's profile rather than on the unit, so it
+    demanded REAL_MONEY and the mainnet keys from *every* authorized unit --
+    including the two producers, whose unit files strip exactly those variables
+    and whose runners refuse to start with them. The two guards were mutually
+    unsatisfiable and both producers crash-looped forever.
+    """
+
+    _verify_runtime_environment(unit, _PRODUCER_ENV, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+    ],
+)
+def test_a_real_money_producer_is_refused_if_it_somehow_holds_order_authority(
+    unit: str, monkeypatch
+) -> None:
+    """The inverse is enforced too: relief is not permission."""
+
+    with pytest.raises(ValueError, match="must not inherit REAL_MONEY"):
+        _verify_runtime_environment(unit, {**_PRODUCER_ENV, "REAL_MONEY": "true"}, monkeypatch)
+    with pytest.raises(ValueError, match="must not inherit mainnet credentials"):
+        _verify_runtime_environment(
+            unit, {**_PRODUCER_ENV, "BYBIT_REAL_API_KEY": "leaked"}, monkeypatch
+        )
+
+
+def test_the_funded_owner_is_proved_to_have_inherited_raw_persistence_disabled(
+    monkeypatch,
+) -> None:
+    with pytest.raises(ValueError, match="authorized raw persistence mode"):
+        _verify_runtime_environment(
+            runtime_authority.REAL_MONEY_OWNER_UNIT,
+            {**_OWNER_ENV, "ACCOUNT_RAW_MARKET_PERSISTENCE": "1"},
+            monkeypatch,
+        )
+
+
+def test_authority_can_never_outlive_the_rules_it_is_reproved_against() -> None:
+    """Authority outliving its rules crash-looped the owner over open positions."""
+
+    from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
+
+    assert runtime_authority.REAL_MONEY_MAX_AUTHORITY_SECONDS <= REGISTERED_MAX_RULE_AGE_SECONDS
+
+
+def test_the_mainnet_fleet_must_be_down_before_authority_is_re_issued() -> None:
+    assert set(runtime_authority.REAL_MONEY_AUTHORIZED_UNITS).issubset(
+        runtime_authority.ISSUANCE_QUIESCENCE_UNITS
+    )
+    # The reset tool's own inventory still excludes them: its job is erasing
+    # account history, and the funded journal must stay unreachable from it.
+    from liquidity_migration.account_reset_receipt import MANAGED_UNITS
+
+    assert not set(runtime_authority.REAL_MONEY_AUTHORIZED_UNITS) & set(MANAGED_UNITS)

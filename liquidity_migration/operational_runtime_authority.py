@@ -28,9 +28,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .env_flags import env_flag, explicitly_false_or_unset, reject_ambiguous_flag
-from .account_reset_receipt import MANAGED_UNITS as ISSUANCE_QUIESCENCE_UNITS
+from .account_reset_receipt import MANAGED_UNITS as _RESET_MANAGED_UNITS
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
-from .candidate_rule_coverage import build_candidate_rule_coverage
+from .candidate_rule_coverage import (
+    REGISTERED_MAX_RULE_AGE_SECONDS,
+    build_candidate_rule_coverage,
+)
 from .deterministic_serialization import canonical_json
 from .execution_adapters import INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 from .maintenance_lock import acquire_inherited_locks
@@ -61,7 +64,15 @@ REAL_MONEY_PROFILE = "real-money"
 #: Real-money authority is never indefinite. An operator who armed the account
 #: and moved on should find it disarmed, not still running months later on a
 #: decision nobody has revisited.
-REAL_MONEY_MAX_AUTHORITY_SECONDS = 30 * 24 * 60 * 60
+#:
+#: It is bounded by the *rule* receipt's registered lifetime rather than by a
+#: round number, because ``_validate_environments`` re-proves candidate/rule
+#: coverage on every ``verify-runtime``. Authority outliving its rules meant a
+#: restart on day eight — a transient venue error under ``Restart=always`` is
+#: enough — failing verification and crash-looping the owner over open funded
+#: positions, with nothing reconciling, re-arming stops, or flattening. Tying
+#: the two together makes that state unreachable instead of merely unlikely.
+REAL_MONEY_MAX_AUTHORITY_SECONDS = int(REGISTERED_MAX_RULE_AGE_SECONDS)
 DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
     "liquidity-migration-bybit-carry-demo.service",
@@ -71,10 +82,26 @@ DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
 )
+#: The one unit with order authority on the funded account. Named separately
+#: because the runtime environment requirements differ by unit, not by profile:
+#: only this one may hold the arming switch and the mainnet keys.
+REAL_MONEY_OWNER_UNIT = "liquidity-migration-account-execution-mainnet.service"
 #: CARRY and LONG on their own owner. Both are admissible only because the
 #: profile partitions the envelope between them (B3); CONTINUOUS is retired and
 #: has no mainnet unit to authorize.
 REAL_MONEY_AUTHORIZED_UNITS = (
+    REAL_MONEY_OWNER_UNIT,
+    "liquidity-migration-bybit-carry-mainnet.service",
+    "liquidity-migration-bybit-long-mainnet.service",
+)
+#: Every unit that must be down before authority is issued. The reset tool's
+#: inventory deliberately omits the mainnet fleet — its whole job is erasing
+#: account history and the funded journal must stay unreachable from it — but
+#: for *issuance* that omission is a hole: re-rendering a dial and re-issuing
+#: is the documented workflow, and doing it while the funded owner holds
+#: positions would publish new limits the running process never adopts.
+ISSUANCE_QUIESCENCE_UNITS = (
+    *_RESET_MANAGED_UNITS,
     "liquidity-migration-account-execution-mainnet.service",
     "liquidity-migration-bybit-carry-mainnet.service",
     "liquidity-migration-bybit-long-mainnet.service",
@@ -1835,16 +1862,46 @@ def verify_operational_authorization(
     # that was valid when written is not evidence that it is valid now.
     require_real_money_authority_unexpired(payload)
     if real_money:
-        if explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
-            raise ValueError(
-                "real-money authorization requires REAL_MONEY to be explicitly armed"
-            )
-        if not (
-            os.environ.get("BYBIT_REAL_API_KEY") and os.environ.get("BYBIT_REAL_API_SECRET")
-        ):
-            raise ValueError("real-money runtime is missing its mainnet credentials")
+        # The requirement is the *unit's*, not the profile's. Only the owner
+        # submits orders, so only the owner may hold the arming switch and the
+        # keys. Demanding them from every authorized unit made the two mainnet
+        # producers unstartable: their unit files strip exactly these variables
+        # and their runners refuse to run with them, so the two guards were
+        # mutually unsatisfiable and both producers crash-looped forever.
+        if unit == REAL_MONEY_OWNER_UNIT:
+            if explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
+                raise ValueError(
+                    "real-money authorization requires REAL_MONEY to be explicitly armed"
+                )
+            if not (
+                os.environ.get("BYBIT_REAL_API_KEY")
+                and os.environ.get("BYBIT_REAL_API_SECRET")
+            ):
+                raise ValueError("real-money runtime is missing its mainnet credentials")
+        else:
+            # A real-money producer is held to the inverse, which is what its
+            # own runner already enforces one layer further in.
+            if not explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
+                raise ValueError(
+                    "a real-money target producer must not inherit REAL_MONEY; "
+                    "it publishes targets and submits nothing"
+                )
+            if os.environ.get("BYBIT_REAL_API_KEY") or os.environ.get(
+                "BYBIT_REAL_API_SECRET"
+            ):
+                raise ValueError(
+                    "a real-money target producer must not inherit mainnet credentials"
+                )
         if os.environ.get("BYBIT_DEMO_API_KEY") or os.environ.get("BYBIT_DEMO_API_SECRET"):
             raise ValueError("real-money runtime environment contains demo credentials")
+        if os.environ.get("ACCOUNT_RAW_MARKET_PERSISTENCE") != str(
+            profile_fields["demo_raw_value"]
+        ):
+            # The profile declares raw persistence disabled; prove the runtime
+            # inherited it, exactly as the demo and paper owners are proved.
+            raise ValueError(
+                "real-money runtime did not inherit the authorized raw persistence mode"
+            )
         return payload
     if not explicitly_false_or_unset(os.environ.get("REAL_MONEY")):
         raise ValueError("runtime environment enables or ambiguously sets REAL_MONEY")

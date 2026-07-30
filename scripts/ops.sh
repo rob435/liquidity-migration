@@ -281,8 +281,13 @@ case "$command" in
     # refuses any dial set that does not pass the load-time envelope proof.
     # Neither sets REAL_MONEY, writes a credential, issues authority, or starts
     # a unit -- every one of those is the owner's own act.
-    subcommand="${1:-preflight}"
-    case "$subcommand" in
+    # No argument means preflight, and it has to be *passed*: leaving argv
+    # empty ran the module with no subcommand and got an argparse usage error
+    # instead of the read-only report the operator asked for.
+    if [[ "$#" -eq 0 ]]; then
+      set -- preflight
+    fi
+    case "${1:-}" in
       preflight|render-profile) ;;
       *) die_usage "real-money subcommand must be preflight or render-profile" ;;
     esac

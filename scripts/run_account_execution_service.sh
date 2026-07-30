@@ -54,8 +54,11 @@ case "$ACCOUNT_VENUE_REALM" in
             echo "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." >&2
             exit 2
         fi
-        case "${REAL_MONEY:-}" in
-            1|true|TRUE|yes|YES|on|ON) ;;
+        # Vocabulary matches liquidity_migration/env_flags.py exactly, which
+        # lower-cases before comparing. A value every Python layer accepts must
+        # not make this shell gate crash-loop the owner.
+        case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) ;;
             *)
                 echo "ACCOUNT_VENUE_REALM=mainnet requires REAL_MONEY to be explicitly armed by the owner." >&2
                 exit 2
@@ -67,8 +70,8 @@ case "$ACCOUNT_VENUE_REALM" in
             echo "The demo owner must not receive mainnet credentials." >&2
             exit 2
         fi
-        case "${REAL_MONEY:-}" in
-            ""|0|false|FALSE|no|NO|off|OFF) ;;
+        case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
+            ""|0|false|no|off) ;;
             *)
                 echo "REAL_MONEY must be unset or explicitly false for the demo owner." >&2
                 exit 2

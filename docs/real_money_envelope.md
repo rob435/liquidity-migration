@@ -310,8 +310,16 @@ committed change, not a host edit.
 **10. Issue the real-money authority receipt:** `--profile real-money`, the
 distinct acknowledgement constant `REAL_MONEY_OWNER_ACKNOWLEDGEMENT`,
 `--capital-ceiling-mode account_equity_multiple --capital-ceiling-value 1.0`,
-and an explicit `--authority-seconds` no greater than 30 days. All three are
+and an explicit `--authority-seconds` no greater than **7 days**. All three are
 mandatory; there is no unbounded ceiling and no indefinite authority.
+
+Seven days rather than a round month because coverage of the instrument rules
+is re-proved on *every* start, and the rules receipt expires at seven. Authority
+outliving its rules meant a restart on day eight — a transient venue error under
+`Restart=always` is enough — failing verification and crash-looping the owner
+over open funded positions. So arming is a weekly ritual: re-freeze the rules,
+re-issue the receipt. Issuance requires the whole fleet, mainnet included, to be
+down first.
 
 **11. Activate at Tier 1.**
 

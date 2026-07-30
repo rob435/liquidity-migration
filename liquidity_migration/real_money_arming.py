@@ -161,6 +161,29 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
         detail = "not armed -- this is the switch that means 'trade my money'"
         fix = "set REAL_MONEY=true, by hand, when you intend to trade real capital"
     results.append(CheckResult("REAL_MONEY", armed, detail, fix))
+    # The mainnet owner unit sets TELEGRAM_ENABLED=1 and its runner exits
+    # rather than start half-notified. Without this check the owner discovers
+    # an empty token as a start-up failure *after* arming, which is the worst
+    # possible moment to learn it. There is no mainnet watchdog unit, so this
+    # is also the only channel that reports the owner is alive.
+    telegram = [
+        key for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not values.get(key, "").strip()
+    ]
+    results.append(
+        CheckResult(
+            "notifications",
+            not telegram,
+            "Telegram is configured"
+            if not telegram
+            else f"the owner unit enables Telegram but {', '.join(telegram)} is empty",
+            ""
+            if not telegram
+            else (
+                "fill both in, or the owner will refuse to start; there is no "
+                "mainnet watchdog unit, so this is the only alive signal"
+            ),
+        )
+    )
     return results
 
 
@@ -206,6 +229,46 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
     ]
 
 
+def _installed_profile_matches_dials(
+    *, dial_values: Mapping[str, str], installed_path: str
+) -> CheckResult:
+    """The single most likely arming mistake: edit a dial, forget to re-render.
+
+    Reporting the dial-derived envelope as a PASS row while the *installed*
+    profile enforces something else is worse than not reporting it at all: the
+    owner reads a 2x envelope off the terminal and arms a 4x one. The receipt
+    does not catch it either — it hashes the env file and the profile
+    independently and never checks that one is the render of the other.
+    """
+
+    path = Path(installed_path)
+    try:
+        installed = path.read_bytes()
+    except OSError:
+        return CheckResult(
+            "profile matches dials",
+            False,
+            f"{path} cannot be read, so the dials cannot be compared to it",
+            "render it: scripts/ops.sh real-money render-profile --execute --output <path>",
+        )
+    try:
+        rendered, _profile = render_real_money_profile(parse_real_money_dials(dial_values))
+    except ValueError as exc:
+        return CheckResult("profile matches dials", False, str(exc), "fix the dial, then re-render")
+    if rendered == installed:
+        return CheckResult(
+            "profile matches dials", True, "the installed profile is the render of these dials"
+        )
+    return CheckResult(
+        "profile matches dials",
+        False,
+        f"{path} is NOT the render of the dials in the env file; the envelope "
+        "reported above is not the one that would be enforced",
+        "re-render it: scripts/ops.sh real-money render-profile --execute "
+        f"--output {path} --overwrite, then re-issue the authority receipt",
+    )
+
+
 def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
     results: list[CheckResult] = []
     missing = [key for key in _OWNER_ENV_KEYS if not values.get(key, "").strip()]
@@ -239,6 +302,29 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "they must name the same frozen artifact",
             )
         )
+    # Issuance hard-requires these to exist, be directories, and be owned by
+    # the issuing user. Nothing in the repository creates them, so without this
+    # the owner discovers it as an issuance failure *after* arming.
+    missing_roots = [
+        key
+        for key in ("ACCOUNT_EXECUTION_ROOT", "ACCOUNT_INTENT_INBOX_ROOT", "ACCOUNT_CAPTURE_ROOT")
+        if values.get(key, "").strip() and not Path(values[key]).is_dir()
+    ]
+    results.append(
+        CheckResult(
+            "state roots",
+            not missing_roots,
+            "every mainnet root exists"
+            if not missing_roots
+            else f"missing directories: {', '.join(missing_roots)}",
+            ""
+            if not missing_roots
+            else (
+                "create them root-owned: mkdir -p "
+                + " ".join(values[key] for key in missing_roots)
+            ),
+        )
+    )
     artifacts = {
         "candidate universe": (
             values.get("ACCOUNT_SYMBOLS_FILE", ""),
@@ -321,6 +407,13 @@ def preflight(
     results.append(owner_result)
     if owner is not None:
         results.extend(_path_checks(owner))
+        installed_profile = owner.get("ACCOUNT_RISK_POLICY_FILE", "").strip()
+        if credentials is not None and installed_profile:
+            results.append(
+                _installed_profile_matches_dials(
+                    dial_values=credentials, installed_path=installed_profile
+                )
+            )
     if check_sleeves:
         results.extend(_sleeve_checks())
     return results

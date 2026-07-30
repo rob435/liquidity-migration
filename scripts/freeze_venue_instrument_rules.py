@@ -100,7 +100,13 @@ def main(argv: list[str] | None = None) -> int:
                 label="candidate-universe artifact",
                 require_single_link=False,
             )
-            candidate = load_candidate_universe(symbols_path, snapshot=snapshot)
+            # The realm matters here: the universe artifact records the realm
+            # it was frozen from and its loader refuses any other, so omitting
+            # this made a mainnet freeze impossible -- it demanded a demo
+            # universe while the coverage proof demanded a mainnet one.
+            candidate = load_candidate_universe(
+                symbols_path, snapshot=snapshot, realm=realm
+            )
         except Exception as exc:  # noqa: BLE001 - reported to the operator verbatim
             parser.error(
                 f"{symbols_path} is not a readable candidate-universe artifact ({exc}). "
