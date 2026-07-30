@@ -45,6 +45,43 @@ __all__ = [
     "validate_demo_order_permission",
 ]
 
+#: The only REST host this repository may address with private credentials.
+DEMO_REST_ENDPOINT = "https://api-demo.bybit.com"
+
+
+def _require_demo_endpoint(client: Any, what: str) -> None:
+    """Assert the realm we actually resolved to, rather than the one we asked for.
+
+    Every demo assertion elsewhere checks ``self.demo``/``self.testnet`` — the
+    flags we *pass in*. The host is then chosen entirely inside pybit's ``demo=``
+    kwarg contract, and nothing here has ever read back the result. That makes
+    the demo realm a third-party promise rather than an invariant this code
+    enforces: a pybit upgrade that renamed or dropped the kwarg, or a shim that
+    replaced ``HTTP``, would silently address mainnet while every local guard
+    still read "demo".
+
+    Today that fails closed only by luck — demo keys do not authenticate against
+    mainnet, so the exchange rejects it. The last line of defence should not be
+    someone else's auth error, and if mainnet credentials ever exist on this host
+    that luck runs in the wrong direction.
+
+    The check is scoped to real pybit transports by module, so the suite's many
+    hand-rolled doubles stay usable. ``test_pybit_still_exposes_the_demo_endpoint``
+    pins the other half of the contract — that a genuine pybit ``HTTP`` still
+    carries ``endpoint`` at all — so a silent removal fails the suite rather than
+    disarming this guard in production.
+    """
+
+    if not type(client).__module__.startswith("pybit"):
+        return
+    endpoint = str(getattr(client, "endpoint", "") or "").rstrip("/")
+    if endpoint != DEMO_REST_ENDPOINT:
+        raise RuntimeError(
+            f"{what} resolved to {endpoint or 'an unknown host'}; "
+            f"only {DEMO_REST_ENDPOINT} is permitted for private Bybit access"
+        )
+
+
 def resolve_demo_credentials() -> tuple[str | None, str | None]:
     """Resolve only the Bybit demo credential pair.
 
@@ -134,6 +171,7 @@ class BybitPrivateClient:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
+        _require_demo_endpoint(self._client, "BybitPrivateClient")
 
     def _assert_submit_allowed(self, action: str) -> None:
         """Require live canonical authority at the request-signing boundary."""

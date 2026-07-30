@@ -2474,3 +2474,46 @@ def test_kline_window_pager_reretries_a_transient_empty_window(monkeypatch) -> N
     client = bybit_market_data.BybitMarketData()
     rows = client.get_klines("BTCUSDT", "60", 0, 9 * interval_ms, limit=3)
     assert [int(row[0]) // interval_ms for row in rows] == list(range(9))
+
+
+def test_pybit_still_exposes_the_demo_endpoint() -> None:
+    """Pins the third-party half of the realm contract.
+
+    ``_require_demo_endpoint`` can only assert a host that pybit still reports.
+    If an upgrade renames or drops ``endpoint``, the guard would quietly become a
+    no-op in production and nothing else would notice — so the removal has to
+    fail here instead.
+    """
+
+    from pybit.unified_trading import HTTP
+
+    from liquidity_migration.bybit import DEMO_REST_ENDPOINT
+
+    demo = HTTP(testnet=False, demo=True, api_key="k", api_secret="s")
+    assert str(getattr(demo, "endpoint")).rstrip("/") == DEMO_REST_ENDPOINT
+
+    mainnet = HTTP(testnet=False, demo=False, api_key="k", api_secret="s")
+    assert str(getattr(mainnet, "endpoint")).rstrip("/") != DEMO_REST_ENDPOINT
+
+
+def test_private_client_refuses_a_transport_that_resolved_to_mainnet() -> None:
+    """The failure this guard exists for: every local flag still reads 'demo'
+    while the transport addresses mainnet."""
+
+    import pytest
+
+    from liquidity_migration import bybit
+
+    class _MainnetHTTP:
+        __module__ = "pybit.unified_trading"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.endpoint = "https://api.bybit.com"
+
+    original = bybit.HTTP
+    bybit.HTTP = _MainnetHTTP  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="only https://api-demo.bybit.com"):
+            bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
+    finally:
+        bybit.HTTP = original  # type: ignore[assignment]
