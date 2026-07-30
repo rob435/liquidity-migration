@@ -47,6 +47,7 @@ from .account_reconcile import (
     BybitAccountReconciler,
 )
 from .account_route import derive_account_route, ensure_account_route
+from .artifact_snapshot import read_stable_file
 from .execution_environment import (
     ExecutionEnvironment,
     account_id_for_environment,
@@ -95,6 +96,7 @@ from .account_loss_guard import (
 from .protection_engine import AccountProtectionEngine
 from .post_fill_markouts import PostFillMarkoutObserver
 from .venue_protection import AccountHealthChain, BybitNativeProtectionManager
+from .venue_instrument_rules import load_venue_rules_bytes
 from .venue_realm import REALM_CREDENTIAL_VARIABLES, VenueRealm, venue_realm
 
 _logger = logging.getLogger(__name__)
@@ -643,10 +645,24 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         owner_lease.close()
         raise
-    rules = load_demo_rules(
-        args.demo_rules_file,
-        max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
-    )
+    if realm is VenueRealm.DEMO:
+        rules = load_demo_rules(
+            args.demo_rules_file,
+            max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
+        )
+    else:
+        # B17. The demo receipt is produced by an order-placing probe. Off demo
+        # the rules come from the read-only instruments-info endpoint instead,
+        # and the loader refuses a receipt bound to any other realm.
+        rules = load_venue_rules_bytes(
+            read_stable_file(
+                Path(args.demo_rules_file).expanduser(),
+                label="venue instrument rules",
+                require_single_link=False,
+            ).data,
+            realm=realm,
+            max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
+        )
     policy = load_risk_policy(args.risk_policy_file)
     symbols_path = Path(args.symbols_file).expanduser()
     symbols = symbols_from_file(symbols_path)
@@ -812,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
         kernel=kernel,
         market_provider=CapturedBybitMarketProvider(recorder),
         snapshot_provider=snapshot_provider,
-        rules_provider=VerifiedBybitDemoRulesProvider(rules),
+        rules_provider=VerifiedBybitDemoRulesProvider(rules, environment=realm.value),
         risk_policy=policy,
         execution_adapter=BybitDemoExecutionAdapter(
             private_client,

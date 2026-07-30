@@ -22,6 +22,7 @@ from typing import Any, Mapping, Sequence
 import polars as pl
 
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
+from .venue_realm import REALM_REST_ENDPOINTS, VenueRealm, venue_realm
 from .config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
 from .deterministic_serialization import canonical_json, json_safe
 from .downloaders import _normalize_instruments, _normalize_tickers
@@ -476,9 +477,17 @@ def build_candidate_universe_artifact(
     snapshot_ts_ns: int,
     long_config: object,
     continuous_config: object,
+    realm: VenueRealm | str = VenueRealm.DEMO,
 ) -> dict[str, Any]:
-    """Build the self-hashed population artifact from one public demo snapshot."""
+    """Build the self-hashed population artifact from one venue snapshot.
 
+    ``realm`` is recorded in the artifact and pins the endpoint it must have
+    been read from. It was previously hardcoded to demo, so a universe frozen
+    from the funded account would have been labelled — and later loaded as —
+    demo evidence.
+    """
+
+    selected = venue_realm(realm)
     if snapshot_ts_ns <= 0:
         raise ValueError("snapshot_ts_ns must be positive")
     snapshot_ts_ms = snapshot_ts_ns // 1_000_000
@@ -520,8 +529,8 @@ def build_candidate_universe_artifact(
     payload: dict[str, Any] = {
         "schema_version": CANDIDATE_UNIVERSE_SCHEMA_VERSION,
         "kind": CANDIDATE_UNIVERSE_KIND,
-        "environment": "demo",
-        "endpoint": "api-demo.bybit.com",
+        "environment": selected.value,
+        "endpoint": _realm_endpoint_host(selected),
         "snapshot_ts_ns": snapshot_ts_ns,
         "strategy_domain": "crypto_perpetuals",
         "strategy_symbol_types": list(CRYPTO_LINEAR_SYMBOL_TYPES),
@@ -593,10 +602,17 @@ def write_candidate_universe(path: str | Path, payload: Mapping[str, Any]) -> Pa
     return output.resolve(strict=True)
 
 
+def _realm_endpoint_host(realm: VenueRealm) -> str:
+    """Host portion of the REST endpoint the artifact must have been read from."""
+
+    return REALM_REST_ENDPOINTS[realm].removeprefix("https://").rstrip("/")
+
+
 def load_candidate_universe(
     path: str | Path,
     *,
     snapshot: StableFileSnapshot | None = None,
+    realm: VenueRealm | str = VenueRealm.DEMO,
 ) -> FrozenCandidateUniverse:
     if snapshot is None:
         try:
@@ -627,10 +643,20 @@ def load_candidate_universe(
         raise ValueError("candidate-universe artifact must be a JSON object")
     if payload.get("schema_version") != CANDIDATE_UNIVERSE_SCHEMA_VERSION:
         raise ValueError("candidate-universe schema_version is unsupported")
-    if payload.get("kind") != CANDIDATE_UNIVERSE_KIND or payload.get("environment") != "demo":
+    if payload.get("kind") != CANDIDATE_UNIVERSE_KIND:
         raise ValueError("candidate-universe identity is invalid")
-    if payload.get("endpoint") != "api-demo.bybit.com":
-        raise ValueError("candidate-universe endpoint is not api-demo.bybit.com")
+    try:
+        artifact_realm = venue_realm(payload.get("environment"))
+    except ValueError as exc:
+        raise ValueError("candidate-universe identity is invalid") from exc
+    if artifact_realm is not venue_realm(realm):
+        raise ValueError(
+            f"candidate-universe artifact is for realm {artifact_realm.value!r}, "
+            f"not {venue_realm(realm).value!r}"
+        )
+    expected_endpoint = _realm_endpoint_host(artifact_realm)
+    if payload.get("endpoint") != expected_endpoint:
+        raise ValueError(f"candidate-universe endpoint is not {expected_endpoint}")
     if payload.get("strategy_domain") != "crypto_perpetuals":
         raise ValueError("candidate-universe strategy domain is invalid")
     if payload.get("strategy_symbol_types") != list(CRYPTO_LINEAR_SYMBOL_TYPES):

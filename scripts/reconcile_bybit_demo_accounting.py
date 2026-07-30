@@ -194,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "status": "passed" if passed else "failed",
-                "environment": "demo",
+                "environment": receipt.get("environment", "demo"),
                 "output": str(output),
                 "query_window_ms": receipt["query_window_ms"],
                 "sample_counts": receipt["sample_counts"],

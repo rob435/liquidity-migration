@@ -94,6 +94,9 @@ def test_candidate_symbol_source_uses_the_exact_descriptor_snapshot(
 
 
 class _ProbeClient:
+    # The order-placing probe refuses any client that is not a demo transport.
+    demo = True
+
     def __init__(
         self,
         *,

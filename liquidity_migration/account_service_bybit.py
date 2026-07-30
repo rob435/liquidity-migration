@@ -406,21 +406,39 @@ def instrument_rules_from_bybit_row(
 
 
 class VerifiedBybitDemoRulesProvider:
-    """Serve only rules verified against demo order behaviour.
+    """Serve only rules bound to one explicitly named realm.
 
-    Public instruments-info is not silently treated as demo truth.  The caller
-    must provide probed/verified demo rules for every traded symbol; this keeps
-    demo-specific minimum notionals separate from eventual live-money sizing.
+    Public instruments-info is not silently treated as demo truth. The demo
+    owner must be given probed/verified demo rules for every traded symbol,
+    which keeps demo's empirical minimum notionals separate from live-money
+    sizing. The mainnet owner is given venue-declared rules read from the
+    read-only instruments-info endpoint — a different and weaker evidence
+    standard, recorded as such on every rule's ``source`` and ``environment``.
+
+    What this class enforces is that the two can never be crossed: a rule whose
+    environment is not the owner's realm is refused outright.
     """
 
-    def __init__(self, rules: Mapping[str, InstrumentRules]) -> None:
+    def __init__(
+        self,
+        rules: Mapping[str, InstrumentRules],
+        *,
+        environment: str = "demo",
+    ) -> None:
+        self.environment = str(environment).strip().lower()
+        if not self.environment:
+            raise ValueError("rules provider requires an explicit environment")
         self.rules = {symbol.upper(): rule for symbol, rule in rules.items()}
         for symbol, rule in self.rules.items():
-            if rule.symbol != symbol or rule.environment != "demo":
-                raise ValueError(f"rule {symbol} is not explicitly verified for demo")
+            if rule.symbol != symbol or rule.environment != self.environment:
+                raise ValueError(
+                    f"rule {symbol} is not explicitly verified for {self.environment}"
+                )
 
     def current(self, symbols: Sequence[str]) -> Mapping[str, InstrumentRules]:
         missing = sorted(set(symbols) - set(self.rules))
         if missing:
-            raise RuntimeError(f"missing verified Bybit demo rules for {', '.join(missing)}")
+            raise RuntimeError(
+                f"missing verified Bybit {self.environment} rules for {', '.join(missing)}"
+            )
         return {symbol: self.rules[symbol] for symbol in symbols}

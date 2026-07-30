@@ -514,6 +514,31 @@ def validate_demo_rule_probe_evidence(
     return minimum_notional
 
 
+def require_demo_probe_realm(client: Any, *, realm: object = None) -> None:
+    """Hard-refuse the order-placing probe anywhere but demo (B17).
+
+    This probe submits and cancels real PostOnly orders up to 200 USDT per
+    symbol, and ``deploy_vps_live.sh`` triggers it automatically once the bound
+    receipt passes half its lifetime. On a funded account that turns shipping
+    code into a way to spend money as a side effect of a deploy.
+
+    The client-level guard (a demo transport plus ``REAL_MONEY`` unset) already
+    made this unreachable in practice. This makes it unreachable *by name*, so
+    the refusal does not depend on someone else's invariant holding.
+    """
+
+    from .venue_realm import VenueRealm, venue_realm  # noqa: PLC0415 - avoids a cycle
+
+    declared = getattr(client, "realm", None) if realm is None else realm
+    selected = VenueRealm.DEMO if declared is None else venue_realm(declared)
+    if selected is not VenueRealm.DEMO or not bool(getattr(client, "demo", False)):
+        raise RuntimeError(
+            "the instrument-rule order probe is demo-only; it places live orders. "
+            "Read rules from get_instruments_info instead "
+            "(liquidity_migration.venue_instrument_rules)."
+        )
+
+
 def probe_demo_instrument_rule(
     client: Any,
     *,
@@ -546,6 +571,7 @@ def probe_demo_instrument_rule(
     probe.
     """
 
+    require_demo_probe_realm(client)
     if (
         not math.isfinite(terminal_history_timeout_seconds)
         or terminal_history_timeout_seconds <= 0.0

@@ -1049,6 +1049,15 @@ PY
             0|false|FALSE|no|NO|off|OFF|'') ;;
             *) fail "demo-rule refresh refuses REAL_MONEY" ;;
         esac
+        # B17. This probe places live PostOnly orders up to 200 USDT per symbol
+        # across the whole candidate universe, and the branch above reaches it
+        # automatically once the bound receipt passes half its lifetime. On a
+        # funded account that would make shipping code spend money as a side
+        # effect. The checks above already refuse mainnet credentials and
+        # REAL_MONEY; this names the refusal instead of leaving it implicit, and
+        # says what to run instead.
+        [ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ] \
+            || fail "the order-placing rule probe is demo-only; freeze rules with scripts/freeze_venue_instrument_rules.py --realm ${DEPLOY_VENUE_REALM}"
         refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
         DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
             --symbols-file "$refreshed_candidate" \

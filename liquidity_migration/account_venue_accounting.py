@@ -20,6 +20,7 @@ from .account_kernel import (
     read_account_journal_bytes,
     reduce_account_events,
 )
+from .execution_environment import ExecutionEnvironment, execution_environment
 from .deterministic_serialization import canonical_json, json_safe
 
 
@@ -258,9 +259,18 @@ def build_venue_accounting_receipt(
     post_position_rows: Sequence[Mapping[str, Any]],
     post_open_order_rows: Sequence[Mapping[str, Any]],
     requirements: VenueAccountingRequirements | None = None,
+    environment: str = ExecutionEnvironment.DEMO.value,
 ) -> dict[str, Any]:
-    """Build a self-hashed, source-bound demo accounting reconciliation."""
+    """Build a self-hashed, source-bound accounting reconciliation.
 
+    ``environment`` was hardcoded to ``demo``. Mainnet evidence written under
+    that label is not merely mislabelled: ``three_way_reconciliation`` reads the
+    receipt's environment to decide which fleet the evidence belongs to, so it
+    would have been loaded as demo evidence and compared against the wrong
+    account.
+    """
+
+    selected_environment = execution_environment(environment).value
     if not expected_account_id.strip() or observed_ts_ns <= 0:
         raise ValueError("venue accounting requires an account id and observation time")
     start_ms = int(query_start_ms)
@@ -690,7 +700,7 @@ def build_venue_accounting_receipt(
     receipt: dict[str, Any] = {
         "schema_version": VENUE_ACCOUNTING_SCHEMA_VERSION,
         "evidence_scope": VENUE_ACCOUNTING_EVIDENCE_SCOPE,
-        "environment": "demo",
+        "environment": selected_environment,
         "account_id": expected_account_id,
         "account_root": str(account_path),
         "observed_ts_ns": int(observed_ts_ns),
