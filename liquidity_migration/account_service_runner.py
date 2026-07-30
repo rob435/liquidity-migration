@@ -7,6 +7,7 @@ import logging
 import math
 import time
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -152,6 +153,78 @@ def require_startup_reconciliation_safe(
     recoverable = report.native_protection_breach_only
     if not recoverable:
         report.require_healthy()
+
+
+@dataclass(frozen=True, slots=True)
+class StartupDegradation:
+    """One startup check that failed while real exposure was already open."""
+
+    stage: str
+    detail: str
+
+    def describe(self) -> str:
+        return f"startup degraded at {self.stage}: {self.detail}"
+
+
+def account_has_open_exposure(
+    *,
+    kernel: Any,
+    report: AccountReconciliationReport | None,
+) -> bool:
+    """Whether anything is open that a stopped owner would leave unmanaged.
+
+    Deliberately generous: a journal position, a venue position, or a working
+    order all count, and an unreadable venue is treated as exposure rather than
+    as proof of flatness.
+    """
+
+    state = kernel._state_ref()
+    if any(position.signed_qty != 0.0 for position in state.positions.values()):
+        return True
+    if state.working_order_ids:
+        return True
+    if report is None:
+        return False
+    return any(abs(float(qty)) > 1e-12 for qty in report.venue_positions.values())
+
+
+def degrade_or_raise(
+    *,
+    stage: str,
+    error: BaseException,
+    kernel: Any,
+    report: AccountReconciliationReport | None,
+) -> StartupDegradation:
+    """Stay alive when exiting would strand a live book; otherwise fail loudly.
+
+    B16. ``Restart=always`` plus a strict startup check is a 2-second crash
+    loop, and during it *nothing* runs: no reconciliation, no protection sync,
+    no health publication, and — the part that actually costs money — no exit
+    path. The position sits at the venue behind only its native stop with no
+    process able to close it.
+
+    Exiting is still the right answer when there is nothing open: a flat
+    account with a broken startup check should fail loudly so the deploy
+    notices, not limp along publishing BLOCKED forever.
+
+    Degrading is not adoption and not permission. The owner enters its normal
+    loop with the failure latched into health, which is what already refuses
+    every exposure-increasing batch; risk-reducing batches and the safety-flat
+    path stay available by design, which is the whole point of staying up.
+    """
+
+    if not account_has_open_exposure(kernel=kernel, report=report):
+        raise error
+    degradation = StartupDegradation(
+        stage=stage,
+        detail=f"{type(error).__name__}: {error}"[:900],
+    )
+    _logger.critical(
+        "%s; staying alive in degraded mode to keep reconciliation, protection "
+        "and the exit path running over open exposure",
+        degradation.describe(),
+    )
+    return degradation
 
 
 #: Freshness bound for the book a software stop/take-profit is decided against.
@@ -560,11 +633,22 @@ def main(argv: list[str] | None = None) -> int:
     # Prove the venue has no unowned regular or conditional order before any
     # stream starts or any strategy request can be claimed. An empty/new journal
     # therefore requires a completely empty venue order book.
-    require_bybit_demo_order_ownership(
-        client=private_client,
-        kernel=kernel,
-        native_order_verifier=native_protection.is_verified_native_order,
-    )
+    startup_degradations: list[StartupDegradation] = []
+    try:
+        require_bybit_demo_order_ownership(
+            client=private_client,
+            kernel=kernel,
+            native_order_verifier=native_protection.is_verified_native_order,
+        )
+    except Exception as exc:  # noqa: BLE001 - classified by degrade_or_raise
+        startup_degradations.append(
+            degrade_or_raise(
+                stage="venue order ownership",
+                error=exc,
+                kernel=kernel,
+                report=None,
+            )
+        )
 
     def build_private_stream() -> BybitPrivateWebSocketStream:
         return BybitPrivateWebSocketStream(
@@ -619,7 +703,17 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap venue truth before the service can claim any request. Existing
     # venue exposure with an empty kernel is a hard mismatch, never auto-adopted.
     bootstrap_reconciliation = reconciler.reconcile_once()
-    require_startup_reconciliation_safe(bootstrap_reconciliation)
+    try:
+        require_startup_reconciliation_safe(bootstrap_reconciliation)
+    except Exception as exc:  # noqa: BLE001 - classified by degrade_or_raise
+        startup_degradations.append(
+            degrade_or_raise(
+                stage="bootstrap reconciliation",
+                error=exc,
+                kernel=kernel,
+                report=bootstrap_reconciliation,
+            )
+        )
     funding_reconciler = BybitAccountFundingReconciler(
         kernel=kernel,
         client=private_client,
@@ -628,12 +722,35 @@ def main(argv: list[str] | None = None) -> int:
         reconciler=reconciler,
         funding_reconciler=funding_reconciler,
     )
-    require_startup_reconciliation_safe(startup_reconciliation)
-    startup_funding_reconciliation.require_healthy()
-    if not native_protection.breaches():
-        native_protection.sync_symbols(
-            [symbol for symbol, position in kernel._state_ref().positions.items() if position.signed_qty != 0.0]
-        )
+    for stage, check in (
+        ("startup reconciliation", lambda: require_startup_reconciliation_safe(startup_reconciliation)),
+        ("startup funding reconciliation", startup_funding_reconciliation.require_healthy),
+        (
+            "startup native protection sync",
+            lambda: (
+                None
+                if native_protection.breaches()
+                else native_protection.sync_symbols(
+                    [
+                        symbol
+                        for symbol, position in kernel._state_ref().positions.items()
+                        if position.signed_qty != 0.0
+                    ]
+                )
+            ),
+        ),
+    ):
+        try:
+            check()
+        except Exception as exc:  # noqa: BLE001 - classified by degrade_or_raise
+            startup_degradations.append(
+                degrade_or_raise(
+                    stage=stage,
+                    error=exc,
+                    kernel=kernel,
+                    report=startup_reconciliation,
+                )
+            )
     health_chain = AccountHealthChain(
         (
             private_stream_supervisor,
@@ -847,6 +964,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if private_stream_status is not True:
                 health_details.append(private_stream_supervisor.health_detail)
+            if startup_degradations:
+                # B16. A startup check failed over open exposure and the owner
+                # stayed up rather than crash-looping. One fully healthy pass
+                # supersedes it — the account is now understood — and until then
+                # the failure rides on health, which is what refuses new
+                # exposure while leaving exits and the safety flat available.
+                if health_status is AccountOwnerHealthStatus.HEALTHY:
+                    _logger.warning(
+                        "startup degradation cleared by a healthy pass: %s",
+                        "; ".join(item.describe() for item in startup_degradations),
+                    )
+                    startup_degradations.clear()
+                else:
+                    health_status = AccountOwnerHealthStatus.BLOCKED
+                    health_details.extend(item.describe() for item in startup_degradations)
             health_detail = "; ".join(detail for detail in health_details if detail)[:1000]
             receipt = None
             try:

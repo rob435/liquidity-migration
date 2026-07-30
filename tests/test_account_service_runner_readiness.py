@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +19,11 @@ from liquidity_migration.account_market_readiness import (
     RequestedMarketWarmupGate,
     run_ready_request_or_converge,
 )
-from liquidity_migration.account_service_runner import require_startup_reconciliation_safe
+from liquidity_migration.account_service_runner import (
+    account_has_open_exposure,
+    degrade_or_raise,
+    require_startup_reconciliation_safe,
+)
 from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
 from liquidity_migration.market_capture import operational_market_symbols
 from liquidity_migration.strategy_runtime import SleeveTargetIntent
@@ -491,6 +496,110 @@ def test_startup_allows_only_typed_native_breach_recovery() -> None:
         require_startup_reconciliation_safe(report("BUSDT:venue=-2:reconstructed=0:tol=0.05"))
     with pytest.raises(RuntimeError, match="transport failed"):
         require_startup_reconciliation_safe(report("native_protection:RuntimeError:transport failed"))
+
+
+class _ExposureKernel:
+    """Minimal kernel stand-in for the B16 startup classification."""
+
+    def __init__(self, *, positions: dict[str, float], working: set[str] | None = None) -> None:
+        self._state = SimpleNamespace(
+            positions={
+                symbol: SimpleNamespace(signed_qty=qty) for symbol, qty in positions.items()
+            },
+            working_order_ids=working or set(),
+        )
+
+    def _state_ref(self) -> SimpleNamespace:
+        return self._state
+
+
+def _report(*, venue_positions: dict[str, float]) -> AccountReconciliationReport:
+    return AccountReconciliationReport(
+        snapshot_key="snapshot",
+        healthy=False,
+        pending_orders_checked=0,
+        execution_rows_observed=0,
+        order_rows_observed=0,
+        venue_positions=venue_positions,
+        reconstructed_positions={},
+        mismatches=("BUSDT:venue=-2:reconstructed=0:tol=0.05",),
+        observed_ts_ns=1,
+    )
+
+
+def test_startup_failure_over_a_flat_account_still_aborts_loudly() -> None:
+    """B16 does not soften a failure that strands nothing."""
+
+    error = RuntimeError("account reconciliation unhealthy: BUSDT:venue=-2")
+    with pytest.raises(RuntimeError, match="venue=-2"):
+        degrade_or_raise(
+            stage="startup reconciliation",
+            error=error,
+            kernel=_ExposureKernel(positions={"BUSDT": 0.0}),
+            report=_report(venue_positions={}),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kernel", "report"),
+    [
+        (_ExposureKernel(positions={"BUSDT": -2.0}), _report(venue_positions={})),
+        (_ExposureKernel(positions={}, working={"cmd-1"}), _report(venue_positions={})),
+        (_ExposureKernel(positions={}), _report(venue_positions={"BUSDT": -2.0})),
+    ],
+    ids=["journal-position", "working-order", "venue-position"],
+)
+def test_startup_failure_over_open_exposure_degrades_instead_of_crash_looping(
+    kernel: _ExposureKernel,
+    report: AccountReconciliationReport,
+) -> None:
+    """B16: exiting here is a 2s crash loop with the book unmanaged."""
+
+    degradation = degrade_or_raise(
+        stage="startup reconciliation",
+        error=RuntimeError("account reconciliation unhealthy: BUSDT:venue=-2"),
+        kernel=kernel,
+        report=report,
+    )
+
+    assert degradation.stage == "startup reconciliation"
+    assert "venue=-2" in degradation.detail
+    assert degradation.describe().startswith("startup degraded at startup reconciliation:")
+
+
+def test_open_exposure_detection_treats_an_unread_venue_as_flat_only_when_the_journal_is() -> None:
+    assert account_has_open_exposure(
+        kernel=_ExposureKernel(positions={"BUSDT": 1e-9}), report=None
+    )
+    assert not account_has_open_exposure(
+        kernel=_ExposureKernel(positions={"BUSDT": 0.0}), report=None
+    )
+
+
+def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
+    """Each startup check that can strand a live book routes through B16."""
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "liquidity_migration"
+        / "account_service_runner.py"
+    ).read_text(encoding="utf-8")
+    for stage in (
+        '"venue order ownership"',
+        '"bootstrap reconciliation"',
+        '"startup reconciliation"',
+        '"startup funding reconciliation"',
+        '"startup native protection sync"',
+    ):
+        assert stage in source, stage
+    # The bare raising forms must not survive at function level (they are only
+    # reachable now from inside a try that hands the error to degrade_or_raise).
+    assert "\n    require_startup_reconciliation_safe(" not in source
+    assert "\n    startup_funding_reconciliation.require_healthy()" not in source
+    assert "\n    require_bybit_demo_order_ownership(" not in source
+    # ...and the latch is folded into published health rather than only logged.
+    assert "if startup_degradations:" in source
+    assert "startup_degradations.clear()" in source
 
 
 def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
