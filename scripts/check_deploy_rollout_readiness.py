@@ -22,9 +22,6 @@ from liquidity_migration.account_kernel import (  # noqa: E402
 from liquidity_migration.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
-from liquidity_migration.account_reset_receipt import (  # noqa: E402
-    load_account_reset_receipt,
-)
 from liquidity_migration.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_demo_credentials,
@@ -70,8 +67,6 @@ def require_rollout_readiness(
     head_binding: str,
     client: Any,
     now_ns: int | None = None,
-    reset_receipt: str | Path | None = None,
-    expected_commit: str | None = None,
 ) -> RolloutReadiness:
     """Require one flat local/direct-venue snapshot or raise fail-closed."""
 
@@ -87,26 +82,7 @@ def require_rollout_readiness(
     if not bool(getattr(client, "demo", False)):
         raise ValueError("rollout readiness refuses a non-demo venue client")
     root = Path(account_root).expanduser()
-    if (reset_receipt is None) != (expected_commit is None):
-        raise ValueError("reset receipt and expected commit must be supplied together")
     reset_boundary_verified = False
-    if reset_receipt is not None:
-        if head_binding != "stopped-maintenance":
-            raise ValueError(
-                "a reset receipt is valid only for stopped-maintenance readiness"
-            )
-        receipt = load_account_reset_receipt(
-            reset_receipt,
-            expected_candidate_commit=expected_commit,
-            require_leave_stopped=True,
-            require_fresh_roots=True,
-        )
-        receipt_account_root = Path(
-            receipt["reset"]["account_epoch_roots"]["demo"]["account"]
-        ).resolve(strict=True)
-        if receipt_account_root != root.resolve(strict=True):
-            raise ValueError("reset receipt names another demo account root")
-        reset_boundary_verified = True
     observed_now_ns = time.time_ns() if now_ns is None else int(now_ns)
     events = read_account_journal(root, verify=True)
     state = reduce_account_events(events)
@@ -248,8 +224,6 @@ def _parser() -> argparse.ArgumentParser:
         choices=("exact", "allow_behind", "none", "stopped-maintenance"),
         required=True,
     )
-    parser.add_argument("--reset-receipt", type=Path)
-    parser.add_argument("--expected-commit")
     return parser
 
 
@@ -267,8 +241,6 @@ def main(argv: list[str] | None = None) -> int:
                 api_secret=api_secret,
                 demo=True,
             ),
-            reset_receipt=args.reset_receipt,
-            expected_commit=args.expected_commit,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"rollout-not-ready: {exc}", file=sys.stderr)

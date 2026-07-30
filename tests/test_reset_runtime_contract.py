@@ -175,7 +175,6 @@ def test_execute_binds_clean_candidate_before_deployed_state_and_rechecks_before
     assert "ls-files --others --exclude-standard" in clean_status
     assert "repository HEAD changed while candidate cleanliness was bound" in text
     assert "repository HEAD changed during candidate cleanliness recheck" in text
-    assert '--systemctl-bin "$SYSTEMCTL_BIN"' in text
 
 
 def test_reset_clean_candidate_check_ignores_git_replace_refs(tmp_path: Path) -> None:
@@ -244,20 +243,6 @@ def test_reset_requires_explicit_flatness_including_conditional_orders() -> None
     assert "get_open_orders(settle_coin=\"USDT\")" in flat
     assert 'order_filter="StopOrder"' in flat
     assert "open_positions={len(positions)} open_orders={len(orders)}" in flat
-
-
-def test_reset_verifies_archive_before_deletion_and_receipt_is_last() -> None:
-    text = _text()
-    archive = text.index("account_reset_archive")
-    digest = text.index('[[ "$archive_sha" =~', archive)
-    verify = text.index("account_reset_archive verify", digest)
-    deletion = text.index("generic_remove_args=(remove", verify)
-    receipt = text.rindex("account_reset_receipt")
-    assert archive < digest < verify < deletion < receipt
-    assert "O_NOFOLLOW" in (
-        SCRIPT.parents[1] / "liquidity_migration" / "account_reset_archive.py"
-    ).read_text(encoding="utf-8")
-    assert "--leave-stopped" in text[text.index('if [[ -n "$RECEIPT_PATH" ]]') :]
 
 
 def test_reset_clears_account_epochs_in_place_without_retiring_lock_inodes() -> None:
@@ -357,12 +342,3 @@ def test_failed_post_clear_handoff_stops_and_verifies_every_managed_unit() -> No
     ]
 
 
-def test_leave_stopped_receipt_is_created_before_owner_leases_are_released() -> None:
-    text = _text()
-    receipt = text.index('"$PYTHON" -m liquidity_migration.account_reset_receipt')
-    stopped_release = text.index(
-        'release_paper_account_lease "post-receipt stopped handoff"'
-    )
-    completion = text.index("RESTART_COMPLETE=1", stopped_release)
-
-    assert receipt < stopped_release < completion

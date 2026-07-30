@@ -219,65 +219,6 @@ def test_readiness_skips_owner_health_only_after_owner_shutdown(
     assert result.journal_sequence == 12
 
 
-def test_fresh_reset_receipt_replaces_only_the_missing_journal_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt_path = tmp_path / "reset-receipt.json"
-    expected_commit = "a" * 40
-    receipt_calls: list[tuple[Path, dict[str, Any]]] = []
-    monkeypatch.setattr(readiness, "read_account_journal", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        readiness,
-        "reduce_account_events",
-        lambda _events: AccountState(events_applied=0),
-    )
-
-    def load_receipt(path: Path, **kwargs: Any) -> dict[str, Any]:
-        receipt_calls.append((path, kwargs))
-        return {
-            "reset": {
-                "account_epoch_roots": {
-                    "demo": {"account": str(tmp_path)},
-                }
-            }
-        }
-
-    monkeypatch.setattr(readiness, "load_account_reset_receipt", load_receipt)
-
-    result = readiness.require_rollout_readiness(
-        account_root=tmp_path,
-        head_binding="stopped-maintenance",
-        client=_Client(),
-        now_ns=40_000_000_000,
-        reset_receipt=receipt_path,
-        expected_commit=expected_commit,
-    )
-
-    assert result.journal_sequence == 0
-    assert receipt_calls == [
-        (
-            receipt_path,
-            {
-                "expected_candidate_commit": expected_commit,
-                "require_leave_stopped": True,
-                "require_fresh_roots": True,
-            },
-        )
-    ]
-
-
-def test_reset_receipt_cannot_relax_running_rollout_readiness(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="only for stopped-maintenance"):
-        readiness.require_rollout_readiness(
-            account_root=tmp_path,
-            head_binding="exact",
-            client=_Client(),
-            reset_receipt=tmp_path / "reset-receipt.json",
-            expected_commit="b" * 40,
-        )
-
-
 def test_readiness_rejects_stale_evidence_and_non_demo_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

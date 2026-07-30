@@ -124,7 +124,6 @@ def test_mutating_remote_routes_require_explicit_handshake() -> None:
     assert _run("deploy", "install").returncode == 2
     assert _run("deploy", "--execute", "verify").returncode == 2
     assert _run("deploy", "--execute", "rollout").returncode == 2
-    assert _run("deploy", "--execute", "recover").returncode == 2
 
 
 def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Path) -> None:
@@ -211,59 +210,6 @@ def test_rollout_requires_and_serializes_an_explicit_profile(
     payload = capture.read_text(encoding="utf-8")
     assert "MODE=rollout" in payload
     assert "DEPLOY_PROFILE=operational" in payload
-
-
-def test_recovery_requires_and_serializes_exact_reset_receipt(
-    tmp_path: Path,
-) -> None:
-    checkout, commit = _isolated_deploy_checkout(tmp_path)
-    capture = tmp_path / "capture"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    ssh = bin_dir / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
-    base = [
-        "bash",
-        str(checkout / "scripts/ops.sh"),
-        "deploy",
-        "--execute",
-        "recover",
-        "--profile",
-        "operational",
-    ]
-    environment = {
-        **os.environ,
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "CAPTURE": str(capture),
-        "EXPECTED_COMMIT": commit,
-        "GITHUB_TOKEN": "test-token",
-    }
-
-    incomplete = subprocess.run(
-        base,
-        cwd=checkout,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert incomplete.returncode == 2
-    assert "reset-receipt" in incomplete.stderr
-    assert not capture.exists()
-
-    complete = subprocess.run(
-        [*base, "--reset-receipt", "/var/lib/liquidity-migration/reset.json"],
-        cwd=checkout,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert complete.returncode == 0, complete.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "MODE=recover" in payload
-    assert "DEPLOY_RESET_RECEIPT=/var/lib/liquidity-migration/reset.json" in payload
 
 
 def test_deploy_rejects_tree_object_before_ssh(tmp_path: Path) -> None:

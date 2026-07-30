@@ -5,18 +5,12 @@ set -euo pipefail
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
 DEPLOY_PROFILE=""
-DEPLOY_RESET_RECEIPT=""
-if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
+if [ "$MODE" = rollout ]; then
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --profile)
                 [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
                 DEPLOY_PROFILE="$2"
-                shift 2
-                ;;
-            --reset-receipt)
-                [ "$#" -ge 2 ] || { echo "--reset-receipt requires a value" >&2; exit 2; }
-                DEPLOY_RESET_RECEIPT="$2"
                 shift 2
                 ;;
             *) echo "unknown $MODE argument: $1" >&2; exit 2 ;;
@@ -26,19 +20,12 @@ if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
         demo-operational|operational) ;;
         *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
     esac
-    if [ "$MODE" = recover ]; then
-        [ -n "$DEPLOY_RESET_RECEIPT" ] && [ "${DEPLOY_RESET_RECEIPT#/}" != "$DEPLOY_RESET_RECEIPT" ] \
-            || { echo "recover requires an absolute --reset-receipt" >&2; exit 2; }
-    elif [ -n "$DEPLOY_RESET_RECEIPT" ]; then
-        echo "--reset-receipt is valid only with recover" >&2
-        exit 2
-    fi
 elif [ "$#" -ne 0 ]; then
-    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout|recover}" >&2
+    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout}" >&2
     exit 2
 fi
 case "$MODE" in
-    install|activate|verify|rollout|recover) ;;
+    install|activate|verify|rollout) ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
 esac
 
@@ -65,7 +52,7 @@ for value in "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" "$RMOM_BOOTSTRAP_RETRY_SECONDS"; 
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "RMOM durations must be positive integers" >&2; exit 2; }
 done
 
-if [[ "$MODE" = install || "$MODE" = rollout || "$MODE" = recover ]] && [ -z "$GITHUB_TOKEN" ] \
+if [[ "$MODE" = install || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
@@ -100,7 +87,7 @@ fi
     exit 1
 }
 ROLLOUT_READINESS_HELPER_B64=""
-if [ "$MODE" = rollout ] || [ "$MODE" = recover ]; then
+if [ "$MODE" = rollout ]; then
     if ! ROLLOUT_READINESS_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
             "$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py" \
@@ -126,7 +113,6 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
     printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
-    printf 'DEPLOY_RESET_RECEIPT=%q\n' "$DEPLOY_RESET_RECEIPT"
     printf 'ROLLOUT_REFRESH_STALE_DEMO_RULES=%q\n' \
         "${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
@@ -807,7 +793,7 @@ invalidate_operational_authorization() {
     echo "invalidated prior operational authorization: $archive"
 }
 
-# Rollout and recover set this themselves. A staged `install` completing a
+# Rollout sets this itself. A staged `install` completing a
 # failed rollout may request the same maintenance explicitly via the
 # environment — without it, a recovery whose failure happened inside rule
 # maintenance can never rebind the candidate/rules and authority issuance
@@ -819,63 +805,6 @@ esac
 ROLLOUT_DEMO_RULES_REFRESHED=0
 ROLLOUT_DEMO_RULES_PROJECTED=0
 
-validate_recovery_reset_receipt() {
-    [ -n "$DEPLOY_RESET_RECEIPT" ] \
-        || fail "recovery requires a reset receipt"
-    "$PYTHON" - \
-        "$DEPLOY_RESET_RECEIPT" \
-        "$EXPECTED_COMMIT" \
-        /etc/liquidity-migration/account-execution.env \
-        /etc/liquidity-migration/account-paper-execution.env <<'PY'
-import json
-import sys
-
-from liquidity_migration.account_reset_receipt import load_account_reset_receipt
-from liquidity_migration.systemd_environment import (
-    load_group_systemd_environment,
-    load_private_systemd_environment,
-)
-
-receipt_path, expected_commit, demo_env_path, paper_env_path = sys.argv[1:]
-demo = load_private_systemd_environment(demo_env_path)
-paper = load_group_systemd_environment(
-    paper_env_path,
-    group_name="liquidity-migration-paper",
-)
-expected_roots = {
-    "demo": {
-        "account": demo["ACCOUNT_EXECUTION_ROOT"],
-        "inbox": demo["ACCOUNT_INTENT_INBOX_ROOT"],
-        "capture": demo["ACCOUNT_CAPTURE_ROOT"],
-    },
-    "paper": {
-        "account": paper["ACCOUNT_EXECUTION_ROOT"],
-        "inbox": paper["ACCOUNT_INTENT_INBOX_ROOT"],
-        "capture": paper["ACCOUNT_PAPER_CAPTURE_ROOT"],
-    },
-}
-receipt = load_account_reset_receipt(
-    receipt_path,
-    expected_candidate_commit=expected_commit,
-    expected_roots=expected_roots,
-    require_leave_stopped=True,
-    require_fresh_roots=True,
-)
-sleeves = receipt["reset"]["sleeves"]
-# Recovery rebuilds the whole box, so the reset must have covered EVERY
-# managed strategy ledger the deployed commit runs (exact set, not subset):
-# a receipt from a narrower reset would leave a stale ledger alive under a
-# fresh account epoch.
-if len(sleeves) != 3 or set(sleeves) != {"long", "continuous", "carry"}:
-    raise SystemExit("recovery receipt must cover all managed strategy ledgers")
-print(json.dumps({
-    "status": "recovery_reset_receipt_valid",
-    "artifact_sha256": receipt["artifact_sha256"],
-    "candidate_commit": receipt["repository"]["candidate_commit"],
-    "sleeves": sleeves,
-}, sort_keys=True))
-PY
-}
 
 refresh_stale_demo_rules_if_requested() {
     [ "$ROLLOUT_REFRESH_STALE_DEMO_RULES" -eq 1 ] || return 0
@@ -934,7 +863,7 @@ from liquidity_migration.account_candidate_universe import load_candidate_univer
 load_candidate_universe(sys.argv[1])
 PY
 
-    if [ "$freshness_status" -eq 0 ] && [ -z "$DEPLOY_RESET_RECEIPT" ] \
+    if [ "$freshness_status" -eq 0 ] \
         && [ "$candidate_readable" -eq 1 ]; then
         echo "demo-rule-maintenance-plan path=reuse reason=fresh"
         return 0
@@ -1254,7 +1183,7 @@ check_demo_order_permissions() {
 }
 
 rollout_flat_check() {
-    local head_binding="$1" reset_receipt="${2:-}" status=0
+    local head_binding="$1" status=0
     local -a readiness_args
     case "$head_binding" in
         exact|allow_behind|none|stopped-maintenance) ;;
@@ -1276,14 +1205,6 @@ rollout_flat_check() {
         --account-root "$ACCOUNT_EXECUTION_ROOT"
         --head-binding "$head_binding"
     )
-    if [ -n "$reset_receipt" ]; then
-        [ "$head_binding" = stopped-maintenance ] \
-            || fail "reset receipt can be used only for stopped-maintenance readiness"
-        readiness_args+=(
-            --reset-receipt "$reset_receipt"
-            --expected-commit "$EXPECTED_COMMIT"
-        )
-    fi
     ROLLOUT_HEAD_BINDING="$head_binding" DEMO=true \
         ACCOUNT_EXECUTION_ROOT="$ACCOUNT_EXECUTION_ROOT" \
         BYBIT_DEMO_API_KEY="$BYBIT_DEMO_API_KEY" \
@@ -1687,55 +1608,12 @@ rollout_mode() {
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
-recover_mode() {
-    # Recovery is narrower than rollout: it cannot stop a running fleet or
-    # rely on expired prior authority. It reopens one full, leave-stopped reset
-    # receipt for this exact commit, independently proves account flatness,
-    # installs, rebinds still-fresh subset evidence or probes only when expiry,
-    # candidate additions, or unsafe rule drift require it, creates fresh
-    # authority, and activates under the same explicit owner handshake.
-    require_checkout
-    require_quiescent
-    PYTHON=.venv/bin/python
-    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-
-    ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
-    ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
-        || fail "cannot read installed checkout HEAD"
-    ROLLOUT_STOPPED=1
-    ROLLOUT_IRREVERSIBLE=1
-    trap rollout_cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
-    # death (HUP on the remote process group, SIGPIPE on the next write) would
-    # otherwise leave the fleet half-stopped with no cleanup at all.
-    trap 'exit 129' HUP
-    trap 'exit 141' PIPE
-
-    run_strict_phase recovery-reset-receipt-proof validate_recovery_reset_receipt
-    run_strict_phase recovery-flat-account-proof \
-        rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
-    echo "deployment-plan class=recovery rule_maintenance=auto candidate_refresh=required"
-    ROLLOUT_REFRESH_STALE_DEMO_RULES=1
-    run_strict_phase stopped-install install_mode
-    run_strict_phase post-rule-maintenance-flat-account-proof \
-        rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"
-    run_strict_phase record-installed-profile record_installed_profile
-    run_strict_phase activate-and-verify activate_mode
-    ROLLOUT_COMPLETE=1
-    ROLLOUT_STOPPED=0
-    printf 'recover-ok commit=%s profile=%s reset_receipt=%s\n' \
-        "$EXPECTED_COMMIT" "$DEPLOY_PROFILE" "$DEPLOY_RESET_RECEIPT"
-}
-
 acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;
-    recover) recover_mode ;;
 esac
 REMOTE_SCRIPT
 } | ssh "${SSH_ARGS[@]}" -- "$SSH_TARGET" bash -s

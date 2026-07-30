@@ -449,8 +449,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     rollout_check = text[text.index("rollout_flat_check()") : text.index("verify_topology()")]
     assert "BYBIT_REAL_API_KEY" in rollout_check
     assert "rollout_readiness_helper" in rollout_check
-    assert '--reset-receipt "$reset_receipt"' in rollout_check
-    assert '--expected-commit "$EXPECTED_COMMIT"' in rollout_check
     assert '|| status=$?' in rollout_check
     assert 'return "$status"' in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
@@ -479,39 +477,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert "expected_downstream_on()" in text
     assert "enabled-not-active cause=expired-authority-recovery" in text
 
-
-
-def test_reset_recovery_reopens_exact_fresh_roots_before_rule_maintenance() -> None:
-    text = _read(DEPLOY)
-    validate = text[
-        text.index("validate_recovery_reset_receipt()") :
-        text.index("refresh_stale_demo_rules_if_requested()")
-    ]
-    assert "load_account_reset_receipt" in validate
-    assert "expected_candidate_commit=expected_commit" in validate
-    assert "expected_roots=expected_roots" in validate
-    assert "require_leave_stopped=True" in validate
-    assert "require_fresh_roots=True" in validate
-    assert '{"long", "continuous", "carry"}' in validate
-    assert "load_private_systemd_environment(demo_env_path)" in validate
-    assert "load_group_systemd_environment(" in validate
-    assert 'group_name="liquidity-migration-paper"' in validate
-
-    recover = text[text.index("recover_mode()") : text.index("acquire_maintenance_locks\n")]
-    assert recover.index("require_quiescent") < recover.index("recovery-reset-receipt-proof")
-    assert recover.index("recovery-reset-receipt-proof") < recover.index("recovery-flat-account-proof")
-    assert recover.index("recovery-flat-account-proof") < recover.index("stopped-install")
-    assert recover.index("stopped-install") < recover.index("post-rule-maintenance-flat-account-proof")
-    assert recover.index("post-rule-maintenance-flat-account-proof") < recover.index(
-        "record-installed-profile"
-    )
-    assert recover.index("record-installed-profile") < recover.index("activate-and-verify")
-    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in recover
-    assert "recovery did not refresh" not in recover
-    assert "candidate_refresh=required" in recover
-    assert recover.count(
-        'rollout_flat_check stopped-maintenance "$DEPLOY_RESET_RECEIPT"'
-    ) == 2
 
 
 def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> None:

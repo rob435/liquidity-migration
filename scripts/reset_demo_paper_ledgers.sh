@@ -57,8 +57,6 @@ Options:
   --label LABEL             optional safe suffix added after the UTC timestamp
   --include-reports         also archive/reset reports/ in selected roots
   --include-caches          also archive/reset .cache/ in selected roots (slow rebuild)
-  --receipt FILE            write one source-reopening success receipt (mode 0600);
-                            requires --execute --leave-stopped and an absolute new path
   --env-file FILE           demo credential env (default: /etc/liquidity-migration/bybit-demo.env)
   --account-env-file FILE   demo owner route env (default: /etc/liquidity-migration/account-execution.env)
   --paper-account-env-file FILE
@@ -131,9 +129,6 @@ SLEEVES_RAW="all"
 INCLUDE_REPORTS=0
 INCLUDE_CACHES=0
 LEAVE_STOPPED=0
-RECEIPT_PATH=""
-RECEIPT_CANDIDATE_COMMIT=""
-RESET_STARTED_TS_NS=""
 EXECUTED_CANDIDATE_COMMIT=""
 ENV_FILE="/etc/liquidity-migration/bybit-demo.env"
 ACCOUNT_ENV_FILE="${ACCOUNT_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-execution.env}"
@@ -226,11 +221,6 @@ while [[ "$#" -gt 0 ]]; do
     --include-caches)
       INCLUDE_CACHES=1
       shift
-      ;;
-    --receipt)
-      [[ "$#" -ge 2 ]] || die "--receipt requires a value"
-      RECEIPT_PATH="$2"
-      shift 2
       ;;
     --env-file)
       [[ "$#" -ge 2 ]] || die "--env-file requires a value"
@@ -753,27 +743,6 @@ DOWNSTREAM_RESTART_UNITS=(
 )
 RESTART_UNITS=("${OWNER_RESTART_UNITS[@]}" "${DOWNSTREAM_RESTART_UNITS[@]}")
 
-if [[ -n "$RECEIPT_PATH" ]]; then
-  [[ "$MODE" == "execute" ]] \
-    || die "--receipt is a success artifact and requires --execute"
-  (( LEAVE_STOPPED )) \
-    || die "--receipt requires --leave-stopped so no owner can write the fresh roots before receipt creation"
-  [[ "$RECEIPT_PATH" == /* && "$RECEIPT_PATH" != *$'\n'* ]] \
-    || die "--receipt must be one absolute path"
-  RECEIPT_CANDIDATE_COMMIT="$EXECUTED_CANDIDATE_COMMIT"
-  receipt_preflight_args=(
-    preflight
-    --output "$RECEIPT_PATH"
-  )
-  for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
-    receipt_preflight_args+=(--forbidden-root "$PWD/$target")
-  done
-  "$CANONICAL_PYTHON" -m liquidity_migration.account_reset_receipt \
-    "${receipt_preflight_args[@]}" >/dev/null \
-    || die "account reset receipt output preflight failed"
-  RESET_STARTED_TS_NS="$("$CANONICAL_PYTHON" -c 'import time; print(time.time_ns())')"
-fi
-
 echo "Ledger reset plan"
 echo "  mode: $MODE"
 echo "  sleeves: ${SELECTED_SLEEVES[*]}"
@@ -781,7 +750,6 @@ echo "  archive dir: $ARCHIVE_DIR"
 echo "  include reports: $INCLUDE_REPORTS"
 echo "  include caches: $INCLUDE_CACHES"
 echo "  leave managed units stopped: $LEAVE_STOPPED"
-[[ -z "$RECEIPT_PATH" ]] || echo "  structured success receipt: $RECEIPT_PATH"
 echo "  canonical account state: ${ACCOUNT_STATE_TARGETS[*]}"
 echo "  existing targets: ${#EXISTING_TARGETS[@]}"
 for target in "${EXISTING_TARGETS[@]}"; do
@@ -1734,39 +1702,6 @@ else
   done
 fi
 
-if [[ -n "$RECEIPT_PATH" ]]; then
-  receipt_create_args=(
-    create
-    --repository-root "$PWD"
-    --candidate-commit "$RECEIPT_CANDIDATE_COMMIT"
-    --started-ts-ns "$RESET_STARTED_TS_NS"
-    --archive "$(canonical_path "$ARCHIVE_PATH")"
-    --sha256-sidecar "$(canonical_path "$SHA_PATH")"
-    --output "$RECEIPT_PATH"
-    --systemctl-bin "$SYSTEMCTL_BIN"
-    --leave-stopped
-    --demo-account-root "$(canonical_path "$DEMO_ACCOUNT_ROOT")"
-    --demo-inbox-root "$(canonical_path "$DEMO_ACCOUNT_INBOX_ROOT")"
-    --demo-capture-root "$(canonical_path "$DEMO_ACCOUNT_CAPTURE_ROOT")"
-    --paper-account-root "$(canonical_path "$PAPER_ACCOUNT_ROOT")"
-    --paper-inbox-root "$(canonical_path "$PAPER_ACCOUNT_INBOX_ROOT")"
-    --paper-capture-root "$(canonical_path "$PAPER_ACCOUNT_CAPTURE_ROOT")"
-  )
-  (( INCLUDE_REPORTS )) && receipt_create_args+=(--include-reports)
-  (( INCLUDE_CACHES )) && receipt_create_args+=(--include-caches)
-  for sleeve in "${SELECTED_SLEEVES[@]}"; do
-    receipt_create_args+=(--sleeve "$sleeve")
-  done
-  for unit in "${STOP_UNITS[@]}"; do
-    receipt_create_args+=(--managed-unit "$unit" --inactive-after-unit "$unit")
-  done
-  for unit in "${ACTIVE_BEFORE[@]:-}"; do
-    [[ -z "$unit" ]] || receipt_create_args+=(--active-before-unit "$unit")
-  done
-  "$PYTHON" -m liquidity_migration.account_reset_receipt "${receipt_create_args[@]}" \
-    || die "completed reset could not produce its structured success receipt"
-fi
-
 if (( LEAVE_STOPPED )); then
   release_paper_account_lease "post-receipt stopped handoff"
   release_demo_account_lease "post-receipt stopped handoff"
@@ -1779,7 +1714,6 @@ echo "Ledger reset complete."
 echo "  archive: $ARCHIVE_PATH"
 echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
-[[ -z "$RECEIPT_PATH" ]] || echo "  structured reset receipt: $RECEIPT_PATH"
 echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
 echo "  account journals/inboxes/captures: archived; fresh empty epoch created"
 echo "  boundary truth: demo venue-flat verified; prior paper epoch archived"

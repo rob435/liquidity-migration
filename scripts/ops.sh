@@ -38,7 +38,7 @@ Safe operator commands:
                                render+prove the operational profile from the
                                RM_* dials in the owner's env file
   test [PYTEST_ARGS...]        run pytest
-  deploy --execute MODE        run install, activation, guarded rollout, or reset recovery
+  deploy --execute MODE        run install, activation, or guarded rollout
   help                         show this help and do nothing else
 
 Environment overrides:
@@ -51,7 +51,7 @@ Safety contract:
     preflight only reports what is missing and never prints a secret;
     render-profile writes one non-secret profile artifact and nothing else.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
-  * deploy requires --execute and MODE=install|activate|rollout|recover.
+  * deploy requires --execute and MODE=install|activate|rollout.
   * Research runs remain research artifacts and are never auto-promoted.
 
 Details: docs/operations.md
@@ -218,8 +218,8 @@ case "$command" in
     [[ "${1:-}" == "--execute" ]] \
       || die_usage "deploy is mutating; its first argument must be --execute"
     shift
-    [[ "${1:-}" == "install" || "${1:-}" == "activate" || "${1:-}" == "rollout" || "${1:-}" == "recover" ]] \
-      || die_usage "deploy mode must be install, activate, rollout, or recover"
+    [[ "${1:-}" == "install" || "${1:-}" == "activate" || "${1:-}" == "rollout" ]] \
+      || die_usage "deploy mode must be install, activate, or rollout"
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "$@"
     ;;
   *)
