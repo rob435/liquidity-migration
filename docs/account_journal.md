@@ -72,7 +72,7 @@ set rather than hiding a durable commit.
 
 Cold/stateful readers use `read_account_journal(..., verify=True)` or
 `verify_account_journal(...)`. Strategy state, reconciliation, venue accounting,
-reset receipts, owner startup, and the liveness journal audit reopen and reduce
+owner startup and the liveness journal audit reopen and reduce
 the full verified journal. Hot owner-health consumers instead scan the immutable
 transaction filename sequence and authenticate only the latest transaction
 payload before matching its exact sequence, account ID, and state hash to a

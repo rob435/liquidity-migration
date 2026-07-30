@@ -82,7 +82,7 @@ Bybit demo prices are real, fills are not.
 
 - `AccountExecutionKernel._evaluate_batch` — real pre-trade gate, six absolute
   limits inside the journal transaction, atomic rejection, not bypassable.
-- Risk policy SHA-256 bound into the authority receipt; limits can't change
+- Limits live in one rendered profile; changing a dial means re-rendering it
   without invalidating authority.
 - Stops armed in the same `place_order` call as entry
   (`bybit_execution_adapter.py:146`) — no naked window in the happy path.
@@ -243,7 +243,7 @@ Tier 1 buys real fills, not returns. Any breach drops to 0, not one tier down.
 ## 6. Arming (owner-executed)
 
 Every step below is the owner's. Nothing in this repository sets `REAL_MONEY`,
-writes a credential, issues authority, or starts a mainnet unit.
+writes a credential, or starts a mainnet unit.
 
 Run this at any point to see exactly what is still outstanding. It reads only,
 and it reports a credential by name and never by value:
@@ -287,45 +287,24 @@ This re-runs the full load-time envelope proof. A dial combination that cannot
 prove is refused here, naming the dial to move, rather than at start-up over a
 funded account.
 
-**6. Freeze the candidate universe** from the mainnet endpoint (`--realm
-mainnet`), so it is not labelled — or later loaded as — demo evidence.
-
-**7. Freeze instrument rules, read-only:**
+**6. Freeze instrument rules, read-only:**
 
 ```bash
-scripts/freeze_venue_instrument_rules.py --realm mainnet --symbols-file <the frozen universe> --output /etc/liquidity-migration/account-execution-mainnet/venue-rules.json
+scripts/freeze_venue_instrument_rules.py --realm mainnet --symbols-file <your symbol list> --output /etc/liquidity-migration/account-execution-mainnet/venue-rules.json
 ```
 
-Do **not** run the demo order probe; it refuses off demo by name. The receipt is
-bound to the exact universe artifact, which is what lets authorization prove the
-rules cover it.
+Do **not** run the demo order probe; it refuses off demo by name.
 
-**8. Enable the producers you want.** Set `CARRY_MAINNET_SLEEVE` and/or
+**7. Enable the producers you want.** Set `CARRY_MAINNET_SLEEVE` and/or
 `LONG_MAINNET_SLEEVE` to `on` in `deploy/sleeves.env` and commit. Repo-off is a
 hard ceiling a host override cannot lift, so arming a real-money producer is a
 committed change, not a host edit.
 
-**9. Staged install**, which puts the units on disk without starting them.
+**8. Staged install**, which puts the units on disk without starting them.
 
-**10. Issue the real-money authority receipt:** `--profile real-money`, the
-distinct acknowledgement constant `REAL_MONEY_OWNER_ACKNOWLEDGEMENT`,
-`--capital-ceiling-mode account_equity_multiple --capital-ceiling-value 1.0`,
-and an explicit `--authority-seconds` no greater than **7 days**. All three are
-mandatory; there is no unbounded ceiling and no indefinite authority.
-
-Seven days rather than a round month because coverage of the instrument rules
-is re-proved on *every* start, and the rules receipt expires at seven. Authority
-outliving its rules meant a restart on day eight — a transient venue error under
-`Restart=always` is enough — failing verification and crash-looping the owner
-over open funded positions. So arming is a weekly ritual: re-freeze the rules,
-re-issue the receipt. Issuance requires the whole fleet, mainnet included, to be
-down first.
-
-**11. Activate at Tier 1.**
+**9. Activate at Tier 1.**
 
 The deploy-time order probe is already refused for a non-demo realm
 (`DEPLOY_VENUE_REALM`), so shipping code cannot spend money as a side effect.
 
-Changing any dial afterwards means re-rendering the profile **and** re-issuing
-the receipt: the receipt hashes both the env file and the rendered profile,
-which is exactly what stops limits from moving without a new authorization.
+Changing any dial afterwards means re-rendering the profile and reinstalling.

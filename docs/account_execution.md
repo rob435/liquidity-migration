@@ -1,7 +1,7 @@
 # Account Execution
 
 This is the current demo/paper execution contract. Code, systemd units, strict
-environment files, and generated receipts define implemented behavior if this
+environment files, and generated artifacts define implemented behavior if this
 document drifts.
 
 ## Ownership
@@ -145,86 +145,16 @@ estimator-inadequate prior data fails closed. Prior age is informational, not a
 freshness gate; coefficient drift remains a limitation, and the prior is not
 current calibration, alpha evidence, or performance evidence.
 
-## Authorization
+## Unit command lines
 
-No guarded unit may run without the create-only receipt at:
+The exact workload argv for every guarded unit is owned by
+`scripts/run_authorized_runtime.sh`: a unit names only its unit and entrypoint,
+and the script maps that pair to one complete command line. Callers cannot
+append arguments.
 
-```text
-/etc/liquidity-migration/account-execution-operational-ready
-```
-
-The supported issuer is root-only and holds the canonical host maintenance
-lock plus the legacy deploy and reset leaves from before the deployed checkout
-is opened or imported until receipt publication returns. After the shell opens
-those inherited descriptors, both the installed helper and the issuer validate
-their exact root-owned, single-link inode and Linux mount identities. This
-excludes cooperating deploy and reset operations across a rolling lock-protocol
-upgrade.
-Raw `python -m liquidity_migration.operational_runtime_authority issue` is not a
-supported substitute: it has already imported checkout code before it can lock,
-so it refuses issuance without the exact pre-import descriptor handoff from
-`scripts/ops.sh`. Direct `verify` and `verify-runtime` remain read-only paths.
-
-The issuer and verifier bind:
-
-- one exact clean Git commit and repository path;
-- the machine identity and selected profile;
-- strict environment-file identities (`0600` for demo/private files; root-owned
-  `0640` for the paper route and sleeve file);
-- absolute, real, owner-controlled, pairwise-disjoint account, inbox, and
-  capture roots;
-- the candidate universe used as the owner symbol file;
-- complete candidate-to-demo-rule coverage;
-- risk-policy and credential-file identities;
-- resolved sleeve toggles and raw-persistence/liveness settings;
-- the exact shared strategy-target tape derived from each authorized capture
-  root;
-- `paper_execution_model_scope=integration_only_uncalibrated` for
-  `operational` (and `not_applicable_no_paper` for `demo-operational`).
-
-Every byte and recorded identity field of a bound environment or runtime-input
-file, every raw tracked regular-file or symlink byte and Git mode, every bound
-root identity, the exact checkout commit, the normalized machine identity, and
-the profile must still match. Runtime verification also rejects mainnet
-variables, ambiguous `REAL_MONEY`, unauthorized units, alternate unit
-fragments/drop-ins, and unregistered command lines. The exact workload argv is
-owned by `scripts/run_authorized_runtime.sh` in the authorized commit.
-
-Issuance requires the exact nine guarded services and three triggering timers
-to be loaded and inactive. The trusted, fixed-environment systemd observation
-runs before source capture and at both later precommit phases. Git verification
-uses an isolated temporary index and explicit, minimally configured Git
-directory/work-tree command, so ambient `GIT_*` variables, replacement refs,
-and ordinary index flags cannot redirect or hide the tracked comparison. It
-also walks the exact commit tree and hashes raw descriptor-read worktree bytes
-and symlink targets against each blob, independently of clean filters,
-line-ending normalization, or attributes; unsupported gitlinks fail closed.
-Non-ignored untracked paths are rejected, while ignored paths remain outside
-this claim. At both precommit phases the issuer also reopens the machine
-identity, environment files, runtime inputs, and roots and compares them with
-the receipt payload.
-
-The 1 MiB-bounded receipt is first written and fsynced as a root-owned mode-`0400`
-staging inode. That same inode is linked create-only at the final name and the
-staging link is removed; it remains mode `0400`, single-linked, and invalid to
-consumer receipt loaders through the final source and systemd checks. Descriptor
-`fchmod` to profile mode `0600` or `0640` is the authority commit, and no
-semantic check follows it. Thus the systemd path condition is only an existence
-precheck: `verify-runtime` still rejects an interrupted mode-`0400` final file
-before executing the registered command.
-
-A hard interruption may leave a randomized hidden mode-`0400` staging file or
-an invalid mode-`0400` final file. An interruption after the permission commit
-may instead leave a valid receipt even if the issuer did not print success.
-Preserve and inspect such artifacts before deliberate cleanup or reissue. The
-protocol assumes a cooperative root-controlled host: systemd cannot identify
-manual processes and advisory locks cannot constrain clients that ignore them.
-It is local point-in-time authorization, not continuous monitoring, signed
-attestation, WORM evidence, or mainnet authority.
-
-Authorization follows stopped installation and precedes activation. It cannot
-be inferred from test success, a research result, a notification, or an old
-receipt. See `docs/operations.md` for the exact sequence.
+The installed profile (`demo-operational` or `operational`) is recorded at
+`/etc/liquidity-migration/profile` during install and read back by deploy
+verification.
 
 ## Environment boundary
 
@@ -271,7 +201,7 @@ sleeve stops target publication; it does not cancel, close, or zero prior state.
 
 Activation requires a quiescent fleet and starts owners before producers:
 
-1. verify authority and demo-key permission;
+1. verify demo-key permission;
 2. start demo owner and wait for same-invocation health/readiness;
 3. for `operational`, start paper owner and wait for readiness;
 4. start enabled LONG and CONTINUOUS producers;
@@ -353,7 +283,7 @@ the implemented scope—fill reconstruction, separately journaled funding,
 offline venue closed-PnL cross-checking, and unallocated account-netted
 component reductions—rather than promising nonexistent online finalizers.
 
-Do not repair a failed activation by hand-starting units, editing the receipt,
+Do not repair a failed activation by hand-starting units,
 adding a systemd override, or deleting journal evidence. Preserve the exact
 failure state, stop unsafe writers, and diagnose against the installed commit.
 Ledger reset is permitted only after authenticated demo flatness and produces a
