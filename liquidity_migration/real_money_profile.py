@@ -204,6 +204,16 @@ def _validate_dials(dials: RealMoneyDials) -> None:
             "RM_ACCOUNT_GROSS_MULTIPLE cannot exceed RM_MAX_LEVERAGE; gross above "
             "reference x leverage is not reachable within the margin the account has"
         )
+    if dials.account_gross_multiple > dials.entry_leverage * dials.initial_margin_fraction + 1e-12:
+        # Holding this much gross at this leverage would post more margin than
+        # the margin cap allows. The sleeve-level proof would catch it, but it
+        # would name a sleeve rather than the dial the owner has to move.
+        raise ValueError(
+            f"RM_ACCOUNT_GROSS_MULTIPLE ({dials.account_gross_multiple:g}) cannot exceed "
+            f"RM_ENTRY_LEVERAGE x RM_INITIAL_MARGIN_FRACTION "
+            f"({dials.entry_leverage:g} x {dials.initial_margin_fraction:g}); holding that "
+            "much gross at that leverage would post more margin than the cap allows"
+        )
     if dials.daily_loss_fraction > 1.0:
         raise ValueError("RM_DAILY_LOSS_FRACTION cannot exceed 1")
     if not 0.0 < dials.carry_stop_loss_fraction < 1.0:
@@ -243,13 +253,15 @@ def render_real_money_profile_json(
     margin_cap = reference * dials.initial_margin_fraction
 
     def _share(gross_share: float) -> dict[str, float]:
-        gross = account_gross * gross_share
+        # The same fraction of each account cap. Deriving the margin share as
+        # ``gross / entry_leverage`` instead looks natural and is wrong: below
+        # ``account_gross_multiple`` leverage the shares then sum *above* the
+        # account margin cap, so what the profile calls a partition would not
+        # be one. Taking the same fraction of both caps makes "the shares sum
+        # inside the account" true by construction, at any leverage.
         return {
-            "max_gross_notional_usdt": gross,
-            # The margin share follows from the leverage the producers request:
-            # a sleeve that cannot spend more gross than this cannot post more
-            # margin than this either.
-            "max_initial_margin_usdt": gross / dials.entry_leverage,
+            "max_gross_notional_usdt": account_gross * gross_share,
+            "max_initial_margin_usdt": margin_cap * gross_share,
         }
 
     return {

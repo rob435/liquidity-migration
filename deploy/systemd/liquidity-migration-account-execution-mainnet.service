@@ -1,0 +1,46 @@
+[Unit]
+Description=liquidity-migration single Bybit MAINNET real-money account execution owner
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+# The mainnet credential file. Disjoint from bybit-demo.env on purpose: it
+# carries BYBIT_REAL_API_KEY/SECRET and REAL_MONEY, and nothing in this
+# repository writes it. The owner does, by hand, root-owned 0600.
+EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
+Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
+Environment=ACCOUNT_VENUE_REALM=mainnet
+Environment=CONFIRM_DEMO_ORDERS=1
+Environment=TELEGRAM_ENABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution-mainnet.service main
+ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution-mainnet.service readiness
+# B16: the owner degrades rather than exiting when a startup check fails over
+# open exposure, so Restart=always is a recovery path and not a crash loop
+# during which nothing reconciles, protects, or exits.
+Restart=always
+RestartSec=2
+TimeoutStartSec=240
+KillMode=control-group
+TimeoutStopSec=180
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=256M
+
+[Install]
+WantedBy=multi-user.target

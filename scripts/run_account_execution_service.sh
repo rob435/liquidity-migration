@@ -22,6 +22,17 @@ ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
 CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
 CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
+ACCOUNT_VENUE_REALM="${ACCOUNT_VENUE_REALM:-demo}"
+case "$ACCOUNT_VENUE_REALM" in
+    demo) ACCOUNT_ID_DEFAULT="bybit-demo-unified" ;;
+    mainnet) ACCOUNT_ID_DEFAULT="bybit-mainnet-unified" ;;
+    *)
+        echo "ACCOUNT_VENUE_REALM must be demo or mainnet; there is no default beyond demo." >&2
+        exit 2
+        ;;
+esac
+ACCOUNT_ID="${ACCOUNT_ID:-$ACCOUNT_ID_DEFAULT}"
+
 if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
     echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for the demo account owner." >&2
     exit 2
@@ -31,9 +42,40 @@ if [[ -z "$ACCOUNT_ROOT" || -z "$ACCOUNT_INTENT_INBOX_ROOT" || -z "$ACCOUNT_CAPT
     exit 2
 fi
 if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
-    echo "CONFIRM_DEMO_ORDERS=1 is required for the demo account execution owner." >&2
+    echo "CONFIRM_DEMO_ORDERS=1 is required for the account execution owner." >&2
     exit 2
 fi
+# The realm and the credentials must agree here, not only inside the client.
+# A mainnet owner started against demo keys would authenticate the wrong
+# account and reconcile a book that is not the one it is protecting.
+case "$ACCOUNT_VENUE_REALM" in
+    mainnet)
+        if [[ -z "${BYBIT_REAL_API_KEY:-}" || -z "${BYBIT_REAL_API_SECRET:-}" ]]; then
+            echo "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." >&2
+            exit 2
+        fi
+        case "${REAL_MONEY:-}" in
+            1|true|TRUE|yes|YES|on|ON) ;;
+            *)
+                echo "ACCOUNT_VENUE_REALM=mainnet requires REAL_MONEY to be explicitly armed by the owner." >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    demo)
+        if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}" ]]; then
+            echo "The demo owner must not receive mainnet credentials." >&2
+            exit 2
+        fi
+        case "${REAL_MONEY:-}" in
+            ""|0|false|FALSE|no|NO|off|OFF) ;;
+            *)
+                echo "REAL_MONEY must be unset or explicitly false for the demo owner." >&2
+                exit 2
+                ;;
+        esac
+        ;;
+esac
 if [[ -z "${DISASTER_STOP_FRACTION:-}" ]]; then
     echo "Set an explicit DISASTER_STOP_FRACTION; no hidden default is allowed." >&2
     exit 2
@@ -75,6 +117,8 @@ if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then
 fi
 
 exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
+    --realm "$ACCOUNT_VENUE_REALM" \
+    --account-id "$ACCOUNT_ID" \
     --account-root "$ACCOUNT_ROOT" \
     --inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
     --capture-root "$ACCOUNT_CAPTURE_ROOT" \

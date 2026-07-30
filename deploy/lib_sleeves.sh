@@ -13,7 +13,7 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 # workload argv lives in run_authorized_runtime.sh; an operator/runtime
 # drop-in or alternate fragment would otherwise be able to replace it after the
 # checked commit had passed review.
-LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-paper.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
+LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-paper.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
@@ -22,11 +22,15 @@ lm_parse_sleeve_environment() {
     _LM_PARSED_CONTINUOUS_PAPER_PRESENT=0
     _LM_PARSED_CARRY_PRESENT=0
     _LM_PARSED_CARRY_PAPER_PRESENT=0
+    _LM_PARSED_CARRY_MAINNET_PRESENT=0
+    _LM_PARSED_LONG_MAINNET_PRESENT=0
     _LM_PARSED_LONG=""
     _LM_PARSED_CONTINUOUS=""
     _LM_PARSED_CONTINUOUS_PAPER=""
     _LM_PARSED_CARRY=""
     _LM_PARSED_CARRY_PAPER=""
+    _LM_PARSED_CARRY_MAINNET=""
+    _LM_PARSED_LONG_MAINNET=""
     _lpe_line_number=0
     while IFS= read -r _lpe_line || [ -n "$_lpe_line" ]; do
         _lpe_line_number=$((_lpe_line_number + 1))
@@ -90,6 +94,22 @@ lm_parse_sleeve_environment() {
                 _LM_PARSED_CARRY_PAPER_PRESENT=1
                 _LM_PARSED_CARRY_PAPER="$_lpe_value"
                 ;;
+            CARRY_MAINNET_SLEEVE)
+                [ "$_LM_PARSED_CARRY_MAINNET_PRESENT" -eq 0 ] || {
+                    echo "duplicate CARRY_MAINNET_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_CARRY_MAINNET_PRESENT=1
+                _LM_PARSED_CARRY_MAINNET="$_lpe_value"
+                ;;
+            LONG_MAINNET_SLEEVE)
+                [ "$_LM_PARSED_LONG_MAINNET_PRESENT" -eq 0 ] || {
+                    echo "duplicate LONG_MAINNET_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_LONG_MAINNET_PRESENT=1
+                _LM_PARSED_LONG_MAINNET="$_lpe_value"
+                ;;
             *)
                 echo "unknown sleeve toggle at $_lpe_file:$_lpe_line_number" >&2
                 return 1
@@ -106,7 +126,8 @@ lm_parse_sleeve_environment() {
 lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
-        CARRY_SLEEVE CARRY_PAPER_SLEEVE 2>/dev/null || true
+        CARRY_SLEEVE CARRY_PAPER_SLEEVE CARRY_MAINNET_SLEEVE \
+        LONG_MAINNET_SLEEVE 2>/dev/null || true
     if [ -f "$_lm_dir/sleeves.env" ]; then
         lm_parse_sleeve_environment "$_lm_dir/sleeves.env"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
@@ -117,12 +138,18 @@ lm_load_sleeve_toggles() {
         [ "$_LM_PARSED_CARRY_PRESENT" -eq 0 ] || CARRY_SLEEVE="$_LM_PARSED_CARRY"
         [ "$_LM_PARSED_CARRY_PAPER_PRESENT" -eq 0 ] \
             || CARRY_PAPER_SLEEVE="$_LM_PARSED_CARRY_PAPER"
+        [ "$_LM_PARSED_CARRY_MAINNET_PRESENT" -eq 0 ] \
+            || CARRY_MAINNET_SLEEVE="$_LM_PARSED_CARRY_MAINNET"
+        [ "$_LM_PARSED_LONG_MAINNET_PRESENT" -eq 0 ] \
+            || LONG_MAINNET_SLEEVE="$_LM_PARSED_LONG_MAINNET"
     fi
     _lm_repo_long="${LONG_SLEEVE:-off}"
     _lm_repo_continuous="${CONTINUOUS_SLEEVE:-off}"
     _lm_repo_continuous_paper="${CONTINUOUS_PAPER_SLEEVE:-off}"
     _lm_repo_carry="${CARRY_SLEEVE:-off}"
     _lm_repo_carry_paper="${CARRY_PAPER_SLEEVE:-off}"
+    _lm_repo_carry_mainnet="${CARRY_MAINNET_SLEEVE:-off}"
+    _lm_repo_long_mainnet="${LONG_MAINNET_SLEEVE:-off}"
     if [ -f "$LM_HOST_SLEEVES_ENV" ]; then
         lm_parse_sleeve_environment "$LM_HOST_SLEEVES_ENV"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
@@ -133,18 +160,26 @@ lm_load_sleeve_toggles() {
         [ "$_LM_PARSED_CARRY_PRESENT" -eq 0 ] || CARRY_SLEEVE="$_LM_PARSED_CARRY"
         [ "$_LM_PARSED_CARRY_PAPER_PRESENT" -eq 0 ] \
             || CARRY_PAPER_SLEEVE="$_LM_PARSED_CARRY_PAPER"
+        [ "$_LM_PARSED_CARRY_MAINNET_PRESENT" -eq 0 ] \
+            || CARRY_MAINNET_SLEEVE="$_LM_PARSED_CARRY_MAINNET"
+        [ "$_LM_PARSED_LONG_MAINNET_PRESENT" -eq 0 ] \
+            || LONG_MAINNET_SLEEVE="$_LM_PARSED_LONG_MAINNET"
     fi
     if ! sleeve_on "$_lm_repo_long"; then LONG_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous"; then CONTINUOUS_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous_paper"; then CONTINUOUS_PAPER_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_carry"; then CARRY_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_carry_paper"; then CARRY_PAPER_SLEEVE=off; fi
+    if ! sleeve_on "$_lm_repo_carry_mainnet"; then CARRY_MAINNET_SLEEVE=off; fi
+    if ! sleeve_on "$_lm_repo_long_mainnet"; then LONG_MAINNET_SLEEVE=off; fi
     # Missing toggles fail safe to off; a missing config cannot resurrect a sleeve.
     : "${LONG_SLEEVE:=off}"
     : "${CONTINUOUS_SLEEVE:=off}"
     : "${CONTINUOUS_PAPER_SLEEVE:=off}"
     : "${CARRY_SLEEVE:=off}"
     : "${CARRY_PAPER_SLEEVE:=off}"
+    : "${CARRY_MAINNET_SLEEVE:=off}"
+    : "${LONG_MAINNET_SLEEVE:=off}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
@@ -172,6 +207,8 @@ lm_write_resolved_sleeve_toggles() {
         printf 'CONTINUOUS_PAPER_SLEEVE=%s\n' "${CONTINUOUS_PAPER_SLEEVE:-off}"
         printf 'CARRY_SLEEVE=%s\n' "${CARRY_SLEEVE:-off}"
         printf 'CARRY_PAPER_SLEEVE=%s\n' "${CARRY_PAPER_SLEEVE:-off}"
+        printf 'CARRY_MAINNET_SLEEVE=%s\n' "${CARRY_MAINNET_SLEEVE:-off}"
+        printf 'LONG_MAINNET_SLEEVE=%s\n' "${LONG_MAINNET_SLEEVE:-off}"
         if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then
             printf 'CONTINUOUS_HEDGE_TIMER=%s\n' "$CONTINUOUS_HEDGE_TIMER"
         fi
@@ -203,6 +240,14 @@ lm_verify_resolved_sleeve_toggles() {
     }
     grep -Fx "CARRY_PAPER_SLEEVE=${CARRY_PAPER_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
         echo "verify failed: resolved CARRY_PAPER_SLEEVE does not match loaded toggle" >&2
+        return 1
+    }
+    grep -Fx "CARRY_MAINNET_SLEEVE=${CARRY_MAINNET_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
+        echo "verify failed: resolved CARRY_MAINNET_SLEEVE does not match loaded toggle" >&2
+        return 1
+    }
+    grep -Fx "LONG_MAINNET_SLEEVE=${LONG_MAINNET_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
+        echo "verify failed: resolved LONG_MAINNET_SLEEVE does not match loaded toggle" >&2
         return 1
     }
     if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then

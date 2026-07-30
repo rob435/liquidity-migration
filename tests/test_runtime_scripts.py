@@ -143,6 +143,7 @@ def test_liveness_timer_has_one_bounded_activation_grace() -> None:
 
 
 def test_producers_require_owner_readiness_and_never_hold_private_order_authority() -> None:
+    mainnet_owner = "liquidity-migration-account-execution-mainnet.service"
     pairs = {
         "liquidity-migration-bybit-long-demo.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-bybit-continuous-demo.service": "liquidity-migration-account-execution.service",
@@ -151,19 +152,41 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
         "liquidity-migration-bybit-long-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-continuous-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-carry-paper.service": "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-bybit-long-mainnet.service": mainnet_owner,
+        "liquidity-migration-bybit-carry-mainnet.service": mainnet_owner,
     }
     for producer, owner in pairs.items():
         fragment = _unit(producer)
         assert f"Requires={owner}" in fragment
         assert owner in next(line for line in fragment.splitlines() if line.startswith("After="))
+        # Every producer, in every realm, has both credential pairs and the
+        # arming switch stripped from its inherited environment.
+        unset = next(line for line in fragment.splitlines() if line.startswith("UnsetEnvironment="))
+        for stripped in (
+            "BYBIT_DEMO_API_KEY",
+            "BYBIT_DEMO_API_SECRET",
+            "BYBIT_REAL_API_KEY",
+            "BYBIT_REAL_API_SECRET",
+            "REAL_MONEY",
+        ):
+            assert stripped in unset, (producer, stripped)
     for runner in (
         "scripts/run_bybit_long_demo_event_engine.sh",
         "scripts/run_bybit_continuous_demo_event_engine.sh",
         "scripts/run_continuous_hedge.sh",
     ):
         text = _read(runner)
-        assert "BYBIT_DEMO_API_SECRET" not in text
         assert "place_order" not in text
+        # A credential name may appear only inside a refusal. Reading one to
+        # reject it is the opposite of holding order authority; assigning one
+        # or handing it to the workload is what this forbids.
+        for variable in ("BYBIT_DEMO_API_SECRET", "BYBIT_REAL_API_SECRET"):
+            for line in text.splitlines():
+                if variable not in line:
+                    continue
+                assert f"{variable}=" not in line.replace(f"{variable}:-", ""), (runner, line)
+                assert "--api-secret" not in line, (runner, line)
+                assert "export" not in line, (runner, line)
 
 
 def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> None:

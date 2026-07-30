@@ -1,0 +1,52 @@
+[Unit]
+Description=liquidity-migration Bybit carry-hold MAINNET target producer (lane2_carry_hold_v3)
+Wants=network-online.target
+Requires=liquidity-migration-account-execution-mainnet.service
+After=network-online.target liquidity-migration-account-execution-mainnet.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
+# A producer publishes targets and submits nothing. It gets no credentials and
+# no arming switch in any realm; the runner refuses to start if either reaches
+# it anyway.
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
+Environment=DATA_ROOT=data/bybit-carry-mainnet-event
+Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
+Environment=EXECUTION_ENVIRONMENT=mainnet
+Environment=INTERVAL_SECONDS=60
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
+Environment=LOOKBACK_DAYS=90
+Environment=WORKERS=2
+# Carry has no WS kline plane; market data arrives via bounded public REST.
+Environment=WS_KLINES_ENABLED=0
+Environment=POLARS_MAX_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-carry-mainnet.service main
+Restart=always
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=180
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0027
+ReadWritePaths=/opt/liquidity-migration
+MemoryHigh=768M
+MemoryMax=896M
+MemorySwapMax=384M
+
+[Install]
+WantedBy=multi-user.target

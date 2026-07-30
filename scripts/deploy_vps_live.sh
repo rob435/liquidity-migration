@@ -1426,6 +1426,17 @@ verify_topology() {
     else
         timer_off liquidity-migration-continuous-hedge.timer || fail "hedge timer is not off"
     fi
+    # This entrypoint is demo/paper only and stays that way. It never starts a
+    # mainnet unit -- but silence is not proof, so verify asserts each one is
+    # off rather than leaving a running real-money owner invisible to a green
+    # demo verification.
+    for mainnet_unit in \
+        liquidity-migration-account-execution-mainnet.service \
+        liquidity-migration-bybit-carry-mainnet.service \
+        liquidity-migration-bybit-long-mainnet.service; do
+        unit_off "$mainnet_unit" \
+            || fail "$mainnet_unit is active under demo/paper authorization"
+    done
     expected_downstream_on liquidity-migration-demo-liveness.timer \
         || fail "liveness timer is not active"
     for oneshot in \

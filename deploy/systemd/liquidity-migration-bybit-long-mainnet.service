@@ -1,0 +1,51 @@
+[Unit]
+Description=liquidity-migration LONG MAINNET target producer (LongV11aDivWeekendVol)
+Wants=network-online.target
+Requires=liquidity-migration-account-execution-mainnet.service
+After=network-online.target liquidity-migration-account-execution-mainnet.service
+ConditionPathExists=/etc/liquidity-migration/account-execution-operational-ready
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
+# A producer publishes targets and submits nothing. It gets no credentials and
+# no arming switch in any realm; the runner refuses to start if either reaches
+# it anyway.
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
+Environment=DATA_ROOT=data/bybit-long-mainnet-event
+Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
+Environment=EXECUTION_ENVIRONMENT=mainnet
+Environment=TELEGRAM_ENABLED=0
+Environment=INTERVAL_SECONDS=60
+Environment=USE_DAEMON=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The 90-day turnover rank requires at least 95 days after bar trimming.
+Environment=LOOKBACK_DAYS=100
+Environment=WORKERS=2
+Environment=WS_KLINES_ENABLED=1
+Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-mainnet.service main
+Restart=always
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=180
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0027
+ReadWritePaths=/opt/liquidity-migration
+MemoryHigh=576M
+MemoryMax=640M
+MemorySwapMax=384M
+
+[Install]
+WantedBy=multi-user.target

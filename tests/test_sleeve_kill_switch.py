@@ -249,11 +249,15 @@ def test_committed_sleeves_env_continuous_retired() -> None:
         "CONTINUOUS_PAPER_SLEEVE": "off",
         "CARRY_SLEEVE": "on",
         "CARRY_PAPER_SLEEVE": "on",
+        # Real-money producers. Repo-off is a hard ceiling a host override
+        # cannot lift, so arming them is a committed change and not a host edit.
+        "CARRY_MAINNET_SLEEVE": "off",
+        "LONG_MAINNET_SLEEVE": "off",
     }
     for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))
         assert line == f"{flag}={value}", f"{flag} must be plain KEY={value} (no inline comment): {line!r}"
-    # Exactly the five registered keys — no stray toggles the parser would reject.
+    # Exactly the registered keys — no stray toggles the parser would reject.
     keys = [ln.split("=", 1)[0] for ln in env.splitlines() if ln and not ln.startswith("#")]
     assert keys == list(expected)
 

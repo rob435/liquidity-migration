@@ -38,6 +38,10 @@ Safe operator commands:
   wedged-command [ARGS...]     report/probe wedged order commands (read-only)
   wedged-command --execute resolve [ARGS...]
                                terminalize one wedged command on venue evidence
+  real-money preflight         report every remaining arming step (read-only)
+  real-money render-profile [--execute --output PATH]
+                               render+prove the operational profile from the
+                               RM_* dials in the owner's env file
   test [PYTEST_ARGS...]        run pytest
   deploy --execute MODE        run install, activation, guarded rollout, or reset recovery
   help                         show this help and do nothing else
@@ -48,7 +52,9 @@ Environment overrides:
   PYTHON       Python executable/path for local tools and tests
 
 Safety contract:
-  * This interface never enables REAL_MONEY or mainnet trading.
+  * This interface never enables REAL_MONEY or mainnet trading. real-money
+    preflight only reports what is missing and never prints a secret;
+    render-profile writes one non-secret profile artifact and nothing else.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
   * clock-offset requires --execute and runs on the VPS clock.
   * deploy requires --execute and MODE=install|activate|rollout|recover.
@@ -267,6 +273,25 @@ case "$command" in
       set -- --account-root "$REPO_DIR/data/bybit-account-execution"
     fi
     remote_python_script scripts/check_kill_criteria.py "$@"
+    ;;
+  real-money)
+    # The owner-facing arming surface. `preflight` reads only and never prints
+    # a secret. `render-profile` without --execute prints the profile to
+    # stdout; with --execute it writes exactly one non-secret artifact and
+    # refuses any dial set that does not pass the load-time envelope proof.
+    # Neither sets REAL_MONEY, writes a credential, issues authority, or starts
+    # a unit -- every one of those is the owner's own act.
+    subcommand="${1:-preflight}"
+    case "$subcommand" in
+      preflight|render-profile) ;;
+      *) die_usage "real-money subcommand must be preflight or render-profile" ;;
+    esac
+    # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
+    # can be proved before anything is copied to the host.
+    if [[ "${LOCAL:-0}" == "1" ]]; then
+      exec "$PYTHON_BIN" -m liquidity_migration.real_money_arming "$@"
+    fi
+    remote_python_module liquidity_migration.real_money_arming "$@"
     ;;
   wedged-command)
     # B15b. `report` and `probe` read only. `resolve` writes one journal

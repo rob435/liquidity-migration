@@ -435,6 +435,11 @@ def build_candidate_rule_coverage(
     candidate = load_candidate_universe(
         candidate_snapshot.path,
         snapshot=candidate_snapshot,
+        # B11: the universe artifact records the realm it was frozen from, and
+        # its loader refuses the other one. Passing the realm through is what
+        # lets a mainnet universe be proved at all -- and what keeps a demo
+        # universe from being accepted as mainnet evidence.
+        realm=selected_realm,
     )
     rules_snapshot = _use_snapshot(
         demo_rules_path,

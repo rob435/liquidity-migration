@@ -51,8 +51,28 @@ case "${EXECUTION_ENVIRONMENT:-}" in
             exit 2
         fi
         ;;
+    mainnet)
+        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
+            echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
+            exit 2
+        fi
+        # A producer has no execution authority and must never hold either.
+        # The unit strips both; this is the check that says so out loud if the
+        # strip ever fails.
+        if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
+            echo "A target producer must not receive venue credentials." >&2
+            exit 2
+        fi
+        case "${REAL_MONEY:-}" in
+            ""|0|false|FALSE|no|NO|off|OFF) ;;
+            *)
+                echo "A target producer must not receive REAL_MONEY; it submits no orders." >&2
+                exit 2
+                ;;
+        esac
+        ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo, paper, or mainnet." >&2
         exit 2
         ;;
 esac
