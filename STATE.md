@@ -56,7 +56,14 @@ history is in Git and in the audit receipts indexed at the bottom.
     because the daemons share a base class — this is why cycles land ~3 min
     apart rather than every 60s. The public linear WebSocket logs `ping/pong
     timed out` roughly every 5 minutes. A single `native protection health is
-    stale` RuntimeError at 11:05 UTC returned one request to pending.
+    stale` RuntimeError at 11:05 UTC returned one request to pending — that
+    string is a freshness assertion about the last venue-side *proof* for a
+    symbol (a 4s bound, from `reconcile_seconds * 2`), not a statement that a
+    stop is missing: the three CARRY stops were armed at Bybit throughout and
+    the only effect was refusing one new non-reducing request. The alarm shares
+    its wording with three sibling gates that do mean protection is absent,
+    which is a reporting defect worth fixing before it teaches anyone to
+    discount it.
 - **2026-07-29 18:24 UTC — installed commit `63f32765b` (Telegram observability
   and alert-noise fixes), deployed through the STAGED path with an open
   position.** Owner authorization: the "check telegram logs for errors and fix
