@@ -11,13 +11,13 @@ What it deliberately does **not** do:
 
 * It never prints a secret. A credential is reported as present or absent, by
   variable name, and its value is never read into the report at all.
-* It never writes a credential, sets ``REAL_MONEY``, issues authority, or
+* It never writes a credential, sets ``REAL_MONEY``, or
   starts a unit. Every one of those is the owner's act, and a tool that could
   do them on the owner's behalf would be a tool that could do them by accident.
 * It is not itself a safety layer. Every check here is re-run, independently
-  and fail-closed, by the credential resolver, the owner runner, the authority
-  issuer, and the runtime verifier. This exists so the owner is not the one
-  discovering those failures one at a time.
+  and fail-closed, by the credential resolver and the owner runner. This
+  exists so the owner is not the one discovering those failures one at a
+  time.
 
 ``render-profile`` is the one mutating command, and it writes exactly one
 non-secret artifact: the operational profile, derived from the dials in the
@@ -97,10 +97,10 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
     if not stat.S_ISREG(metadata.st_mode):
         return None, CheckResult(path.name, False, f"{path} is not a regular file", "")
     mode = stat.S_IMODE(metadata.st_mode)
-    # Matches the authority issuer's own rule (uid 0 or the caller's), so a
+    # Root-owned or caller-owned, so a
     # non-root dry run on a workstation reports the same thing the VPS will.
     # The deployed file is read by a root service and must be root-owned there;
-    # the authority issuer is what enforces that, fail-closed.
+    # the owner runner is what enforces that, fail-closed.
     if metadata.st_uid not in {0, os.geteuid()} or mode != 0o600:
         return None, CheckResult(
             path.name,
@@ -265,7 +265,7 @@ def _installed_profile_matches_dials(
         f"{path} is NOT the render of the dials in the env file; the envelope "
         "reported above is not the one that would be enforced",
         "re-render it: scripts/ops.sh real-money render-profile --execute "
-        f"--output {path} --overwrite, then re-issue the authority receipt",
+        f"--output {path} --overwrite, then reinstall",
     )
 
 
@@ -523,8 +523,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{len(outstanding)} step(s) remaining before real money can trade.")
         else:
             print(
-                "Every precondition is met. Remaining owner acts: issue the "
-                "real-money authority receipt, then activate the mainnet units."
+                "Every precondition is met. Remaining owner act: activate the "
+                "mainnet units."
             )
     return 0 if all(row.ok for row in results) else 1
 
