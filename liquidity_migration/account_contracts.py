@@ -158,6 +158,14 @@ class AccountRiskPolicy:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float = 1e-12
+    #: Absolute daily loss ceiling in USDT, measured against the UTC day's
+    #: opening equity. 0.0 disables it. Enforced by ``AccountLossGuard`` in the
+    #: owner loop rather than here, because the ceiling needs the day's opening
+    #: equity and a trip has to survive a process restart -- neither of which a
+    #: per-batch cap can express. It lives on the policy so it is bound into the
+    #: operational profile, and therefore hashed into the authority receipt:
+    #: the ceiling cannot be raised without invalidating the deploy authority.
+    max_daily_loss_usdt: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -22,11 +22,26 @@ OPERATIONAL_PROFILE_SCHEMA_VERSION = 1
 OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
 
 
-def _object(value: object, *, label: str, fields: set[str]) -> Mapping[str, Any]:
+def _object(
+    value: object,
+    *,
+    label: str,
+    fields: set[str],
+    optional: frozenset[str] = frozenset(),
+) -> Mapping[str, Any]:
+    """Reject typos without forcing every profile to restate every new knob.
+
+    ``fields`` stay mandatory: a profile missing one is a misconfiguration, and
+    the unknown-field check is what turns a typo into a startup failure instead
+    of a silently ignored limit. ``optional`` names keys that are permitted but
+    not required, so a control can be added without invalidating the profile
+    already deployed -- which would otherwise stop the owner from starting.
+    """
+
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be a JSON object")
     missing = sorted(fields - set(value))
-    unknown = sorted(set(value) - fields)
+    unknown = sorted(set(value) - fields - optional)
     if missing:
         raise ValueError(f"{label} is missing fields: {', '.join(missing)}")
     if unknown:
@@ -62,6 +77,7 @@ class AccountRiskSettings:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float
+    max_daily_loss_usdt: float = 0.0
 
     def to_policy(self) -> AccountRiskPolicy:
         return AccountRiskPolicy(
@@ -71,6 +87,7 @@ class AccountRiskSettings:
             max_initial_margin_usdt=self.max_initial_margin_usdt,
             max_leverage=self.max_leverage,
             quantity_tolerance=self.quantity_tolerance,
+            max_daily_loss_usdt=self.max_daily_loss_usdt,
         )
 
 
@@ -139,7 +156,15 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         "max_leverage",
         "quantity_tolerance",
     }
-    row = _object(value, label="operational profile account_risk", fields=fields)
+    row = _object(
+        value,
+        label="operational profile account_risk",
+        fields=fields,
+        # Absent means no daily loss ceiling. Present and positive arms the
+        # account-level halt. Optional so adding it cannot brick a deployed
+        # profile that predates it.
+        optional=frozenset({"max_daily_loss_usdt"}),
+    )
     settings = AccountRiskSettings(
         max_component_gross_notional_usdt=_positive_float(
             row["max_component_gross_notional_usdt"],
@@ -162,6 +187,13 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         ),
         quantity_tolerance=_positive_float(
             row["quantity_tolerance"], label="account_risk.quantity_tolerance"
+        ),
+        max_daily_loss_usdt=(
+            _positive_float(
+                row["max_daily_loss_usdt"], label="account_risk.max_daily_loss_usdt"
+            )
+            if row.get("max_daily_loss_usdt") is not None
+            else 0.0
         ),
     )
     if settings.max_symbol_notional_usdt > settings.max_component_gross_notional_usdt:

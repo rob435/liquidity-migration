@@ -74,6 +74,11 @@ from .market_capture import (
     recorder_callback,
     symbols_from_file,
 )
+from .account_loss_guard import (
+    LOSS_GUARD_OK,
+    LOSS_GUARD_TRIPPED,
+    AccountLossGuard,
+)
 from .protection_engine import AccountProtectionEngine
 from .post_fill_markouts import PostFillMarkoutObserver
 from .venue_protection import AccountHealthChain, BybitNativeProtectionManager
@@ -701,6 +706,17 @@ def main(argv: list[str] | None = None) -> int:
     last_request_failure_signature = ""
     latest_reconcile_report = reconciler.last_report
     last_capital_snapshot = snapshot_provider.current(batch_id="owner-health/bootstrap")
+    # Account-level daily loss halt. The ceiling rides on the risk policy, so it
+    # is bound into the operational profile and hashed into the authority
+    # receipt: it cannot be raised without invalidating the deploy authority.
+    # Absent/zero leaves the machinery running and observable but never tripping,
+    # which is how it is exercised on demo long before it guards anything real.
+    loss_guard = AccountLossGuard(
+        max_daily_loss_usdt=(
+            policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
+        )
+    )
+    loss_guard_flat_published = False
     try:
         while True:
             now = time.monotonic()
@@ -929,6 +945,35 @@ def main(argv: list[str] | None = None) -> int:
                             health_detail,
                             requested_symbols_ready,
                         )
+                loss_state, loss_detail = loss_guard.evaluate(
+                    equity_usdt=last_capital_snapshot.equity_usdt,
+                    equity_ts_ns=last_capital_snapshot.snapshot_ts_ns,
+                    now_ns=time.time_ns(),
+                )
+                if loss_state != LOSS_GUARD_OK:
+                    health_status = AccountOwnerHealthStatus.BLOCKED
+                    health_detail = _append_health_error(health_detail, loss_detail)[:1000]
+                    health_signature = (
+                        health_status.value,
+                        health_detail,
+                        requested_symbols_ready,
+                    )
+                if loss_state == LOSS_GUARD_TRIPPED and not loss_guard_flat_published:
+                    # Publish once. run_safety_flat_once is the same durable
+                    # all-flat path a native-protection breach uses: reductions
+                    # bypass every notional cap and the health chain, so a
+                    # BLOCKED owner can still close. Republishing every cycle
+                    # would queue redundant flats behind the first.
+                    _logger.critical("account loss ceiling reached: %s", loss_detail)
+                    try:
+                        service.run_safety_flat_once(inbox)
+                        loss_guard_flat_published = True
+                    except Exception as exc:  # noqa: BLE001 - never kill the owner
+                        _logger.exception("loss-ceiling safety flat failed")
+                        health_detail = _append_health_error(
+                            health_detail,
+                            f"loss-ceiling safety flat failed: {type(exc).__name__}: {exc}",
+                        )[:1000]
                 published_health = publish_demo_owner_health(
                     kernel=kernel,
                     account_root=route.account_path,
