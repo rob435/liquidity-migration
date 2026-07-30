@@ -250,10 +250,20 @@ FUNDING_LOOKBACK_DAYS = 2
 #: Paper freshness: the follower refuses to decide on a leader kline cache
 #: whose newest bar CLOSE is older than this (one dead leader day + margin).
 PAPER_KLINE_FRESHNESS_MS = 26 * HOUR_MS
-#: Resize dead-band: republishing a target for sub-USDT drift would churn the
-#: inbox every cycle as equity marks wiggle.
+#: Resize dead-band. A resize is a real round trip at a measured ~15.6bp, so
+#: the band has to sit where the tracking-error it buys is worth the spread it
+#: spends: closing a 5% notional gap costs ~0.8bp of the position, closing a
+#: 0.1% gap costs ~0.02bp and buys nothing a daily sleeve can use.
+#:
+#: The 0.001 this replaced was below the noise floor of the sizing input
+#: itself. On 2026-07-30 the live CARRY book booked 133 involuntary reductions
+#: and traded $84.7k of notional against a ~$30k book in thirteen hours,
+#: without a single strategy exit, purely because live equity wiggled ±0.15%
+#: per cycle against a 0.1% band. The anchor in
+#: :meth:`CarryCycleState.sizing_equity` removes the cause; this band is the
+#: backstop that keeps fill rounding and partial fills from re-creating it.
 RESIZE_MIN_NOTIONAL_USDT = 1.0
-RESIZE_MIN_FRACTION_OF_STANDING = 0.001
+RESIZE_MIN_FRACTION_OF_STANDING = 0.05
 #: Entries below this notional would round to zero venue quantity and come
 #: back as a terminal (permanently suppressing) rejection; skip them instead.
 ENTRY_MIN_NOTIONAL_USDT = 10.0
@@ -274,21 +284,66 @@ class CarryCycleState:
     """Mutable, daemon-owned cross-cycle memory (never decision authority).
 
     The cycle function itself is stateless — everything decision-relevant is
-    recomputed from disk and REST each cycle. This object only carries two
+    recomputed from disk and REST each cycle. This object carries three
     operational hints between cycles: when the funding cache was last swept
     (settled prints only change on hour boundaries, so re-sweeping every 60s
-    would be ~200k pointless REST calls/day) and the newest successful
-    decision (so the ``decision_stale`` alarm does not need to re-read the
-    cycles dataset on every failing cycle). Losing this object — restart,
-    ``--once`` invocations — costs one extra funding sweep and one cycles-
-    dataset read, nothing else.
+    would be ~200k pointless REST calls/day), the newest successful decision
+    (so the ``decision_stale`` alarm does not need to re-read the cycles
+    dataset on every failing cycle), and the equity this decision was first
+    sized against.
+
+    Losing this object — restart, ``--once`` invocations — costs one extra
+    funding sweep, one cycles-dataset read, and one re-anchor of the sizing
+    equity to the current mark. The re-anchor is bounded rather than free: it
+    can move the day's targets by however much equity has moved since the
+    decision, and the resize dead-band absorbs that unless the move is large.
     """
 
-    __slots__ = ("funding_swept_hour_ts", "last_successful_decision_ts_ms")
+    __slots__ = (
+        "funding_swept_hour_ts",
+        "last_successful_decision_ts_ms",
+        "sizing_equity_usdt",
+        "sizing_equity_decision_ts_ms",
+    )
 
     def __init__(self) -> None:
         self.funding_swept_hour_ts: int | None = None
         self.last_successful_decision_ts_ms: int | None = None
+        self.sizing_equity_usdt: float | None = None
+        self.sizing_equity_decision_ts_ms: int | None = None
+
+    def sizing_equity(self, *, decision_ts_ms: int, equity_usdt: float) -> float:
+        """Equity as of when this decision was first sized, not the live mark.
+
+        CARRY decides once a day and holds. Sizing every cycle off the live
+        account mark makes the day's targets a function of the book's own
+        unrealized P&L, and that feedback has a direction: equity rises
+        because the longs rose, so the target rises, so the sleeve buys more
+        after the move — and sells after a fall. It is buy-high/sell-low
+        wearing a rebalance costume, and it fires whenever the mark drifts
+        past the dead-band, which on 2026-07-30 was every three minutes.
+
+        Anchoring to the decision makes intraday targets constant, so a
+        converged book stays converged and only a genuinely new decision moves
+        it. Equity moving is not new information to a sleeve that has already
+        decided; the disaster stop and native protection remain the
+        capital-preservation path, unchanged.
+
+        An unusable equity read (``<= 0``) is passed through untouched rather
+        than anchored: callers already refuse to size on it, and poisoning the
+        anchor with a failed read would outlive the failure.
+        """
+
+        if equity_usdt <= 0.0:
+            return equity_usdt
+        if (
+            self.sizing_equity_decision_ts_ms != int(decision_ts_ms)
+            or self.sizing_equity_usdt is None
+            or self.sizing_equity_usdt <= 0.0
+        ):
+            self.sizing_equity_decision_ts_ms = int(decision_ts_ms)
+            self.sizing_equity_usdt = float(equity_usdt)
+        return float(self.sizing_equity_usdt)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -683,6 +738,7 @@ def _carry_target_plan(
     equity_usdt: float,
     account_owner_health_error: str,
     cycle_now_ms: int,
+    cycle_state: CarryCycleState | None = None,
 ) -> CarryTargetPlan:
     """Diff the desired book against the standing book into target intents.
 
@@ -691,6 +747,12 @@ def _carry_target_plan(
     and resizes size off equity and are blocked without it. When the decision
     itself is unavailable NOTHING is planned — a data hiccup must hold the
     standing book, never flatten it.
+
+    Sizing uses :meth:`CarryCycleState.sizing_equity`, the equity this
+    decision was first sized against, rather than the live mark handed in as
+    ``equity_usdt``. Callers without cross-cycle state (single-shot planning,
+    unit tests) size off the live value, which for one cycle is the same
+    thing.
     """
 
     if decision is None:
@@ -700,6 +762,11 @@ def _carry_target_plan(
     desired = decision.weights
     entry_health_ok = not account_owner_health_error and equity_usdt > 0.0
     entry_blocked_reason = "" if entry_health_ok else "account_owner_health_unavailable"
+    sizing_equity_usdt = (
+        cycle_state.sizing_equity(decision_ts_ms=decision_ts_ms, equity_usdt=equity_usdt)
+        if cycle_state is not None
+        else equity_usdt
+    )
 
     exit_symbols = sorted(set(standing_notional) - set(desired))
     exit_intents = [
@@ -748,7 +815,7 @@ def _carry_target_plan(
                 entry_cap_deferrals += 1
                 continue
             weight = float(desired[symbol])
-            target_notional = weight * equity_usdt * demo.notional_multiplier
+            target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
             if target_notional < ENTRY_MIN_NOTIONAL_USDT:
                 entry_dust_skips += 1
                 continue
@@ -780,7 +847,7 @@ def _carry_target_plan(
             planned_entries += 1
         for symbol in sorted(set(desired) & set(standing_notional)):
             weight = float(desired[symbol])
-            target_notional = weight * equity_usdt * demo.notional_multiplier
+            target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
             standing = float(standing_notional[symbol])
             delta = target_notional - standing
             threshold = max(
@@ -1322,6 +1389,7 @@ def run_carry_demo_cycle(
             equity_usdt=equity_usdt,
             account_owner_health_error=account_owner_health_error,
             cycle_now_ms=cycle_now_ms,
+            cycle_state=state,
         )
         suppression = suppress_target_intents(
             exit_intents=plan.exit_intents,
@@ -1439,6 +1507,12 @@ def run_carry_demo_cycle(
             # Null, not 0.0, when owner health is unavailable: a literal zero
             # reads as a -100% equity spike in every cycles-derived curve.
             "equity_usdt": equity_usdt if not account_owner_health_error else None,
+            # The mark above is descriptive; this is the number the day's
+            # targets were actually sized against. They differ by whatever the
+            # book has marked since the decision, and only this one explains a
+            # published notional.
+            "sizing_equity_usdt": state.sizing_equity_usdt,
+            "sizing_equity_decision_ts_ms": state.sizing_equity_decision_ts_ms,
             "account_owner_health_error": account_owner_health_error,
             "wallet_error": account_owner_health_error,
             "entry_risk_health_ok": not account_owner_health_error and equity_usdt > 0.0,

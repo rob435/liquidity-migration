@@ -40,6 +40,7 @@ from liquidity_migration.account_reconcile import (
 from liquidity_migration.account_service import AccountConvergenceItem, AccountConvergenceReport
 from liquidity_migration.account_paper_runner import publish_paper_owner_health
 from liquidity_migration.account_service_runner import (
+    PositionTruthSettling,
     append_unique_notification_health_error,
     notification_position_truth,
     owner_health_publish_decision,
@@ -660,6 +661,81 @@ def test_notification_position_truth_preserves_failure_classification(
     assert healthy is False
     assert detail == str(error)
     assert status == expected_status
+
+
+# ---------------------------------------------------------------------------
+# PositionTruthSettling -- the post-fill propagation window
+# ---------------------------------------------------------------------------
+
+SETTLE_NS = 30 * 1_000_000_000
+
+
+def test_settling_suppresses_a_disagreement_younger_than_the_window() -> None:
+    """The venue lagging a just-journaled fill is not a fault to page about."""
+
+    settling = PositionTruthSettling(settle_ns=SETTLE_NS)
+    assert settling.evaluate(True, "", "healthy", now_ns=0) == (True, "", "healthy")
+
+    healthy, detail, status = settling.evaluate(
+        False, "BUSDT:venue=0:current_reconstructed=2", "mismatch", now_ns=1_000
+    )
+    assert (healthy, detail, status) == (True, "", "settling")
+    healthy, _, status = settling.evaluate(
+        False, "BUSDT:venue=0:current_reconstructed=2", "mismatch", now_ns=1_000 + SETTLE_NS - 1
+    )
+    assert (healthy, status) == (True, "settling")
+
+
+def test_settling_reports_a_disagreement_that_outlives_the_window() -> None:
+    """A real contradiction does not clear; it reports one window later, in full."""
+
+    settling = PositionTruthSettling(settle_ns=SETTLE_NS)
+    settling.evaluate(False, "detail", "mismatch", now_ns=1_000)
+    healthy, detail, status = settling.evaluate(
+        False, "detail", "mismatch", now_ns=1_000 + SETTLE_NS
+    )
+    assert (healthy, detail, status) == (False, "detail", "mismatch")
+
+
+def test_settling_clock_is_not_restarted_by_changing_detail() -> None:
+    """A book resized name by name must not hold the window open forever.
+
+    The window measures continuous disagreement, not disagreement about one
+    unchanging thing, so a mismatch whose text changes every cycle still
+    reports on schedule.
+    """
+
+    settling = PositionTruthSettling(settle_ns=SETTLE_NS)
+    for step in range(5):
+        settling.evaluate(False, f"symbol-{step}", "mismatch", now_ns=1_000 + step)
+    healthy, _, status = settling.evaluate(
+        False, "symbol-late", "mismatch", now_ns=1_000 + SETTLE_NS
+    )
+    assert (healthy, status) == (False, "mismatch")
+
+
+def test_settling_window_restarts_only_after_agreement() -> None:
+    settling = PositionTruthSettling(settle_ns=SETTLE_NS)
+    settling.evaluate(False, "detail", "mismatch", now_ns=1_000)
+    assert settling.evaluate(True, "", "healthy", now_ns=2_000) == (True, "", "healthy")
+    # A later disagreement gets its own full window rather than inheriting the
+    # elapsed time of the one that already resolved.
+    healthy, _, status = settling.evaluate(False, "detail", "mismatch", now_ns=3_000)
+    assert (healthy, status) == (True, "settling")
+
+
+def test_settling_fails_closed_when_the_clock_runs_backwards() -> None:
+    settling = PositionTruthSettling(settle_ns=SETTLE_NS)
+    settling.evaluate(False, "detail", "mismatch", now_ns=10_000)
+    healthy, detail, status = settling.evaluate(False, "detail", "mismatch", now_ns=9_000)
+    assert (healthy, detail, status) == (False, "detail", "mismatch")
+
+
+def test_a_zero_window_reports_immediately() -> None:
+    """The suppression is opt-in: settle_ns=0 restores the unbuffered behaviour."""
+
+    settling = PositionTruthSettling(settle_ns=0)
+    assert settling.evaluate(False, "detail", "stale", now_ns=1) == (False, "detail", "stale")
 
 
 @pytest.mark.parametrize(

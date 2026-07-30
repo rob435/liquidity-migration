@@ -399,6 +399,93 @@ class TestCarryTargetPlan:
         assert plan.entry_intents == []
         assert plan.entry_validity_expired_skips == 3
 
+    def test_intraday_equity_drift_alone_never_publishes_a_resize(self) -> None:
+        """The regression: a converged book must stay silent while the mark moves.
+
+        On 2026-07-30 this produced 133 involuntary reductions and $84.7k of
+        traded notional against a ~$30k book in thirteen hours, with no
+        strategy exit and no weight change -- the sleeve was rebalancing to
+        its own unrealized P&L. Sizing is anchored to the decision, so equity
+        moving is not, by itself, an instruction to trade.
+        """
+
+        state = CarryCycleState()
+        converged = {
+            "AUSDT": 0.05 * EQUITY,
+            "BUSDT": 0.04 * EQUITY,
+            "CUSDT": 0.03 * EQUITY,
+        }
+        first = _carry_target_plan(
+            **_plan_kwargs(standing_notional=converged, cycle_state=state)
+        )
+        assert first.resize_intents == []
+
+        # Equity swings well past the old 0.1% dead-band, in both directions.
+        for drift in (1.02, 0.97, 1.05, 0.93):
+            plan = _carry_target_plan(
+                **_plan_kwargs(
+                    standing_notional=converged,
+                    equity_usdt=EQUITY * drift,
+                    cycle_state=state,
+                )
+            )
+            assert plan.resize_intents == [], f"drift {drift} published a resize"
+
+    def test_a_new_decision_re_anchors_the_sizing_equity(self) -> None:
+        """Anchoring must not freeze the book: tomorrow sizes off tomorrow."""
+
+        state = CarryCycleState()
+        _carry_target_plan(**_plan_kwargs(cycle_state=state))
+        assert state.sizing_equity_usdt == pytest.approx(EQUITY)
+        assert state.sizing_equity_decision_ts_ms == D0
+
+        tomorrow = CarryDecision(
+            decision_ts_ms=D0 + MS_PER_DAY,
+            weights={"AUSDT": 0.05},
+            universe_size=100,
+            replay_days=90,
+            gross=0.05,
+        )
+        plan = _carry_target_plan(
+            **_plan_kwargs(
+                decision=tomorrow,
+                equity_usdt=EQUITY * 1.5,
+                cycle_now_ms=NOW_MS + MS_PER_DAY,
+                cycle_state=state,
+            )
+        )
+        assert state.sizing_equity_usdt == pytest.approx(EQUITY * 1.5)
+        assert plan.entry_intents[0].intent.signed_notional_usdt == pytest.approx(
+            0.05 * EQUITY * 1.5
+        )
+
+    def test_a_failed_equity_read_never_poisons_the_anchor(self) -> None:
+        state = CarryCycleState()
+        _carry_target_plan(**_plan_kwargs(cycle_state=state))
+        _carry_target_plan(
+            **_plan_kwargs(
+                equity_usdt=0.0,
+                account_owner_health_error="AccountOwnerHealthHeadPending: stale",
+                cycle_state=state,
+            )
+        )
+        assert state.sizing_equity_usdt == pytest.approx(EQUITY)
+
+    def test_a_genuine_weight_change_still_clears_the_dead_band(self) -> None:
+        """The band suppresses noise, not decisions."""
+
+        state = CarryCycleState()
+        plan = _carry_target_plan(
+            **_plan_kwargs(
+                standing_notional={"CUSDT": 0.03 * EQUITY * 0.5},
+                cycle_state=state,
+            )
+        )
+        assert [item.intent.symbol for item in plan.resize_intents] == ["CUSDT"]
+        assert plan.resize_intents[0].intent.signed_notional_usdt == pytest.approx(
+            0.03 * EQUITY
+        )
+
     def test_missing_decision_plans_nothing(self) -> None:
         plan = _carry_target_plan(
             **_plan_kwargs(decision=None, standing_notional={"GONEUSDT": 250.0})

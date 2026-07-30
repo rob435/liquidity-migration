@@ -22,7 +22,13 @@ from .deterministic_runtime import Clock, SystemClock
 
 NOTIFICATION_SCHEMA_VERSION = 3
 HOUR_NS = 3_600_000_000_000
-POSITION_TRUTH_STATUSES = frozenset({"healthy", "mismatch", "stale", "unavailable"})
+#: ``settling`` is healthy for lifecycle purposes and honest in the digest: the
+#: venue and the local journal disagree right now, but the disagreement is
+#: younger than the venue's own propagation delay, so it is not yet evidence of
+#: anything. See ``account_service_runner.PositionTruthSettling``.
+POSITION_TRUTH_STATUSES = frozenset({"healthy", "settling", "mismatch", "stale", "unavailable"})
+#: Statuses under which lifecycle facts may be stated plainly.
+POSITION_TRUTH_LIFECYCLE_OK = frozenset({"healthy", "settling"})
 
 
 def _fsync_directory(path: Path) -> None:
@@ -116,7 +122,7 @@ class AccountNotificationEngine:
         )
         if truth_status not in POSITION_TRUTH_STATUSES:
             raise ValueError(f"unknown position truth status {truth_status!r}")
-        if position_truth_healthy != (truth_status == "healthy"):
+        if position_truth_healthy != (truth_status in POSITION_TRUTH_LIFECYCLE_OK):
             raise ValueError("position truth health and status disagree")
         persisted = self._load()
         first_run_with_history = persisted.last_sequence == 0 and bool(events)
@@ -493,6 +499,10 @@ def _hourly_summary(
     unrealized = 0.0
     unpriced_symbols: list[str] = []
     lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
+    if position_truth_status == "settling":
+        # Rare in a digest: the window is seconds and this renders hourly. Say
+        # it anyway rather than let a suppressed alarm read as a clean one.
+        lines.append("ℹ️ Venue position view is catching up to a just-journaled fill")
     for symbol, position in positions:
         stop = _active_stop(state, symbol)
         stop_text = f" · SL ${stop:,.8g}" if stop > 0.0 else " · SL unavailable"

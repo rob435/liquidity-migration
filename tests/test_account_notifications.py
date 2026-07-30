@@ -583,6 +583,83 @@ def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) 
     assert "Local reconstruction: BUSDT long 2" in stale.message
 
 
+def test_settling_states_the_reduction_once_and_queues_no_retraction(tmp_path: Path) -> None:
+    """A settling venue view must not turn one reduction into two messages.
+
+    ``settling`` means the venue's position endpoint has not yet caught up to
+    a fill the kernel already journaled -- the normal state of affairs for a
+    few seconds after every reduction. Announcing it as
+    ``awaiting venue reconciliation`` and then retracting it seconds later is
+    the alert-noise defect this status exists to remove, so the plain
+    lifecycle line must be the ONLY line, with nothing left pending.
+    """
+
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+    notifier.commit(
+        notifier.prepare(
+            midpoint_by_symbol={"BUSDT": 10.0},
+            health="healthy",
+            venue_positions={"BUSDT": 2.0},
+        )
+    )
+    kernel.record_close(
+        close_key="settling-close",
+        symbol="BUSDT",
+        reason="carry resize: depth rescale",
+        venue_flat=False,
+        exchange_ts_ns=10,
+        local_receive_ts_ns=11,
+        metadata={"reconstructed_flat": False},
+    )
+    kernel.record_pnl(
+        pnl_key="settling-pnl",
+        close_key="settling-close",
+        symbol="BUSDT",
+        gross_pnl_usdt=-1.0,
+        fee_usdt=0.01,
+        funding_usdt=0.0,
+        net_pnl_usdt=-1.01,
+        exchange_ts_ns=10,
+        local_receive_ts_ns=11,
+        source="fill_reconstructed_provisional_funding",
+    )
+
+    update = notifier.prepare(
+        midpoint_by_symbol={"BUSDT": 10.0},
+        health="healthy",
+        venue_positions={"BUSDT": 2.0},
+        position_truth_healthy=True,
+        position_truth_status="settling",
+    )
+
+    assert "✅ Reduced BUSDT" in update.message
+    assert "Local journal reduction" not in update.message
+    assert "awaiting venue reconciliation" not in update.message
+    assert update.next_state.pending_lifecycle_confirmations == {}
+
+
+def test_settling_status_must_still_agree_with_the_health_flag(tmp_path: Path) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notify-state.json",
+        clock=clock,
+    )
+    with pytest.raises(ValueError, match="disagree"):
+        notifier.prepare(
+            midpoint_by_symbol={},
+            health="healthy",
+            venue_positions={},
+            position_truth_healthy=False,
+            position_truth_status="settling",
+        )
+
+
 def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> None:
     kernel, clock, *_ = _setup_open(tmp_path / "account")
     notifier = AccountNotificationEngine(

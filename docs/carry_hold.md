@@ -232,7 +232,12 @@ and deploy this strategy in its place. The runtime now exists:
    the P&L; the 2026-07-28 stop grid in the review §11 is why nothing
    tighter is declared). Sizing: weight × owner equity × profile multiplier
    (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
-   owner's unchanged risk caps.
+   owner's unchanged risk caps. **The equity in that product is the equity as
+   of the decision, not the live mark** (2026-07-30 change point): sizing off
+   the live mark made the day's targets a function of the book's own
+   unrealized P&L and rebalanced the whole book every few minutes. Targets are
+   constant between decisions, and the resize dead-band is 5% of standing
+   notional — below that the tracking error is not worth the round trip.
 4. **Live-vs-scored divergence, stated up front**: the research frame drops
    each symbol's terminal 24h (the registered frame caveat, ~+0.13 Sharpe
    in research's favor); the live sleeve cannot and does not dodge — it

@@ -358,6 +358,54 @@ follows it; two guarded rollouts, receipts in `STATE.md`. Five lines:
 5. **Boundary**: demo + paper only; `REAL_MONEY=false`; mainnet untouched.
    Real money remains a separate, narrow owner door.
 
+### 2026-07-30 — CARRY sizing anchored to the decision; the live sleeve was rebalancing to its own P&L
+
+Found from the owner's Telegram feed, confirmed against the live account
+journal. **Change point: this commit** — the registered config
+`lane2_carry_hold_v3` is untouched, but the *deployed execution* of it
+changes, so `lane2_carry_hold_v3`'s live forward record has a discontinuity
+here and the pre-2026-07-30 portion is not comparable on turnover or cost.
+
+1. **What was happening.** `_carry_target_plan` sized every cycle as
+   `weight × live_equity × multiplier` and republished whenever the result
+   drifted past a 0.1% dead-band. Live equity is the account mark, which
+   moves *because of* the open book, so the day's targets were a function of
+   the book's own unrealized P&L — and with a direction: equity rises when
+   the longs rise, so the target rises, so the sleeve buys after the move and
+   sells after a fall.
+2. **Measured cost, 2026-07-30 00:00–13:00 UTC** (account journal,
+   `data/bybit-account-execution/account_journal/events.jsonl`): **133
+   closing events, every one of them `carry resize: depth rescale` and not
+   one a strategy exit**; **$84.7k of notional traded against a ~$30k gross
+   book**, ~2.8× turnover in thirteen hours on a sleeve whose intended
+   holding period is a day. At the measured 15.56 bp round trip that is
+   ≈$66/day of spread, ≈9%/yr of the $255k account, against a mechanism whose
+   whole edge is collected funding. Daily reduction counts: 1 (2026-07-26,
+   pre-CARRY) → 23 (07-29, deployment day) → 133 (07-30).
+3. **Fix, two parts.** `CarryCycleState.sizing_equity` anchors the sizing
+   equity to `decision_ts_ms`, so intraday targets are constant and a
+   converged book stays converged; and the resize dead-band moves 0.001 →
+   0.05, set where the tracking error it buys exceeds the spread it spends.
+   The anchor is the load-bearing half — a test pinning the regression still
+   fails on a 5% equity drift with the wider band alone.
+4. **What this deliberately gives up.** The sleeve no longer de-risks
+   intraday when equity falls; it de-risks at the next decision. That matches
+   what a daily-rebalance strategy is, and the declared 0.35 stop plus the
+   native disaster stop remain the capital-preservation path, unchanged.
+   Losing the daemon's cross-cycle state (restart) re-anchors to the current
+   mark once; the dead-band absorbs that unless the move is large.
+5. **Second, separate defect fixed in the same change.** Every reduction was
+   announced twice — `⚠️ Local journal reduction … awaiting venue
+   reconciliation` and then its retraction — because the notification path
+   reused the reduction *admission* gate, which compares the current kernel
+   position against the last venue snapshot and therefore trips after every
+   fill by construction. Journaled venue snapshots were clean all day
+   (1,556/1,556), confirming the disagreement was never real. Telegram now
+   gets a `settling` status with a 30-second window; the admission gate is
+   untouched and still refuses to send a reduce-only order on stale evidence.
+   Measured basis: all 108 alarms that day were retracted within 14 seconds,
+   median 7.
+
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
 Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change

@@ -211,6 +211,68 @@ def notification_position_truth(
     return True, "", "healthy"
 
 
+#: How many reconciliation passes a fresh venue/local disagreement is given to
+#: resolve itself before Telegram calls it a fault, and the floor that bound
+#: never drops below.
+POSITION_TRUTH_SETTLE_RECONCILE_PASSES = 15
+POSITION_TRUTH_SETTLE_FLOOR_NS = 30 * 1_000_000_000
+
+
+class PositionTruthSettling:
+    """Hold a fresh venue/local disagreement briefly before calling it a fault.
+
+    The venue's REST position view lags a fill. The kernel journals the fill
+    the moment it reconstructs it, while Bybit keeps returning the pre-fill
+    quantity for a few seconds after. ``require_recent_symbols_consistent``
+    compares the CURRENT kernel position against the LAST venue snapshot, so
+    that gap reads as a contradiction even though nothing is wrong — and it
+    reads that way after every single fill, by construction.
+
+    The reduction admission gate must keep treating it as a hard stop: it is
+    about to send a reduce-only order against evidence it does not have. A
+    Telegram lifecycle message must not. Sharing one predicate between the two
+    made the account owner announce every reduction twice — once as
+    ``⚠️ Local journal reduction … awaiting venue reconciliation`` and once,
+    seconds later, as its retraction. On 2026-07-30 that was 108 alarms and 86
+    retractions before 13:00 UTC.
+
+    The window is wall time since the disagreement began, reset only by
+    agreement, so a disagreement whose *details* keep changing (a book being
+    resized name by name) cannot hold the clock open indefinitely. Anything
+    that survives the window is reported in full, with its original cause. A
+    clock that runs backwards fails closed and reports immediately.
+
+    Measured basis: every one of the 2026-07-30 alarms was retracted within 14
+    seconds, median 7. The 30-second floor is a bit over twice the worst
+    observed case; the pass-count bound scales it if reconciliation is ever
+    slowed down.
+    """
+
+    __slots__ = ("settle_ns", "_since_ns")
+
+    def __init__(self, *, settle_ns: int) -> None:
+        self.settle_ns = max(int(settle_ns), 0)
+        self._since_ns: int | None = None
+
+    def evaluate(
+        self,
+        healthy: bool,
+        detail: str,
+        status: str,
+        *,
+        now_ns: int,
+    ) -> tuple[bool, str, str]:
+        if healthy:
+            self._since_ns = None
+            return True, "", "healthy"
+        if self._since_ns is None:
+            self._since_ns = int(now_ns)
+        elapsed_ns = int(now_ns) - self._since_ns
+        if 0 <= elapsed_ns < self.settle_ns:
+            return True, "", "settling"
+        return False, detail, status
+
+
 def append_unique_notification_health_error(
     errors: list[str],
     detail: str,
@@ -588,6 +650,12 @@ def main(argv: list[str] | None = None) -> int:
         _logger.warning("recovered %d account intent(s) left processing by a prior crash", recovered)
 
     last_reconcile = time.monotonic()
+    position_truth_settling = PositionTruthSettling(
+        settle_ns=max(
+            int(args.reconcile_seconds * POSITION_TRUTH_SETTLE_RECONCILE_PASSES * 1_000_000_000),
+            POSITION_TRUTH_SETTLE_FLOOR_NS,
+        )
+    )
     last_symbol_refresh = float("-inf")
     last_notification_poll = 0.0
     last_capital_refresh = float("-inf")
@@ -880,6 +948,18 @@ def main(argv: list[str] | None = None) -> int:
                     kernel=kernel,
                     report=latest_reconcile_report,
                     max_age_ns=reconcile_health_max_age_ns,
+                )
+                # Reporting only. The reduction admission gate calls the
+                # reconciler directly and is never softened by this.
+                (
+                    position_truth_healthy,
+                    position_truth_error,
+                    position_truth_status,
+                ) = position_truth_settling.evaluate(
+                    position_truth_healthy,
+                    position_truth_error,
+                    position_truth_status,
+                    now_ns=notification_now_ns,
                 )
                 if position_truth_error:
                     append_unique_notification_health_error(
