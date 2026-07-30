@@ -142,6 +142,117 @@ def test_reconcile_records_and_fails_on_position_mismatch(tmp_path: Path) -> Non
         reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=1)
 
 
+def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicate(
+    tmp_path: Path,
+) -> None:
+    """B6: one illegible symbol must not suspend stop proof for the whole account."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="scoped-skip", clock=clock)
+
+    class MismatchClient(_NoOpenOrdersClient):
+        demo = True
+
+        def get_positions(self, **_params: object):
+            # CUSDT exists only at the venue, so its journal quantity is not a
+            # legible basis for a stop plan. DUSDT is flat on both sides.
+            return [
+                {"symbol": "CUSDT", "side": "Buy", "size": "3"},
+                {"symbol": "DUSDT", "side": "Buy", "size": "0"},
+            ]
+
+    calls: list[frozenset[str]] = []
+
+    class RecordingNativeManager:
+        def reconcile_venue_positions(
+            self, rows: object, *, skip_symbols: frozenset[str] = frozenset()
+        ) -> None:
+            calls.append(frozenset(skip_symbols))
+
+        def is_verified_native_order(self, _candidate: object) -> bool:
+            return False
+
+    report = BybitAccountReconciler(
+        kernel=kernel,
+        client=MismatchClient(),
+        instrument_rules={},
+        native_protection_manager=RecordingNativeManager(),
+        clock=clock,
+    ).reconcile_once()
+
+    assert not report.healthy
+    # The call happened at all — before B6 a single mismatch skipped it entirely.
+    assert calls == [frozenset({"CUSDT"})]
+
+
+def test_protection_reverification_skips_a_symbol_with_an_ambiguous_submission(
+    tmp_path: Path,
+) -> None:
+    """An in-flight ambiguous entry makes only its own symbol illegible."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(
+        tmp_path, account_id="ambiguous-scope", clock=clock, id_seed="ambiguous"
+    )
+    result = kernel.submit_targets(
+        batch_id="batch-1",
+        market_inputs=[MarketInputRef("book-1", "BUSDT", 900, 1_000, 10.0)],
+        targets=[
+            DesiredTarget(
+                decision_key="d1",
+                target_key="long/main/BUSDT",
+                sleeve="long",
+                strategy_id="long-v1",
+                component_id="main",
+                symbol="BUSDT",
+                signed_qty=2.0,
+                reference_price=10.0,
+                leverage=10.0,
+            )
+        ],
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet", 950),
+        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 20.0, 10.0),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+    )
+    command_id = result.commands[0].command_id
+    kernel.record_submission_attempt(command_id=command_id, adapter_name="bybit_demo")
+
+    class FlatClient(_NoOpenOrdersClient):
+        demo = True
+
+        def get_positions(self, **_params: object):
+            return []
+
+        def get_trade_history(self, **_params: object):
+            return []
+
+        def get_order_history(self, **_params: object):
+            return []
+
+    calls: list[frozenset[str]] = []
+
+    class RecordingNativeManager:
+        def reconcile_venue_positions(
+            self, rows: object, *, skip_symbols: frozenset[str] = frozenset()
+        ) -> None:
+            calls.append(frozenset(skip_symbols))
+
+        def is_verified_native_order(self, _candidate: object) -> bool:
+            return False
+
+    report = BybitAccountReconciler(
+        kernel=kernel,
+        client=FlatClient(),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        native_protection_manager=RecordingNativeManager(),
+        clock=clock,
+    ).reconcile_once()
+
+    assert not report.healthy
+    assert any("ambiguous_submission_unresolved" in text for text in report.mismatches)
+    assert calls == [frozenset({"BUSDT"})]
+
+
 def test_dual_side_venue_position_fails_closed_for_net_position_kernel(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel = AccountExecutionKernel(tmp_path, account_id="dual", clock=clock)
@@ -533,8 +644,11 @@ def test_reconciliation_accepts_journal_verified_native_open_order(tmp_path: Pat
             return [row] if params.get("order_filter") == "StopOrder" else [row]
 
     class VerifiedNativeManager:
-        def reconcile_venue_positions(self, rows: object) -> None:
+        def reconcile_venue_positions(
+            self, rows: object, *, skip_symbols: object = frozenset()
+        ) -> None:
             assert rows == []
+            assert skip_symbols == frozenset()
 
         def is_verified_native_order(self, candidate: object) -> bool:
             return candidate == row
@@ -575,8 +689,11 @@ def test_reconciliation_propagates_only_structured_native_breach_authority(
             return []
 
     class NativeManager:
-        def reconcile_venue_positions(self, rows: object) -> None:
+        def reconcile_venue_positions(
+            self, rows: object, *, skip_symbols: object = frozenset()
+        ) -> None:
             assert rows == []
+            assert skip_symbols == frozenset()
             error = RuntimeError("provider text may mention NativeProtectionBreachError")
             error.breaches_only = breaches_only  # type: ignore[attr-defined]
             raise error

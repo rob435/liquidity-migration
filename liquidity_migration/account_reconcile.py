@@ -226,23 +226,35 @@ class BybitAccountReconciler:
             if abs(position.signed_qty) > 1e-12
         }
         post_recovery_state = self.kernel._state_ref()
-        mismatches: list[str] = [
-            (
+        # Track *which* symbols a mismatch implicates, not merely that one
+        # exists. Protection re-verification is suspended only for the symbols
+        # whose venue row this pass cannot read against the journal; every other
+        # symbol still has its stop proved (B6).
+        illegible_symbols: set[str] = set()
+        mismatches: list[str] = []
+        for order in sorted(
+            post_recovery_state.orders.values(),
+            key=lambda item: item.command_id,
+        ):
+            if (
+                order.status != "commanded"
+                or order.submission_attempts <= 0
+                or order.reduce_only
+            ):
+                continue
+            mismatches.append(
                 f"{order.symbol}:ambiguous_submission_unresolved:"
                 f"command={order.command_id}:attempts={order.submission_attempts}"
             )
-            for order in sorted(
-                post_recovery_state.orders.values(),
-                key=lambda item: item.command_id,
-            )
-            if order.status == "commanded"
-            and order.submission_attempts > 0
-            and not order.reduce_only
-        ]
+            # An ambiguous exposure-creating submission may land at any moment,
+            # so this symbol's reconstructed quantity is not a stable basis for
+            # a stop plan.
+            illegible_symbols.add(str(order.symbol).upper())
         native_protection_breach_only = False
         for symbol, sides in sorted(active_sides.items()):
             if len(sides) > 1:
                 mismatches.append(f"{symbol}:dual_side_position_not_supported")
+                illegible_symbols.add(symbol)
         for symbol in sorted(set(venue_positions) | set(reconstructed)):
             venue_qty = venue_positions.get(symbol, 0.0)
             reconstructed_qty = reconstructed.get(symbol, 0.0)
@@ -252,10 +264,19 @@ class BybitAccountReconciler:
                 mismatches.append(
                     f"{symbol}:venue={venue_qty:.16g}:reconstructed={reconstructed_qty:.16g}:tol={tolerance:.16g}"
                 )
-        if not mismatches and self.native_protection_manager is not None:
+                illegible_symbols.add(symbol)
+        if self.native_protection_manager is not None:
+            # Previously this whole call was gated on ``not mismatches``, so
+            # protection verification stopped for the entire account exactly
+            # when one symbol was least understood — every other open position
+            # silently lost its stop proof. Per-symbol skipping keeps the
+            # account-wide freshness contract honest: a skipped symbol simply
+            # ages out of ``last_sync_ns_by_symbol`` and fails
+            # ``require_recent_healthy`` on its own.
             try:
                 self.native_protection_manager.reconcile_venue_positions(
-                    [row for row, _symbol, _side, _size in position_rows]
+                    [row for row, _symbol, _side, _size in position_rows],
+                    skip_symbols=frozenset(illegible_symbols),
                 )
             except Exception as exc:  # noqa: BLE001 - protection failure makes the snapshot unhealthy
                 mismatches.append(f"native_protection:{type(exc).__name__}:{exc}")

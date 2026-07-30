@@ -361,6 +361,200 @@ def test_manager_installs_outermost_component_stop_and_requires_health(tmp_path:
     assert len(client.stops) == 1
 
 
+class _PositionReadbackClient(_DemoClient):
+    """Demo client that can answer the B5 post-create position read-back."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, object]] | None = None,
+        *,
+        stop_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.rows = rows if rows is not None else []
+        self.stop_error = stop_error
+        self.position_queries = 0
+
+    def get_positions(self, **_params: object) -> list[dict[str, object]]:
+        self.position_queries += 1
+        return list(self.rows)
+
+    def set_trading_stop(self, **params: object) -> dict[str, object]:
+        if self.stop_error is not None:
+            raise self.stop_error
+        return super().set_trading_stop(**params)
+
+
+def _readback_manager(
+    kernel: AccountExecutionKernel,
+    clock: VirtualClock,
+    client: _PositionReadbackClient,
+) -> BybitNativeProtectionManager:
+    return BybitNativeProtectionManager(
+        kernel=kernel,
+        client=client,
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1, environment="demo"),
+        },
+        fallback_stop_fraction=0.07,
+        clock=clock,
+    )
+
+
+def test_entry_attached_stop_verified_when_the_venue_applied_it(tmp_path: Path) -> None:
+    """B5: the happy path proves arming from venue truth, and mutates nothing."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0, entry_attached=True)
+    client = _PositionReadbackClient(
+        [{"symbol": "BUSDT", "side": "Buy", "size": "2", "stopLoss": "8", "markPrice": "10"}]
+    )
+    manager = _readback_manager(kernel, clock, client)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT", expected_stop_price=8.0, command_id="cmd-1"
+    )
+
+    assert verdict == "armed"
+    assert client.stops == []
+
+
+def test_entry_attached_stop_dropped_by_the_venue_is_installed_immediately(
+    tmp_path: Path,
+) -> None:
+    """B5: the venue accepted the order but dropped the stop; install it now."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0, entry_attached=True)
+    client = _PositionReadbackClient(
+        [{"symbol": "BUSDT", "side": "Buy", "size": "2", "markPrice": "10"}]
+    )
+    manager = _readback_manager(kernel, clock, client)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT", expected_stop_price=8.0, command_id="cmd-1"
+    )
+
+    assert verdict == "repaired"
+    assert client.stops == [
+        {
+            "symbol": "BUSDT",
+            "tpsl_mode": "Full",
+            "position_idx": 0,
+            "stop_loss": "8",
+            "take_profit": "0",
+            "sl_trigger_by": "MarkPrice",
+            "tp_trigger_by": None,
+        }
+    ]
+
+
+def test_unrepairable_entry_stop_blocks_health_and_flattens_on_the_next_pass(
+    tmp_path: Path,
+) -> None:
+    """B5: absent stop that cannot be installed becomes a flatten, not a shrug."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0, entry_attached=True)
+    rejection = BybitRequestRejected(
+        "Bybit set_trading_stop failed: 10001 stoploss[8] must be less than base_price[7.5]"
+    )
+    client = _PositionReadbackClient(
+        [{"symbol": "BUSDT", "side": "Buy", "size": "2", "markPrice": "7.5"}],
+        stop_error=rejection,
+    )
+    manager = _readback_manager(kernel, clock, client)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT", expected_stop_price=8.0, command_id="cmd-1"
+    )
+    assert verdict == "breached"
+
+    # New exposure is refused from this instant, before any reconciliation tick.
+    with pytest.raises(RuntimeError, match="did not apply an entry-attached stop"):
+        manager.require_recent_healthy(max_age_ns=10_000_000_000)
+
+    # The next reconciliation converts the latch into the durable breach that
+    # the protection engine turns into a software flat request.
+    with pytest.raises(Exception):
+        manager.reconcile_venue_positions(
+            [{"symbol": "BUSDT", "side": "Buy", "size": "2", "markPrice": "7.5"}]
+        )
+    assert [breach.plan.symbol for breach in manager.breaches()] == ["BUSDT"]
+
+
+def test_a_stop_that_lands_late_clears_the_latch_instead_of_flattening(
+    tmp_path: Path,
+) -> None:
+    """A late-but-correct stop is not a reason to close a live position."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0, entry_attached=True)
+    client = _PositionReadbackClient(
+        [{"symbol": "BUSDT", "side": "Buy", "size": "2", "markPrice": "10"}],
+        stop_error=BybitRequestRejected("Bybit set_trading_stop failed: transient"),
+    )
+    manager = _readback_manager(kernel, clock, client)
+    # 9.3 is this manager's own plan for the position, so the reconciliation
+    # walk below agrees with the entry-attached price rather than repairing it.
+    assert (
+        manager.verify_entry_attached_stop(
+            symbol="BUSDT", expected_stop_price=9.3, command_id="cmd-1"
+        )
+        == "breached"
+    )
+
+    manager.reconcile_venue_positions(
+        [{"symbol": "BUSDT", "side": "Buy", "size": "2", "stopLoss": "9.3", "markPrice": "10"}]
+    )
+
+    assert manager.breaches() == ()
+    manager.require_recent_healthy(max_age_ns=10_000_000_000)
+
+
+def test_unreadable_position_truth_after_a_create_fails_closed(tmp_path: Path) -> None:
+    """B5: no position visible is not evidence of an armed one."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0, entry_attached=True)
+    client = _PositionReadbackClient([])
+    manager = _readback_manager(kernel, clock, client)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT", expected_stop_price=8.0, command_id="cmd-1", attempts=2
+    )
+
+    assert verdict == "position_not_visible"
+    assert client.position_queries == 2
+    assert client.stops == []
+    with pytest.raises(RuntimeError, match="unverified"):
+        manager.require_recent_healthy(max_age_ns=10_000_000_000)
+
+
+def test_skipped_symbol_is_left_stale_rather_than_marked_verified(tmp_path: Path) -> None:
+    """B6: a skipped symbol must not be repaired, and must not look fresh."""
+
+    kernel, clock = _open_position(
+        tmp_path,
+        signed_qty=2.0,
+        fill_price=11.0,
+        metadata={"stop_loss_pct": 0.125},
+    )
+    manager, client = _manager(kernel, clock)
+    manager.sync("BUSDT")
+    manager.require_recent_healthy(max_age_ns=1_000_000_000)
+    clock.advance_ns(1_000_000_001)
+
+    row = {"symbol": "BUSDT", "side": "Buy", "size": "2", "stopLoss": "9.6"}
+    manager.reconcile_venue_positions([row], skip_symbols=frozenset({"BUSDT"}))
+
+    # No repair attempted, and the freshness clock was NOT advanced: the symbol
+    # still fails its own staleness check rather than borrowing a proof it did
+    # not earn.
+    assert len(client.stops) == 1
+    with pytest.raises(RuntimeError, match="stale"):
+        manager.require_recent_healthy(max_age_ns=1_000_000_000)
+
+    # The same pass without the skip proves it and clears the staleness.
+    manager.reconcile_venue_positions([row])
+    manager.require_recent_healthy(max_age_ns=1_000_000_000)
+
+
 def test_entry_attached_stop_is_owned_before_exact_post_fill_reanchor(
     tmp_path: Path,
 ) -> None:

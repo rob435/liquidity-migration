@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from .account_contracts import (
     MarketInputRef,
@@ -13,6 +13,20 @@ from .account_contracts import (
 from .bybit_errors import BybitRequestRejected
 from .deterministic_runtime import Clock, SystemClock
 from .execution_adapters import ExecutionObservation, ExecutionObservationType
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a protection import cycle
+    from typing import Protocol
+
+    class EntryStopVerifier(Protocol):
+        def __call__(
+            self,
+            *,
+            symbol: str,
+            expected_stop_price: float,
+            command_id: str,
+        ) -> str: ...
+else:  # pragma: no cover - runtime alias
+    EntryStopVerifier = object
 
 
 def bybit_private_execution_metadata(
@@ -73,6 +87,7 @@ class BybitDemoExecutionAdapter:
         *,
         clock: Clock | None = None,
         max_unsubmitted_exposure_age_ns: int = 5_000_000_000,
+        entry_stop_verifier: EntryStopVerifier | None = None,
     ) -> None:
         if not bool(getattr(client, "demo", False)):
             raise ValueError("BybitDemoExecutionAdapter requires a demo client; mainnet is forbidden")
@@ -84,6 +99,10 @@ class BybitDemoExecutionAdapter:
         self.client = client
         self.clock = clock or SystemClock()
         self.max_unsubmitted_exposure_age_ns = max_unsubmitted_exposure_age_ns
+        # B5. Atomic arming is a Bybit behaviour, not a guarantee this system
+        # owns. Without a verifier the create is trusted, which is only tolerable
+        # on demo where the worst case is a log line.
+        self.entry_stop_verifier = entry_stop_verifier
 
     @staticmethod
     def _entry_protection_metadata(command: OrderCommand) -> dict[str, Any]:
@@ -251,6 +270,7 @@ class BybitDemoExecutionAdapter:
             exchange_ack_ts_ns = int(float(exchange_ack_ms) * 1_000_000)
         except (TypeError, ValueError):
             exchange_ack_ts_ns = 0
+        verification = self._verify_entry_attached_stop(command)
         return (
             ExecutionObservation(
                 observation_type=ExecutionObservationType.ACK,
@@ -267,10 +287,37 @@ class BybitDemoExecutionAdapter:
                     ),
                     "idempotent_existing_order": idempotent_existing_order,
                     "requested_leverage": command.leverage,
+                    "entry_attached_stop_verification": verification,
                     **entry_protection_metadata,
                 },
             ),
         )
+
+    def _verify_entry_attached_stop(self, command: OrderCommand) -> str:
+        """Prove the venue applied the attached stop, right after the create (B5).
+
+        Never raises: the order is already at the venue and losing this
+        acknowledgement would orphan a live position, which is strictly worse
+        than an unverified one. The verifier owns the fail-closed consequence —
+        it repairs the stop where it can and latches a breach where it cannot,
+        which blocks new exposure and flattens through the software-flat path.
+        """
+
+        if command.reduce_only or self.entry_stop_verifier is None:
+            return "not_applicable" if command.reduce_only else "unverified_no_verifier"
+        stop_price = command.entry_stop_price
+        if stop_price is None:  # pragma: no cover - _entry_protection_metadata rejects this first
+            return "unverified_no_stop_price"
+        try:
+            return str(
+                self.entry_stop_verifier(
+                    symbol=command.symbol,
+                    expected_stop_price=float(stop_price),
+                    command_id=command.command_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - the ACK must survive a verifier fault
+            return f"verifier_failed:{type(exc).__name__}"[:120]
 
     def submit(
         self,

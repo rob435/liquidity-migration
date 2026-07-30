@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Set as AbstractSet
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import wraps
@@ -26,6 +27,8 @@ from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
 from .native_protection_math import round_native_stop
 
+
+_logger = logging.getLogger(__name__)
 
 _LockOwner = TypeVar("_LockOwner")
 _Params = ParamSpec("_Params")
@@ -170,6 +173,13 @@ class BybitNativeProtectionManager:
         # the same symbol can expose multiple recent child identities.
         self.observed_entry_stop_order_ids: dict[str, dict[str, str]] = {}
         self._breaches: dict[str, NativeProtectionBreach] = {}
+        # B5: symbols whose entry-attached stop the venue provably did not apply
+        # and which this process could not repair on the spot. Latched here
+        # because the fill may not be journaled yet, so no plan exists to breach
+        # against. Health fails immediately; the next reconciliation pass, which
+        # does have the position, converts the latch into a real breach and the
+        # existing software-flat pipeline closes the position.
+        self._unarmed_entries: dict[str, dict[str, Any]] = {}
         self._restore_persisted_breaches()
 
     def _restore_persisted_breaches(self) -> None:
@@ -856,14 +866,242 @@ class BybitNativeProtectionManager:
             raise
 
     @_serialized_manager_method
-    def reconcile_venue_positions(self, rows: Sequence[Mapping[str, Any]]) -> None:
+    def verify_entry_attached_stop(
+        self,
+        *,
+        symbol: str,
+        expected_stop_price: float,
+        command_id: str,
+        attempts: int = 3,
+    ) -> str:
+        """Prove the venue actually applied an entry-attached stop (B5).
+
+        Bybit's documented behaviour is that a Market order carrying ``stopLoss``
+        arms the position atomically, so the happy path has no naked window. That
+        is a *venue* promise, and it has never been exercised against a mainnet
+        key. If mainnet accepts the order and drops the attached stop, the
+        position opens unprotected and — before this check — nothing noticed
+        until the next reconciliation tick.
+
+        This reads position truth back immediately and returns one of:
+
+        ``armed``
+            The venue reports the exact stop we sent. Nothing to do.
+        ``repaired``
+            The stop was absent or different and ``set_trading_stop`` installed
+            it right here. Reconciliation binds it into the journal next pass.
+        ``breached``
+            The stop is absent and could not be installed. Latched; the position
+            gets flattened through the existing software-flat pipeline.
+        ``position_not_visible``
+            No position at the venue yet, so there is nothing unprotected. Left
+            to reconciliation, which is why ``last_error`` is set: health
+            degrades and no new exposure is admitted until a pass confirms it.
+        ``unreadable``
+            Position truth could not be read at all. Fails closed the same way.
+
+        This never resends the entry and never invents a fill. The stop price is
+        the one the command already carried and the kernel already validated
+        before any exposure existed.
+        """
+
+        symbol = symbol.upper()
+        stop_price = float(expected_stop_price)
+        if not math.isfinite(stop_price) or stop_price <= 0.0:
+            raise ValueError("entry-attached stop verification requires a positive stop price")
+        rule = self.rules.get(symbol)
+        tolerance = max(rule.tick_size / 2.0 if rule is not None else 0.0, 1e-12)
+        rounds = max(int(attempts), 1)
+        read_error = ""
+        for attempt in range(rounds):
+            try:
+                rows = self.client.get_positions(symbol=symbol)
+            except Exception as exc:  # noqa: BLE001 - a read failure must not orphan the ACK
+                read_error = f"{type(exc).__name__}: {exc}"
+                continue
+            row = self._open_position_row(rows, symbol)
+            if row is None:
+                # Bybit can lag between the create acknowledgement and the
+                # position becoming readable. Only the last attempt concludes.
+                if attempt + 1 < rounds:
+                    continue
+                self.last_error = (
+                    f"{symbol} entry-attached stop is unverified: command {command_id} "
+                    "was accepted but no venue position is readable yet"
+                )[:1000]
+                return "position_not_visible"
+            venue_stop = _optional_float(row.get("stopLoss") or row.get("stop_loss"))
+            if venue_stop is not None and abs(venue_stop - stop_price) <= tolerance:
+                self._unarmed_entries.pop(symbol, None)
+                return "armed"
+            venue_mark = _optional_float(row.get("markPrice") or row.get("mark_price"))
+            return self._repair_unapplied_entry_stop(
+                symbol=symbol,
+                command_id=command_id,
+                stop_price=stop_price,
+                observed_stop=venue_stop,
+                observed_mark=venue_mark,
+            )
+        self.last_error = (
+            f"{symbol} entry-attached stop is unverified: command {command_id} "
+            f"was accepted but position truth is unreadable ({read_error or 'no response'})"
+        )[:1000]
+        return "unreadable"
+
+    def _repair_unapplied_entry_stop(
+        self,
+        *,
+        symbol: str,
+        command_id: str,
+        stop_price: float,
+        observed_stop: float | None,
+        observed_mark: float | None,
+    ) -> str:
+        """Install the declared stop the venue did not apply, or latch a breach."""
+
+        observed_text = "absent" if observed_stop is None else f"{observed_stop:g}"
+        detail = (
+            f"{symbol} entry-attached stop {stop_price:g} was not applied by the venue "
+            f"for command {command_id} (venue reports {observed_text})"
+        )
+        try:
+            self.client.set_trading_stop(
+                symbol=symbol,
+                tpsl_mode="Full",
+                position_idx=0,
+                stop_loss=_decimal_text(stop_price),
+                take_profit="0",
+                sl_trigger_by="MarkPrice",
+                tp_trigger_by=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - every failure here is fail-closed
+            rejection_mark = _crossed_stop_rejection_mark(exc, requested_stop=stop_price)
+            mark = rejection_mark if rejection_mark is not None else observed_mark
+            self._latch_unarmed_entry(
+                symbol=symbol,
+                command_id=command_id,
+                stop_price=stop_price,
+                observed_mark=mark,
+                detail=f"{detail}; repair failed: {type(exc).__name__}: {exc}",
+                evidence_source=(
+                    "bybit_post_create_stop_repair_rejected_as_crossed"
+                    if rejection_mark is not None
+                    else "bybit_post_create_stop_repair_failed"
+                ),
+            )
+            return "breached"
+        _logger.warning("%s; installed it directly instead", detail)
+        self._unarmed_entries.pop(symbol, None)
+        self.last_error = ""
+        return "repaired"
+
+    def _latch_unarmed_entry(
+        self,
+        *,
+        symbol: str,
+        command_id: str,
+        stop_price: float,
+        observed_mark: float | None,
+        detail: str,
+        evidence_source: str,
+    ) -> None:
+        self._unarmed_entries[symbol] = {
+            "command_id": command_id,
+            "stop_price": stop_price,
+            "observed_mark": observed_mark,
+            "detail": detail[:1000],
+            "evidence_source": evidence_source,
+            "observed_ts_ns": self.clock.wall_time_ns(),
+        }
+        self.last_error = detail[:1000]
+        _logger.error("%s", detail)
+
+    @staticmethod
+    def _open_position_row(
+        rows: Any,
+        symbol: str,
+    ) -> Mapping[str, Any] | None:
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            if str(row.get("symbol") or "").upper() != symbol:
+                continue
+            size = _optional_float(row.get("size"))
+            if size is not None and size > 0.0:
+                return row
+        return None
+
+    def _resolve_unarmed_entry(
+        self,
+        symbol: str,
+        *,
+        venue_row: Mapping[str, Any] | None,
+    ) -> None:
+        """Clear or escalate an unarmed-entry latch now that a plan may exist."""
+
+        latch = self._unarmed_entries.get(symbol)
+        if latch is None:
+            return
+        stop_price = float(latch["stop_price"])
+        rule = self.rules.get(symbol)
+        tolerance = max(rule.tick_size / 2.0 if rule is not None else 0.0, 1e-12)
+        venue_stop = (
+            None
+            if venue_row is None
+            else _optional_float(venue_row.get("stopLoss") or venue_row.get("stop_loss"))
+        )
+        if venue_stop is not None and abs(venue_stop - stop_price) <= tolerance:
+            # The stop did land, late. Nothing was ever unprotected in a way this
+            # pass can still act on, so clear rather than flatten a live book.
+            self._unarmed_entries.pop(symbol, None)
+            self.last_error = ""
+            return
+        plan = self.plan(symbol)
+        if plan is None:
+            # Still no journal position. Keep failing closed rather than
+            # discarding evidence that the venue dropped a declared stop.
+            self.last_error = str(latch["detail"])[:1000]
+            return
+        observed_mark = latch.get("observed_mark")
+        if observed_mark is None and venue_row is not None:
+            observed_mark = _optional_float(
+                venue_row.get("markPrice") or venue_row.get("mark_price")
+            )
+        if observed_mark is None:
+            self.last_error = str(latch["detail"])[:1000]
+            return
+        self._unarmed_entries.pop(symbol, None)
+        raise self._record_breach(
+            plan,
+            observed_mark=float(observed_mark),
+            evidence_source=str(latch["evidence_source"]),
+            detail=str(latch["detail"]),
+        )
+
+    @_serialized_manager_method
+    def reconcile_venue_positions(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        skip_symbols: AbstractSet[str] = frozenset(),
+    ) -> None:
         """Verify every reconstructed open position's native stop from REST truth.
 
         A local ``active`` event is not proof that the exchange still owns the
         stop. The position snapshot carries Bybit's current ``stopLoss``; a
         missing or different value is repaired before health is refreshed.
+
+        ``skip_symbols`` names symbols whose journal position cannot currently
+        be read against the venue — an unresolved quantity mismatch, a dual-side
+        row, an ambiguous in-flight submission. Their stop plan would be derived
+        from a quantity this pass knows to be wrong, so they are left untouched
+        rather than "repaired" toward a fiction. They are *not* marked fresh, so
+        ``require_recent_healthy`` still fails them on age. Every other symbol
+        is verified normally: one illegible symbol must not suspend protection
+        proof for the whole account.
         """
 
+        skipped = {str(symbol).upper() for symbol in skip_symbols}
         venue_rows: dict[str, Mapping[str, Any]] = {}
         for row in rows:
             symbol = str(row.get("symbol") or "").upper()
@@ -874,7 +1112,17 @@ class BybitNativeProtectionManager:
 
         state = self.kernel._state_ref()
         failures: list[tuple[str, BaseException]] = []
+        # A latched unarmed entry can name a symbol the journal has no position
+        # for yet, so it is resolved before (and independently of) the position
+        # walk below.
+        for symbol in sorted(set(self._unarmed_entries) - skipped):
+            try:
+                self._resolve_unarmed_entry(symbol, venue_row=venue_rows.get(symbol))
+            except Exception as exc:  # noqa: BLE001 - escalate, do not abort the sweep
+                failures.append((symbol, exc))
         for symbol, position in sorted(state.positions.items()):
+            if symbol in skipped:
+                continue
             try:
                 if position.signed_qty == 0.0:
                     venue_row = venue_rows.get(symbol)
@@ -1616,6 +1864,14 @@ class BybitNativeProtectionManager:
             raise RuntimeError(
                 "native disaster stop breached without venue protection: "
                 + "; ".join(self._breaches[symbol].detail for symbol in sorted(self._breaches))
+            )
+        if self._unarmed_entries:
+            raise RuntimeError(
+                "venue did not apply an entry-attached stop: "
+                + "; ".join(
+                    str(self._unarmed_entries[symbol]["detail"])
+                    for symbol in sorted(self._unarmed_entries)
+                )
             )
         if self.last_error:
             raise RuntimeError(self.last_error)

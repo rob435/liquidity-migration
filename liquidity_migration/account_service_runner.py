@@ -650,7 +650,12 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_provider=snapshot_provider,
         rules_provider=VerifiedBybitDemoRulesProvider(rules),
         risk_policy=policy,
-        execution_adapter=BybitDemoExecutionAdapter(private_client),
+        execution_adapter=BybitDemoExecutionAdapter(
+            private_client,
+            # B5: read position truth back at the create boundary instead of
+            # trusting Bybit's atomic-arming promise until the next reconcile.
+            entry_stop_verifier=native_protection.verify_entry_attached_stop,
+        ),
         native_protection_policy=native_protection_policy,
         required_rules_environment="demo",
         health_provider=health_chain,

@@ -2043,6 +2043,129 @@ def test_bybit_demo_adapter_refuses_mainnet_and_never_synthesizes_a_fill() -> No
     assert observations[0].metadata["exchange_ack_ts_status"] == "observed"
 
 
+def test_bybit_demo_adapter_verifies_the_attached_stop_after_the_create() -> None:
+    """B5: an exposure-increasing create is followed by a venue read-back."""
+
+    class DemoClient:
+        demo = True
+
+        def set_leverage(self, **_params: object) -> dict[str, object]:
+            return {}
+
+        def place_order(self, **_params: object) -> dict[str, str]:
+            return {"orderId": "venue-demo-1", "_response_time_ms": "2000"}
+
+    seen: list[dict[str, object]] = []
+
+    def verifier(*, symbol: str, expected_stop_price: float, command_id: str) -> str:
+        seen.append(
+            {
+                "symbol": symbol,
+                "expected_stop_price": expected_stop_price,
+                "command_id": command_id,
+            }
+        )
+        return "armed"
+
+    entry = OrderCommand(
+        command_id="33333333-3333-5333-8333-333333333333",
+        batch_id="verify-batch",
+        symbol="BUSDT",
+        side="Buy",
+        qty=0.1,
+        signed_qty=0.1,
+        reduce_only=False,
+        reference_price=10.0,
+        target_signed_qty=0.1,
+        chunk_index=0,
+        chunk_count=1,
+        entry_stop_price=8.0,
+        entry_stop_fraction=0.2,
+        entry_stop_source="test_entry_attached_stop",
+        entry_stop_trigger_by="MarkPrice",
+    )
+    adapter = BybitDemoExecutionAdapter(
+        DemoClient(),
+        clock=VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=50),
+        entry_stop_verifier=verifier,
+    )
+    observation = tuple(adapter.submit(entry, _market()))[0]
+
+    assert observation.metadata["entry_attached_stop_verification"] == "armed"
+    assert seen == [
+        {
+            "symbol": "BUSDT",
+            "expected_stop_price": 8.0,
+            "command_id": "33333333-3333-5333-8333-333333333333",
+        }
+    ]
+
+    # A reduce-only exit carries no attached stop, so there is nothing to prove.
+    exit_command = OrderCommand(
+        command_id="44444444-4444-5444-8444-444444444444",
+        batch_id="verify-batch",
+        symbol="BUSDT",
+        side="Sell",
+        qty=0.1,
+        signed_qty=-0.1,
+        reduce_only=True,
+        reference_price=10.0,
+        target_signed_qty=0.0,
+        chunk_index=0,
+        chunk_count=1,
+    )
+    exit_observation = tuple(adapter.submit(exit_command, _market()))[0]
+    assert exit_observation.metadata["entry_attached_stop_verification"] == "not_applicable"
+    assert len(seen) == 1
+
+
+def test_bybit_demo_adapter_keeps_the_ack_when_the_verifier_itself_faults() -> None:
+    """Losing an ACK would orphan a live position; the verifier owns the fail-closed."""
+
+    class DemoClient:
+        demo = True
+
+        def set_leverage(self, **_params: object) -> dict[str, object]:
+            return {}
+
+        def place_order(self, **_params: object) -> dict[str, str]:
+            return {"orderId": "venue-demo-2", "_response_time_ms": "2000"}
+
+    def exploding_verifier(**_kwargs: object) -> str:
+        raise TimeoutError("venue read timed out")
+
+    observation = tuple(
+        BybitDemoExecutionAdapter(
+            DemoClient(),
+            clock=VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=50),
+            entry_stop_verifier=exploding_verifier,
+        ).submit(
+            OrderCommand(
+                command_id="55555555-5555-5555-8555-555555555555",
+                batch_id="verify-batch",
+                symbol="BUSDT",
+                side="Buy",
+                qty=0.1,
+                signed_qty=0.1,
+                reduce_only=False,
+                reference_price=10.0,
+                target_signed_qty=0.1,
+                chunk_index=0,
+                chunk_count=1,
+                entry_stop_price=8.0,
+                entry_stop_fraction=0.2,
+                entry_stop_source="test_entry_attached_stop",
+                entry_stop_trigger_by="MarkPrice",
+            ),
+            _market(),
+        )
+    )[0]
+
+    assert observation.accepted
+    assert observation.venue_order_id == "venue-demo-2"
+    assert observation.metadata["entry_attached_stop_verification"] == "verifier_failed:TimeoutError"
+
+
 def test_bybit_demo_adapter_times_create_after_leverage_negotiation() -> None:
     clock = VirtualClock(current_wall_ns=2_000_000_000)
 
