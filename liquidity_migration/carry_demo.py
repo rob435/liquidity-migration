@@ -219,6 +219,7 @@ CARRY_COMPONENT_ID = "carry_hold"
 CARRY_PROFILE_NAME = "carry_hold_v3_live_v1"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_PAPER_CYCLES_DATASET = "carry_hold_paper_cycles"
+CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
 
 #: Fetch-universe breadth. The registered rule ranks its own top-100 by adv24
@@ -439,11 +440,17 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
 
 
 def carry_cycles_dataset(config: CarryDemoCycleConfig) -> str:
-    """Cycle-heartbeat dataset for the carry demo or paper planner."""
+    """Cycle-heartbeat dataset for this planner's environment.
 
-    if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
-        return CARRY_PAPER_CYCLES_DATASET
-    return CARRY_CYCLES_DATASET
+    Named per environment, not per "is it paper". A mainnet cycle written into
+    the demo dataset is exactly the mislabelling B11 closed elsewhere: later
+    readers would load real evidence as demo evidence.
+    """
+
+    return {
+        ExecutionEnvironment.PAPER: CARRY_PAPER_CYCLES_DATASET,
+        ExecutionEnvironment.MAINNET: CARRY_MAINNET_CYCLES_DATASET,
+    }.get(execution_environment(config.execution_environment), CARRY_CYCLES_DATASET)
 
 
 def carry_decision_ts_ms(now_ms: int) -> int:

@@ -27,8 +27,13 @@ from liquidity_migration.bybit import (  # noqa: E402
     resolve_private_credentials,
 )
 from liquidity_migration.logging_setup import ensure_default_log_handler  # noqa: E402
+from liquidity_migration.account_candidate_universe import (  # noqa: E402
+    load_candidate_universe,
+)
+from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
 from liquidity_migration.venue_instrument_rules import (  # noqa: E402
     build_venue_instrument_rules,
+    candidate_symbol_source,
     render_venue_rules_artifact,
 )
 from liquidity_migration.venue_realm import (  # noqa: E402
@@ -61,14 +66,48 @@ def main(argv: list[str] | None = None) -> int:
         choices=tuple(realm.value for realm in VenueRealm),
         help="Venue realm to read rules from. Required; there is no default.",
     )
-    parser.add_argument("--symbols-file", required=True)
+    parser.add_argument(
+        "--symbols-file",
+        required=True,
+        help=(
+            "Frozen candidate-universe artifact. The receipt is bound to its exact "
+            "bytes, so authorization can prove the rules cover this universe."
+        ),
+    )
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--unbound-symbol-list",
+        action="store_true",
+        help=(
+            "Accept a plain symbol list instead of a candidate-universe artifact. "
+            "The receipt then carries no source binding and cannot satisfy the "
+            "operational-authority coverage proof; diagnostics only."
+        ),
+    )
     args = parser.parse_args(argv)
 
     realm = venue_realm(args.realm)
     output = Path(args.output).expanduser()
     if output.exists():
         parser.error(f"refusing to overwrite an existing rules artifact: {output}")
+
+    symbols_path = Path(args.symbols_file).expanduser()
+    symbol_source = None
+    if not args.unbound_symbol_list:
+        try:
+            snapshot = read_stable_file(
+                symbols_path,
+                label="candidate-universe artifact",
+                require_single_link=False,
+            )
+            candidate = load_candidate_universe(symbols_path, snapshot=snapshot)
+        except Exception as exc:  # noqa: BLE001 - reported to the operator verbatim
+            parser.error(
+                f"{symbols_path} is not a readable candidate-universe artifact ({exc}). "
+                "Freeze the universe first, or pass --unbound-symbol-list for a "
+                "diagnostics-only receipt."
+            )
+        symbol_source = candidate_symbol_source(candidate, size_bytes=snapshot.size)
 
     api_key, api_secret = resolve_private_credentials(realm=realm)
     if not api_key or not api_secret:
@@ -88,10 +127,15 @@ def main(argv: list[str] | None = None) -> int:
     rules = build_venue_instrument_rules(
         client,
         realm=realm,
-        symbols=_symbols(Path(args.symbols_file).expanduser()),
+        symbols=_symbols(symbols_path),
         observed_ts_ns=observed_ts_ns,
     )
-    data = render_venue_rules_artifact(rules, realm=realm, verified_ts_ns=observed_ts_ns)
+    data = render_venue_rules_artifact(
+        rules,
+        realm=realm,
+        verified_ts_ns=observed_ts_ns,
+        symbol_source=symbol_source,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(str(output), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:

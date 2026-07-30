@@ -199,7 +199,7 @@ def test_the_checks_are_inert_on_a_demo_receipt() -> None:
     require_book_within_receipt_ceiling(demo, gross_notional_usdt=1e12, equity_usdt=1.0)
 
 
-def test_the_mainnet_profile_is_carry_shaped_and_equity_anchored() -> None:
+def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
     """The committed mainnet envelope holds no hard money amount."""
 
     from liquidity_migration.operational_profile import load_operational_profile
@@ -214,11 +214,11 @@ def test_the_mainnet_profile_is_carry_shaped_and_equity_anchored() -> None:
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(2 * reference)
     assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.1 * reference)
     assert profile.account_risk.max_leverage == 2.0
-    # CARRY carries the book; LONG (deferred behind B3) and CONTINUOUS
-    # (retired) are shrunk to a minimum envelope rather than removed, because
-    # the profile schema requires all three blocks.
+    # CARRY and LONG both carry real size now that B3 partitions the envelope.
+    # CONTINUOUS is retired and shrunk to a token envelope rather than removed,
+    # because the profile schema requires all three blocks.
     assert profile.carry.notional_multiplier == 1.0
-    assert profile.long.notional_multiplier <= 0.001
+    assert profile.long.notional_multiplier > 0.1
     assert profile.continuous.notional_multiplier <= 0.001
     assert profile.continuous.max_active == 1
 
@@ -227,6 +227,40 @@ def test_the_mainnet_profile_is_carry_shaped_and_equity_anchored() -> None:
         scaled = profile_at_capital_reference(profile, equity)
         assert scaled.account_risk.max_initial_margin_usdt == pytest.approx(equity)
         assert scaled.account_risk.max_account_gross_notional_usdt == pytest.approx(2 * equity)
+
+
+def test_the_mainnet_partition_is_a_real_partition() -> None:
+    """B3: no sleeve can spend another's share, and the shares fit the account."""
+
+    from liquidity_migration.operational_profile import load_operational_profile
+
+    profile = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
+    risk = profile.account_risk
+    shares = {limit.sleeve: limit for limit in risk.sleeve_limits}
+
+    assert set(shares) == {"carry", "continuous", "long"}
+    assert sum(limit.max_gross_notional_usdt for limit in risk.sleeve_limits) <= (
+        risk.max_account_gross_notional_usdt
+    )
+    assert sum(limit.max_initial_margin_usdt for limit in risk.sleeve_limits) <= (
+        risk.max_initial_margin_usdt
+    )
+    # Neither funded sleeve may reach the whole envelope on its own -- that is
+    # the entire content of B3.
+    for sleeve in ("carry", "long"):
+        assert shares[sleeve].max_gross_notional_usdt < risk.max_account_gross_notional_usdt
+    # Retired CONTINUOUS has no mainnet unit; a token share, not an exemption.
+    assert shares["continuous"].max_gross_notional_usdt < 0.02 * (
+        risk.max_account_gross_notional_usdt
+    )
+
+    # The partition is a ratio like every other cap, so it follows the wallet.
+    scaled = profile_at_capital_reference(profile, 10 * profile.capital_reference_usdt)
+    scaled_shares = {limit.sleeve: limit for limit in scaled.account_risk.sleeve_limits}
+    for sleeve, limit in shares.items():
+        assert scaled_shares[sleeve].max_gross_notional_usdt == pytest.approx(
+            10 * limit.max_gross_notional_usdt
+        )
 
 
 def test_the_producer_clamp_is_disabled_when_the_ceiling_tracks_equity() -> None:

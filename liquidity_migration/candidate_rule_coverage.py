@@ -406,11 +406,22 @@ def build_candidate_rule_coverage(
     max_rule_age_seconds: float = REGISTERED_MAX_RULE_AGE_SECONDS,
     candidate_snapshot: StableFileSnapshot | None = None,
     demo_rules_snapshot: StableFileSnapshot | None = None,
+    realm: str = "demo",
 ) -> dict[str, Any]:
-    """Reopen both sources and prove one accepted rule per frozen symbol."""
+    """Reopen both sources and prove one accepted rule per frozen symbol.
+
+    ``realm`` selects which rules receipt is admissible. Demo's comes from the
+    order-placing probe; every other realm's comes from the read-only
+    instruments-info freeze (B17). The coverage proof itself — one rule per
+    frozen symbol, bound to this exact universe artifact — is identical, and
+    deliberately so: the evidence standard differs, the coverage requirement
+    does not.
+    """
 
     from .account_execution_config import load_demo_rules_bytes
+    from .venue_instrument_rules import load_venue_rules_bytes
 
+    selected_realm = str(realm or "").strip().lower()
     max_rule_age_seconds = require_registered_rule_age(max_rule_age_seconds)
     created = time.time_ns() if created_ts_ns is None else int(created_ts_ns)
     if created <= 0:
@@ -439,11 +450,19 @@ def build_candidate_rule_coverage(
         raise ValueError("demo-rule receipt is not valid UTF-8 JSON") from exc
     if not isinstance(rules_payload, Mapping):
         raise ValueError("demo-rule receipt must be a JSON object")
-    rules = load_demo_rules_bytes(
-        rules_data,
-        now_ns=validation_now_ns,
-        max_age_seconds=max_rule_age_seconds,
-    )
+    if selected_realm == "demo":
+        rules = load_demo_rules_bytes(
+            rules_data,
+            now_ns=validation_now_ns,
+            max_age_seconds=max_rule_age_seconds,
+        )
+    else:
+        rules = load_venue_rules_bytes(
+            rules_data,
+            realm=selected_realm,
+            now_ns=validation_now_ns,
+            max_age_seconds=max_rule_age_seconds,
+        )
     rules_snapshot_after = _read_regular(
         rules_resolved,
         label="demo-rule receipt",

@@ -276,7 +276,12 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     long_demo.add_argument(
         "--execution-environment",
         required=True,
-        choices=("demo", "paper"),
+        # LONG reaches the mainnet owner only because B3 is closed: the
+        # profile's sleeve partition means LONG cannot spend CARRY's share and
+        # CARRY cannot spend LONG's. Selecting mainnet remains necessary and
+        # never sufficient -- REAL_MONEY and the real-money authority receipt
+        # are separate owner acts.
+        choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )
     long_demo.add_argument(
@@ -475,10 +480,10 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--execution-environment",
         required=True,
-        # CARRY is the only sleeve cleared for the mainnet owner. LONG stays
-        # demo|paper behind B3 (no per-sleeve capital partition) and
-        # CONTINUOUS is retired: neither can be pointed at real capital by
-        # a flag, which is a stronger gate than a comment.
+        # CARRY and LONG are cleared for the mainnet owner now that the profile
+        # partitions the envelope between them (B3). CONTINUOUS is retired and
+        # stays demo|paper: it cannot be pointed at real capital by a flag,
+        # which is a stronger gate than a comment.
         choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )

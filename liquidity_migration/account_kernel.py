@@ -1990,9 +1990,23 @@ class AccountExecutionKernel:
             )
         policy_values = asdict(risk_policy)
         for key, value in policy_values.items():
+            if key == "sleeve_limits":
+                # Scanned below with its own labels; ``asdict`` renders it as a
+                # list of objects that ``_finite`` cannot read.
+                continue
             number = _finite(value, label=f"risk policy {key}")
             if number < 0.0:
                 rejections.append(_risk_rejection_key(batch_id, f"negative_{key}"))
+        for limit in risk_policy.sleeve_limits:
+            for field_name in ("max_gross_notional_usdt", "max_initial_margin_usdt"):
+                number = _finite(
+                    getattr(limit, field_name),
+                    label=f"risk policy sleeve_limits.{limit.sleeve}.{field_name}",
+                )
+                if number < 0.0:
+                    rejections.append(
+                        _risk_rejection_key(batch_id, f"negative_{field_name}", limit.sleeve)
+                    )
         equity = _finite(risk_snapshot.equity_usdt, label="equity_usdt")
         available_margin = _finite(risk_snapshot.available_margin_usdt, label="available_margin_usdt")
         snapshot_unavailable = risk_snapshot.snapshot_key.startswith("exit-only-capital-unavailable:")
@@ -2007,9 +2021,12 @@ class AccountExecutionKernel:
         prices: dict[str, float] = {}
         component_gross = 0.0
         component_margin = 0.0
+        sleeve_gross: dict[str, float] = {}
+        sleeve_margin: dict[str, float] = {}
         symbol_leverages: dict[str, list[float]] = {}
         for target_key, payload in sorted(updates.items()):
             symbol = str(payload.get("symbol") or "").upper()
+            sleeve = str(payload.get("sleeve") or "").strip().lower()
             signed_qty = _finite(payload.get("signed_qty"), label=f"{target_key} signed_qty")
             proposed_price = _finite(payload.get("reference_price"), label=f"{target_key} reference_price")
             leverage = _finite(payload.get("leverage"), label=f"{target_key} leverage")
@@ -2048,9 +2065,12 @@ class AccountExecutionKernel:
                 rejections.append(_risk_rejection_key(batch_id, "venue_leverage_limit", symbol))
             prices[symbol] = price
             symbol_leverages.setdefault(symbol, []).append(leverage)
-            component_gross += abs(signed_qty) * price
+            notional = abs(signed_qty) * price
+            component_gross += notional
+            sleeve_gross[sleeve] = sleeve_gross.get(sleeve, 0.0) + notional
             if leverage > 0.0:
-                component_margin += abs(signed_qty) * price / leverage
+                component_margin += notional / leverage
+                sleeve_margin[sleeve] = sleeve_margin.get(sleeve, 0.0) + notional / leverage
 
         # A final zero replacement is absent from ``updates`` by design, but
         # its symbol must remain in this batch's aggregate so the kernel emits
@@ -2090,6 +2110,29 @@ class AccountExecutionKernel:
             rejections.append(_risk_rejection_key(batch_id, "initial_margin_limit"))
         if not risk_reducing_only and component_margin > available_margin:
             rejections.append(_risk_rejection_key(batch_id, "available_margin_limit"))
+        # B3. ``component_gross`` above is account-wide despite its name, so one
+        # sleeve could always consume the whole envelope and leave the others
+        # unable to enter. When the profile declares a partition, each sleeve is
+        # additionally held to its own share, and a sleeve the partition does
+        # not name gets nothing rather than everything.
+        if risk_policy.sleeve_limits and not risk_reducing_only:
+            declared = {limit.sleeve: limit for limit in risk_policy.sleeve_limits}
+            for sleeve in sorted(set(sleeve_gross) | set(sleeve_margin)):
+                label = sleeve or "unnamed"
+                share = declared.get(sleeve)
+                if share is None:
+                    rejections.append(
+                        _risk_rejection_key(batch_id, "unpartitioned_sleeve", label)
+                    )
+                    continue
+                if sleeve_gross.get(sleeve, 0.0) > share.max_gross_notional_usdt:
+                    rejections.append(
+                        _risk_rejection_key(batch_id, "sleeve_gross_limit", label)
+                    )
+                if sleeve_margin.get(sleeve, 0.0) > share.max_initial_margin_usdt:
+                    rejections.append(
+                        _risk_rejection_key(batch_id, "sleeve_margin_limit", label)
+                    )
         for symbol, signed_qty in sorted(aggregates.items()):
             if risk_reducing_only and symbol not in requested_symbols:
                 continue

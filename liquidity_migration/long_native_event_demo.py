@@ -157,9 +157,13 @@ class LongNativeDemoCycleConfig:
 
 
 def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
-    if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
-        return "long_native_paper_cycles"
-    return "long_native_demo_cycles"
+    # Named per environment, not per "is it paper". A mainnet cycle written
+    # into the demo dataset is exactly the mislabelling B11 closed elsewhere:
+    # later readers would load real evidence as demo evidence.
+    return {
+        ExecutionEnvironment.PAPER: "long_native_paper_cycles",
+        ExecutionEnvironment.MAINNET: "long_native_mainnet_cycles",
+    }.get(execution_environment(config.execution_environment), "long_native_demo_cycles")
 
 
 def _validate_long_demo_config(

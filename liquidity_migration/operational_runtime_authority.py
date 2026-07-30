@@ -27,7 +27,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .env_flags import explicitly_false_or_unset
+from .env_flags import env_flag, explicitly_false_or_unset, reject_ambiguous_flag
 from .account_reset_receipt import MANAGED_UNITS as ISSUANCE_QUIESCENCE_UNITS
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .candidate_rule_coverage import build_candidate_rule_coverage
@@ -51,7 +51,8 @@ OWNER_ACKNOWLEDGEMENT = "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTI
 #: they have typed dozens of times on a fleet where the worst case is a log
 #: line. This one has to be typed knowing what it says.
 REAL_MONEY_OWNER_ACKNOWLEDGEMENT = (
-    "AUTHORIZE_BYBIT_MAINNET_REAL_MONEY_CARRY_WITHIN_THE_RECORDED_CEILING_AND_EXPIRY"
+    "AUTHORIZE_BYBIT_MAINNET_REAL_MONEY_CARRY_AND_LONG_WITHIN_THE_PARTITIONED_"
+    "CEILING_AND_RECORDED_EXPIRY"
 )
 DEMO_OPERATIONAL_PROFILE = "demo-operational"
 OPERATIONAL_PROFILE = "operational"
@@ -70,11 +71,13 @@ DEMO_OPERATIONAL_AUTHORIZED_UNITS = (
     "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
 )
-#: CARRY only, on its own owner. LONG is deferred behind B3 and CONTINUOUS is
-#: retired, so neither has a mainnet unit to authorize.
+#: CARRY and LONG on their own owner. Both are admissible only because the
+#: profile partitions the envelope between them (B3); CONTINUOUS is retired and
+#: has no mainnet unit to authorize.
 REAL_MONEY_AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution-mainnet.service",
     "liquidity-migration-bybit-carry-mainnet.service",
+    "liquidity-migration-bybit-long-mainnet.service",
 )
 AUTHORIZED_UNITS = (
     "liquidity-migration-account-execution.service",
@@ -109,6 +112,15 @@ REQUIRED_ENVIRONMENT_PATHS = (
     Path("/etc/liquidity-migration/bybit-demo.env"),
     Path("/etc/liquidity-migration/sleeves.resolved.env"),
 )
+#: Disjoint from the demo set on purpose, exactly like the credential variables
+#: they carry: the mainnet owner reads its own route file and its own
+#: credential file, so a stale demo environment cannot configure a funded run.
+REAL_MONEY_ENVIRONMENT_PATHS = (
+    Path("/etc/liquidity-migration/account-execution-mainnet.env"),
+    Path("/etc/liquidity-migration/bybit-mainnet.env"),
+)
+_MAINNET_OWNER_ENVIRONMENT = "account-execution-mainnet.env"
+_MAINNET_CREDENTIAL_ENVIRONMENT = "bybit-mainnet.env"
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _UNIT = re.compile(r"liquidity-migration-[a-z0-9-]+\.service")
@@ -136,6 +148,15 @@ _INPUT_KEYS: dict[str, tuple[str, ...]] = {
         "ACCOUNT_RISK_POLICY_FILE",
     ),
     "account-paper-execution.env": (
+        "ACCOUNT_SYMBOLS_FILE",
+        "ACCOUNT_DEMO_RULES_FILE",
+        "ACCOUNT_RISK_POLICY_FILE",
+    ),
+    # ``ACCOUNT_DEMO_RULES_FILE`` keeps its historical name here so the owner
+    # runner takes one flag in every realm. The realm safety is in the artifact,
+    # not the variable: ``load_venue_rules_bytes`` refuses a receipt frozen
+    # against the other realm's endpoint.
+    _MAINNET_OWNER_ENVIRONMENT: (
         "ACCOUNT_SYMBOLS_FILE",
         "ACCOUNT_DEMO_RULES_FILE",
         "ACCOUNT_RISK_POLICY_FILE",
@@ -725,6 +746,21 @@ _ROOT_KEYS = {
         "ACCOUNT_INTENT_INBOX_ROOT",
         "ACCOUNT_PAPER_CAPTURE_ROOT",
     ),
+    _MAINNET_OWNER_ENVIRONMENT: (
+        "ACCOUNT_EXECUTION_ROOT",
+        "ACCOUNT_INTENT_INBOX_ROOT",
+        "ACCOUNT_CAPTURE_ROOT",
+    ),
+}
+
+#: Which environment files each profile's roots and inputs are read from. The
+#: previous ``tuple(_ROOT_KEYS)`` fallback meant "every filename this module
+#: knows about", which silently became wrong the moment a third profile with a
+#: different file set existed.
+_PROFILE_STATE_FILENAMES: dict[str, tuple[str, ...]] = {
+    DEMO_OPERATIONAL_PROFILE: ("account-execution.env",),
+    OPERATIONAL_PROFILE: ("account-execution.env", "account-paper-execution.env"),
+    REAL_MONEY_PROFILE: (_MAINNET_OWNER_ENVIRONMENT,),
 }
 
 
@@ -785,12 +821,15 @@ _PROFILE_FIELDS: dict[str, dict[str, Any]] = {
         "paper_execution_model_scope": INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
     },
     REAL_MONEY_PROFILE: {
-        "scope": "bybit_mainnet_real_money_carry_only",
+        "scope": "bybit_mainnet_real_money_carry_and_long_partitioned",
         "raw_market_persistence": "disabled",
         "research_evidence_status": "not_claimed_or_authorized",
         "authorized_units": REAL_MONEY_AUTHORIZED_UNITS,
-        "demo_raw_value": None,
-        "liveness_scope": "mainnet",
+        "demo_raw_value": "0",
+        # There is no mainnet watchdog unit yet, so there is no scope to
+        # declare. ``None`` skips the check rather than asserting a value no
+        # unit sets -- see docs/real_money_envelope.md.
+        "liveness_scope": None,
         "paper_execution_model_scope": "not_applicable_no_paper",
     },
 }
@@ -1057,12 +1096,17 @@ def _parse_environment_snapshots(
 ]:
     snapshots: dict[str, StableFileSnapshot] = {}
     values: dict[str, dict[str, str]] = {}
-    paths_by_name = {path.name: path for path in REQUIRED_ENVIRONMENT_PATHS}
+    paths_by_name = {
+        path.name: path
+        for path in (*REQUIRED_ENVIRONMENT_PATHS, *REAL_MONEY_ENVIRONMENT_PATHS)
+    }
     if set(paths_by_name) != {
         "account-execution.env",
         "account-paper-execution.env",
         "bybit-demo.env",
         "sleeves.resolved.env",
+        _MAINNET_OWNER_ENVIRONMENT,
+        _MAINNET_CREDENTIAL_ENVIRONMENT,
     }:
         raise ValueError("operational environment path set is invalid")
     try:
@@ -1110,12 +1154,29 @@ def _validate_environments(
     profile: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, StableFileSnapshot]]:
     profile_fields = _profile_fields(profile)
-    demo = values["account-execution.env"]
-    credentials = values["bybit-demo.env"]
+    real_money = profile == REAL_MONEY_PROFILE
+    owner_name = _MAINNET_OWNER_ENVIRONMENT if real_money else "account-execution.env"
+    credential_name = (
+        _MAINNET_CREDENTIAL_ENVIRONMENT if real_money else "bybit-demo.env"
+    )
+    demo = values[owner_name]
+    credentials = values[credential_name]
     sleeves = values["sleeves.resolved.env"]
 
     if demo.get("ACCOUNT_EXECUTION_KERNEL_REQUIRED") != "1":
         raise ValueError("demo operational environment does not require the account kernel")
+    if real_money and demo.get("ACCOUNT_VENUE_REALM") != "mainnet":
+        # The owner selects its realm by flag; this is the authorization-time
+        # proof that the bound environment agrees with the profile it was
+        # issued under, so a mainnet receipt cannot cover a demo-realm run or
+        # the reverse.
+        raise ValueError(
+            "real-money operational environment must set ACCOUNT_VENUE_REALM=mainnet"
+        )
+    if not real_money and demo.get("ACCOUNT_VENUE_REALM", "demo") != "demo":
+        raise ValueError(
+            "demo operational environment must not select a non-demo ACCOUNT_VENUE_REALM"
+        )
     expected_demo_raw = str(profile_fields["demo_raw_value"])
     if demo.get("ACCOUNT_RAW_MARKET_PERSISTENCE") != expected_demo_raw:
         raise ValueError(
@@ -1145,14 +1206,41 @@ def _validate_environments(
             )
         if any(paper.get(key) for key in _EXCHANGE_CREDENTIAL_ENVIRONMENT_KEYS):
             raise ValueError("paper operational environment must not contain exchange credentials")
-    if not credentials.get("BYBIT_DEMO_API_KEY") or not credentials.get(
-        "BYBIT_DEMO_API_SECRET"
-    ):
-        raise ValueError("demo credentials are missing")
-    if any(credentials.get(key) for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")):
-        raise ValueError("operational credential file must not contain mainnet credentials")
-    if not explicitly_false_or_unset(credentials.get("REAL_MONEY")):
-        raise ValueError("operational credential file does not explicitly disable REAL_MONEY")
+    if real_money:
+        if not credentials.get("BYBIT_REAL_API_KEY") or not credentials.get(
+            "BYBIT_REAL_API_SECRET"
+        ):
+            raise ValueError("mainnet credentials are missing")
+        if any(
+            credentials.get(key) for key in ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET")
+        ):
+            raise ValueError(
+                "real-money credential file must not contain demo credentials"
+            )
+        reject_ambiguous_flag("REAL_MONEY", environ=credentials)
+        if not env_flag("REAL_MONEY", environ=credentials):
+            # Unlike every other profile this one requires the switch to be ON.
+            # Issuing real-money authority against an environment that has not
+            # armed it would produce a receipt the runtime can never satisfy.
+            raise ValueError(
+                "real-money credential file must set REAL_MONEY=true; this is the "
+                "owner's arming switch and nothing in this repository sets it"
+            )
+    else:
+        if not credentials.get("BYBIT_DEMO_API_KEY") or not credentials.get(
+            "BYBIT_DEMO_API_SECRET"
+        ):
+            raise ValueError("demo credentials are missing")
+        if any(
+            credentials.get(key) for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
+        ):
+            raise ValueError(
+                "operational credential file must not contain mainnet credentials"
+            )
+        if not explicitly_false_or_unset(credentials.get("REAL_MONEY")):
+            raise ValueError(
+                "operational credential file does not explicitly disable REAL_MONEY"
+            )
     for key in (
         "LONG_SLEEVE",
         "CONTINUOUS_SLEEVE",
@@ -1163,6 +1251,19 @@ def _validate_environments(
     ):
         if sleeves.get(key, "").strip().lower() not in {"on", "off"}:
             raise ValueError(f"resolved sleeve environment has invalid {key}")
+    for key in ("CARRY_MAINNET_SLEEVE", "LONG_MAINNET_SLEEVE"):
+        declared = sleeves.get(key, "").strip().lower()
+        if real_money:
+            # Stated explicitly under real-money authority, so the receipt
+            # records which producers it covers. Both off is legitimate: an
+            # owner with no producers is a flat, watching deployment.
+            if declared not in {"on", "off"}:
+                raise ValueError(f"resolved sleeve environment has invalid {key}")
+        elif declared not in {"", "off"}:
+            # Absent means off for a demo fleet, so an already-resolved sleeve
+            # file that predates these keys keeps working. A mainnet sleeve
+            # switched *on* under demo authority is still refused.
+            raise ValueError(f"demo/paper profiles require {key}=off")
     if (
         profile == DEMO_OPERATIONAL_PROFILE
         and sleeves.get("CONTINUOUS_PAPER_SLEEVE", "").strip().lower() != "off"
@@ -1181,7 +1282,7 @@ def _validate_environments(
     _validate_strategy_target_capture_path(
         demo,
         capture_root_key="ACCOUNT_CAPTURE_ROOT",
-        label="demo operational environment",
+        label=f"{'real-money' if real_money else 'demo'} operational environment",
     )
     if paper is not None:
         _validate_strategy_target_capture_path(
@@ -1192,11 +1293,7 @@ def _validate_environments(
 
     roots: list[Path] = []
     root_identities: dict[str, dict[str, Any]] = {}
-    root_filenames = (
-        ("account-execution.env",)
-        if profile == DEMO_OPERATIONAL_PROFILE
-        else tuple(_ROOT_KEYS)
-    )
+    root_filenames = _PROFILE_STATE_FILENAMES[profile]
     for filename in root_filenames:
         keys = _ROOT_KEYS[filename]
         environment = values[filename]
@@ -1222,11 +1319,7 @@ def _validate_environments(
                 raise ValueError("operational roots must not contain one another")
 
     inputs: dict[str, StableFileSnapshot] = {}
-    input_filenames = (
-        ("account-execution.env",)
-        if profile == DEMO_OPERATIONAL_PROFILE
-        else tuple(_INPUT_KEYS)
-    )
+    input_filenames = _PROFILE_STATE_FILENAMES[profile]
     for filename in input_filenames:
         input_keys = _INPUT_KEYS[filename]
         input_keys = (*input_keys, _CANDIDATE_UNIVERSE_KEY)
@@ -1258,17 +1351,25 @@ def _validate_environments(
         raise ValueError(
             "demo operational candidate universe must also be the owner symbols file"
         )
-    candidate_snapshot = inputs[
-        f"account-execution.env:{_CANDIDATE_UNIVERSE_KEY}"
-    ]
-    rules_snapshot = inputs["account-execution.env:ACCOUNT_DEMO_RULES_FILE"]
-    risk_snapshot = inputs["account-execution.env:ACCOUNT_RISK_POLICY_FILE"]
+    candidate_snapshot = inputs[f"{owner_name}:{_CANDIDATE_UNIVERSE_KEY}"]
+    rules_snapshot = inputs[f"{owner_name}:ACCOUNT_DEMO_RULES_FILE"]
+    risk_snapshot = inputs[f"{owner_name}:ACCOUNT_RISK_POLICY_FILE"]
     operational_profile = load_operational_profile(risk_snapshot.path, snapshot=risk_snapshot)
+    if real_money and not operational_profile.account_risk.sleeve_limits:
+        # B3. Without a partition one sleeve can consume the whole envelope,
+        # which is the reason LONG was previously refused real capital at all.
+        # An unpartitioned profile is therefore not merely unwise here, it is
+        # outside what this authorization means.
+        raise ValueError(
+            "the real-money profile requires account_risk.sleeve_limits: an "
+            "unpartitioned envelope lets one sleeve spend another's capital"
+        )
     build_candidate_rule_coverage(
         demo_candidate_path,
         rules_snapshot.path,
         candidate_snapshot=candidate_snapshot,
         demo_rules_snapshot=rules_snapshot,
+        realm="mainnet" if real_money else "demo",
     )
     if profile == OPERATIONAL_PROFILE:
         assert paper is not None

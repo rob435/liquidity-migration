@@ -101,10 +101,12 @@ DATASETS = {
     "event_demo_klines_1h",
     "long_native_demo_cycles",
     "long_native_paper_cycles",
+    "long_native_mainnet_cycles",
     "continuous_fade_demo_cycles",
     "continuous_fade_paper_cycles",
     "carry_hold_demo_cycles",
     "carry_hold_paper_cycles",
+    "carry_hold_mainnet_cycles",
     "carry_funding_events",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
@@ -129,10 +131,12 @@ DATASET_KEYS = {
     "event_demo_klines_1h": ("ts_ms", "symbol"),
     "long_native_demo_cycles": ("cycle_id",),
     "long_native_paper_cycles": ("cycle_id",),
+    "long_native_mainnet_cycles": ("cycle_id",),
     "continuous_fade_demo_cycles": ("cycle_id",),
     "continuous_fade_paper_cycles": ("cycle_id",),
     "carry_hold_demo_cycles": ("cycle_id",),
     "carry_hold_paper_cycles": ("cycle_id",),
+    "carry_hold_mainnet_cycles": ("cycle_id",),
     # Settled prints are naturally keyed by their settlement instant; the
     # dedup makes the carry sleeve's overlap-window incremental appends
     # idempotent at the storage layer too.

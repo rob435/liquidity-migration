@@ -105,9 +105,18 @@ def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
     assert offenders == []
 
 
-def test_mainnet_is_never_a_producer_default_or_a_long_sleeve_choice() -> None:
-    """Only CARRY may address the mainnet owner; nothing defaults to it."""
+def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() -> None:
+    """CARRY and LONG may address the mainnet owner; nothing defaults to it.
 
+    LONG joined once B3 closed: the profile's ``sleeve_limits`` partition means
+    LONG cannot spend CARRY's share. CONTINUOUS is retired and stays
+    ``demo|paper``, so it cannot be pointed at real capital by a flag.
+    """
+
+    partitioned = {
+        "_add_carry_demo_cycle_parser",
+        "_add_long_native_event_demo_cycle_parser",
+    }
     source = (REPO / "liquidity_migration" / "cli_parsers.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     environment_choices: list[tuple[str, str]] = []
@@ -130,8 +139,9 @@ def test_mainnet_is_never_a_producer_default_or_a_long_sleeve_choice() -> None:
                         f"{node.name} gives --execution-environment a default"
                     )
     assert environment_choices, "no producer exposes --execution-environment"
+    assert partitioned <= {name for name, _ in environment_choices}
     for function_name, rendered in environment_choices:
-        if function_name == "_add_carry_demo_cycle_parser":
+        if function_name in partitioned:
             assert rendered == "EXECUTION_ENVIRONMENT_CHOICES"
         else:
             assert rendered == "('demo', 'paper')", (function_name, rendered)

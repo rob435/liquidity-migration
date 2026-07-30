@@ -42,6 +42,7 @@ __all__ = [
     "VENUE_RULES_KIND",
     "VENUE_RULES_SCHEMA_VERSION",
     "build_venue_instrument_rules",
+    "candidate_symbol_source",
     "load_venue_rules_bytes",
     "render_venue_rules_artifact",
 ]
@@ -111,13 +112,38 @@ def build_venue_instrument_rules(
     return rules
 
 
+def candidate_symbol_source(candidate: Any, *, size_bytes: int) -> dict[str, Any]:
+    """The exact binding shape ``build_candidate_rule_coverage`` re-derives.
+
+    Kept here rather than open-coded at each call site so the freeze script and
+    the coverage check cannot drift into two shapes that never compare equal.
+    """
+
+    return {
+        "kind": "candidate_universe_artifact",
+        "path": str(candidate.path),
+        "size_bytes": int(size_bytes),
+        "sha256": candidate.file_sha256,
+        "artifact_sha256": candidate.artifact_sha256,
+        "artifact_self_hash_verified": True,
+    }
+
+
 def render_venue_rules_artifact(
     rules: Mapping[str, InstrumentRules],
     *,
     realm: VenueRealm | str,
     verified_ts_ns: int | None = None,
+    symbol_source: Mapping[str, Any] | None = None,
 ) -> bytes:
-    """Serialize one self-describing, hash-bound venue-declared rules receipt."""
+    """Serialize one self-describing, hash-bound venue-declared rules receipt.
+
+    ``symbol_source`` binds the receipt to the exact candidate-universe artifact
+    its symbol list came from. The demo probe receipt carries the same binding,
+    and the authorization-time coverage proof re-derives and compares it — so a
+    rules receipt frozen against a different universe cannot be installed as if
+    it covered this one.
+    """
 
     selected = venue_realm(realm)
     if not rules:
@@ -137,6 +163,7 @@ def render_venue_rules_artifact(
         "environment": selected.value,
         "evidence": VENUE_RULES_EVIDENCE,
         "verified_ts_ns": stamped,
+        "symbol_source": dict(symbol_source) if symbol_source is not None else None,
         "rules": {
             symbol.upper(): {
                 "qty_step": rule.qty_step,

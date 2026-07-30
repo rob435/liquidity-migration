@@ -149,6 +149,27 @@ class AccountRiskSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class SleeveCapitalLimit:
+    """One sleeve's private share of the account envelope (B3).
+
+    ``max_component_gross_notional_usdt`` bounds *every* sleeve's projected
+    exposure together, so a single sleeve could always consume the whole
+    envelope and leave the others unable to enter — which is why LONG and CARRY
+    could not previously be funded at the same time. A partition gives each
+    sleeve a share nothing else can spend.
+
+    Declared as a tuple of these on the policy rather than a mapping so the
+    policy stays a frozen, hashable, ``asdict``-serializable value: it is
+    recorded verbatim in the journal's risk decision and hashed into the
+    authority receipt through the operational profile.
+    """
+
+    sleeve: str
+    max_gross_notional_usdt: float
+    max_initial_margin_usdt: float
+
+
+@dataclass(frozen=True, slots=True)
 class AccountRiskPolicy:
     """Explicit absolute limits; no hidden resize floor or implicit leverage."""
 
@@ -166,6 +187,13 @@ class AccountRiskPolicy:
     #: operational profile, and therefore hashed into the authority receipt:
     #: the ceiling cannot be raised without invalidating the deploy authority.
     max_daily_loss_usdt: float = 0.0
+    #: Per-sleeve partition of the account envelope. Empty is the historical
+    #: unpartitioned behaviour and stays the default so a profile that predates
+    #: B3 keeps working. Non-empty partitions the envelope *and* refuses any
+    #: sleeve the partition does not name: declaring a partition and then
+    #: silently exempting an unlisted sleeve would be the same hole with extra
+    #: steps.
+    sleeve_limits: tuple[SleeveCapitalLimit, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

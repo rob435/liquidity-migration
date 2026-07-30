@@ -15,14 +15,28 @@
     "max_initial_margin_usdt": 2500.0,
     "max_leverage": 2.0,
     "quantity_tolerance": 1e-12,
-    "max_daily_loss_usdt": 250.0
+    "max_daily_loss_usdt": 250.0,
+    "sleeve_limits": {
+      "carry": {
+        "max_gross_notional_usdt": 2750.0,
+        "max_initial_margin_usdt": 1375.0
+      },
+      "continuous": {
+        "max_gross_notional_usdt": 50.0,
+        "max_initial_margin_usdt": 25.0
+      },
+      "long": {
+        "max_gross_notional_usdt": 2000.0,
+        "max_initial_margin_usdt": 1000.0
+      }
+    }
   },
   "long": {
-    "notional_multiplier": 0.001,
+    "notional_multiplier": 0.4,
     "entry_leverage": 2.0,
     "max_projected_initial_margin_pct_equity": 0.5,
     "max_order_notional_pct_equity": 0.0,
-    "max_new_entries_per_cycle": 1
+    "max_new_entries_per_cycle": 5
   },
   "continuous": {
     "max_active": 1,
