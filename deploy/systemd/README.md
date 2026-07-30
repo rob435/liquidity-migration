@@ -18,6 +18,16 @@ This topology is demo/paper only. It never authorizes mainnet.
 | `liquidity-migration-continuous-hedge.service` | Demo-only hedge target publisher |
 | `liquidity-migration-continuous-rmom-refresh.service` | Residual-momentum refresh |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
+| `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |
+| `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers, gated by `CARRY_MAINNET_SLEEVE` / `LONG_MAINNET_SLEEVE` |
+
+The three mainnet units are inert on a demo host: they are installed by the unit
+manifest but never enabled or started by this entrypoint, their environment
+files do not exist, and `verify` asserts each one is inactive rather than
+leaving a running real-money owner invisible to a green demo verification. They
+come up only under a `real-money` authority receipt. See
+`docs/real_money_envelope.md` §6; nothing in this repository sets `REAL_MONEY`,
+writes a credential, or starts one of them.
 
 The hedge, RMOM, and liveness services are invoked by their matching timers.
 Target producers and auxiliary services have private API, mainnet,

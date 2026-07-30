@@ -1,18 +1,20 @@
 # Real-Money Envelope
 
-Blocker list and controls for putting real capital behind CARRY. Written
-2026-07-30 from a five-way subsystem audit; the code path was built the same
-day and this file updated with it.
+Blocker list and controls for putting real capital behind CARRY and LONG.
+Written 2026-07-30 from a five-way subsystem audit; the code path was built the
+same day and this file updated with it.
 
-**Config:** CARRY only (LONG deferred behind B3), existing main account,
-**ceiling anchored to account equity** — initial margin ≤ equity, gross ≤ 2×
-equity, daily loss 10% of equity. No hard money amount binds anything: the
-`2500.0` in `configs/operational.mainnet.json` is the declared reference the
-load-time envelope proof runs against, and every cap is a ratio of it.
+**Config:** CARRY **and** LONG on the existing main account, each holding a
+private share of the envelope (B3), **ceiling anchored to account equity** —
+initial margin ≤ equity, gross ≤ 2× equity, daily loss 10% of equity. No hard
+money amount binds anything: the `2500.0` in
+`configs/operational.mainnet.json` is the declared reference the load-time
+envelope proof runs against, and every cap is a ratio of it.
 
 **Built, not armed.** The path exists and is tested; `REAL_MONEY` is unset,
 no credentials have been written, and nothing is deployed. §6 is the owner's
-remaining work.
+remaining work — and `scripts/ops.sh real-money preflight` will tell you which
+of it is still outstanding at any moment.
 
 ---
 
@@ -99,6 +101,7 @@ Bybit demo prices are real, fills are not.
 | | What | Where |
 | --- | --- | --- |
 | B2/B13 | Account-level daily loss halt, wired to `run_safety_flat_once` | `account_loss_guard.py` |
+| B3 | Per-sleeve capital partition, enforced in the pre-trade gate | `operational_profile.py`, `account_kernel.py` |
 | B4 | Envelope anchored to observed equity; caps re-proved at each rebase | `equity_anchored_envelope.py`, `operational_profile.py` |
 | B5 | Post-create stop assertion; repair on the spot, else latch and flatten | `venue_protection.py`, `bybit_execution_adapter.py` |
 | B6 | Protection re-verification is per-symbol, not account-gated | `account_reconcile.py`, `venue_protection.py` |
@@ -111,6 +114,22 @@ Bybit demo prices are real, fills are not.
 | B15b | Exits unblocked for a wedged symbol; operator-authorized terminalization | `account_kernel.py`, `account_service.py`, `wedged_command_resolution.py` |
 | B16 | Degraded-but-alive startup over open exposure | `account_service_runner.py` |
 | B17 | Rules from the read-only endpoint; the order probe refuses off demo | `venue_instrument_rules.py`, `demo_rule_probe.py`, `deploy_vps_live.sh` |
+
+**B3 detail:** `max_component_gross_notional_usdt` is account-wide despite its
+name, so a single sleeve could consume the whole envelope and leave the others
+unable to enter — which is why LONG could not be funded alongside CARRY. The
+profile may now declare `account_risk.sleeve_limits`, a share of the gross and
+margin caps per sleeve. It is a partition literally: the shares must *sum*
+inside the account caps, because overlapping shares would still let one sleeve
+crowd another out at the account limit. Three layers enforce it — the kernel
+holds each sleeve to its share on every exposure-increasing batch and refuses a
+sleeve the partition does not name; the load-time proof checks each producer's
+worst-case envelope against its own share, so a config that could only produce
+rejections fails on a terminal rather than on a live book; and the rescale
+carries the shares, so the partition follows the wallet like every other cap.
+Absent means the historical single shared envelope, so the demo profile is
+unaffected — but the real-money profile is *required* to carry one, because an
+unpartitioned envelope is outside what that authorization means.
 
 **B4 detail:** producers size off live venue equity while the six caps were
 calibrated against a fixed `capital_reference_usdt`. Fund below the reference and
@@ -164,13 +183,15 @@ the duration. The 15s bound is a guess — tune on observed gap durations.
 
 ### Open
 
-**B3 — no per-sleeve capital partition.** `max_component_gross_notional_usdt` is
-account-wide despite the name (`account_kernel.py:2049`). One sleeve can consume
-the whole envelope. Blocks running CARRY and LONG together — which is why the
-CARRY producer is the only one whose `--execution-environment` accepts
-`mainnet`, and why the real-money authority profile authorizes only the mainnet
-owner and the mainnet CARRY unit. LONG cannot be pointed at real capital by a
-flag, which is a stronger gate than this note.
+Nothing on the original blocker list remains open. CONTINUOUS is retired and
+stays `demo|paper`: it cannot be pointed at real capital by a flag, which is a
+stronger gate than a note.
+
+**There is no mainnet watchdog unit.** `liquidity-migration-demo-liveness` is
+demo-scoped, so the mainnet fleet has no independent observer raising an alarm
+when the owner stops, fails, or goes stale. The owner's own Telegram path is
+enabled on its unit, but an absent owner cannot report its own absence. Watch it
+yourself during Tier 1.
 
 ### Hardening
 
@@ -188,7 +209,8 @@ flag, which is a stronger gate than this note.
 Fail-closed for *new* exposure, and no longer fail-open on managing existing
 exposure: B5, B6, B15b and B16 are closed, so a stranded position, a suspended
 stop proof, a frozen symbol, and an absent owner each have a named answer. B3
-remains, which is why only CARRY may address the mainnet owner.
+is closed too, so CARRY and LONG can hold real capital at the same time without
+either being able to spend the other's share.
 
 The venue-native stop is unaffected by any local failure, bounding the tail at
 `declared_stop_loss_fraction` (0.35) per position. That makes a bounded Tier-1
@@ -221,33 +243,81 @@ Tier 1 buys real fills, not returns. Any breach drops to 0, not one tier down.
 ## 6. Arming (owner-executed)
 
 Every step below is the owner's. Nothing in this repository sets `REAL_MONEY`,
-writes a credential, or activates a mainnet unit.
+writes a credential, issues authority, or starts a mainnet unit.
 
-1. Confirm the account has no manual position or open order.
-   `require_bybit_demo_order_ownership` refuses to start otherwise — and under
-   B16 it now degrades rather than crash-loops if it fails over open exposure,
-   which is a worse thing to discover than a clean refusal.
-2. API key: contract trading only, **withdrawal disabled**, IP-allowlisted to
-   the VPS.
-3. Write `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` and `REAL_MONEY=true`
-   to `/etc/liquidity-migration/bybit-mainnet.env` by hand, root-owned `0600`.
-   These are deliberately *different variables* from the demo pair, so a stale
-   demo key cannot authenticate a mainnet run.
-4. Install `configs/operational.mainnet.json`. Nothing to recalibrate: every cap
-   is a ratio of observed equity.
-5. Freeze mainnet instrument rules read-only:
-   `scripts/freeze_venue_instrument_rules.py --realm mainnet`. Do **not** run
-   the demo order probe; it refuses off demo by name.
-6. Freeze the candidate universe from the mainnet endpoint (`--realm mainnet`),
-   so it is not labelled — or later loaded as — demo evidence.
-7. Issue the real-money authority receipt:
-   `--profile real-money`, the distinct acknowledgement constant
-   `REAL_MONEY_OWNER_ACKNOWLEDGEMENT`, `--capital-ceiling-mode
-   account_equity_multiple --capital-ceiling-value 1.0`, and an explicit
-   `--authority-seconds` no greater than 30 days. All three are mandatory;
-   there is no unbounded ceiling and no indefinite authority.
-8. Staged install, then activate at Tier 1.
+Run this at any point to see exactly what is still outstanding. It reads only,
+and it reports a credential by name and never by value:
+
+```bash
+scripts/ops.sh real-money preflight
+```
+
+**1. Confirm the account is flat.** No manual position, no open order.
+`require_bybit_demo_order_ownership` refuses to start otherwise — and under B16
+it degrades rather than crash-loops if it fails over open exposure, which is a
+worse thing to discover than a clean refusal.
+
+**2. Create the API key** on the funded account: contract trading only,
+**withdrawal disabled**, IP-allowlisted to the VPS.
+
+**3. Fill in one file.** Copy `deploy/bybit-mainnet.env.template` to
+`/etc/liquidity-migration/bybit-mainnet.env`, root-owned `0600`. Paste the key
+and secret into `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` — deliberately
+*different variables* from the demo pair, so a stale demo key cannot
+authenticate a mainnet run — and set `REAL_MONEY=true`. That switch is the
+single act that means "trade my money".
+
+The same file holds every deployment dial: leverage, the CARRY/LONG shares of
+the envelope, the stop distance, the daily-loss halt. All of them are ratios,
+because the envelope is anchored to observed equity — deposit or withdraw
+freely and nothing here goes stale. Leave a dial out to take the committed
+default.
+
+**4. Copy the route file.** `deploy/account-execution-mainnet.env.template` to
+`/etc/liquidity-migration/account-execution-mainnet.env`, root-owned `0600`.
+Its roots are disjoint from demo and paper by construction.
+
+**5. Render the profile from your dials:**
+
+```bash
+scripts/ops.sh real-money render-profile --execute --output /etc/liquidity-migration/account-execution-mainnet/risk-policy.json
+```
+
+This re-runs the full load-time envelope proof. A dial combination that cannot
+prove is refused here, naming the dial to move, rather than at start-up over a
+funded account.
+
+**6. Freeze the candidate universe** from the mainnet endpoint (`--realm
+mainnet`), so it is not labelled — or later loaded as — demo evidence.
+
+**7. Freeze instrument rules, read-only:**
+
+```bash
+scripts/freeze_venue_instrument_rules.py --realm mainnet --symbols-file <the frozen universe> --output /etc/liquidity-migration/account-execution-mainnet/venue-rules.json
+```
+
+Do **not** run the demo order probe; it refuses off demo by name. The receipt is
+bound to the exact universe artifact, which is what lets authorization prove the
+rules cover it.
+
+**8. Enable the producers you want.** Set `CARRY_MAINNET_SLEEVE` and/or
+`LONG_MAINNET_SLEEVE` to `on` in `deploy/sleeves.env` and commit. Repo-off is a
+hard ceiling a host override cannot lift, so arming a real-money producer is a
+committed change, not a host edit.
+
+**9. Staged install**, which puts the units on disk without starting them.
+
+**10. Issue the real-money authority receipt:** `--profile real-money`, the
+distinct acknowledgement constant `REAL_MONEY_OWNER_ACKNOWLEDGEMENT`,
+`--capital-ceiling-mode account_equity_multiple --capital-ceiling-value 1.0`,
+and an explicit `--authority-seconds` no greater than 30 days. All three are
+mandatory; there is no unbounded ceiling and no indefinite authority.
+
+**11. Activate at Tier 1.**
 
 The deploy-time order probe is already refused for a non-demo realm
-(`DEPLOY_VENUE_REALM`), so step 8 cannot spend money as a side effect of
-shipping code.
+(`DEPLOY_VENUE_REALM`), so shipping code cannot spend money as a side effect.
+
+Changing any dial afterwards means re-rendering the profile **and** re-issuing
+the receipt: the receipt hashes both the env file and the rendered profile,
+which is exactly what stops limits from moving without a new authorization.
