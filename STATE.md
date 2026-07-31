@@ -19,6 +19,52 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-07-31 — `flatten` shipped, both books taken to zero, and the fleet
+  rolled out at `0506cef` through the guarded `rollout` path.** First rollout
+  this fleet has ever completed: it proves the demo account flat three times and
+  a position-taking book could never satisfy that, because turning a sleeve off
+  stops publication but leaves its last targets standing in the journal.
+  `scripts/ops.sh flatten` closes that gap — it publishes a zero replacement
+  target for every component holding exposure and watches the journal until the
+  owner converges, placing no order itself. Sequence run: sleeves off → `install`
+  → `activate` → flatten demo (journal 44316 → 44383, both CARRY positions
+  closed) → flatten paper (10361 → 10542) → `rollout` to `0506cef` with the
+  sleeves back on. **The CARRY sample restarts from flat at this date**; the
+  VANRY/BANK holdings and their history end here. Fleet after: 8 units, 0 failed,
+  both owners healthy, demo equity 255,121.74, paper 253,784.56.
+- **2026-07-31 — the paper target mirror is running for the first time.** The
+  reason recorded for it being off was wrong. It was not a demo/paper filesystem
+  boundary problem: the runner called `ensure_account_route`, an owner-side
+  initializer that requires the manifests to belong to the running process. The
+  mirror is not an owner and runs privileged on purpose (the demo capture tape is
+  0600 root:root), so it now uses `require_account_route` with the paper owner's
+  uid named explicitly — the read that function already documents for a
+  privileged observer, and *narrower* than the default, which accepts whoever is
+  running. No boundary was widened and the tape is still 0600 root-only. Its
+  first start also adopted offset zero, which would have republished 9.4 MB of
+  the leader's history onto a live paper book; it now adopts the tape head
+  durably and follows from there. `CARRY_PAPER_SLEEVE` stays off.
+- **2026-07-31 — no code fence blocks a mainnet owner any more.**
+  `BybitNativeProtectionManager`, `BybitDemoExecutionAdapter` and the rollout
+  readiness proof each refused any non-demo client. All three now call
+  `client_venue_realm`, which accepts either realm but refuses a client whose
+  declared realm and transport disagree, and refuses testnet — the coherence the
+  fences were actually worth. `bybit_demo` stays the adapter's `name`: it is
+  journaled as `adapter_name` and keys the position-truth and native-protection
+  requirements, so it is an identity, not a description. **Nothing is armed.**
+  Mainnet units are installed, disabled and inactive; `account-execution-mainnet.env`
+  (paths only, no secrets) and the three state roots are in place;
+  `real-money preflight` reports 5 steps outstanding, and all five are downstream
+  of `bybit-mainnet.env` — the credential file, which is the owner's own act — or
+  of the mainnet sleeve toggles, which are the arming decision.
+- **2026-07-31 — `verify` reported a commit it never checked.** It printed
+  `commit=$EXPECTED_COMMIT` verbatim, so a host 38 commits behind answered with
+  the commit you asked about: `verify-ok commit=70b3a49` came back from a host
+  sitting at `cdb6e61`. It now prints the installed HEAD and the requested commit
+  separately and fails on a mismatch. An unknown deploy mode also succeeded
+  silently having done nothing; it now fails.
+
+
 - **2026-07-31 — everything below deployed to the VPS at `cdb6e61`.** The host
   had been pinned at `b13cbfa` (2026-07-30) while 38 commits accumulated on
   `main`, so `scripts/ops.sh` from a current checkout could not reach it at all
@@ -30,8 +76,9 @@ how it got there. That history is in Git.
   untouched — verified after activation, journal and venue agreeing with no
   mismatches. Two defects surfaced at first contact, both recorded under **Open
   operational defects**: the restructure had rewritten a persisted identity tag
-  (fixed in `68171bd`), and the paper target mirror cannot run under the
-  deployed boundary (parked in `cdb6e61`).
+  (fixed in `68171bd`), and the paper target mirror could not start (parked in
+  `cdb6e61`; the diagnosis recorded at the time was wrong and it was fixed in
+  `0506cef`, see the entry above).
 - **2026-07-31 — repository restructure, deployed in `cdb6e61`.** The
   125-module package moved into eleven subpackages
   (`liquidity_migration/README.md`), `scripts/` grouped by who runs it
@@ -59,10 +106,10 @@ how it got there. That history is in Git.
   sources, snapshot keys, health strings and error text; the three whose own
   names said `demo` lost it (`BybitAccountSnapshotProvider`,
   `{inspect,require}_bybit_order_ownership`). Demo decisions, journal keys,
-  ledger keys and error text are unchanged. Two fences still block a mainnet
-  start, `BybitNativeProtectionManager` (`venue_protection.py:151`, built ahead
-  of all four) and `BybitDemoExecutionAdapter`
-  (`bybit_execution_adapter.py:91`), so the mainnet owner is still not startable.
+  ledger keys and error text are unchanged. Two fences still blocked a mainnet
+  start as of this entry, `BybitNativeProtectionManager` (built ahead of all
+  four) and `BybitDemoExecutionAdapter`; both were lifted later the same day in
+  `fb78c6c` — see the entry above.
   Off demo the funding reconciler now refuses a settlement row carrying nonzero
   `cashFlow` rather than double-counting it; that raise is outside
   `degrade_or_raise`. `REAL_MONEY` is still unset, no mainnet credential exists,
@@ -563,7 +610,7 @@ every item here is operational, not strategy.
 | Item | State |
 | --- | --- |
 | Remediation for the journal re-projection, paper funding snapshot, per-bar decision freeze, and stranded zero-quantity reservations | **Deployed** in `cdb6e61`. The cursor is 138× faster on the steady-state planning read at 3.3× lower peak memory, outputs identical on the real journal |
-| Paper CARRY has no target source | `PAPER_TARGET_MIRROR` is off: the unit must run as `liquidity-migration-paper` to pass the route manifest's owner check (`artifact_snapshot.read_stable_file`), but as that user it cannot read the demo capture tape — the demo producer re-forces `0600` root-only on every append (`strategy_target_replay._append_private_line`), so a group-read grant does not survive one cycle. Both exits change an owner-owned control. `CARRY_PAPER_SLEEVE` is **not** the fallback: it reinstates the raced read it was retired for |
+| ~~Paper CARRY has no target source~~ | **Resolved 2026-07-31 in `0506cef`**, and the diagnosis recorded here was wrong: it was never a filesystem boundary problem. The runner called `ensure_account_route`, an owner-side initializer that requires the manifests to belong to the running process; the mirror is not an owner. It now uses `require_account_route` with the paper owner's uid named explicitly. The unit is active and both books started flat. `CARRY_PAPER_SLEEVE` remains **not** the fallback: it reinstates the raced read it was retired for |
 | The LONG demo producer is SIGKILLed by every stop | It drains its current cycle on SIGTERM, but a cycle runs ~180–350s against the unit's 180s `TimeoutStopSec`, so systemd kills it and the unit ends `failed`. Harmless for a deploy (`require_quiescent` accepts `failed`, and targets publish atomically), but it means no LONG stop is ever graceful |
 | Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45 | Needs an operator. Clearing it is a state mutation on a live fleet; the route is `scripts/ops.sh wedged-command`, deployed in `cdb6e61` and now reachable |
 | Reported P&L is provisional | 166 of 187 `pnl` events carry `funding_status=pending_venue_reconciliation`; every figure is fill-reconstructed, not venue-confirmed. No closed-loop accounting check yet, which real money needs |
