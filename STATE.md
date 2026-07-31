@@ -16,11 +16,24 @@ how it got there. That history is in Git.
 > operational-authority` and the `ConditionPathExists` gate on all 14 units are
 > gone; the installed profile is now a plain `/etc/liquidity-migration/profile`
 > marker. **Entries dated before that describe the tooling as it was and are
-> accurate history — they are not runnable instructions.** The change is
-> committed but not deployed.
+> accurate history — they are not runnable instructions.** Deployed
+> 2026-07-31 in `cdb6e61`.
 
-- **2026-07-31 — repository restructure, committed on `repo-restructure` and
-  not deployed.** The 125-module package moved into eleven subpackages
+- **2026-07-31 — everything below deployed to the VPS at `cdb6e61`.** The host
+  had been pinned at `b13cbfa` (2026-07-30) while 38 commits accumulated on
+  `main`, so `scripts/ops.sh` from a current checkout could not reach it at all
+  (`No module named 'liquidity_migration.policy'`). Landed by staged
+  `install` + `activate`, not `rollout`: the guarded rollout proves the demo
+  account flat three times, and the book was holding two CARRY positions
+  (`VANRYUSDT`, `BANKUSDT`). Staged needs only a quiesced fleet, so both
+  positions, their venue-native stops and 43,939 journal events survived
+  untouched — verified after activation, journal and venue agreeing with no
+  mismatches. Two defects surfaced at first contact, both recorded under **Open
+  operational defects**: the restructure had rewritten a persisted identity tag
+  (fixed in `68171bd`), and the paper target mirror cannot run under the
+  deployed boundary (parked in `cdb6e61`).
+- **2026-07-31 — repository restructure, deployed in `cdb6e61`.** The
+  125-module package moved into eleven subpackages
   (`liquidity_migration/README.md`), `scripts/` grouped by who runs it
   (`scripts/README.md`), `tests/` mirrored onto the package, and the dated
   research runs archived under `docs/archive/`. **No systemd unit file
@@ -32,9 +45,13 @@ how it got there. That history is in Git.
   code deploy, and the whole restructure must land in one release** — a
   checkout carrying the old shell against the new tree, or the reverse, fails
   at unit start. Behaviour is unchanged: no strategy, threshold, journal key,
-  or ledger key was touched, and the suite is the same 2768 tests.
+  or ledger key was touched, and the suite is the same 2768 tests. One
+  exception surfaced at deploy: `_ROUTE_ID_DOMAIN` reads like a module path but
+  is hashed into every stored `account_route.json`, and the rewrite moved it, so
+  the demo owner refused to start with `AccountRouteIntegrityError`. Frozen and
+  pinned in `68171bd`; both live manifests reproduce exactly. The suite is 2770.
 - **2026-07-31 — four of six demo-only client fences off the mainnet owner's
-  critical path, in the working tree and not deployed.** The wallet snapshot
+  critical path, deployed in `cdb6e61`.** The wallet snapshot
   provider, the start-up order-ownership check, the position reconciler and the
   funding reconciler each refused a non-demo client, so `--realm mainnet` raised
   at construction before any start-up read. All four now take the realm the
@@ -51,7 +68,7 @@ how it got there. That history is in Git.
   `degrade_or_raise`. `REAL_MONEY` is still unset, no mainnet credential exists,
   and none of this has run against a funded account. Limitations:
   `docs/real_money.md`.
-- **2026-07-31 — mainnet arming tooling, in the working tree and not deployed.**
+- **2026-07-31 — mainnet arming tooling, deployed in `cdb6e61`.**
   Four gaps closed: `scripts/maintain/freeze_account_candidate_universe.py` now takes a
   required `--realm`, so the universe can be frozen from `api.bybit.com`;
   `scripts/ops.sh real-money create-state-roots [--execute]` creates the mainnet
@@ -493,7 +510,7 @@ decides, both execute). Reason (2) needs either a flatten of both books or an
 accepted basis difference — **an owner decision, because it mutates live state,
 and it is not taken here.**
 
-Also in the working tree, not deployed: paper equity is marked from its own
+Also deployed in `cdb6e61`: paper equity is marked from its own
 journal instead of the constant 250,000 it reported for its whole life
 (measured effect: paper published **0** resizes across 1,776 cycles against
 demo's 366, which was arithmetic and not a threshold), paper accrues modelled
@@ -545,10 +562,12 @@ every item here is operational, not strategy.
 
 | Item | State |
 | --- | --- |
-| Remediation for the journal re-projection, paper funding snapshot, per-bar decision freeze, and stranded zero-quantity reservations | In the working tree, gate green, **not deployed**. The cursor is 138× faster on the steady-state planning read at 3.3× lower peak memory, outputs identical on the real journal |
-| Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45 | Needs an operator. Clearing it is a state mutation on a live fleet; the route is `scripts/ops.sh wedged-command`, which also still needs deploying |
+| Remediation for the journal re-projection, paper funding snapshot, per-bar decision freeze, and stranded zero-quantity reservations | **Deployed** in `cdb6e61`. The cursor is 138× faster on the steady-state planning read at 3.3× lower peak memory, outputs identical on the real journal |
+| Paper CARRY has no target source | `PAPER_TARGET_MIRROR` is off: the unit must run as `liquidity-migration-paper` to pass the route manifest's owner check (`artifact_snapshot.read_stable_file`), but as that user it cannot read the demo capture tape — the demo producer re-forces `0600` root-only on every append (`strategy_target_replay._append_private_line`), so a group-read grant does not survive one cycle. Both exits change an owner-owned control. `CARRY_PAPER_SLEEVE` is **not** the fallback: it reinstates the raced read it was retired for |
+| The LONG demo producer is SIGKILLed by every stop | It drains its current cycle on SIGTERM, but a cycle runs ~180–350s against the unit's 180s `TimeoutStopSec`, so systemd kills it and the unit ends `failed`. Harmless for a deploy (`require_quiescent` accepts `failed`, and targets publish atomically), but it means no LONG stop is ever graceful |
+| Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45 | Needs an operator. Clearing it is a state mutation on a live fleet; the route is `scripts/ops.sh wedged-command`, deployed in `cdb6e61` and now reachable |
 | Reported P&L is provisional | 166 of 187 `pnl` events carry `funding_status=pending_venue_reconciliation`; every figure is fill-reconstructed, not venue-confirmed. No closed-loop accounting check yet, which real money needs |
-| Sizing is not clamped to the capital reference in the deployed build | Live sizing anchored at 255,357.40 against a 250,000 reference (+2.14%). The clamp exists locally and is not deployed. Immaterial at current gross, but a load-time envelope proof that does not bind at runtime |
+| Sizing was not clamped to the capital reference in the deployed build | The clamp shipped in `cdb6e61` (`policy/equity_anchored_envelope.py`, present on the host). The pre-deploy observation stands as history — live sizing anchored at 255,357.40 against a 250,000 reference (+2.14%) — and that it now binds at runtime is unobserved until the next resize |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/carry_hold.md` §7.5 states it rather than treating it as settled |
 
