@@ -301,13 +301,24 @@ def _capture_hash(prior_hash: str, event: TargetSchedulingCaptureEvent) -> str:
 
 def load_target_scheduling_capture_bytes(
     data: bytes,
+    *,
+    prior_capture_hash: str | None = None,
 ) -> tuple[tuple[TargetSchedulingCaptureEvent, ...], str]:
-    """Parse and fully verify captured target-scheduling bytes."""
+    """Parse and fully verify captured target-scheduling bytes.
+
+    ``prior_capture_hash`` verifies a *suffix* of the tape against a chain hash
+    a caller already holds, so a follower can read only the lines appended
+    since its last read instead of re-verifying the whole file every poll. The
+    per-line verification is identical either way; only the starting link
+    differs. Duplicate-id detection is necessarily scoped to the slice being
+    read, which is why the chain hash — not the id sets — is the anti-tamper
+    property a resumed read relies on.
+    """
 
     events: list[TargetSchedulingCaptureEvent] = []
     seen_source_events: set[str] = set()
     seen_capture_events: set[str] = set()
-    chain_hash = _CAPTURE_GENESIS_HASH
+    chain_hash = _CAPTURE_GENESIS_HASH if prior_capture_hash is None else prior_capture_hash
     for line_number, raw in enumerate(data.splitlines(keepends=True), start=1):
         if not raw.endswith(b"\n"):
             raise ValueError(f"target scheduling capture has a partial line at {line_number}")

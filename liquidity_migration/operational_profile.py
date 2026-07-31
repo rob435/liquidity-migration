@@ -21,9 +21,8 @@ from .artifact_snapshot import StableFileSnapshot, read_stable_file
 OPERATIONAL_PROFILE_SCHEMA_VERSION = 1
 OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
 
-#: The sleeves a partition may name. Deliberately closed: a typo'd sleeve would
-#: otherwise create a partition nothing ever spends while the real sleeve stays
-#: unlisted and refused.
+#: The sleeves a partition may name. Closed, so a typo cannot create a partition
+#: nothing spends while the real sleeve stays unlisted and refused.
 PARTITIONABLE_SLEEVES: tuple[str, ...] = ("carry", "continuous", "hedge", "long")
 
 
@@ -36,11 +35,9 @@ def _object(
 ) -> Mapping[str, Any]:
     """Reject typos without forcing every profile to restate every new knob.
 
-    ``fields`` stay mandatory: a profile missing one is a misconfiguration, and
-    the unknown-field check is what turns a typo into a startup failure instead
-    of a silently ignored limit. ``optional`` names keys that are permitted but
-    not required, so a control can be added without invalidating the profile
-    already deployed -- which would otherwise stop the owner from starting.
+    ``fields`` are mandatory; ``optional`` names permitted-but-not-required keys
+    so a new control does not invalidate an already-deployed profile. Unknown
+    keys raise, turning a typo into a startup failure instead of an ignored limit.
     """
 
     if not isinstance(value, Mapping):
@@ -148,12 +145,10 @@ class HedgeOperationalSettings:
 class CarryOperationalSettings:
     """Operational envelope for the CARRY sleeve.
 
-    Rule parameters (entry/exit prints, filters, per-name cap, gross cap)
-    come from the immutable registered config the producer loads; this block
-    carries only the deployment dials: sizing multiplier, entry leverage,
-    the declared disaster-stop fraction (the sl35 pattern — wide enough that
-    the strategy's funding-normalization exit is always the real exit), and
-    the per-cycle entry throttle.
+    Rule parameters (entry/exit prints, filters, per-name and gross caps) come
+    from the registered config the producer loads. This block carries only the
+    deployment dials. The declared stop fraction is deliberately wide, so the
+    strategy's funding-normalization exit is always the real exit.
     """
 
     notional_multiplier: float
@@ -170,21 +165,16 @@ CAPITAL_REFERENCE_ACCOUNT_EQUITY = "account_equity"
 class CapitalReferenceSettings:
     """How the profile's capital reference is chosen at runtime.
 
-    ``fixed``
-        The declared ``capital_reference_usdt`` is the reference forever. This
-        is the historical behaviour and stays the default.
+    ``fixed`` (default)
+        The declared ``capital_reference_usdt`` is the reference forever.
     ``account_equity``
-        The reference tracks observed venue equity. Every producer envelope and
-        every account cap in this profile is *linear* in the reference, so the
-        whole structure is a set of ratios and the load-time envelope proof is
-        scale-invariant — but it is re-run at each rebase rather than argued,
-        because ``max_leverage`` and ``quantity_tolerance`` are not.
+        The reference tracks observed venue equity. Every envelope and cap here
+        is linear in the reference, but the load-time proof is still re-run at
+        each rebase because ``max_leverage`` and ``quantity_tolerance`` are not.
 
-    ``floor_usdt`` bounds the reference from below so a momentarily unreadable
-    or near-zero balance cannot produce a degenerate envelope. The dead band
-    applies to *expansion only*: contraction follows equity down immediately,
-    because that is the safe direction, while expansion waits for a material
-    move so ordinary equity wander cannot re-scale the caps every cycle.
+    ``floor_usdt`` bounds the reference from below so an unreadable or near-zero
+    balance cannot produce a degenerate envelope. The dead band applies to
+    expansion only: contraction follows equity down immediately.
     """
 
     mode: str = CAPITAL_REFERENCE_FIXED
@@ -217,9 +207,8 @@ class OperationalProfile:
 def _parse_sleeve_limits(value: object, *, risk: AccountRiskSettings) -> tuple[SleeveLimitSettings, ...]:
     """Parse and prove a genuine partition of the account envelope.
 
-    "Partition" is meant literally: the shares must *sum* inside the account
-    caps. Overlapping shares would still let one sleeve crowd another out at
-    the account limit, which is the whole defect B3 names.
+    The shares must sum inside the account caps; overlapping shares would still
+    let one sleeve crowd another out at the account limit.
     """
 
     if not isinstance(value, Mapping):
@@ -231,8 +220,7 @@ def _parse_sleeve_limits(value: object, *, risk: AccountRiskSettings) -> tuple[S
         )
     if not value:
         # An empty object reads as "partitioned" but behaves as "everything
-        # refused". Say so rather than shipping a fleet that rejects every
-        # entry with an obscure key.
+        # refused".
         raise ValueError("operational profile sleeve_limits must name at least one sleeve")
     limits: list[SleeveLimitSettings] = []
     for sleeve in PARTITIONABLE_SLEEVES:
@@ -283,11 +271,8 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         value,
         label="operational profile account_risk",
         fields=fields,
-        # Absent means no daily loss ceiling. Present and positive arms the
-        # account-level halt. Optional so adding it cannot brick a deployed
-        # profile that predates it.
-        # ``sleeve_limits`` is optional for the same reason: absent means the
-        # historical single shared envelope.
+        # Absent ``max_daily_loss_usdt`` means no daily loss ceiling; absent
+        # ``sleeve_limits`` means one shared, unpartitioned envelope.
         optional=frozenset({"max_daily_loss_usdt", "sleeve_limits"}),
     )
     settings = AccountRiskSettings(
@@ -476,9 +461,8 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
             "account_risk initial-margin cap exceeds capital_reference_usdt"
         )
 
-    # Import lazily so the shared account-policy loader stays free of strategy
-    # import cycles. These are the actual active-profile sizing constants, not
-    # parallel magic numbers in the config validator.
+    # Imported lazily to keep the shared account-policy loader out of strategy
+    # import cycles; these are the real sizing constants, not copies of them.
     from .continuous_demo import (  # noqa: PLC0415
         ContinuousDemoCycleConfig,
         apply_continuous_demo_profile,
@@ -553,9 +537,7 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     )
     continuous_margin = continuous_gross / profile.continuous.entry_leverage
 
-    # CARRY worst case from the registered rule constants, not parallel magic
-    # numbers: per-name cap and gross cap come from the immutable Lane-2
-    # registration the producer itself loads.
+    # CARRY worst case from the registered rule constants the producer loads.
     from .carry_demo import load_carry_config  # noqa: PLC0415
 
     carry_rule = load_carry_config()
@@ -585,10 +567,7 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     if long_margin + continuous_margin + carry_margin > risk.max_initial_margin_usdt + tolerance:
         raise ValueError("combined producer margin envelope exceeds account_risk margin cap")
 
-    # B3: when the envelope is partitioned, prove each producer fits its OWN
-    # share rather than only the shared total. Without this a partition would
-    # be a runtime surprise -- the owner would reject entries the producer had
-    # every reason to believe were sized correctly.
+    # When partitioned, each producer must fit its own share, not just the total.
     if risk.sleeve_limits:
         producer_envelopes = {
             "long": (long_gross, long_margin),
@@ -666,15 +645,10 @@ def profile_at_capital_reference(
 ) -> OperationalProfile:
     """Rescale every absolute limit to a new capital reference, and re-prove it.
 
-    Every producer envelope and every account cap is linear in the reference,
-    so this is a pure rescale of the ratios the profile already encodes — the
-    *rule* for the limits is unchanged, which is what the authority receipt's
-    profile hash binds. ``max_leverage`` and ``quantity_tolerance`` are
-    scale-free and deliberately untouched.
-
-    The envelope proof is re-run at the new reference rather than argued from
-    linearity, because the non-linear fields above are exactly the ones an
-    argument from linearity would miss.
+    Every envelope and cap is linear in the reference, so this is a pure rescale
+    of ratios the profile already encodes. ``max_leverage`` and
+    ``quantity_tolerance`` are scale-free and untouched — which is why the
+    envelope proof is re-run rather than argued from linearity.
     """
 
     target = float(reference_usdt)
@@ -693,10 +667,8 @@ def profile_at_capital_reference(
             max_leverage=risk.max_leverage,
             quantity_tolerance=risk.quantity_tolerance,
             max_daily_loss_usdt=risk.max_daily_loss_usdt * scale,
-            # Each share is a ratio of the reference exactly like the caps it
-            # partitions, so it rescales with them. Leaving it fixed would turn
-            # a proportional partition into an absolute one the first time the
-            # wallet moved.
+            # Shares are ratios of the reference like the caps they partition,
+            # so they rescale with them.
             sleeve_limits=tuple(
                 SleeveLimitSettings(
                     sleeve=limit.sleeve,
@@ -734,8 +706,7 @@ def load_operational_profile_bytes(
         payload,
         label="operational profile",
         fields=fields,
-        # Optional so adding equity anchoring cannot brick a deployed profile
-        # that predates it. Absent means the historical fixed reference.
+        # Absent ``capital_reference`` means a fixed reference.
         optional=frozenset({"capital_reference"}),
     )
     if row["schema_version"] != OPERATIONAL_PROFILE_SCHEMA_VERSION:

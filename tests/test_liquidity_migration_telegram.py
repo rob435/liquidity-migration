@@ -28,9 +28,8 @@ class FakeResponse:
 
 
 def _install_urlopen(monkeypatch: pytest.MonkeyPatch, handler) -> list[dict[str, object]]:
-    """Replace urlopen with a recording fake; never touches the network.
-
-    Returns a list that captures one dict per call describing the request.
+    """Replace ``urlopen`` with a recording fake and return a list that captures one
+    dict per call describing the request.
     """
     calls: list[dict[str, object]] = []
 
@@ -254,7 +253,7 @@ def test_empty_message_text_is_still_sent(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# audit2: edge-case robustness for the notify-only telegram transport.
+# Edge-case robustness for the notify-only telegram transport.
 #
 # Four defects, each with a failing-on-old-code regression plus a normal-input
 # guard so the happy path stays byte-identical:
@@ -300,7 +299,7 @@ class _Resp:
 def test_nonfinite_retry_after_clamped_to_finite_default(
     monkeypatch: pytest.MonkeyPatch, raw: str
 ) -> None:
-    # audit2: PRE-FIX: float("nan") slips past `> cap_seconds` (nan comparisons are
+    # float("nan") slips past `> cap_seconds` (nan comparisons are
     # False) and reaches time.sleep(nan) -> ValueError. Patch sleep to capture
     # the arg and assert it is finite & within the configured cap.
     _set_credentials_a2(monkeypatch)
@@ -328,7 +327,7 @@ def test_nonfinite_retry_after_clamped_to_finite_default(
 
 
 def test_nonfinite_retry_after_helper_returns_finite() -> None:
-    # audit2: Direct unit check on the helper: a "nan" header falls back to the 1s
+    # Direct unit check on the helper: a "nan" header falls back to the 1s
     # default (matching the missing-header behavior), not nan.
     cap = TelegramConfig().rate_limit_retry_cap_seconds
     out = _rate_limit_retry_seconds(_http_error(429, hdrs={"Retry-After": "nan"}), cap_seconds=cap)
@@ -338,8 +337,7 @@ def test_nonfinite_retry_after_helper_returns_finite() -> None:
 
 
 def test_finite_retry_after_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    # audit2: Normal input guard: a plain "3" still sleeps exactly 3.0s (byte-identical
-    # to pre-fix behavior — see tests/test_audit_fix_b08.py telegram-alert-4).
+    # Normal input guard: a plain "3" still sleeps exactly 3.0s.
     _set_credentials_a2(monkeypatch)
     sleeps: list[float] = []
     monkeypatch.setattr(telegram.time, "sleep", lambda s: sleeps.append(s))
@@ -364,7 +362,7 @@ def test_finite_retry_after_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_429_retry_closes_leaked_error_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    # audit2: PRE-FIX: the first HTTPError's fp is never closed before retrying. Hand it
+    # Without the fix the first HTTPError's fp is never closed before retrying. Hand it
     # a real fp and assert close() ran (the underlying socket/fp is released).
     _set_credentials_a2(monkeypatch)
     monkeypatch.setattr(telegram.time, "sleep", lambda s: None)
@@ -394,7 +392,7 @@ def test_429_retry_closes_leaked_error_response(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # telegram-alert-3: HTTPError(headers=None) on a 429 must NOT raise AttributeError out of
+    # HTTPError(headers=None) on a 429 must NOT raise AttributeError out of
     # the handler. With null headers the retry-after defaults to 1s; the retry below succeeds.
     _set_credentials_a2(monkeypatch)
     sleeps: list[float] = []
@@ -416,7 +414,7 @@ def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytes
 
 
 def test_429_retry_after_beyond_cap_propagates_without_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
-    # telegram-alert-4: a Retry-After beyond the cap must NOT sleep and must propagate the 429
+    # A Retry-After beyond the cap must NOT sleep and must propagate the 429
     # (sleeping longer than the cap inside a cycle-thread send is worse than dropping the page).
     _set_credentials_a2(monkeypatch)
     sleeps: list[float] = []

@@ -2870,7 +2870,7 @@ def test_chunked_commands_carry_exact_step_quantities(tmp_path: Path) -> None:
 
     2.7 split into 1.0-unit chunks leaves 0.7000000000000002 under float
     accumulation; the adapter transmits qty verbatim and the venue rejects an
-    off-step quantity, permanently wedging the final chunk of a close.
+    off-step quantity, wedging the final chunk of a close.
     """
 
     kernel = _kernel(tmp_path)
@@ -3405,12 +3405,11 @@ def _sub_cent_book() -> L2BookSnapshot:
 def test_large_multi_fill_order_reaches_filled_without_wedging_reconciliation(
     tmp_path: Path,
 ) -> None:
-    """A five-figure USDT position in a sub-cent coin is 1e6 base units; filling
-    it in several partials accumulates ~1e-10 of float error. The terminal
-    ORDER_STATUS check used an absolute 1e-12 tolerance while fill
-    reconstruction used a quantity-scaled one, so the venue's own Filled row
-    raised inside the journal transaction on every 0.25s retry forever
-    (2026-07-27 audit H4)."""
+    """Terminal ORDER_STATUS and fill reconstruction must share a quantity-scaled
+    tolerance. A five-figure USDT position in a sub-cent coin is 1e6 base units;
+    filling it in several partials accumulates ~1e-10 of float error, and an
+    absolute 1e-12 check raises inside the journal transaction on every retry.
+    """
 
     kernel = _kernel(tmp_path)
     rules = {

@@ -59,26 +59,18 @@ _BYBIT_MANIFEST_PROVENANCE_COLUMNS = (
 class ArchiveManifestConfig:
     """Config for ``build_archive_trade_manifest``.
 
-    The manifest is always built from **two sources merged**:
-
-    1. The historical public-archive scrape (``public.bybit.com/trading``).
-    2. The currently-Trading Bybit v5 ``instruments-info`` listing.
-
-    Both are necessary. The archive carries deep history but (a) misses
-    symbols that the scrape pattern never picked up (observed 2026-05-25
-    with BANUSDT/TRUSTUSDT, both demo-tradeable yet never in the scrape) and
-    (b) has a ~24h tail lag — the prior day's CSV is published ~24h after
-    close, so a same-day ``--end`` build would otherwise have a one-day
-    membership gap for every recently-traded symbol. The v5 listing closes
-    both gaps by synthesising rows for any ``(symbol, date)`` the scrape
-    missed, keyed off the symbol's ``launchTime``.
+    The manifest merges two sources: the historical public-archive scrape
+    (``public.bybit.com/trading``) and the currently-Trading Bybit v5
+    ``instruments-info`` listing. Both are needed -- the archive carries deep
+    history but misses symbols the scrape pattern never picked up and lags ~24h
+    at the tail, so a same-day ``--end`` build would have a one-day membership
+    gap. The v5 listing fills both, keyed off each symbol's ``launchTime``.
 
     Synthesised rows carry ``url=bybit_v5_listing`` and
-    ``source="bybit_v5_listing"`` (not a real archive zip). The downstream
-    scrape-based hourly archive path skips those rows with an explicit
-    ``status="skipped_v5_listing"`` because there is no real archive URL to
-    fetch; the v5 1h kline API path treats ``(symbol, date)`` as the key and ignores ``url``, so the
-    full-PIT 1h pipeline (the canonical Bybit build) picks them up transparently.
+    ``source="bybit_v5_listing"``. The scrape-based hourly path skips them with
+    ``status="skipped_v5_listing"`` (no real archive URL); the v5 1h kline API
+    path keys on ``(symbol, date)`` and ignores ``url``, so the canonical
+    full-PIT 1h build picks them up.
     """
 
     base_url: str = DEFAULT_BYBIT_PUBLIC_TRADING_URL
@@ -227,14 +219,10 @@ def fetch_v5_trading_perp_listings(
 ) -> dict[str, int]:
     """Fetch currently-listed Bybit v5 perpetual symbols + their launchTime (ms).
 
-    Returns a mapping `{symbol -> launch_time_ms}` restricted to symbols whose
-    `status == "Trading"`, quote_suffix-quoted, and `contractType` is a perpetual
-    flavour. Used by ``build_archive_trade_manifest`` to discover
-    demo-tradeable symbols (BANUSDT, TRUSTUSDT, etc.) that the
-    ``public.bybit.com/trading`` archive hasn't yet exposed.
-
-    Network failures are caller's responsibility — this is read-only research
-    data, callers can swallow and degrade gracefully.
+    Returns `{symbol -> launch_time_ms}` for `status == "Trading"`,
+    quote_suffix-quoted, perpetual contracts. Used to discover symbols the
+    ``public.bybit.com/trading`` archive has not exposed yet. Network failures
+    are the caller's to handle.
     """
     listings: dict[str, int] = {}
     cursor: str | None = None
@@ -270,24 +258,16 @@ def synthesize_v5_listing_manifest_rows(
     """Build manifest rows from v5-Trading listings for ``(symbol, date)``
     pairs missing from the archive scrape. Two patterns are filled in one pass:
 
-    1.  **Fully absent symbols** (BANUSDT, TRUSTUSDT on 2026-05-25): the public
-        archive doesn't list them at all. Rows are emitted from
-        ``launch_date`` through ``end-1`` for the entire history.
+    1.  **Fully absent symbols**: the public archive never lists them. Rows are
+        emitted from ``launch_date`` through ``end-1``.
 
-    2.  **Archive-lag tail** (every recently-traded symbol on the same day the
-        manifest is rebuilt): ``public.bybit.com/trading`` publishes the prior
-        day's CSV ~24h after close, so a same-day ``--end`` always has a one-
-        day gap for symbols the archive otherwise covers. Without this fill,
-        ``tradable_membership_flag`` is silently ``False`` for the current
-        day, the strategy treats every symbol as non-tradable, and live demo
-        signals (e.g. DRIFTUSDT 2026-05-26) never reconcile against the
-        backtest. The v5-listing supplement therefore emits rows for any
-        ``(symbol, day)`` genuinely absent from ``existing_symbol_dates``
-        even when the symbol itself is in the scrape.
+    2.  **Archive-lag tail**: the prior day's CSV is published ~24h after close,
+        so a same-day ``--end`` leaves a one-day gap even for covered symbols.
+        Without the fill ``tradable_membership_flag`` is ``False`` for the
+        current day and the strategy treats every symbol as non-tradable.
 
-    ``existing_symbol_dates`` is the set of ``(symbol, date)`` tuples already
-    present in the HTML scrape — checked per-day instead of per-symbol so the
-    tail-fill case works.
+    ``existing_symbol_dates`` is checked per ``(symbol, date)`` rather than per
+    symbol, which is what makes the tail-fill case work.
     """
     if not listings:
         return []
@@ -573,18 +553,16 @@ def build_archive_trade_manifest(
     1. ``public.bybit.com/trading`` HTML scrape — historical archive directory.
     2. Bybit v5 ``instruments-info`` — currently-Trading perpetuals.
 
-    Both are always queried. The v5 listing closes two known archive gaps:
-    symbols the scrape never picked up at all (BANUSDT, TRUSTUSDT) and the
-    ~24h archive publishing lag at the current-day tail. A v5 endpoint blip
-    degrades gracefully — the archive scrape is still returned on its own.
+    Both are always queried. The v5 listing closes two archive gaps: symbols
+    the scrape never picked up, and the ~24h publishing lag at the current-day
+    tail. A v5 blip degrades to the archive scrape alone.
     """
     base_html = fetch_directory_html(base_url)
     available_symbols = parse_symbol_directories(base_html, quote_suffix=quote_suffix)
     requested = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
     if requested:
-        # The Bybit archive root listing has historically lagged direct symbol
-        # directories. If the caller asks for explicit symbols, probe those
-        # directories even when they are absent from the root page.
+        # The archive root listing lags direct symbol directories, so probe
+        # explicitly requested symbols even when the root page omits them.
         selected = list(requested)
     else:
         selected = available_symbols
@@ -607,9 +585,8 @@ def build_archive_trade_manifest(
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 scrape_rows = [row for symbol_rows in executor.map(fetch_symbol, selected) for row in symbol_rows]
 
-    # Always supplement with v5 instruments-info. A v5 endpoint blip degrades
-    # gracefully — we still return the archive-scrape rows on their own
-    # rather than failing the build.
+    # Always supplement with v5 instruments-info; a blip degrades to the
+    # archive-scrape rows rather than failing the build.
     v5_rows: list[dict[str, Any]] = []
     try:
         listings = fetch_v5_trading_perp_listings(
@@ -632,11 +609,10 @@ def build_archive_trade_manifest(
     combined = scrape_rows + v5_rows
     if not combined:
         return _empty_manifest()
-    # Survivorship diagnostic (data-assembly-2): the v5 supplement only lists currently-Trading perps,
-    # so a DELISTED symbol survives in the PIT manifest ONLY if the archive scrape caught it. Surface
-    # the scrape-only (not-currently-Trading) symbol count per build so a scrape that under-captures
-    # delisted names — a survivorship hole — is visible rather than silent. A count near zero relative
-    # to the traded universe is the red flag.
+    # Survivorship diagnostic: the v5 supplement lists only currently-Trading
+    # perps, so a delisted symbol survives in the PIT manifest only if the
+    # scrape caught it. The scrape-only count makes an under-capturing scrape
+    # visible; near zero relative to the traded universe is the red flag.
     scrape_symbols = {str(r["symbol"]).upper() for r in scrape_rows}
     trading_symbols = {str(s).upper() for s in listings} if listings else set()
     delisted_only = scrape_symbols - trading_symbols
@@ -687,9 +663,8 @@ def run_archive_manifest(
         diagnostics=diagnostics,
     )
     symbols = manifest["symbol"].unique().sort().to_list() if not manifest.is_empty() else []
-    # Survivorship guard: detect (and loudly warn about) any symbol the previous
-    # persisted manifest for this root covered but the new universe dropped. The
-    # Bybit archive root listing has historically lagged, so a silently shrinking
+    # Survivorship guard: warn on any symbol the persisted manifest covered but
+    # the new universe dropped. The archive root listing lags, so a shrinking
     # universe is a survivorship hole, not necessarily a clean delisting.
     survivorship_warning = _detect_universe_shrink(data_root, new_symbols=symbols)
     payload = {
@@ -731,8 +706,8 @@ def run_archive_manifest(
                 f"in {output_dir} were still written for diagnosis. Re-run when the v5 "
                 "endpoint is healthy, or pass --allow-degraded for an intentional override."
             )
-        # Per-date writes replace partitions, so union prior rows before a narrow
-        # rebuild to avoid erasing other symbols' historical membership.
+        # Per-date writes replace partitions, so union prior rows first or a
+        # narrow rebuild erases other symbols' historical membership.
         to_persist = stamp_bybit_manifest_provenance(
             _union_with_persisted_manifest(data_root, manifest)
         )
@@ -753,9 +728,8 @@ def _union_with_persisted_manifest(data_root: str | Path, manifest: pl.DataFrame
         return manifest
     if previous.is_empty() or not {"symbol", "date", "url"}.issubset(previous.columns):
         return manifest
-    # Preserve schema additions instead of collapsing to the intersection. A
-    # canonical rebuild may add provenance needed to interpret historical rows
-    # while the persisted root still has the prior schema. Missing values are
+    # Keep schema additions rather than collapsing to the intersection: a
+    # rebuild may add provenance the persisted root lacks. Missing values are
     # explicitly null on the older side.
     columns = [
         *manifest.columns,
@@ -785,11 +759,9 @@ def _union_with_persisted_manifest(data_root: str | Path, manifest: pl.DataFrame
 def _detect_universe_shrink(data_root: str | Path, *, new_symbols: list[str]) -> str:
     """Warn when the new manifest universe is smaller than the previous one.
 
-    Compares the freshly resolved symbol set against the previously persisted
-    `archive_trade_manifest` for the same data root. Any symbol that was covered
-    before but is now absent is logged as a loud warning and returned as a
-    human-readable string for the manifest report. Returns "" when no symbol is
-    dropped (or there is no prior manifest to compare against).
+    Any symbol the persisted `archive_trade_manifest` covered but the new set
+    drops is warned about and returned as a report string. "" when nothing is
+    dropped or there is no prior manifest.
     """
     try:
         previous = read_dataset(data_root, "archive_trade_manifest")
@@ -1289,10 +1261,8 @@ def _select_manifest_rows(
     if config.start:
         frame = frame.filter(pl.col("date") >= config.start[:10])
     if config.end:
-        # End-exclusive: the day named by `--end` is not downloaded, matching
-        # the `volume-events` convention (see docs/data.md). An inclusive
-        # bound here would fabricate flat bars for a partial trailing day via
-        # kline densification.
+        # End-exclusive (see docs/data.md): an inclusive bound would fabricate
+        # flat bars for a partial trailing day via kline densification.
         frame = frame.filter(pl.col("date") < config.end[:10])
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in config.symbols if symbol.strip()))
     if symbols:

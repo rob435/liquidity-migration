@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Historical equity for the code-defined active continuous profile.
 
-The active component triggers, weights, age gates, take profits, stops, and
-the settled-funding admission floor come from
-``liquidity_migration.continuous_profile``. Generated reports are outputs,
-not configuration inputs. The output remains descriptive
-historical evidence, not forward-runtime parity or deployment authorization.
+Component triggers, weights, age gates, take profits, stops, and the
+settled-funding admission floor all come from
+``liquidity_migration.continuous_profile``; the generated reports are outputs,
+never configuration inputs.
 
     PYTHONIOENCODING=utf-8 POLARS_MAX_THREADS=6 .venv/bin/python \
         scripts/continuous_deployed_equity_refresh.py --end-date YYYY-MM-DD
@@ -142,8 +141,7 @@ def active_component_config(
     if start_date is not None:
         cfg = replace(cfg, start_date=start_date)
     if research_disable_btc_gate:
-        # Research-render ablation only (T-A). Never set by operational entry
-        # points; the runtime demo/paper producers own their separate gate.
+        # Research-render ablation only; runtime producers own their own gate.
         cfg = replace(cfg, btc_trend_gate="off")
     return _with_backtest_leverage(cfg, backtest_leverage=backtest_leverage)
 
@@ -243,11 +241,9 @@ def load_extended_panel(venue: str, *, end_date: str, root: Path | None = None) 
 def pad_flat_tail(df: pl.DataFrame, *, through_date: dt.date) -> pl.DataFrame:
     """Extend the rebalance frame through `through_date` with flat (zero-return) days.
 
-    This pad happens strictly AFTER `apply_rebalance_rule` — the right layer. The component
-    mtm CSVs keep ledger-day rows on purpose (see `_portfolio_mtm_equity`: calendar-filling
-    the rebalance INPUT dilutes the vol window and fabricates hedge PnL on flat days), so the
-    book's closing flat spell is added here, where it can no longer affect sizing or hedging.
-    A flat book IS a position state. Interior gaps are already zero-filled by `stats`.
+    Must run strictly after `apply_rebalance_rule`: calendar-filling the rebalance
+    INPUT dilutes the vol window and fabricates hedge PnL on flat days. Interior
+    gaps are already zero-filled by `stats`.
     """
     if df.is_empty():
         return df
@@ -814,8 +810,7 @@ def run_venue(
     research_disable_btc_gate: bool = False,
 ) -> dict[str, Any]:
     if research_disable_btc_gate:
-        # Research ablation renders must never overwrite the standard
-        # operational report root; require an isolated output root.
+        # An ablation render must not overwrite the standard report root.
         default_root = (SHARED / "continuous_equity").resolve()
         if output_root.resolve() == default_root or default_root in output_root.resolve().parents:
             raise RuntimeError(

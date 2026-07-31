@@ -64,11 +64,9 @@ def _terminal_status(row: Mapping[str, Any]) -> str:
 def _command_id_for_row(row: Mapping[str, Any], state: AccountState) -> str:
     """Resolve Bybit rows by either client id or the venue's durable order id.
 
-    Exchange-created position TP/SL orders have an empty ``orderLinkId``.  Once
-    the first verified native fill is adopted, its synthetic kernel command
-    retains ``orderId`` in the ACK, so every later execution/order row must be
-    joined on that venue identity instead of being treated as another unknown
-    external order.
+    Exchange-created position TP/SL orders have an empty ``orderLinkId``; the
+    synthetic kernel command adopted for the first native fill keeps ``orderId``
+    in its ACK, so later rows join on that venue identity.
     """
 
     venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
@@ -122,19 +120,16 @@ class BybitAccountExecutionConsumer:
         self._closed = False
         self._terminal_recorded: set[str] = set()
         # Highest journal sequence already folded into `_terminal_recorded`.
-        # Rescanning the whole journal on every new terminal AND on every 0.25 s
-        # blocked retry was O(journal) per pass on the owner hot path
-        # (2026-07-27 audit L14); only the delta since this mark can contain a
-        # row we have not seen.
+        # Only the delta past this mark can hold an unseen row; rescanning the
+        # whole journal per pass is O(journal) on the owner hot path.
         self._terminal_scanned_sequence = 0
         self._absorb_recorded_terminals()
 
     def _absorb_recorded_terminals(self) -> None:
         """Fold ORDER_STATUS rows committed since the last scan into the index.
 
-        Journal verification guarantees contiguous 1-based sequences, so the
-        already-scanned prefix can be skipped by slicing the owner-internal
-        snapshot rather than re-walking a full copy of the journal.
+        Journal sequences are contiguous and 1-based, so the scanned prefix can
+        be skipped by slicing the owner-internal snapshot.
         """
 
         events, _state = self.kernel._snapshot_ref()
@@ -189,9 +184,8 @@ class BybitAccountExecutionConsumer:
                 raise RuntimeError("execution consumer is closed")
             if private_stream is self.private_stream:
                 raise RuntimeError("replacement private stream must be a new instance")
-        # Provider construction/subscription may perform network I/O.  Keep it
-        # outside the publication lock so owner-loop health checks and shutdown
-        # remain responsive while a replacement handshake is in flight.
+        # Construction/subscription may do network I/O; keep it outside the
+        # publication lock so health checks and shutdown stay responsive.
         self._subscribe(private_stream)
 
     def publish_private_stream(
@@ -262,10 +256,9 @@ class BybitAccountExecutionConsumer:
                     or self.native_protection_manager.native_execution_identity_evidence(row)
                 )
             ):
-                # Exchange-created stop children normally have an empty client
-                # id, but a provider payload may echo its parent orderLinkId.
-                # Native provenance must win before ordinary command lookup or
-                # the reduction could be misapplied as another entry fill.
+                # A provider payload may echo the parent orderLinkId onto an
+                # exchange-created stop child, so native provenance must win
+                # over command lookup or the reduction lands as an entry fill.
                 external_rows.append(row)
                 continue
             if command_id not in state.orders:
@@ -280,11 +273,9 @@ class BybitAccountExecutionConsumer:
             execution_id = str(row.get("execId") or row.get("exec_id") or "")
             price = _float(row.get("execPrice") or row.get("exec_price"))
             if not execution_id or signed_qty == 0.0 or price <= 0.0:
-                # A malformed execution row for a KNOWN command is missing
-                # accounting, not noise: silently dropping it lets the kernel
-                # position diverge from the venue with no causal record. Latch
-                # it as an adoption failure so owner health blocks until the
-                # row parses or reconciliation resolves the divergence.
+                # A malformed row for a KNOWN command is missing accounting.
+                # Latch it as an adoption failure so owner health blocks until
+                # it parses or reconciliation resolves the divergence.
                 if execution_id and self.native_protection_manager is not None:
                     malformed = AccountTransitionError(
                         f"known-command execution row is malformed: "
@@ -315,12 +306,10 @@ class BybitAccountExecutionConsumer:
             for event in committed_events:
                 if event.event_type == AccountEventType.FILL.value:
                     self._notify_committed_fill(str(event.payload.get("execution_id") or ""))
-        # Bybit may coalesce an entry fill and its immediately-triggered
-        # attached stop into one message, in either row order. Commit every
-        # known entry fill first so the stop is evaluated against the real
-        # reconstructed position instead of being rejected as a reduction of
-        # local flat. External rows remain sequential so partial fills join the
-        # synthetic command created by the first row.
+        # Bybit may coalesce an entry fill and its triggered attached stop into
+        # one message in either row order, so commit known entry fills first or
+        # the stop reduces a locally flat position. External rows stay
+        # sequential so partial fills join the first row's synthetic command.
         if self.native_protection_manager is not None:
             for row in external_rows:
                 adopted_events: tuple[Any, ...] = ()
@@ -331,9 +320,8 @@ class BybitAccountExecutionConsumer:
                         message_creation_ts_ns=message_creation_ts_ns,
                     )
                 except AccountTransitionError as exc:
-                    # Unknown/manual reductions must remain visible as a
-                    # reconciliation failure; never relabel them as the
-                    # account-owned stop just because one is also active.
+                    # Unknown/manual reductions stay visible as reconciliation
+                    # failures; never relabel them as the account-owned stop.
                     _logger.error("unadopted external execution: %s", exc)
                     self.native_protection_manager.note_adoption_failure(row, exc)
                 for event in adopted_events:
@@ -486,12 +474,10 @@ class BybitAccountExecutionConsumer:
         reconstructed = abs(order.filled_signed_qty)
         tolerance = quantity_tolerance(order.signed_qty)
         if order.status == "commanded":
-            # A terminal venue row is stronger evidence than a missing create
-            # response. Infer the acknowledgement so an ambiguous submission
-            # cannot remain working forever. A clean Rejected row is a
-            # definite negative acknowledgement; cancellation/fill states prove
-            # prior acceptance. Rows claiming rejected-with-fills are treated as
-            # accepted and wait for their executions before terminal handling.
+            # Infer the ACK from the terminal row so an ambiguous submission
+            # cannot stay working forever. Clean Rejected is a negative ACK;
+            # cancellation/fill prove prior acceptance. Rejected-with-fills
+            # counts as accepted and waits for its executions.
             accepted = terminal.status != "rejected" or terminal.cumulative_filled_qty > tolerance
             self.kernel.record_ack(
                 command_id=command_id,
@@ -527,9 +513,8 @@ class BybitAccountExecutionConsumer:
             rejection_key=terminal.rejection_key,
             metadata=terminal.metadata,
         )
-        # A partially-filled IOC is not final until its cancellation removes
-        # the unfilled remainder. Full fills are finalized from the execution
-        # path; the kernel call is idempotent for either delivery order.
+        # A partially-filled IOC is not final until cancellation removes the
+        # unfilled remainder. Idempotent for either delivery order.
         self.kernel.finalize_flat_position(
             symbol=order.symbol,
             command_id=command_id,
@@ -703,9 +688,8 @@ class PrivateExecutionStreamSupervisor:
             if outcome in {"replaced", "recovered"}:
                 if outcome == "replaced":
                     self.reconnect_successes += 1
-                # The replacement gets its own continuous-down grace period if
-                # it is already false on the next owner tick. Recovery also
-                # starts a fresh continuous-down interval if it drops again.
+                # Resets the continuous-down interval: the replacement earns a
+                # fresh grace period if it drops again.
                 self.not_ready_since = None
                 self.last_error = ""
             else:
@@ -725,8 +709,7 @@ class PrivateExecutionStreamSupervisor:
             self.last_error = ""
             return True
         if connected is None:
-            # Older/opaque clients cannot be rebuilt safely from an ambiguous
-            # signal, but unknown mutation-stream health still fails closed.
+            # Ambiguous signal: cannot rebuild safely, still fails closed.
             return None
         if self.not_ready_since is None:
             self.not_ready_since = now

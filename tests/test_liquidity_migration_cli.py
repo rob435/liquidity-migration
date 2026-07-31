@@ -21,9 +21,10 @@ from liquidity_migration.universe import _safe_name as _universe_safe_name
 
 
 def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
-    """Live daemon entrypoints self-provision a missing ledger root (so a brand-new sleeve
-    doesn't crash-loop on first deploy); research/backtest commands keep the strict
-    must-already-exist guard; no-data-root commands return the path untouched."""
+    """Live daemon entrypoints self-provision a missing ledger root so a brand-new
+    sleeve does not crash-loop on first deploy; research/backtest commands keep the
+    strict must-already-exist guard; no-data-root commands return the path untouched.
+    """
     missing = tmp_path / "new_sleeve_root"
     assert not missing.exists()
     out = _resolve_data_root("continuous-event-demo-cycle", missing)
@@ -148,11 +149,11 @@ def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
 
 
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
-    """The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield
-    the full taker round-trip cost (2 * (taker_fee + taker_slippage) = 15 bps),
-    removing the maker-blend under-costing (M2). The dataclass DEFAULT now also
-    models 100%% taker, so an ad-hoc CostConfig() no longer under-costs.
-    (cli-config-2 / cost-funding-1)"""
+    """The deployed runner is 100%% taker: ``maker_fill_probability=0.0`` yields the
+    full taker round trip (2 * (taker_fee + taker_slippage) = 15 bps), and the
+    dataclass default also models 100%% taker so an ad-hoc ``CostConfig()`` does not
+    under-cost.
+    """
     from dataclasses import replace
 
     from liquidity_migration.config import CostConfig
@@ -256,8 +257,8 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# audit2b unit ``cli_report_path``: discover-universe / archive-* must print the
-# slugified on-disk report path, not the raw ``--name``.
+# discover-universe / archive-* must print the slugified on-disk report path,
+# not the raw ``--name``.
 # --------------------------------------------------------------------------- #
 def _run(monkeypatch, capsys, tmp_path: Path, argv: list[str]) -> str:
     rc = cli.main(["--data-root", str(tmp_path), *argv])
@@ -289,7 +290,6 @@ def _patch_archive(monkeypatch, func_name: str) -> None:
     monkeypatch.setattr(cli, func_name, lambda *a, **k: payload)
 
 
-# audit2b: discover-universe
 def test_discover_universe_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_universe(monkeypatch)
     out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "My Universe"])
@@ -297,11 +297,10 @@ def test_discover_universe_prints_slugged_path_for_nontrivial_name(monkeypatch, 
     expected_file = f"universe_{_universe_safe_name('My Universe')}.md"
     assert expected_file == "universe_My-Universe.md"  # guards the slug rule itself
     assert expected_file in out
-    # The buggy raw-name path must NOT appear (this is what the old code printed).
+    # The raw-name path must NOT appear.
     assert "universe_My Universe.md" not in out
 
 
-# audit2b: discover-universe
 def test_discover_universe_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
     # A name that is already a clean slug must print byte-identically to before.
     _patch_universe(monkeypatch)
@@ -309,7 +308,6 @@ def test_discover_universe_normal_name_path_unchanged(monkeypatch, capsys, tmp_p
     assert str(tmp_path / "reports" / "universe_auto.md") in out
 
 
-# audit2b: archive-manifest
 def test_archive_manifest_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_archive(monkeypatch, "run_archive_manifest")
     out = _run(monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "Q3 run/A"])
@@ -319,7 +317,6 @@ def test_archive_manifest_prints_slugged_path_for_nontrivial_name(monkeypatch, c
     assert "archive_manifest_Q3 run/A.md" not in out
 
 
-# audit2b: archive-manifest
 def test_archive_manifest_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
     _patch_archive(monkeypatch, "run_archive_manifest")
     out = _run(monkeypatch, capsys, tmp_path, ["archive-manifest", "--name", "bybit-public-trading"])
@@ -349,10 +346,7 @@ def test_archive_klines_print_slugged_path(
     assert f"{stem}_My Klines.md" not in out
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b02.py (audit bucket b02 regressions):
 # build_parser() boundary-help and order-submission-default contracts.
-# ---------------------------------------------------------------------------
 def _subparser_actions(parser, name: str):
     import argparse
 
@@ -362,7 +356,7 @@ def _subparser_actions(parser, name: str):
     raise AssertionError(f"subparser {name} not found")
 
 
-# cli-config-6: download-data / binance-proxy --start/--end boundary semantics documented
+# Download-data / binance-proxy --start/--end boundary semantics documented
 def test_download_data_end_help_documents_exclusive_boundary() -> None:
     parser = build_parser()
     help_by_dest = {a.dest: (a.help or "") for a in _subparser_actions(parser, "download-data")}
@@ -391,12 +385,8 @@ def test_target_environment_replaces_order_submission_flags(subcommand: str) -> 
     assert not hasattr(args, "confirm_demo_orders")
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
-# cli-config-3 / cli-config-4 / cli-config-7 / code-quality-9 dataset+universe
-# argument validation and symbol parsing.
-# ---------------------------------------------------------------------------
-# cli-config-4: unknown/typo'd --datasets must fail loud, not silently no-op.
+# Dataset + universe argument validation and symbol parsing.
+# Unknown/typo'd --datasets must fail loud, not silently no-op.
 def test_validate_datasets_rejects_unknown_bybit_dataset() -> None:
     with pytest.raises(RuntimeError, match="funidng"):
         _validate_datasets({"klines_1h", "funidng"}, _KNOWN_BYBIT_DATASETS, venue="Bybit")
@@ -425,7 +415,7 @@ def test_download_command_defaults_are_known_datasets() -> None:
     assert not (proxy_default - _KNOWN_BINANCE_PROXY_DATASETS)
 
 
-# cli-config-7: contradictory --include-excluded + --exclude-defaults must error.
+# Contradictory --include-excluded + --exclude-defaults must error.
 def _universe_args(**overrides) -> argparse.Namespace:
     base = dict(
         exclude_symbols=None,
@@ -457,15 +447,15 @@ def test_universe_config_single_flag_still_resolves() -> None:
 
 
 def test_discover_universe_parser_rejects_both_exclusion_flags_at_parse() -> None:
-    # cli-config-7 (see test_audit_int_iK) made the four exclusion flags a parse-time
-    # mutually-exclusive group, so passing both is now an argparse error (SystemExit)
-    # BEFORE runtime. The runtime guard in _universe_config_from_args remains as
-    # defense-in-depth for a programmatic caller and is pinned above via _universe_args.
+    # The four exclusion flags are a parse-time mutually-exclusive group, so
+    # passing both is an argparse error (SystemExit) before runtime. The runtime
+    # guard in _universe_config_from_args stays for programmatic callers and is
+    # pinned above via _universe_args.
     with pytest.raises(SystemExit):
         build_parser().parse_args(["discover-universe", "--include-excluded", "--exclude-defaults"])
 
 
-# code-quality-9: single symbol-parsing helper used by every download branch.
+# A single symbol-parsing helper is used by every download branch.
 def test_parse_symbols_strips_and_uppercases() -> None:
     assert _parse_symbols(" btcusdt, ethusdt ,, solusdt ") == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     assert _parse_symbols("") == []
@@ -495,8 +485,8 @@ def test_no_exclusion_flags_defaults_false() -> None:
 
 
 def test_contradictory_exclude_and_include_is_parse_error() -> None:
-    # The core fix: contradictory pair must hard-error rather than silently drop
-    # --exclude-defaults (cli-config-7).
+    # A contradictory pair must hard-error rather than silently drop
+    # --exclude-defaults.
     with pytest.raises(SystemExit) as exc:
         _parse_discover_universe(["--exclude-defaults", "--include-excluded"])
     assert exc.value.code == 2

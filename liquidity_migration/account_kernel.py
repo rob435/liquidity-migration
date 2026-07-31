@@ -1,18 +1,17 @@
 """Account-level deterministic execution kernel.
 
-This is the migration target for every strategy sleeve and risk process.  A
-strategy proposes component-level :class:`DesiredTarget` values; one serialized
-transaction evaluates the complete projected account and emits the net venue
-commands.  No execution adapter is allowed to mutate account state directly.
+A strategy proposes component-level :class:`DesiredTarget` values; one
+serialized transaction evaluates the projected account and emits the net venue
+commands. Execution adapters never mutate account state directly.
 
 The canonical control-plane order is::
 
     MarketInputRef -> Decision -> Target -> RiskDecision -> OrderCommand
       -> Ack -> Fill -> Protection -> Close -> P&L
 
-The environment (historical, paper, demo) is intentionally absent from domain
-state.  It belongs to an execution adapter, which makes pre-execution hashes
-directly comparable across environments.
+The environment (historical, paper, demo) is absent from domain state; it
+belongs to an execution adapter, which keeps pre-execution hashes comparable
+across environments.
 """
 
 from __future__ import annotations
@@ -24,8 +23,9 @@ import math
 import os
 import re
 import threading
+import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -242,13 +242,11 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             accepted_proposals = [
                 target for target in state.target_proposals.values() if str(target.get("batch_id") or "") == batch_id
             ]
-            # Convergence retries reassert already-accepted desires solely to
-            # create a fresh net order command. They must not become a new
-            # strategy lifecycle revision or replace the original stop/TP/
-            # reason metadata. Require both the reserved namespace and the
-            # explicit marker so a coincidental/spoofed batch id cannot bypass
-            # desire tracking. All ordinary accepted batches advance the full
-            # registry, including zero replacements.
+            # A convergence retry reasserts an accepted desire only to emit a
+            # fresh net command; it must not become a new lifecycle revision or
+            # overwrite the original stop/TP/reason metadata. Both the reserved
+            # namespace and the explicit marker are required so a coincidental
+            # batch id cannot skip desire tracking.
             convergence_retry = (
                 batch_id.startswith("account-convergence/")
                 and bool(accepted_proposals)
@@ -270,9 +268,9 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
                     raise AccountTransitionError("target update must be an object")
                 if abs(_finite(target.get("signed_qty"), label="target update signed_qty")) > 0.0:
                     projected_targets[str(key)] = dict(target)
-            # The journal retains every zero replacement target. Current state
-            # retains only desired nonzero components, otherwise every future
-            # risk batch would require prices/rules for every symbol ever closed.
+            # State keeps only nonzero components; otherwise every future risk
+            # batch would need prices/rules for every symbol ever closed. The
+            # journal still retains the zero replacements.
             state.component_targets = projected_targets
             state.aggregate_targets = {str(key): float(value) for key, value in aggregates.items()}
     elif event_type is AccountEventType.ORDER_COMMAND:
@@ -440,12 +438,10 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         if status == "rejected" and abs(order.filled_signed_qty) > 1e-12:
             raise AccountTransitionError("an order with fills cannot become rejected")
         if status == "filled":
-            # The scaled rule, matching _apply_fill and the WS/REST consumer
-            # gate. An absolute epsilon here rejected the venue's own Filled row
-            # for large multi-fill orders, and because the raise happens inside
-            # the journal transaction the 0.25s retry loop never converged:
-            # reconciliation, the position-truth report, and every reduce-only
-            # exit stayed wedged until manual intervention (audit H4).
+            # Scaled tolerance, matching _apply_fill and the WS/REST consumer
+            # gate. An absolute epsilon rejects the venue's own Filled row for
+            # large multi-fill orders, and the raise happens inside the journal
+            # transaction, so the retry loop would never converge.
             if abs(order.filled_signed_qty - order.signed_qty) > quantity_tolerance(order.signed_qty):
                 raise AccountTransitionError("filled status precedes reconstructed executions")
             # Snap so residual float error cannot accumulate across later reads.
@@ -483,9 +479,9 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         pnl_position = state.positions.get(event.symbol)
         metadata = payload.get("metadata") or {}
         source = str(payload.get("source") or "")
-        # Funding and liquidation cash-flow rows do not account for fill P&L.
-        # Advancing these checkpoints for every generic PNL event could make a
-        # later close silently omit realized fills or execution fees.
+        # Funding and liquidation cash-flow rows carry no fill P&L, so
+        # advancing the checkpoint for them would let a later close omit
+        # realized fills or execution fees.
         fill_checkpoint = (
             (bool(metadata.get("fill_accounting_checkpoint")) if isinstance(metadata, Mapping) else False)
             or source.startswith("fill_reconstructed")
@@ -498,9 +494,9 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         snapshot_key = str(payload.get("snapshot_key") or "")
         if not snapshot_key:
             raise AccountTransitionError("venue snapshot requires snapshot_key")
-        # The immutable journal is the complete reconciliation history. The
-        # materialized state only needs current venue truth; retaining every
-        # checkpoint here made each later transaction copy an ever-growing map.
+        # State only needs current venue truth; keeping every checkpoint makes
+        # each later transaction copy an ever-growing map. The journal keeps
+        # the full reconciliation history.
         state.venue_snapshots.clear()
         state.venue_snapshots[snapshot_key] = dict(payload)
     state.events_applied += 1
@@ -536,6 +532,30 @@ def _transaction_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(material)).hexdigest()
 
 
+def _parse_transaction_segment(label: str, data: bytes) -> list[AccountEvent]:
+    """Validate one transaction segment's envelope and return its events."""
+
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise AccountJournalIntegrityError(f"invalid account transaction {label}: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise AccountJournalIntegrityError(f"account transaction is not an object: {label}")
+    if int(payload.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION:
+        raise AccountJournalIntegrityError(f"unsupported account transaction schema: {label}")
+    if str(payload.get("transaction_hash") or "") != _transaction_hash(payload):
+        raise AccountJournalIntegrityError(f"account transaction hash mismatch: {label}")
+    rows = payload.get("events")
+    if not isinstance(rows, list) or not rows:
+        raise AccountJournalIntegrityError(f"account transaction has no events: {label}")
+    transaction_events = [AccountEvent.from_dict(row) for row in rows]
+    if int(payload.get("first_sequence") or 0) != transaction_events[0].sequence:
+        raise AccountJournalIntegrityError(f"account transaction first_sequence mismatch: {label}")
+    if int(payload.get("last_sequence") or 0) != transaction_events[-1].sequence:
+        raise AccountJournalIntegrityError(f"account transaction last_sequence mismatch: {label}")
+    return transaction_events
+
+
 def _read_transaction_event_bytes(
     files: Sequence[tuple[str, bytes]],
 ) -> list[AccountEvent] | None:
@@ -543,26 +563,67 @@ def _read_transaction_event_bytes(
         return None
     events: list[AccountEvent] = []
     for label, data in files:
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError as exc:
-            raise AccountJournalIntegrityError(f"invalid account transaction {label}: {exc}") from exc
-        if not isinstance(payload, Mapping):
-            raise AccountJournalIntegrityError(f"account transaction is not an object: {label}")
-        if int(payload.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION:
-            raise AccountJournalIntegrityError(f"unsupported account transaction schema: {label}")
-        if str(payload.get("transaction_hash") or "") != _transaction_hash(payload):
-            raise AccountJournalIntegrityError(f"account transaction hash mismatch: {label}")
-        rows = payload.get("events")
-        if not isinstance(rows, list) or not rows:
-            raise AccountJournalIntegrityError(f"account transaction has no events: {label}")
-        transaction_events = [AccountEvent.from_dict(row) for row in rows]
-        if int(payload.get("first_sequence") or 0) != transaction_events[0].sequence:
-            raise AccountJournalIntegrityError(f"account transaction first_sequence mismatch: {label}")
-        if int(payload.get("last_sequence") or 0) != transaction_events[-1].sequence:
-            raise AccountJournalIntegrityError(f"account transaction last_sequence mismatch: {label}")
-        events.extend(transaction_events)
+        events.extend(_parse_transaction_segment(label, data))
     return events
+
+
+def _transaction_segment_names(root: str | Path) -> list[str]:
+    """Sorted segment filenames. Sorting by name is sorting by sequence.
+
+    Names are zero-padded ``<first>-<last>-<transaction_hash>.json``, so lexical
+    order is sequence order and a rewritten segment cannot keep its name --
+    which is what makes a name prefix an immutability witness for the cursor.
+    """
+
+    directory = account_transactions_path(root)
+    if not directory.is_dir():
+        return []
+    with os.scandir(directory) as entries:
+        return sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+
+
+def _segment_names_are_contiguous(names: Sequence[str]) -> bool:
+    """Do these filenames cover sequences 1..N with no gap?
+
+    A scan racing the owner's atomic renames can omit an entry that already
+    exists. Filenames carry their own ``<first>-<last>`` range, so the hole is
+    detectable before any file is opened and a re-scan resolves it; a hole that
+    survives re-scanning is real corruption.
+    """
+
+    expected_first = 1
+    for name in names:
+        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
+        if match is None:
+            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
+        first_sequence = int(match.group("first"))
+        last_sequence = int(match.group("last"))
+        if last_sequence < first_sequence:
+            raise AccountJournalIntegrityError(
+                f"account transaction filename has an inverted range: {name}"
+            )
+        if first_sequence != expected_first:
+            return False
+        expected_first = last_sequence + 1
+    return True
+
+
+def _stable_transaction_segment_names(
+    root: str | Path, *, attempts: int = 4, backoff_seconds: float = 0.01
+) -> list[str]:
+    """Segment names from a scan that is contiguous, retrying a racy scan."""
+
+    names: list[str] = []
+    for attempt in range(attempts):
+        names = _transaction_segment_names(root)
+        if _segment_names_are_contiguous(names):
+            return names
+        if attempt + 1 < attempts:
+            time.sleep(backoff_seconds)
+    raise AccountJournalIntegrityError(
+        "account transaction filenames are not contiguous after "
+        f"{attempts} scans; the journal has a real sequence hole"
+    )
 
 
 def _read_transaction_events(root: str | Path) -> list[AccountEvent] | None:
@@ -600,14 +661,171 @@ def _verify_account_events(events: Sequence[AccountEvent], *, verify: bool) -> l
     return output
 
 
+@dataclass(frozen=True, slots=True)
+class AccountJournalDigest:
+    """A fully verified journal read reduced to what read models inspect.
+
+    ``events`` is filtered to the event types the caller asked to retain, in
+    journal order; every event, retained or not, was shape/sequence/duplicate
+    checked, hash-chain verified, and folded into ``state``.
+
+    ``state`` and ``events`` belong to the producing cursor and are replaced by
+    its next :meth:`AccountJournalCursor.read`. Never mutate them.
+    """
+
+    segment_names: tuple[str, ...]
+    events: tuple[AccountEvent, ...]
+    state: AccountState
+    events_folded: int
+    retained_event_types: frozenset[str] | None
+    head_event_hash: str
+    resumed_from_segments: int
+
+
+class AccountJournalCursor:
+    """Resumable verified reader over the append-only account journal.
+
+    Keeps the fold state (account state, chain hash, seen event ids, sequence)
+    and re-reads only segments that appeared since last time, so steady-state
+    cost tracks new events rather than total history. Resumption is taken only
+    when the previously read filenames are still an exact prefix of what is on
+    disk; a filename embeds its transaction hash, so that prefix witnesses that
+    the bytes behind it did not change. Anything else -- truncation, reset, a
+    rewritten segment -- falls back to a cold full read.
+
+    Single-threaded, owned by one cycle runner. It caches a verification this
+    process already performed and does not replace the account owner's startup
+    integrity verification.
+    """
+
+    __slots__ = (
+        "_account_id",
+        "_events",
+        "_expected_hash",
+        "_retain",
+        "_seen_ids",
+        "_segment_names",
+        "_sequence",
+        "_state",
+        "_verify",
+    )
+
+    def __init__(
+        self,
+        *,
+        retain_event_types: Iterable[str] | None = None,
+        verify: bool = True,
+    ) -> None:
+        self._retain: frozenset[str] | None = (
+            None if retain_event_types is None else frozenset(retain_event_types)
+        )
+        self._verify = bool(verify)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._segment_names: tuple[str, ...] = ()
+        self._events: list[AccountEvent] = []
+        self._state = AccountState()
+        self._seen_ids: set[str] = set()
+        self._expected_hash = GENESIS_HASH
+        self._account_id = ""
+        self._sequence = 0
+
+    def _fold(self, root: Path, names: Sequence[str]) -> None:
+        directory = account_transactions_path(root)
+        retain = self._retain
+        for name in names:
+            for event in _parse_transaction_segment(
+                str(directory / name), (directory / name).read_bytes()
+            ):
+                self._sequence += 1
+                _validate_event_shape(event)
+                if event.sequence != self._sequence:
+                    raise AccountJournalIntegrityError(
+                        f"account sequence gap at line {self._sequence}: got {event.sequence}"
+                    )
+                if event.event_id in self._seen_ids:
+                    raise AccountJournalIntegrityError(
+                        f"duplicate account event_id {event.event_id}"
+                    )
+                if self._account_id and event.account_id != self._account_id:
+                    raise AccountJournalIntegrityError(
+                        "one account journal contains multiple account ids"
+                    )
+                self._account_id = event.account_id
+                if self._verify:
+                    if event.prev_event_hash != self._expected_hash:
+                        raise AccountJournalIntegrityError(
+                            f"account hash-chain break at sequence {event.sequence}"
+                        )
+                    if event.event_hash != _event_hash(event.to_dict()):
+                        raise AccountJournalIntegrityError(
+                            f"account event hash mismatch at sequence {event.sequence}"
+                        )
+                apply_account_event(self._state, event)
+                if self._verify and event.state_hash != self._state.state_hash():
+                    raise AccountJournalIntegrityError(
+                        f"account state hash mismatch at sequence {event.sequence}"
+                    )
+                self._seen_ids.add(event.event_id)
+                self._expected_hash = event.event_hash
+                if retain is None or event.event_type in retain:
+                    self._events.append(event)
+
+    def read(self, root: str | Path) -> AccountJournalDigest:
+        """Advance to the journal's current head and return the digest."""
+
+        account_root = Path(root)
+        names = _stable_transaction_segment_names(account_root)
+        if not names:
+            projection = account_journal_path(account_root)
+            if projection.exists() and projection.stat().st_size > 0:
+                raise AccountJournalIntegrityError(
+                    "account journal has events.jsonl but no authoritative transaction "
+                    "segments; reset the account root explicitly"
+                )
+            self._reset()
+            return AccountJournalDigest(
+                segment_names=(),
+                events=(),
+                state=self._state,
+                events_folded=0,
+                retained_event_types=self._retain,
+                head_event_hash=GENESIS_HASH,
+                resumed_from_segments=0,
+            )
+
+        known = self._segment_names
+        resumable = len(known) <= len(names) and tuple(names[: len(known)]) == known
+        if not resumable:
+            self._reset()
+            known = ()
+        # A half-advanced cursor would resume the next cycle from state that
+        # never matched any on-disk prefix.
+        try:
+            self._fold(account_root, names[len(known) :])
+        except Exception:
+            self._reset()
+            raise
+        self._segment_names = tuple(names)
+        return AccountJournalDigest(
+            segment_names=self._segment_names,
+            events=tuple(self._events),
+            state=self._state,
+            events_folded=self._sequence,
+            retained_event_types=self._retain,
+            head_event_hash=self._expected_hash,
+            resumed_from_segments=len(known),
+        )
+
+
 def read_account_journal(root: str | Path, *, verify: bool = True) -> list[AccountEvent]:
     """Read the authoritative atomic transaction segments.
 
-    ``events.jsonl`` is a human/tooling projection. Journals persist each
-    complete kernel transaction via fsync + atomic rename first, so a crash can
-    expose either the prior state or the whole transaction, never half a target
-    batch. A projection without transaction segments is not authoritative and
-    requires an explicit account-root reset.
+    ``events.jsonl`` is only a tooling projection: each transaction is
+    persisted via fsync + atomic rename first, so a crash exposes either the
+    prior state or the whole transaction. A projection without transaction
+    segments is not authoritative and requires an explicit account-root reset.
     """
 
     transaction_events = _read_transaction_events(root)
@@ -625,12 +843,9 @@ def read_account_journal(root: str | Path, *, verify: bool = True) -> list[Accou
 def read_account_journal_head(root: str | Path) -> AccountEvent | None:
     """Read the current immutable head without replaying payload history.
 
-    This metadata-only hot-path binding primitive is not a replacement for
-    :func:`read_account_journal` or startup/full integrity verification.  It
-    validates the complete filename sequence, the latest transaction hash,
-    every event shape/hash inside that latest transaction, and its local hash
-    chain.  Earlier transaction payloads remain the responsibility of the full
-    verifier that every account-owner generation runs before serving.
+    Validates the filename sequence, the latest transaction hash, and every
+    event shape/hash and local chain link inside that latest transaction.
+    Earlier payloads are the full verifier's job, not this one's.
     """
 
     directory = account_transactions_path(root)
@@ -833,9 +1048,8 @@ def _append_jsonl_projection(
 ) -> None:
     """Append the rebuildable projection, repairing it after an interrupted write.
 
-    Rewriting every prior event after each ACK/fill made long historical tapes
-    quadratic. Atomic transaction segments are authoritative, so a stale/torn
-    projection can be detected from its last hash and rebuilt before append.
+    A stale or torn projection is detected from its last hash and rebuilt
+    before the append; rewriting every prior event per ACK/fill is quadratic.
     """
 
     if not appended:
@@ -843,9 +1057,8 @@ def _append_jsonl_projection(
     path = account_journal_path(root)
     actual_previous = _projection_last_event_hash(path) if path.exists() else ""
     if actual_previous != expected_previous_hash:
-        # Transaction segments are already authoritative at this point. Read
-        # them only on the exceptional repair path instead of carrying and
-        # copying the complete prior event list through every ordinary append.
+        # Repair path only: reading the segments back here keeps the ordinary
+        # append from carrying a copy of the whole prior event list.
         _write_jsonl_projection(root, read_account_journal(root, verify=True))
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -885,29 +1098,22 @@ class AccountJournal:
     ) -> None:
         self.root = Path(root).expanduser()
         self.account_id = account_id
-        # Transaction segments serialize writers across processes.  This lock
-        # protects the in-process cache as one immutable committed snapshot;
-        # prospective transaction state is never installed until its segment
-        # has been durably replaced on disk.
+        # Writers are serialized across processes by the transaction segments.
+        # This lock protects the in-process cache as one immutable committed
+        # snapshot; prospective state is installed only after the durable
+        # segment replace.
         self._cache_lock = threading.RLock()
         self._cached_events: list[AccountEvent] | None = None
         self._cached_events_by_id: dict[str, AccountEvent] | None = None
         self._cached_signature: tuple[object, ...] | None = None
         self._cached_state: AccountState | None = None
-        # A transaction segment becomes authoritative at atomic replace, just
-        # before this object can publish the matching in-process cache.  Hot
-        # readers must keep observing the prior coherent cache during that
-        # narrow window.  If they instead stat the now-changed directory, they
-        # can replay the entire immutable journal while holding ``_cache_lock``;
-        # the writer then waits behind that replay while still owning the
-        # cross-process journal lock.  On long-lived accounts that turned a
-        # millisecond publication window into minute-scale execution and
-        # reconciliation stalls.
+        # Between the atomic replace and the matching cache publication, a
+        # reader that stats the changed directory would replay the whole
+        # journal while holding ``_cache_lock``, stalling the writer behind it.
+        # This flag holds readers on the prior coherent cache instead.
         self._local_transaction_publish_in_progress = False
-        # Outcome-blind historical recovery only. The default production path
-        # retains isolated prospective state and prior-state reader visibility.
-        # The opt-in path is safe only with one process/thread and an infallible
-        # in-memory transaction buffer; it carries no rollback/durability claim.
+        # Historical recovery only: safe with one process/thread and an
+        # infallible in-memory buffer, with no rollback or durability claim.
         self._unsafe_single_process_inplace_research = bool(unsafe_single_process_inplace_research)
         if not account_id:
             raise ValueError("account_id is required")
@@ -918,12 +1124,9 @@ class AccountJournal:
                 self._local_transaction_publish_in_progress
                 and self._cached_signature is not None
             ):
-                # The only cooperative writer that can change this directory
-                # while our process holds the account-journal file lock is the
-                # transaction currently being published below.  Serve the
-                # prior immutable cache until all cache fields advance
-                # together; cross-process writers remain serialized by that
-                # same file lock and are still discovered outside this window.
+                # While we hold the journal file lock the only writer that can
+                # change this directory is the transaction publishing below, so
+                # serve the prior cache until all fields advance together.
                 return self._cached_signature
             transaction_dir = account_transactions_path(self.root)
             if transaction_dir.is_dir():
@@ -980,10 +1183,8 @@ class AccountJournal:
 
         with self._cache_lock:
             state = self._state_ref()
-            # Resolve state first: ``_state_ref`` may refresh both caches when
-            # another process committed since our last signature check.  Read
-            # the event reference only after that refresh so the two objects
-            # necessarily describe the same journal head.
+            # State first: ``_state_ref`` may refresh both caches, so reading
+            # the events after it keeps the two describing one journal head.
             events = self._cached_events
             if events is None:  # pragma: no cover - guarded by _state_ref
                 raise AccountJournalIntegrityError("account snapshot cache is unavailable")
@@ -1001,19 +1202,18 @@ class AccountJournal:
     ) -> list[AccountEvent]:
         """Atomically append builder events.
 
-        Every builder operates on state isolated from the committed cache.
-        Kernel-owned builders are reviewed as read-only and may share the
-        isolated reducer copy; general callers receive a separate sandbox so
-        builder-side mutation cannot influence persisted event hashes.
+        Builders run on state isolated from the committed cache. Kernel-owned
+        read-only builders may share the isolated reducer copy; general callers
+        get a separate sandbox so builder-side mutation cannot reach the
+        persisted event hashes.
         """
 
         path = account_journal_path(self.root)
         path.parent.mkdir(parents=True, exist_ok=True)
         with exclusive_file_lock(account_journal_lock_path(self.root), stale_seconds=600, poll_seconds=0.01):
-            # Take a stable committed snapshot while holding the cache lock,
-            # then release it during the potentially slow durable write.  This
-            # lets concurrent readers continue to see the prior committed
-            # snapshot; they can never observe the prospective reducer state.
+            # Snapshot under the cache lock, then release it for the slow
+            # durable write so readers keep seeing the prior committed snapshot
+            # and never the prospective reducer state.
             with self._cache_lock:
                 existing = self._events_ref()
                 committed_state = self._state_ref()
@@ -1106,23 +1306,17 @@ class AccountJournal:
                         transaction_count + 1,
                         transaction_path.name,
                     )
-                    # The atomic segment is the commit point. Publish all cache
-                    # fields together only after it succeeds; failed writes
-                    # leave the prior cache untouched. Readers deliberately
-                    # retain that prior cache until this publication completes.
+                    # The atomic segment is the commit point: publish all cache
+                    # fields together only after it succeeds.
                     with self._cache_lock:
                         if self._cached_events is existing:
-                            # The usual single-writer path extends the committed
-                            # cache in place. Rebuilding two history-sized lists
-                            # and a history-sized ID map for every target made long
-                            # historical sessions quadratic in prior events.
+                            # Single-writer path: extend in place. Rebuilding
+                            # the history-sized list and id map per target is
+                            # quadratic over a long session.
                             existing.extend(appended)
                             self._cached_events = existing
                         else:
-                            # A non-cooperating in-process mutation or an
-                            # unexpected cache replacement can still force this
-                            # concurrency-only fallback. Cooperative readers are
-                            # held on the prior cache by the publication flag.
+                            # Fallback for an unexpected cache replacement.
                             refreshed = self._cached_events or []
                             expected_count = existing_count + len(appended)
                             if (
@@ -1146,8 +1340,8 @@ class AccountJournal:
                 finally:
                     with self._cache_lock:
                         self._local_transaction_publish_in_progress = False
-                # Rebuildable operator/tooling projection. If this fails, the
-                # transaction and published cache still agree on committed truth.
+                # Rebuildable tooling projection; a failure here leaves the
+                # transaction and published cache agreeing on committed truth.
                 _append_jsonl_projection(
                     self.root,
                     expected_previous_hash=(existing_last_event_hash if existing_count else ""),
@@ -1183,17 +1377,16 @@ def _target_batch_request_hash(
 ) -> str:
     """Bind an idempotency key to immutable strategy-request content.
 
-    Market, wallet, policy, and rule snapshots are deliberately excluded. They
-    are evaluation evidence recorded by the first transaction, but a crash
-    retry may observe fresher versions and must still recover that committed
-    result instead of turning the same immutable target request into a conflict.
+    Market, wallet, policy, and rule snapshots are excluded: a crash retry may
+    observe fresher versions and must still recover the committed result rather
+    than conflict with itself.
 
     The ``request_content_hash is None`` fallback hashes the derived target
-    payloads, which still carry ``reference_price``. Any caller that rebuilds
-    its targets from a fresh book on replay -- every owner-generated
-    convergence/entry-unwind batch -- must therefore pass an explicit
-    ``request_content_hash`` (see ``_owner_batch_request_content_hash``) or the
-    replay conflicts with its own committed batch (2026-07-27 audit H5).
+    payloads, which carry ``reference_price``. A caller that rebuilds targets
+    from a fresh book on replay -- every owner convergence/entry-unwind batch --
+    must pass an explicit ``request_content_hash`` (see
+    ``_owner_batch_request_content_hash``) or its replay conflicts with its own
+    committed batch.
     """
 
     identity: Mapping[str, Any]
@@ -1274,13 +1467,12 @@ def _native_entry_stop_spec(
 ) -> tuple[float, float, str]:
     """Derive the durable provisional Full-position stop for an entry.
 
-    The exact native stop remains fill anchored.  Before a fill exists, every
-    exposure-increasing venue command instead carries an outward-rounded stop
-    from each component's durable decision reference.  The outermost explicit
-    component stop keeps this account-wide seatbelt outside each component's
-    software stop; an already-active native stop is an additional outward
-    bound during scale-in.  The account fallback is used only when no
-    same-direction component declares a stop.
+    The exact native stop is fill anchored; before a fill exists every
+    exposure-increasing command carries an outward-rounded stop from each
+    component's decision reference. The outermost explicit component stop keeps
+    this account-wide seatbelt outside every component's software stop, and an
+    already-active native stop bounds it further during scale-in. The account
+    fallback applies only when no same-direction component declares a stop.
     """
 
     if not math.isfinite(target_signed_qty) or target_signed_qty == 0.0:
@@ -1424,12 +1616,11 @@ def _wedged_working_symbols(
     now_ns: int,
     tolerance: float,
 ) -> frozenset[str]:
-    """Symbols whose *every* working order has stopped being in flight (B15b).
+    """Symbols whose *every* working order has stopped being in flight.
 
-    A symbol qualifies only when nothing genuinely live remains for it. One
-    healthy in-flight submission alongside a wedged one still freezes the
-    symbol, because the live order's fills are still coming and a reduction
-    sized against the current position would race them.
+    One healthy in-flight submission alongside a wedged one still freezes the
+    symbol: the live order's fills are still coming and a reduction sized
+    against the current position would race them.
     """
 
     working = {
@@ -1461,11 +1652,11 @@ def _exposure_clamped_component_flat_targets(
 ) -> dict[str, float] | None:
     """Return immediate venue targets for an all-component-flat replacement.
 
-    Removing an offsetting component can expose a retained aggregate that is
-    farther from zero or on the other side of the venue position.  Committing
-    the zero desire is safe, but that intermediate request must not add venue
-    exposure.  A later owner-convergence batch performs any residual increase
-    under ordinary entry admission.
+    Removing an offsetting component can expose a retained aggregate farther
+    from zero, or on the other side of the venue position. Committing the zero
+    desire is safe, but the intermediate request must not add venue exposure;
+    a later owner-convergence batch does any residual increase under ordinary
+    entry admission.
     """
 
     if not target_payloads:
@@ -1531,14 +1722,13 @@ def _strictly_risk_reducing_target_batch(
 ) -> bool:
     """Prove that a target replacement cannot add venue or component risk.
 
-    The exemption is intentionally narrower than ``reduceOnly`` inference.  A
-    component may only stay the same or move toward zero.  The immediate venue
-    target may only stay on the reconstructed/projected position's side while
-    moving toward zero.  An explicit removal of an existing nonzero component
-    is evaluated with its exposure-clamped immediate target; any retained
-    residual that would add risk is left for ordinary owner convergence.
-    Reasserting a durable zero desire against a still-open position remains
-    eligible, which is what a convergence close needs after a reject.
+    Narrower than ``reduceOnly`` inference: a component may only hold or move
+    toward zero, and the immediate venue target may only stay on the
+    reconstructed position's side while moving toward zero. Removing an
+    existing nonzero component is evaluated with its exposure-clamped immediate
+    target, leaving any risk-adding residual to owner convergence. Reasserting
+    a zero desire against a still-open position stays eligible, which is what a
+    convergence close needs after a reject.
     """
 
     if not target_payloads:
@@ -1557,9 +1747,8 @@ def _strictly_risk_reducing_target_batch(
         if prior is None:
             prior = state.component_targets.get(target_key)
         if prior is None:
-            # A newly introduced nonzero component is an entry even when some
-            # unrelated/manual venue exposure happens to make the net order
-            # point toward zero. Orphan cleanup is allowed only to flat.
+            # A new nonzero component is an entry even when unrelated venue
+            # exposure makes the net order point toward zero.
             if abs(new_qty) > tolerance:
                 return False
             continue
@@ -1637,10 +1826,8 @@ def _order_commands_from_events(events: Iterable[AccountEvent]) -> tuple[OrderCo
                 chunk_index=int(payload["chunk_index"]),
                 chunk_count=int(payload["chunk_count"]),
                 leverage=float(payload.get("leverage") or 1.0),
-                # Pre-cutover journals did not persist command time in the
-                # payload.  Their immutable event envelope remains the direct
-                # source for that timestamp; new journals persist both and the
-                # drift verifier requires them to agree.
+                # Older journals carry command time only on the event
+                # envelope; newer ones persist both and must agree.
                 created_ts_ns=int(payload.get("created_ts_ns") or event.wall_ts_ns),
                 entry_stop_price=(
                     None if payload.get("entry_stop_price") is None else float(payload["entry_stop_price"])
@@ -1697,10 +1884,9 @@ class AccountExecutionKernel:
     ) -> bool:
         """Preview the kernel-owned reduction proof without mutating state.
 
-        The service uses this only to avoid requesting unrelated account books
-        and health for a close. ``_evaluate_batch`` repeats the same proof
-        inside the serialized transaction, so a stale preview can never turn an
-        entry into an exempt order.
+        Used only to skip fetching unrelated books and health for a close;
+        ``_evaluate_batch`` repeats the proof inside the serialized
+        transaction, so a stale preview cannot exempt an entry.
         """
 
         if quantity_tolerance < 0.0:
@@ -1893,11 +2079,8 @@ class AccountExecutionKernel:
             return specs
 
         appended = self.journal.transact(build, trusted_readonly_builder=True)
-        # A freshly appended batch is its own complete event set: every spec the
-        # builder emitted carries this batch's correlation id, and a reused
-        # batch id short-circuits inside the builder. Copying and rescanning
-        # the full journal here made every accepted batch O(history); the scan
-        # survives only for the rare idempotent-replay path.
+        # A freshly appended batch is already its own complete event set, so
+        # the O(history) journal scan is only for the idempotent-replay path.
         if appended:
             batch_events = tuple(appended)
         else:
@@ -2023,12 +2206,11 @@ class AccountExecutionKernel:
         component_margin = 0.0
         sleeve_gross: dict[str, float] = {}
         sleeve_margin: dict[str, float] = {}
-        # The sleeves this batch actually asks to grow. A sleeve already over
-        # its share must not veto another sleeve's de-risking: the strict
-        # risk-reduction proof cannot always be established (a live submission
-        # leaves the aggregate above the reconstructed position), and without
-        # this a partition would block partial exits -- the one thing every cap
-        # here is required never to do.
+        # The sleeves this batch asks to grow. A sleeve already over its share
+        # must not veto another sleeve's de-risking: the strict risk-reduction
+        # proof is not always establishable (a live submission leaves the
+        # aggregate above the reconstructed position), so without this a
+        # partition would block partial exits.
         touched_sleeves = {
             str(payload.get("sleeve") or "").strip().lower()
             for payload in target_payloads
@@ -2084,9 +2266,9 @@ class AccountExecutionKernel:
                 component_margin += notional / leverage
                 sleeve_margin[sleeve] = sleeve_margin.get(sleeve, 0.0) + notional / leverage
 
-        # A final zero replacement is absent from ``updates`` by design, but
-        # its symbol must remain in this batch's aggregate so the kernel emits
-        # the reducing command from the reconstructed position to flat.
+        # A final zero replacement is absent from ``updates``, but its symbol
+        # must stay in the aggregate so the kernel emits the reducing command
+        # from the reconstructed position to flat.
         for symbol in sorted(requested_symbols):
             if not symbol:
                 rejections.append(_risk_rejection_key(batch_id, "missing_symbol"))
@@ -2122,15 +2304,12 @@ class AccountExecutionKernel:
             rejections.append(_risk_rejection_key(batch_id, "initial_margin_limit"))
         if not risk_reducing_only and component_margin > available_margin:
             rejections.append(_risk_rejection_key(batch_id, "available_margin_limit"))
-        # B3. ``component_gross`` above is account-wide despite its name, so one
-        # sleeve could always consume the whole envelope and leave the others
-        # unable to enter. When the profile declares a partition, each sleeve is
-        # additionally held to its own share, and a sleeve the partition does
-        # not name gets nothing rather than everything.
+        # ``component_gross`` above is account-wide despite its name. When the
+        # profile declares a partition each sleeve is additionally held to its
+        # own share, and a sleeve the partition does not name gets nothing.
         if risk_policy.sleeve_limits and not risk_reducing_only:
-            # The book as it stood before this batch, priced at the SAME
-            # reference prices, so the comparison isolates the quantity change
-            # this batch requests rather than a price move nobody chose.
+            # The prior book at the SAME reference prices, so the comparison
+            # isolates this batch's quantity change, not a price move.
             for target_key, prior_payload in state.component_targets.items():
                 prior_symbol = str(prior_payload.get("symbol") or "").upper()
                 if prior_symbol not in prices:
@@ -2164,9 +2343,8 @@ class AccountExecutionKernel:
                     prior_sleeve_margin.get(sleeve, 0.0) + share_tolerance
                 )
                 if sleeve not in touched_sleeves and not (grew_gross or grew_margin):
-                    # Untouched and not growing. Whatever it holds is the
-                    # existing book's problem, not this batch's, and the
-                    # account-level caps above still bind everything that grows.
+                    # Untouched and not growing; the account-level caps above
+                    # still bind everything that does grow.
                     continue
                 share = declared.get(sleeve)
                 if share is None:
@@ -2241,30 +2419,24 @@ class AccountExecutionKernel:
                 tolerance = risk_policy.quantity_tolerance
                 symbol_wedged = symbol in wedged_symbols
                 if symbol in working_symbols and not symbol_wedged:
-                    # A newer target supersedes the desired state immediately,
-                    # but must not create an offsetting market order while an
-                    # older submission is still ambiguous/live. Reconciliation
-                    # first terminalizes that command; owner convergence then
-                    # executes only the residual against reconstructed fills.
-                    # This is especially important for target-flat: emitting a
-                    # reduce-only offset while venue position is still zero is
-                    # both unsafe and the source of Bybit 110017 reject loops.
+                    # A newer target supersedes the desire immediately but must
+                    # not emit an offsetting order while an older submission is
+                    # still ambiguous. Reconciliation terminalizes that command
+                    # first; convergence then executes only the residual. For
+                    # target-flat especially, a reduce-only offset against a
+                    # still-zero venue position drives Bybit 110017 loops.
                     continue
                 if symbol_wedged:
-                    # B15b. Every working order for this symbol is wedged: it has
-                    # sat in ``commanded`` far past any plausible flight time and
-                    # nothing in the runtime expires it, so the rule above froze
-                    # the symbol permanently — exits included — while the real
-                    # position sat at the venue behind only its native stop.
+                    # Every working order here has sat in ``commanded`` past any
+                    # plausible flight time and nothing expires it, so the rule
+                    # above would freeze the symbol permanently, exits included.
                     #
                     # Size the reduction against the reconstructed position
-                    # ALONE. The wedged quantity may or may not exist at the
-                    # venue, and counting it would ask to sell more than is
-                    # provably open, which is what produced the 110017 loops.
-                    # Only reduce-only commands are unblocked below, and a
-                    # reduce-only order cannot create exposure, so this can never
-                    # do more than close what is already there. If the wedged
-                    # order later fills, the next pass closes that too.
+                    # ALONE: the wedged quantity may not exist at the venue, and
+                    # counting it asks to sell more than is provably open. Only
+                    # reduce-only commands are unblocked below, so this can
+                    # never do more than close what is already there; a wedged
+                    # order that later fills is closed on the next pass.
                     projected_qty = position_qty
                 execution_target_qty = (
                     component_flat_targets[symbol]
@@ -2296,9 +2468,9 @@ class AccountExecutionKernel:
                     projected_qty
                 )
                 if symbol_wedged and not reduce_only:
-                    # A wedge unblocks the exit, never a fresh entry. Adding
-                    # exposure while an older submission may still be live at
-                    # the venue is the doubling this rule exists to prevent.
+                    # A wedge unblocks the exit, never a fresh entry: adding
+                    # exposure while an older submission may still be live is
+                    # the doubling this rule prevents.
                     continue
                 if qty + tolerance < rules.min_qty:
                     rejections.append(_risk_rejection_key(batch_id, "below_min_qty", symbol))
@@ -2337,12 +2509,10 @@ class AccountExecutionKernel:
                     entry_stop_trigger_by = native_protection_policy.trigger_by
                 max_qty = rules.max_order_qty if rules.max_order_qty > 0.0 else qty
                 chunk_count = max(1, math.ceil(qty / max_qty - tolerance))
-                # Chunk in exact Decimal arithmetic: accumulating float
-                # subtraction leaves binary dust on the final chunk (e.g.
-                # 250.7 into 100-unit chunks yields 50.69999999999999), which
-                # the adapter would transmit verbatim and the venue rejects as
-                # an off-step quantity. ``qty`` is already step-quantized, so
-                # exact chunks keep every command a step multiple.
+                # Exact Decimal chunking: float subtraction leaves dust on the
+                # final chunk (250.7 in 100-unit chunks -> 50.69999999999999),
+                # which the venue rejects as an off-step quantity. ``qty`` is
+                # already step-quantized, so exact chunks stay step multiples.
                 remaining_dec = Decimal(str(qty))
                 max_qty_dec = Decimal(str(max_qty))
                 for chunk_index in range(chunk_count):
@@ -2492,11 +2662,10 @@ class AccountExecutionKernel:
                     raise AccountTransitionError(f"ack venue order id changed for command {command_id}")
                 if rejection_key and order.rejection_key and rejection_key != order.rejection_key:
                     raise AccountTransitionError(f"ack rejection key changed for command {command_id}")
-                # REST create responses, private executions, and private order
-                # rows can race while carrying the same durable acknowledgement.
-                # The first observation owns the semantic transition. Preserve
-                # a later HTTP request/response measurement as a supplemental
-                # fact so execution timing evidence does not lose valid data.
+                # REST create responses, private executions, and order rows can
+                # race the same durable ACK. The first observation owns the
+                # transition; a later HTTP timing measurement is kept as a
+                # supplemental fact.
                 try:
                     local_socket_send_ts_ns = int(normalized_metadata.get("local_socket_send_ts_ns") or 0)
                 except (TypeError, ValueError):
@@ -2516,10 +2685,10 @@ class AccountExecutionKernel:
                             sleeve="account_execution",
                             symbol=order.symbol,
                             wall_ts_ns=max(local_ack_ts_ns, 1),
-                            # The HTTP response's durable wall timestamps are in
-                            # the payload. Zero keeps exact redelivery
-                            # idempotent; a later process cannot reconstruct the
-                            # first observer's process-local monotonic clock.
+                            # Wall timestamps live in the payload; zero here
+                            # keeps redelivery idempotent, since no later
+                            # process can reconstruct the first observer's
+                            # process-local monotonic clock.
                             monotonic_ns=0,
                             payload={
                                 "command_id": command_id,
@@ -2603,9 +2772,8 @@ class AccountExecutionKernel:
                         raise AccountTransitionError(f"execution {execution_id} changed {label}")
                 if int(prior.get("exchange_ts_ns") or 0) != exchange_ts_ns:
                     raise AccountTransitionError(f"execution {execution_id} changed exchange timestamp")
-                # Delivery-local timestamps and source metadata may legitimately
-                # differ across WS redelivery and REST recovery. The first
-                # durable observation remains authoritative.
+                # Delivery-local timestamps and source metadata differ across WS
+                # redelivery and REST recovery; the first observation wins.
                 return []
             return [
                 AccountEventSpec(
@@ -2773,28 +2941,25 @@ class AccountExecutionKernel:
     ) -> tuple[AccountEvent, ...]:
         """Checkpoint a completed reduce batch into account-level Close/P&L.
 
-        The historical method name is retained for callers, but waiting for the
-        *whole symbol* to become flat is incorrect when two components own the
-        same net venue position.  A first component can exit while the second
-        remains open; deferring its realized fills would later credit them to
-        the second component's close reason.  This method therefore checkpoints
-        every terminal reduce-only batch.
+        Checkpoints every terminal reduce-only batch rather than waiting for
+        the whole symbol to be flat: when two components own the same net venue
+        position, deferring the first exit's realized fills would credit them
+        to the second component's close reason.
 
-        The venue exposes one net position and netted fills, so the resulting
-        P&L is truthful only at symbol/account-batch scope.  Component target
-        identities are retained as causal context while exact component P&L is
-        explicitly marked pending rather than allocated by an invented rule.
+        The venue exposes one net position and netted fills, so this P&L is
+        truthful only at symbol/account-batch scope. Component identities are
+        kept as causal context and exact component P&L is marked pending rather
+        than allocated by an invented rule.
         """
 
         symbol = symbol.upper()
         caller_metadata = dict(metadata or {})
 
         def build(state: AccountState) -> list[AccountEventSpec]:
-            # Re-evaluate every precondition inside the serialized journal
-            # transaction. Private-stream and REST recovery can observe the same
-            # terminal fill concurrently; a stale pre-transaction snapshot must
-            # not propose a different immutable Close for an already-finalized
-            # batch.
+            # Re-check preconditions inside the serialized transaction:
+            # private-stream and REST recovery can see the same terminal fill
+            # concurrently, and a stale snapshot must not propose a different
+            # Close for an already-finalized batch.
             order = state.orders.get(command_id)
             if order is None or order.symbol != symbol:
                 raise AccountTransitionError(f"unknown close command {command_id!r} for {symbol}")
@@ -2877,8 +3042,7 @@ class AccountExecutionKernel:
                             "close_key": close_key,
                             "command_id": command_id,
                             "reason": close_reason,
-                            # A reconstructed zero is not a fresh REST venue
-                            # fact. Only an explicit caller can confirm it.
+                            # A reconstructed zero is not a fresh REST fact.
                             "venue_flat": venue_flat_confirmed,
                             "exchange_ts_ns": int(exchange_ts_ns),
                             "local_receive_ts_ns": int(local_receive_ts_ns),
@@ -3009,18 +3173,14 @@ class AccountExecutionKernel:
     ) -> tuple[AccountEvent, ...]:
         """Atomically adopt an out-of-band reduce fill and zero its owners.
 
-        Bybit-created TP/SL executions do not carry a kernel command id.  This
-        also applies to manual, delisting, liquidation, and otherwise
-        unattributed venue reductions. This method synthesizes the missing
-        canonical command/ack
-        while replacing all same-symbol component targets with zero in the
-        *same journal transaction* as the fill. A restart or later target cycle
-        therefore cannot reopen a position the venue already reduced.
+        Venue-created TP/SL executions -- and manual, delisting, or liquidation
+        reductions -- carry no kernel command id. This synthesizes the missing
+        command/ack and zeroes all same-symbol component targets in the *same*
+        journal transaction as the fill, so a restart or later target cycle
+        cannot reopen a position the venue already reduced.
 
-        ``execution_origin`` is deliberately closed: only a fill independently
-        identified from Bybit stop provenance may claim ``verified_native_stop``.
-        Other reductions are adopted conservatively without being mislabeled as
-        the account-owned protection.
+        ``execution_origin`` is closed: only a fill independently identified
+        from Bybit stop provenance may claim ``verified_native_stop``.
         """
 
         symbol = symbol.upper()
@@ -3498,10 +3658,9 @@ class AccountExecutionKernel:
             if order is None:
                 raise AccountTransitionError(f"unknown command {command_id!r}")
             # WS delivery and REST recovery race the same terminal fact from
-            # separate consumer threads; the builder runs under the journal
-            # lock, so re-checking here makes the second commit an idempotent
-            # no-op instead of a duplicate-content integrity error (the two
-            # observations legitimately differ in local timestamps).
+            # separate threads. The builder runs under the journal lock, so
+            # re-checking here makes the second commit an idempotent no-op
+            # instead of a duplicate-content integrity error.
             if order.terminal_status_recorded and order.status == normalized:
                 return []
             return [

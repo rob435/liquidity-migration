@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Phase 5A — tune gates and filters for *t*, not for mean.
 
-`docs/research_findings.md` §8. Every filter in this program was chosen to raise
-the mean, but ``t = effect x sqrt(n)``, so a filter that raises the mean while
-cutting the sample can *lower* the evidence it produces:
+Every filter in this program was chosen to raise the mean, but
+``t = effect x sqrt(n)``, so a filter that raises the mean while cutting the
+sample can *lower* the evidence it produces:
 
 | sample kept | effect multiple needed just to hold t constant |
 | ---: | ---: |
@@ -18,11 +18,9 @@ absolute: **report the entire curve, never the best cell.** A t that peaks sharp
 at one setting and collapses either side is overfitting. A broad plateau is a real
 parameter.
 
-Costs are charged at each cell's own *measured* turnover (§17.1), because
-strictness changes turnover and a fixed charge would bias the curve toward
-whichever end churns less.
-
-Research-only. Lane-1 on seen data; grades nothing (``AGENTS.md``).
+Costs are charged at each cell's own *measured* turnover, because strictness
+changes turnover and a fixed charge would bias the curve toward whichever end
+churns less. Details in `docs/research_findings.md`.
 """
 
 from __future__ import annotations

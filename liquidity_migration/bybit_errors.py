@@ -1,8 +1,7 @@
 """Shared Bybit transport errors and response classification.
 
-This module is deliberately credential-free.  Both the public market-data
-plane and the demo-account client use the same exception identities without
-making public strategy imports load account-mutation authority.
+Credential-free, so the public market-data plane and the account client share
+exception identities without strategy imports pulling in mutation authority.
 """
 
 from __future__ import annotations

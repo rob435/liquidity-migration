@@ -1,11 +1,7 @@
-"""Contracts for the financed-longs forward ledger appender.
-
-The ledger is receipts: append-first, never rewriting an existing
-(date, config_id) row, every scored day present with an explicit
-``forward_eligible`` flag, and the carry-hold v2-vs-v1 paired differential
-derived inside the same file. Idempotency and append-only behavior are the
-load-bearing properties — a scorer that silently rewrites history can
-flatter a forward record.
+"""Contracts for the financed-longs forward ledger appender: append-first, never rewriting
+an existing (date, config_id) row, every scored day present with an explicit
+``forward_eligible`` flag, and the carry-hold v2-vs-v1 paired differential derived inside
+the same file. Idempotency and append-only behaviour are the load-bearing properties.
 """
 
 from __future__ import annotations

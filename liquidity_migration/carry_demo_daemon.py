@@ -4,19 +4,16 @@ Thin subclass of :class:`LongNativeDemoDaemon`: it reuses the public ticker
 cache, lifecycle, evidence-capture, and graceful-shutdown plumbing and swaps in
 the carry cycle runner. Two deliberate divergences from the other sleeves:
 
-* PURE TIMER cadence (``event_driven_cycle=False``). The carry decision is
-  daily and its publication is a diff against the standing book, so there is
-  nothing for a confirmed-bar wake to accelerate — and the sleeve runs no WS
-  kline pool that could emit one (``ws_klines_enabled`` is validated False, so
-  the base never starts a kline manager and the loop runs the fixed
-  60-second grid).
-* A daemon-owned :class:`CarryCycleState` is threaded into every cycle. It is
-  an operational hint (funding-sweep throttle, decision-staleness clock),
-  never decision state: the cycle replays the registered rule from scratch
-  each time, so restarts need no recovery beyond a plain start.
+* PURE TIMER cadence (``event_driven_cycle=False``). The decision is daily and
+  publication is a diff against the standing book, so a confirmed-bar wake has
+  nothing to accelerate; ``ws_klines_enabled`` is validated False, so the base
+  never starts a kline manager and the loop runs a fixed 60-second grid.
+* A daemon-owned :class:`CarryCycleState` is threaded into every cycle as an
+  operational hint (funding-sweep throttle, decision-staleness clock), never
+  decision state: each cycle replays the registered rule from scratch.
 
-Startup is target-only: demo and paper routes publish to the canonical account
-owner and never construct a sleeve-private execution stream, router, or cache.
+Startup is target-only: both routes publish to the account owner and never
+construct a sleeve-private execution stream, router, or cache.
 """
 
 from __future__ import annotations
@@ -37,17 +34,15 @@ from .long_native_event_demo_daemon import LongNativeDemoDaemon
 from .strategy_target_replay import PublishedTargetCyclePayload
 
 if TYPE_CHECKING:
-    # Only referenced in the cast below (the base daemon's config annotation);
-    # carry has its own CarryDemoCycleConfig and the base touches only the
-    # fields the two configs share.
+    # Only for the cast below; the base touches only shared config fields.
     from .long_native_event_demo import LongNativeDemoCycleConfig
 
 
 def _validate_carry_daemon_startup(config: CarryDemoCycleConfig) -> None:
     """Fail before shared resources unless CARRY has one account-owner route.
 
-    The cycle runner validates too, but it catches cycle exceptions and keeps
-    looping; a misconfigured daemon must instead terminate at startup.
+    The cycle runner validates too, but it swallows cycle exceptions and keeps
+    looping; a misconfigured daemon must terminate at startup instead.
     """
 
     _validate_carry_demo_config(config)
@@ -85,15 +80,14 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
         if follow_root and Path(follow_root).expanduser().resolve() == Path(
             data_root
         ).expanduser().resolve():
-            # A follower never writes the leader caches — following your own
-            # root would read a snapshot nobody updates, frozen from day one.
+            # A follower never writes the leader caches, so following your own
+            # root reads a snapshot nobody updates.
             raise ValueError(
                 "market_follow_root must not equal the sleeve's own data root "
                 "(circular self-follow)"
             )
-        # The base only accesses fields shared by the LONG and CARRY configs,
-        # and with ws_klines_enabled validated False it never invokes a kline
-        # stream manager factory.
+        # The base touches only fields shared by the LONG and CARRY configs,
+        # and never builds a kline manager while ws_klines_enabled is False.
         super().__init__(
             data_root,
             config=config,
@@ -113,9 +107,11 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
         return super().run()
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
+        # REPLACES the base kwargs rather than extending: CARRY's cycle runner
+        # takes no ``journal_cursor`` -- its cursor lives in the cycle state.
         return {"cycle_state": self._carry_cycle_state}
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
-        # CARRY cycle payloads are flat; the inherited LONG formatter expects
-        # a nested cycle object.
+        # CARRY payloads are flat; the inherited formatter expects a nested
+        # cycle object.
         return format_carry_demo_cycle_summary(payload)

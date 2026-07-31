@@ -63,7 +63,6 @@ def test_cost_config_default_models_live_100pct_taker() -> None:
     # (maker_fill_probability=0.0), NOT a 0.60 maker blend. A maker-blend default
     # under-costs by ~36% (9.6 vs 15.0 bps) and silently flatters returns on any
     # consumer that does not pass the YAML — the canonical cost-too-low error.
-    # (cli-config-2 / cost-funding-1)
     assert CostConfig().maker_fill_probability == pytest.approx(0.0)
     assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
         2.0 * (5.5 + 2.0)  # 15.0 bps round-trip, 100% taker
@@ -104,9 +103,9 @@ universe:
         load_config(config_path)
 
 
-# audit2b defect 2: _merge_dataclass now applies the same numeric coercion that
-# UniverseConfig already gets. A quoted-numeric YAML value used to flow into the
-# frozen dataclass as a str and only crash later in str-arithmetic.
+# _merge_dataclass applies the same numeric coercion UniverseConfig gets; a
+# quoted-numeric YAML value otherwise enters the frozen dataclass as a str and
+# only crashes later in str-arithmetic.
 def test_cost_config_quoted_numeric_is_coerced(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -123,7 +122,7 @@ cost_model:
     assert isinstance(config.costs.maker_fee_bps, float)
     assert config.costs.maker_fee_bps == pytest.approx(2.0)
     assert config.costs.taker_fee_bps == pytest.approx(5.5)
-    # On OLD code this raised TypeError (str + float) in str-arithmetic.
+    # Uncoerced, this raises TypeError (str + float) in str-arithmetic.
     assert config.costs.base_entry_exit_cost_bps == pytest.approx(2.0 * (5.5 + 2.0))
 
 
@@ -133,8 +132,8 @@ def test_merge_dataclass_coerces_quoted_float_directly() -> None:
     assert merged.maker_fee_bps == pytest.approx(2.0)
 
 
-# audit2b defect 2 (happy-path guard): native float/str/bool YAML values must be
-# numerically/byte unchanged by the coercion.
+# Native float/str/bool YAML values must be numerically/byte unchanged by the
+# coercion.
 def test_merge_dataclass_native_values_unchanged() -> None:
     cost = _merge_dataclass(
         CostConfig, {"maker_fee_bps": 2.0, "taker_fee_bps": 5.5}
@@ -159,8 +158,7 @@ def test_default_config_load_unchanged() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
-# cli-config-2 / cost-funding-1: CostConfig default must model 100% taker.
+# The CostConfig default must model 100% taker.
 # --------------------------------------------------------------------------- #
 def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
     # The default must NOT be the 0.60 maker blend (9.6 bps) that under-costs by
@@ -176,9 +174,9 @@ def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
 
 
 def test_merge_dataclass_bool_coercion_is_strict() -> None:
-    """audit-iter2 core-config-1: builtin bool('false') is True. A quoted YAML bool
-    must parse to the right value, native bools pass through, and an ambiguous string
-    must raise rather than silently flip."""
+    """``bool('false')`` is True, so a quoted YAML bool must parse to the right value,
+    native bools pass through, and an ambiguous string must raise.
+    """
     assert _merge_dataclass(ExchangeConfig, {"testnet": "false"}).testnet is False
     assert _merge_dataclass(ExchangeConfig, {"testnet": "no"}).testnet is False
     assert _merge_dataclass(ExchangeConfig, {"testnet": "true"}).testnet is True
@@ -188,6 +186,5 @@ def test_merge_dataclass_bool_coercion_is_strict() -> None:
 
 
 def test_default_research_data_root_is_expanded() -> None:
-    """audit-iter2 core-config-2: the default must be expanduser()'d so a direct
-    ResearchConfig() exposes a resolvable path."""
+    """The default must be ``expanduser()``'d so a direct ``ResearchConfig()`` exposes a resolvable path."""
     assert "~" not in str(DEFAULT_RESEARCH_DATA_ROOT)

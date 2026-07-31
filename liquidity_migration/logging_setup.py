@@ -1,18 +1,8 @@
 """Default stderr logging for package entrypoints running under systemd.
 
-Without a handler, Python's last-resort logger drops every record below
-WARNING, which leaves long-running owners journald-silent in normal
-operation and hides INFO-level transport/receipt evidence.
-
-The handler goes on the ROOT logger, not on ``liquidity_migration``. Every
-service entrypoint runs as ``python -m liquidity_migration.<module>``, so its
-own module logger is named ``__main__`` and sits outside the package tree: a
-package-only handler silently dropped every INFO record the entrypoints emit
-(the account owners' Telegram-delivery and request-completion audit lines
-among them) and rendered their WARNING/ERROR records through
-``logging.lastResort`` with no timestamp, level, or logger name. Observed live
-2026-07-29: the demo owner delivered hourly Telegram digests for days without
-one journald line to prove it.
+The handler goes on the ROOT logger, not on ``liquidity_migration``: entrypoints
+run as ``python -m liquidity_migration.<module>``, so their own logger is named
+``__main__`` and a package-only handler would miss every record they emit.
 """
 
 from __future__ import annotations
@@ -21,8 +11,7 @@ import logging
 import os
 
 
-# Third-party loggers reachable from the root handler that are chatty at INFO
-# and carry no evidence value; the journal has a fixed size cap on the VPS.
+# Chatty at INFO; the VPS journal has a fixed size cap.
 _QUIET_THIRD_PARTY_LOGGERS = ("pybit", "websocket", "urllib3", "requests")
 
 
@@ -39,8 +28,7 @@ def ensure_default_log_handler() -> None:
     level_name = os.environ.get("LIQMIG_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     root_logger.setLevel(level)
-    # Keep the package at the requested level explicitly: a caller that raised
-    # the root level later must not silently mute our own evidence lines.
+    # Set explicitly so a later root-level change cannot mute the package.
     package_logger.setLevel(level)
     for name in _QUIET_THIRD_PARTY_LOGGERS:
         third_party = logging.getLogger(name)

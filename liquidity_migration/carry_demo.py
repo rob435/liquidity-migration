@@ -11,29 +11,27 @@ the registered frame caveat says they must: the decision bar itself, which
 the research frame drops because it requires a forward 24h return no live
 decision can see.
 
-Statelessness: the replay recomputes the hysteresis state from scratch each
-cycle over ``REPLAY_DAYS`` of history. The longest state spell in the full
-2021-2026 record is 19 days, so a 90-day window carries ~4.7x margin; a
-spell that outlived the window would be re-captured on any bar where its
-funding print re-crosses the entry threshold (entry implies hold), and the
-residual miss case (a >90-day-old spell hovering strictly between the exit
-and entry prints for the entire window) has never occurred in the record.
-No state file exists, so there is no state file to corrupt, and recovery
-from downtime of any length is a plain restart.
+Stateless: the replay recomputes hysteresis state from scratch each cycle over
+``REPLAY_DAYS`` of history. The longest state spell in the 2021-2026 record is
+19 days, so a 90-day window carries ~4.7x margin, and a spell that outlived the
+window is re-captured on any bar where its funding print re-crosses the entry
+threshold (entry implies hold). There is no state file, so recovery from
+downtime of any length is a plain restart.
 
-Authority note: ``configs/lane2_carry_hold_v3.json`` is an immutable Lane-2
-registration and authorizes nothing. This engine loads it only so the
-deployed parameters are byte-identical to the registered ones. Runtime
-authority comes from the operational profile and the owner's recorded
-deployment change point.
+``configs/lane2_carry_hold_v3.json`` is loaded only so the deployed parameters
+are byte-identical to the registered ones.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import io
 import json
 import logging
 import math
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +62,7 @@ from liquidity_migration.event_demo_data import (
 from liquidity_migration.execution_environment import (
     ExecutionEnvironment,
     account_id_for_environment,
+    candidate_universe_realm,
     execution_environment,
 )
 from liquidity_migration.financed_longs import (
@@ -81,11 +80,13 @@ from liquidity_migration.storage import (
 )
 from liquidity_migration.strategy_planning import (
     account_owner_equity_or_error,
+    new_planning_journal_cursor,
     sleeve_planning_snapshot,
     suppress_target_intents,
 )
 from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
 from liquidity_migration.strategy_targets import component_target_intent
+from liquidity_migration.venue_realm import VenueRealm
 
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
@@ -96,11 +97,9 @@ HOUR_MS = 3_600_000
 REPLAY_DAYS = 90
 MIN_REPLAY_DAYS = 45
 
-#: The decision bar must carry at least this many universe symbols, else the
-#: data build is considered broken and the engine fails closed (holding the
-#: previous targets is the daemon's documented stale policy; silently
-#: flattening a healthy book on a data hole is the one behavior this floor
-#: exists to prevent). The real universe is 100 names by construction.
+#: Minimum universe symbols on the decision bar. Below this the data build is
+#: broken and the engine fails closed, holding the previous targets, rather than
+#: flattening a healthy book on a data hole. The real universe is 100 names.
 MIN_DECISION_SYMBOLS = 50
 
 CARRY_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "lane2_carry_hold_v3.json"
@@ -147,10 +146,9 @@ def decide_book(
     bar; a misaligned window would silently move the decision clock, which
     is a registered parameter).
 
-    Fails closed (raises) when the window is misaligned, too short, or the
-    decision bar is missing/thin. An *empty* book on a healthy decision bar
-    is not an error — being in cash is a legitimate state of this strategy
-    (28% of days in the full record).
+    Fails closed when the window is misaligned, too short, or the decision bar
+    is missing/thin. An *empty* book on a healthy decision bar is not an error:
+    cash is a legitimate state (28% of days in the full record).
     """
     if decision_ts_ms % DAY_MS != 0:
         raise CarrySleeveError(f"decision ts {decision_ts_ms} is not a 00:00 UTC bar")
@@ -235,11 +233,10 @@ DECISION_KLINE_LAG_MS = 20 * 60 * 1000
 #: that has not been accepted within 6h belongs to a stale book; the account
 #: service expires it rather than executing it late.
 SIGNAL_VALIDITY_MS = 6 * HOUR_MS
-#: Producer-side guard band before ``signal_valid_until_ms``: publishing an
-#: entry the service would expire on arrival wastes nothing venue-side, but the
-#: expiry is a TERMINAL attempt and — with carry's stable per-symbol component
-#: ids — terminal attempts suppress that symbol's entries permanently. Never
-#: hand the service an entry it can only expire.
+#: Producer-side guard band before ``signal_valid_until_ms``. Expiry is a
+#: TERMINAL attempt and, with carry's stable per-symbol component ids, terminal
+#: attempts suppress that symbol's entries permanently, so never hand the
+#: service an entry it can only expire.
 ENTRY_PUBLISH_GUARD_MS = 15 * 60 * 1000
 #: A sleeve whose newest successful decision is older than this is loudly
 #: stale: today's decision still failing past 06:00 the next day.
@@ -251,33 +248,27 @@ FUNDING_LOOKBACK_DAYS = 2
 #: Paper freshness: the follower refuses to decide on a leader kline cache
 #: whose newest bar CLOSE is older than this (one dead leader day + margin).
 PAPER_KLINE_FRESHNESS_MS = 26 * HOUR_MS
-#: Resize dead-band. A resize is a real round trip at a measured ~15.6bp, so
-#: the band has to sit where the tracking-error it buys is worth the spread it
-#: spends: closing a 5% notional gap costs ~0.8bp of the position, closing a
-#: 0.1% gap costs ~0.02bp and buys nothing a daily sleeve can use.
-#:
-#: The 0.001 this replaced was below the noise floor of the sizing input
-#: itself. On 2026-07-30 the live CARRY book booked 133 involuntary reductions
-#: and traded $84.7k of notional against a ~$30k book in thirteen hours,
-#: without a single strategy exit, purely because live equity wiggled ±0.15%
-#: per cycle against a 0.1% band. The anchor in
-#: :meth:`CarryCycleState.sizing_equity` removes the cause; this band is the
-#: backstop that keeps fill rounding and partial fills from re-creating it.
+#: Resize dead-band. A resize is a round trip at a measured ~15.6bp, so the
+#: band sits where the tracking error it buys is worth the spread it spends:
+#: closing a 5% notional gap costs ~0.8bp of the position, closing a 0.1% gap
+#: costs ~0.02bp and buys nothing a daily sleeve can use. A band below the
+#: sizing input's own noise floor churns the book on equity wiggle alone;
+#: :meth:`CarryCycleState.sizing_equity` removes that cause and this band is the
+#: backstop against fill rounding and partial fills re-creating it.
 RESIZE_MIN_NOTIONAL_USDT = 1.0
 RESIZE_MIN_FRACTION_OF_STANDING = 0.05
 #: Entries below this notional would round to zero venue quantity and come
 #: back as a terminal (permanently suppressing) rejection; skip them instead.
 ENTRY_MIN_NOTIONAL_USDT = 10.0
 #: Decision-bar rows with a settled print, as a fraction of all decision-bar
-#: rows. Every listed perp settles at least every 8h, so healthy funding data
-#: puts this near 1.0; a collapsed fraction means the funding cache is broken,
-#: and an empty book computed from missing funding would flatten a healthy
-#: standing book — the one failure this layer must never convert into orders.
+#: rows. Every listed perp settles at least every 8h, so this sits near 1.0 when
+#: healthy; a collapsed fraction means the funding cache is broken, and an empty
+#: book computed from missing funding would flatten a healthy standing book.
 MIN_DECISION_FUNDING_COVERAGE = 0.5
 #: A standing symbol with fresh klines whose last cached print is older than
-#: this has a funding-data hole (max settle interval is 8h). A hole makes the
-#: trailing-funding series decay toward zero, which reads as a "recovery" to
-#: the registered velocity exit — a false exit taken on missing data.
+#: this has a funding-data hole (max settle interval is 8h). The hole decays the
+#: trailing-funding series toward zero, which the velocity exit reads as a
+#: recovery: a false exit taken on missing data.
 STANDING_FUNDING_MAX_AGE_H = 25.0
 
 
@@ -285,54 +276,86 @@ class CarryCycleState:
     """Mutable, daemon-owned cross-cycle memory (never decision authority).
 
     The cycle function itself is stateless — everything decision-relevant is
-    recomputed from disk and REST each cycle. This object carries three
+    recomputed from disk and REST each cycle. This object carries four
     operational hints between cycles: when the funding cache was last swept
     (settled prints only change on hour boundaries, so re-sweeping every 60s
     would be ~200k pointless REST calls/day), the newest successful decision
     (so the ``decision_stale`` alarm does not need to re-read the cycles
-    dataset on every failing cycle), and the equity this decision was first
-    sized against.
+    dataset on every failing cycle), the equity this decision was first sized
+    against, and the account-journal read position (so a cycle verifies the
+    segments written since the last one instead of the whole account history).
 
-    Losing this object — restart, ``--once`` invocations — costs one extra
-    funding sweep, one cycles-dataset read, and one re-anchor of the sizing
-    equity to the current mark. The re-anchor is bounded rather than free: it
-    can move the day's targets by however much equity has moved since the
-    decision, and the resize dead-band absorbs that unless the move is large.
+    Losing this object (restart, ``--once``) costs one extra funding sweep, one
+    cycles-dataset read, one cold journal read, and one re-anchor of the sizing
+    equity to the current mark. The re-anchor can move the day's targets by
+    however much equity moved since the decision; the resize dead-band absorbs
+    that unless the move is large.
     """
 
     __slots__ = (
+        "frozen_decision_bar_ts_ms",
+        "frozen_decision_payload",
         "funding_swept_hour_ts",
+        "journal_cursor",
         "last_successful_decision_ts_ms",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
     )
 
     def __init__(self) -> None:
+        self.frozen_decision_bar_ts_ms: int | None = None
+        self.frozen_decision_payload: tuple[CarryDecision, dict[str, float], int] | None = None
         self.funding_swept_hour_ts: int | None = None
+        self.journal_cursor = new_planning_journal_cursor()
         self.last_successful_decision_ts_ms: int | None = None
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
 
+    def frozen_decision(
+        self, decision_ts_ms: int
+    ) -> tuple[CarryDecision, dict[str, float], int] | None:
+        """This bar's already-computed book, if there is one.
+
+        The registered rule decides ONCE per 00:00 UTC bar and holds for the
+        day. Recomputing every 60s makes the book a function of whatever the
+        caches held at that moment, and the same bar can then produce different
+        symbol sets minutes apart. Later prints belong to tomorrow's bar. A
+        failed decision is never frozen, so a data hiccup still retries.
+        """
+
+        if (
+            self.frozen_decision_bar_ts_ms == int(decision_ts_ms)
+            and self.frozen_decision_payload is not None
+        ):
+            return self.frozen_decision_payload
+        return None
+
+    def freeze_decision(
+        self,
+        *,
+        decision_ts_ms: int,
+        decision: CarryDecision,
+        trail_by_symbol: dict[str, float],
+        universe_eligible: int,
+    ) -> None:
+        """Pin this bar's book. Only a NEW bar replaces it."""
+
+        self.frozen_decision_bar_ts_ms = int(decision_ts_ms)
+        self.frozen_decision_payload = (decision, dict(trail_by_symbol), int(universe_eligible))
+
     def sizing_equity(self, *, decision_ts_ms: int, equity_usdt: float) -> float:
         """Equity as of when this decision was first sized, not the live mark.
 
-        CARRY decides once a day and holds. Sizing every cycle off the live
-        account mark makes the day's targets a function of the book's own
-        unrealized P&L, and that feedback has a direction: equity rises
-        because the longs rose, so the target rises, so the sleeve buys more
-        after the move — and sells after a fall. It is buy-high/sell-low
-        wearing a rebalance costume, and it fires whenever the mark drifts
-        past the dead-band, which on 2026-07-30 was every three minutes.
+        CARRY decides once a day and holds. Sizing off the live mark every cycle
+        makes the day's targets a function of the book's own unrealized P&L, and
+        that feedback has a direction: equity rises because the longs rose, so
+        the target rises and the sleeve buys after the move, and sells after a
+        fall. Anchoring to the decision keeps intraday targets constant, so only
+        a new decision moves the book. The disaster stop and native protection
+        remain the capital-preservation path.
 
-        Anchoring to the decision makes intraday targets constant, so a
-        converged book stays converged and only a genuinely new decision moves
-        it. Equity moving is not new information to a sleeve that has already
-        decided; the disaster stop and native protection remain the
-        capital-preservation path, unchanged.
-
-        An unusable equity read (``<= 0``) is passed through untouched rather
-        than anchored: callers already refuse to size on it, and poisoning the
-        anchor with a failed read would outlive the failure.
+        An unusable equity read (``<= 0``) passes through unanchored: callers
+        already refuse to size on it, and anchoring it would outlive the failure.
         """
 
         if equity_usdt <= 0.0:
@@ -352,11 +375,11 @@ class CarryDemoCycleConfig:
     """CARRY demo/paper target-producer configuration.
 
     Sizing fields (``notional_multiplier``, ``entry_leverage``,
-    ``declared_stop_loss_fraction``, ``max_new_entries_per_cycle``) are
-    injected from the shared operational profile's ``carry`` block by the CLI;
-    rule parameters stay in the immutable registered config the engine loads.
-    The ``ws_klines_*`` block exists only because the shared base daemon reads
-    those fields — carry runs pure REST and never starts a kline manager.
+    ``declared_stop_loss_fraction``, ``max_new_entries_per_cycle``) are injected
+    from the operational profile's ``carry`` block by the CLI; rule parameters
+    stay in the registered config the engine loads. The ``ws_klines_*`` block
+    exists only because the shared base daemon reads those fields -- carry runs
+    pure REST and never starts a kline manager.
     """
 
     # --- environment / wiring ---
@@ -373,14 +396,10 @@ class CarryDemoCycleConfig:
     declared_stop_loss_fraction: float = 0.35
     max_new_entries_per_cycle: int = 10
     #: Ceiling on the equity this producer may size against, from the profile's
-    #: top-level ``capital_reference_usdt``. The owner's six pre-trade caps are
-    #: absolute USDT numbers calibrated against that reference, but sizing reads
-    #: *live venue equity*, so without a clamp the two drift apart in both
-    #: directions: fund below the reference and every cap sits far above
-    #: anything reachable, leaving the pre-trade risk layer decorative; grow
-    #: above it — by funding or simply by profit — and the load-time envelope
-    #: proof in ``operational_profile`` silently stops being true. Clamping here
-    #: makes that proof hold at every equity level. 0.0 disables the clamp.
+    #: ``capital_reference_usdt``. The owner's pre-trade caps are absolute USDT
+    #: numbers calibrated against that reference while sizing reads live equity,
+    #: so without a clamp the two drift apart and the load-time envelope proof
+    #: in ``operational_profile`` stops holding. 0.0 disables the clamp.
     capital_reference_usdt: float = 0.0
     operational_profile_sha256: str = ""
     # --- data build ---
@@ -442,9 +461,8 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
 def carry_cycles_dataset(config: CarryDemoCycleConfig) -> str:
     """Cycle-heartbeat dataset for this planner's environment.
 
-    Named per environment, not per "is it paper". A mainnet cycle written into
-    the demo dataset is exactly the mislabelling B11 closed elsewhere: later
-    readers would load real evidence as demo evidence.
+    Named per environment, not per "is it paper": a cycle written into the wrong
+    dataset would later be read as the wrong environment's evidence.
     """
 
     return {
@@ -569,19 +587,17 @@ def _validate_carry_view_health(
 ) -> None:
     """Refuse decisions whose funding inputs are visibly broken.
 
-    ``decide_book``'s own floor counts decision-bar SYMBOLS, which stays
-    healthy even when every funding value is null — and an all-null funding
-    build yields a legitimate-looking EMPTY book whose diff would flatten a
-    healthy standing book. Two cycle-layer guards close that gap:
+    ``decide_book``'s floor counts decision-bar SYMBOLS, which stays healthy
+    even when every funding value is null, and an all-null build yields a
+    legitimate-looking EMPTY book whose diff would flatten a healthy standing
+    book. Two guards close that:
 
     * decision-bar settled-print coverage below ``MIN_DECISION_FUNDING_COVERAGE``
-      means the funding cache, not the market, is broken — refuse to decide;
-    * a STANDING symbol with a fresh decision-bar kline but a stale (or
-      absent) funding print has a per-symbol funding hole. A hole decays the
-      trailing-funding series toward zero, which the registered velocity exit
-      reads as a genuine recovery — a false exit on missing data. A delisted
-      standing symbol never trips this guard (its klines end too, and the
-      rule then exits it on the ordinary path).
+      means the funding cache, not the market, is broken;
+    * a STANDING symbol with a fresh decision-bar kline but a stale or absent
+      funding print has a per-symbol hole, which decays its trailing-funding
+      series toward zero and reads to the velocity exit as a recovery. A
+      delisted standing symbol never trips this (its klines end too).
     """
 
     at_bar = view.filter(pl.col("bar_ts_ms") == int(decision_ts_ms))
@@ -638,14 +654,17 @@ def _trailing_settled_funding(
     return {str(row["symbol"]): float(row["trail"]) for row in sums.iter_rows(named=True)}
 
 
-def _carry_standing_book(reservations: pl.DataFrame) -> dict[str, float]:
-    """Accepted signed notional per symbol from open/pending reservations.
+def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, float]]:
+    """Accepted (signed notional, signed quantity) per open/pending reservation.
 
     Reservations are accepted desired targets (``open`` or ``target_pending``),
-    not fills; the diff must compare desire against desire, otherwise a target
-    accepted but not yet filled would be re-proposed every cycle. The accepted
-    notional is reconstructed as ``signed_qty x target_reference_price`` — the
-    exact pair the account kernel stamped when it accepted the target.
+    not fills: the diff compares desire against desire, or a target accepted but
+    unfilled is re-proposed every cycle. Notional is reconstructed as
+    ``signed_qty x target_reference_price``, the pair the kernel stamped.
+
+    Quantity comes along because zero is meaningful: a reservation for an
+    already-zero target is a completed exit desire with nothing left to reduce,
+    and re-exiting it loops forever.
     """
 
     if reservations.is_empty():
@@ -656,14 +675,20 @@ def _carry_standing_book(reservations: pl.DataFrame) -> dict[str, float]:
         raise RuntimeError(f"carry reservations lack expected columns: {missing}")
     frame = reservations.select(
         pl.col("symbol").cast(pl.String),
+        pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0).alias("signed_qty"),
         (
             pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0)
             * pl.col("target_reference_price").cast(pl.Float64, strict=False).fill_null(0.0)
         ).alias("standing_notional_usdt"),
     )
-    sums = frame.group_by("symbol").agg(pl.col("standing_notional_usdt").sum())
+    sums = frame.group_by("symbol").agg(
+        pl.col("standing_notional_usdt").sum(), pl.col("signed_qty").sum()
+    )
     return {
-        str(row["symbol"]): float(row["standing_notional_usdt"])
+        str(row["symbol"]): (
+            float(row["standing_notional_usdt"]),
+            float(row["signed_qty"]),
+        )
         for row in sums.iter_rows(named=True)
     }
 
@@ -726,6 +751,7 @@ class CarryTargetPlan:
     entry_validity_expired_skips: int
     entry_dust_skips: int
     entry_blocked_reason: str
+    stranded_zero_quantity_reservations: int = 0
 
 
 def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
@@ -742,6 +768,7 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
         entry_validity_expired_skips=0,
         entry_dust_skips=0,
         entry_blocked_reason=entry_blocked_reason,
+        stranded_zero_quantity_reservations=0,
     )
 
 
@@ -749,7 +776,7 @@ def _carry_target_plan(
     *,
     decision: CarryDecision | None,
     rule: CarryHoldConfig,
-    standing_notional: dict[str, float],
+    standing_rows: dict[str, tuple[float, float]],
     trail_by_symbol: dict[str, float],
     demo: CarryDemoCycleConfig,
     equity_usdt: float,
@@ -759,17 +786,14 @@ def _carry_target_plan(
 ) -> CarryTargetPlan:
     """Diff the desired book against the standing book into target intents.
 
-    Exit-first asymmetry by design: exits are zero targets that need no
-    equity, so they publish even when the owner-health read failed; entries
-    and resizes size off equity and are blocked without it. When the decision
-    itself is unavailable NOTHING is planned — a data hiccup must hold the
-    standing book, never flatten it.
+    Exit-first by design: exits are zero targets needing no equity, so they
+    publish even when the owner-health read failed, while entries and resizes
+    are blocked without it. When the decision itself is unavailable NOTHING is
+    planned -- a data hiccup holds the standing book, never flattens it.
 
-    Sizing uses :meth:`CarryCycleState.sizing_equity`, the equity this
-    decision was first sized against, rather than the live mark handed in as
-    ``equity_usdt``. Callers without cross-cycle state (single-shot planning,
-    unit tests) size off the live value, which for one cycle is the same
-    thing.
+    Sizing uses :meth:`CarryCycleState.sizing_equity` rather than the live mark
+    in ``equity_usdt``. Callers without cross-cycle state size off the live
+    value, which for one cycle is the same thing.
     """
 
     if decision is None:
@@ -784,16 +808,31 @@ def _carry_target_plan(
         if cycle_state is not None
         else equity_usdt
     )
-    # Clamp to the profile's capital reference. The owner's absolute caps are
-    # calibrated against that number while sizing reads live equity, so an
-    # unclamped producer silently invalidates the load-time envelope proof as
-    # soon as equity leaves the reference in either direction. Applied after the
-    # decision anchor so a profitable day cannot ratchet the book up, and never
-    # applied upward: a smaller account still sizes off its own equity.
+    # Clamp to the profile's capital reference, after the decision anchor so a
+    # profitable day cannot ratchet the book up. Never applied upward: a smaller
+    # account still sizes off its own equity.
     if demo.capital_reference_usdt > 0.0:
         sizing_equity_usdt = min(sizing_equity_usdt, float(demo.capital_reference_usdt))
 
-    exit_symbols = sorted(set(standing_notional) - set(desired))
+    # A reservation whose accepted quantity is already ZERO is a completed exit
+    # desire, not exposure: re-publishing a zero target converges nothing and
+    # just re-creates the pending reservation next cycle, forever.
+    #
+    # Such a reservation is INERT on every path. Excluding it from exits alone
+    # would let a still-desired name escape through the resize branch, where a
+    # zero standing notional clears any dead-band and republishes the whole
+    # target every cycle. It still counts for ADMISSION, so the name is not
+    # re-entered underneath its own unconverged target. Resolving it needs an
+    # operator (``scripts/ops.sh wedged-command``), hence the count.
+    stranded_symbols = sorted(
+        symbol for symbol, (_notional, qty) in standing_rows.items() if qty == 0.0
+    )
+    live_standing = {
+        symbol: notional
+        for symbol, (notional, qty) in standing_rows.items()
+        if qty != 0.0
+    }
+    exit_symbols = sorted(set(live_standing) - set(desired))
     exit_intents = [
         _carry_component_intent(
             action="exit",
@@ -822,17 +861,16 @@ def _carry_target_plan(
     if entry_health_ok:
         signal_valid_until_ms = decision_ts_ms + SIGNAL_VALIDITY_MS
         entry_symbols = sorted(
-            (symbol for symbol in desired if symbol not in standing_notional),
-            # Deepest trailing crowd payment first; the trail is negative for
-            # exactly the prints this strategy collects, so ascending order is
-            # deepest-first. Symbol tiebreak keeps the order deterministic.
+            (symbol for symbol in desired if symbol not in standing_rows),
+            # Deepest trailing crowd payment first: the trail is negative for
+            # the prints this strategy collects, so ascending is deepest-first.
+            # The symbol tiebreak keeps the order deterministic.
             key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
         )
         if cycle_now_ms >= signal_valid_until_ms - ENTRY_PUBLISH_GUARD_MS:
-            # Too late in the decision's life to open NEW risk: the service
-            # would expire these on arrival, and an expiry is a terminal
-            # attempt that permanently suppresses the symbol (stable per-
-            # symbol component ids). Tomorrow's decision re-desires them.
+            # Too late to open NEW risk: the service would expire these on
+            # arrival, and an expiry permanently suppresses the symbol.
+            # Tomorrow's decision re-desires them.
             entry_validity_expired_skips = len(entry_symbols)
             entry_symbols = []
         for symbol in entry_symbols:
@@ -870,10 +908,10 @@ def _carry_target_plan(
                 )
             )
             planned_entries += 1
-        for symbol in sorted(set(desired) & set(standing_notional)):
+        for symbol in sorted(set(desired) & set(live_standing)):
             weight = float(desired[symbol])
             target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
-            standing = float(standing_notional[symbol])
+            standing = float(live_standing[symbol])
             delta = target_notional - standing
             threshold = max(
                 RESIZE_MIN_NOTIONAL_USDT,
@@ -918,6 +956,7 @@ def _carry_target_plan(
         entry_validity_expired_skips=entry_validity_expired_skips,
         entry_dust_skips=entry_dust_skips,
         entry_blocked_reason=entry_blocked_reason,
+        stranded_zero_quantity_reservations=len(stranded_symbols),
     )
 
 
@@ -952,18 +991,15 @@ def _refresh_carry_funding_cache(
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Maintain the on-disk settled-print cache and return the full frame.
 
-    Incremental by construction: each symbol is fetched from one hour before
-    its newest cached print (settlements land exactly on hour boundaries, so
-    the overlap can only re-observe the boundary print, which the strict
-    ``>`` filter drops) or, cold, from the full replay window plus the as-of
-    join lookback. Sweeps are throttled to one per wall hour via the daemon
-    state — prints only change on hour boundaries and an unthrottled 60s
-    cadence would be ~200k pointless REST calls a day.
+    Incremental: each symbol is fetched from one hour before its newest cached
+    print (settlements land on hour boundaries, so the overlap only re-observes
+    the boundary print, which the strict ``>`` filter drops), or cold from the
+    replay window plus the as-of join lookback. Sweeps are throttled to one per
+    wall hour, since prints only change on hour boundaries.
 
-    Per-symbol failures are loud but NON-fatal: one symbol's broken funding
-    endpoint must not take down the whole cycle (the view-health guards decide
-    whether the resulting frame is still safe to decide on). A sweep in which
-    EVERY symbol failed does not count as swept, so the next cycle retries.
+    Per-symbol failures are loud but NON-fatal: the view-health guards decide
+    whether the resulting frame is safe to decide on. A sweep in which EVERY
+    symbol failed does not count as swept, so the next cycle retries.
     """
 
     cached = _normalized_funding_events(read_dataset(root, CARRY_FUNDING_DATASET))
@@ -1046,13 +1082,104 @@ def _refresh_carry_funding_cache(
         if not fresh.is_empty()
         else cached
     )
+    if not fresh.is_empty():
+        _write_funding_follow_snapshot(root, combined)
     return combined, stats
+
+
+def _funding_follow_snapshot_paths(cache_root: Path) -> tuple[Path, Path]:
+    root = Path(cache_root).expanduser() / ".cache" / CARRY_FUNDING_DATASET
+    return root / "latest_funding.parquet", root / "latest_funding.json"
+
+
+def _write_funding_follow_snapshot(root: Path, funding: pl.DataFrame) -> None:
+    """Publish the swept funding series as ONE atomically replaced file.
+
+    The follower has no write access to the leader's root and so cannot take its
+    dataset lock; it reads ``lock=False``. That is safe for a single
+    rename-replaced file and unsafe for the per-symbol partitioned dataset,
+    where a sweep lands one symbol's part at a time and a concurrent read can
+    see some symbols' new settlements and not others.
+
+    A rename is atomic, so a reader gets the whole previous sweep or the whole
+    new one. The sidecar carries the parquet digest so a truncated file is
+    detectable; a failed write leaves the previous snapshot in place. Mirrors
+    ``_write_demo_kline_compact_cache``.
+    """
+
+    if funding.is_empty():
+        return
+    parquet_path, metadata_path = _funding_follow_snapshot_paths(root)
+    try:
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = f"{os.getpid()}.{time.time_ns()}"
+        temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{stamp}.tmp")
+        temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{stamp}.tmp")
+        try:
+            funding.write_parquet(temp_parquet)
+            digest = hashlib.sha256(temp_parquet.read_bytes()).hexdigest()
+            temp_metadata.write_text(
+                json.dumps(
+                    {
+                        "rows": int(funding.height),
+                        "symbols": int(funding.get_column("symbol").n_unique()),
+                        "max_funding_ts_ms": coerce_int(
+                            funding.get_column("funding_ts_ms").max()
+                        ),
+                        "parquet_sha256": digest,
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            # Parquet first: new metadata must never name unreadable bytes.
+            temp_parquet.replace(parquet_path)
+            temp_metadata.replace(metadata_path)
+        finally:
+            temp_parquet.unlink(missing_ok=True)
+            temp_metadata.unlink(missing_ok=True)
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        # Never fatal: the leader does not read this file and a follower
+        # without it falls back to the partitioned dataset.
+        _logger.warning("carry funding follow-snapshot write failed: %s", exc)
+
+
+def _read_leader_funding(follow_root: Path) -> pl.DataFrame:
+    """Read the leader's funding series, preferring its atomic snapshot.
+
+    Falls back to the partitioned dataset when the snapshot is missing, torn,
+    or digest-mismatched — which is what a cold leader looks like before its
+    first sweep.  The fallback carries the torn-read risk the snapshot exists
+    to remove, so it is reported, not silent.
+    """
+
+    parquet_path, metadata_path = _funding_follow_snapshot_paths(follow_root)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        expected = str(metadata.get("parquet_sha256") or "")
+        raw = parquet_path.read_bytes()
+        if expected and hashlib.sha256(raw).hexdigest() == expected:
+            snapshot = pl.read_parquet(io.BytesIO(raw))
+            if not snapshot.is_empty() and {
+                "symbol",
+                "funding_ts_ms",
+                "funding_rate",
+            } <= set(snapshot.columns):
+                return snapshot
+    except (OSError, json.JSONDecodeError, ValueError, pl.exceptions.PolarsError):
+        pass
+    _logger.warning(
+        "carry follower fell back to the leader's partitioned funding dataset; "
+        "this read is not isolated from an in-flight sweep"
+    )
+    return read_dataset(follow_root, CARRY_FUNDING_DATASET, lock=False)
 
 
 def _candidate_filtered_universe(
     top_symbols: list[str],
     *,
     candidate_universe_file: str,
+    realm: VenueRealm,
     standing_symbols: set[str],
 ) -> tuple[list[str], int]:
     """Intersect the turnover universe with the frozen candidate epoch.
@@ -1065,7 +1192,9 @@ def _candidate_filtered_universe(
     skipped = 0
     kept = list(top_symbols)
     if candidate_universe_file:
-        allowed = set(load_candidate_universe(candidate_universe_file).symbols)
+        allowed = set(
+            load_candidate_universe(candidate_universe_file, realm=realm).symbols
+        )
         kept = [symbol for symbol in top_symbols if symbol in allowed]
         skipped = len(top_symbols) - len(kept)
     return sorted(set(kept) | set(standing_symbols)), skipped
@@ -1089,6 +1218,7 @@ def _build_carry_demo_market_data(
     fetch_symbols, candidate_skipped = _candidate_filtered_universe(
         top_symbols,
         candidate_universe_file=demo.candidate_universe_file,
+        realm=candidate_universe_realm(demo.execution_environment),
         standing_symbols=standing_symbols,
     )
     if not fetch_symbols:
@@ -1164,9 +1294,8 @@ def _read_leader_klines(follow_root: Path) -> pl.DataFrame:
             return compact
     except (OSError, pl.exceptions.PolarsError):
         pass
-    # lock=False: the sandboxed follower must not (and cannot) create lock
-    # files under the leader's root; a rename-straddled read raises and the
-    # follower's next 60s cycle retries.
+    # lock=False: the sandboxed follower cannot create lock files under the
+    # leader's root. A rename-straddled read raises and the next cycle retries.
     return read_dataset(follow_root, "event_demo_klines_1h", lock=False)
 
 
@@ -1180,8 +1309,8 @@ def _read_follower_market_data(
     """Paper (follower) data path: leader-root reads only, no REST.
 
     The paper shadow shares the demo sleeve's market-data plane so both books
-    decide on identical inputs. Staleness fails closed: a follower must hold
-    its standing book on a dead leader, exactly like a demo data failure.
+    decide on identical inputs. Staleness fails closed: a dead leader holds the
+    follower's standing book, exactly like a demo data failure.
     """
 
     klines = _read_leader_klines(follow_root)
@@ -1196,15 +1325,16 @@ def _read_follower_market_data(
     fetched_symbols = klines.get_column("symbol").n_unique()
     candidate_skipped = 0
     if demo.candidate_universe_file:
-        allowed = set(load_candidate_universe(demo.candidate_universe_file).symbols) | set(
-            standing_symbols
-        )
+        allowed = set(
+            load_candidate_universe(
+                demo.candidate_universe_file,
+                realm=candidate_universe_realm(demo.execution_environment),
+            ).symbols
+        ) | set(standing_symbols)
         before = fetched_symbols
         klines = klines.filter(pl.col("symbol").is_in(sorted(allowed)))
         candidate_skipped = before - klines.get_column("symbol").n_unique()
-    funding = _normalized_funding_events(
-        read_dataset(follow_root, CARRY_FUNDING_DATASET, lock=False)
-    )
+    funding = _normalized_funding_events(_read_leader_funding(follow_root))
     if funding.is_empty():
         raise CarrySleeveError(f"leader funding cache under {follow_root} is empty")
     stats: dict[str, Any] = {
@@ -1268,19 +1398,16 @@ def run_carry_demo_cycle(
 ) -> PublishedTargetCyclePayload:
     """Plan one CARRY cycle and publish immutable account targets.
 
-    This process has no venue client with order authority, no fill model, no
-    trade ledger, and no notification authority. Every cycle: rebuild the
-    venue view, replay the registered rule to today's desired book, read the
-    account owner's accepted reservations, and publish only the exit-first
-    difference. Failure policy is HOLD-STEADY: any data-build or decision
-    failure publishes nothing and never flattens — the standing book simply
-    persists while ``decision_error``/``decision_stale`` make the outage loud
-    (the cycle watchdog pages on stale cycles separately).
+    Every cycle: rebuild the venue view, replay the registered rule to today's
+    desired book, read the account owner's accepted reservations, and publish
+    only the exit-first difference. Failure policy is HOLD-STEADY: a data-build
+    or decision failure publishes nothing and never flattens, while
+    ``decision_error``/``decision_stale`` make the outage loud.
 
     ``kline_store`` and ``ticker_cache`` are accepted because the shared base
-    daemon passes them to every sleeve's cycle runner; carry deliberately
-    ignores both — its decision bars are close-keyed against the REST window
-    contract, and its intents carry notionals, not prices.
+    daemon passes them to every cycle runner; carry ignores both -- its decision
+    bars are close-keyed against the REST window contract and its intents carry
+    notionals, not prices.
     """
 
     del kline_store, ticker_cache, state_cache_stale_seconds  # base-daemon surface; unused by design
@@ -1313,10 +1440,11 @@ def run_carry_demo_cycle(
             account_route,
             sleeve=SleeveAdapterKind.CARRY,
             strategy_ids=(CARRY_STRATEGY_ID,),
+            journal_cursor=state.journal_cursor,
         )
         reservations = target_reservation_rows(planning.canonical_trades)
-        standing_notional = _carry_standing_book(reservations)
-        standing_symbols = set(standing_notional)
+        standing_rows = _carry_standing_rows(reservations)
+        standing_symbols = set(standing_rows)
         open_trades = (
             planning.canonical_trades.filter(pl.col("status") == "open")
             if not planning.canonical_trades.is_empty()
@@ -1330,6 +1458,7 @@ def run_carry_demo_cycle(
 
         decision: CarryDecision | None = None
         decision_error: str | None = None
+        decision_frozen = False
         rule = load_carry_config()
         trail_by_symbol: dict[str, float] = {}
         build_stats: dict[str, Any] = {}
@@ -1364,24 +1493,34 @@ def run_carry_demo_cycle(
                 max_bar_ts_ms=decision_ts_ms,
             )
             if not view.is_empty():
-                # A cold-started cache begins at the bootstrap hour, so the
-                # view's earliest KEYED bar can sit mid-day and the engine's
-                # daily-grid phase guard would rightly refuse it. Trim the
-                # leading partial day to the first 00:00 UTC key; once the
-                # cache spans the full replay window the trim is a no-op
-                # (window_start_ms is midnight-aligned by construction).
+                # A cold-started cache begins mid-day, which the engine's
+                # daily-grid phase guard rightly refuses, so trim to the first
+                # 00:00 UTC key. A no-op once the cache spans the window.
                 first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
                 if first_ts % DAY_MS != 0:
                     aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
                     view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
             universe_eligible = int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
-            _validate_carry_view_health(
-                view,
-                decision_ts_ms=decision_ts_ms,
-                standing_symbols=standing_symbols,
-            )
-            trail_by_symbol = _trailing_settled_funding(funding, decision_ts_ms=decision_ts_ms)
-            decision = decide_book(view, rule, decision_ts_ms)
+            frozen = state.frozen_decision(decision_ts_ms)
+            if frozen is not None:
+                decision, trail_by_symbol, universe_eligible = frozen
+                decision_frozen = True
+            else:
+                _validate_carry_view_health(
+                    view,
+                    decision_ts_ms=decision_ts_ms,
+                    standing_symbols=standing_symbols,
+                )
+                trail_by_symbol = _trailing_settled_funding(
+                    funding, decision_ts_ms=decision_ts_ms
+                )
+                decision = decide_book(view, rule, decision_ts_ms)
+                state.freeze_decision(
+                    decision_ts_ms=decision_ts_ms,
+                    decision=decision,
+                    trail_by_symbol=trail_by_symbol,
+                    universe_eligible=universe_eligible,
+                )
         except Exception as exc:  # noqa: BLE001 - hold-steady: a data hiccup must never flatten
             decision_error = f"{type(exc).__name__}: {exc}"[:500]
             _logger.exception("carry decision build failed; holding the standing book")
@@ -1408,7 +1547,7 @@ def run_carry_demo_cycle(
         plan = _carry_target_plan(
             decision=decision,
             rule=rule,
-            standing_notional=standing_notional,
+            standing_rows=standing_rows,
             trail_by_symbol=trail_by_symbol,
             demo=demo,
             equity_usdt=equity_usdt,
@@ -1442,16 +1581,16 @@ def run_carry_demo_cycle(
             planning.publisher,
             batch_prefix=f"carry/{cycle_id}",
             exit_intents=kept_exits,
-            # Entries precede resizes so the per-cycle entry budget keeps
-            # publication priority under the stop-at-first-error contract.
+            # Entries before resizes: under stop-at-first-error, that gives the
+            # per-cycle entry budget publication priority.
             entry_intents=[*kept_entries, *kept_resizes],
             created_ts_ns=cycle_now_ms * 1_000_000,
             independent_entry_requests=True,
         )
         published_exit_targets = len(publication.exit_requests)
-        # Independent entry-channel requests publish in caller order and stop
-        # at the first error, so the published list is always a prefix of
-        # [entries..., resizes...]; the split falls out of the prefix length.
+        # Independent entry-channel requests publish in caller order and stop at
+        # the first error, so the published list is a prefix of
+        # [entries..., resizes...] and the split is the prefix length.
         published_entry_channel = len(publication.entry_requests)
         published_entry_targets = min(published_entry_channel, len(kept_entries))
         published_resize_targets = published_entry_channel - published_entry_targets
@@ -1504,6 +1643,7 @@ def run_carry_demo_cycle(
             "decision_ts_ms": decision_ts_ms,
             "decision_error": decision_error,
             "decision_stale": decision_stale,
+            "decision_frozen": decision_frozen,
             "decision_universe_size": decision.universe_size if decision is not None else 0,
             "decision_replay_days": decision.replay_days if decision is not None else 0,
             "desired_book_size": plan.desired_book_size,
@@ -1521,6 +1661,7 @@ def run_carry_demo_cycle(
             "entry_validity_expired_skips": plan.entry_validity_expired_skips,
             "entry_dust_skips": plan.entry_dust_skips,
             "entry_blocked_reason": plan.entry_blocked_reason,
+            "stranded_zero_quantity_reservations": plan.stranded_zero_quantity_reservations,
             "exit_targets_queued": published_exit_targets,
             "entry_targets_queued": published_entry_targets,
             "resize_targets_queued": published_resize_targets,
@@ -1532,10 +1673,8 @@ def run_carry_demo_cycle(
             # Null, not 0.0, when owner health is unavailable: a literal zero
             # reads as a -100% equity spike in every cycles-derived curve.
             "equity_usdt": equity_usdt if not account_owner_health_error else None,
-            # The mark above is descriptive; this is the number the day's
-            # targets were actually sized against. They differ by whatever the
-            # book has marked since the decision, and only this one explains a
-            # published notional.
+            # The mark above is descriptive; this is what the day's targets
+            # were sized against and the only one that explains a notional.
             "sizing_equity_usdt": state.sizing_equity_usdt,
             "sizing_equity_decision_ts_ms": state.sizing_equity_decision_ts_ms,
             "account_owner_health_error": account_owner_health_error,
@@ -1597,14 +1736,18 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     )
     gross = payload.get("desired_gross_weight")
     gross_text = f"{float(gross):.3f}" if isinstance(gross, (int, float)) else "?"
+    stranded = int(payload.get("stranded_zero_quantity_reservations", 0) or 0)
+    # Only rendered when non-zero: a stranded reservation needs an operator.
+    stranded_text = f" stranded={stranded}" if stranded else ""
     return (
         "carry target producer "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
         f"decision_day={decision_day} stale={payload.get('decision_stale')} "
+        f"frozen={payload.get('decision_frozen')} "
         f"book={payload.get('desired_book_size')} gross={gross_text} "
         f"standing={payload.get('standing_symbols')} open={payload.get('open_positions')} "
         f"pub exit/entry/resize={payload.get('exit_targets_queued')}/"
         f"{payload.get('entry_targets_queued')}/{payload.get('resize_targets_queued')} "
-        f"suppressed={suppressed} equity={equity_text} "
+        f"suppressed={suppressed}{stranded_text} equity={equity_text} "
         f"err={payload.get('decision_error') or 'none'}"
     )

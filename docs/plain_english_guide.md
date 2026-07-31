@@ -9,7 +9,7 @@ an as-of date and drift. As of 2026-07-31.
 ## 1. The system in five sentences
 
 1. Two automated strategies trade crypto perpetual contracts on Bybit with
-   **play money only**. No code here has ever placed a real-money order.
+   **play money only**.
 2. **CARRY**, the crowd-fee collector, buys small coins whose short-sellers are
    paying heavily to stay short, and holds while that payment lasts. Live on the
    play-money account since 2026-07-29. **LONG**, the breakout buyer, buys large
@@ -21,16 +21,25 @@ an as-of date and drift. As of 2026-07-31.
 4. Everything runs on one rented Linux server; you get an hourly Telegram digest
    and trade notices, and a separate watcher that cannot trade sends warnings
    when something looks broken.
-5. We do not trust our own simulations, because our own history proved they
-   flatter — a number counts as evidence only once the exact rule is in the code
+5. A simulation score counts as evidence only once the exact rule is in the code
    history and gets graded on days it never saw.
 
 ## 2. The crowd fee (`funding`), because CARRY lives on it
 
 Perpetual contracts never expire. To keep each contract glued to the real coin's
-price, the exchange makes the crowded side pay the other side every 8 hours.
-Crowded longs pay shorts; crowded shorts pay longs; at zero nobody pays. We
-always read the last fee **actually charged**, never a forecast.
+price, the exchange makes the crowded side pay the other side at fixed
+settlement times. Crowded longs pay shorts; crowded shorts pay longs; at zero
+nobody pays. We always read the last fee **actually charged**, never a forecast.
+
+**How often varies by coin, and it changed under us.** Bybit sets the gap per
+symbol — 8 hours everywhere in 2021, but by 2025 about half of all settlements
+were 4-hourly and a fifth hourly. Our entry test reads one settlement, so the
+same threshold means a different *daily* rate on a 4-hour coin than on an
+8-hour one; 73–80% of the coins CARRY has held since 2025 settle faster than 8
+hours. Normalising the test to a daily rate was tried and made it worse — the
+sharpness of one print is doing the work. This is also where a research bug
+lived: the old scorer charged some settlements twice
+([`docs/carry_hold.md`](carry_hold.md) §0).
 
 ## 3. CARRY — the crowd-fee collector (`lane2_carry_hold_v3`)
 
@@ -41,7 +50,7 @@ for absorbing the panic. Once a day, just after midnight UTC:
 | Step | Rule |
 | --- | --- |
 | Rank | 100 most-traded Bybit coins by real traded value over the past day |
-| Qualify | last **settled** crowd fee deeper than 10 cents per $100 per 8h, paid by shorts to holders |
+| Qualify | last **settled** crowd fee deeper than 10 cents per $100 in that one settlement, paid by shorts to holders |
 | Refuse the grind | no entry while the coin is down 5–30% over three days — there the shorts are simply right |
 | Refuse dead coins | no entry while the daily swing is under 5% — a pinned price has no squeeze fuel |
 | Size | up to 10% of the book per coin, scaled by how much the crowd is actually paying; whole book ≤ 1× the account |
@@ -82,27 +91,24 @@ Bitcoin/Ethereum hedge job are all dormant. Restarting it is a fresh decision.
 
 The paper twin is being changed so it no longer decides for itself: it
 republishes demo's targets verbatim (`paper-target-mirror`) and only executes
-them. Two producers reading the same files 13 seconds apart disagreed 6% of the
-time, and on 2026-07-29 that opened and closed a TLMUSDT position demo never
-asked for, for −70.73 USDT. One fleet decides, both execute, so every remaining
-difference between the two books is execution and nothing else.
+them. Two producers reading the same files seconds apart disagreed 6% of the
+time — once opening and closing a TLMUSDT position demo never asked for, for
+−70.73 USDT. One fleet decides, both execute, so every remaining difference
+between the two books is execution and nothing else.
 
-Two more things about the twin that were quietly untrue until now. Its account
-balance was a **fixed number** that never moved — so it could never resize a
-position, and over 1,776 cycles it never did, while demo did 366 times. And it
-was never charged the crowd fees it was supposedly collecting, on a strategy
-whose entire return is crowd fees. Both are fixed in the same change.
+The same change fixes two things the twin got wrong: its account balance was a
+fixed number, so it could never resize a position (0 resizes in 1,776 cycles
+against demo's 366), and it was never charged the crowd fees it was supposedly
+collecting.
 
-**None of this is live yet.** It is written and tested but not deployed on the
-box. Deploying it is your call. Until then the twin still runs its own producer
-with a frozen balance.
+**None of this is live yet** — written and tested, not deployed. Until it is,
+the twin still runs its own producer with a frozen balance.
 
-**Real money is your act alone.** Claude never sets `REAL_MONEY`, never handles
-mainnet credentials, never activates a live account. The mainnet sleeves are off
-in the repository, which a host edit cannot reverse.
-[`docs/real_money.md`](real_money.md) tracks what would be
-involved; `scripts/ops.sh real-money preflight` reports what is missing and
-changes nothing.
+Arming real money is your act alone. The mainnet sleeves are off in the
+repository, which a host edit cannot reverse. The steps are now commands rather
+than hand-work, written out in [`docs/real_money.md`](real_money.md);
+`scripts/ops.sh real-money preflight` reports what is still missing and changes
+nothing.
 
 ## 7. The money limits
 
@@ -139,69 +145,53 @@ What stands between the account and a bad day:
   makes every cap above a ratio of observed wallet equity, not a number someone
   remembered to update. Equity down shrinks the caps immediately; equity up
   waits for a move past a 5% dead band; equity unknown moves nothing.
-- **The per-sleeve partition** (B3, in
+- **The per-sleeve partition** (in
   [`account_kernel.py`](../liquidity_migration/account_kernel.py)) holds each
   sleeve to its own share, so one strategy cannot eat the book, and **the
   exchange-side stop**
   ([`venue_protection.py`](../liquidity_migration/venue_protection.py)) goes on
   in the same request that opens the position.
 
-## 8. What was just removed, and what did not change
+## 8. Deploying, and the correctness pieces
 
-An earlier agent had built a large self-checking layer on top of all of this.
-It is gone — about 10,500 lines across five commits:
+Deploying is: install the code stopped, activate, verify — or run the guarded
+`rollout` when the account is flat ([`docs/operations.md`](operations.md)). What
+each service runs is fixed in one file
+([`scripts/run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh)): a
+unit names a job, the script owns the whole command line, nothing can append to
+it. Which shape is installed is a one-line marker at
+`/etc/liquidity-migration/profile`.
 
-- every service checked an installed file against the checked-out code before it
-  would start, and refused if they disagreed;
-- deploying required typing an approval phrase, and that approval expired after
-  seven days;
-- resets, clock offsets, and shutdowns each wrote their own separate files for
-  later steps to re-read.
-
-None of it moved money, sized a position, or stopped a loss; it checked that
-other things had happened, and when it failed it stopped the fleet.
-
-**Nothing in §7 changed.** The caps, the daily loss halt, the wallet anchoring,
-the sleeve partition, and the exchange-side stops are untouched. So are the
-correctness pieces: one owner per account
+Beside the money limits in §7 sit three correctness pieces: one owner per
+account
 ([`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py)), the
 constant cross-check against the exchange
 ([`account_reconcile.py`](../liquidity_migration/account_reconcile.py)), and the
 checks that run before anything deletes a directory
 ([`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py)).
 
-Deploying is now install the code stopped, activate, verify, or run the guarded
-`rollout` when the account is flat ([`docs/operations.md`](operations.md)). What
-each service runs is still fixed in one file
-([`scripts/run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh)): a
-unit names a job, the script owns the whole command line, nothing can append to
-it. Which shape is installed is a one-line marker at
-`/etc/liquidity-migration/profile`.
-
-**Standing rule from here on:** no more safety features, guards, or gates on an
-agent's own initiative. Propose them; you decide.
+**Standing rule:** no new safety features, guards, or gates on an agent's own
+initiative. Propose them; you decide.
 
 ## 9. How we decide what is true
 
 **A simulation score is an opinion. A score on days the rule could not have
 seen is evidence.** The process
-([`docs/AGENTS.md`](../AGENTS.md)): explore freely on data we have already
+([`AGENTS.md`](../AGENTS.md)): explore freely on data we have already
 seen (Lane 1); when an idea looks good, save its exact rules into the code
 history — that save *is* the registration, there is no other paperwork; from
 that day every new market day adds one honest point (Lane 2); promote or kill
 with a five-line note.
 
-Why we are this strict, all from our own 2026 history: a flagship 2.73
-smoothness claim collapsed to −2.54% once the live stop was replayed; two cost
-errors each reversed a conclusion; five of six effects found on Bybit failed on
-Binance; one idea's entire profit came from 2021; and a fee-counting bug
-double-charged every crowd-fee payment in research. Details in
+Our own failures set that bar: a flagship 2.73 smoothness claim collapsed to
+−2.54% once the live stop was replayed; two cost errors each reversed a
+conclusion; five of six effects found on Bybit failed on Binance; one idea's
+entire profit came from 2021; and a fee-counting bug double-charged every
+crowd-fee payment in research. Details in
 [`docs/backtesting_errors_we_never_repeat.md`](backtesting_errors_we_never_repeat.md).
 
 Honest position today:
 
-- **Every fill in every record here is simulated or demo.** No mainnet API call
-  has ever been made.
 - After the double-count fix, the original buy-when-shorts-pay idea
   (`carry_hold`) scores a corrected benchmark smoothness of **1.21 (t 2.31)** and
   does **not** beat the CONTINUOUS benchmark. The older 2.57 / t 4.87 figures
@@ -267,7 +257,7 @@ file, a record, or a log line.
 | refuse to act when something safety-critical is unknown | fail closed |
 | holding nothing: no positions, orders, or pending wishes | flat |
 | lock preventing two account managers running at once | lease |
-| the alert-only health watcher that cannot trade | watchdog, demo-liveness |
+| the alert-only health watcher that cannot trade | watchdog, demo-liveness, mainnet-liveness |
 | the supervised deploy you trigger on GitHub | rollout |
 | measured snapshot of Bybit demo's real order rules — that realm rejects orders its own stated minimum accepts | demo rule probe |
 | recorded date-and-version marker when the live system changes | change point |
@@ -285,7 +275,6 @@ file, a record, or a log line.
 | saving a rule's exact definition into code history on a date | registration (commit = registration) |
 | the day-by-day record on unseen days — the only real proof | forward record |
 | putting a rule into the live system | promotion |
-| pre-written shut-off conditions for a live strategy | kill criteria |
 | you ordering a change before the evidence earned it | operator override |
 | use only what was knowable at that moment | point-in-time, PIT |
 | failed-idea list; retesting needs a new mechanism, new data, or a fixed defect | negative results ledger |

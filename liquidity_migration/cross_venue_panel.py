@@ -35,17 +35,13 @@ Known source defect — read this before using ``by_open_interest``:
     alts are exactly where short exposure pays. Use funding and premium as the
     primary crowding measurements; treat OI as corroboration on the survivor
     cohort, and replicate any OI-conditioned result funding-only on the full
-    population before believing it. Detail in
-    ``docs/audit/2026-07-24-repo-and-strategy-audit.md``.
+    population before believing it. Detail in ``docs/research_findings.md`` §4.
 
 The builder resolves its symbol universe by canonical identity
 (`symbol_codec`), rejects within-venue partition collisions instead of
 silently collapsing them, and emits a manifest recording the git commit, a
 config hash, population/date bounds, per-venue-year coverage, and every
-exclusion with its reason.
-
-This module reads research roots only. It has no operational authority, opens
-no venue connection, and never touches an account journal.
+exclusion with its reason. It reads research roots only.
 """
 
 from __future__ import annotations
@@ -85,11 +81,9 @@ SOURCES: tuple[_Source, ...] = (
     _Source("bybit", "mark_price_1h", "by_mark", ("close",)),
     _Source("bybit", "index_price_1h", "by_index", ("close",)),
     _Source("bybit", "premium_index_1h", "by_premium", ("close",), required_for_universe=True),
-    # ``open_interest_value`` is dropped deliberately: measured 2026-07-24, it
-    # is a byte-for-byte duplicate of ``open_interest`` across the whole
-    # dataset, not a quote-currency notional. Carrying it would invite a
-    # consumer to read contract units as USD. The panel derives a real notional
-    # below instead.
+    # ``open_interest_value`` is dropped: it is a byte-for-byte duplicate of
+    # ``open_interest`` across the whole dataset, not a quote-currency
+    # notional. The panel derives a real notional below instead.
     _Source("bybit", "open_interest", "by", ("open_interest",)),
     _Source("binance", "klines_1h", "bn", ("close", "turnover_quote"), required_for_universe=True),
     _Source("binance", "binance_usdm_premium_index_1h", "bn_premium", ("close",), required_for_universe=True),
@@ -404,12 +398,9 @@ def build_panel(spec: PanelSpec) -> tuple[pl.DataFrame, dict[str, Any]]:
                 right_on=stamp,
                 by="symbol",
                 strategy="backward",
-                # Both sides are globally sorted ts-first (`panel` by
-                # [decision_ts_ms, symbol]; `funding` by [ts_ms, symbol]), which
-                # implies per-`by`-group order. polars cannot verify sortedness
-                # once `by` groups are given and emits a UserWarning; asserting
-                # what the sorts above already guarantee keeps the output
-                # byte-identical and the test suite warning-free.
+                # Both sides are globally sorted ts-first, which implies
+                # per-`by`-group order. polars cannot verify sortedness once
+                # `by` groups are given, so assert what the sorts guarantee.
                 check_sortedness=False,
             )
             .with_columns(
@@ -421,14 +412,14 @@ def build_panel(spec: PanelSpec) -> tuple[pl.DataFrame, dict[str, Any]]:
     panel = panel.with_columns(
         [pl.col(field).is_not_null().alias(flag) for flag, field in COVERAGE_FIELDS]
     ).with_columns(
-        # Cross-venue differences: the substrate's reason to exist. Mechanical
-        # transforms of aligned fields, not signals.
+        # Cross-venue differences: mechanical transforms of aligned fields,
+        # not signals.
         basis_bp=(pl.col("by_close") / pl.col("bn_close") - 1.0) * 10_000.0,
         premium_diff_bp=(pl.col("by_premium_close") - pl.col("bn_premium_close")) * 10_000.0,
         funding_diff_bp=(pl.col("by_funding") - pl.col("bn_funding")) * 10_000.0,
-        # Open interest in contract units is not comparable across symbols.
-        # The mark price is the venue's own valuation basis, so this is the
-        # quote-currency notional the source dataset does not actually provide.
+        # Open interest in contract units is not comparable across symbols;
+        # the mark price is the venue's own valuation basis, so this is the
+        # quote-currency notional the source dataset lacks.
         by_oi_notional=pl.col("by_open_interest") * pl.col("by_mark_close"),
     )
 

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import os
 import time
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from .env_flags import explicitly_false_or_unset
 from .account_execution_config import (
@@ -18,7 +17,7 @@ from .account_execution_config import (
 )
 from .account_notifications import AccountNotificationEngine, deliver_notification_batch
 from .logging_setup import ensure_default_log_handler
-from .account_contracts import AccountRiskSnapshot, OrderCommand
+from .account_contracts import OrderCommand
 from .account_kernel import AccountExecutionKernel
 from .passive_execution import (
     PassivePaperExecutionAdapter,
@@ -48,13 +47,14 @@ from .account_service_bybit import (
     VerifiedBybitDemoRulesProvider,
 )
 from .continuous_cycle_status import ContinuousCycleStatusReader
-from .deterministic_runtime import Clock, SystemClock
+from .deterministic_runtime import SystemClock
 from .execution_adapters import (
     INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
     ExecutionTwinConfig,
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
+from .bybit_market_data import BybitMarketData
 from .market_capture import (
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
@@ -63,6 +63,11 @@ from .market_capture import (
     recorder_callback,
     symbols_from_file,
 )
+from .paper_account_equity import (
+    MarkedPaperSnapshotProvider,
+    PaperEquityUnavailableError,
+)
+from .paper_funding_accrual import PaperFundingAccrual
 from .protection_engine import AccountProtectionEngine
 
 _logger = logging.getLogger(__name__)
@@ -112,23 +117,35 @@ def _integration_only_health_detail(detail: str) -> str:
     return "; ".join(part for part in (prefix, detail) if part)[:1000]
 
 
-class FixedCapitalSnapshotProvider:
-    """Fresh paper margin snapshots with an explicit fixed capital base."""
+def fresh_l2_midpoints(
+    recorder: SequenceAwareMarketRecorder,
+    symbols: Iterable[str],
+    *,
+    max_market_age_ns: int,
+    input_key_prefix: str,
+) -> tuple[dict[str, float], list[str]]:
+    """Midpoints inside the owner's freshness contract, plus what is unpriceable.
 
-    def __init__(self, equity_usdt: float, *, clock: Clock | None = None) -> None:
-        if not math.isfinite(equity_usdt) or equity_usdt <= 0.0:
-            raise ValueError("paper equity must be finite and positive")
-        self.equity_usdt = float(equity_usdt)
-        self.clock = clock or SystemClock()
+    One definition serves marking equity, protection, and notifications, so a
+    symbol can never be fresh enough to size against but too stale to report.
+    """
 
-    def current(self, *, batch_id: str) -> AccountRiskSnapshot:
-        observed = self.clock.wall_time_ns()
-        return AccountRiskSnapshot(
-            equity_usdt=self.equity_usdt,
-            available_margin_usdt=self.equity_usdt,
-            snapshot_key=f"paper-fixed:{self.equity_usdt:g}:{batch_id}",
-            snapshot_ts_ns=observed,
-        )
+    priced: dict[str, float] = {}
+    unavailable: list[str] = []
+    for symbol in symbols:
+        book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
+        age_ns = observed_wall_ns - book.local_receive_ts_ns if book is not None else -1
+        if book is None or book.sequence_gap or age_ns < 0 or age_ns > max_market_age_ns:
+            unavailable.append(symbol)
+            continue
+        try:
+            priced[symbol] = book.market_ref(
+                input_key=f"{input_key_prefix}:{symbol}:{book.sequence}",
+                source="bybit_raw_l2",
+            ).reference_price
+        except ValueError:
+            unavailable.append(symbol)
+    return priced, unavailable
 
 
 def publish_paper_owner_health(
@@ -188,7 +205,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--demo-rules-file", required=True)
     parser.add_argument("--risk-policy-file", required=True)
     parser.add_argument("--account-id", default="bybit-paper-unified")
-    parser.add_argument("--equity-usdt", type=float, required=True)
+    parser.add_argument(
+        "--equity-usdt",
+        type=float,
+        required=True,
+        help=(
+            "Paper STARTING capital. Standing equity is marked from the journal "
+            "(realized fills less fees, modelled funding, unrealized mark), so "
+            "this is the opening balance and not the reported equity."
+        ),
+    )
+    parser.add_argument(
+        "--funding-poll-seconds",
+        type=float,
+        default=300.0,
+        help="How often to accrue newly settled public funding onto open paper positions.",
+    )
     parser.add_argument("--max-demo-rule-age-hours", type=float, default=168.0)
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
@@ -298,12 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     def _component_for_command(command: OrderCommand) -> tuple[str, str]:
         """Resolve the registered A/B identity (trade id, sleeve) for a command.
 
-        Read from the REDUCED state, not the raw journal. ``journal.events()``
-        returns a full copy and the scan was O(journal) per order submission,
-        inside the 250 ms decision window, growing for the epoch's whole life
-        (2026-07-27 audit L13). ``target_proposals`` is the reducer's own index
-        of exactly these rows, and the answer is immutable per (batch, symbol),
-        so it is memoized.
+        Reads REDUCED state: ``journal.events()`` copies the whole journal, so
+        scanning it per submission is O(journal) inside the 250 ms decision
+        window. ``target_proposals`` is the reducer's index of exactly these
+        rows, and the answer is immutable per (batch, symbol), so memoize it.
         """
 
         key = (command.batch_id, command.symbol.upper())
@@ -331,11 +361,34 @@ def main(argv: list[str] | None = None) -> int:
         clock=runtime_clock,
         reduce_only_max_decision_age_ns=DEFAULT_MAX_MARKET_AGE_NS,
     )
+
+    def _equity_marks(symbols: Iterable[str]) -> dict[str, float]:
+        priced, _unavailable = fresh_l2_midpoints(
+            recorder,
+            symbols,
+            max_market_age_ns=DEFAULT_MAX_MARKET_AGE_NS,
+            input_key_prefix="paper-equity-mark",
+        )
+        return priced
+
+    snapshot_provider = MarkedPaperSnapshotProvider(
+        state_ref=kernel._state_ref,
+        mark_source=_equity_marks,
+        starting_capital_usdt=args.equity_usdt,
+        leverage=policy.max_leverage,
+        clock=runtime_clock,
+    )
+    funding_accrual = PaperFundingAccrual(
+        kernel=kernel,
+        market=BybitMarketData(category="linear", testnet=False),
+        clock=runtime_clock,
+        poll_seconds=args.funding_poll_seconds,
+    )
     service = AccountExecutionService(
         route=route,
         kernel=kernel,
         market_provider=market_provider,
-        snapshot_provider=FixedCapitalSnapshotProvider(args.equity_usdt, clock=runtime_clock),
+        snapshot_provider=snapshot_provider,
         rules_provider=VerifiedBybitDemoRulesProvider(rules),
         risk_policy=policy,
         execution_adapter=execution_adapter,
@@ -343,9 +396,8 @@ def main(argv: list[str] | None = None) -> int:
         clock=runtime_clock,
         max_market_age_ns=DEFAULT_MAX_MARKET_AGE_NS,
     )
-    # Passive pending state is in-memory: after a restart, terminal-cancel any
-    # working order left by a prior process so nothing stays phantom-working;
-    # the convergence loop re-plans the remainder deterministically.
+    # Passive pending state is in-memory, so terminal-cancel any working order
+    # left by a prior process; convergence re-plans the remainder.
     restart_recovery = recover_orphaned_working_orders(
         kernel._state_ref(),
         now_ns=runtime_clock.wall_time_ns(),
@@ -398,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     loop_sequence = 0
     requested_symbols_ready = True
     symbol_health_detail = ""
+    funding_health_detail = ""
     try:
         while True:
             now = time.monotonic()
@@ -429,8 +482,8 @@ def main(argv: list[str] | None = None) -> int:
                 missing = sorted(desired - set(rules))
                 if missing:
                     _logger.error("paper targets lack verified rules: %s", missing)
-                # Capture every pending symbol in parallel. Only the durable
-                # queue head can become executable after exact-book readiness.
+                # Capture every pending symbol in parallel; only the queue head
+                # becomes executable after exact-book readiness.
                 recorder.set_required_symbols(desired)
                 public_stream.update_symbols(desired)
                 last_symbol_refresh = now
@@ -459,6 +512,38 @@ def main(argv: list[str] | None = None) -> int:
                 passive_observations = execution_adapter.poll()
                 if passive_observations:
                     service.runtime.driver.ingest(passive_observations)
+            # Accrue settled funding before equity is read, so a settlement
+            # never shows up as an unexplained equity step one loop later.
+            if funding_accrual.due(now):
+                nonflat_now = sorted(
+                    symbol
+                    for symbol, position in kernel._state_ref().positions.items()
+                    if position.signed_qty != 0.0
+                )
+                funding_marks, _unpriced = fresh_l2_midpoints(
+                    recorder,
+                    nonflat_now,
+                    max_market_age_ns=service.max_market_age_ns,
+                    input_key_prefix="paper-funding-mark",
+                )
+                try:
+                    funding_report = funding_accrual.poll(
+                        marks=funding_marks, now_monotonic=now
+                    )
+                except Exception as exc:  # noqa: BLE001 - accrual must not stop the owner
+                    _logger.exception("paper funding accrual failed")
+                    funding_health_detail = f"funding accrual failed: {type(exc).__name__}: {exc}"
+                else:
+                    funding_health_detail = (
+                        "" if funding_report.healthy else f"funding accrual: {funding_report.detail}"
+                    )
+                    if funding_report.rows_recorded:
+                        _logger.info(
+                            "paper funding accrued rows=%d usdt=%.4f symbols=%s",
+                            funding_report.rows_recorded,
+                            funding_report.funding_usdt,
+                            ",".join(funding_report.symbols_polled),
+                        )
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY if requested_symbols_ready else AccountOwnerHealthStatus.BLOCKED
             )
@@ -498,10 +583,22 @@ def main(argv: list[str] | None = None) -> int:
                     detail=health_detail,
                 )
                 convergence_detail = ""
-            if convergence_detail:
-                health_detail = "; ".join(
-                    part for part in (health_detail, convergence_detail) if part
-                )[:1000]
+            # Health reports the same equity the risk layer sized against, so
+            # an unmarkable book blocks here exactly as it does there.
+            try:
+                equity_breakdown = snapshot_provider.breakdown()
+            except PaperEquityUnavailableError as exc:
+                reported_equity_usdt = 0.0
+                health_status = AccountOwnerHealthStatus.BLOCKED
+                equity_detail = f"equity unavailable: {exc}"
+            else:
+                reported_equity_usdt = equity_breakdown.equity_usdt
+                equity_detail = equity_breakdown.detail()
+            health_detail = "; ".join(
+                part
+                for part in (health_detail, convergence_detail, funding_health_detail, equity_detail)
+                if part
+            )[:1000]
             health_now = time.monotonic()
             health_signature = (
                 health_status.value,
@@ -517,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
                     kernel=kernel,
                     account_root=route.account_path,
                     account_id=route.account_id,
-                    equity_usdt=args.equity_usdt,
+                    equity_usdt=reported_equity_usdt,
                     status=health_status,
                     observed_ts_ns=runtime_clock.wall_time_ns(),
                     loop_sequence=loop_sequence,
@@ -532,34 +629,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.notification_poll_seconds, 0.25
             ):
                 notification_now_ns = runtime_clock.wall_time_ns()
-                midpoint_by_symbol: dict[str, float] = {}
-                unavailable_midpoint_symbols: list[str] = []
-                for symbol, position in kernel._state_ref().positions.items():
-                    if position.signed_qty == 0.0:
-                        continue
-                    book, notification_wall_ns = recorder.current_book_with_observed_wall_ns(
+                midpoint_by_symbol, unavailable_midpoint_symbols = fresh_l2_midpoints(
+                    recorder,
+                    (
                         symbol
-                    )
-                    book_age_ns = (
-                        notification_wall_ns - book.local_receive_ts_ns
-                        if book is not None
-                        else -1
-                    )
-                    if (
-                        book is None
-                        or book.sequence_gap
-                        or book_age_ns < 0
-                        or book_age_ns > service.max_market_age_ns
-                    ):
-                        unavailable_midpoint_symbols.append(symbol)
-                        continue
-                    try:
-                        midpoint_by_symbol[symbol] = book.market_ref(
-                            input_key=f"notification:{symbol}:{book.sequence}",
-                            source="bybit_raw_l2",
-                        ).reference_price
-                    except ValueError:
-                        unavailable_midpoint_symbols.append(symbol)
+                        for symbol, position in kernel._state_ref().positions.items()
+                        if position.signed_qty != 0.0
+                    ),
+                    max_market_age_ns=service.max_market_age_ns,
+                    input_key_prefix="notification",
+                )
                 notification_health_errors: list[str] = []
                 if unavailable_midpoint_symbols:
                     notification_health_errors.append(
@@ -576,17 +655,15 @@ def main(argv: list[str] | None = None) -> int:
                     notification_health = "healthy · " + health_detail.strip()[:240]
                 else:
                     notification_health = "healthy"
-                # The paper twin has no external venue: the local journal is
-                # position truth by construction, so the healthy defaults of
-                # prepare() are the honest report rather than an assumption.
+                # No external venue here, so the local journal is position
+                # truth and prepare()'s healthy defaults are correct.
                 notification = notifier.prepare(
                     midpoint_by_symbol=midpoint_by_symbol,
                     health=notification_health,
                     continuous_status=(
                         continuous_status_reader.render(now_ns=notification_now_ns)
                         if continuous_status_reader is not None
-                        # See the demo owner: an unconfigured cycle root means
-                        # the sleeve is retired, so the digest carries no line.
+                        # Unconfigured cycle root means the sleeve is retired.
                         else ""
                     ),
                     now_ns=notification_now_ns,

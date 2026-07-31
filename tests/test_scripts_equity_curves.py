@@ -1,12 +1,8 @@
-"""Tests for scripts/equity_curves.py (+ scripts/continuous_deployed_equity_refresh.py).
-
-Covers two crash-on-edge fixes and the continuous frozen-start routing (audit2):
-(1) start-date year shift no longer raises on Feb 29 (clamps to Feb 28);
-(2) continuous_deployed_equity_refresh.stats() returns mar=None on a no-drawdown curve
-    instead of dividing by zero;
-(3) the continuous sleeve inherits the frozen deployed start (start_date=None)
-    unless --start/--years explicitly asks for a window.
-Normal (finite) inputs stay byte-identical.
+"""Tests for scripts/equity_curves.py and scripts/continuous_deployed_equity_refresh.py:
+a start-date year shift clamps to Feb 28 on Feb 29; ``stats()`` returns mar=None on a
+no-drawdown curve instead of dividing by zero; and the continuous sleeve inherits the
+frozen deployed start (start_date=None) unless --start/--years asks for a window.
+Finite inputs stay byte-identical.
 """
 from __future__ import annotations
 
@@ -44,7 +40,7 @@ def _eq_df(returns: list[float]) -> pl.DataFrame:
     return pl.DataFrame({"ts_ms": ts, "basket_return": returns})
 
 
-# ---- audit2: defect (1) — Feb-29 start-date shift ---------------------------
+# ---- Feb-29 start-date shift ------------------------------------------------
 
 def test_old_inline_shift_crashes_on_feb29():
     # Proves the original expression is defective: replace(year=...) on Feb 29
@@ -77,17 +73,17 @@ def test_main_start_computation_does_not_raise_on_feb29(monkeypatch):
     assert start == "2021-02-28"
 
 
-# ---- audit2: defect (2) — mar on a no-drawdown curve ------------------------
+# ---- mar on a no-drawdown curve ---------------------------------------------
 
 def test_stats_no_drawdown_returns_none_mar():
-    # Monotonically increasing equity -> zero drawdown -> old code divided by 0.
+    # Monotonically increasing equity -> zero drawdown -> a naive mar divides by 0.
     out = continuous_refresh.stats(_eq_df([0.01] * 10))
     assert out["mar"] is None
     assert out["max_drawdown_pct"] == 0.0
 
 
 def test_stats_with_drawdown_mar_unchanged():
-    # A path WITH drawdown must yield the exact same finite mar as before the fix.
+    # A path WITH drawdown still yields the ordinary finite mar.
     import numpy as np
 
     rets = [0.05, 0.05, -0.20, 0.03, 0.04, -0.02, 0.06]
@@ -114,7 +110,7 @@ def test_stats_with_drawdown_mar_unchanged():
     assert out["max_drawdown_pct"] < 0.0
 
 
-# ---- audit2c: defect (3) — continuous inherits the frozen deployed start ----
+# ---- continuous inherits the frozen deployed start --------------------------
 
 def _drive_main(monkeypatch, tmp_path: Path, argv: list[str]) -> dict[str, object]:
     """Run ``main`` for the continuous sleeve and capture run_venue's kwargs."""

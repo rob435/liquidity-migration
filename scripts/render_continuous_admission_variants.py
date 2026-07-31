@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""CONTINUOUS admission-variant research renders (Lane-1; grades nothing).
+"""CONTINUOUS admission-variant research renders.
 
-Reproduction and forward scorer for `docs/research_findings.md`.
-Runs component variants of the deployed single funding-gated cell through the
-real engine (`run_continuous_equity_component`, existing config fields only)
-and renders hedged books through the exact deployed overlay stack imported
-from `scripts/continuous_deployed_equity_refresh.py`.
+Reproduction and forward scorer for `docs/research_findings.md`. Runs component
+variants of the deployed single funding-gated cell through the real engine
+(`run_continuous_equity_component`, existing config fields only) and renders
+hedged books through the deployed overlay stack imported from
+`scripts/continuous_deployed_equity_refresh.py`.
 
 The registered Lane-2 formulation is `fund0_venue_scoped`: the settled-funding
 admission floor applies only to symbols in the both-venue cross-venue-panel
 universe; Bybit-only contracts admit regardless of funding sign. Its scorer is
-this script re-run with a later --end-date, compared against `fund0_base`
-re-run identically. The `venue_scoped` and `reject_unknown` variants patch
-`_funding_admission_filter` in-process (recorded in each cell's
-`variant_meta.json`); runtime code is never modified and the deployed profile
-is untouched.
+this script re-run with a later --end-date, compared against `fund0_base` re-run
+identically. `venue_scoped` and `reject_unknown` patch
+`_funding_admission_filter` in-process, recorded in each cell's
+`variant_meta.json`; the deployed profile is untouched.
 
     PYTHONIOENCODING=utf-8 POLARS_MAX_THREADS=6 .venv/bin/python \
         scripts/render_continuous_admission_variants.py all --end-date 2026-07-17
@@ -67,8 +66,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
 DATA_ROOT = SHARED / "bybit_full_pit"
 CROSS_VENUE_PANEL = SHARED / "cross_venue_panel_v1"
-# Session-local artifacts from the 2026-07-26 redesign; renders that need them
-# skip gracefully when absent.
+# Session-local artifacts; renders that need them skip gracefully when absent.
 RD = DATA_ROOT / "reports" / "continuous_redesign_2026-07-26"
 BENCH_COMPONENTS = DATA_ROOT / "reports" / "equity_curves_sl35_2026-07-26" / "continuous" / "components"
 WINDOW_START = dt.date(2023, 3, 13)
@@ -227,19 +225,16 @@ def admission_variant_filter(
 ) -> Any:
     """Build the patched ``_funding_admission_filter`` for one admission variant.
 
-    Extracted from the runner method so the registered ``fund0_venue_scoped``
-    forward scorer is unit-testable. It was previously a closure with no tests at
-    all, and silent drift in the patched filter (the +1 h bisect boundary, the
-    concat ordering, the counter names) corrupts the forward comparison any
-    promotion depends on (2026-07-27 audit L18).
-
     ``venue_scoped``: the settled-funding floor applies only to symbols in the
     both-venue cross-venue-panel universe; Bybit-only contracts admit regardless
     of funding sign.
     ``reject_unknown``: symbols with no settled print at the decision timestamp
     are rejected rather than admitted.
-    """
 
+    A top-level function, not a closure, so the forward scorer is unit-testable:
+    drift in the +1h bisect boundary, the concat ordering, or the counter names
+    silently corrupts the forward comparison.
+    """
     if mode not in {"venue_scoped", "reject_unknown"}:
         raise ValueError(f"unknown admission variant mode {mode!r}")
 

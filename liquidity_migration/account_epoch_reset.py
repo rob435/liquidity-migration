@@ -752,10 +752,9 @@ def _apply_missing_root(plan: _RootPlan) -> AccountEpochClearResult:
             ):
                 raise RuntimeError(f"missing account epoch root changed during creation: {plan.root}")
         except BaseException:
-            # There is no POSIX conditional-rmdir primitive. A pathname check
-            # followed by rmdir can delete a replacement installed between the
-            # two syscalls, so a failed creation deliberately leaves any
-            # directory behind for fail-closed operator inspection.
+            # No POSIX conditional-rmdir exists: a pathname check then rmdir can
+            # delete a replacement installed between the two syscalls, so a
+            # failed creation leaves the directory behind.
             raise
     finally:
         if child_fd >= 0:
@@ -989,15 +988,12 @@ def clear_account_epoch_roots_preserving_locks(
 ) -> tuple[AccountEpochClearResult, ...]:
     """Clear all epoch payloads after prevalidating every root and lock inode.
 
-    Traversal and every deletion are rooted in validated directory descriptors,
-    so replacing a nested directory with a symlink cannot redirect deletion
-    outside the epoch root. Canonical paths are reopened only to rebind their
-    planned identities and for the final read-only exact-tree rescan. Linux
-    mount IDs additionally reject same-device nested bind mounts. The batch is
-    planned in full before the first unlink. A later I/O or non-cooperating
-    mutation can still leave a partial clear (and failed missing-root creation
-    deliberately leaves its inode for inspection), so callers must keep owners
-    stopped after any apply failure.
+    Traversal and deletion are rooted in validated directory descriptors, so
+    swapping a nested directory for a symlink cannot redirect deletion outside
+    the epoch root; Linux mount IDs also reject same-device nested bind mounts.
+    The batch is planned in full before the first unlink. A later I/O error or
+    non-cooperating mutation can still leave a partial clear, so callers must
+    keep owners stopped after any apply failure.
     """
     normalized = tuple(_lexical_absolute(root) for root in roots)
     if len(normalized) != len(set(normalized)):

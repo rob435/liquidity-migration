@@ -9,7 +9,8 @@ This workflow crosses SSH, credentials, deployment, and running demo/paper
 services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
-- `scripts/deploy_vps_live.sh` with `install|activate|verify`;
+- `scripts/deploy_vps_live.sh` with
+  `install|activate|verify|rollout|activate-mainnet|stop-mainnet`;
 - `scripts/print_vps_recovery_command.sh` and the current SSH restore scripts;
 - `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.
@@ -25,8 +26,8 @@ receipts or this skill.
 3. Confirm the task authorizes recovery/deployment, not only diagnosis.
 4. Verify all credential paths remain demo/paper and `REAL_MONEY=false`.
 5. Read current workflow/script refusal conditions.
-6. Record whether the fleet is quiescent and whether an operational receipt
-   already exists.
+6. Record whether the fleet is quiescent and which profile marker
+   (`/etc/liquidity-migration/profile`) is installed.
 
 If the checkout is dirty, preserve and inspect its diff first. Do not reset,
 overwrite, or delete it without explicit cleanup authority and a verified
@@ -69,10 +70,9 @@ Installation, authorization, and activation are separate boundaries.
 EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
   scripts/deploy_vps_live.sh install
 
-# Configure/review the stopped host, then issue a new exact operational receipt
-# through scripts/ops.sh operational-authority --execute issue.
+# Configure/review the stopped host, then activate.
 
-# Reopens that receipt and starts only its allowed topology.
+# Reads the installed profile marker and starts only that topology.
 EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
   scripts/deploy_vps_live.sh activate
 
@@ -88,20 +88,21 @@ and a quiescent fleet. It installs locked dependencies, validates code, installs
 the current unit manifest, disables all project units, writes resolved sleeve
 toggles, and starts nothing.
 
-Authority is create-only and binds the exact commit, machine, profile,
-environment bytes, runtime inputs, and root identities. Activation must follow
-without an intervening checkout or config edit. Verify never repairs drift.
+Activation must follow the install without an intervening checkout or config
+edit. Verify never repairs drift: it compares installed unit files against the
+checkout's manifest and asserts topology, not the installed HEAD.
 
-Confirm the success marker, exact commit, resolved sleeves, receipt profile,
+Confirm the success marker, exact commit, resolved sleeves, installed profile,
 credential mode, service/timer state, owner-before-producer readiness, liveness,
 and journal/venue agreement appropriate to the task.
 
 ## GitHub Actions
 
-The manual workflow exposes exactly `install`, `activate`, and `verify`.
-It runs CI first, configures the pinned SSH identity, and passes the workflow
-commit to the selected mode. A verify workflow cannot update a stale checkout;
-run install while stopped, issue new authority, then activate.
+The manual workflow exposes `rollout`, `install`, `activate`, and `verify` — four
+of the six deploy modes; the two mainnet modes are deliberately shell-only. It
+runs CI first, configures the pinned SSH identity, and passes the workflow commit
+to the selected mode. A verify workflow cannot update a stale checkout; run
+install while stopped, then activate.
 
 If host/IP/deploy identity changes permanently, update workflow variables or
 pins, scripts, tests, recovery material, and operator docs together. Run the
@@ -114,8 +115,9 @@ focused runtime/deploy tests and lint before proposing a push.
   rotation across workflow, authorized keys, scripts, and tests.
 - Permission denied: verify user, authorized keys, modes, and provider state.
 - Expected-commit mismatch: run stopped install; verify is not deploy.
-- Missing/invalid authority: keep the fleet stopped, correct reviewed inputs,
-  then issue a new receipt; never fabricate or edit one.
+- Wrong or missing profile marker: keep the fleet stopped, correct the reviewed
+  inputs, and re-run install (only `rollout` writes the marker); never hand-edit
+  it.
 - Dirty checkout: inspect and archive; request cleanup authority.
 - CI-only failure: compare workflow variables/secrets and environment with the
   successful local command without exposing secrets.

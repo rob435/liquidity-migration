@@ -53,38 +53,23 @@ __all__ = [
     "validate_private_order_permission",
 ]
 
-#: The only REST host this repository may address with demo credentials.
-#: Retained as a name because five demo-enforcement layers cite it.
+#: The only REST host addressed with demo credentials.
 DEMO_REST_ENDPOINT = REALM_REST_ENDPOINTS[VenueRealm.DEMO]
 
 
 def _require_realm_endpoint(client: Any, what: str, *, realm: VenueRealm) -> None:
-    """Assert the realm we actually resolved to, rather than the one we asked for.
+    """Assert the realm actually resolved to, not the one asked for.
 
-    Every realm assertion elsewhere checks ``self.realm``/``self.testnet`` — the
-    values we *pass in*. The host is then chosen entirely inside pybit's ``demo=``
-    kwarg contract, and nothing here has ever read back the result. That makes
-    the realm a third-party promise rather than an invariant this code enforces:
-    a pybit upgrade that renamed or dropped the kwarg, or a shim that replaced
-    ``HTTP``, would silently address the wrong host while every local guard still
-    read what it asked for.
+    Every other realm check reads ``self.realm``/``self.testnet`` -- the values
+    passed in. The host is chosen inside pybit's ``demo=`` kwarg contract, so a
+    pybit upgrade that renamed or dropped the kwarg, or a shim replacing
+    ``HTTP``, would address the wrong host while every local guard still read
+    what it asked for. The check is symmetric: the resolved endpoint must equal
+    the selected realm's, for both realms.
 
-    For demo that used to fail closed only by luck — demo keys do not
-    authenticate against mainnet, so the exchange rejects it. The last line of
-    defence should not be someone else's auth error, and now that mainnet
-    credentials can exist on the host that luck runs in the wrong direction: a
-    dropped kwarg would send a *mainnet-authenticated* client wherever pybit
-    defaults, or a demo-intended run to the funded account.
-
-    So the check is symmetric. Whichever realm was explicitly selected is the
-    one the resolved endpoint must equal — this never skips, and there is no
-    realm for which it is a no-op.
-
-    The check is scoped to real pybit transports by module, so the suite's many
-    hand-rolled doubles stay usable. ``test_pybit_still_exposes_the_demo_endpoint``
-    pins the other half of the contract — that a genuine pybit ``HTTP`` still
-    carries ``endpoint`` at all — so a silent removal fails the suite rather than
-    disarming this guard in production.
+    Scoped by module to real pybit transports so hand-rolled test doubles stay
+    usable. ``test_pybit_still_exposes_the_demo_endpoint`` pins the other half:
+    a genuine pybit ``HTTP`` still carries ``endpoint``.
     """
 
     if not type(client).__module__.startswith("pybit"):
@@ -102,14 +87,10 @@ def _require_realm_endpoint(client: Any, what: str, *, realm: VenueRealm) -> Non
 def resolve_private_credentials(*, realm: VenueRealm | str) -> tuple[str | None, str | None]:
     """Resolve the credential pair for one explicitly named realm.
 
-    ``realm`` is keyword-only and has no default, so no caller reaches a venue
-    without naming which one. The two realms read *different* environment
-    variables, so a stale demo key can never authenticate a mainnet run.
-
-    ``REAL_MONEY`` remains the arming switch, with ``reject_ambiguous_flag``
-    semantics intact on both realms: a typo'd value fails startup rather than
-    coercing to a default in either direction. Demo refuses to run while it is
-    armed; mainnet refuses to run unless it is.
+    ``realm`` is keyword-only with no default, and the two realms read different
+    environment variables. ``REAL_MONEY`` is the arming switch and a typo'd
+    value fails startup rather than coercing to a default: demo refuses to run
+    while it is armed, mainnet refuses unless it is.
     """
 
     selected = venue_realm(realm)
@@ -164,10 +145,9 @@ def validate_demo_order_permission(*, confirm_demo_orders: bool) -> None:
 def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, str]:
     """Return whether Bybit key metadata permits state-changing order actions.
 
-    Bybit can report granular ContractTrade permissions while the whole key is
-    still read-only. The readOnly flag is authoritative for this incident class:
-    a read-only key can read wallet/positions, so ordinary liveness checks pass,
-    but order-submitting daemons later fail on set_leverage/place_order.
+    Bybit reports granular ContractTrade permissions even on a read-only key, so
+    readOnly is authoritative here: such a key passes ordinary liveness checks
+    but fails later on set_leverage/place_order.
     """
     raw_read_only = api_key_info.get("readOnly", api_key_info.get("readonly"))
     if raw_read_only is None:
@@ -197,11 +177,9 @@ def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, 
 class BybitPrivateClient:
     category: str = "linear"
     testnet: bool = False
-    # ``demo`` is the pybit transport kwarg and stays the field five existing
-    # enforcement layers read via ``getattr(client, "demo")``. ``realm`` is the
-    # authority. Omitting ``realm`` resolves to DEMO and never to MAINNET, which
-    # is the whole point: reaching the funded account requires someone to have
-    # typed it, and REAL_MONEY to be armed on top of that.
+    # ``demo`` is the pybit transport kwarg, read elsewhere via
+    # ``getattr(client, "demo")``. ``realm`` is the authority and defaults to
+    # DEMO when omitted.
     demo: bool = True
     realm: VenueRealm | str | None = None
     api_key: str | None = None
@@ -209,9 +187,8 @@ class BybitPrivateClient:
     retries: int = 2
     retry_sleep_seconds: float = 0.5
     rate_limiter: _BybitRestRateLimiter | None = None
-    # Read-only clients need no lease. Every state-changing call must carry a
-    # currently held canonical lease bound to the authenticated account and API
-    # credential, in the same realm.
+    # Read-only clients need no lease. Every state-changing call needs a held
+    # canonical lease bound to the authenticated account, credential, and realm.
     mutation_lease: DemoAccountMutationLease | None = None
     _client: Any = field(init=False, repr=False)
 
@@ -225,9 +202,8 @@ class BybitPrivateClient:
                 f"BybitPrivateClient realm {self.realm.value!r} contradicts demo={self.demo!r}"
             )
         if self.realm is VenueRealm.MAINNET and not env_flag("REAL_MONEY"):
-            # Constructing a mainnet transport is itself a real-money act: it
-            # signs requests against the funded account. Naming the realm is not
-            # authorization; REAL_MONEY is, and it is the owner's switch alone.
+            # A mainnet transport signs requests against the funded account, so
+            # naming the realm is not on its own authorization.
             reject_ambiguous_flag("REAL_MONEY")
             raise RuntimeError(
                 "Refusing to build a mainnet BybitPrivateClient while REAL_MONEY is unset or false"
@@ -294,14 +270,11 @@ class BybitPrivateClient:
         try:
             payload = self._call_once("place_order", category=self.category, **params)
         except BybitDataError as exc:
-            # A duplicate-orderLinkId reject (110089) is NOT a failure: it means
-            # Bybit already accepted an order under this idempotency key — almost
-            # always our own prior submit (e.g. the trade router's WS submit
-            # reached the venue, the ack was lost, and the REST fallback re-sent
-            # the same orderLinkId). Resubmitting a second order would be wrong;
-            # raising would orphan a LIVE position (the caller records an error
-            # and writes no ledger row). Probe by orderLinkId and return the
-            # existing order so the submit is idempotent end to end.
+            # A duplicate-orderLinkId reject (110089) means Bybit already
+            # accepted an order under this idempotency key, normally our own
+            # prior submit whose ack was lost. Resubmitting would double the
+            # order and raising would orphan a live position, so probe by
+            # orderLinkId and return the existing order.
             if not _is_duplicate_order_link(exc):
                 raise
             existing = self._lookup_order_by_link(
@@ -309,11 +282,9 @@ class BybitPrivateClient:
                 order_link_id=params["orderLinkId"],
             )
             if existing is None:
-                # A duplicate id proves that some prior request reached Bybit,
-                # but until order/trade history becomes readable its outcome is
-                # unknown. Never turn this into a local rejection: that would
-                # remove the command from working exposure and permit a second
-                # order while the first may still be live.
+                # The duplicate id proves a prior request reached Bybit, but
+                # its outcome is unreadable. A local rejection would drop the
+                # command from working exposure and allow a second order.
                 raise BybitSubmissionUncertain(
                     f"Bybit reports duplicate orderLinkId {params['orderLinkId']!r}, "
                     "but the existing order is not yet observable"
@@ -322,10 +293,8 @@ class BybitPrivateClient:
             recovered["_idempotent_existing_order"] = True
             return recovered
         result = dict(payload.get("result", {}))
-        # V5 exposes the server receipt timestamp at the response envelope,
-        # outside ``result``. Preserve it for account-owner request/ack latency
-        # evidence; dropping it makes one-way entry/response decomposition
-        # impossible even when the operator supplies a clock-offset receipt.
+        # V5 puts the server receipt timestamp on the response envelope,
+        # outside ``result``; it is the request/ack latency evidence.
         response_time_ms = payload.get("time")
         if response_time_ms is not None:
             result["_response_time_ms"] = response_time_ms
@@ -449,7 +418,7 @@ class BybitPrivateClient:
                 )
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        # Recovery callers reconstruct accounting from these rows; a silently
+        # Recovery reconstructs accounting from these rows, so a silently
         # truncated tail is worse than a failed pass.
         raise BybitDataError(
             f"Bybit get_order_history pagination exceeded max_pages={page_limit}; "
@@ -500,7 +469,7 @@ class BybitPrivateClient:
                 )
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        # Fill recovery reconstructs position truth from these rows; a
+        # Fill recovery reconstructs position truth from these rows, so a
         # silently truncated tail is worse than a failed pass.
         raise BybitDataError(
             f"Bybit get_trade_history pagination exceeded max_pages={page_limit}; "
@@ -615,8 +584,8 @@ class BybitPrivateClient:
                 )
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        # Truncation would silently drop the actual closing record; the
-        # non-strict mode tolerates missing endpoints, never missing tails.
+        # Truncation would drop the actual closing record; non-strict mode
+        # tolerates missing endpoints, never missing tails.
         raise BybitDataError(
             f"Bybit get_closed_pnl pagination exceeded max_pages={page_limit}; "
             "refusing an incomplete result"
@@ -689,9 +658,8 @@ class BybitPrivateClient:
                 )
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        # The funding reconciler advances its query window past whatever this
-        # returns; a silently truncated settlement tail would be permanently
-        # skipped while the pass reported healthy.
+        # The funding reconciler advances its window past whatever this
+        # returns, so a truncated settlement tail is skipped permanently.
         raise BybitDataError(
             f"Bybit get_transaction_log pagination exceeded max_pages={page_limit}; "
             "refusing an incomplete result"
@@ -706,10 +674,9 @@ class BybitPrivateClient:
         if effective_sell <= 0.0:
             raise ValueError("sell_leverage must be positive")
         self._assert_submit_allowed("set_leverage")
-        # Retry a transient set_leverage failure rather than silently dropping an
-        # otherwise-valid entry. _call_once (not _call) keeps the original error
-        # text -- which carries the "110043 not modified" marker -- intact, and a
-        # 110043 reject returns immediately without wasting retries.
+        # Retry a transient set_leverage failure rather than dropping a valid
+        # entry. _call_once (not _call) keeps the original error text, which
+        # carries the "110043 not modified" marker, so that case returns at once.
         attempts = max(self.retries, 1)
         last_error: BybitDataError = BybitDataError("Bybit set_leverage failed")
         for attempt in range(attempts):
@@ -773,12 +740,9 @@ class BybitPrivateClient:
         try:
             payload = self._call_once("set_trading_stop", **params)
         except BybitDataError as exc:
-            # ErrCode 34040 "not modified": the requested stop levels are the
-            # levels already installed on the venue. The desired protection
-            # exists, so this is a converged no-op, not a failure — the same
-            # classification set_leverage applies to its 110043 twin. Treating
-            # it as a rejection latched reconciliation unhealthy and blocked
-            # execution health while venue protection was correct.
+            # ErrCode 34040 "not modified": the requested stop levels are
+            # already installed, so this is a converged no-op, not a failure --
+            # the same classification set_leverage gives its 110043 twin.
             message = str(exc).lower()
             if "34040" not in message and "not modified" not in message:
                 raise
@@ -792,9 +756,8 @@ class BybitPrivateClient:
         return None
 
     def _call_once(self, method_name: str, **params: Any) -> dict[str, Any]:
-        # Every current single-shot private call is state-changing. Keep the
-        # capability check here as well as on the public method so a future
-        # caller cannot bypass it by reaching for this transport helper.
+        # Every single-shot private call is state-changing, so the capability
+        # check lives here too and not only on the public method.
         self._assert_submit_allowed(method_name)
         method = getattr(self._client, method_name)
         try:
@@ -823,8 +786,8 @@ class BybitPrivateClient:
         for attempt in range(self.retries):
             try:
                 if requires_mutation_lease:
-                    # Re-prove the lease before every retry, not just before a
-                    # potentially long transport/backoff sequence begins.
+                    # Re-prove the lease before every retry, not just once
+                    # before a long transport/backoff sequence.
                     self._assert_submit_allowed(method_name)
                 if self.rate_limiter is not None:
                     self.rate_limiter.acquire()
@@ -835,22 +798,20 @@ class BybitPrivateClient:
                 return payload
             except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
                 last_error = exc
-                # A non-zero retCode that is not a rate-limit is a definite venue
-                # reject -- retrying the identical request only repeats it and
-                # wastes the backoff. Transport errors and rate-limits still retry.
+                # A non-zero retCode that is not a rate-limit is a definite
+                # reject; retrying the identical request just wastes backoff.
                 if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
                     raise
-                # pybit (5.x) raises InvalidRequestError for a non-zero retCode BEFORE our
-                # retCode check ever runs, so the branch above never classified live venue
-                # rejects -- they were retried with backoff and the final raise dropped the
-                # retCode/retMsg. Match by class name to avoid a hard pybit dependency here.
+                # pybit 5.x raises InvalidRequestError for a non-zero retCode
+                # before the branch above ever sees it. Match by class name to
+                # avoid a hard pybit dependency.
                 if type(exc).__name__ == "InvalidRequestError" and not _is_rate_limit(exc):
                     raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
                 if attempt + 1 >= self.retries:
                     break
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
-        # Keep the venue's last words in the surfaced message -- callers ledger
-        # str(exc), and __cause__ does not survive into those error columns.
+        # Keep the venue's message inline: callers ledger str(exc) and
+        # __cause__ does not survive into those error columns.
         raise BybitDataError(f"Bybit {method_name} failed after retries: {last_error}") from last_error
 
 
@@ -990,8 +951,8 @@ class BybitPrivateWebSocketStream:
         if type(success) is not bool and not is_error:
             return
         with self._control_lock:
-            # Every authenticated connection generation must prove its own
-            # resubscription acknowledgements; old ACKs cannot cross a reconnect.
+            # Each connection generation proves its own resubscription ACKs;
+            # old ACKs cannot cross a reconnect.
             self._acked_topics.clear()
             if success is True and not is_error:
                 self._last_control_error = ""

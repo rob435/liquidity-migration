@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Periodic BTC+ETH hedge target for one explicit demo or paper account route.
 # HEDGE_ACTION defaults to dry-run; only HEDGE_ACTION=execute publishes targets
-# to the mandatory owner inbox. This launcher has no credentials/order authority.
+# to the owner inbox.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

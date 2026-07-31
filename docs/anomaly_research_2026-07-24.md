@@ -7,9 +7,8 @@ mechanisms tested under one harness. Two survived every screen.
 
 **Labelling, per `docs/governance.md`.** All of this is **Lane-1 exploration on
 already-seen data**. These runs selected these results and therefore cannot
-grade them. Nothing here is a validated alpha claim, authorizes a deployment, or
-touches the real-money boundary. A Lane-2 verdict needs a committed config and
-scorer graded on days that postdate the commit.
+grade them. A Lane-2 verdict needs a committed config and scorer graded on days
+that postdate the commit.
 
 **2026-07-28 correction notice.** The settlement-exact funding accounting
 this document uses (`lane2_blend.settlement_exact_funding`) charged every
@@ -192,9 +191,8 @@ can actually use.
 **Funding carry fails here**: it lives in thin names and dies in deep ones. Its
 era split explains why — 12.6, 14.0, 10.5, 12.8, **−4.2, −52.1** bp/day for
 2021→2026. It broke precisely when funding turned structurally negative in
-2025-26 (the inversion measured in
-`docs/audit/2026-07-24-repo-and-strategy-audit.md` §5). Internally consistent,
-and a reason not to build on it now.
+2025-26 (the inversion measured in `docs/research_findings.md` §4).
+Internally consistent, and a reason not to build on it now.
 
 ## 5. Negative results worth keeping
 
@@ -275,7 +273,7 @@ survivor, which argues the effect is a convergence force, not a trend.
 - **Delisting announcements.** See §6.1.
 - **Sub-hourly data.** The rolloff mechanism is real but decays inside an hour.
   Unreachable with hourly bars; local tick datasets are event windows, not
-  panels (`docs/audit/2026-07-24-repo-and-strategy-audit.md` §6, Tier D).
+  panels (`docs/data.md`, Tier D).
 
 ## 6. Corrections to the superseded working documents
 
@@ -536,13 +534,12 @@ rather than confidence:
 - Both are **Lane-1**: these profiles were selected on this history and cannot
   grade themselves. The run labels are `exploratory` and `historical_equity`.
 - Neither reconstruction is a literal daemon replay; capacity, netting, order
-  lifecycle, and live state can differ (`docs/active_trading_logic.md`).
+  lifecycle, and live state can differ (`docs/trading_logic.md`).
 - The 4× CONTINUOUS chart is **presentation leverage only** — it models no margin
   or liquidation and must never be quoted as a modelled result.
 
 The honest next step is to resolve `funding=partial` before treating either
-sleeve's Sharpe as real, and to run `scripts/check_kill_criteria.py` against the
-live journal, which needs VPS access.
+sleeve's Sharpe as real.
 
 ---
 
@@ -678,13 +675,13 @@ Applying the same 3.89× to the modelled 2.19%: net over 646 days falls from
 explain forward losses** — consistent with §11.1, where break-even needed 10.6×.
 The tail remains the better explanation, which is what the §11 experiment tests.
 
-### 12.3 Kill criteria: no trip, but no sample either
+### 12.3 The live journal held no sample
 
-`ops.sh kill-criteria` against the live journal returns **NO TRIP** — and that
-verdict is empty. The 2026-07-22 reset restarted the record, so at 5.39 forward
-days CONTINUOUS has **0 attributed round trips** and LONG has **1** (net −0.53
-USDT). K2 and K3 do not evaluate until 2026-10-17. This is not evidence of
-health; it is evidence of no data.
+The 2026-07-22 reset restarted the record, so at 5.39 forward days CONTINUOUS
+had **0 attributed round trips** and LONG **1** (net −0.53 USDT). Any verdict
+read off that book was empty — not evidence of health, evidence of no data.
+(The per-sleeve kill-criteria checker that produced the original verdict has
+since been removed.)
 
 ### 12.4 Attention/salience alphas: all dead at realistic cost
 
@@ -721,8 +718,9 @@ including a large part of the config registered a day earlier. The single
 highest-value open question is therefore **not another signal**: it is whether
 maker fills are achievable at scale, because that alone moves the round trip from
 15.56 bp back toward 4 bp and restores everything above. That is precisely what
-`passive_execution_experiment_2026-07-20.md` was built to answer, and reading it
-is now the top priority.
+the registered passive-execution A/B was built to answer (read thresholds and
+kill rule in `docs/research_findings.md` §1), and reading it is now the top
+priority.
 
 ---
 
@@ -838,8 +836,8 @@ come back to you are precisely the ones that were about to go wrong. You save
 **Chase-then-cross is the right answer and it already exists.** The hybrid beats
 both immediate execution (31.30 vs 28.42) and today's cost basis (vs 23.86). The
 lever is the passive **fill rate**, not removing the fallback — which is exactly
-what arm B of `passive_execution_experiment_2026-07-20.md` already implements at
-a 25% fill rate. Raise the rate; keep the cross.
+what arm B of the registered A/B (`liquidity_migration/passive_execution.py`)
+already implements at a 25% fill rate. Raise the rate; keep the cross.
 
 ### 15.2 Entries are only half the bill
 
@@ -892,9 +890,8 @@ primary exit to backstop, which is what it should have been.
 
 ## 16. Phase 0 — the instruments, repaired (2026-07-25)
 
-Executing `docs/roadmap_2026-07-25.md` §2. Three of the four tasks close; one is
-blocked on access. Two published claims are withdrawn, and **Gate 0.3 is
-explained** — the CONTINUOUS backtest and the forward record were never
+Three of the four tasks close; one is blocked on access. Two published claims
+are withdrawn, and **Gate 0.3 is explained** — the CONTINUOUS backtest and the forward record were never
 measuring the same strategy.
 
 Run identity: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
@@ -1112,8 +1109,8 @@ grades nothing.
 
 ## 17. Phase 1 — the honest re-screen, and 2A/2B (2026-07-25)
 
-Executing `docs/roadmap_2026-07-25.md` §3–§4. One pass over the mechanisms that
-had survived something, at the honest cost basis, threshold **t ≥ 3.25**.
+One pass over the mechanisms that had survived something, at the honest cost
+basis, threshold **t ≥ 3.25**.
 
 **Gate 1 result: 0 of 12 cells clear t ≥ 3.25.** That is the roadmap's expected
 outcome, so no further sweeps were run.
@@ -1293,9 +1290,8 @@ grades nothing (`docs/governance.md` §1).
 
 ## 18. Phase 5A — tuned for *t*. One mechanism clears, and it is uninvestable (2026-07-25)
 
-`docs/roadmap_2026-07-25.md` §8. One-dimensional strictness sweeps on the
-already-selected books, selecting on **t** rather than mean, at each cell's own
-measured turnover. Harness `scripts/tune_phase5.py`. 8 cells × 3 parameters ×
+One-dimensional strictness sweeps on the already-selected books, selecting on
+**t** rather than mean, at each cell's own measured turnover. Harness `scripts/tune_phase5.py`. 8 cells × 3 parameters ×
 3 signals × 2 venues = **144 cells swept, all reported**. Lane-1 on seen data.
 
 ### 18.1 The roadmap's arithmetic is confirmed empirically
@@ -1448,8 +1444,7 @@ account lost 275%. All Lane-1 on seen data; grades nothing.
 
 ## 19. Phase 5C — one external hypothesis, tested to destruction (2026-07-25)
 
-`docs/roadmap_2026-07-25.md` §8, 5C. Few hypotheses, chosen for mechanism
-plausibility, tested deeply. One was imported and it turned out to explain a
+Few hypotheses, chosen for mechanism plausibility, tested deeply. One was imported and it turned out to explain a
 result this program had already produced — and then to fail for the reason its own
 author gave.
 
@@ -1723,9 +1718,9 @@ model.
 ### 20.2 Passive execution: a fast probe joined to the registered experiment
 
 Discovery first: the roadmap's "measure passive execution" already has a
-registered in-flow A/B
-(`docs/preregistration/passive_execution_experiment_2026-07-20.md`, arm B
-shipped in `liquidity_migration/passive_execution.py` on the paper owner).
+registered in-flow A/B (arm B shipped in
+`liquidity_migration/passive_execution.py` on the paper owner; read thresholds
+in `docs/research_findings.md` §1).
 That instrument is the right grader — hash-assigned arms on *real* entries at
 *signal* times — and it is slow for a measured reason: §16.3's realized-scale
 finding (~1 position on 38% of days) makes 100 fills/arm months of accrual.

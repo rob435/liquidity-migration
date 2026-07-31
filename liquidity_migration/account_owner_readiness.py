@@ -1,10 +1,9 @@
 """Bounded readiness gate for account-owner dependent services.
 
-``After=`` and ``Requires=`` only order process startup.  They do not prove
-that an owner has initialized the exact account route, reconciled its journal,
-published a healthy head-bound observation, or received fresh public-market
-data.  This module supplies that missing fail-closed boundary for systemd
-``ExecStartPost`` and checked deployment.
+``After=``/``Requires=`` only order process startup; they do not prove the
+owner initialized its route, reconciled its journal, published a healthy
+head-bound observation, or has fresh market data. This is that fail-closed
+boundary, for systemd ``ExecStartPost`` and checked deployment.
 """
 
 from __future__ import annotations
@@ -517,9 +516,8 @@ def require_account_owner_ready(
     market_age_ns = market_now_ns - market_ts_ns
     if market_age_ns < 0 or market_age_ns > max_age_ns:
         raise RuntimeError(f"account owner live market is stale: age_ns={market_age_ns}")
-    # Generation identifiers, not cross-thread wall-clock ordering, bind these
-    # independent projections. Both must be current-generation and fresh; their
-    # timestamps do not prove which completed first.
+    # These projections are bound by generation id, not wall-clock ordering:
+    # their timestamps do not prove which completed first.
     return AccountOwnerReadiness(
         environment=selected,
         account_id=account_id,

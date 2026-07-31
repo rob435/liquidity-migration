@@ -1,24 +1,17 @@
-"""Executable form of ``configs/lane2_premium_momentum_blend_v1.json``.
+"""Executable form of ``configs/lane2_premium_momentum_blend_v1.json``: panel in,
+daily score row out.
 
-Research-only. This module reads a panel and produces a daily score row. It has
-no venue access, no order path, and no runtime surface; nothing here can open the
-real-money door.
+Two modelling choices change the answer and are load-bearing:
 
-Two corrections are baked in deliberately, because both changed the answer:
+* Funding is charged at settlements, not pro rata. It is a discrete cash event
+  at 00/08/16 UTC; pro-rating inverts which signal carries the book.
+* Each leg is averaged separately and then differenced (via
+  :mod:`liquidity_migration.cross_section`). Pooling the tails, or an uncentred
+  ``rank/len`` percentile, gives them different name counts and makes a
+  market-neutral book directional.
 
-* **Funding accrues at settlements, not pro rata.** Earlier drafts charged
-  ``rate * hours / 8``, which applies whatever rate happens to be current across
-  the whole hold. Real funding is a discrete cash event at 00/08/16 UTC. The
-  pro-rated version roughly doubled the premium leg (33.63 -> 16.55 bp/day) and
-  halved the momentum leg, i.e. it inverted which signal was carrying the book.
-* **Each leg is averaged separately and then differenced.** Pooling both tails
-  into one mean, or using an uncentred ``rank/len`` percentile, hands the tails
-  different name counts and quietly makes a market-neutral book directional.
-  That lives in :mod:`liquidity_migration.cross_section` and is reused here.
-
-The volatility scale for day ``t`` uses returns strictly before ``t``. That is the
-only place a look-ahead could hide, so it is kept explicit rather than folded
-into a rolling helper.
+The volatility scale for day ``t`` uses returns strictly before ``t``, kept
+explicit rather than folded into a rolling helper.
 """
 
 from __future__ import annotations
@@ -69,14 +62,9 @@ class BlendConfig:
 
     @property
     def cost_basis_bp(self) -> float:
-        """The cost basis a score is charged at unless a caller overrides it.
-
-        The measured basis, not the registered 4 bp maker assumption. The rule
-        (universe, signals, weights, volatility target) is untouched; only the
-        price of trading it is corrected to what the forward journal actually
-        paid. ``maker_round_trip_bp`` is retained so the as-registered number
-        stays reproducible.
-        """
+        """Default cost basis: the measured round trip, not the registered 4 bp
+        maker assumption. ``maker_round_trip_bp`` is retained so the
+        as-registered number stays reproducible."""
         return self.measured_round_trip_bp
 
     @classmethod
@@ -110,11 +98,9 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     interval we want, so the shift is by a full ``h`` rather than ``h - 1``.
     """
     age = pl.col("by_funding_age_h")
-    # A settlement bar has age ~0 (exact 0.0 on-hour prints), or an age DROP
-    # versus the prior bar when the settlement bar itself is missing. The old
-    # ``age < FRESH_FUNDING_MAX_AGE_H`` predicate also matched the next bar's
-    # float-epsilon age (0.9999999999999999) and charged every 8h/4h/2h
-    # settlement twice (2026-07-28 correction).
+    # A settlement bar has age ~0, or an age DROP versus the prior bar when the
+    # settlement bar itself is missing. The half-window keeps the next bar's
+    # float-epsilon age (0.9999999999999999) from being charged a second time.
     is_settlement = (age < FRESH_FUNDING_MAX_AGE_H / 2.0) | (
         age < age.shift(1).over("symbol")
     ).fill_null(False)
@@ -161,9 +147,8 @@ def daily_book(
     """One row per decision day: the blended net book return in bp.
 
     Entries are sampled every ``hold_hours`` from the first observation so the
-    holding windows never overlap. Overlapping entries do not bias the mean but
-    badly inflate its t-statistic, which is how an earlier draft convinced itself
-    a weekly hold was better.
+    holding windows never overlap; overlapping entries leave the mean unbiased
+    but badly inflate its t-statistic.
 
     ``cost_bp`` defaults to :attr:`BlendConfig.cost_basis_bp` — the measured
     round trip. Pass ``cfg.maker_round_trip_bp`` to reproduce the as-registered
@@ -193,8 +178,7 @@ def daily_book(
 def volatility_scale(ret_bp: np.ndarray, cfg: BlendConfig) -> np.ndarray:
     """Leverage per day from volatility measured strictly before that day.
 
-    Days without a full lookback get scale 0 rather than an unscaled position:
-    trading at unknown risk is the thing the target exists to prevent.
+    Days without a full lookback get scale 0, not an unscaled position.
     """
     returns = np.asarray(ret_bp, dtype=float) / 1e4
     scale = np.zeros(len(returns))
@@ -230,11 +214,8 @@ def summarize(ret_bp: np.ndarray, cfg: BlendConfig) -> dict[str, float]:
 def score(
     panel: pl.DataFrame, cfg: BlendConfig, *, cost_bp: float | None = None
 ) -> dict[str, Any]:
-    """Full pass: panel in, scoring row out.
-
-    The charged cost basis is reported in the result so no downstream table can
-    be ambiguous about which cost a number was produced at.
-    """
+    """Full pass: panel in, scoring row out. The charged cost basis is echoed in
+    the result so downstream tables are unambiguous about it."""
     charged = cfg.cost_basis_bp if cost_bp is None else float(cost_bp)
     book = daily_book(prepare(panel, cfg), cfg, cost_bp=charged)
     result: dict[str, Any] = {"config_id": cfg.config_id, "cost_basis_bp": charged}

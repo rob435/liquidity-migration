@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """Run a repository script with a POSIX-only stdlib stub on Windows (research only).
 
-``liquidity_migration.storage`` (and a few lock helpers) import ``fcntl`` at
-module top, which does not exist on Windows.  Read-only renders and
-derived-artifact rebuilds are executed on the Windows research box, so this
-wrapper installs a no-op ``fcntl`` stub into ``sys.modules`` before running the
-target script in-process.
+``liquidity_migration.storage`` and a few lock helpers import ``fcntl`` at module
+top, which Windows lacks. This wrapper installs no-op stubs into ``sys.modules``
+before running the target script in-process.
 
-Scope and safety:
-- The stub exists only inside this research process.  Operational entry points
-  (VPS systemd services, ops.sh) run on Linux with the real ``fcntl`` and never
-  import this wrapper.
-- No-op locking is acceptable only for single-process research runs; do not
-  run two stubbed writers against the same dataset concurrently.
-- Research renders make no crash-durability or POSIX-durability claim.
+The stubs live only inside this process; Linux entry points never import it.
+No-op locking holds only for single-process runs — do not run two stubbed writers
+against one dataset — and stubbed runs make no crash-durability claim.
 
 Usage: .venv\\Scripts\\python.exe scripts/run_with_stub.py <script.py> [args...]
 """
@@ -35,8 +29,7 @@ def ensure_posix_stubs() -> None:
     try:
         import fcntl  # noqa: F401
     except ModuleNotFoundError:
-        # Attributes are set dynamically on a synthesised module, so mypy cannot
-        # know them; the ignores are the price of the stub, not a defect.
+        # type: ignore[attr-defined] below: attributes set on a synthesised module.
         stub = types.ModuleType("fcntl")
         stub.LOCK_SH = 1  # type: ignore[attr-defined]
         stub.LOCK_EX = 2  # type: ignore[attr-defined]
@@ -54,8 +47,7 @@ def ensure_posix_stubs() -> None:
         sys.modules["fcntl"] = stub
 
     # storage.exclusive_file_lock needs O_DIRECTORY/O_NOFOLLOW flock semantics
-    # that Windows lacks.  Patch the single lock boundary with a thread-level
-    # no-op BEFORE any caller from-imports it.  Single-process research only.
+    # Windows lacks. Patch it before any caller from-imports it.
     import contextlib
     import threading
 
@@ -72,10 +64,8 @@ def ensure_posix_stubs() -> None:
 
     storage_module.exclusive_file_lock = _research_process_lock
 
-    # account_kernel durability opens directory fds for fsync (POSIX-only) and
-    # its JSONL projection append uses os.fchmod (POSIX-only).  Replace the
-    # write boundary with atomic-but-not-crash-durable Windows equivalents and
-    # drop the optional projection.
+    # account_kernel fsyncs directory fds and fchmods its JSONL projection, both
+    # POSIX-only. Swap in atomic-but-not-crash-durable writes; drop the projection.
     from liquidity_migration import account_kernel as account_kernel_module
 
     def _research_atomic_replace(path: Path, data: bytes) -> None:
@@ -88,19 +78,16 @@ def ensure_posix_stubs() -> None:
     account_kernel_module._atomic_replace = _research_atomic_replace
     account_kernel_module._append_jsonl_projection = lambda *_args, **_kwargs: None
 
-    # continuous_btc_risk fsyncs files/directories through O_RDONLY descriptors,
-    # which Windows rejects (Errno 9). Atomic-but-not-crash-durable is the same
-    # trade already accepted above for the account kernel.
+    # continuous_btc_risk fsyncs through O_RDONLY descriptors; Windows rejects
+    # that with Errno 9.
     from liquidity_migration import continuous_btc_risk as continuous_btc_risk_module
 
     continuous_btc_risk_module._fsync_file = lambda path: None
     continuous_btc_risk_module._fsync_directory = lambda path: None
 
-    # artifact_snapshot.rename_noreplace deliberately fails closed off
-    # Linux/Darwin (renameat2/renamex_np). Windows os.rename is natively
-    # no-replace (FileExistsError when the destination exists), so the
-    # research substitute keeps the evidence-preservation semantics while
-    # dropping only the POSIX atomicity claim this wrapper already disclaims.
+    # artifact_snapshot.rename_noreplace fails closed off Linux/Darwin
+    # (renameat2/renamex_np). Windows os.rename is natively no-replace, so the
+    # substitute keeps the no-clobber semantics and drops only POSIX atomicity.
     from liquidity_migration import account_route as account_route_module
     from liquidity_migration import artifact_snapshot as artifact_snapshot_module
 
@@ -114,8 +101,7 @@ def ensure_posix_stubs() -> None:
 
     artifact_snapshot_module.rename_noreplace = _research_rename_noreplace
     account_route_module.rename_noreplace = _research_rename_noreplace
-    # Directory fsync via an O_RDONLY descriptor is POSIX-only (Windows denies
-    # opening directories as files). Same non-durable research trade as above.
+    # Windows denies opening a directory as a file, so directory fsync is out.
     account_route_module._fsync_directory = lambda path: None
 
 

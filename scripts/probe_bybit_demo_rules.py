@@ -28,6 +28,7 @@ from liquidity_migration.account_candidate_universe import (  # noqa: E402
     CANDIDATE_UNIVERSE_KIND,
     load_candidate_universe,
 )
+from liquidity_migration.venue_realm import VenueRealm  # noqa: E402
 from liquidity_migration.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
@@ -94,12 +95,9 @@ def _flatness_snapshot(client: Any) -> dict[str, Any]:
 def _cleanup_probe_state(client: Any) -> dict[str, Any]:
     """Cancel probe orders, recover probe fills, and report every exposure seen.
 
-    The caller starts from proved flatness, so any position observed here was
-    created during this probe attempt. Recovery is mandatory for safety but it
-    does not rescue the evidence gate: any observed position makes the attempt
-    fail. The structured report is retained in both passed and failed receipts.
+    The caller starts flat, so any position observed here came from this probe.
+    Recovering it does not rescue the attempt — an observed position still fails.
     """
-
     started_ts_ns = time.time_ns()
     open_orders_observed = [dict(row) for row in _open_orders_all_kinds(client)]
     cancellation_attempts: list[dict[str, Any]] = []
@@ -289,7 +287,9 @@ def _symbols_from_file(path: str | Path) -> tuple[list[str], dict[str, Any]]:
             raise ValueError("symbol source contains invalid JSON") from exc
         if isinstance(value, dict):
             if value.get("kind") == CANDIDATE_UNIVERSE_KIND:
-                frozen = load_candidate_universe(resolved, snapshot=snapshot)
+                frozen = load_candidate_universe(
+                    resolved, snapshot=snapshot, realm=VenueRealm.DEMO
+                )
                 return list(frozen.symbols), {
                     "kind": "candidate_universe_artifact",
                     "path": str(resolved),
@@ -522,9 +522,9 @@ def main(argv: list[str] | None = None) -> int:
             instrument = instrument_rows.get(symbol)
             if instrument is None:
                 raise RuntimeError(f"{symbol}: absent from api-demo instruments-info")
-            # Keep the PostOnly distance bound to a current per-symbol bid. A
-            # single all-symbol snapshot can be many minutes old by the tail of
-            # a broad exceptional refresh and is not a safe latency shortcut.
+            # Re-read the bid per symbol: a single all-symbol snapshot can be
+            # minutes stale by the tail of a broad refresh, which would compute
+            # the PostOnly distance against an old price.
             tickers = client.get_tickers(symbol=symbol)
             if not tickers:
                 raise RuntimeError(f"{symbol}: api-demo ticker is unavailable")

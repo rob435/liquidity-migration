@@ -1,11 +1,6 @@
-"""Decision contract for cleanup of the active CONT profile.
-
-Claim and scope: deleting retired CONT paths must preserve deterministic forward
-demo/paper decisions for the sole ``continuous_ensemble_v2`` profile: confirmed
-entry timing, component targets, causal size multipliers, max-hold sleeve exits,
-and account-target identity. These fixture checks are refactor-parity evidence
-only; they are not alpha, performance, fill-quality, capacity, or mainnet
-evidence.
+"""Refactor-parity contract for the sole ``continuous_ensemble_v2`` profile: deleting
+retired CONT paths must preserve confirmed entry timing, component targets, causal size
+multipliers, max-hold sleeve exits, and account-target identity.
 """
 
 from __future__ import annotations
@@ -41,8 +36,8 @@ from liquidity_migration.continuous_events import compute_continuous_decile_pane
 
 
 ACTIVE_COMPONENTS = (
-    # Operator override 2026-07-26: single turn3_pop3 cell with the
-    # settled-funding >= 0 admission (docs/continuous_redesign_2026-07-26.md).
+    # Single turn3_pop3 cell with the settled-funding >= 0 admission
+    # (docs/research_findings.md).
     ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
 )
 STRATEGY_ID = "continuous_fade_v2"
@@ -238,7 +233,7 @@ def test_active_profile_uses_confirmed_bar_one_hour_after_close() -> None:
     )
     deciding_bar = current_hour - 2 * MS_PER_HOUR
     # The prior confirmed bar travels alongside the deciding bar so the live
-    # crowding gate can reproduce the engine's fresh-entrant rule (audit M2);
+    # crowding gate can reproduce the engine's fresh-entrant rule;
     # the deciding-bar contract itself is the unprefixed columns.
     deciding_columns = [
         column for column in actual.columns if not column.startswith(PRIOR_BAR_COLUMN_PREFIX)

@@ -1,10 +1,7 @@
-"""audit2 regression: regenerate_hedge_warmstart.daily_returns gap-guard.
-
-The naive builder paired adjacent PRESENT kline days with no calendar guard, so
-a missing UTC day made a multi-day close-to-close move be mislabeled as a single
-day's return -> corrupted the BTC/ETH beta in deploy/hedge_warmstart/*.csv. The
-fix only emits a return when cur - prev == one calendar day; contiguous series
-are numerically identical to the naive computation.
+"""``regenerate_hedge_warmstart.daily_returns`` emits a return only when cur - prev is one
+calendar day. Pairing adjacent PRESENT kline days across a gap mislabels a multi-day
+close-to-close move as one day's return and corrupts the BTC/ETH beta in
+deploy/hedge_warmstart/*.csv; contiguous series are numerically unchanged.
 """
 
 from __future__ import annotations
@@ -22,7 +19,7 @@ MS_DAY = mod.MS_DAY
 
 
 def _naive(closes: dict[int, float]) -> dict[int, float]:
-    """The pre-fix builder: pairs adjacent present days, no calendar guard."""
+    """Pairs adjacent present days with no calendar guard."""
     days = sorted(closes)
     out: dict[int, float] = {}
     for prev, cur in zip(days, days[1:]):

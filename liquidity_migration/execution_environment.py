@@ -1,24 +1,16 @@
-"""Explicit forward-execution environment contract.
-
-Strategy producers never decide whether they may submit orders.  They publish
-targets to exactly one account owner selected by this value; the owner adapter
-is the only layer with venue-mutation authority.
-
-Three owners exist, and they are not three points on one scale:
+"""Which account owner a producer's targets are routed to.
 
 ``demo``
-    Bybit's api-demo realm. Real prices, simulated fills, no capital.
+    Bybit's api-demo realm: real prices, simulated fills, no capital.
 ``paper``
-    A credential-free twin of the demo owner. It has no venue at all; its
-    cycles are routing/lifecycle evidence, never fill evidence.
+    Credential-free twin of the demo owner. No venue at all, so its cycles are
+    routing/lifecycle evidence, never fill evidence.
 ``mainnet``
-    The funded Bybit account. Selecting it is necessary but never sufficient:
-    ``REAL_MONEY`` is the arming switch and belongs to the owner alone.
+    The funded Bybit account. Selecting it is not sufficient; ``REAL_MONEY`` is
+    the separate arming switch.
 
-``EXECUTION_ENVIRONMENT_VALUES`` exists so a fourth member can never again be
-added while a dozen ``{"demo", "paper"}`` literals silently keep the old
-arity — which is exactly the defect (B10) that made adding the third one a
-project rather than a line.
+Import ``EXECUTION_ENVIRONMENT_VALUES`` instead of restating the member set, so
+adding a member does not leave stale literals behind.
 """
 
 from __future__ import annotations
@@ -50,9 +42,8 @@ _ACCOUNT_IDS: dict[ExecutionEnvironment, str] = {
     ExecutionEnvironment.MAINNET: "bybit-mainnet-unified",
 }
 
-#: The venue realm an environment authenticates against. ``paper`` maps to
-#: nothing on purpose: it holds no credentials and addresses no venue, so a
-#: caller that needs a realm must handle its absence rather than be handed a
+#: The venue realm an environment authenticates against. ``paper`` is absent on
+#: purpose: it has no venue, so callers must handle ``None`` rather than get a
 #: plausible-looking default.
 _VENUE_REALMS: dict[ExecutionEnvironment, VenueRealm] = {
     ExecutionEnvironment.DEMO: VenueRealm.DEMO,
@@ -81,3 +72,16 @@ def venue_realm_for_environment(value: object) -> VenueRealm | None:
     """The realm this environment authenticates against, or None for ``paper``."""
 
     return _VENUE_REALMS.get(execution_environment(value))
+
+
+def candidate_universe_realm(value: object) -> VenueRealm:
+    """The realm whose frozen candidate universe this environment reads.
+
+    ``paper`` has no venue but is the demo owner's twin, so it reads the
+    demo-frozen artifact.
+    """
+
+    environment = execution_environment(value)
+    if environment is ExecutionEnvironment.PAPER:
+        return VenueRealm.DEMO
+    return _VENUE_REALMS[environment]

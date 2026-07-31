@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 # Carry-hold demo sleeve — daily-decision target producer on a 60s diff loop.
 #
-# Carry runner. The target-publishing demo service uses this script; whether it
-# runs is toggled per-sleeve in deploy/sleeves.env (the single source of truth,
-# don't hardcode its state here). The paper service uses the same runner with
-# EXECUTION_ENVIRONMENT=paper plus MARKET_FOLLOW_ROOT pointed at the demo root
-# (the follower reads the leader's kline + carry_funding_events caches and
-# never touches REST). The shared account owners exclusively handle execution,
-# fills, reconciliation, and notifications.
-# The daemon wakes every INTERVAL_SECONDS, but the decision itself is DAILY:
-# it computes for the current 00:00 UTC boundary once klines allow (00:20),
-# and every other cycle is an idempotent diff against the standing book.
+# Whether it runs is toggled per-sleeve in deploy/sleeves.env. The paper service
+# uses the same runner with EXECUTION_ENVIRONMENT=paper and MARKET_FOLLOW_ROOT
+# pointed at the demo root, reading the leader's kline + carry_funding_events
+# caches instead of REST. The account owners handle execution and fills.
 #
-# Hard gate: EXECUTION_ENVIRONMENT is explicit and requires its account-owner
-# route. Sizing comes exclusively from the shared operational profile
-# (ACCOUNT_RISK_POLICY_FILE); the rule itself is the immutable Lane-2
-# registration configs/lane2_carry_hold_v3.json.
+# The daemon wakes every INTERVAL_SECONDS, but the decision is DAILY: computed
+# for the current 00:00 UTC boundary once klines allow (00:20); every other
+# cycle is an idempotent diff against the standing book.
+#
+# EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. Sizing
+# comes from the shared operational profile (ACCOUNT_RISK_POLICY_FILE); the rule
+# is configs/lane2_carry_hold_v3.json.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -73,9 +70,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
             echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
-        # A producer has no execution authority and must never hold either.
-        # The unit strips both; this is the check that says so out loud if the
-        # strip ever fails.
+        # The unit strips these; fail loudly if the strip ever misses.
         if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
             echo "A target producer must not receive venue credentials." >&2
             exit 2
@@ -128,13 +123,13 @@ if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
 # MARKET_FOLLOW_ROOT: the paper shadow reads the demo root's kline and settled-
-# funding caches read-only instead of running a second REST plane — one shared
-# market-data plane per box AND identical decision inputs. Empty = this sleeve
+# funding caches read-only instead of running a second REST plane, giving one
+# market-data plane per box and identical decision inputs. Empty = this sleeve
 # fetches its own data (the demo leader).
 if [[ -n "${MARKET_FOLLOW_ROOT:-}" ]]; then
     if [[ "$MARKET_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        # A follower never writes the caches — following your own root means a
-        # permanently frozen market view. Only the SHADOW sleeve sets this.
+        # A follower never writes the caches, so self-following freezes its
+        # market view permanently.
         echo "MARKET_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
         exit 2
     fi

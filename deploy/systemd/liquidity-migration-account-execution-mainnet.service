@@ -8,9 +8,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
-# The mainnet credential file. Disjoint from bybit-demo.env on purpose: it
-# carries BYBIT_REAL_API_KEY/SECRET and REAL_MONEY, and nothing in this
-# repository writes it. The owner does, by hand, root-owned 0600.
+# Disjoint from bybit-demo.env: carries BYBIT_REAL_API_KEY/SECRET and
+# REAL_MONEY. Installed by hand, root-owned 0600.
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
 EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
@@ -21,9 +20,8 @@ Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution-mainnet.service main
 ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution-mainnet.service readiness
-# B16: the owner degrades rather than exiting when a startup check fails over
-# open exposure, so Restart=always is a recovery path and not a crash loop
-# during which nothing reconciles, protects, or exits.
+# The owner degrades rather than exits when a startup check fails over open
+# exposure, so Restart=always is a recovery path, not a crash loop.
 Restart=always
 RestartSec=2
 TimeoutStartSec=240

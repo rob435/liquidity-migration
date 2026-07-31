@@ -1,7 +1,7 @@
 """Credential-free Bybit public REST and WebSocket market-data clients.
 
-Nothing in this module can resolve credentials or mutate an account.  Strategy
-producers import this plane directly; demo execution authority lives elsewhere.
+Strategy producers import this plane directly; execution authority lives
+elsewhere.
 """
 
 from __future__ import annotations
@@ -27,17 +27,9 @@ except ModuleNotFoundError:  # pragma: no cover - dependency may be absent befor
 class _PybitRateLimitLogFilter(logging.Filter):
     """Drop pybit's 10006 (rate limit) retry chatter.
 
-    pybit's _handle_retryable_error logs at ERROR level twice for every 10006
-    retry -- once before sleeping ("Hit the API rate limit on <url>. Sleeping
-    then trying again.") and once after computing the reset window ("API rate
-    limit will reset at HH:MM:SS. Sleeping for Nms. Retrying..."). With ~180
-    demo symbols hitting the public kline endpoint at top-of-hour, plus pybit's
-    default max_retries=3, this produces 10K-22K identical lines per minute
-    in the journal. The retries themselves are working as intended (pybit
-    sleeps until X-Bapi-Limit-Reset-Timestamp and recovers without our
-    wrapper getting involved); the log volume just buries real errors and
-    fills disk. Filter only the 10006-specific lines; let other pybit errors
-    through untouched.
+    pybit logs at ERROR twice per 10006 retry, which at ~180 symbols hitting the
+    kline endpoint on the hour is 10K-22K identical lines per minute. The
+    retries themselves work; only the 10006-specific lines are filtered.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -49,9 +41,8 @@ class _PybitRateLimitLogFilter(logging.Filter):
         )
 
 
-# Install the filter at module import. pybit instantiates its logger lazily on
-# first HTTP() call, but addFilter is idempotent on the named-logger handle
-# regardless of when the underlying logger picks up the filter.
+# pybit instantiates its logger lazily on the first HTTP() call, but addFilter
+# on the named-logger handle is idempotent and order-independent.
 logging.getLogger("pybit._http_manager").addFilter(_PybitRateLimitLogFilter())
 
 
@@ -59,12 +50,11 @@ _logger_market_data = logging.getLogger("liquidity_migration.bybit.market_data")
 
 
 class BybitRestRateLimiter:
-    """Thread-safe sliding-window rate limiter shared across BybitMarketData
-    instances. Bybit public REST endpoints allow ~120 requests / 5 seconds per
-    IP per category; we default to a conservative 18 req/s so concurrent demo
-    workers don't sustain 429s that pybit then handles by sleeping 2 seconds
-    per retry — the dominant tail in entry-cycle latency. Stays out of the
-    way (no waiting, no lock contention) when callers stay under budget.
+    """Thread-safe sliding-window rate limiter shared across BybitMarketData.
+
+    Bybit public REST allows ~120 requests / 5s per IP per category; the default
+    18 req/s keeps concurrent workers off sustained 429s, which pybit handles by
+    sleeping 2s per retry. No waiting or lock contention under budget.
     """
 
     __slots__ = ("_max", "_per", "_timestamps", "_lock", "_throttle_events", "_throttled_seconds")
@@ -82,28 +72,21 @@ class BybitRestRateLimiter:
         self._throttled_seconds = 0.0
 
     def acquire(self) -> None:
-        # Compute the throttle wait UNDER the lock, then sleep OUTSIDE it. Sleeping
-        # while holding the lock (the old behaviour) serialised the entire shared REST
-        # worker pool: one throttled worker blocked every other worker from even
-        # checking the window for the full sleep. We re-acquire + re-check after the
-        # sleep, so the sliding-window semantics are preserved (a slot is only ever
-        # claimed when len < max), while concurrent workers can make progress.
+        # Compute the wait UNDER the lock, sleep OUTSIDE it, then re-acquire and
+        # re-check: sleeping under the lock serialises the whole shared REST
+        # worker pool. A slot is still only claimed when len < max.
         #
-        # Throttle stats are counted ONCE per acquire that actually blocked: we
-        # accumulate the real slept time across however many re-loops it takes to
-        # claim a slot and record a single throttle_event at the end. The earlier
-        # per-loop counting inflated both counters under contention (a re-loop that
-        # still found len>=max counted again), misleading throttled_seconds — the
-        # very metric used to size the REST budget.
+        # Stats count once per blocking acquire, accumulating slept time across
+        # re-loops; per-loop counting inflates throttled_seconds, the metric used
+        # to size the REST budget.
         slept = 0.0
         while True:
             with self._lock:
                 now = time.monotonic()
                 cutoff = now - self._per
-                # Pop slots at OR before the cutoff: a slot exactly at the window
-                # edge has aged out, so leaving it (strict `<`) produced wait<=0 and
-                # a tight busy-spin (continue with no sleep) until the clock advanced
-                # past the boundary. `<=` frees that slot immediately.
+                # `<=`, not `<`: a slot exactly at the window edge has aged out,
+                # and leaving it gives wait<=0 and a busy-spin until the clock
+                # passes the boundary.
                 while self._timestamps and self._timestamps[0] <= cutoff:
                     self._timestamps.popleft()
                 if len(self._timestamps) < self._max:
@@ -114,8 +97,8 @@ class BybitRestRateLimiter:
                     return
                 wait = self._per - (now - self._timestamps[0])
                 if wait <= 0.0:
-                    # Window boundary; the oldest slot rolls off on the next pop —
-                    # re-evaluate immediately without sleeping or double-counting.
+                    # Window boundary: the oldest slot rolls off on the next
+                    # pop, so re-evaluate without sleeping or double-counting.
                     continue
             time.sleep(wait)
             slept += wait
@@ -154,10 +137,9 @@ def _raise_on_bracketed_empty_window(
 ) -> None:
     """Refuse a hole strictly inside the fetched range.
 
-    Windows before a symbol's listing and after its delisting are legitimately
-    empty; a window that returned nothing while both an earlier and a later
-    window returned rows is a dropped range, and the caller must fail rather than
-    let the downloader seal it with a completeness marker.
+    Windows before listing and after delisting are legitimately empty, but one
+    that returned nothing between two that returned rows is a dropped range and
+    must fail rather than be sealed with a completeness marker.
     """
 
     if not any(window_row_counts):
@@ -178,10 +160,9 @@ def _raise_on_bracketed_empty_window(
 class BybitMarketData:
     category: str = "linear"
     testnet: bool = False
-    # Credential-free public reads may be pinned to api-demo.bybit.com for a
-    # maintenance snapshot. Runtime strategies normally leave this false and
-    # consume the ordinary public market-data plane.  `demo` and `testnet` are
-    # distinct Bybit environments and must never be combined implicitly.
+    # Public reads may be pinned to api-demo.bybit.com for a maintenance
+    # snapshot; strategies normally leave this false. `demo` and `testnet` are
+    # distinct Bybit environments and cannot be combined.
     demo: bool = False
     retries: int = 3
     retry_sleep_seconds: float = 0.5
@@ -197,12 +178,9 @@ class BybitMarketData:
     slow_call_ms: float = field(init=False, default=0.0)
     last_error: str = field(init=False, default="")
     _client: Any = field(init=False, repr=False)
-    # The bootstrap ThreadPoolExecutor (16 workers) shares ONE BybitMarketData,
-    # so every stat-counter mutation is a concurrent read-modify-write. Guard
-    # them with a lock; without it, increments were lost and stats() under-
-    # reported retries/slow-calls during a cold start (an operator relying on
-    # that telemetry to judge REST health saw a degrading startup as healthy).
-    # The lock only wraps the cheap counter arithmetic, never the HTTP call.
+    # The bootstrap worker pool shares ONE BybitMarketData, so every counter
+    # mutation is a concurrent read-modify-write and lost increments make
+    # stats() under-report. The lock wraps only the arithmetic, never the call.
     _stats_lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -222,12 +200,10 @@ class BybitMarketData:
         max_pages: int = 50,
         require_complete: bool = False,
     ) -> list[dict[str, Any]]:
-        # Bound the cursor walk (mirrors other paginated account/public reads):
-        # a Bybit response that returns a stable, non-empty
-        # nextPageCursor would otherwise loop forever, hanging whatever thread
-        # called it (each _get is bounded by pybit's 10s, but the loop is not).
-        # 50 pages * 1000 rows comfortably covers the full linear universe; we
-        # break on a non-advancing cursor too, so a repeated cursor cannot spin.
+        # Bound the cursor walk: each _get is bounded by pybit's 10s but the
+        # loop is not, so a stable non-empty nextPageCursor would hang the
+        # calling thread. 50 pages * 1000 rows covers the linear universe, and a
+        # non-advancing cursor also breaks.
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(max(1, int(max_pages))):
@@ -266,23 +242,18 @@ class BybitMarketData:
     ) -> list[Any]:
         """Fetch ``[start, end)`` as a sequence of bounded time windows.
 
-        Two contracts the ad-hoc copies of this loop got wrong:
+        Two easily-broken contracts:
 
-        * ``end`` is EXCLUSIVE, matching ``--end`` in ``cli_parsers`` and the
-          ``[start..end)`` the downloader prints. Bybit's own ``end`` parameter is
-          inclusive, so the request is capped at ``end - 1`` and rows are filtered
-          ``start <= ts < end``. Writing the 00:00 bar of the excluded day into a
-          ``date=<end>`` partition made ``pit_coverage`` read kline coverage one
-          day fresher than reality and turned that single bar into a bogus daily
-          close at the panel tail (2026-07-27 audit M6).
-        * A window that comes back empty is re-requested once, and an empty
-          window BRACKETED by non-empty windows raises. Unlike the other pagers
-          in this file this loop had no mid-range hole guard at all, so a
-          transient retCode-0 empty response silently dropped up to
-          ``limit x interval`` bars and the downloader then sealed the hole with
-          a full-range completeness marker (audit M7). Bracketing keeps the guard
-          precise: leading windows before a listing and trailing windows after a
-          delisting are legitimately empty and never raise.
+        * ``end`` is EXCLUSIVE while Bybit's own ``end`` is inclusive, so the
+          request caps at ``end - 1`` and rows filter ``start <= ts < end``.
+          Writing the excluded day's 00:00 bar into a ``date=<end>`` partition
+          makes ``pit_coverage`` read one day fresher than reality and puts a
+          bogus daily close at the panel tail.
+        * An empty window is re-requested once, and an empty window BRACKETED by
+          non-empty windows raises: a transient retCode-0 empty response would
+          otherwise drop up to ``limit x interval`` bars and let the downloader
+          seal the hole with a completeness marker. Bracketing keeps leading and
+          trailing empty windows (pre-listing, post-delisting) legitimate.
         """
 
         interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
@@ -373,9 +344,8 @@ class BybitMarketData:
     def _paged_time_range(self, method_name: str, timestamp_key: str, **params: Any) -> list[dict[str, Any]]:
         rows_by_ts: dict[int, dict[str, Any]] = {}
         start = int(params["startTime"])
-        # `endTime` is the caller's EXCLUSIVE bound; Bybit's own endTime is
-        # inclusive, so the request and the row filter both cap at end - 1
-        # (audit M6).
+        # `endTime` is the caller's EXCLUSIVE bound; Bybit's is inclusive, so
+        # the request and the row filter both cap at end - 1.
         end = int(params["endTime"])
         cursor_end = end - 1
         limit = int(params.get("limit", 200))
@@ -411,19 +381,17 @@ class BybitMarketData:
                 if start <= ts < end:
                     rows_by_ts[ts] = item
             oldest = min(timestamps)
-            # Safe to exit on `oldest <= start`: rows_by_ts is keyed by ts, so
-            # any duplicates from overlapping pages overwrite cleanly, and the
-            # next cursor_end would be `oldest - 1 < start`, exiting the outer
-            # `while cursor_end >= start` loop on the following iteration anyway.
+            # Safe to exit on `oldest <= start`: rows_by_ts is ts-keyed so
+            # overlapping duplicates overwrite cleanly, and the next cursor_end
+            # would fall below `start` anyway.
             if len(batch) < limit or oldest <= start:
                 break
             next_cursor_end = oldest - 1
             if next_cursor_end >= cursor_end:
                 break
             cursor_end = next_cursor_end
-            # We only reach here on a full page that did not hit `start`, so the
-            # next iteration is expected to return more rows. Arm the mid-range
-            # empty-page guard for that next request.
+            # A full page that did not reach `start`: more rows are expected,
+            # so arm the mid-range empty-page guard for the next request.
             prior_full_page = True
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
@@ -452,10 +420,10 @@ class BybitMarketData:
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
                     self._record_call(elapsed_ms, error_text=str(exc), rate_limited=_is_rate_limit(exc))
                 last_error = exc
-                # A definite (non-rate-limit) venue reject — bad symbol, invalid param —
-                # won't change on retry, so raise immediately instead of wasting the full
-                # retry budget + exponential backoff on identical calls (mirrors
-                # BybitPrivateClient._call; EXC-3). Transport errors + rate limits still retry.
+                # A definite (non-rate-limit) venue reject -- bad symbol,
+                # invalid param -- will not change on retry, so raise instead of
+                # spending the backoff on identical calls. Mirrors
+                # BybitPrivateClient._call.
                 if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
                     raise
                 if attempt + 1 >= self.retries:
@@ -466,7 +434,7 @@ class BybitMarketData:
         raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
 
     def _record_call(self, elapsed_ms: float, *, error_text: str = "", rate_limited: bool = False) -> None:
-        # Guarded so the shared-instance bootstrap pool cannot lose increments.
+        # Guarded so the shared bootstrap pool cannot lose increments.
         with self._stats_lock:
             self.total_call_ms += elapsed_ms
             if elapsed_ms >= self.slow_call_threshold_ms:
@@ -479,8 +447,8 @@ class BybitMarketData:
                 self.rate_limit_events += 1
 
     def stats(self) -> dict[str, Any]:
-        # Snapshot under the lock so a concurrent worker can't mutate a counter
-        # mid-read and produce an internally inconsistent dict.
+        # Snapshot under the lock so a concurrent mutation cannot produce an
+        # internally inconsistent dict.
         with self._stats_lock:
             backoff_events = self.retry_events + self.rate_limit_events + self.slow_calls
             return {
@@ -681,9 +649,9 @@ class BybitKlineStreamPool:
     Operations:
 
     * ``subscribe(symbols, on_bar)``: partitions the symbol set across
-      ``topics_per_connection`` slices, opens one connection per slice with
-      a small inter-connection delay (Bybit allows 500 connects/IP/5min on
-      public; this stays well clear), then subscribes each slice's symbols.
+      ``topics_per_connection`` slices, opens one connection per slice with a
+      small inter-connection delay (Bybit allows 500 connects/IP/5min on
+      public), then subscribes each slice's symbols.
     * ``update_subscriptions(new_symbols)``: diffs against the current
       assignment, unsubscribes removed symbols (per-connection), adds new
       symbols to existing connections with capacity, and creates fresh
@@ -706,12 +674,9 @@ class BybitKlineStreamPool:
     DEFAULT_WATCHDOG_INTERVAL_SECONDS = 10.0
     DEFAULT_CONNECTION_SPACING_SECONDS = 0.1
     DEFAULT_RECONNECT_BACKOFF_SECONDS = 5.0
-    # Bybit V5 caps args list per WS subscription message; the conservative
-    # cap is 10 (spot tier) but linear/inverse have looser caps. Stay under
-    # 10 so a single subscribe call never gets bounced. We then issue
-    # multiple subscribe calls under the same WebSocket, which pybit
-    # supports (each new kline_stream invocation queues another subscribe
-    # frame). The per-symbol-chunk loop is bounded by topics_per_connection.
+    # Bybit V5 caps the args list per WS subscribe message; 10 is the
+    # conservative spot-tier cap. Repeated kline_stream calls queue further
+    # subscribe frames on the same WebSocket.
     DEFAULT_SUBSCRIBE_ARGS_PER_MESSAGE = 10
 
     def __init__(
@@ -776,8 +741,7 @@ class BybitKlineStreamPool:
             if self._on_bar is None:
                 self._on_bar = on_bar
             elif self._on_bar is not on_bar:
-                # Re-subscribing with a different callback is supported but
-                # rare; the new callback replaces the old for every connection.
+                # A different callback replaces the old one on every connection.
                 self._on_bar = on_bar
             if not self._connections:
                 self._build_initial_connections_locked(unique_symbols)
@@ -789,10 +753,8 @@ class BybitKlineStreamPool:
         adds, unsubscribe from removals. Returns counts.
 
         Each add is ISOLATED: a subscribe failure on one symbol is logged and
-        skipped so it cannot abort the rest of the batch. Without this, a single
-        un-subscribable symbol (e.g. pybit's "already subscribed" on a churn
-        coin) would silently block every genuinely-new listing sorted after it,
-        on every hourly refresh."""
+        skipped, so one un-subscribable symbol cannot block every new listing
+        sorted after it on every hourly refresh."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("pool is closed")
@@ -842,13 +804,9 @@ class BybitKlineStreamPool:
         return state
 
     def _subscribe_symbol_locked(self, symbol: str) -> None:
-        # Find an OPEN connection under capacity, else open a new one.
-        # Previously the "find under capacity" check didn't filter on
-        # state.closed, so a connection waiting on a failed reconnect
-        # retry (closed=True, assigned_symbols < cap) could be picked
-        # as the target — and kline_stream() on a dead client would
-        # either no-op or raise, silently losing the new symbol's WS
-        # feed.
+        # Find an OPEN connection under capacity, else open a new one. The
+        # closed filter matters: a connection awaiting a failed reconnect is
+        # under capacity, and kline_stream() on a dead client loses the feed.
         target = next(
             (
                 state
@@ -872,9 +830,8 @@ class BybitKlineStreamPool:
 
     def _subscribe_client_chunks(self, state: _KlineConnectionState, symbols: list[str]) -> set[str]:
         callback = self._make_callback(state)
-        # Chunk the subscribe so each WS message stays under Bybit's per-message
-        # args cap. pybit accepts repeated kline_stream calls per WebSocket;
-        # each issues another subscribe frame on the same connection.
+        # Chunk so each WS message stays under Bybit's per-message args cap;
+        # repeated kline_stream calls queue further frames on the connection.
         chunk = self.subscribe_args_per_message
         symbols_list = list(symbols)
         subscribed: set[str] = set()
@@ -888,16 +845,13 @@ class BybitKlineStreamPool:
                 )
             except Exception as exc:  # noqa: BLE001
                 if _is_already_subscribed_error(exc):
-                    # pybit still holds (one of) these topics in its callback
-                    # directory — a churn symbol that left then re-entered the
-                    # universe whose prior unsubscribe didn't clear it. pybit
-                    # rejects the WHOLE frame, so retry a multi-symbol slice one
-                    # at a time (the genuinely-new topics still subscribe); for a
-                    # single already-subscribed topic ADOPT the live subscription
-                    # — its callback already routes bars to the same sink, and a
-                    # genuinely-dead topic is rebuilt by the staleness watchdog.
-                    # Re-raising here instead aborts the whole add batch and recurs
-                    # every refresh, silently dropping later new listings.
+                    # pybit still holds one of these topics in its callback
+                    # directory and rejects the WHOLE frame, so retry a
+                    # multi-symbol slice one at a time. A single
+                    # already-subscribed topic is ADOPTED: its callback already
+                    # feeds the same sink, and a dead topic is rebuilt by the
+                    # staleness watchdog. Re-raising would abort the add batch
+                    # every refresh and drop later new listings.
                     if len(slice_) > 1:
                         for symbol in slice_:
                             subscribed.update(self._subscribe_client_chunks(state, [symbol]))
@@ -943,23 +897,19 @@ class BybitKlineStreamPool:
         """Build a closure that parses pybit's kline message, marks the
         connection alive, and dispatches each bar through ``on_bar``.
 
-        pybit delivers the full message dict: ``{"topic": "kline.60.SYMBOL",
-        "data": [{"start": ..., "confirm": True, ...}, ...]}``. The pool's
-        contract with consumers is ``on_bar(symbol, bar_dict, confirmed)`` —
-        one call per bar in the message.
+        pybit delivers the full message dict ``{"topic": "kline.60.SYMBOL",
+        "data": [{"start": ..., "confirm": True, ...}]}``; the consumer contract
+        is one ``on_bar(symbol, bar_dict, confirmed)`` call per bar.
 
-        The closure reads ``self._on_bar`` at dispatch time (not at build
-        time). subscribe() documents that a re-subscribe with a different
-        callback replaces the sink "for every connection" — capturing the
-        callback here would silently break that for already-subscribed topics
-        (they would keep firing the OLD sink). Dereferencing live makes the
-        swap honoured everywhere, matching the documented contract."""
+        ``self._on_bar`` is read at dispatch time, not build time: capturing it
+        here would leave already-subscribed topics firing the OLD sink after a
+        re-subscribe with a different callback."""
         if self._on_bar is None:  # defensive — subscribe() always sets this first
             raise RuntimeError("internal error: on_bar callback not set")
 
         def _callback(message: dict[str, Any]) -> None:
-            # Each connection has one writer. Readers may see a sub-tick-old value;
-            # avoid the shared pool lock on this hot path.
+            # One writer per connection; readers may see a sub-tick-old value.
+            # Avoids the shared pool lock on this hot path.
             state.message_count += 1
             state.last_message_monotonic = time.monotonic()
             on_bar = self._on_bar
@@ -1029,12 +979,10 @@ class BybitKlineStreamPool:
         idle past ``stale_reconnect_seconds`` are torn down and rebuilt with
         the same slice. Returns the number of reconnects performed.
 
-        Also retries any connection where a PRIOR reconnect failed mid-way
-        (state.closed=True but assigned_symbols still set) — without this,
-        a single transient ``_websocket_factory`` failure would orphan
-        every symbol on that slice until the next hourly universe refresh
-        re-subscribed them. The watchdog ticks every ~10s, so persistent
-        outages still surface to logs while transient blips recover."""
+        Also retries any connection whose prior reconnect failed mid-way
+        (closed=True with assigned_symbols still set); otherwise one transient
+        ``_websocket_factory`` failure orphans that whole slice until the next
+        hourly universe refresh."""
         reconnects = 0
         now = time.monotonic()
         with self._lock:
@@ -1042,22 +990,17 @@ class BybitKlineStreamPool:
             for state in list(self._connections):
                 if not state.assigned_symbols:
                     continue
-                # Per-connection backoff gate: a connection that attempted a
-                # reconnect within the last backoff window is left for a later
-                # watchdog tick. This replaces the old in-lock time.sleep so the
-                # pool lock is never held across the backoff (the sleep blocked
-                # subscribe/update_subscriptions/stats for backoff×N seconds on a
-                # multi-connection reconnect). backoff < watchdog interval, so the
-                # gate never blocks a connection indefinitely.
+                # Per-connection backoff gate, so the pool lock is never held
+                # across a backoff sleep. backoff < watchdog interval, so the
+                # gate cannot block a connection indefinitely.
                 if (
                     state.last_reconnect_monotonic > 0.0
                     and now - state.last_reconnect_monotonic < self.reconnect_backoff_seconds
                 ):
                     continue
                 if state.closed:
-                    # Prior reconnect failed and left this slice without a
-                    # live client. Retry now (the backoff gate above already
-                    # protects the venue from a tight retry storm).
+                    # Prior reconnect left this slice without a live client;
+                    # the backoff gate above prevents a retry storm.
                     to_reconnect.append(state.index)
                     continue
                 gap = now - state.last_message_monotonic
@@ -1093,19 +1036,12 @@ class BybitKlineStreamPool:
         state = self._connections[index]
         if not state.assigned_symbols:
             return None
-        # Snapshot the slice BEFORE clearing — we need to preserve it so a
-        # mid-reconnect failure leaves the watchdog enough state to retry
-        # on the next tick. Previously assigned_symbols was cleared
-        # eagerly; a transient _websocket_factory failure then orphaned
-        # every symbol on that slice until the next hourly universe
-        # refresh re-subscribed them. Now: keep assigned_symbols intact,
-        # only clear on a SUCCESSFUL resubscribe (which rebuilds the set
-        # in _subscribe_to_connection_locked).
+        # Snapshot the slice but keep assigned_symbols intact, so a mid-reconnect
+        # failure leaves the watchdog enough state to retry next tick. It is
+        # cleared only on a successful resubscribe.
         slice_symbols = sorted(state.assigned_symbols)
-        # Stamp the attempt BEFORE doing any work so the watchdog's backoff gate
-        # spaces the next retry even if the factory build below raises. This
-        # replaces the old in-lock time.sleep(backoff) that throttled storms at
-        # the cost of holding the pool lock for the whole sleep.
+        # Stamp the attempt before any work so the backoff gate spaces the next
+        # retry even if the factory build below raises.
         attempt_monotonic = time.monotonic()
         state.last_reconnect_monotonic = attempt_monotonic
         state.closed = True
@@ -1140,8 +1076,8 @@ class BybitKlineStreamPool:
                 index,
                 exc,
             )
-            # State stays closed=True with assigned_symbols populated; the
-            # watchdog's closed+assigned branch above picks it up next tick.
+            # Stays closed=True with assigned_symbols set; the watchdog's
+            # closed+assigned branch picks it up next tick.
             return
         new_state = _KlineConnectionState(
             index=index,
@@ -1170,9 +1106,8 @@ class BybitKlineStreamPool:
                 old_state = self._connections[index]
                 desired_symbols = set(old_state.assigned_symbols)
                 install_symbols = sorted(set(subscribed) & desired_symbols)
-                # Successful new client: clear the stale symbol->conn mapping
-                # (the closed client's entries are now invalid). The fresh state
-                # is already subscribed; the lock is only for publishing it.
+                # New client is up: drop the closed client's now-invalid
+                # symbol->conn entries. The lock only publishes the fresh state.
                 for symbol in slice_symbols:
                     self._symbol_to_connection.pop(symbol, None)
                 if not install_symbols:

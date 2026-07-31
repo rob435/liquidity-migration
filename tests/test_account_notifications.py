@@ -586,12 +586,9 @@ def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) 
 def test_settling_states_the_reduction_once_and_queues_no_retraction(tmp_path: Path) -> None:
     """A settling venue view must not turn one reduction into two messages.
 
-    ``settling`` means the venue's position endpoint has not yet caught up to
-    a fill the kernel already journaled -- the normal state of affairs for a
-    few seconds after every reduction. Announcing it as
-    ``awaiting venue reconciliation`` and then retracting it seconds later is
-    the alert-noise defect this status exists to remove, so the plain
-    lifecycle line must be the ONLY line, with nothing left pending.
+    ``settling`` means the venue's position endpoint has not yet caught up to a fill
+    the kernel already journaled -- normal for a few seconds after every reduction.
+    The plain lifecycle line must be the ONLY line, with nothing left pending.
     """
 
     kernel, clock, *_ = _setup_open(tmp_path / "account")
@@ -1369,13 +1366,8 @@ def test_deliver_notification_batch_commits_empty_batches_without_transport(
 
 
 def test_retired_sleeve_contributes_no_digest_line(tmp_path: Path) -> None:
-    """An empty sleeve status renders nothing at all.
-
-    CONTINUOUS was retired 2026-07-29; the owners previously passed a
-    placeholder string, so every hourly digest carried either
-    "CONTINUOUS BTC gate: unavailable · cycle root not configured" or an
-    ever-growing "STALE · last completed cycle is N min old" for a sleeve that
-    nobody runs.
+    """An empty sleeve status renders nothing at all, rather than a placeholder that
+    turns into a permanent staleness line for a sleeve nobody runs.
     """
 
     kernel, clock, *_ = _setup_open(tmp_path / "account")

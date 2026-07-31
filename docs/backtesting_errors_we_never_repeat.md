@@ -1,14 +1,12 @@
 # Research Failure-Mode Reference
 
-This historical filename is retained because code, tests, and old receipts link
-to it. The governing evidence policy is `docs/governance.md`. This file is a
-review taxonomy: use it to find ways a result can be wrong, not as a universal
-recipe or a source of permanent metric thresholds.
+A review taxonomy: use it to find ways a result can be wrong, not as a universal
+recipe or a source of permanent metric thresholds. The governing evidence policy
+is `docs/governance.md`. The filename is kept because code, tests, and old
+receipts link to it.
 
-The first eleven items were originally prompted by a 2022 public thread by
-macrocephalopod; the rest were accumulated from this repository's own failures.
-Their value comes from the failure mechanisms, not from the age or authority of
-their source.
+The first eleven items came from a 2022 public thread by macrocephalopod; the
+rest from this repository's own failures.
 
 ## Failure Taxonomy
 
@@ -141,6 +139,29 @@ their source.
     milestones, and retire unused machinery rather than treating artifact
     volume as progress.
 
+34. **Log returns as a P&L target.** A strategy scored against a log-return
+    target pays itself the variance drag `E[log(1+r)] ≈ E[r] − Var(r)/2`, so any
+    volatility-correlated signal earns a spurious spread for shorting volatile
+    names. Measured on the 2026-07-30 Bybit idio panel the drag is **−34.76
+    bp/day** and strongly cross-sectional: it manufactured an apparent Sharpe
+    4.46 for a vol-of-vol sort that survived removing the residualisation
+    entirely, i.e. the "alpha" was Jensen's inequality. Log returns are correct
+    for *fitting* a factor model and for *cumulating* a price path — a `cumsum`
+    of simple returns does not compound — and wrong as the thing a book is
+    graded on, because a trader earns the arithmetic return. Keep the two series
+    separate and name them so they cannot be swapped
+    (`docs/research_2026-07-30_idio_charts.md` §4.3).
+
+35. **Cost models that assume full rebalance.** Charging a round trip per period
+    to a slow signal overstates its cost by the reciprocal of its turnover and
+    converts real edges into uniform losses.
+    `cross_section.summary` says so in its own docstring, and the first pass of
+    the idio screen still reported "27/48 cells clearing the bar" — which was the
+    significance of *losing* series, because measured turnover was 0.08–0.28 and
+    not 1.0. Measure realised turnover before concluding that cost killed
+    something, and remember that a decile spread is symmetric: a negative gross
+    mean is an edge in the other direction, and cost is paid either way.
+
 ## Applying The Taxonomy
 
 The relevant checks depend on the claim:
@@ -160,10 +181,11 @@ For the active repository:
 
 - Treat daily closes and synthetic current bars according to their actual
   availability and executable order window.
-- Verify the precise manifest provenance in `docs/pit_gate.md`; archive-observed
-  membership and current-listing-derived tail coverage are not the same fact.
-- Treat demo/paper reconciliation as execution evidence. It is not automatic
-  alpha proof, OOS proof, or deployment authorization.
+- Verify the precise manifest provenance in `docs/data.md` (Point-in-time
+  membership); archive-observed membership and current-listing-derived tail
+  coverage are not the same fact.
+- Treat demo/paper reconciliation as execution evidence, not as alpha or OOS
+  proof.
 - Inspect funding and alternative-data coverage per run. Root names and old
   coverage receipts do not establish current completeness.
 - Preserve every forward epoch and change point even when operational ledgers are

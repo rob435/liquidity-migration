@@ -6,25 +6,25 @@ state, and code/tests own implemented behavior. Historical research is useful
 only through the compact priors below; its old plans, queues, reports, and
 one-off runners are retired.
 
-Nothing in this document changes the active demo/paper profiles, authorizes a
-deployment, or opens the separate real-money boundary.
-
 ## Current truth
 
-- The active profiles are `continuous_ensemble_v2` at revision
-  `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the
-  profile id predates the 2026-07-26 replacement and no longer implies an
-  ensemble) and `LongV11aDivWeekendVol`. They are demo/paper runtime
-  configurations, not validated alpha claims.
+- The publishing profiles are `lane2_carry_hold_v3` (CARRY) and
+  `LongV11aDivWeekendVol` (LONG). `continuous_ensemble_v2` at revision
+  `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
+  id predates the 2026-07-26 replacement and no longer implies an ensemble) was
+  retired from demo and paper on 2026-07-29 by owner override and its code is
+  dormant. All of these are runtime configurations, not validated alpha claims;
+  `deploy/sleeves.env` and `STATE.md` are the authority for what publishes.
 - No researched replacement currently qualifies for implementation.
-- Sleeve kill criteria and the paper passive-execution experiment remain active
-  operational evidence surfaces. The prospective runtime-parity epoch and all its
-  machinery were deleted on 2026-07-24; the forward stream is now just the
-  rolling record under `docs/governance.md`.
+- The paper passive-execution experiment is **dormant, not accruing**: arm
+  eligibility requires `sleeve == "continuous"` and CONTINUOUS is off on both
+  routes, so no fill has reached either arm since 2026-07-29
+  (`docs/research_findings.md` §1). The forward stream is the rolling record
+  under `docs/governance.md`.
 - The account-kernel remediation was independent of this research reset and
   deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
   (Deployment) is the authority for what is installed.
-- **Phase 0 of `docs/roadmap_2026-07-25.md` is complete (2026-07-25); see
+- **The instrument-repair phase is complete (2026-07-25); see
   `docs/anomaly_research_2026-07-24.md` §16.** Three results change the position:
   - **CONTINUOUS's Sharpe 2.73 is withdrawn as evidence about the deployed
     sleeve.** Its backtest models no stop-loss; the deployed account attaches a
@@ -44,7 +44,7 @@ deployment, or opens the separate real-money boundary.
     strategy-level exit its backtest also models — not another signal search.
 - **Phase 1 and 2A/2B are complete (2026-07-25); see §17.** Screened on an
   11.4M-row / 636-symbol both-venue panel, 2021-2026, at the honest cost basis.
-  - **Gate 1: 0 of 12 cells clear t ≥ 3.25.** No further sweeps, per roadmap §3.
+  - **Gate 1: 0 of 12 cells clear t ≥ 3.25.** No further sweeps were run.
   - **A second cost error, independent of the 4 bp one.** The long/short books are
     2x gross but were charged one round trip. Charged their *measured* turnover,
     the flat rate had **overcharged** slow-rotating momentum (11.9 bp actual) and
@@ -273,7 +273,7 @@ Owner decision, same day as registration. Change point: this commit. Five lines:
    `reports/carry_hold_v3_trade_diagnostics_2026-07-28/` (1,670 trades,
    replica validated bar-identical to the registered scorer).
 5. **Boundary**: demo/paper would require the §7 runtime build and its own
-   owner dispatch; REAL_MONEY remains a separate, narrow owner door.
+   owner dispatch.
 
 ### 2026-07-28 — wave 3: `lane2_funding_spread_v1`; the funding-carry program
 
@@ -336,10 +336,8 @@ follows it; two guarded rollouts, receipts in `STATE.md`. Five lines:
 
 1. **What**: by explicit owner instruction ("depromote the continuous strat
    from demo and paper, and replace it with this one"), the CONTINUOUS
-   sleeve is retired from BOTH fleets (`sleeves.env` off/off; retirement
-   note in `docs/preregistration/sleeve_kill_criteria_2026-07-20.md` — an
-   operator override, not a K-trip) and a new CARRY sleeve deploys the
-   promoted `lane2_carry_hold_v3` on demo + paper.
+   sleeve is retired from BOTH fleets (`sleeves.env` off/off) and a new CARRY
+   sleeve deploys the promoted `lane2_carry_hold_v3` on demo + paper.
 2. **How**: the producer replays the registered scorer's own functions on a
    90-day live frame (`prepare_decision`; parity vs the research frame over
    the last 90 days: identical on every shared bar, differing only at the
@@ -351,12 +349,9 @@ follows it; two guarded rollouts, receipts in `STATE.md`. Five lines:
    shape (gross cap 1.0 × capital reference); any CONTINUOUS re-promotion
    must re-size explicitly.
 4. **Evidence**: the Lane-2 forward scorer keeps grading the registered
-   config independently; the live book is graded by
-   `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md` (K1–K4
-   armed at deployment). The known live-vs-scored divergence is the
-   registered terminal-day frame caveat, stated in both places.
-5. **Boundary**: demo + paper only; `REAL_MONEY=false`; mainnet untouched.
-   Real money remains a separate, narrow owner door.
+   config independently. The known live-vs-scored divergence is the
+   registered terminal-day frame caveat.
+5. **Boundary**: demo + paper only; mainnet untouched.
 
 ### 2026-07-30 — CARRY sizing anchored to the decision; the live sleeve was rebalancing to its own P&L
 
@@ -408,10 +403,11 @@ here and the pre-2026-07-30 portion is not comparable on turnover or cost.
 
 ### 2026-07-27 — recorded change points from the repo-wide audit remediation
 
-Three fixes from `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` change
-numbers rather than only correctness, so they are change points, not refactors.
-All three were owner-approved on 2026-07-27 before landing. None is deployed;
-the rollout dispatch belongs to the owner.
+Three fixes from that audit change numbers rather than only correctness, so
+they are change points, not refactors.
+All three were owner-approved on 2026-07-27 before landing and deployed the same
+day at ~18:26 UTC in the `f1626565f` batch (Actions run 30293398218); `STATE.md`
+carries the rollout evidence.
 
 - **CONTINUOUS live entry behaviour — crowding counting base (audit M2).**
   The live sleeve counted the `entry_crowding_max_fresh` cap on the
@@ -520,7 +516,8 @@ V3 shape — one `turn3_pop3` cell (age 240d, TP 12%, declared stop 35%, weight
 1.0) plus the settled-funding admission `funding_min_at_entry = 0.0` ("only
 fade pumps whose longs are paying"; last settled print at-or-before the
 signal-bar close, never a predicted rate; unknown funding admits and is
-counted/journaled). Evidence basis: `docs/continuous_redesign_2026-07-26.md`.
+counted/journaled). Evidence basis: `docs/research_findings.md` §1 (CONTINUOUS)
+and §2 (CONTINUOUS shape).
 
 **Promotion note (recorded change point):**
 
@@ -573,10 +570,8 @@ Deliberate identity consequence recorded with the change point: the new
 `ContinuousEventConfig` field shifts `config_hash()` / `kernel_strategy_id`
 for every CONTINUOUS config, and the cycle-status funnel schema is v2; the
 sizer's authoritative-chain self-heal (`ddbded5`) is expected to rebase
-prior-epoch state on the first post-deploy cycles. The sleeve kill criteria
-(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to govern
-the sleeve unchanged. Rollout remains owner-dispatched; this commit deploys
-nothing.
+prior-epoch state on the first post-deploy cycles. Rollout remains
+owner-dispatched; this commit deploys nothing.
 
 ### 2026-07-27 — ladder mechanism decomposed; admission variants; one registered lead
 
@@ -634,7 +629,7 @@ missing?"). Full evidence, all cells and negatives:
 | Historical sleeve curves | Some historical curves are positive, but LONG is materially dependent on a small take-profit tail and CONTINUOUS does not have complete live-runtime reconstruction. | Keep as descriptive controls, not promotion evidence. |
 | Breadth study | CONTINUOUS increased from about 6.55 to 7.30 bets per open day, but per-bet volatility was about 1,000 bp and average dependence about 0.21. A 25 bp effect would need roughly 5.6 years at that information rate. | Breadth alone is not a research direction. Fix quantization only as an execution-validity issue. |
 | Young-listing lifecycle | The 2021-24 unconditional short effect reversed in 2025-26. A day-0 long was negative or flat. The required listing-week 1-minute cost data had zero symbol/date overlap with the 27,398-row event panel. | Retire calendar-age rules and the proposed T-L v2. |
-| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The paper maker-first A/B is running toward 100 fills per arm. | Continue measuring execution separately; do not confuse cost improvement with alpha. |
+| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The paper maker-first A/B was accruing toward 100 fills per arm; it has been dormant since CONTINUOUS retired on 2026-07-29 and stands at 2 of 8 (`docs/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
 | Cross-venue follow-ups merged 2026-07-21 | A Bybit turnover-collapse listing short looked strong by era (+247/+246/+510 bp at day 2) but failed in every Binance era (-415/-41/-290 bp). Hedged extreme-funding carry was negative across every declared arm on both venues. Naive pump-event longs were negative in 23 of 24 venue/era cells; D9 and BTC-uptrend short-path differences were only about +26 to +62 bp and uncertain. | Preserve venue divergence, the post-2025 negative-funding explosion, and the small D9/uptrend directional effect as anomaly leads. Retire the fixed admission bars, bulk reports, and one-off runners. |
 | Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | These are priced, regime-dependent insurance diagnostics—not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
 
@@ -718,7 +713,7 @@ direction.
 ### Feasibility already checked
 
 Re-measured 2026-07-24; the earlier taker-flow line was materially wrong and is
-corrected here. Full detail in `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
+corrected here. The current tiered census is `docs/data.md`.
 
 - Bybit hourly premium, funding, index, mark, and open-interest partitions span
   `2021-01-01` through `2026-07-17`. **Bybit open interest is the deepest
@@ -756,7 +751,6 @@ The hard boundaries are evidence physics: causal availability, honest
 population/PIT scope, missingness, executable fills/costs/funding for a
 performance claim, reconstructable accounting, and provenance. A violation
 changes what the result can mean; it does not make the diagnostic useless.
-Runtime and real-money safety boundaries remain unchanged.
 
 ### P0 — minimal causal research substrate
 
@@ -834,9 +828,9 @@ records. The existing LONG/CONTINUOUS sleeves remain controls and are not
 modified to help a challenger.
 
 Promotion requires the five-line note in `docs/governance.md`, a recorded
-change point, stable paper execution, no sleeve kill-rule breach, and an
-explicit replacement/migration diff. Promotion means demo only. Mainnet still
-requires a separate owner instruction naming the deployment and risk boundary.
+change point, stable paper execution, and an explicit replacement/migration
+diff. Promotion means demo only. Mainnet still requires a separate owner
+instruction naming the deployment and risk boundary.
 
 ### P4 — directions remain open
 
@@ -852,14 +846,66 @@ authorized.
 
 ## Live task queue
 
-**Sequenced plan: `docs/roadmap_2026-07-25.md`.** That document supersedes the
-ordering of this list. The measured position it starts from: ~44 mechanisms
-tested means the corrected significance threshold is t = 3.25, and our best
+The measured position this list starts from: ~44 mechanisms tested means the corrected significance threshold is t = 3.25, and our best
 signals are t 1.30-2.06 at the measured 15.56 bp round trip. There is no
 validated edge yet, and execution work cannot create one (its ceiling is
 Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
 
 
+- [ ] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
+      them.** Found 2026-07-30 while setting the bar for the idio screen: no
+      artifact in the tree or in git history lists them. `scripts/screen_phase1.py`
+      and four configs all *assert* the count, none enumerates it. Every Bonferroni threshold this programme quotes — the
+      standing t = 3.25, and the 3.46 / 3.57 the idio screens derived from it —
+      therefore rests on an unverifiable denominator, and whether a new grid
+      overlaps something already inside the 44 cannot be checked. Either build
+      the list (it is recoverable from the research docs and git history) or
+      replace the count-based threshold with something auditable. This is a
+      defect in the evidence standard itself, not in any one result.
+- [x] **Idio charts — closed as a Sharpe upgrade for this book (2026-07-30).**
+      `docs/research_2026-07-30_idio_charts.md`. Pre-declared 48-cell grid over
+      the Bybit full-PIT panel (2023-06-01..2026-06-30, 1,126 days, 880
+      symbols): **0 cells profitable in their best direction and clearing
+      t > 3.46** on measured turnover; max t anywhere is 1.90. Idio beats the
+      information-matched (3-day-lagged) raw control on 2/6 features, 1/6
+      era-stable. A demean-only control arm decomposes the null: de-marketing
+      buys a median −0.032 Sharpe and factor-stripping on top +0.083 median /
+      −0.057 mean — a decile long/short is already market-neutral, so
+      residualising before ranking sells it something it has for free.
+      COMMON4 explains only **6.0%** of daily cross-sectional dispersion.
+      Corroborates two deleted June-2026 receipts recovered from git
+      (`rmom-latency-falsification-2026-06-09`,
+      `intraday-residual-scout-2026-06-10`): residualisation yields a real
+      signal that does not pay this cost stack.
+      **Mode (b) run and the declared kill condition FIRED:** the BTC-beta-hedged
+      book (only `btc_beta` has a tradable instrument; the three rank factors do
+      not) improves net Sharpe in 3/24 cells, median Δ −0.183, 0/24 profitable
+      and clearing the bar. Inside that null: the decile books are *not*
+      beta-neutral (|net_beta| 0.38–0.59 raw) and residualising genuinely
+      de-betas them (0.26–0.39 idio) — the construction works, it just does not
+      pay. **Momentum arms re-run on a momentum-free factor set** (`nomom3`,
+      COMMON4 minus `xs_rank_ret_30d`, which had made those arms circular):
+      idio beats the control in 1/6 rather than 2/6, so the defect was real and
+      not load-bearing.
+      Two reusable defects were found and added to the failure taxonomy as
+      items **34** (log returns as a P&L target — a −34.76 bp/day variance drag
+      that manufactured an apparent Sharpe 4.46) and **35** (full-rebalance cost
+      models). Item 34 was then reintroduced by this same work via a column
+      rename and caught by a negative R²; read it as a naming discipline.
+      **The directional single-name book — the claim's strongest form — was also
+      run and fails harder.** `pos = sign(60d per-symbol z-score)`, no
+      cross-sectional information, so common-factor motion does not cancel:
+      raw arms carry |net_beta| 0.82–0.84 (3× the decile book) and idio arms cut
+      it to 0.22–0.40, so the mechanism works — but median Δ Sharpe
+      (idio − control) is **−0.572** and 0/24 hedged cells clear |t| > 3.57.
+      Residualising performs *worse* in the construction that theoretically
+      favours it. That is what closes the programme rather than merely bounding
+      it to one book. Across all three screens: **0 of 96 pre-declared cells are
+      profitable and significant.**
+      New: `liquidity_migration/residual_price.py`,
+      `liquidity_migration/idio_features.py`, `scripts/build_idio_panel.py`,
+      `scripts/screen_idio_charts.py`, `scripts/screen_idio_hedged.py`,
+      `scripts/diagnose_idio_panel.py`.
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
@@ -867,8 +913,9 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       `liquidity_migration/cross_venue_panel.py` +
       `scripts/build_cross_venue_panel.py`, built 2026-07-24 over the
       both-venue population from `2021-01-01`. Coverage lives in each shard's
-      `manifest.json`; two source defects it exposed are recorded in
-      `docs/audit/2026-07-24-repo-and-strategy-audit.md`.
+      `manifest.json`; the two source defects it exposed (`open_interest_value`
+      is contract units, `funding_event_kind` on 2 of 2,024 partitions) are in
+      `docs/research_findings.md` §4.
 - [x] Produce the P1 anomaly search with the full log, and consolidate it.
       `docs/anomaly_research_2026-07-24.md` — 37 mechanisms tested identically.
       Survivors are cross-venue premium divergence and 1-week cross-sectional
@@ -924,7 +971,10 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research_2026-07-26_financed_longs.md` with the 22-row
       negative-results ledger.
-- [ ] Score the five financed-longs configs on each new completed UTC day
+- [ ] Score the six registered financed-longs configs on each new completed UTC day
+      (`lane2_carry_hold_v1/v2/v3`, `lane2_funding_spread_v1`,
+      `lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`;
+      `DEFAULT_CONFIGS` in the scorer is the list)
       (rolling forward record; the registration commit is the change point;
       since 2026-07-28 the scorer charges each settlement exactly once;
       `lane2_carry_hold_v2`/`v3` score beside v1 with the paired daily
@@ -948,9 +998,11 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       era profile is the thing the forward record must test).
 - [ ] Read the paper passive-execution A/B for realised maker-fill probability
       (target was 100 fills per arm). This is the last unmeasured cost input and
-      needs VPS data.
-- [ ] Run `scripts/check_kill_criteria.py` against the deployed sleeves. Needs
-      the canonical account journal, which is VPS-only.
+      needs VPS data. **Blocked, not pending:** arm eligibility is
+      `sleeve == "continuous"` (`passive_execution.py:140`) and CONTINUOUS is off
+      on both routes, so the sample is frozen at 2 fills of 8 attempts and will
+      not move until a CONTINUOUS sleeve runs again. Reading it needs either that
+      or a re-scoped arm.
 - [ ] Orthogonalise `basis` against `premium_diff` — they are one family and
       should not be double-counted.
 

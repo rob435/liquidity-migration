@@ -9,12 +9,8 @@ from typing import Any
 
 import polars as pl
 
-
-
-# Splits live exclusively on VolumeEventResearchConfig.splits (default ()).
-# The default therefore has no internal validation split. OOS status depends on
-# exposure history, not on whether data is historical or forward
-# (AGENTS.md).
+# Splits live exclusively on VolumeEventResearchConfig.splits (default ()), so
+# the default has no internal validation split.
 
 from ._common import _float_or_nan, _parse_day
 from .trade_lifecycle import _has_columns
@@ -107,8 +103,7 @@ def _write_equity_benchmark_chart(
         end=end,
         monthly_rows=monthly_rows,
         metrics=metrics,
-        # The equity-derived fallback counts rows-with-marks per month, NOT trades —
-        # label it honestly (a padded flat June showed "11 trades" with zero taken).
+        # The equity-derived fallback counts rows-with-marks per month, not trades.
         count_label="Trades" if has_real_monthly else "Days",
         **header,
     )
@@ -204,8 +199,7 @@ def _write_equity_benchmark_png(
     font_legend_value = _chart_font(ImageFont, 18 * scale)
 
     def _fit_font(content: str, base_px: int, *, bold: bool, min_px: int) -> Any:
-        # Shrink-to-fit: a long header (e.g. "... — refreshed to 2026-06-12") must not run
-        # off the canvas — the truncated part is usually the load-bearing claim.
+        # Shrink to fit so a long header is not truncated off the canvas.
         max_w = (width - left - 24) * scale
         size = base_px
         font = _chart_font(ImageFont, size * scale, bold=bold)
@@ -226,9 +220,8 @@ def _write_equity_benchmark_png(
     max_day = _parse_day(end) or _parse_day(all_points[-1]["date"]) or min_day
     if max_day <= min_day:
         max_day = date.fromordinal(min_day.toordinal() + 1)
-    # Small right-side headroom on the x domain so the final month tick (often the freshest,
-    # most-looked-at label) sits inside the plot instead of flush against the right spine.
-    # Ticks stay derived from the data end — no tick is drawn in the pad zone.
+    # Right-side headroom so the final month tick sits inside the plot rather
+    # than flush against the spine. Ticks stay derived from the data end.
     axis_end_day = date.fromordinal(
         max_day.toordinal() + max(2, round((max_day.toordinal() - min_day.toordinal()) * 0.015))
     )
@@ -465,9 +458,8 @@ def _monthly_return_color(value: float) -> tuple[int, int, int, int]:
     return (185, 28, 28, 255)
 
 def _fill_month_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Insert +0.00%/count-0 rows for months absent between the first and last row. A month
-    where the book sat flat must show as zero, not vanish — a missing month reads as a
-    rendering bug and hides that the strategy was alive but idle."""
+    """Insert +0.00%/count-0 rows for months absent between the first and last row,
+    so a month where the book sat flat renders as zero rather than vanishing."""
     if not rows:
         return rows
     by_month = {row["month"]: row for row in rows}
@@ -492,7 +484,6 @@ def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -
     has_monthly_returns = (
         monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return")
     )
-    # Without a trades column, the fallback count is equity days and is labelled accordingly.
     if has_monthly_returns and monthly is not None and "trades" in monthly.columns:
         rows = [
             {
@@ -505,8 +496,7 @@ def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -
         ]
         return _fill_month_gaps(rows)
     if has_monthly_returns and monthly is not None:
-        # Monthly returns without a trades column: keep the real returns, derive the
-        # count from equity rows per month (0 when equity is unavailable).
+        # No trades column: keep the real returns and count equity rows per month.
         day_counts: dict[str, int] = {}
         if not equity.is_empty() and _has_columns(equity, "date"):
             day_counts = {
@@ -595,9 +585,8 @@ def _draw_monthly_return_table(
             text(x + block_w - 10, y + 7, str(int(row.get("count") or 0)), (51, 65, 85, 255), font_table, anchor="ra")
 
 def _chart_font(image_font: Any, size: int, *, bold: bool = False) -> Any:
-    # Windows paths included: without them the loop exhausts and falls back to
-    # PIL's fixed-size bitmap default, which IGNORES `size` — every chart
-    # rendered on a Windows box came out with unreadably tiny text.
+    # Windows paths included: exhausting the loop falls back to PIL's fixed-size
+    # bitmap default, which ignores ``size``.
     names = (
         [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -704,12 +693,10 @@ def _step_fill_daily(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Forward-fill an equity series to one point per calendar day so no-trade
     gaps render flat (a staircase) instead of a misleading diagonal.
 
-    Realised-PnL equity only carries a point on trade-exit days; between exits the
-    book is flat (holds are short and the gaps are position-free), so carrying the
-    last value forward across the gap is the honest shape. Drawing a straight line
-    between two far-apart exit points instead implies smooth daily growth that did
-    not happen. A series already at daily granularity is unchanged: the fill only
-    inserts the days strictly between consecutive points.
+    Realised-PnL equity only carries a point on trade-exit days, and between
+    exits the book is flat, so a straight line between two far-apart exits would
+    imply daily growth that did not happen. A series already at daily granularity
+    is unchanged: only days strictly between consecutive points are inserted.
     """
     if len(points) < 2:
         return points

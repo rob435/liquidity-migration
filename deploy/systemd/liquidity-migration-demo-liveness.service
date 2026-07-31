@@ -1,17 +1,15 @@
 [Unit]
 Description=liquidity-migration account-kernel and strategy-input liveness watchdog
 Wants=network-online.target
-# The observer must run when the account owner is stopped or failed. Coupling
-# activation would restart the writer or suppress the very alert this unit owns.
+# No Requires= on the owner: the observer must still run when the owner is
+# stopped or failed, which is exactly what it alerts on.
 After=network-online.target
 
 [Service]
 Type=oneshot
-# systemd's oneshot default is TimeoutStartSec=infinity, and an OnUnitActiveSec
-# timer cannot re-trigger while its unit is still activating: a single hung run
-# would silently stop this 3-minute position-safety watchdog forever. Bound the
-# run to well under the timer interval so a wedged run goes `failed` (which the
-# verify/reset paths already handle) instead of silencing the alarm.
+# The oneshot default is TimeoutStartSec=infinity, and an OnUnitActiveSec timer
+# cannot re-trigger while its unit is activating, so one hung run would silence
+# this 3-minute watchdog forever. Bound it under the timer interval.
 TimeoutStartSec=120
 User=root
 Group=root

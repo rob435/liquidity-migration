@@ -501,12 +501,10 @@ ACCOUNT_STATE_TARGETS=(
   "$PAPER_ACCOUNT_CAPTURE_ROOT"
 )
 
-# Account-owner state is an independently reset execution epoch. Refuse route
-# layouts that overlap each other or any strategy root: otherwise a
-# seemingly narrow account reset could recursively erase a preserved canonical
-# journal, cache, config, or an unselected sleeve. The normal deployment uses six
-# sibling roots, so overlap indicates a bad env file rather than a supported
-# layout.
+# Refuse route layouts that overlap each other or any strategy root: a narrow
+# account reset could otherwise recursively erase a preserved journal, cache,
+# config, or unselected sleeve. The deployment uses six sibling roots, so
+# overlap means a bad env file.
 "$CANONICAL_PYTHON" - "$PWD" "${ACCOUNT_STATE_TARGETS[@]}" <<'PY' \
   || die "account execution roots must be pairwise disjoint and separate from strategy roots"
 import pathlib
@@ -667,13 +665,10 @@ refresh_existing_targets() {
 }
 refresh_existing_targets
 
-# The archive must never sit inside anything that will be added to the archive,
-# whether that path is reset or retained live. Besides losing the recovery copy,
-# tar could consume its own growing output. Canonical journals may be created by
-# the pre-archive bootstrap below, so guard their potential paths even when they
-# do not exist yet. Canonicalise through existing symlinks and collapse '.',
-# '..', and relative/absolute aliases; a lexical prefix check is bypassable with
-# e.g. ``target/./_archive``.
+# The archive must never sit inside anything being archived, or tar consumes its
+# own growing output. Guard journal paths the pre-archive bootstrap may still
+# create. Canonicalise through symlinks and collapse '.', '..', and
+# relative/absolute aliases; a lexical prefix check misses ``target/./_archive``.
 canonical_path() {
   "$CANONICAL_PYTHON" -c '
 import pathlib
@@ -777,10 +772,9 @@ if [[ "$MODE" == "dry-run" ]]; then
   exit 0
 fi
 
-# Even a first-time/fully-absent layout must pass through the flatness guard,
-# create all six fresh roots, and leave a durable archive+manifest receipt. A
-# successful no-op here would make a missing epoch indistinguishable from a
-# completed reset.
+# Even a fully-absent layout passes through the flatness guard, creates all six
+# roots, and writes an archive+manifest, so a missing epoch is never mistaken
+# for a completed reset.
 [[ -r "$ENV_FILE" ]] || die "demo env file is missing or unreadable: $ENV_FILE"
 [[ "$SYSTEMCTL_BIN" == /* && -x "$SYSTEMCTL_BIN" && ! -L "$SYSTEMCTL_BIN" ]] \
   || die "systemctl must be one absolute non-symlink executable: $SYSTEMCTL_BIN"
@@ -801,10 +795,9 @@ validate_real_money_value "$ENV_FILE" "${credential_real_money:-__unset__}"
 [[ -n "$credential_api_key" && -n "$credential_api_secret" ]] \
   || die "missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET in $ENV_FILE"
 
-# This read-only authenticated call resolves the venue account before any
-# service mutation. The ordinary module constructor has no path override; the
-# returned path is account-wide across API keys because it is keyed by Bybit
-# userID, not by a caller-selected ledger root or API-key fingerprint.
+# Resolve the venue account before any service mutation. The returned lease path
+# is keyed by Bybit userID, so it is account-wide across API keys and cannot be
+# steered by a caller-selected ledger root.
 if ! DEMO_ACCOUNT_LEASE_PATH="$(
   unset DEMO REAL_MONEY BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
     BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
@@ -1175,10 +1168,8 @@ restart_previously_active() {
 stop_all_managed_units_after_failed_handoff() {
   local unit failed=0
   echo "Stopping every managed unit after the failed reset handoff ..." >&2
-  # STOP_UNITS is deliberately ordered downstream-before-owner. Repeating the
-  # full stop sequence is safe when a unit never restarted and closes the
-  # partial-topology case where an earlier start succeeded before a later one
-  # failed.
+  # STOP_UNITS is ordered downstream-before-owner. Repeating the full stop is
+  # safe for units that never restarted and closes the partial-topology case.
   for unit in "${STOP_UNITS[@]}"; do
     if "$SYSTEMCTL_BIN" stop "$unit"; then
       echo "  stopped $unit" >&2
@@ -1196,10 +1187,9 @@ stop_all_managed_units_after_failed_handoff() {
   return "$failed"
 }
 
-# Cleanup diagnostics must survive the transport dying underneath the reset
-# (SSH client death HUPs the remote process group and turns every later write
-# into SIGPIPE). Mirror each line into the host journal and never let a failed
-# write abort the fail-closed handoff.
+# If the transport dies mid-reset, sshd HUPs the remote process group and every
+# later write raises SIGPIPE. Mirror each line into the host journal, and never
+# let a failed write abort the fail-closed handoff.
 cleanup_notice() {
   logger -t liquidity-migration-reset -p daemon.err -- "$*" 2>/dev/null || true
   printf '%s\n' "$*" >&2 2>/dev/null || true
@@ -1208,10 +1198,8 @@ cleanup_notice() {
 cleanup() {
   local rc="$?"
   trap - EXIT
-  # Once cleanup owns the handoff, a second interactive/service signal must
-  # not interrupt the fail-closed stop sequence. SIGKILL remains inherently
-  # untrappable, but INT/TERM/HUP are deferred by ignoring them until exit, and
-  # PIPE is ignored so a dead stdout cannot kill the stop sequence mid-way.
+  # Once cleanup owns the handoff, a second signal or a dead stdout must not
+  # interrupt the fail-closed stop sequence.
   trap '' INT TERM HUP PIPE
   set +e
   [[ -z "$MANIFEST_DIR" ]] || rm -rf -- "$MANIFEST_DIR"
@@ -1242,8 +1230,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client death
-# (HUP on the remote process group, SIGPIPE on the next write) would otherwise
-# skip the fail-closed handoff entirely and leave a partially stopped fleet.
+# (HUP, then SIGPIPE) would skip the fail-closed handoff entirely.
 trap 'exit 129' HUP
 trap 'exit 141' PIPE
 
@@ -1259,13 +1246,10 @@ for unit in "${STOP_UNITS[@]}"; do
     die "unit remained active after stop: $unit"
   fi
 done
-# A stopped service may retain ActiveState=failed from an earlier timeout or
-# expired-authority pre-exec refusal. Both the source-reopening reset receipt
-# and subsequent create-only operational authority require literal inactive,
-# not merely "not active". Reset only units that are actually failed: systemd
-# may garbage-collect an inactive unit object between stop and reset-failed,
-# making an unconditional reset-failed race with an otherwise healthy unit.
-# Re-read the exact loaded/inactive state before the first archive mutation.
+# A stopped service may retain ActiveState=failed from an earlier timeout, and
+# downstream checks require literal `inactive`. Reset only units that really are
+# failed: systemd may garbage-collect an inactive unit object between stop and
+# reset-failed, so an unconditional reset-failed races a healthy unit.
 for unit in "${STOP_UNITS[@]}"; do
   unit_load_state="$(
     "$SYSTEMCTL_BIN" show "$unit" --property=LoadState --value
@@ -1376,9 +1360,8 @@ if not api_key or not api_secret:
 
 client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
 positions = [row for row in client.get_positions(settle_coin="USDT") if amount(row) > 0.0]
-# Bybit documents the omitted orderFilter as all linear order kinds, but issue
-# an explicit StopOrder query as well. Reset is a destructive epoch boundary;
-# it must not rely on a wrapper/default continuing to expose conditional rows.
+# Bybit documents the omitted orderFilter as all linear order kinds, but query
+# StopOrder explicitly too rather than trust a default to expose conditionals.
 all_orders = list(client.get_open_orders(settle_coin="USDT"))
 conditional_orders = list(
     client.get_open_orders(settle_coin="USDT", order_filter="StopOrder")
@@ -1498,9 +1481,8 @@ verify_clean_candidate_checkout
   --size "$archive_size" \
   || die "reset archive changed before live-state removal"
 
-# From the first live-state removal onward, a failure leaves every managed unit
-# stopped for explicit recovery. Restarting owners into a partially cleared
-# epoch would be worse than an outage, even though the durable archive exists.
+# From the first live-state removal onward a failure leaves every managed unit
+# stopped: restarting owners into a partially cleared epoch is worse than an outage.
 FAILURE_RECOVERY_ALLOWED=0
 
 echo

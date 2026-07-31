@@ -29,13 +29,12 @@ Do not maintain a static package-subcommand list.
 ## Canonical wrappers
 
 - Deployment/account state: `scripts/ops.sh status`.
-- Stopped install and authorized activation:
-  `scripts/ops.sh deploy --execute install|activate`.
-- Full reset-epoch recovery: use `scripts/ops.sh deploy --execute recover`
-  only with the exact full-scope, leave-stopped reset receipt and explicit
-  demo/paper authority inputs from current help.
-- Operational receipt: `scripts/ops.sh operational-authority`; creation
-  requires `--execute issue`.
+- Deploy: `scripts/ops.sh deploy --execute {install,activate,rollout,
+  activate-mainnet,stop-mainnet}`. Staged install leaves the fleet stopped;
+  `rollout` requires a venue-flat account. There is no `recover` mode and no
+  operational-authority receipt — both were removed on 2026-07-31.
+- Mainnet arming state (read-only): `scripts/ops.sh real-money preflight`.
+- Wedged order commands: `scripts/ops.sh wedged-command`.
 - Account evidence: `scripts/ops.sh venue-accounting`; apply
   `pit-reconcile`.
 - Ledger reset: `scripts/ops.sh reset`, dry-run unless `--execute`.
@@ -46,9 +45,9 @@ Do not maintain a static package-subcommand list.
 ## Forward safety
 
 Demo is not a dry run: it changes the external demo account. Before a forward
-command, inspect `EXECUTION_ENVIRONMENT`, profile, credentials, confirmation,
-receipt, checkout, and `REAL_MONEY`. Use a true plan/dry-run mode when one
-exists.
+command, inspect `EXECUTION_ENVIRONMENT`, the installed profile marker,
+credentials, confirmation, checkout, and `REAL_MONEY`. Use a true plan/dry-run
+mode when one exists.
 
 Mainnet is categorically separate. Never set `REAL_MONEY`, select mainnet
 credentials, or infer permission from broad repository work.

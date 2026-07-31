@@ -1,16 +1,54 @@
 # Operational State
 
-Current operational snapshot. **Exact live truth comes from the authenticated
-deployment receipt and `scripts/ops.sh status`, not from this prose.** Every
-observation below is point-in-time and dated; none of it is a claim about the
-account right now.
+Current operational snapshot. **Exact live truth comes from `scripts/ops.sh
+status` against the host, not from this prose.** Every observation below is
+point-in-time and dated; none of it is a claim about the account right now.
 
-Detailed incident evidence lives in `docs/audit/`. This file records what is
-deployed and what constrains it — not the history of how it got there. That
-history is in Git and in the audit receipts indexed at the bottom.
+This file records what is deployed and what constrains it — not the history of
+how it got there. That history is in Git.
 
 ## Deployment
 
+> **Reading the entries below.** The operational-authority receipt was removed
+> from the repository on 2026-07-31 (`c396d87`…`f5a37b7`, ~5.1k lines) by owner
+> override: it gated every unit start on a clean-checkout hash and changed
+> nothing about what a process could trade. `scripts/ops.sh
+> operational-authority` and the `ConditionPathExists` gate on all 14 units are
+> gone; the installed profile is now a plain `/etc/liquidity-migration/profile`
+> marker. **Entries dated before that describe the tooling as it was and are
+> accurate history — they are not runnable instructions.** The change is
+> committed but not deployed.
+
+- **2026-07-31 — four of six demo-only client fences off the mainnet owner's
+  critical path, in the working tree and not deployed.** The wallet snapshot
+  provider, the start-up order-ownership check, the position reconciler and the
+  funding reconciler each refused a non-demo client, so `--realm mainnet` raised
+  at construction before any start-up read. All four now take the realm the
+  private client names (`require_named_realm`) and carry it in their journal
+  sources, snapshot keys, health strings and error text; the three whose own
+  names said `demo` lost it (`BybitAccountSnapshotProvider`,
+  `{inspect,require}_bybit_order_ownership`). Demo decisions, journal keys,
+  ledger keys and error text are unchanged. Two fences still block a mainnet
+  start, `BybitNativeProtectionManager` (`venue_protection.py:151`, built ahead
+  of all four) and `BybitDemoExecutionAdapter`
+  (`bybit_execution_adapter.py:91`), so the mainnet owner is still not startable.
+  Off demo the funding reconciler now refuses a settlement row carrying nonzero
+  `cashFlow` rather than double-counting it; that raise is outside
+  `degrade_or_raise`. `REAL_MONEY` is still unset, no mainnet credential exists,
+  and none of this has run against a funded account. Limitations:
+  `docs/real_money.md`.
+- **2026-07-31 — mainnet arming tooling, in the working tree and not deployed.**
+  Four gaps closed: `scripts/freeze_account_candidate_universe.py` now takes a
+  required `--realm`, so the universe can be frozen from `api.bybit.com`;
+  `scripts/ops.sh real-money create-state-roots [--execute]` creates the mainnet
+  journal roots; `scripts/check_demo_liveness.py` became
+  `scripts/check_fleet_liveness.py --account-scope {demo,demo-paper,mainnet}`
+  behind the new `liquidity-migration-mainnet-liveness.{service,timer}`; and
+  `deploy_vps_live.sh` gained `activate-mainnet` / `stop-mainnet`, with its
+  mainnet `verify` half now conditional on the resolved mainnet sleeve toggles.
+  `CARRY_MAINNET_SLEEVE` and `LONG_MAINNET_SLEEVE` are off, `REAL_MONEY` is
+  unset, no mainnet credential exists, and none of this has run against a funded
+  account. Runbook: `docs/real_money.md`.
 - **2026-07-30 13:45 UTC — installed `b13cbfac3` (CARRY sizing anchored to the
   decision; resize alert no longer double-sent), STAGED path with three open
   positions.** Authorization: "fix this permanently please" / "go". Receipts:
@@ -143,11 +181,9 @@ history is in Git and in the audit receipts indexed at the bottom.
     shared bar over the last 90 days, differing only at the decision bar
     the research frame cannot see), declared stop 0.35 / no take-profit,
     sizing w × owner equity × multiplier 1.0 under the unchanged 25×
-    account risk caps. Kill criteria armed at deployment:
-    `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md`.
-  - CONTINUOUS: retired by owner override (not a K-trip; retirement note in
-    `docs/preregistration/sleeve_kill_criteria_2026-07-20.md`; K clocks
-    stop at the change point). Unit files stay installed-but-disabled; the
+    account risk caps.
+  - CONTINUOUS: retired by owner override. Unit files stay
+    installed-but-disabled; the
     hedge and rmom timers are off (hedge book flat at retirement); the
     profile's `continuous` block is shrunk to minimum envelope
     (`max_active` 1) so the freed envelope funds CARRY — re-promotion must
@@ -169,7 +205,7 @@ history is in Git and in the audit receipts indexed at the bottom.
   `operational`, on 2026-07-27 ~18:26 UTC, owner authorization: the "deploy
   all" chat instruction (Actions run 30293398218 — CI and the guarded VPS
   rollout both green in one pass). This batch is the complete remediation of
-  `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` (all 53 findings).
+  the 2026-07-27 repo-wide audit (all 53 findings).
   Rollout evidence: every phase `phase-ok`, `deployment-plan class=routine
   rule_maintenance=reuse reason=fresh`, `rmom-bootstrap path=reuse
   reason=current-valid-gate`, `verify-ok commit=f1626565f… profile=operational`.
@@ -265,7 +301,7 @@ history is in Git and in the audit receipts indexed at the bottom.
   profile; the pre-scale-up bytes hashed to `cf68369c…`). The tracked editable
   source is `configs/operational.demo.json`.
 - Deployment status is authoritative only when tied to an exact pushed commit and
-  a fresh authenticated rollout receipt.
+  a `verify-ok` line read from the host for it.
 
 ### Deployed — paper-fleet Telegram notifications
 
@@ -287,10 +323,9 @@ logging, Telegram delivery audit trail, REST-timeout-tolerant periodic
 reconcile, watchdog disk/digest/hedge-runtime alerts and heartbeat
 send-failure suppression, LONG_PAPER_SLEEVE toggle, null equity on blocked
 cycles, journald cap + credential-backup pruning at provision) from the
-fleet audit (docs/audit/2026-07-27-vps-fleet-telegram-audit.md). The BTC
-hedge sizing and BTC trend gate were independently verified
-legit-as-designed (bit-identical recomputation; see the audit follow-up
-section); the one open hedge item is the policy-due model-prior
+2026-07-27 fleet audit. The BTC hedge sizing and BTC trend gate were
+independently verified legit-as-designed (bit-identical
+recomputation); the one open hedge item is the policy-due model-prior
 regeneration, which needs the next standard continuous equity refresh's
 component ledgers.
 
@@ -323,9 +358,8 @@ receipts are installed. The 14:03 UTC rollout exercised exactly that path:
 the current receipt is `demo-rules-20260727T133929Z`, expiring ~2026-08-03.
 
 2026-07-27 (DEPLOYED ~18:26 UTC, Actions run 30293398218): the repo-wide
-audit remediation (`docs/audit/2026-07-27-repo-wide-multi-agent-audit.md`, all
-53 findings). Three items are change points rather than refactors and were
-owner-approved before landing; the full statements are in
+audit remediation (all 53 findings). Three items are change points rather than
+refactors and were owner-approved before landing; the full statements are in
 `docs/strategy_program.md` under "2026-07-27 — recorded change points":
 **CONTINUOUS crowding now counts on the engine's base** (funding-admitted fresh
 entrants, before the age gate), which can only skip more entries than the
@@ -350,10 +384,7 @@ the sizer's authoritative-chain self-heal (`ddbded5`) rebases prior-epoch
 state onto the shifted kernel strategy identities (counted and journaled),
 and the account notification may show one `CONTINUOUS BTC gate: unavailable ·
 unsupported schema 1` line until the first new cycle writes the v2 status
-projection. The sleeve kill criteria
-(`docs/preregistration/sleeve_kill_criteria_2026-07-20.md`) continue to
-govern the sleeve; the new revision's forward evidence run restarts at
-`1fe0e48`.
+projection. The new revision's forward evidence run restarts at `1fe0e48`.
 
 ## Topology
 
@@ -405,9 +436,12 @@ strict operational profile; independent systemd sizing variables were removed.
   venue `deliveryTime=1784538000000`. They are recorded prospectively in private
   mode-0600 retirement registries and may retire only while account positions,
   targets, orders, and inbox exposure are all flat.
-- Push remains CI-only. The manual GitHub workflow exposes guarded `rollout` and
-  `recover` with explicit profile, task reference, demo/paper authorization, and
-  reset-receipt inputs.
+- Push remains CI-only. The manual GitHub workflow exposes four of the six deploy
+  modes — `rollout`, `install`, `activate`, `verify` — with explicit profile, task
+  reference and demo/paper authorization inputs
+  (`.github/workflows/vps-deploy.yml:14-30`). There is no `recover` mode and no
+  reset-receipt input; both were removed with the receipts. The two mainnet modes
+  are deliberately absent from CI ([`docs/operations.md`](docs/operations.md)).
 
 ## Forward evidence stream
 
@@ -423,11 +457,35 @@ on the run of days it predates, continuously, with recorded change points. There
 is no ceremony, no waiting window, and no separate registration artifact — the
 commit is the registration.
 
-Two dates survive as a plain range because
-`docs/preregistration/sleeve_kill_criteria_2026-07-20.md` measures against them:
-**2026-07-19 14:00 UTC through 2026-10-17 14:00 UTC**, first 45 days
-calibration-only. They are now just dates in an active contract, not a registered
-epoch with its own tooling.
+### Change point — 2026-07-31: cross-fleet comparison, and what it invalidates
+
+**Cross-fleet P&L comparison before 2026-07-31 is invalid. Do not quote a
+demo-vs-paper difference from any earlier data as an execution result.** Two
+independent reasons, both measured:
+
+1. **The two fleets decided off different data.** Paper's producers were
+   read-only followers polling the demo producers' data stores on their own
+   grid. Over 1,633 live paper cycles the funding cache matched demo's 94.2% of
+   the time and the kline cache 82.4%. On 2026-07-29 that opened and closed a
+   `TLMUSDT` position demo never asked for, for −70.73 USDT.
+2. **The two books are on different price bases.** Demo's carry targets were
+   re-stamped through the 2026-07-30 resize churn (ending 13:36:24) and paper's
+   still carry their entry stamp, so the fleets hold 9–17% different quantities
+   of the same three symbols while their published notionals agree to 0.005%.
+   This does not self-heal; it clears when the book is next rebuilt.
+
+Reason (1) is closed in the working tree by the target mirror (one fleet
+decides, both execute). Reason (2) needs either a flatten of both books or an
+accepted basis difference — **an owner decision, because it mutates live state,
+and it is not taken here.**
+
+Also in the working tree, not deployed: paper equity is marked from its own
+journal instead of the constant 250,000 it reported for its whole life
+(measured effect: paper published **0** resizes across 1,776 cycles against
+demo's 366, which was arithmetic and not a threshold), paper accrues modelled
+funding from public rates (it previously accrued **none**, on a sleeve whose
+entire return is funding), and a demo↔paper agreement check runs in the
+liveness watchdog. Plan and evidence: `docs/demo_paper_convergence_plan.md`.
 
 ## Evidence boundary
 
@@ -465,17 +523,24 @@ audit.
 | `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Root-caused 2026-07-27: venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — socket stays up and answers pings (20s/10s keepalive active), Bybit stops pushing frames. Not the host (kernel clean, producers' busy 508-symbol feeds unaffected through every episode), not scheduled (14 episodes over Jul 19–27 spread across the whole clock), not load (32% of all 20-min windows have a >100 s LONG cycle; only 3/13 episodes do). A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by the old per-attempt clock reset (fixed in `d11db79`+`7af59f3`, **deployed 2026-07-27 ~14:03 UTC**; both owners logged `raw Bybit public stream connected generation=1` at first start — record Bybit's verbatim close/error codes here from the transport logs on the next episode). Fails closed; zero trades lost. If quiet-stalls persist post-deploy, next lever is a second heartbeat topic or proactive resubscribe. |
 | `unadopted external execution: external protection fill is not position-reducing` (2026-07-27 10:47:20, once) | A manual ~10 USDT spot BTCUSDT buy made in the demo account UI at 10:47:20.106 (venue execution `1784799743630817527`), three minutes before the owner's 250k top-up transfers (+90k 10:49:40, +100k 10:52:20, +50k 10:52:26). The kernel manages linear perps only and was flat, so it correctly refused adoption, surfaced the error once, and health returned to green. The ~0.000153 BTC sits in the unified wallet outside the managed book; no reconciliation drift. |
 
-## Audit receipts
+## Open operational defects
 
-| Date | Subject |
+Carried forward from the 2026-07-30 demo/paper reconciliation. Decision logic is
+verified faithful — an independent replay reproduces the live book exactly — so
+every item here is operational, not strategy.
+
+| Item | State |
 | --- | --- |
-| 2026-07-27 | `docs/audit/2026-07-27-repo-wide-multi-agent-audit.md` — repo-wide ten-agent audit; 53 findings, all remediated and deployed the same day (`f1626565f`, Actions run 30293398218) |
-| 2026-07-24 | `docs/audit/2026-07-24-repo-and-strategy-audit.md` — repository and strategy audit; measured tail geometry, funding inversion, data tiers |
-| 2026-07-22 | `docs/audit/2026-07-22-demo-journal-publication-race.md` — journal publication race behind delayed fills and protection adoption |
-| 2026-07-22 | `docs/audit/2026-07-22-deploy-workflow-and-runtime-followup.md` — rollout gate, expired-rule recovery, shell status defect |
-| 2026-07-22 | `docs/audit/2026-07-22-paper-reduction-convergence.md` — paper reduce-only freshness contract mismatch |
-| 2026-07-21 | `docs/audit/2026-07-21-account-kernel-incident.md` — unprotected-interval gap and the venue-stop-first repair |
-| 2026-07-19 | `docs/audit/2026-07-19-load-bearing-audit.md` — ten runtime defect fixes and two O(history) scaling removals |
+| Remediation for the journal re-projection, paper funding snapshot, per-bar decision freeze, and stranded zero-quantity reservations | In the working tree, gate green, **not deployed**. The cursor is 138× faster on the steady-state planning read at 3.3× lower peak memory, outputs identical on the real journal |
+| Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45 | Needs an operator. Clearing it is a state mutation on a live fleet; the route is `scripts/ops.sh wedged-command`, which also still needs deploying |
+| Reported P&L is provisional | 166 of 187 `pnl` events carry `funding_status=pending_venue_reconciliation`; every figure is fill-reconstructed, not venue-confirmed. No closed-loop accounting check yet, which real money needs |
+| Sizing is not clamped to the capital reference in the deployed build | Live sizing anchored at 255,357.40 against a 250,000 reference (+2.14%). The clamp exists locally and is not deployed. Immaterial at current gross, but a load-time envelope proof that does not bind at runtime |
+| Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/carry_hold.md` |
+| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/carry_hold.md` §7.5 states it rather than treating it as settled |
+
+Audit reports are not kept as standing files. Their findings live in the topic
+docs — `docs/research_findings.md`, `docs/architecture.md`, `docs/data.md`,
+`docs/trading_logic.md`, `docs/notifications.md` — and in Git history.
 
 ## Recovery archive
 

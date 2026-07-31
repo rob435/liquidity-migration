@@ -36,8 +36,12 @@ Safe operator commands:
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
                                RM_* dials in the owner's env file
+  real-money create-state-roots [--execute]
+                               create the mainnet state roots; dry run without
+                               --execute
   test [PYTEST_ARGS...]        run pytest
-  deploy --execute MODE        run install, activation, or guarded rollout
+  deploy --execute MODE        run install, activation, guarded rollout, or the
+                               staged mainnet start/stop
   help                         show this help and do nothing else
 
 Environment overrides:
@@ -48,9 +52,13 @@ Environment overrides:
 Safety contract:
   * This interface never enables REAL_MONEY or mainnet trading. real-money
     preflight only reports what is missing and never prints a secret;
-    render-profile writes one non-secret profile artifact and nothing else.
+    render-profile writes one non-secret profile artifact and nothing else;
+    create-state-roots creates empty directories and nothing else.
   * reset is a remote dry-run unless --execute reaches the guarded reset script.
-  * deploy requires --execute and MODE=install|activate|rollout.
+  * deploy requires --execute and
+    MODE=install|activate|rollout|activate-mainnet|stop-mainnet.
+  * activate-mainnet starts already-armed mainnet units and refuses unless the
+    arming preflight passes; it never sets REAL_MONEY or installs a credential.
   * Research runs remain research artifacts and are never auto-promoted.
 
 Details: docs/operations.md
@@ -149,8 +157,10 @@ case "$command" in
     # a secret. `render-profile` without --execute prints the profile to
     # stdout; with --execute it writes exactly one non-secret artifact and
     # refuses any dial set that does not pass the load-time envelope proof.
-    # Neither sets REAL_MONEY, writes a credential, or starts
-    # a unit -- every one of those is the owner's own act.
+    # `create-state-roots` without --execute lists the directories it would
+    # create; with --execute it creates them. None of them sets REAL_MONEY,
+    # writes a credential, or starts a unit -- every one of those is the
+    # owner's own act.
     # No argument means preflight, and it has to be *passed*: leaving argv
     # empty ran the module with no subcommand and got an argparse usage error
     # instead of the read-only report the operator asked for.
@@ -158,8 +168,8 @@ case "$command" in
       set -- preflight
     fi
     case "${1:-}" in
-      preflight|render-profile) ;;
-      *) die_usage "real-money subcommand must be preflight or render-profile" ;;
+      preflight|render-profile|create-state-roots) ;;
+      *) die_usage "real-money subcommand must be preflight, render-profile, or create-state-roots" ;;
     esac
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.
@@ -188,8 +198,10 @@ case "$command" in
     [[ "${1:-}" == "--execute" ]] \
       || die_usage "deploy is mutating; its first argument must be --execute"
     shift
-    [[ "${1:-}" == "install" || "${1:-}" == "activate" || "${1:-}" == "rollout" ]] \
-      || die_usage "deploy mode must be install, activate, or rollout"
+    case "${1:-}" in
+      install|activate|rollout|activate-mainnet|stop-mainnet) ;;
+      *) die_usage "deploy mode must be install, activate, rollout, activate-mainnet, or stop-mainnet" ;;
+    esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "$@"
     ;;
   *)

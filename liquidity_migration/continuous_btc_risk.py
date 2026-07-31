@@ -262,9 +262,9 @@ def percentile_from_prior(prior: list[float], value: float) -> float:
     """Share of prior observations at or below ``value``.
 
     ``prior`` is maintained SORTED (see ``ExpandingBtcRiskState.score``), so the
-    count is a bisect rather than a full scan: the authoritative replay calls
-    this once per component per receipt and the linear scan made the whole
-    reconciliation quadratic in chain length (2026-07-27 audit L15).
+    count is a bisect: the authoritative replay calls this once per component
+    per receipt, and a linear scan makes reconciliation quadratic in chain
+    length.
     """
 
     if not prior:
@@ -366,8 +366,8 @@ class ExpandingBtcRiskState:
         for name in BTC_RISK_COMPONENTS:
             value = raw_values.get(name)
             if value is not None:
-                # Insert in order: `percentile_from_prior` bisects, and history
-                # order carries no meaning beyond the empirical distribution.
+                # Sorted insert: `percentile_from_prior` bisects, and history
+                # order means nothing beyond the empirical distribution.
                 bisect.insort(self.raw_history.setdefault(name, []), float(value))
         self.seen_keys.add(decision_key)
         self.decision_count += 1
@@ -443,8 +443,8 @@ class BtcRiskLiveSizer:
         self._rows = []
         self.state = ExpandingBtcRiskState(min_prior=self.state.min_prior)
         self._state_hash = _BTC_RISK_STATE_GENESIS_HASH
-        # Parquet row order is the accepted receipt-chain order. Retain it so
-        # later receipts accepted out of signal-time order still replay exactly.
+        # Parquet row order is the accepted receipt-chain order, so receipts
+        # accepted out of signal-time order still replay exactly.
         for row in rows:
             symbol = str(row.get("symbol") or "").upper()
             signal_ts_ms = int(row.get("signal_ts_ms") or 0)
@@ -460,9 +460,8 @@ class BtcRiskLiveSizer:
                 raise ValueError("BTC-risk state contains unreadable decision evidence") from exc
             evidence = normalize_btc_risk_decision_evidence(raw_evidence)
             if evidence["arm_id"] != self.arm_id or evidence["policy"] != self.policy:
-                # A persisted decision from another arm epoch (policy or arm
-                # retune) is a prior-epoch orphan, not corruption: drop it and
-                # count it for the next authoritative reconciliation.
+                # A decision from another arm epoch is a prior-epoch orphan,
+                # not corruption: drop and count it.
                 self._epoch_orphaned_rows += 1
                 continue
             raw_values = {name: _finite(row.get(name)) for name in BTC_RISK_COMPONENTS}
@@ -598,11 +597,10 @@ class BtcRiskLiveSizer:
     ) -> None:
         """Validate a receipt rebased across a never-accepted predecessor link.
 
-        The recorded chain hashes and score live on a proposal branch whose
-        predecessor was never accepted, so a causal replay of the recorded
-        result is impossible: validation is limited to identity, raw-value
-        agreement, recorded-link integrity, and the receipt's own policy
-        arithmetic.
+        The recorded hashes and score live on a proposal branch whose
+        predecessor was never accepted, so the result cannot be replayed:
+        validation covers identity, raw-value agreement, recorded-link
+        integrity, and the receipt's own policy arithmetic.
         """
 
         if (
@@ -654,9 +652,8 @@ class BtcRiskLiveSizer:
                 continue
             evidence = normalize_btc_risk_decision_evidence(raw_evidence)
             if evidence["arm_id"] != self.arm_id or evidence["policy"] != self.policy:
-                # Accepted evidence from another arm epoch (policy or arm
-                # retune) is not authority for the active arm: ignore it and
-                # count it. Same-key conflicts apply within one epoch only.
+                # Accepted evidence from another arm epoch is not authority for
+                # the active arm. Same-key conflicts apply within one epoch.
                 epoch_ignored += 1
                 continue
             row_symbol = str(row.get("symbol") or "").upper()
@@ -707,23 +704,20 @@ class BtcRiskLiveSizer:
     ) -> tuple[ExpandingBtcRiskState, str, list[dict[str, Any]], int]:
         """Replay accepted receipts as one chain, healing never-accepted links.
 
-        Only accepted proposals reach the authority, so a receipt chained past
-        a never-accepted same-cycle proposal (risk rejection, suppression,
-        publication error) records a predecessor no accepted evidence can
-        fill. Such a receipt commits rebased onto the replayed head — counted
-        per severed link — and its same-cycle successors follow the recorded
-        proposal branch so acceptance order is preserved. Receipts whose
-        recorded predecessor matches the replayed head still commit strictly,
-        and a forked predecessor still fails closed.
+        Only accepted proposals reach the authority, so a receipt chained past a
+        never-accepted same-cycle proposal records a predecessor no accepted
+        evidence can fill. It commits rebased onto the replayed head (counted per
+        severed link) and its same-cycle successors follow the recorded branch so
+        acceptance order is preserved. A receipt whose recorded predecessor
+        matches the replayed head commits strictly; a forked one fails closed.
         """
 
         replayed_rows: list[dict[str, Any]] = []
         orphaned_links = 0
         linked_state_hash = candidate_state_hash
         remaining = dict(evidence_by_key)
-        # Index by predecessor once. Rebuilding the candidate list by scanning
-        # every remaining receipt on each iteration made the replay quadratic in
-        # chain length, on a path that runs every 60 s forever (audit L15).
+        # Index by predecessor once: rescanning every remaining receipt per
+        # iteration makes the replay quadratic in chain length.
         by_predecessor: dict[str, list[str]] = {}
         for key, evidence in remaining.items():
             by_predecessor.setdefault(str(evidence["predecessor_state_hash"]), []).append(key)
@@ -935,14 +929,11 @@ class BtcRiskLiveSizer:
         self._authoritative_reconciliation_error = "authoritative reconciliation did not complete"
         try:
             evidence_by_key, ignored, epoch_ignored, duplicate_rows = self._normalize_accepted_evidence_rows(rows)
-            # Short-circuit an unchanged authority. The replay below re-hashes
-            # every receipt from genesis; on a chain that has not moved since the
-            # last successful reconciliation there is nothing to learn, and this
-            # runs every 60 s forever (2026-07-27 audit L15). The signature
-            # covers the exact authoritative evidence AND the persisted state, so
-            # any real drift still forces the full replay, and the cheap
-            # steady-state recount below is an extra guard: anything left to
-            # ingest, drop, or rebase falls through to the full path.
+            # Short-circuit an unchanged authority: the replay below re-hashes
+            # every receipt from genesis. The signature covers the authoritative
+            # evidence AND the persisted state, so real drift still forces the
+            # full replay, and the recount below catches anything left to
+            # ingest, drop, or rebase.
             signature = self._authority_signature(
                 self._persisted_evidence_by_key(),
                 evidence_by_key,
@@ -1079,8 +1070,8 @@ class BtcRiskLiveSizer:
         else:
             _unlink_quietly(backup_path)
             if prior_exists:
-                # The replacement itself is already durable. Failure to fsync
-                # removal of the now-redundant backup must not roll it back.
+                # The replacement is already durable; a failed fsync of the
+                # redundant backup's removal must not roll it back.
                 try:
                     _fsync_directory(parent)
                 except OSError:

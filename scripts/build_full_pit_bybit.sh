@@ -13,10 +13,9 @@
 #     exposes Bybit linear/inverse perpetuals; the USDT quote-suffix filter
 #     restricts the result to USDT-quoted linear perps.
 #   * `archive-download-klines-1h-api` is invoked with `--category linear`.
-#   * `download-data` consumes the manifest-derived symbol list directly,
-#     so no spot symbol can leak in.
-# A post-manifest sanity check rejects any symbol that does not end with USDT
-# (catches accidental categorical drift if upstream URL or filters change).
+#   * `download-data` consumes the manifest-derived symbol list directly.
+# A post-manifest check rejects any symbol not ending in USDT, catching
+# categorical drift if the upstream URL or filters change.
 #
 # See: docs/data.md
 #
@@ -76,12 +75,9 @@ echo "[1/4] Bybit — PIT manifest from public.bybit.com archive + v5 instrument
 # archive-manifest always merges two sources:
 #   * public.bybit.com/trading scrape (deep history; the archive root)
 #   * Bybit v5 instruments-info listing (currently-Trading perps)
-# The v5 listing closes two known archive gaps: symbols the scrape never
-# picked up at all (observed 2026-05-25 with BANUSDT/TRUSTUSDT — both
-# demo-tradeable yet absent from the scrape) and the ~24h current-day
-# publishing lag. No flag controls this; archive-only mode would silently
-# drop demo-tradeable symbols and is never the right behaviour for a
-# backtest. See ArchiveManifestConfig docstring for details.
+# The v5 listing closes two archive gaps: symbols the scrape never picked up,
+# and the ~24h current-day publishing lag. No flag controls this — archive-only
+# mode silently drops tradeable symbols. See the ArchiveManifestConfig docstring.
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS"
 
@@ -97,9 +93,8 @@ echo "[3/4] Bybit — validate independent manifest against ≥20-bar kline cove
 "$PYTHON_BIN" -m liquidity_migration.binance_vision \
   validate-manifest --data-root "$ROOT"
 
-# Derive the symbol list from the validated independent manifest. Required by download-data.
-# Perps-only guard: any symbol not USDT-quoted fails the build loudly rather
-# than silently slipping spot or inverse symbols into the ancillary datasets.
+# Symbol list for download-data, from the validated manifest. Perps-only guard:
+# a non-USDT-quoted symbol fails the build rather than reaching the ancillaries.
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os, pathlib, sys
 import polars as pl
@@ -120,7 +115,6 @@ if bad:
 print(",".join(syms))
 PY
 )
-# A blank symbol list has zero members.
 if [ -z "$SYMBOLS" ]; then
   N_SYMBOLS=0
 else

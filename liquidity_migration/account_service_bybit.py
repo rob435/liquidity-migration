@@ -1,4 +1,4 @@
-"""Bybit demo providers for the single-owner account execution service."""
+"""Bybit account providers for the single-owner account execution service."""
 
 from __future__ import annotations
 
@@ -23,6 +23,27 @@ from .execution_adapters import (
     MarketOrderExecutionTwin,
 )
 from .market_capture import SequenceAwareMarketRecorder
+from .venue_realm import VenueRealm, venue_realm
+
+#: All four blank means the UNIFIED row carries no account-level equity at all.
+#: Which venue account or margin modes produce that is unverified here.
+ACCOUNT_WIDE_WALLET_FIELDS = (
+    "totalEquity",
+    "totalAvailableBalance",
+    "totalMarginBalance",
+    "totalInitialMargin",
+)
+
+
+def require_named_realm(client: Any, *, label: str) -> VenueRealm:
+    """Read the realm a private client names, refusing an unnamed or unparsable one."""
+
+    try:
+        return venue_realm(getattr(client, "realm", None))
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} requires a client naming venue realm 'demo' or 'mainnet'"
+        ) from exc
 
 
 def _finite(value: Any, *, label: str) -> float:
@@ -54,8 +75,8 @@ class CapturedBybitMarketProvider:
             market = book.market_ref(input_key=str(record["record_id"]), source="bybit_raw_l2")
             with self._lock:
                 self._contexts[market.input_key] = book
-                # Contexts are consumed promptly by the execution adapter; keep
-                # a hard bound for rejected batches and crash/retry churn.
+                # Bound for rejected batches and crash/retry churn; the adapter
+                # consumes contexts promptly.
                 while len(self._contexts) > 10_000:
                     self._contexts.pop(next(iter(self._contexts)))
             output[symbol] = replace(
@@ -108,12 +129,11 @@ class CapturedPaperExecutionAdapter:
         return self.twin.submit(command, market_input)
 
 
-class BybitDemoAccountSnapshotProvider:
-    """Read one fresh demo wallet snapshot; mainnet clients are refused."""
+class BybitAccountSnapshotProvider:
+    """Read one fresh wallet snapshot for the realm the client names."""
 
     def __init__(self, client: Any, *, clock: Clock | None = None) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("demo account snapshot provider refuses a non-demo client")
+        self.realm = require_named_realm(client, label="account snapshot provider")
         self.client = client
         self.clock = clock or SystemClock()
 
@@ -121,8 +141,13 @@ class BybitDemoAccountSnapshotProvider:
         result = self.client.get_wallet_balance(account_type="UNIFIED", coin="USDT")
         rows = result.get("list") if isinstance(result, Mapping) else None
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], Mapping):
-            raise RuntimeError("Bybit demo wallet response has no UNIFIED account row")
+            raise RuntimeError(f"Bybit {self.realm.value} wallet response has no UNIFIED account row")
         account = rows[0]
+        if all(account.get(field) in (None, "") for field in ACCOUNT_WIDE_WALLET_FIELDS):
+            raise RuntimeError(
+                f"Bybit {self.realm.value} UNIFIED row blanks every account-wide field "
+                f"({', '.join(ACCOUNT_WIDE_WALLET_FIELDS)}); the owner cannot size against it"
+            )
         equity = _finite(account.get("totalEquity"), label="totalEquity")
         available_raw = account.get("totalAvailableBalance")
         if available_raw in (None, ""):
@@ -132,7 +157,9 @@ class BybitDemoAccountSnapshotProvider:
         else:
             available = _finite(available_raw, label="totalAvailableBalance")
         if equity <= 0.0 or available < 0.0:
-            raise RuntimeError("Bybit demo wallet snapshot has nonpositive equity or negative available margin")
+            raise RuntimeError(
+                f"Bybit {self.realm.value} wallet snapshot has nonpositive equity or negative available margin"
+            )
         observed_ns = self.clock.wall_time_ns()
         material = {
             "batch_id": batch_id,
@@ -143,39 +170,47 @@ class BybitDemoAccountSnapshotProvider:
         return AccountRiskSnapshot(
             equity_usdt=equity,
             available_margin_usdt=available,
-            snapshot_key="bybit-demo:" + hashlib.sha256(canonical_json(material)).hexdigest()[:20],
+            snapshot_key=f"bybit-{self.realm.value}:"
+            + hashlib.sha256(canonical_json(material)).hexdigest()[:20],
             snapshot_ts_ns=observed_ns,
         )
 
 
 @dataclass(frozen=True, slots=True)
-class UnownedBybitDemoOrder:
+class UnownedVenueOrder:
     symbol: str
     description: str
 
 
 @dataclass(frozen=True, slots=True)
-class BybitDemoOrderOwnershipSnapshot:
+class BybitOrderOwnershipSnapshot:
     journal_events_applied: int
     all_kinds_rows_observed: int
     conditional_rows_observed: int
     unique_orders_observed: int
-    unowned_orders: tuple[UnownedBybitDemoOrder, ...]
+    unowned_orders: tuple[UnownedVenueOrder, ...]
 
 
-def _validated_open_order_rows(value: Any, *, query_name: str) -> tuple[Mapping[str, Any], ...]:
+def _validated_open_order_rows(
+    value: Any,
+    *,
+    realm: VenueRealm,
+    query_name: str,
+) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise RuntimeError(f"Bybit demo {query_name} open-order query returned a non-list payload")
+        raise RuntimeError(
+            f"Bybit {realm.value} {query_name} open-order query returned a non-list payload"
+        )
     rows: list[Mapping[str, Any]] = []
     for index, row in enumerate(value):
         if not isinstance(row, Mapping):
             raise RuntimeError(
-                f"Bybit demo {query_name} open-order query returned a non-object row at index {index}"
+                f"Bybit {realm.value} {query_name} open-order query returned a non-object row at index {index}"
             )
         symbol = row.get("symbol")
         if type(symbol) is not str or not symbol.strip():
             raise RuntimeError(
-                f"Bybit demo {query_name} open-order row {index} lacks symbol"
+                f"Bybit {realm.value} {query_name} open-order row {index} lacks symbol"
             )
         order_id = row.get("orderId") or row.get("order_id")
         order_link_id = row.get("orderLinkId") or row.get("order_link_id")
@@ -184,7 +219,7 @@ def _validated_open_order_rows(value: Any, *, query_name: str) -> tuple[Mapping[
             or (type(order_link_id) is str and bool(order_link_id.strip()))
         ):
             raise RuntimeError(
-                f"Bybit demo {query_name} open-order row {index} lacks durable order identity"
+                f"Bybit {realm.value} {query_name} open-order row {index} lacks durable order identity"
             )
         rows.append(row)
     return tuple(rows)
@@ -256,6 +291,8 @@ def _describe_open_order(
 
 def _open_order_symbol(
     variants: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    realm: VenueRealm,
 ) -> str:
     symbols = {
         str(row.get("symbol") or "").strip().upper()
@@ -264,31 +301,30 @@ def _open_order_symbol(
     }
     if len(symbols) > 1:
         raise RuntimeError(
-            "Bybit demo duplicated one open-order identity across conflicting symbols"
+            f"Bybit {realm.value} duplicated one open-order identity across conflicting symbols"
         )
     return next(iter(symbols), "")
 
 
-def inspect_bybit_demo_order_ownership(
+def inspect_bybit_order_ownership(
     *,
     client: Any,
     state: AccountState,
     native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
-) -> BybitDemoOrderOwnershipSnapshot:
+) -> BybitOrderOwnershipSnapshot:
     """Read all regular/conditional venue orders and classify durable ownership."""
 
-    if not bool(getattr(client, "demo", False)):
-        raise ValueError("venue-order ownership inspection refuses a non-demo client")
+    realm = require_named_realm(client, label="venue-order ownership inspection")
 
     def read(query_name: str, **params: Any) -> tuple[Mapping[str, Any], ...]:
         try:
             value = client.get_open_orders(settle_coin="USDT", **params)
         except Exception as exc:
             raise RuntimeError(
-                "Bybit demo could not prove venue order ownership: "
+                f"Bybit {realm.value} could not prove venue order ownership: "
                 f"{query_name} open-order query failed: {type(exc).__name__}: {exc}"
             ) from exc
-        return _validated_open_order_rows(value, query_name=query_name)
+        return _validated_open_order_rows(value, realm=realm, query_name=query_name)
 
     all_kinds = read("all-kinds")
     conditional = read("conditional", order_filter="StopOrder")
@@ -297,14 +333,12 @@ def inspect_bybit_demo_order_ownership(
         for row in rows:
             grouped.setdefault(_open_order_identity(row), []).append((source, row))
 
-    unowned: list[UnownedBybitDemoOrder] = []
+    unowned: list[UnownedVenueOrder] = []
     for variants in grouped.values():
-        symbol = _open_order_symbol(variants)
+        symbol = _open_order_symbol(variants, realm=realm)
         description = _describe_open_order(variants)
         if state.events_applied == 0:
-            unowned.append(
-                UnownedBybitDemoOrder(symbol=symbol, description=description)
-            )
+            unowned.append(UnownedVenueOrder(symbol=symbol, description=description))
             continue
         if any(_kernel_working_order_owns_row(state, row) for _source, row in variants):
             continue
@@ -316,15 +350,13 @@ def inspect_bybit_demo_order_ownership(
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    "Bybit demo could not verify native-protection order ownership: "
+                    f"Bybit {realm.value} could not verify native-protection order ownership: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
         if not native_owned:
-            unowned.append(
-                UnownedBybitDemoOrder(symbol=symbol, description=description)
-            )
+            unowned.append(UnownedVenueOrder(symbol=symbol, description=description))
 
-    return BybitDemoOrderOwnershipSnapshot(
+    return BybitOrderOwnershipSnapshot(
         journal_events_applied=state.events_applied,
         all_kinds_rows_observed=len(all_kinds),
         conditional_rows_observed=len(conditional),
@@ -333,26 +365,26 @@ def inspect_bybit_demo_order_ownership(
     )
 
 
-def require_bybit_demo_order_ownership(
+def require_bybit_order_ownership(
     *,
     client: Any,
     kernel: AccountExecutionKernel,
     native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
-    """Fail demo-owner startup unless every venue order has a durable owner.
+    """Fail owner startup unless every venue order has a durable owner.
 
-    Bybit's omitted ``orderFilter`` is documented as all order kinds for linear
-    accounts, but startup also issues an explicit ``StopOrder`` query so a
-    wrapper/default change cannot hide conditional orders. Duplicate rows are
-    folded by durable venue/client identity. An empty account journal cannot
-    own any row. Restarts accept only a still-working kernel command or an
-    exchange-native protection that the journal-backed protection verifier can
-    identify; this function never cancels or adopts an order.
+    An omitted ``orderFilter`` covers all linear order kinds, but startup also
+    issues an explicit ``StopOrder`` query so a wrapper default cannot hide
+    conditional orders; duplicates fold by venue/client identity. An empty
+    journal owns nothing. Only a still-working kernel command or a
+    verifier-identified native protection is accepted, and nothing here cancels
+    or adopts an order.
     """
 
+    realm = require_named_realm(client, label="venue-order ownership inspection")
     state_ref = getattr(kernel, "_state_ref", None)
     state = state_ref() if callable(state_ref) else kernel.state()
-    snapshot = inspect_bybit_demo_order_ownership(
+    snapshot = inspect_bybit_order_ownership(
         client=client,
         state=state,
         native_order_verifier=native_order_verifier,
@@ -365,11 +397,11 @@ def require_bybit_demo_order_ownership(
     )
     if snapshot.journal_events_applied == 0:
         raise RuntimeError(
-            "Bybit demo startup refused venue orders with an empty/new account journal: "
+            f"Bybit {realm.value} startup refused venue orders with an empty/new account journal: "
             + row_summary
         )
     raise RuntimeError(
-        "Bybit demo startup refused unowned venue order(s): " + row_summary
+        f"Bybit {realm.value} startup refused unowned venue order(s): " + row_summary
     )
 
 
@@ -408,15 +440,11 @@ def instrument_rules_from_bybit_row(
 class VerifiedBybitDemoRulesProvider:
     """Serve only rules bound to one explicitly named realm.
 
-    Public instruments-info is not silently treated as demo truth. The demo
-    owner must be given probed/verified demo rules for every traded symbol,
-    which keeps demo's empirical minimum notionals separate from live-money
-    sizing. The mainnet owner is given venue-declared rules read from the
-    read-only instruments-info endpoint — a different and weaker evidence
-    standard, recorded as such on every rule's ``source`` and ``environment``.
-
-    What this class enforces is that the two can never be crossed: a rule whose
-    environment is not the owner's realm is refused outright.
+    The demo owner requires probed demo rules, which carry demo's empirical
+    minimum notionals; the mainnet owner gets venue-declared instruments-info
+    rules, a weaker standard recorded on each rule's ``source`` and
+    ``environment``. A rule whose environment is not the owner's realm is
+    refused outright.
     """
 
     def __init__(

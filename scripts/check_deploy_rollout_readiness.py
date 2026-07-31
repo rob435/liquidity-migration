@@ -68,8 +68,7 @@ def require_rollout_readiness(
     client: Any,
     now_ns: int | None = None,
 ) -> RolloutReadiness:
-    """Require one flat local/direct-venue snapshot or raise fail-closed."""
-
+    """Require one flat local/direct-venue snapshot, or raise."""
     if head_binding not in {
         "exact",
         "allow_behind",
@@ -87,10 +86,8 @@ def require_rollout_readiness(
     events = read_account_journal(root, verify=True)
     state = reduce_account_events(events)
     if now_ns is None:
-        # The full verified journal read can take seconds while the owner keeps
-        # publishing. Re-sample after that read; otherwise a genuinely newer
-        # health/snapshot is misclassified as future-dated against a timestamp
-        # captured before the I/O began.
+        # Re-sample after the verified read, which can take seconds while the
+        # owner keeps publishing; otherwise a newer snapshot reads as future-dated.
         observed_now_ns = time.time_ns()
     problems: list[str] = []
 

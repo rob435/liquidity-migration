@@ -62,9 +62,8 @@ case "$UNIT:$ENTRYPOINT" in
         )
         ;;
     liquidity-migration-paper-target-mirror.service:main)
-        # Reads the demo fleet's published targets and republishes them onto
-        # the paper route. Deliberately verbatim: the mirror exists so that a
-        # difference between the two books is execution and nothing else.
+        # Republishes the demo fleet's published targets onto the paper route,
+        # verbatim, so execution is the only difference between the two books.
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
             -m liquidity_migration.paper_target_mirror_runner
@@ -90,10 +89,9 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-bybit-carry-demo.service:main | \
     liquidity-migration-bybit-carry-paper.service:main | \
     liquidity-migration-bybit-carry-mainnet.service:main)
-        # The sleeve contract names the paper follow root CARRY_MARKET_FOLLOW_ROOT
-        # (sleeve-scoped, greppable beside KLINES_FOLLOW_ROOT); the carry runner
-        # consumes the generic MARKET_FOLLOW_ROOT. Map it here so the authorized
-        # commit owns the translation; the demo unit sets neither.
+        # The sleeve contract names the paper follow root
+        # CARRY_MARKET_FOLLOW_ROOT; the carry runner consumes the generic
+        # MARKET_FOLLOW_ROOT. The demo unit sets neither.
         if [ -n "${CARRY_MARKET_FOLLOW_ROOT:-}" ]; then
             MARKET_FOLLOW_ROOT="$CARRY_MARKET_FOLLOW_ROOT"
             export MARKET_FOLLOW_ROOT
@@ -109,11 +107,23 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            scripts/check_demo_liveness.py
+            scripts/check_fleet_liveness.py
             --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
             --account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env
             --max-cycle-age-min 10
             --cooldown-min 360
+            --telegram
+        )
+        ;;
+    liquidity-migration-mainnet-liveness.service:main)
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            scripts/check_fleet_liveness.py
+            --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
+            --carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event
+            --long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event
+            --max-cycle-age-min 10
+            --cooldown-min 60
             --telegram
         )
         ;;

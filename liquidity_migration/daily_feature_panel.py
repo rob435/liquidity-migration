@@ -1,9 +1,9 @@
 """Daily PIT feature-panel builders used by residual momentum and risk models.
 
-This module builds a wide (symbol, date, feature_1..feature_k, fwd_ret_Nd)
-panel from PIT venue roots. It is deliberately a data-preparation module.
+Builds a wide (symbol, date, feature_1..feature_k, fwd_ret_Nd) panel from PIT
+venue roots. Data preparation only.
 
-Design contract — non-negotiable:
+Design contract:
 
   1. Causality. Every feature value computed for (symbol, date=D) uses only
      data observable at the END-OF-DAY close on D. Rolling windows therefore
@@ -93,12 +93,8 @@ def _read_window(
     ``end_ms`` is end-exclusive to match the repo's data_root boundary convention.
 
     The read is pruned at the DIRECTORY level to ``start_ms``'s date before any
-    parquet is opened. ``read_dataset_columns`` grew ``since_date`` precisely for
-    this (a full ``**/*.parquet`` walk of a (date, symbol)-partitioned root is
-    ~500k files / tens of seconds), but nothing on the panel path passed it, so
-    every windowed build -- including the live residual-momentum refresh -- read
-    the whole multi-year history of four datasets and then filtered it away
-    (2026-07-27 audit M9).
+    parquet is opened: a full ``**/*.parquet`` walk of a (date, symbol)-
+    partitioned root is ~500k files and tens of seconds.
     """
     df = read_dataset_columns(
         data_root,
@@ -144,11 +140,9 @@ def _aggregate_daily_klines(klines_1h: pl.DataFrame) -> pl.DataFrame:
     """
     if klines_1h.is_empty():
         return klines_1h
-    # ``ts_ms`` in klines_1h is the bar START. The bar with the smallest
-    # ts_ms on a given date is the bar that OPENS at 00:00 UTC and CLOSES
-    # at 01:00 UTC — that close is what an event_demo cell with
-    # --entry-delay-hours 1 would have filled at for a signal generated at
-    # the previous day's 23:00→24:00 bar close.
+    # ``ts_ms`` is the bar START, so the smallest ts_ms on a date is the bar
+    # opening 00:00 UTC and closing 01:00 UTC — the fill price for a signal from
+    # the previous day's 23:00->24:00 close under --entry-delay-hours 1.
     daily = (
         klines_1h.sort(["symbol", "ts_ms"])
         .group_by(["symbol", "date"], maintain_order=True)
@@ -329,13 +323,10 @@ def _make_xs_rank_ret_Nd(n: int):
     def builder(ctx: FeatureContext) -> pl.DataFrame:
         if ctx.daily_returns.is_empty():
             return pl.DataFrame()
-        # Calendar-exact: resolve the D-n close by an explicit ts_ms - n*MS_PER_DAY
-        # match (calendar_shift), NOT a positional shift(n). On a gapped symbol a
-        # positional shift reaches the n-th PRESENT row, so an "Nd return" would
-        # silently span more than N calendar days — the same gap-blindness
-        # _attach_daily_returns / _attach_forward_returns deliberately avoid. A
-        # gapped row gets a null ret_Nd (no exact D-n partner) instead of a
-        # misaligned horizon. Byte-identical to shift(n) on a contiguous series.
+        # calendar_shift, not a positional shift(n): on a gapped symbol the
+        # positional form reaches the n-th PRESENT row, so an "Nd return" would
+        # span more than N calendar days. A gapped row gets a null instead.
+        # Byte-identical to shift(n) on a contiguous series.
         df = ctx.daily_returns.sort(["symbol", "ts_ms"]).with_columns(
             (pl.col("close") / calendar_shift(pl.col("close"), n) - 1.0).alias("ret_Nd")
         )
@@ -353,11 +344,9 @@ def _build_liquidity_rank(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_klines.is_empty():
         return pl.DataFrame()
-    # Calendar-bounded 7d mean (calendar_roll): a missing day shrinks the window
-    # rather than stretching the "7d" mean across >7 calendar days on a gapped
-    # symbol. shifted=False => trailing 7d INCLUDING today (turnover[D-6..D]).
-    # Numerically identical to rolling_mean(window_size=7, min_samples=1) on a
-    # contiguous daily grid.
+    # calendar_roll: a missing day shrinks the window rather than stretching the
+    # "7d" mean past 7 calendar days. shifted=False => turnover[D-6..D].
+    # Identical to rolling_mean(window_size=7, min_samples=1) on a full grid.
     df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
         calendar_roll(pl.col("turnover_quote"), "mean", 7, shifted=False, min_samples=1)
         .over("symbol")
@@ -380,10 +369,9 @@ def _make_liquidity_rank_delta(n: int):
         lr = _build_liquidity_rank(ctx)
         if lr.is_empty():
             return lr
-        # Calendar-exact prior rank (calendar_shift): the D-n rank must be the
-        # one EXACTLY n calendar days back, else a gapped symbol's "Nd rank
-        # delta" silently compares against a >n-day-old rank. Null across a gap
-        # rather than misaligned; identical to shift(n) on contiguous data.
+        # calendar_shift: the D-n rank must be exactly n calendar days back, or
+        # a gapped symbol compares against an older rank. Null across a gap;
+        # identical to shift(n) on contiguous data.
         df = lr.sort(["symbol", "ts_ms"]).with_columns(
             (calendar_shift(pl.col("liquidity_rank"), n) - pl.col("liquidity_rank")).alias(
                 f"liquidity_rank_delta_{n}d"
@@ -404,11 +392,9 @@ def _make_turnover_delta(n: int):
     def builder(ctx: FeatureContext) -> pl.DataFrame:
         if ctx.daily_klines.is_empty():
             return pl.DataFrame()
-        # Calendar-bounded prior-N-day mean (calendar_roll, shifted=True =>
-        # closed="left", the prior N days EXCLUDING today). A positional
-        # shift(1).rolling_mean(N) would, on a gapped symbol, average rows that
-        # span >N calendar days and mislabel today's turnover_delta. Identical to
-        # the positional version on a contiguous daily grid.
+        # calendar_roll with shifted=True => closed="left", the prior N days
+        # EXCLUDING today. The positional shift(1).rolling_mean(N) would span
+        # >N calendar days on a gapped symbol. Identical on a full grid.
         df = ctx.daily_klines.sort(["symbol", "ts_ms"]).with_columns(
             calendar_roll(pl.col("turnover_quote"), "mean", n, shifted=True, min_samples=1)
             .over("symbol")
@@ -447,11 +433,9 @@ def _build_funding_rate_delta_7d(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.funding_daily.is_empty():
         return pl.DataFrame()
-    # Calendar-bounded 7d funding sum (trailing 7 days incl. today) and a
-    # calendar-exact 7-day-prior comparison. A positional rolling_sum(7).shift(7)
-    # on a gapped symbol would sum across >7 calendar days and compare against a
-    # window that is not exactly 7 days old. Identical to the positional form on
-    # a contiguous daily grid.
+    # 7d funding sum incl. today, plus an exactly-7-day-prior comparison. The
+    # positional rolling_sum(7).shift(7) would span >7 calendar days on a gapped
+    # symbol. Identical to the positional form on a full grid.
     df = ctx.funding_daily.sort(["symbol", "ts_ms"]).with_columns(
         calendar_roll(pl.col("funding_rate_1d_sum"), "sum", 7, shifted=False, min_samples=1)
         .over("symbol")
@@ -542,11 +526,9 @@ def _build_realized_vol_7d(ctx: FeatureContext) -> pl.DataFrame:
     """
     if ctx.daily_returns.is_empty():
         return pl.DataFrame()
-    # Calendar-bounded 7d vol (trailing 7 days incl. today). A positional
-    # rolling_std(7) on a gapped symbol spans >7 calendar days, so this FROZEN
-    # feature (also the inverse-vol sizing denominator) would mislabel its
-    # horizon. Identical to rolling_std(window_size=7, min_samples=3) on a
-    # contiguous daily grid.
+    # 7d vol incl. today. A positional rolling_std(7) spans >7 calendar days on
+    # a gapped symbol, mislabelling this frozen feature (also the inverse-vol
+    # sizing denominator). Identical to min_samples=3 rolling_std on a full grid.
     df = ctx.daily_returns.sort(["symbol", "ts_ms"]).with_columns(
         (
             calendar_roll(pl.col("ret_1d"), "std", 7, shifted=False, min_samples=3)
@@ -789,12 +771,9 @@ def _autodetect_dataset_names(data_root: Path | str) -> dict[str, str]:
       * Binance: binance_usdm_funding/, binance_usdm_open_interest/,
                  binance_usdm_premium_index_1h/, binance_usdm_mark_price_1h/
 
-    ``klines_1h`` is the same on both venues. We sniff which subdirs exist
-    and return the right mapping so callers don't have to know the
-    convention up-front. Phase 5a hit this: dispatch used default Bybit
-    names against the Binance root, silently produced 100%-null
-    funding_rate_z / oi_delta_7d / premium_index_z, and the resulting
-    panel was unusable for Phase 5b IC.
+    ``klines_1h`` is the same on both venues. Sniffing which subdirs exist keeps
+    callers from having to know the convention; the wrong mapping silently
+    yields 100%-null funding_rate_z / oi_delta_7d / premium_index_z.
     """
     root = Path(str(data_root)).expanduser()
     binance_prefix = "binance_usdm_"

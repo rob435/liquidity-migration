@@ -1,7 +1,5 @@
-"""Tests for the cross-sectional evaluation primitives.
-
-Constructed so each property is checked against a hand-computable answer,
-because these primitives decide whether an anomaly read is believed.
+"""Tests for the cross-sectional evaluation primitives, each checked against a
+hand-computable answer.
 """
 
 from __future__ import annotations
@@ -127,11 +125,8 @@ class TestSummary:
         assert summary(r, periods_per_year=365, cost_bp=4.0).mean_bp == pytest.approx(6.0)
 
     def test_default_cost_basis_is_the_measured_round_trip_not_gross(self) -> None:
-        """Omitting ``cost_bp`` must not silently produce a gross number.
-
-        A gross read is a diagnostic, not a result (``docs/governance.md`` §2),
-        so the default is the measured round trip and a gross read has to be
-        asked for.
+        """Omitting ``cost_bp`` must not silently produce a gross number: the default is
+        the measured round trip and a gross read has to be asked for.
         """
         r = np.full(100, 30.0)
         assert MEASURED_ROUND_TRIP_BP == pytest.approx(15.56)
@@ -189,10 +184,10 @@ class TestLagScreen:
         return frame(rows)
 
     def test_screen_scores_every_lag_at_the_requested_annualisation(self) -> None:
-        """The previous `**kwargs` forwarded straight into `long_short`, which
-        takes no `**kwargs`: supplying `periods_per_year` — the one key the next
-        line read — raised TypeError, and omitting it silently scored at the
-        daily default (2026-07-27 audit L19)."""
+        """``periods_per_year`` must reach the scorer: forwarding it through ``**kwargs``
+        into ``long_short`` raised TypeError, and omitting it scored at the daily
+        default.
+        """
 
         out = lag_screen(
             self._build,

@@ -1,19 +1,16 @@
-# Shared sleeve, systemd-manifest, and topology helpers.
-# so the sleeve->units mapping and the on/off predicate live in ONE place (no drift between
-# deploy and verify). Toggles come from deploy/sleeves.env (+ host override that can only
-# narrow an enabled repo sleeve to off). bash-3.2-safe (no associative arrays).
-# See deploy/sleeves.env for semantics.
+# Shared sleeve, systemd-manifest, and topology helpers: one place for the
+# sleeve->units mapping and the on/off predicate, so deploy and verify cannot
+# drift. Toggles come from deploy/sleeves.env plus a host override that can only
+# narrow a repo-on sleeve to off. bash-3.2-safe (no associative arrays).
 
 LM_HOST_SLEEVES_ENV="${LM_HOST_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.env}"
 LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.resolved.env}"
 LM_SYSTEMD_UNIT_DIR="${LM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}"
 
-# These units cross the operational authorization boundary. Their complete
-# workload argv lives in run_authorized_runtime.sh; an operator/runtime
-# drop-in or alternate fragment would otherwise be able to replace it after the
-# checked commit had passed review.
-LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-paper.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service"
+# These units keep their whole workload argv in run_authorized_runtime.sh, so a
+# drop-in or alternate fragment cannot replace it after the commit is reviewed.
+LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-paper-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-paper.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-paper-target-mirror.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
@@ -24,6 +21,7 @@ lm_parse_sleeve_environment() {
     _LM_PARSED_CARRY_PAPER_PRESENT=0
     _LM_PARSED_CARRY_MAINNET_PRESENT=0
     _LM_PARSED_LONG_MAINNET_PRESENT=0
+    _LM_PARSED_PAPER_MIRROR_PRESENT=0
     _LM_PARSED_LONG=""
     _LM_PARSED_CONTINUOUS=""
     _LM_PARSED_CONTINUOUS_PAPER=""
@@ -31,6 +29,7 @@ lm_parse_sleeve_environment() {
     _LM_PARSED_CARRY_PAPER=""
     _LM_PARSED_CARRY_MAINNET=""
     _LM_PARSED_LONG_MAINNET=""
+    _LM_PARSED_PAPER_MIRROR=""
     _lpe_line_number=0
     while IFS= read -r _lpe_line || [ -n "$_lpe_line" ]; do
         _lpe_line_number=$((_lpe_line_number + 1))
@@ -110,6 +109,14 @@ lm_parse_sleeve_environment() {
                 _LM_PARSED_LONG_MAINNET_PRESENT=1
                 _LM_PARSED_LONG_MAINNET="$_lpe_value"
                 ;;
+            PAPER_TARGET_MIRROR)
+                [ "$_LM_PARSED_PAPER_MIRROR_PRESENT" -eq 0 ] || {
+                    echo "duplicate PAPER_TARGET_MIRROR at $_lpe_file:$_lpe_line_number" >&2
+                    return 1
+                }
+                _LM_PARSED_PAPER_MIRROR_PRESENT=1
+                _LM_PARSED_PAPER_MIRROR="$_lpe_value"
+                ;;
             *)
                 echo "unknown sleeve toggle at $_lpe_file:$_lpe_line_number" >&2
                 return 1
@@ -118,16 +125,14 @@ lm_parse_sleeve_environment() {
     done < "$_lpe_file"
 }
 
-# Load the toggles as strict data: committed defaults first, then an optional
-# per-host override. The host override is intentionally a safety NARROWING
-# layer: it may turn a repo-on sleeve off for one box, but it may not turn a
-# repo-off sleeve back on. Resolve the repo dir from this file's location so it
-# works regardless of the caller's CWD.
+# Load the toggles as strict data: committed defaults, then an optional per-host
+# override that may only narrow (repo-on -> off, never repo-off -> on). The repo
+# dir comes from this file's location, so the caller's CWD is irrelevant.
 lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
         CARRY_SLEEVE CARRY_PAPER_SLEEVE CARRY_MAINNET_SLEEVE \
-        LONG_MAINNET_SLEEVE 2>/dev/null || true
+        LONG_MAINNET_SLEEVE PAPER_TARGET_MIRROR 2>/dev/null || true
     if [ -f "$_lm_dir/sleeves.env" ]; then
         lm_parse_sleeve_environment "$_lm_dir/sleeves.env"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
@@ -142,6 +147,8 @@ lm_load_sleeve_toggles() {
             || CARRY_MAINNET_SLEEVE="$_LM_PARSED_CARRY_MAINNET"
         [ "$_LM_PARSED_LONG_MAINNET_PRESENT" -eq 0 ] \
             || LONG_MAINNET_SLEEVE="$_LM_PARSED_LONG_MAINNET"
+        [ "$_LM_PARSED_PAPER_MIRROR_PRESENT" -eq 0 ] \
+            || PAPER_TARGET_MIRROR="$_LM_PARSED_PAPER_MIRROR"
     fi
     _lm_repo_long="${LONG_SLEEVE:-off}"
     _lm_repo_continuous="${CONTINUOUS_SLEEVE:-off}"
@@ -150,6 +157,7 @@ lm_load_sleeve_toggles() {
     _lm_repo_carry_paper="${CARRY_PAPER_SLEEVE:-off}"
     _lm_repo_carry_mainnet="${CARRY_MAINNET_SLEEVE:-off}"
     _lm_repo_long_mainnet="${LONG_MAINNET_SLEEVE:-off}"
+    _lm_repo_paper_mirror="${PAPER_TARGET_MIRROR:-off}"
     if [ -f "$LM_HOST_SLEEVES_ENV" ]; then
         lm_parse_sleeve_environment "$LM_HOST_SLEEVES_ENV"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
@@ -164,6 +172,8 @@ lm_load_sleeve_toggles() {
             || CARRY_MAINNET_SLEEVE="$_LM_PARSED_CARRY_MAINNET"
         [ "$_LM_PARSED_LONG_MAINNET_PRESENT" -eq 0 ] \
             || LONG_MAINNET_SLEEVE="$_LM_PARSED_LONG_MAINNET"
+        [ "$_LM_PARSED_PAPER_MIRROR_PRESENT" -eq 0 ] \
+            || PAPER_TARGET_MIRROR="$_LM_PARSED_PAPER_MIRROR"
     fi
     if ! sleeve_on "$_lm_repo_long"; then LONG_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_continuous"; then CONTINUOUS_SLEEVE=off; fi
@@ -172,6 +182,7 @@ lm_load_sleeve_toggles() {
     if ! sleeve_on "$_lm_repo_carry_paper"; then CARRY_PAPER_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_carry_mainnet"; then CARRY_MAINNET_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_long_mainnet"; then LONG_MAINNET_SLEEVE=off; fi
+    if ! sleeve_on "$_lm_repo_paper_mirror"; then PAPER_TARGET_MIRROR=off; fi
     # Missing toggles fail safe to off; a missing config cannot resurrect a sleeve.
     : "${LONG_SLEEVE:=off}"
     : "${CONTINUOUS_SLEEVE:=off}"
@@ -180,6 +191,7 @@ lm_load_sleeve_toggles() {
     : "${CARRY_PAPER_SLEEVE:=off}"
     : "${CARRY_MAINNET_SLEEVE:=off}"
     : "${LONG_MAINNET_SLEEVE:=off}"
+    : "${PAPER_TARGET_MIRROR:=off}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
@@ -209,6 +221,7 @@ lm_write_resolved_sleeve_toggles() {
         printf 'CARRY_PAPER_SLEEVE=%s\n' "${CARRY_PAPER_SLEEVE:-off}"
         printf 'CARRY_MAINNET_SLEEVE=%s\n' "${CARRY_MAINNET_SLEEVE:-off}"
         printf 'LONG_MAINNET_SLEEVE=%s\n' "${LONG_MAINNET_SLEEVE:-off}"
+        printf 'PAPER_TARGET_MIRROR=%s\n' "${PAPER_TARGET_MIRROR:-off}"
         if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then
             printf 'CONTINUOUS_HEDGE_TIMER=%s\n' "$CONTINUOUS_HEDGE_TIMER"
         fi
@@ -248,6 +261,10 @@ lm_verify_resolved_sleeve_toggles() {
     }
     grep -Fx "LONG_MAINNET_SLEEVE=${LONG_MAINNET_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
         echo "verify failed: resolved LONG_MAINNET_SLEEVE does not match loaded toggle" >&2
+        return 1
+    }
+    grep -Fx "PAPER_TARGET_MIRROR=${PAPER_TARGET_MIRROR:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
+        echo "verify failed: resolved PAPER_TARGET_MIRROR does not match loaded toggle" >&2
         return 1
     }
     if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then
@@ -333,8 +350,8 @@ lm_verify_no_unknown_liqmig_units() {
 }
 
 # Fail closed unless systemd's effective guarded-unit surface is exactly the
-# checked manifest. We never delete a current-unit drop-in here: it may be
-# operator work. Instead deployment stops and names the conflicting path.
+# checked manifest. A current-unit drop-in is never deleted here — it may be
+# operator work; deployment stops and names the conflicting path instead.
 lm_verify_guarded_unit_surfaces() {
     _lvgus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     for _lvgus_unit in $LM_AUTHORIZED_UNITS; do
@@ -392,9 +409,8 @@ lm_verify_guarded_unit_surfaces() {
 }
 
 # Install exactly the checked-in unit manifest without enabling or starting any
-# current service/timer. Unknown historical units are stopped and removed because
-# allowing a retired order mutator to survive this phase would defeat the point of
-# a single-owner topology. This function never creates runtime authorization.
+# service/timer. Unknown historical units are stopped and removed so a retired
+# order mutator cannot survive alongside the single-owner topology.
 lm_install_current_systemd_units() {
     _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     for _licsu_required in \

@@ -39,9 +39,9 @@ class RequestedMarketReadiness:
 class RequestedMarketWarmupGate:
     """Gate the durable queue head on an exact healthy captured L2 book.
 
-    The timeout is deliberately latched for the current request. A late
-    snapshot cannot silently reopen the owner epoch after the readiness SLA was
-    missed; the request remains pending and owner health stays blocked.
+    The timeout is latched for the current request, so a late snapshot cannot
+    reopen the owner epoch after the SLA was missed: the request stays pending
+    and owner health stays blocked.
     """
 
     timeout_seconds: float
@@ -162,11 +162,9 @@ def run_ready_request_or_converge(
 ) -> AccountServiceReceipt | None:
     """Claim only a proved-ready head while preserving prior convergence work.
 
-    Market warmup governs the newly queued request, not deterministic retries
-    already committed to the account journal.  No queue head, or a
-    missing/stale book on an unrelated head, must therefore leave claims alone
-    without starving an earlier convergence plan (especially a risk-reducing
-    one).
+    Warmup governs the newly queued request, not retries already committed to
+    the journal, so an absent or stale book on an unrelated head must not
+    starve an earlier convergence plan.
     """
 
     safety_receipt = service.run_safety_flat_once(inbox)

@@ -114,7 +114,7 @@ def test_daily_factor_owner_matches_data_root_builder(tmp_path: Path) -> None:
 def test_build_factor_panel_honours_klines_dataset_override(tmp_path: Path) -> None:
     # Live demo/paper roots store WS klines under event_demo_klines_1h, NOT klines_1h. The
     # autodetect always returns klines_1h, so without the override the read is empty (the
-    # 2026-06-02 continuous zero-signal blackout); the override must read the live store.
+    # continuous zero-signal blackout); the override must read the live store.
     _write_klines_root(tmp_path, symbols=["BTCUSDT", "AAA", "BBB"], days=40, dataset="event_demo_klines_1h")
     assert build_factor_panel(tmp_path, start="2025-01-10", end="2025-02-08").is_empty()  # autodetect -> klines_1h (absent)
     panel = build_factor_panel(
@@ -168,7 +168,7 @@ def _load_precompute_module():
 def test_precompute_residual_momentum_reaches_today(tmp_path: Path) -> None:
     # The live continuous decile exact-joins residual_momentum on TODAY's day_ts, but residual_return
     # only completes ~2 days late -> without the trailing pad the table stops ~2 days back and the live
-    # gate is silently empty (the 2026-06-02 zero-signal blackout). Klines run through a known last day;
+    # gate is silently empty (the zero-signal blackout). Klines run through a known last day;
     # `end` = that day + 1 ("tomorrow"), matching the live daily refresh.
     mod = _load_precompute_module()
     base = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -210,12 +210,10 @@ def test_btc_beta_contiguous_matches_known_slope() -> None:
 
 
 def test_btc_beta_gap_does_not_stretch_window_past_calendar_span() -> None:
-    """A gapped symbol must NOT get a beta that spans >window CALENDAR days.
-
-    Pre-fix (row-based rolling): a symbol whose returns are present only on days
-    {0,1,...,29} then jumps to day 200 gets a 'window-day' window stitching the
-    pre-gap rows onto day 200 — a stale beta. With the calendar window, day 200 sees
-    far fewer than min_periods CALENDAR-recent rows -> null (correctly shrunk window).
+    """A gapped symbol must not get a beta spanning more than ``window`` CALENDAR days.
+    A row-based rolling window stitches pre-gap rows onto a far-later day and yields a
+    stale beta; with the calendar window that day sees fewer than ``min_periods``
+    calendar-recent rows and is correctly null.
     """
     # BTC present every day so a partner exists; ALT present only on days 0..29, then 200.
     btc = [(d, 0.01 if d % 2 else -0.01) for d in range(201)]

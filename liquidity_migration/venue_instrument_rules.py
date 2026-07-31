@@ -1,29 +1,15 @@
-"""Instrument rules read from the venue, without placing a single order.
+"""Instrument rules read from the venue's read-only ``get_instruments_info``.
 
-The demo fleet derives its rules from ``demo_rule_probe``, which submits and
-cancels real PostOnly orders to find the *empirically* accepted minimum
-notional — Bybit's demo realm rejects some orders its own
-``minNotionalValue`` says it should accept, and the probe is how that gap was
-measured rather than guessed.
+The demo fleet instead derives rules from ``demo_rule_probe``, which submits and
+cancels real PostOnly orders to find the empirically accepted minimum notional,
+because Bybit's demo realm rejects some orders its own ``minNotionalValue`` says
+it should accept. That probe places live orders and refuses any realm but demo,
+so off demo the declared ``minNotionalValue`` is taken at face value.
 
-That technique does not transfer. On a funded account the probe places live
-orders up to 200 USDT per symbol across the whole candidate universe, and
-``deploy_vps_live.sh`` triggers it automatically whenever the bound receipt
-passes half its lifetime — which would make shipping code a way to spend money
-as a side effect. So the mainnet owner reads its rules from
-``get_instruments_info``, an authenticated **read-only** endpoint that needs no
-mutation lease and creates no exposure, and takes the venue's declared
-``minNotionalValue`` at face value.
-
-That is a real difference in evidence quality and it is recorded as one: the
-artifact says ``venue_declared`` rather than ``probe_verified``, and the
-``source`` on every rule names the endpoint it came from. Undersized entries
-are rejected by the venue at submit time rather than pre-empted locally, which
-is a worse failure mode than demo's — but it is a rejected order, not a
-surprise position, and it is the correct trade against a deploy that trades.
-
-The probe itself now refuses any realm but demo, so this is not merely the
-recommended path — it is the only one that exists off demo.
+The weaker evidence is recorded as such: the artifact says ``venue_declared``
+rather than ``probe_verified``, and each rule's ``source`` names its endpoint.
+Undersized entries are then rejected by the venue at submit rather than
+pre-empted locally.
 """
 
 from __future__ import annotations
@@ -50,8 +36,8 @@ __all__ = [
 VENUE_RULES_SCHEMA_VERSION = 1
 VENUE_RULES_KIND = "bybit_venue_declared_instrument_rules"
 
-#: Names the evidence standard in the artifact itself so a reader never has to
-#: infer it from the schema. ``probe_verified`` belongs to the demo receipt.
+#: The evidence standard, stamped into the artifact. The demo receipt instead
+#: carries ``probe_verified``.
 VENUE_RULES_EVIDENCE = "venue_declared"
 
 
@@ -66,10 +52,7 @@ def build_venue_instrument_rules(
     symbols: Iterable[str],
     observed_ts_ns: int,
 ) -> dict[str, InstrumentRules]:
-    """Read structural rules for ``symbols`` through the read-only endpoint.
-
-    Places no orders, needs no mutation lease, and creates no exposure.
-    """
+    """Read structural rules for ``symbols`` through the read-only endpoint."""
 
     selected = venue_realm(realm)
     wanted = {str(symbol).upper() for symbol in symbols}
@@ -99,14 +82,12 @@ def build_venue_instrument_rules(
             environment=selected.value,
             observed_ts_ns=int(observed_ts_ns),
         )
-        # The venue's own declared floor is the whole point of this path; a
-        # zero or absent one would silently admit dust orders the venue then
-        # rejects at submit, one symbol at a time, forever.
+        # A zero or absent floor would admit dust orders the venue then rejects
+        # at submit, one symbol at a time.
         if not math.isfinite(rule.min_notional) or rule.min_notional <= 0.0:
             raise RuntimeError(f"{symbol}: {selected.value} declares no minimum notional")
+        # A non-positive max_leverage voids the venue leverage cap downstream.
         if not math.isfinite(rule.max_leverage) or rule.max_leverage <= 0.0:
-            # B7: a non-positive max_leverage silently voids the venue leverage
-            # cap downstream. Refuse the rule rather than ship a void one.
             raise RuntimeError(f"{symbol}: {selected.value} declares no maximum leverage")
         rules[symbol] = rule
     return rules
@@ -115,8 +96,8 @@ def build_venue_instrument_rules(
 def candidate_symbol_source(candidate: Any, *, size_bytes: int) -> dict[str, Any]:
     """The exact binding shape ``build_candidate_rule_coverage`` re-derives.
 
-    Kept here rather than open-coded at each call site so the freeze script and
-    the coverage check cannot drift into two shapes that never compare equal.
+    Shared so the freeze script and the coverage check cannot drift into two
+    shapes that never compare equal.
     """
 
     return {
@@ -138,11 +119,9 @@ def render_venue_rules_artifact(
 ) -> bytes:
     """Serialize one self-describing, hash-bound venue-declared rules receipt.
 
-    ``symbol_source`` binds the receipt to the exact candidate-universe artifact
-    its symbol list came from. The demo probe receipt carries the same binding,
-    and the authorization-time coverage proof re-derives and compares it — so a
-    rules receipt frozen against a different universe cannot be installed as if
-    it covered this one.
+    ``symbol_source`` binds the receipt to the candidate-universe artifact its
+    symbol list came from, so a receipt frozen against a different universe
+    cannot be installed as if it covered this one.
     """
 
     selected = venue_realm(realm)
@@ -213,8 +192,6 @@ def load_venue_rules_bytes(
             f"schema_version={VENUE_RULES_SCHEMA_VERSION}"
         )
     if payload.get("environment") != selected.value:
-        # Loading a demo receipt into a mainnet owner (or the reverse) is the
-        # mislabelling this whole realm axis exists to prevent.
         raise ValueError(
             f"venue rules file is for realm {payload.get('environment')!r}, "
             f"not {selected.value!r}"

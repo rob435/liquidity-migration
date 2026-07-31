@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Ready-gated demo account execution owner. This script is inert until the
-# operator has supplied verified demo rules and an explicit disaster-stop risk
-# choice; it never falls back to public/mainnet minima or real-money settings.
+# Ready-gated demo account execution owner. Inert until the operator supplies
+# verified demo rules and an explicit disaster-stop fraction; no defaults.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,18 +44,16 @@ if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
     echo "CONFIRM_DEMO_ORDERS=1 is required for the account execution owner." >&2
     exit 2
 fi
-# The realm and the credentials must agree here, not only inside the client.
-# A mainnet owner started against demo keys would authenticate the wrong
-# account and reconcile a book that is not the one it is protecting.
+# The realm and the credentials must agree here, not only inside the client: a
+# mainnet owner on demo keys would reconcile the wrong account.
 case "$ACCOUNT_VENUE_REALM" in
     mainnet)
         if [[ -z "${BYBIT_REAL_API_KEY:-}" || -z "${BYBIT_REAL_API_SECRET:-}" ]]; then
             echo "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." >&2
             exit 2
         fi
-        # Vocabulary matches liquidity_migration/env_flags.py exactly, which
-        # lower-cases before comparing. A value every Python layer accepts must
-        # not make this shell gate crash-loop the owner.
+        # Vocabulary matches liquidity_migration/env_flags.py, which lower-cases
+        # before comparing; keep the two in step or this gate crash-loops.
         case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
             1|true|yes|on) ;;
             *)
@@ -108,9 +105,8 @@ if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
     telegram_args+=(--telegram)
 fi
 
-# A sleeve with no configured cycle root is not running (CONTINUOUS retired
-# 2026-07-29). Pass nothing rather than a stale root, so the hourly Telegram
-# digest carries no permanently STALE gate line for a retired sleeve.
+# A sleeve with no configured cycle root is not running. Pass nothing rather
+# than a stale root, so the Telegram digest carries no permanent STALE line.
 continuous_cycle_args=()
 if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then
     continuous_cycle_args+=(

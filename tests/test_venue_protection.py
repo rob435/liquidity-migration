@@ -18,7 +18,7 @@ from liquidity_migration.account_kernel import (
     TargetBatchResult,
     read_account_journal,
 )
-from liquidity_migration.account_service_bybit import inspect_bybit_demo_order_ownership
+from liquidity_migration.account_service_bybit import inspect_bybit_order_ownership
 from liquidity_migration.bybit_errors import BybitRequestRejected
 from liquidity_migration.deterministic_runtime import VirtualClock
 from liquidity_migration.execution_adapters import ExecutionObservation, KernelExecutionDriver
@@ -1512,11 +1512,12 @@ def test_full_stop_update_accepts_bybit_reused_order_id_as_native_lineage(
 
     class ConditionalOrderClient:
         demo = True
+        realm = "demo"
 
         def get_open_orders(self, **_params: object):
             return [original_order]
 
-    ownership = inspect_bybit_demo_order_ownership(
+    ownership = inspect_bybit_order_ownership(
         client=ConditionalOrderClient(),
         state=kernel._state_ref(),
         native_order_verifier=manager.is_verified_native_order,
@@ -2017,9 +2018,10 @@ def test_funding_execution_is_not_treated_as_unaccounted_position_mutation(
 def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
     tmp_path: Path,
 ) -> None:
-    """2026-07-20 BLUAIUSDT page: a consumed Full stop lingering in the venue
-    open-order cache must stay owned for a bounded window after the protection
-    record leaves {active, triggering}, then fail closed again."""
+    """A consumed Full stop lingering in the venue open-order cache stays owned for a
+    bounded window after the protection record leaves {active, triggering}, then fails
+    closed again.
+    """
 
     from liquidity_migration.venue_protection import (
         NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,
@@ -2083,11 +2085,12 @@ def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
 
     class _LingeringOrderClient:
         demo = True
+        realm = "demo"
 
         def get_open_orders(self, **_params: object):
             return [lingering]
 
-    ownership = inspect_bybit_demo_order_ownership(
+    ownership = inspect_bybit_order_ownership(
         client=_LingeringOrderClient(),
         state=kernel._state_ref(),
         native_order_verifier=manager.is_verified_native_order,
@@ -2110,7 +2113,7 @@ def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
     # Past the grace window the same lingering row fails closed again.
     clock.advance_ns(NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS + 1)
     assert manager.is_verified_native_order(lingering) is False
-    ownership_after = inspect_bybit_demo_order_ownership(
+    ownership_after = inspect_bybit_order_ownership(
         client=_LingeringOrderClient(),
         state=kernel._state_ref(),
         native_order_verifier=manager.is_verified_native_order,
@@ -2121,9 +2124,9 @@ def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
 def test_visibility_grace_rejects_same_price_foreign_and_partial_rows(
     tmp_path: Path,
 ) -> None:
-    """Tightened grace contract: identity evidence must match when it exists,
-    partial-stop provenance is never grace-owned, and a restart keeps both
-    properties via the journaled record."""
+    """Identity evidence must match when it exists, partial-stop provenance is never
+    grace-owned, and a restart keeps both properties via the journaled record.
+    """
 
     kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
     manager, _client = _manager(kernel, clock)
@@ -2195,10 +2198,10 @@ def test_visibility_grace_rejects_same_price_foreign_and_partial_rows(
 def test_visibility_grace_first_install_uses_live_observed_binding(
     tmp_path: Path,
 ) -> None:
-    """First-install trigger (no replacement, record lineage empty): the live
-    in-memory observed id rejects same-price foreign rows; after a restart no
-    identity evidence exists and the bounded price-fallback residual applies
-    (documented in STATE.md)."""
+    """First-install trigger (no replacement, record lineage empty): the live in-memory
+    observed id rejects same-price foreign rows; after a restart no identity evidence
+    exists and the bounded price-fallback residual applies.
+    """
 
     kernel, clock = _open_position(tmp_path, signed_qty=-2.0)
     manager, _client = _manager(kernel, clock)
@@ -2257,9 +2260,10 @@ def test_visibility_grace_first_install_uses_live_observed_binding(
 
 
 def test_visibility_grace_bounds_record_exchange_time(tmp_path: Path) -> None:
-    """An owner-downtime recovery writes the terminal record late; the grace
-    window must also bound the record's exchange time so it cannot reopen a
-    long-dead venue window."""
+    """An owner-downtime recovery writes the terminal record late, so the grace window
+    must also bound the record's exchange time and cannot reopen a long-dead venue
+    window.
+    """
 
     from liquidity_migration.venue_protection import (
         NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,

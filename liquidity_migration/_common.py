@@ -1,10 +1,4 @@
-"""Shared low-level helpers and constants for the liquidity_migration package.
-
-Centralises small utilities that were previously re-implemented across many
-modules: millisecond time constants, percentage formatting, finite-float
-coercion, filesystem-safe name slugs, and UTC date parsing. Import these from
-here rather than re-defining them.
-"""
+"""Shared low-level helpers: time constants, formatting, coercion, date parsing."""
 from __future__ import annotations
 
 import math
@@ -31,11 +25,9 @@ def exact_duration_ms(
 ) -> int:
     """Return an exact integer millisecond duration.
 
-    Use this for timestamp lookbacks and cooldowns where "X time ago" means the
-    same millisecond on the clock, not a floored hour/day bucket. Values are
-    parsed through ``Decimal(str(value))`` so month-equivalent constants such as
-    ``365.25 / 12`` resolve to the intended decimal duration. Durations that do
-    not land on a whole millisecond raise instead of being rounded.
+    Components go through ``Decimal(str(value))`` so fractional constants such as
+    ``365.25 / 12`` resolve exactly. A duration that does not land on a whole
+    millisecond raises rather than rounding.
     """
     try:
         total = (
@@ -121,18 +113,14 @@ def date_ms(value: str) -> int:
 
 
 def calendar_shift(value: pl.Expr, periods: int, *, time_col: str = "ts_ms", day_ms: int = MS_PER_DAY) -> pl.Expr:
-    """A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unless
-    the partner row is EXACTLY ``periods`` calendar days back — i.e. gap-aware (BAC-1/BAC-7).
+    """Gap-aware per-symbol shift: NULL unless the partner row is EXACTLY ``periods``
+    calendar days back.
 
-    On the daily feature grid a plain ``shift(N)`` reaches the Nth *present* row, which
-    spans more than N calendar days across a mid-history gap (delist/relist, archive hole),
-    silently measuring the wrong lookback (e.g. a "7-day" liquidity-rank improvement over
-    14+ days — the flagship migration gate). This nulls the value across such a gap instead.
-
-    For a CONTIGUOUS daily series it is byte-identical to ``value.shift(periods).over(
-    "symbol")`` (every partner ts is exactly periods*day_ms back), so it is a no-op except
-    on gapped symbols. Requires the frame sorted by ``[symbol, time_col]`` with a
-    midnight-snapped daily ``time_col``.
+    A plain ``shift(N)`` reaches the Nth *present* row, which spans more than N calendar
+    days across a mid-history gap (delist/relist, archive hole) and so measures the wrong
+    lookback. On a contiguous daily series this is identical to
+    ``value.shift(periods).over("symbol")``. Requires the frame sorted by
+    ``[symbol, time_col]`` with a midnight-snapped daily ``time_col``.
     """
     aligned = pl.col(time_col).shift(periods).over("symbol") == (pl.col(time_col) - periods * day_ms)
     return pl.when(aligned).then(value.shift(periods).over("symbol")).otherwise(None)
@@ -156,6 +144,14 @@ def calendar_roll(
     ``rolling_*_by`` measures the timestamp span instead. For contiguous data it
     is numerically equivalent to the row-based rolling call with the same
     ``min_samples``.
+
+    CAVEAT on null-bearing columns: ``rolling_*_by`` resolves ``min_samples``
+    against the ROWS in the window while skipping nulls in the aggregation,
+    whereas row-based ``rolling_*`` counts non-nulls. On a densified grid
+    ``min_samples`` therefore degenerates into a warm-up-age gate -- a nominal
+    ``min_samples=15`` can be met by two real values. Aggregate on the sparse
+    frame and join onto the grid when the threshold must bound sample size
+    (``residual_price.build_idio_price`` does this).
     """
     window = f"{int(n_periods) * int(period_ms)}i"
     closed = "left" if shifted else "right"
@@ -163,7 +159,7 @@ def calendar_roll(
     return method(time_col, window_size=window, closed=closed, min_samples=min_samples, **kwargs)
 
 
-# --- shared date/frame helpers (relocated from volume_events.py, 2026-06-11) ---
+# --- shared date/frame helpers ---
 
 def _date_range(df: pl.DataFrame) -> dict[str, str | None]:
     if df.is_empty() or "ts_ms" not in df.columns:
@@ -233,25 +229,13 @@ def _cal_roll(
     shifted: bool,
     min_samples: int,
 ) -> pl.Expr:
-    """BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms grid.
+    """Calendar-aware rolling window over a per-symbol (or market) daily ts_ms grid.
 
-    Row-based ``rolling_*(window_size=N)`` counts ROWS, so it silently spans a
-    mid-history gap — a bar 30 calendar days back counts as "yesterday" when the
-    intervening days are missing (delist/relist or a data gap). ``rolling_*_by``
-    counts CALENDAR span instead, so a gapped window correctly shrinks (and NULLs
-    out under ``min_samples``). For a *contiguous* daily series the two are
-    bit-identical — verified equivalence: ``shift(1).rolling_X(N, min_samples=M)``
-    == ``rolling_X_by(window=N days, closed="left", min_samples=M)`` and
-    ``rolling_X(N, min_samples=M)`` == ``rolling_X_by(..., closed="right", ...)``.
-
-    The caller applies ``.over("symbol")`` (per-symbol grids) or nothing (the
-    single market series). ``min_samples`` is passed explicitly because
-    ``rolling_*_by`` defaults it to 1, whereas bare ``rolling_*`` defaults it to
-    ``window_size`` — matching it keeps the contiguous-case output identical.
-
-    ``shifted=True``  reproduces ``.shift(1).rolling_X(N)`` — the prior N days
-        EXCLUDING the current day — via ``closed="left"``.
-    ``shifted=False`` reproduces ``.rolling_X(N)`` — the trailing N days
-        INCLUDING the current day — via ``closed="right"``.
+    ``shifted=True`` reproduces ``.shift(1).rolling_X(N)`` -- the prior N days
+    EXCLUDING today. ``shifted=False`` reproduces ``.rolling_X(N)`` -- the
+    trailing N days INCLUDING today. The caller applies ``.over("symbol")`` for
+    per-symbol grids, nothing for the single market series. ``min_samples`` is
+    passed explicitly because ``rolling_*_by`` defaults it to 1 while bare
+    ``rolling_*`` defaults it to ``window_size``.
     """
     return calendar_roll(expr, agg, n_days, shifted=shifted, min_samples=min_samples)

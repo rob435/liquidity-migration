@@ -124,9 +124,40 @@ def test_mutating_remote_routes_require_explicit_handshake() -> None:
     assert _run("deploy", "install").returncode == 2
     assert _run("deploy", "--execute", "verify").returncode == 2
     assert _run("deploy", "--execute", "rollout").returncode == 2
+    assert _run("deploy", "activate-mainnet").returncode == 2
+    assert _run("deploy", "--execute", "activate-mainnnet").returncode == 2
+    assert _run("deploy", "--execute", "stop").returncode == 2
 
 
-def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Path) -> None:
+def test_real_money_allowlist_covers_the_arming_subcommands() -> None:
+    rejected = _run("real-money", "arm-it")
+    assert rejected.returncode == 2
+    assert "preflight, render-profile, or create-state-roots" in rejected.stderr
+    help_text = _run("help").stdout
+    assert "real-money create-state-roots [--execute]" in help_text
+    assert "activate-mainnet|stop-mainnet" in help_text
+
+
+def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Path) -> None:
+    capture = tmp_path / "capture"
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
+    ssh.chmod(0o700)
+    environment = {"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)}
+
+    dry = _run("real-money", "create-state-roots", env=environment)
+    assert dry.returncode == 0, dry.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "MODULE=liquidity_migration.real_money_arming" in payload
+    assert "create-state-roots" in payload
+    assert "--execute" not in payload
+
+    executing = _run("real-money", "create-state-roots", "--execute", env=environment)
+    assert executing.returncode == 0, executing.stderr
+    assert "--execute" in capture.read_text(encoding="utf-8")
+
+
+def test_deploy_forwards_every_staged_mode_after_a_valid_handshake(tmp_path: Path) -> None:
     checkout, commit = _isolated_deploy_checkout(tmp_path)
     capture = tmp_path / "capture"
     bin_dir = tmp_path / "bin"
@@ -137,7 +168,7 @@ def test_deploy_forwards_install_and_activate_after_valid_handshake(tmp_path: Pa
         encoding="utf-8",
     )
     ssh.chmod(0o700)
-    for mode in ("install", "activate"):
+    for mode in ("install", "activate", "activate-mainnet", "stop-mainnet"):
         result = subprocess.run(
             ["bash", str(checkout / "scripts/ops.sh"), "deploy", "--execute", mode],
             cwd=checkout,
@@ -299,14 +330,13 @@ def test_remote_clean_check_ignores_current_index_flags(
 
 
 def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
-    """`"${arr[@]}"` on an EMPTY array is an unbound-variable error under
-    `set -u` on Bash 3.2 (the operator laptops this repo deliberately supports),
-    which broke the documented no-argument `ops.sh reset` preview and bare
-    `clock-offset --execute`. The portable guard idiom was already used three
-    lines earlier in the same function (2026-07-27 audit L11)."""
+    """``"${arr[@]}"`` on an EMPTY array is an unbound-variable error under ``set -u`` on
+    Bash 3.2, which this repo supports; the portable guard idiom is used three lines
+    earlier in the same function.
+    """
 
     text = (Path(__file__).resolve().parents[1] / "scripts" / "ops.sh").read_text(encoding="utf-8")
-    for array in ("reset_args", "script_args", "module_args"):
+    for array in ("reset_args", "module_args"):
         assert f'"${{{array}[@]}}"' not in text.replace(f'${{{array}[@]+"${{{array}[@]}}"}}', "")
         assert f'${{{array}[@]+"${{{array}[@]}}"}}' in text
 
@@ -329,15 +359,14 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
 
 
 def test_authenticated_fetch_keeps_the_github_token_off_argv() -> None:
-    """`GIT_ENV` begins with `/usr/bin/env -i`, so a `GIT_CONFIG_VALUE_0=...`
-    prefix is an argv word of env and is world-readable via /proc for the
-    fork-exec window — carrying the operator's long-lived `gh auth token` on a
-    local dispatch (2026-07-27 audit L16)."""
+    """``GIT_ENV`` begins with ``/usr/bin/env -i``, so a ``GIT_CONFIG_VALUE_0=...`` prefix
+    is an argv word of env and is world-readable via /proc for the fork-exec window.
+    """
 
     deploy = (
         Path(__file__).resolve().parents[1] / "scripts" / "deploy_vps_live.sh"
     ).read_text(encoding="utf-8")
-    fetch = deploy[deploy.index("git_fetch() {") : deploy.index("invalidate_operational_authorization() {")]
+    fetch = deploy[deploy.index("git_fetch() {") : deploy.index("retire_stale_operational_receipt() {")]
     code = "\n".join(
         line for line in fetch.splitlines() if not line.lstrip().startswith("#")
     )

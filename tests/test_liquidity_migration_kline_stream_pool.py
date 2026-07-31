@@ -1,11 +1,7 @@
-"""Tests for the multi-connection BybitKlineStreamPool.
-
-The pool is the venue-facing surface for the WS kline pipeline. These tests
-exercise it through an injected fake WebSocket factory so no live network is
-required: the fake records every ``kline_stream`` and ``unsubscribe`` call,
-exposes an ``inject_message`` helper that synthesises the pybit-shape kline
-message, and lets us assert on partitioning, callback fan-out, reconnect
-behaviour, and the subscription diff.
+"""Tests for the multi-connection BybitKlineStreamPool, driven through an injected fake
+WebSocket factory that records every ``kline_stream``/``unsubscribe`` call and can
+inject pybit-shape kline messages: partitioning, callback fan-out, reconnect behaviour,
+and the subscription diff.
 """
 
 from __future__ import annotations
@@ -22,11 +18,10 @@ from liquidity_migration.bybit_market_data import (
 
 
 class _FakeWebSocket:
-    """Minimal stand-in for pybit's WebSocket.
-
-    Records subscribe + unsubscribe calls, holds the dispatch callback per
-    connection, and exposes ``inject_bar`` to fire messages into the same
-    callback path the pool's wrapper installs."""
+    """Minimal stand-in for pybit's WebSocket: records subscribe + unsubscribe calls,
+    holds the dispatch callback per connection, and exposes ``inject_bar`` to fire
+    messages into the same callback path the pool's wrapper installs.
+    """
 
     def __init__(self) -> None:
         self.subscribed_symbols: list[str] = []
@@ -196,9 +191,8 @@ def test_update_subscriptions_adds_and_removes() -> None:
 
 class _AlreadySubscribedWebSocket(_FakeWebSocket):
     """pybit quirk repro: a topic stays in the callback directory even after
-    ``unsubscribe()``, so re-subscribing it raises 'already subscribed' — exactly
-    the live long-sleeve failure on a symbol that churns out of, then back into,
-    the universe."""
+    ``unsubscribe()``, so re-subscribing it raises 'already subscribed'.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -230,12 +224,11 @@ class _AlreadySubscribedFactory:
 
 
 def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() -> None:
-    """Regression for the live long-sleeve bug: a churn symbol (BILLUSDT) leaves
-    then re-enters the universe; pybit still holds its topic (unsubscribe didn't
-    clear the directory), so the re-subscribe raises 'already subscribed'. The
-    pool must (a) NOT raise, (b) ADOPT the churn symbol, and (c) still subscribe a
-    genuinely-new listing sorted AFTER it in the same batch (previously the throw
-    aborted the whole add loop and dropped ZZZUSDT, every hourly refresh)."""
+    """A churn symbol leaves then re-enters the universe and pybit still holds its
+    topic, so the re-subscribe raises 'already subscribed'. The pool must not raise,
+    must adopt the churn symbol, and must still subscribe a genuinely-new listing
+    sorted after it in the same batch.
+    """
     factory = _AlreadySubscribedFactory()
     pool, _ = _build_pool(topics_per_connection=10, factory=factory)
     pool.subscribe(["AAAUSDT", "BILLUSDT"], lambda s, b, c: None)
@@ -246,7 +239,7 @@ def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() 
         assert pool.stats()["subscribed_symbols"] == 1
 
         # BILLUSDT re-enters WITH a genuinely-new listing in the same batch.
-        # adds sort to [BILLUSDT, ZZZUSDT]; the old code threw on BILLUSDT and
+        # adds sort to [BILLUSDT, ZZZUSDT]; a throw on BILLUSDT would abort and
         # never reached ZZZUSDT. Must NOT raise now.
         result = pool.update_subscriptions({"AAAUSDT", "BILLUSDT", "ZZZUSDT"})
 
@@ -290,9 +283,9 @@ def test_subscribed_symbols_idempotent_when_set_unchanged() -> None:
 
 
 def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
-    """Force a slice to look stale (no message in N seconds) and ensure the
-    watchdog reconnects: closes the old WebSocket, opens a fresh one, and
-    re-subscribes the same symbols."""
+    """Force a slice to look stale (no message in N seconds): the watchdog closes the
+    old WebSocket, opens a fresh one, and re-subscribes the same symbols.
+    """
     pool, factory = _build_pool(
         topics_per_connection=10,
         stale_warning_seconds=0.01,
@@ -321,13 +314,10 @@ def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
 
 
 def test_reconnect_backoff_does_not_sleep_under_lock() -> None:
-    """Regression guard for the watchdog lock-hold fix.
-
-    Before the fix: _reconnect_connection_locked did time.sleep(backoff) while
-    holding the pool lock, so a reconnect with backoff=5s blocked
-    subscribe/stats for 5s. After: the backoff is enforced by a per-connection
-    gate in check_stale_connections (no sleep), so a reconnect returns
-    immediately and a second check within the backoff window is skipped."""
+    """The backoff is enforced by a per-connection gate in ``check_stale_connections``,
+    not by sleeping under the pool lock, so a reconnect returns immediately and a
+    second check within the backoff window is skipped.
+    """
     factory = _FakeWebSocketFactory()
     pool = BybitKlineStreamPool(
         interval_minutes=60,
@@ -363,8 +353,7 @@ def test_reconnect_backoff_does_not_sleep_under_lock() -> None:
 
 
 class _FailingFactory:
-    """Factory wrapper that fails the Nth build to simulate a transient
-    WS outage during reconnect."""
+    """Factory wrapper that fails the Nth build to simulate a transient WS outage during reconnect."""
 
     def __init__(self, *, fail_on_call_n: int = 2) -> None:
         self.built: list[_FakeWebSocket] = []
@@ -382,20 +371,11 @@ class _FailingFactory:
 
 
 def test_failed_reconnect_keeps_slice_for_retry() -> None:
-    """Regression guard: a transient _websocket_factory failure during
-    reconnect MUST NOT orphan the slice's symbols.
-
-    Before the fix: _reconnect_connection_locked cleared assigned_symbols
-    eagerly + cleared the symbol→conn mapping, then tried to build a new
-    client. If the factory raised, the state was left closed=True with
-    assigned_symbols=empty — the watchdog's `closed or not assigned_symbols`
-    guard then skipped it forever. Symbols stuck without live data until
-    the next hourly universe refresh re-subscribed them.
-
-    After the fix: keep assigned_symbols + symbol→conn intact until a
-    successful new client is built. On factory failure, leave the slice
-    in a re-tryable state (closed=True + assigned_symbols populated) so
-    the watchdog picks it up next tick."""
+    """A transient ``_websocket_factory`` failure during reconnect must not orphan the
+    slice's symbols. ``assigned_symbols`` and the symbol->conn mapping stay intact
+    until a new client is built, so a factory failure leaves the slice re-tryable
+    (closed=True with symbols populated) instead of invisible to the watchdog.
+    """
     factory = _FailingFactory(fail_on_call_n=2)
     pool = BybitKlineStreamPool(
         interval_minutes=60,
@@ -435,14 +415,10 @@ def test_failed_reconnect_keeps_slice_for_retry() -> None:
 
 
 def test_new_symbol_subscribe_skips_closed_connection_in_retry_state() -> None:
-    """When a connection is mid-retry (closed=True but assigned_symbols
-    still populated waiting for the watchdog to rebuild), a new
-    subscribe must NOT pick it as the target.
-
-    Without this guard, the new symbol would be added to the dead
-    client's slot — kline_stream() on a closed pybit client either
-    no-ops or raises, silently losing the new symbol's WS feed until
-    the next universe refresh."""
+    """A connection mid-retry (closed=True, symbols still assigned) must not be picked
+    as the target for a new subscribe: ``kline_stream()`` on a closed pybit client
+    either no-ops or raises, losing the new symbol's feed until the next refresh.
+    """
     factory = _FailingFactory(fail_on_call_n=2)
     pool = BybitKlineStreamPool(
         interval_minutes=60,
@@ -480,8 +456,7 @@ def test_new_symbol_subscribe_skips_closed_connection_in_retry_state() -> None:
 
 
 def test_callback_updates_last_message_timestamp() -> None:
-    """An incoming bar must reset the staleness clock so a healthy stream is
-    never reconnected by accident."""
+    """An incoming bar must reset the staleness clock so a healthy stream is never reconnected by accident."""
     pool, factory = _build_pool(
         topics_per_connection=10,
         stale_warning_seconds=0.01,
@@ -520,9 +495,9 @@ def test_close_blocks_further_subscribes() -> None:
 
 
 def test_callback_drops_malformed_message_without_raising() -> None:
-    """The pool callback is called from a WS thread; an exception there would
-    take down the thread. Any message without a topic / data should be counted
-    as dropped, never propagated."""
+    """The pool callback runs on a WS thread, where an exception takes the thread down,
+    so a message without a topic or data is counted as dropped, never propagated.
+    """
     pool, factory = _build_pool()
     bars: list[tuple[str, dict, bool]] = []
     pool.subscribe(["BTCUSDT"], lambda s, b, c: bars.append((s, b, c)))
@@ -600,9 +575,9 @@ def test_reject_invalid_construction_params() -> None:
 
 
 def test_subscribe_chunks_message_args_to_respect_bybit_cap() -> None:
-    """Bybit V5 limits args per subscribe message (~10). Even with a high
-    topics_per_connection, the pool must chunk the subscribe call so each
-    message stays under the cap."""
+    """Bybit V5 limits args per subscribe message (~10), so the pool chunks the
+    subscribe call even with a high ``topics_per_connection``.
+    """
     pool, factory = _build_pool(topics_per_connection=100)
     # Override the cap to a small value so we can assert on exact chunk sizes.
     pool.subscribe_args_per_message = 3
@@ -620,9 +595,9 @@ def test_subscribe_chunks_message_args_to_respect_bybit_cap() -> None:
 
 
 def test_callback_thread_safety_concurrent_inject_and_update() -> None:
-    """Two threads: one injects bars across symbols; another rotates the
-    universe via update_subscriptions. The pool must keep dispatch correct
-    and no exception may escape."""
+    """One thread injects bars across symbols while another rotates the universe via
+    ``update_subscriptions``: dispatch stays correct and no exception escapes.
+    """
     pool, factory = _build_pool(topics_per_connection=10)
     received: list[str] = []
     received_lock = threading.Lock()

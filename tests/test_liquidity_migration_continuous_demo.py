@@ -1,9 +1,6 @@
-"""Target-only decision contract for the CONTINUOUS demo and paper producer.
-
-These tests cover signal construction, admission, deterministic target planning,
-and the strict account-owner publication boundary. Venue orders, fills, P&L,
-protection, and notifications belong to the account service and are intentionally
-absent from this suite.
+"""Target-only decision contract for the CONTINUOUS demo and paper producer: signal
+construction, admission, deterministic target planning, and the account-owner
+publication boundary.
 """
 
 from __future__ import annotations
@@ -77,6 +74,7 @@ from liquidity_migration.continuous_demo import (
 from liquidity_migration.continuous_cycle_status import read_continuous_cycle_status
 from liquidity_migration.continuous_events import compute_continuous_decile_panel
 from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.venue_realm import VenueRealm
 
 
 def _synth(
@@ -482,9 +480,10 @@ def test_settled_funding_probe_uses_last_settled_print_and_fails_open() -> None:
 
 
 def test_funding_admission_filters_candidates_before_crowding() -> None:
-    """A negative-funding name is rejected ahead of the crowd count, so the
-    remaining admitted names stay inside the crowding cap and still trade —
-    the engine's fresh-entries-then-crowding order."""
+    """A negative-funding name is rejected ahead of the crowd count, so the remaining
+    admitted names stay inside the crowding cap and still trade -- the engine's
+    fresh-entries-then-crowding order.
+    """
     state = pl.DataFrame(
         {
             "symbol": ["NEGUSDT", "POSUSDT", "UNKUSDT"],
@@ -695,9 +694,10 @@ def _observe_single_component(
 
 
 def test_entry_cooldown_matches_research_hold_anchor() -> None:
-    """cooldown_ms = hold_ms from last entry per component book, so a fast TP
-    close cannot re-enter on the next hourly signal (research parity) while a
-    sibling component keeps its own clock."""
+    """cooldown_ms = hold_ms from the last entry per component book, so a fast TP close
+    cannot re-enter on the next hourly signal while a sibling component keeps its own
+    clock.
+    """
 
     now_ms = 1_700_000_000_000
     entry_signal = now_ms - 3 * MS_PER_HOUR
@@ -853,9 +853,10 @@ def test_entry_crowding_gate_skips_the_whole_component_stack() -> None:
 
 
 def test_same_signal_symbols_cannot_starve_fresh_names_below_the_cutoff() -> None:
-    """Prior-signal symbols are excluded BEFORE the capacity truncation, so a
-    closed same-signal trade cannot re-occupy a top slot and silently drop the
-    fresh name ranked just below it."""
+    """Prior-signal symbols are excluded BEFORE the capacity truncation, so a closed
+    same-signal trade cannot re-occupy a top slot and drop the fresh name ranked just
+    below it.
+    """
 
     signal_ts = 1_700_000_000_000
     state = pl.DataFrame(
@@ -891,10 +892,10 @@ def test_same_signal_symbols_cannot_starve_fresh_names_below_the_cutoff() -> Non
 
 
 def test_capacity_truncated_stack_completes_in_a_later_cycle() -> None:
-    """Window guards are scoped per component book: a symbol reserved by one
-    component does not block a sibling from completing the capacity-truncated
-    stack later in the same signal window (research parity: independent
-    books). An unattributable reservation still fails safe to blocking all."""
+    """Window guards are scoped per component book: a symbol reserved by one component
+    does not block a sibling from completing the capacity-truncated stack later in the
+    same signal window. An unattributable reservation still fails safe to blocking all.
+    """
 
     signal_ts = 1_700_000_000_000
     state = pl.DataFrame(
@@ -964,9 +965,10 @@ def test_capacity_truncated_stack_completes_in_a_later_cycle() -> None:
 
 
 def test_preselection_reason_wins_in_both_rejection_channels() -> None:
-    """A cycle-level gate (e.g. owner-health failure) must be the first
-    rejection in BOTH the funnel channel and the blocked-rows channel; a
-    reserved symbol must not mask it (2026-07-25 15:57:46Z contradiction)."""
+    """A cycle-level gate (e.g. owner-health failure) must be the first rejection in
+    BOTH the funnel channel and the blocked-rows channel; a reserved symbol must not
+    mask it.
+    """
 
     signal_ts = 1_700_000_000_000
     state = pl.DataFrame(
@@ -1464,10 +1466,11 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
 
     monkeypatch.setattr(module, "apply_continuous_demo_profile", lambda value: value)
 
-    def load_candidate(path: str) -> SimpleNamespace:
+    def load_candidate(path: str, *, realm: VenueRealm) -> SimpleNamespace:
         nonlocal candidate_loads
         candidate_loads += 1
         assert Path(path).absolute() == candidate_path
+        assert realm is VenueRealm.DEMO
         return frozen_candidate
 
     monkeypatch.setattr(module, "load_candidate_universe", load_candidate)
@@ -1599,7 +1602,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     # 7af59f3's null-not-0.0 equity fix (a literal 0.0 reads as a -100% equity
     # spike in cycles-derived curves) was pinned only for the LONG daemon; the
     # continuous test mocked owner health as always healthy, so a regression to
-    # 0.0 would have passed the whole suite (2026-07-27 audit M18).
+    # 0.0 would otherwise pass the whole suite.
     def blocked_owner_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         raise RuntimeError("owner health receipt is stale")
 
@@ -1646,7 +1649,7 @@ def test_profile_resolves_only_the_active_target_contract() -> None:
     assert config.target_vol_per_name == pytest.approx(0.01)
     assert config.vol_weight_clamp == pytest.approx(2.0)
     assert config.ensemble_components == (
-        # Operator override 2026-07-26: single funding-gated turn3_pop3 cell.
+        # Single funding-gated turn3_pop3 cell.
         ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
     )
     assert continuous_managed_strategy_ids(config) == ("continuous_fade_v2",)
@@ -2161,11 +2164,11 @@ def _aged_universe(ages: dict[str, float]) -> pl.DataFrame:
 
 
 def test_crowding_counts_before_the_age_gate_like_the_engine() -> None:
-    """`_run_trades` counts crowding on every funding-admitted fresh entry sharing
-    a signal_ts and applies its per-entry age gate afterwards. Counting on the
-    age-filtered frame instead let the live book take entries the validated
-    engine crowd-skipped, in exactly the fresh-listing-squeeze hours the two
-    gates were designed around (2026-07-27 audit M2)."""
+    """``_run_trades`` counts crowding on every funding-admitted fresh entry sharing a
+    signal_ts and applies its per-entry age gate afterwards. Counting on the
+    age-filtered frame instead lets the live book take entries the validated engine
+    crowd-skipped, in exactly the fresh-listing-squeeze hours both gates target.
+    """
 
     state = pl.DataFrame(
         {
@@ -2209,10 +2212,10 @@ def test_crowding_counts_before_the_age_gate_like_the_engine() -> None:
 
 
 def test_crowding_counts_only_fresh_entrants_when_prior_bar_state_is_present() -> None:
-    """The engine counts crowding on `_fresh_entries` — rows whose symbol was not
-    already in the (decile AND trigger) set one bar earlier. Carrying the prior
-    bar lets the live sleeve reproduce that instead of counting continuation
-    rows."""
+    """The engine counts crowding on ``_fresh_entries`` -- rows whose symbol was not
+    already in the (decile AND trigger) set one bar earlier. Carrying the prior bar
+    lets the live sleeve reproduce that instead of counting continuation rows.
+    """
 
     state = pl.DataFrame(
         {
@@ -2258,10 +2261,9 @@ def test_crowding_counts_only_fresh_entrants_when_prior_bar_state_is_present() -
 
 
 def test_funding_rejection_is_named_instead_of_being_reported_as_capacity() -> None:
-    """When every age-qualified candidate is funding-rejected the cascade used to
-    fall through to "capacity" while the funnel showed funding 0 — the two
-    operator channels contradicting each other for the signature rejection mode
-    of the deployed funding-gated profile (2026-07-27 audit M3)."""
+    """When every age-qualified candidate is funding-rejected, the cascade must name
+    funding rather than fall through to "capacity" while the funnel shows funding 0.
+    """
 
     state = pl.DataFrame(
         {

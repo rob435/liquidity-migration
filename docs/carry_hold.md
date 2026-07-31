@@ -8,7 +8,7 @@ against, how it should be run, and what would kill it. Registered config:
 executable: `liquidity_migration/financed_longs.py`.
 
 Status: **Lane-2 registered, accruing a forward record since the registration
-commit. Not deployed. No runtime, no venue access, no real-money implication.**
+commit.**
 *(2026-07-28: the owner promoted `lane2_carry_hold_v3` to lead config of the
 family — the reference for any §7 implementation work. Research-only status
 unchanged; v1/v2 keep scoring. Trade diagnostics:
@@ -208,6 +208,20 @@ grind-downs where shorts are not paying.
 - **Capacity**: the deep-negative-funding subset of top-100 names at demo-account
   scale. Fees are measured at small notional; no impact model. This is not a
   large-book claim.
+  - **2026-07-30, first measured impact evidence** (n=3 live entries, against the
+    exact decision books captured at entry). A single
+    **$25k** clip already exhausts most of the *visible top-50 levels*:
+    `LAUSDT` 79% covered, `ESPUSDT` 74%, `VANRYUSDT` 100% (13 levels).
+    Book-walk VWAP for the full clip was **+47.4 / +45.7 / +16.1 bp** — roughly
+    **6× the 7.78 bp/side the scorer charges**. Realised execution was much
+    better than that (effective spread **−29.2 / +3.2 / −2.3 bp**) because the
+    producer chunks (5 / 2 / 2 clips over 0.4–2.4 s) and the book refills
+    between clips, beating the visible walk by 17–62 bp. Read it as: the fee
+    model is fine, the *impact* model is still absent, and patience is what is
+    currently paying for its absence. Nothing here supports scaling this book
+    an order of magnitude without re-measuring.
+  - Observed taker fee is **5.50 bp/side, exactly**, on all 346 live orders —
+    the §3 assumption of 7.78 bp/side is conservative by 2.28 bp/side.
 
 ## 7. Implementation path — BUILT AND DEPLOYED 2026-07-29 (owner override)
 
@@ -243,8 +257,25 @@ and deploy this strategy in its place. The runtime now exists:
    in research's favor); the live sleeve cannot and does not dodge — it
    holds through bars the scorer never sees. Forward research rows and the
    live journal are two records; neither substitutes for the other.
-5. **Kill criteria**: §8 armed at deployment as
-   `docs/preregistration/carry_sleeve_kill_criteria_2026-07-29.md`.
+   - **Entry price basis (2026-07-30).** §3 scores entries at the decision-bar
+     close (`execution_delay_ms=0`). The live sleeve cannot get that price: the
+     00:00 UTC bar is only published at ~00:20, so orders go out ~23 minutes
+     after the price the headline numbers use. Measured on the two on-time live
+     entries, the gap between the modelled and realised entry price was
+     **−363.8 bp (`ESPUSDT`) and +111.4 bp (`VANRYUSDT`)** — sign is noise at
+     n=2, the dispersion is the point. The edge itself survives this (§5.2
+     stress: +1h → t 4.19, +4h → t 4.82), but that means **the live sleeve runs
+     the delayed-entry stress case, not the headline case**. Quote forward
+     comparisons on that basis.
+5. **What the live sleeve does that the scorer does not.** The scorer sets
+   weights once per daily bar and lets quantity ride until the next one. The
+   producer additionally re-sizes intraday whenever the accepted notional
+   drifts more than 5% from target. That overlay is not in any registered
+   number. It is now bounded (dead-band, decision-anchored equity) rather than
+   continuous — 2026-07-29/30 it fired 340 times in 34 hours, 45% of those
+   orders under $100 on a $255k account — but it has not been removed, and
+   whether a daily book should track notional intraday at all is an open owner
+   decision, not a settled one.
 6. **Known sharp edges at deployment** (from the build review): (a) entry
    attempt keys are per-symbol-stable, so one terminal kernel-side
    rejection suppresses that symbol's entries for the journal's life — the
@@ -257,25 +288,7 @@ and deploy this strategy in its place. The runtime now exists:
    cycles datasets grow as single part files (~1.4k rows/day) until a
    month-bucket registration lands; queued.
 
-Real money remains a separate owner door; the sleeve runs `DEMO=true`,
-`REAL_MONEY=false`, and nothing in this deployment changes that boundary.
-
-## 8. Proposed kill criteria (pre-registered before the evidence arrives)
-
-To be armed with the forward record, mirroring
-`docs/preregistration/sleeve_kill_criteria_2026-07-20.md` discipline:
-
-- **K1 (drawdown)**: vol-targeted forward drawdown > **30%** from the forward
-  peak ⇒ demote to research.
-- **K2 (dead run)**: 120 consecutive forward days with the book deployed ≥ 30%
-  of days and cumulative net ≤ 0 ⇒ demote.
-- **K3 (mechanism break)**: funding received minus price bleed (the §2
-  attribution, recomputed on forward trades) turns negative over any 90-day
-  deployed stretch ⇒ demote — the payment, not the price, is the thesis.
-- **K4 (insufficient sample)**: fewer than 25 deployed days in 180 calendar
-  days ⇒ no verdict either way; keep accruing, do not promote.
-
-## 9. What this document does not claim
+## 8. What this document does not claim
 
 Lane-1 numbers selected this rule; only the forward record grades it. Fees are
 measured, impact is not. The 2025-26 contribution rides the structural funding

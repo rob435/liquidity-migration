@@ -1,0 +1,42 @@
+[Unit]
+Description=liquidity-migration paper target mirror (republishes demo targets onto the paper route)
+Wants=network-online.target
+Requires=liquidity-migration-account-paper-execution.service
+After=network-online.target liquidity-migration-account-paper-execution.service liquidity-migration-account-execution.service
+
+[Service]
+Type=simple
+# Privileged on purpose: the demo capture tape is 0600 root:root and the paper
+# owner is unprivileged. Copying here keeps that tape root-only instead of
+# widening access to it for every paper-side process.
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/account-paper-execution.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+Environment=REAL_MONEY=false
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-paper-target-mirror.service main
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=60
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+ReadWritePaths=/opt/liquidity-migration/data/bybit-account-paper-intents /opt/liquidity-migration/data/bybit-account-paper /opt/liquidity-migration/data/bybit-account-paper-market-capture
+MemoryHigh=256M
+MemoryMax=384M
+MemorySwapMax=128M
+
+[Install]
+WantedBy=multi-user.target

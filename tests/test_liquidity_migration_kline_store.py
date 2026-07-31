@@ -1,9 +1,7 @@
-"""Tests for the WS-driven kline store.
-
-Covers thread-safety, eviction, idempotent add, get-by-range, persistence
-round-trip, and the flush thread. Tests deliberately exercise the same
-schema contract the cycle's _download_recent_1h_klines uses so the store is
-a verified drop-in for the REST path.
+"""Tests for the WS-driven kline store: thread-safety, eviction, idempotent add,
+get-by-range, persistence round-trip, and the flush thread. They exercise the same
+schema contract the cycle's ``_download_recent_1h_klines`` uses, so the store is a
+verified drop-in for the REST path.
 """
 
 from __future__ import annotations
@@ -134,8 +132,9 @@ def test_insert_drops_bar_older_than_retain_window_immediately() -> None:
 
 
 def test_far_future_bar_is_rejected_and_does_not_mass_evict() -> None:
-    """H6: a corrupt far-future ts must not advance the eviction reference and
-    evict every legitimate bar (total store loss → silent REST fallback)."""
+    """A corrupt far-future ts must not advance the eviction reference and evict every
+    legitimate bar (total store loss, then silent REST fallback).
+    """
     from liquidity_migration.kline_store import _utc_now_ms
 
     store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
@@ -153,8 +152,9 @@ def test_far_future_bar_is_rejected_and_does_not_mass_evict() -> None:
 
 
 def test_bootstrap_skips_far_future_bars() -> None:
-    """H6: bulk bootstrap must drop corrupt far-future bars, not let them
-    poison the eviction reference for the good bars in the same batch."""
+    """Bulk bootstrap must drop corrupt far-future bars, not let them poison the
+    eviction reference for the good bars in the same batch.
+    """
     from liquidity_migration.kline_store import _utc_now_ms
 
     store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
@@ -168,9 +168,10 @@ def test_bootstrap_skips_far_future_bars() -> None:
 
 
 def test_recover_from_disk_skips_far_future_bars(tmp_path) -> None:
-    """H6 (recovery path, ws-dataplane-3): a corrupt far-future bar in the flush
-    file must not advance the eviction reference and mass-evict every recovered
-    legitimate bar. The insert + bootstrap paths clamp such bars; recovery must too."""
+    """A corrupt far-future bar in the flush file must not advance the eviction
+    reference and mass-evict every recovered legitimate bar. The insert and bootstrap
+    paths clamp such bars; recovery must too.
+    """
     import polars as pl
 
     from liquidity_migration.kline_store import _utc_now_ms
@@ -258,11 +259,10 @@ def test_symbols_with_coverage_through_reflects_bar_freshness() -> None:
 
 
 def test_symbols_with_coverage_in_window_requires_both_ends() -> None:
-    """The bootstrap-skip check uses this: a symbol is "already covered"
-    only if its stored bars span the FULL [start_ms, end_ms] window.
-    Recovery from a flush file with only the latest hour must NOT make
-    the symbol look "covered" — otherwise bootstrap would skip and the
-    cycle would run on partial history forever."""
+    """A symbol counts as "already covered" for the bootstrap skip only if its stored
+    bars span the FULL [start_ms, end_ms] window. Recovery from a flush file holding
+    only the latest hour must not make it look covered.
+    """
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     # ABC has the full window (bars at hour 1 + hour 10).
     store.add_bar("ABCUSDT", _ws_bar(MS_PER_HOUR), confirmed=True)
@@ -296,11 +296,10 @@ def test_bootstrap_symbol_idempotent_with_overlapping_ts() -> None:
 
 
 def test_bootstrap_does_not_overwrite_live_ws_bar() -> None:
-    """At cold-start the bootstrap REST backfill and the live WS stream race.
-    A freshly-closed bar can arrive on WS first; the bootstrap then refetches
-    that hour from REST. The WS bar must win — it reflects the latest venue
-    state. Without this guard the older REST snapshot silently overwrites the
-    fresh WS row."""
+    """At cold start the bootstrap REST backfill races the live WS stream. A
+    freshly-closed bar can arrive on WS first and the bootstrap then refetches that
+    hour from REST; the WS bar must win, since it reflects the latest venue state.
+    """
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     # 1. Live WS bar arrives first with close=200.0 (the "fresh" value).
     store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=200.0), confirmed=True)
@@ -314,9 +313,9 @@ def test_bootstrap_does_not_overwrite_live_ws_bar() -> None:
 
 
 def test_bootstrap_fills_gaps_around_live_ws_bar() -> None:
-    """Bootstrap should still fill OTHER hours — only the hours the live WS
-    stream already has are protected. This guarantees we don't lose 89 days
-    of historical bars just because the live WS landed a single bar first."""
+    """Bootstrap still fills other hours -- only the hours the live WS stream already
+    has are protected -- so a single early WS bar cannot cost 89 days of history.
+    """
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     store.add_bar("BTCUSDT", _ws_bar(2 * MS_PER_HOUR, close=222.0), confirmed=True)
     accepted = store.bootstrap_symbol(
@@ -337,9 +336,10 @@ def test_bootstrap_fills_gaps_around_live_ws_bar() -> None:
 
 
 def test_concurrent_add_and_get_thread_safety() -> None:
-    """Hammer the store from two threads: one inserts bars, one reads
-    rectangular windows. The lock should keep the read stable and never
-    crash on a partial dict mutation."""
+    """Hammer the store from two threads, one inserting bars and one reading
+    rectangular windows: the lock keeps the read stable and never crashes on a
+    partial dict mutation.
+    """
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     base = 1_000_000_000
     n_bars = 200
@@ -428,8 +428,7 @@ def test_recover_missing_file_is_noop(tmp_path: Path) -> None:
 
 
 def test_recover_evicts_bars_outside_retain_window(tmp_path: Path) -> None:
-    """A long-lived flush file plus a short retain_days on recovery must not
-    bring back already-stale bars."""
+    """A long-lived flush file plus a short retain_days on recovery must not bring back already-stale bars."""
     base = 10 * MS_PER_DAY
     store_a = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     store_a.add_bar("BTCUSDT", _ws_bar(base - 8 * MS_PER_DAY), confirmed=True)
@@ -521,23 +520,13 @@ def test_parser_returns_none_for_negative_or_partial_payload() -> None:
 
 
 def test_bootstrap_symbol_completes_full_universe_in_a_few_seconds() -> None:
-    """Regression guard for the O(N²) eviction bug that made cold-start
-    bootstrap take 15+ minutes in production.
+    """Guard for the O(N^2) eviction path: ``_insert_bar`` must not full-scan every
+    symbol (``_max_ts_with_new``) and every symbol x bar (``_evict_old_locked``) on
+    every inserted bar, which collapsed throughput under the store's RLock.
 
-    The bug: _insert_bar called _max_ts_with_new (full scan of all symbols)
-    and _evict_old_locked (full scan of all symbols × all bars) on EVERY
-    inserted bar. With 567 symbols × 1083 bars/symbol, this was O(N²) under
-    the store's RLock — workers competed for the lock and effective
-    throughput collapsed.
-
-    Post-fix this completes in well under a second on commodity hardware
-    and ~2.5s on the 2-core ubuntu-latest CI runner. A real regression
-    would take MINUTES, not seconds, so the 10s budget catches the bug
-    without flaking on slow runners.
-
-    Reduced to 250 symbols × 500 bars (= 125k row total) — keeps the test
-    fast enough on CI while still exercising the same O(N²) path that
-    blew up under the prior implementation.
+    250 symbols x 500 bars completes well under a second locally and ~2.5s on a
+    2-core CI runner; a real regression takes MINUTES, so the 10s budget catches it
+    without flaking.
     """
     store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
     base_ts = 100 * MS_PER_DAY
@@ -556,10 +545,10 @@ def test_bootstrap_symbol_completes_full_universe_in_a_few_seconds() -> None:
 
 
 def test_keep_only_symbols_drops_everything_outside_the_set() -> None:
-    """Used at manager startup to trim out-of-scope bars when the universe
-    scope shrinks between runs (e.g. long sleeve recovered with 567
-    symbols' worth of data from a prior wider-universe daemon but now
-    only tracks the top-50)."""
+    """Used at manager startup to trim out-of-scope bars when the universe shrinks
+    between runs (e.g. a long sleeve recovered a wider universe's data but now tracks
+    only the top-50).
+    """
     store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
     for sym in ("BTCUSDT", "ETHUSDT", "DOGEUSDT", "SHIBUSDT"):
         store.add_bar(sym, _ws_bar(MS_PER_HOUR), confirmed=True)
@@ -583,10 +572,7 @@ def test_keep_only_symbols_is_a_noop_when_universe_unchanged() -> None:
 
 
 def test_amortized_eviction_does_not_skip_long_overdue_purges() -> None:
-    """Eviction is amortized to fire once per hour-window, but bars that
-    have been stale for many hours still get purged the next time it fires.
-    A single very-old bar plus a much-later insert must still trigger
-    eviction of the old bar."""
+    """Eviction fires once per hour-window, but bars stale for many hours still get purged the next time it fires."""
     store = KlineStore(cache_root=None, retain_days=1, flush_interval_seconds=0.0)
     # Old bar at t=0, within retention as the only entry.
     store.add_bar("OLD", _ws_bar(0, close=50.0), confirmed=True)
@@ -614,9 +600,10 @@ def test_get_klines_cache_matches_uncached_output() -> None:
 
 
 def test_flush_skips_when_store_unchanged(tmp_path: Path) -> None:
-    """Tier C: re-serializing the whole store every ~30s with no new bars is
-    wasted CPU + lock contention. flush_to_disk skips when the mutation version
-    is unchanged since the last flush, and resumes when a new bar lands."""
+    """``flush_to_disk`` skips when the mutation version is unchanged since the last
+    flush, and resumes when a new bar lands: re-serializing the whole store every
+    ~30s with no new bars is wasted CPU and lock contention.
+    """
     store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=100.0), confirmed=True)
     assert store.flush_to_disk() == 1
@@ -631,9 +618,10 @@ def test_flush_skips_when_store_unchanged(tmp_path: Path) -> None:
 
 
 def test_stats_scan_is_cached_and_recomputed_on_mutation(monkeypatch) -> None:
-    """ws-dataplane-7: oldest_ts_ms + row_count are an O(symbols x bars) scan;
-    stats() must not re-run that scan on every poll when the store is unchanged,
-    and MUST recompute once the store mutates (insert / eviction / recovery)."""
+    """``oldest_ts_ms`` + ``row_count`` are an O(symbols x bars) scan, so ``stats()``
+    must cache it while the store is unchanged and recompute once it mutates (insert,
+    eviction, recovery).
+    """
     store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
     base = 100 * MS_PER_DAY
     store.add_bar("BTCUSDT", _ws_bar(base, close=10.0), confirmed=True)
@@ -682,7 +670,7 @@ def test_flush_failure_cleans_up_temp_file(tmp_path: Path, monkeypatch) -> None:
     assert leftovers == []
 
 
-# audit2b — verification of the flagged kline_store freshness defect
+# kline_store freshness: newest_ts_ms is always backed by a stored bar
 # (kline_store_fresh #1). VERDICT: NOT a defect within kline_store.py.
 # recover_from_disk is a documented add-only idempotent keyed MERGE; it never
 # drops symbols (that is keep_only_symbols' job). After recovery the cached
@@ -690,13 +678,10 @@ def test_flush_failure_cleans_up_temp_file(tmp_path: Path, monkeypatch) -> None:
 # so newest_ts_ms() never reports a phantom timestamp. These tests PIN that
 # verified contract on the current (unmodified) source.
 def test_recover_keeps_global_max_consistent_with_present_bars(tmp_path: Path) -> None:
-    """recover_from_disk is add-only: after every recover, newest_ts_ms() equals
-    the true max of bars actually present. It never reports a phantom ts.
-
-    This is the core of the flagged-defect verification: the store's reported
-    freshness is always backed by a real stored bar, even across a snapshot that
-    shrank the leader universe. (The departed symbol's bar is genuinely still in
-    the store until pruned — see the prune test below.)"""
+    """``recover_from_disk`` is add-only: after every recover, ``newest_ts_ms()`` equals
+    the true max of bars actually present, never a phantom ts. A departed symbol's
+    bar is genuinely still in the store until pruned -- see the prune test below.
+    """
     leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     leader.add_bar("AAAUSDT", _ws_bar(100 * MS_PER_HOUR), confirmed=True)
     leader.add_bar("CCCUSDT", _ws_bar(200 * MS_PER_HOUR, close=9.0), confirmed=True)
@@ -722,11 +707,10 @@ def test_recover_keeps_global_max_consistent_with_present_bars(tmp_path: Path) -
 
 
 def test_keep_only_symbols_corrects_newest_after_universe_shrink(tmp_path: Path) -> None:
-    """The prune corrector: dropping the departed global-max holder recomputes
-    the global max downward, so newest_ts_ms() tracks the surviving bars.
-
-    This pins that the fix for the flagged symptom lives in keep_only_symbols
-    (already correct), not in recover_from_disk."""
+    """Dropping the departed global-max holder recomputes the global max downward, so
+    ``newest_ts_ms()`` tracks the surviving bars. The correction lives in
+    ``keep_only_symbols``, not in ``recover_from_disk``.
+    """
     store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     store.add_bar("AAAUSDT", _ws_bar(150 * MS_PER_HOUR, close=5.0), confirmed=True)
     store.add_bar("CCCUSDT", _ws_bar(200 * MS_PER_HOUR, close=9.0), confirmed=True)
@@ -757,9 +741,9 @@ def test_recover_into_empty_store_normal_path_unchanged(tmp_path: Path) -> None:
     assert follower.row_count() == 10
 
 
-# --- audit bucket b15: newest_ts staleness + flush serialization (ws-pool-2/-5) ---
+# --- newest_ts staleness + flush serialization -------------------------------
 def test_newest_ts_recomputed_after_keep_only_trims_max_holder() -> None:
-    # ws-pool-2: trimming the lone symbol that holds the global-max timestamp must
+    # Trimming the lone symbol that holds the global-max timestamp must
     # drop newest_ts_ms to the surviving max — never leave it stale/too-fresh.
     store = KlineStore(cache_root=None, retain_days=365, flush_interval_seconds=0.0)
     store.add_bar("AAA", _ws_bar(10 * MS_PER_HOUR), confirmed=True)
@@ -771,7 +755,7 @@ def test_newest_ts_recomputed_after_keep_only_trims_max_holder() -> None:
 
 
 def test_newest_ts_recomputed_after_eviction_drops_max_holder() -> None:
-    # ws-pool-2: the same staleness applies to age-eviction. After a far-newer bar
+    # The same staleness applies to age-eviction. After a far-newer bar
     # ages out an old symbol entirely, newest must reflect the surviving bars.
     store = KlineStore(cache_root=None, retain_days=1, flush_interval_seconds=0.0)
     store.add_bar("AAA", _ws_bar(1 * MS_PER_HOUR), confirmed=True)
@@ -793,7 +777,7 @@ def test_newest_ts_survives_keep_only_when_max_holder_kept() -> None:
 
 
 def test_flush_has_dedicated_serialization_lock() -> None:
-    # ws-pool-5: a dedicated flush IO lock (separate from the data RLock) must
+    # A dedicated flush IO lock (separate from the data RLock) must
     # serialize the whole flush so the final stop() flush can't race a lingering
     # loop flush.
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
@@ -802,7 +786,7 @@ def test_flush_has_dedicated_serialization_lock() -> None:
 
 
 def test_concurrent_flushes_serialize_and_keep_file_consistent(tmp_path: Path) -> None:
-    # ws-pool-5: two concurrent flush_to_disk calls (the stop() race) must produce
+    # Two concurrent flush_to_disk calls (the stop() race) must produce
     # a consistent on-disk file and consistent version bookkeeping, not a torn file
     # or a skipped subsequent flush.
     store = KlineStore(cache_root=tmp_path, retain_days=365, flush_interval_seconds=0.0)

@@ -5,9 +5,8 @@ Sharding is a memory decision, not a semantic one: a full-history build is tens
 of millions of rows and does not need to exist in one frame. Each shard carries
 its own manifest, and a top-level manifest records the set.
 
-Read-only over research roots. No venue access, no account journal, no
-operational authority. See `liquidity_migration/cross_venue_panel.py` for the
-causality contract this inherits.
+`liquidity_migration/cross_venue_panel.py` holds the causality contract this
+inherits.
 
 Example:
 
@@ -66,7 +65,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def year_windows(start: dt.date, end: dt.date) -> list[tuple[dt.date, dt.date]]:
     """Split ``[start, end)`` into per-calendar-year half-open windows."""
-
     windows: list[tuple[dt.date, dt.date]] = []
     cursor = start
     while cursor < end:

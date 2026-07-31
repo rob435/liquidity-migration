@@ -42,9 +42,14 @@ reconciliation events, immutable venue identifiers, and authenticated venue
 snapshot. Preserve contradictory facts and stop unsafe writers. Do not repair
 the headline by editing projections or resetting before flatness is proved.
 
-There is no current combined historical/paper/demo structural-comparison command.
-A request for model-versus-forward agreement needs a newly declared claim and
-artifacts appropriate to that claim.
+The combined backtest/demo/paper structural comparison is
+`scripts/ops.sh research-refresh reconcile --run-dir ... --demo-account-root ...
+--paper-account-root ...`, over frozen account snapshots, on the grain
+`(sleeve, component, symbol, causal signal_ts_ms)`. Its own `claim_scope` limits it
+to accepted entry-key structural agreement: execution quality, fill attribution,
+account P&L, backtest performance and runtime parity stay separate claims
+(`docs/data.md`, Refresh). A request for model-versus-forward *performance*
+agreement still needs a newly declared claim and its own artifacts.
 
 ## PIT evidence
 
@@ -61,6 +66,6 @@ current-listing-derived tail rows are inference, not archive observations. A
 partial/current-universe run may support only its declared narrower scope.
 
 PIT coverage cannot prove execution, and a reconciled demo journal cannot repair
-a survivorship-invalid historical claim. Apply `AGENTS.md`,
-`docs/pit_gate.md`, and `docs/account_execution.md` to keep those conclusions
-separate.
+a survivorship-invalid historical claim. Apply `AGENTS.md`, `docs/data.md`
+(Point-in-time membership), and `docs/architecture.md` (The account journal) to
+keep those conclusions separate.

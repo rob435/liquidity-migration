@@ -12,9 +12,9 @@ from liquidity_migration.volume_events_charts import (
 
 
 def test_monthly_table_rows_fills_gap_months() -> None:
-    """A month where the book sat flat must appear as a +0.00% row, not vanish — a missing
-    month is indistinguishable from a rendering bug and hides that the strategy was alive
-    but idle (observed: 2025-11 / 2026-02 absent from the deployed-refresh table)."""
+    """A month where the book sat flat must appear as a +0.00% row, not vanish -- a
+    missing month is indistinguishable from a rendering bug.
+    """
     from liquidity_migration.volume_events_charts import _monthly_table_rows
 
     equity = pl.DataFrame({

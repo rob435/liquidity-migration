@@ -1,20 +1,17 @@
 """Pure-data contracts for the account execution kernel.
 
-This module is the serialization-free contract slice of the account kernel:
-event types, value objects, mutable account state, and the execution-intent
-results that dependents exchange with :mod:`liquidity_migration.account_kernel`.
-It deliberately has no internal imports so that consumers of the contract
-vocabulary (diagnostics, adapters, replay, profiles) do not depend on journal
-persistence or the stateful kernel engine.
+Event types, value objects, mutable account state, and execution-intent results.
+No internal imports, so consumers of the contract vocabulary (diagnostics,
+adapters, replay, profiles) do not pull in journal persistence or the kernel.
 
 The canonical control-plane order is::
 
     MarketInputRef -> Decision -> Target -> RiskDecision -> OrderCommand
       -> Ack -> Fill -> Protection -> Close -> P&L
 
-The environment (historical, paper, demo) is intentionally absent from domain
-state.  It belongs to an execution adapter, which makes pre-execution hashes
-directly comparable across environments.
+The environment (historical, paper, demo) is absent from domain state; it
+belongs to an execution adapter, which keeps pre-execution hashes comparable
+across environments.
 """
 
 from __future__ import annotations
@@ -52,22 +49,21 @@ class AccountEventType(StrEnum):
     TARGET = "target"
     RISK_DECISION = "risk_decision"
     ORDER_COMMAND = "order_command"
-    # Durable pre-effect boundary. A provider-capable adapter records this
-    # immediately before an exposure-capable submission so ``commanded`` never
-    # conflates unsent work with an ACK-lost, possibly-live venue order.
+    # Durable pre-effect boundary, recorded immediately before an
+    # exposure-capable submission so ``commanded`` never conflates unsent work
+    # with an ACK-lost, possibly-live venue order.
     SUBMISSION_ATTEMPT = "submission_attempt"
     ACK = "ack"
-    # Supplemental transport observation. A private fill can establish the
-    # semantic ACK before the HTTP create response returns; retain that later
-    # request/response timing without rewriting or duplicating the transition.
+    # A private fill can establish the semantic ACK before the HTTP create
+    # response returns; this records the later timing without duplicating the
+    # transition.
     ACK_OBSERVATION = "ack_observation"
     FILL = "fill"
     PROTECTION = "protection"
     CLOSE = "close"
     PNL = "pnl"
-    # Supplemental venue fact. Market IOC orders can partially fill then cancel;
-    # without a terminal status the unfilled remainder would remain phantom
-    # working exposure forever.
+    # Market IOC orders can partially fill then cancel; without a terminal
+    # status the unfilled remainder stays phantom working exposure forever.
     ORDER_STATUS = "order_status"
     VENUE_SNAPSHOT = "venue_snapshot"
 
@@ -122,14 +118,12 @@ class InstrumentRules:
     observed_ts_ns: int = 0
 
 
-# Float error in a reconstructed cumulative quantity scales with the quantity
-# itself.  A routine order at the deployed capital reference is 1e5-1e7 base
-# units (a five-figure USDT position in a sub-cent coin) and filling it in
-# several partials accumulates a few ulps -- inside a relative tolerance, well
-# outside a fixed absolute one.  Every quantity comparison in the kernel, the
-# execution stream, the venue-protection path, and the adapters must therefore
-# use this one rule: a site that disagrees can raise inside the journal
-# transaction on every retry forever (2026-07-27 audit H4).
+# Float error in a reconstructed cumulative quantity scales with the quantity.
+# A routine order is 1e5-1e7 base units and several partials accumulate a few
+# ulps -- inside a relative tolerance, outside a fixed absolute one. Every
+# quantity comparison (kernel, execution stream, venue protection, adapters)
+# must use this one rule; a site that disagrees can raise inside the journal
+# transaction on every retry forever.
 QUANTITY_RELATIVE_TOLERANCE = 1e-12
 QUANTITY_ABSOLUTE_TOLERANCE = 1e-12
 
@@ -150,18 +144,15 @@ class AccountRiskSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SleeveCapitalLimit:
-    """One sleeve's private share of the account envelope (B3).
+    """One sleeve's private share of the account envelope.
 
-    ``max_component_gross_notional_usdt`` bounds *every* sleeve's projected
-    exposure together, so a single sleeve could always consume the whole
-    envelope and leave the others unable to enter — which is why LONG and CARRY
-    could not previously be funded at the same time. A partition gives each
-    sleeve a share nothing else can spend.
+    ``max_component_gross_notional_usdt`` bounds every sleeve's exposure
+    together, so without a partition one sleeve can consume the whole envelope
+    and leave the others unable to enter.
 
-    Declared as a tuple of these on the policy rather than a mapping so the
-    policy stays a frozen, hashable, ``asdict``-serializable value: it is
-    recorded verbatim in the journal's risk decision and hashed into the
-    authority receipt through the operational profile.
+    Declared as a tuple on the policy rather than a mapping so the policy stays
+    a frozen, hashable, ``asdict``-serializable value recorded verbatim in the
+    journal's risk decision.
     """
 
     sleeve: str
@@ -179,20 +170,13 @@ class AccountRiskPolicy:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float = 1e-12
-    #: Absolute daily loss ceiling in USDT, measured against the UTC day's
-    #: opening equity. 0.0 disables it. Enforced by ``AccountLossGuard`` in the
-    #: owner loop rather than here, because the ceiling needs the day's opening
-    #: equity and a trip has to survive a process restart -- neither of which a
-    #: per-batch cap can express. It lives on the policy so it is bound into the
-    #: operational profile, and therefore hashed into the authority receipt:
-    #: the ceiling cannot be raised without invalidating the deploy authority.
+    #: Absolute daily loss ceiling in USDT against the UTC day's opening equity;
+    #: 0.0 disables it. Enforced by ``AccountLossGuard`` in the owner loop, not
+    #: here: it needs the day's opening equity and a trip must survive a restart.
     max_daily_loss_usdt: float = 0.0
-    #: Per-sleeve partition of the account envelope. Empty is the historical
-    #: unpartitioned behaviour and stays the default so a profile that predates
-    #: B3 keeps working. Non-empty partitions the envelope *and* refuses any
-    #: sleeve the partition does not name: declaring a partition and then
-    #: silently exempting an unlisted sleeve would be the same hole with extra
-    #: steps.
+    #: Per-sleeve partition of the account envelope. Empty means unpartitioned.
+    #: Non-empty partitions the envelope *and* refuses any sleeve it does not
+    #: name.
     sleeve_limits: tuple[SleeveCapitalLimit, ...] = ()
 
 
@@ -200,9 +184,9 @@ class AccountRiskPolicy:
 class NativeDisasterProtectionPolicy:
     """Account-level contract for exchange-attached entry protection.
 
-    The policy is deliberately separate from strategy stop metadata.  It makes
-    the process-death seatbelt a required execution input while allowing the
-    exact post-fill stop to remain component/fill anchored.
+    Separate from strategy stop metadata: this is the process-death seatbelt,
+    a required execution input, while the exact post-fill stop stays
+    component/fill anchored.
     """
 
     fallback_stop_fraction: float
@@ -265,12 +249,9 @@ class AccountEvent:
             raise AccountJournalIntegrityError(f"invalid account event: {exc}") from exc
 
     def to_dict(self) -> dict[str, Any]:
-        # dataclasses.asdict deep-copies every leaf — and before Python
-        # 3.12's atomic fast path it routes even plain scalars through
-        # copy.deepcopy — putting an O(payload) copy on the trusted append
-        # path for consumers that only hash or JSON-serialize the result.
-        # Events are immutable after publication; serialize by reference
-        # with a top-level payload copy against accidental caller aliasing.
+        # Not dataclasses.asdict: it deep-copies every leaf, an O(payload) cost
+        # on the append path. Events are immutable after publication, so
+        # serialize by reference with one top-level payload copy.
         output = {name: getattr(self, name) for name in self.__dataclass_fields__}
         output["payload"] = dict(self.payload)
         return output
@@ -321,11 +302,10 @@ class AccountState:
     latest_market_inputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     decisions: dict[str, dict[str, Any]] = field(default_factory=dict)
     target_proposals: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Latest accepted replacement for every component key, including explicit
-    # zero targets. ``component_targets`` deliberately omits zeroes so normal
-    # risk evaluation does not require prices/rules for every historical
-    # component, but the execution owner still needs the zero replacement to
-    # retry a terminally rejected/cancelled close after a restart.
+    # Latest accepted replacement per component key, zero targets included.
+    # ``component_targets`` omits zeroes so risk evaluation does not need
+    # prices/rules for every historical component, but the execution owner
+    # needs them to retry a terminally rejected/cancelled close after restart.
     component_target_desires: dict[str, dict[str, Any]] = field(default_factory=dict)
     component_target_desire_sequences: dict[str, int] = field(default_factory=dict)
     component_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -372,26 +352,19 @@ class AccountState:
         )
 
     def state_hash(self) -> str:
-        # A transition hash is O(1) in journal length and is reproduced by the
-        # reducer; hashing every historical map after every event made replay
-        # quadratic.
+        # Rolling: O(1) in journal length. Hashing every historical map per
+        # event makes replay quadratic.
         return self.rolling_state_hash
 
 
 def transaction_state_copy(state: AccountState) -> AccountState:
     """Copy mutable reducer structure without cloning immutable history payloads.
 
-    Journal event payloads are normalized before reduction and existing mapping
-    values are never mutated by the account-event reducer; a transition only
-    replaces top-level mapping entries.  Orders and positions are the two
-    reducer-owned mutable value types, so they receive independent shallow
-    copies along with every top-level container.  This keeps prospective state
-    isolated from concurrent readers without making transaction latency grow
-    with all historical decision metadata.
-
-    Untrusted transaction builders still receive a full deep copy in the
-    kernel.  This optimized copy is only the reducer's private prospective
-    state.
+    A transition only replaces top-level mapping entries, so every top-level
+    container plus the two reducer-owned mutable value types (orders,
+    positions) get independent shallow copies. This is the reducer's private
+    prospective state only; untrusted transaction builders still get a full
+    deep copy in the kernel.
     """
 
     return AccountState(

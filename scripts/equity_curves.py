@@ -4,20 +4,17 @@
 LONG runs from ``long_native.long_v11a_profile``.
 CONTINUOUS is reconstructed from the continuous entry book
 (`continuous_ensemble_v2`, code-defined TP12 components, 2f hedge, BTC-vol
-regime) via the continuous refresh runner. Its output is descriptive historical
-evidence, not runtime parity or deployment authorization.
+regime) via the continuous refresh runner.
 CARRY renders the registered research config ``configs/lane2_carry_hold_v3.json``
-through the same --research-config path (cross-venue panel, corrected
-settlement-exact scorer), clearly labelled as the registered research shape —
-it is NOT a demo/paper daemon replay.
+through the same --research-config path (cross-venue panel, settlement-exact
+scorer). That is the registered research shape, not a demo/paper daemon replay.
 
     bash scripts/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
-    bash scripts/equity_curves.sh --sleeves continuous # active continuous profile
+    bash scripts/equity_curves.sh --sleeves continuous # retired-from-publication profile
     bash scripts/equity_curves.sh --sleeves long,continuous,carry
     bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 
-The strategy modules own their active configurations. Forward demo provides
-separately scoped execution evidence.
+The strategy modules own their active configurations.
 """
 from __future__ import annotations
 
@@ -175,14 +172,11 @@ def _run_carry(
     end: str,
     out: Path,
 ) -> dict[str, Any]:
-    """Render the deployed CARRY sleeve's registered research shape.
+    """Render the CARRY sleeve's registered research shape.
 
-    The carry runtime replays the immutable Lane-2 registration
-    ``configs/lane2_carry_hold_v3.json`` (see liquidity_migration.carry_demo),
-    so its standard curve IS that config rendered through the SAME
-    --research-config path, labelled RESEARCH / simulation-on-seen-data. This
-    is a registered-research render, NOT a daemon replay: it reads the
-    cross-venue panel, not the demo/paper cycle record.
+    The carry runtime replays ``configs/lane2_carry_hold_v3.json``, so its
+    standard curve is that same config through the --research-config path. It
+    reads the cross-venue panel, not the demo/paper cycle record.
     """
     from liquidity_migration.carry_demo import CARRY_CONFIG_PATH
     from liquidity_migration.financed_longs import research_equity_chart
@@ -515,10 +509,8 @@ def main() -> int:
             print(f"  {s:11} [X] {r['error'][:80]}")
         else:
             print(f"  {s:11} {r.get('run_label', '-'):42} {r.get('png') or '(no png)'}")
-    # This script is also an orchestration boundary. Printing a per-sleeve
-    # failure while returning success made CI and refresh drivers accept a
-    # partial benchmark as complete. Preserve the useful keep-going behavior,
-    # then fail the process if any requested cell failed.
+    # Keep going across sleeves, but exit non-zero so a driver cannot accept a
+    # partial benchmark as complete.
     return 1 if any(result.get("error") for result in results.values()) else 0
 
 

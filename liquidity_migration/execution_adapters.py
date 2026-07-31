@@ -1,14 +1,12 @@
 """Execution ports for the account kernel and a deterministic market-order twin.
 
 Historical and paper runs use :class:`MarketOrderExecutionTwin`. Demo uses the
-same :class:`KernelExecutionDriver` with the account-owner-only adapter in
-``bybit_execution_adapter``; private venue dependencies do not belong in this
-shared replay module. Private WebSocket executions are normalized into the same
-observations.
+same :class:`KernelExecutionDriver` with the adapter in
+``bybit_execution_adapter``; private venue dependencies stay out of this shared
+replay module. Private WebSocket executions normalize into the same observations.
 
-The twin intentionally makes the replay-book limitation explicit: it walks the
-observed book for this order but does not mutate future historical snapshots.
-That is a replay assumption, not a claim that our order had no market impact.
+The twin walks the observed book for an order but does not mutate future
+historical snapshots — a replay assumption, not a claim of zero market impact.
 """
 
 from __future__ import annotations
@@ -585,11 +583,9 @@ class MarketOrderExecutionTwin:
                 metadata={
                     "book_sequence": book.sequence,
                     "book_level": fill_count - 1,
-                    # Every modeled fill carries the terminal modeled quantity so
-                    # equal-timestamp executions remain replayable when delivery
-                    # order differs from book-level order.  ``terminal`` still
-                    # identifies the source-order final fill, but kernel state is
-                    # based on reconstructed cumulative quantity.
+                    # Carried on every fill so equal-timestamp executions stay
+                    # replayable when delivery order differs from book-level
+                    # order; kernel state uses reconstructed cumulative quantity.
                     "modeled_terminal_cumulative_filled_qty": executable,
                     "submit_to_first_fill_latency_ns": self.config.latency.submit_to_first_fill_ns,
                     "inter_fill_spacing_ns": self.config.latency.fill_spacing_ns,
@@ -786,10 +782,8 @@ class KernelExecutionDriver:
                 if prepared_observations:
                     normalized = prepared_observations
                 else:
-                    # Preparation may itself be a bounded provider round trip
-                    # (Bybit leverage negotiation). Recheck at the actual
-                    # exposure boundary so a once-fresh command cannot age out
-                    # while setup is in flight.
+                    # Preparation is itself a provider round trip (leverage
+                    # negotiation), so recheck freshness at the exposure boundary.
                     if not order.reduce_only and order.submission_attempts == 0:
                         now_ns = self.kernel.clock.wall_time_ns()
                         assert type(max_unsubmitted_age_ns) is int

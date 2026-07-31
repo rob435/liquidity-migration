@@ -1,14 +1,10 @@
 """The owner edits one file, runs one command, and is told what is left.
 
-Two things are worth pinning here, and they pull in opposite directions.
+Ergonomics: a dial in the env file must reach the rendered profile, and the committed
+profile must be the render of the committed defaults, or the two drift apart.
 
-The **ergonomics**: a dial in the env file must actually reach the rendered
-profile, and the committed profile must be the render of the committed
-defaults, or the file and the renderer drift into two different answers.
-
-The **safety**: making arming easy must not make it accidental. No dial
-combination may produce an envelope the load-time proof would reject, the
-preflight must never print a secret, and nothing in this path may set
+Safety: no dial combination may produce an envelope the load-time proof would reject,
+the preflight must never print a secret, and nothing in this path may set
 ``REAL_MONEY``, write a credential, or start a unit.
 """
 
@@ -450,14 +446,9 @@ def test_preflight_catches_an_empty_telegram_pair_before_arming(tmp_path: Path) 
 def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
     tmp_path: Path,
 ) -> None:
-    """Found by adversarial review: the likeliest arming mistake was invisible.
-
-    preflight printed the dial-derived envelope as a PASS row and separately
-    checked only that the installed profile *existed*, so editing a dial and
-    forgetting to re-render produced a green report describing an envelope
-    nothing enforced. The receipt does not catch it either: it hashes the env
-    file and the profile independently and never checks that one is the render
-    of the other.
+    """The preflight must check that the installed profile IS the render of the dials.
+    Printing the dial-derived envelope as a PASS row while only checking that the
+    profile exists produces a green report describing an envelope nothing enforces.
     """
 
     from liquidity_migration.real_money_arming import main
@@ -513,9 +504,319 @@ def test_preflight_checks_the_state_roots_exist(tmp_path: Path) -> None:
     results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
     row = next(check for check in results if check.name == "state roots")
     assert not row.ok
-    assert "mkdir -p" in row.fix
+    assert "create-state-roots" in row.fix
 
     for name in ("account", "inbox", "capture"):
         (roots / name).mkdir(parents=True)
     results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
     assert next(check for check in results if check.name == "state roots").ok
+
+
+# --------------------------------------------------------------------------
+# create-state-roots
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_realm_envs(tmp_path: Path, monkeypatch) -> None:
+    """Point the other-realm env files at absent paths so a VPS run stays hermetic."""
+
+    from liquidity_migration import real_money_arming
+
+    monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", tmp_path / "absent-demo.env")
+    monkeypatch.setattr(real_money_arming, "PAPER_OWNER_ENV", tmp_path / "absent-paper.env")
+
+
+def _owner_env_with_roots(tmp_path: Path, roots: Path, **overrides: str) -> Path:
+    body = OWNER_TEMPLATE.read_text(encoding="utf-8")
+    replacements = {
+        "ACCOUNT_EXECUTION_ROOT": str(roots / "account"),
+        "ACCOUNT_INTENT_INBOX_ROOT": str(roots / "inbox"),
+        "ACCOUNT_CAPTURE_ROOT": str(roots / "capture"),
+        "STRATEGY_TARGET_CAPTURE_PATH": str(roots / "capture" / "strategy-targets.jsonl"),
+        **overrides,
+    }
+    for key, value in replacements.items():
+        line = next(ln for ln in body.splitlines() if ln.startswith(f"{key}="))
+        body = body.replace(line, f"{key}={value}")
+    return _env_file(tmp_path, "owner.env", body)
+
+
+def test_create_state_roots_dry_run_creates_nothing(tmp_path: Path, capsys) -> None:
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner)]) == 0
+    printed = capsys.readouterr()
+    assert not roots.exists()
+    for name in ("account", "inbox", "capture"):
+        assert str(roots / name) in printed.out
+    assert "dry run" in printed.err
+
+
+def test_create_state_roots_creates_all_three_private(tmp_path: Path, capsys) -> None:
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    created = {roots / name for name in ("account", "inbox", "capture")}
+    assert {Path(path) for path in summary["created"]} == created
+    assert summary["already_present"] == []
+    for path in created:
+        assert path.is_dir()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+        assert summary["roots"][str(path)]["mode"] == "0700"
+        assert summary["roots"][str(path)]["uid"] == os.getuid()
+    # The capture path is a file, not a directory: only its parent is created.
+    assert not (roots / "capture" / "strategy-targets.jsonl").exists()
+
+
+def test_create_state_roots_creates_the_capture_paths_own_parent(
+    tmp_path: Path, capsys
+) -> None:
+    """The shipped template nests it in the capture root; a moved one still works."""
+
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    targets = roots / "targets"
+    owner = _owner_env_with_roots(
+        tmp_path,
+        roots,
+        STRATEGY_TARGET_CAPTURE_PATH=str(targets / "strategy-targets.jsonl"),
+    )
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert str(targets) in summary["created"]
+    assert targets.is_dir()
+    assert not (targets / "strategy-targets.jsonl").exists()
+
+
+def test_create_state_roots_handles_one_root_nested_in_another(
+    tmp_path: Path, capsys
+) -> None:
+    """Creating the child materialises the parent; both are still declared roots."""
+
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    owner = _owner_env_with_roots(
+        tmp_path,
+        roots,
+        ACCOUNT_EXECUTION_ROOT=str(roots / "inbox" / "account"),
+        ACCOUNT_INTENT_INBOX_ROOT=str(roots / "inbox"),
+    )
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert len(summary["created"]) == 3
+    for path in (roots / "inbox", roots / "inbox" / "account"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+        assert summary["roots"][str(path)]["mode"] == "0700"
+
+
+def test_create_state_roots_is_idempotent(tmp_path: Path, capsys) -> None:
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    capsys.readouterr()
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["created"] == []
+    assert len(summary["already_present"]) == 3
+
+
+def test_create_state_roots_refuses_a_relative_root(tmp_path: Path, capsys) -> None:
+    from liquidity_migration.real_money_arming import main
+
+    owner = _owner_env_with_roots(
+        tmp_path, tmp_path / "state", ACCOUNT_INTENT_INBOX_ROOT="var/inbox-mainnet"
+    )
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "is not an absolute path" in capsys.readouterr().err
+    assert not (tmp_path / "state").exists()
+
+
+def test_create_state_roots_refuses_a_root_that_is_a_file(tmp_path: Path, capsys) -> None:
+    """Never unlink: the owner is told, and the file stays exactly as it is."""
+
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    roots.mkdir()
+    (roots / "inbox").write_text("not a directory", encoding="utf-8")
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "is not a directory" in capsys.readouterr().err
+    assert (roots / "inbox").read_text(encoding="utf-8") == "not a directory"
+    assert not (roots / "account").exists()
+
+
+def test_create_state_roots_refuses_a_root_under_the_demo_root(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A mainnet journal inside the demo tree would mix two realms' state."""
+
+    from liquidity_migration import real_money_arming
+    from liquidity_migration.real_money_arming import main
+
+    demo_root = tmp_path / "demo"
+    demo_env = _env_file(
+        tmp_path,
+        "account-execution.env",
+        f"ACCOUNT_EXECUTION_ROOT={demo_root}\n"
+        f"ACCOUNT_INTENT_INBOX_ROOT={tmp_path / 'demo-inbox'}\n"
+        f"ACCOUNT_CAPTURE_ROOT={tmp_path / 'demo-capture'}\n",
+    )
+    monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", demo_env)
+
+    owner = _owner_env_with_roots(
+        tmp_path, tmp_path / "state", ACCOUNT_EXECUTION_ROOT=str(demo_root / "account-mainnet")
+    )
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    err = capsys.readouterr().err
+    assert "is at or inside" in err and "account-execution.env" in err
+    assert not demo_root.exists()
+    assert not (tmp_path / "state").exists()
+
+    # An absent demo env file is not an error: a workstation dry run still works.
+    monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", tmp_path / "absent.env")
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+
+
+def test_create_state_roots_refuses_a_root_under_the_paper_root(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Paper roots live in their own env file; checking only the demo one misses them."""
+
+    from liquidity_migration import real_money_arming
+    from liquidity_migration.real_money_arming import main
+
+    paper_root = tmp_path / "paper"
+    paper_env = _env_file(
+        tmp_path,
+        "account-paper-execution.env",
+        f"ACCOUNT_EXECUTION_ROOT={paper_root}\n"
+        f"ACCOUNT_PAPER_CAPTURE_ROOT={tmp_path / 'paper-capture'}\n",
+    )
+    monkeypatch.setattr(real_money_arming, "PAPER_OWNER_ENV", paper_env)
+
+    owner = _owner_env_with_roots(
+        tmp_path, tmp_path / "state", ACCOUNT_CAPTURE_ROOT=str(paper_root / "capture-mainnet")
+    )
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    err = capsys.readouterr().err
+    assert "is at or inside" in err and "account-paper-execution.env" in err
+    assert not paper_root.exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_create_state_roots_resolves_before_comparing_realms(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A lexical compare misses a symlink or ``..`` that lands in the demo tree."""
+
+    from liquidity_migration import real_money_arming
+    from liquidity_migration.real_money_arming import main
+
+    demo_root = tmp_path / "demo"
+    demo_root.mkdir()
+    demo_env = _env_file(
+        tmp_path, "account-execution.env", f"ACCOUNT_EXECUTION_ROOT={demo_root}\n"
+    )
+    monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", demo_env)
+
+    # Same directory, spelled so a string compare cannot see it.
+    sideways = tmp_path / "state" / ".." / "demo" / "account-mainnet"
+    owner = _owner_env_with_roots(
+        tmp_path, tmp_path / "state", ACCOUNT_EXECUTION_ROOT=str(sideways)
+    )
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "is at or inside" in capsys.readouterr().err
+    assert not (demo_root / "account-mainnet").exists()
+
+    link = tmp_path / "link-to-demo"
+    link.symlink_to(demo_root)
+    owner = _owner_env_with_roots(
+        tmp_path, tmp_path / "state", ACCOUNT_EXECUTION_ROOT=str(link / "account-mainnet")
+    )
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "is at or inside" in capsys.readouterr().err
+    assert not (demo_root / "account-mainnet").exists()
+
+
+def test_create_state_roots_accepts_a_root_that_is_a_symlinked_directory(
+    tmp_path: Path, capsys
+) -> None:
+    """The preflight passes a symlinked root; refusing it here would deadlock arming."""
+
+    from liquidity_migration.real_money_arming import main, preflight
+
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    roots = tmp_path / "state"
+    roots.mkdir()
+    (roots / "account").symlink_to(volume)
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["already_present"] == [str(roots / "account")]
+    assert {Path(path).name for path in summary["created"]} == {"inbox", "capture"}
+
+    credential = _filled_credential_env(tmp_path)
+    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    assert next(row for row in results if row.name == "state roots").ok
+
+
+def test_create_state_roots_refuses_a_broken_symlinked_root(tmp_path: Path, capsys) -> None:
+    """mkdir would raise FileExistsError on it; say what is actually wrong."""
+
+    from liquidity_migration.real_money_arming import main
+
+    roots = tmp_path / "state"
+    roots.mkdir()
+    (roots / "inbox").symlink_to(tmp_path / "nowhere")
+    owner = _owner_env_with_roots(tmp_path, roots)
+
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "symlink to nothing" in capsys.readouterr().err
+    assert not (roots / "account").exists()
+
+
+def test_create_state_roots_refuses_an_installed_but_unreadable_realm_env(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Silently skipping the realm check is how a mainnet root lands in the demo tree."""
+
+    from liquidity_migration import real_money_arming
+    from liquidity_migration.real_money_arming import main
+
+    demo_env = _env_file(tmp_path, "account-execution.env", "ACCOUNT_EXECUTION_ROOT=/demo\n")
+    demo_env.chmod(0o000)
+    monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", demo_env)
+    if os.access(demo_env, os.R_OK):  # running as root: the mode does not bite
+        pytest.skip("cannot make a file unreadable as this user")
+
+    owner = _owner_env_with_roots(tmp_path, tmp_path / "state")
+    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
+    assert "unreadable" in capsys.readouterr().err
+    assert not (tmp_path / "state").exists()
+
+
+def test_create_state_roots_reports_an_unreadable_owner_env(tmp_path: Path, capsys) -> None:
+    from liquidity_migration.real_money_arming import main
+
+    assert main(["create-state-roots", "--owner-env", str(tmp_path / "absent.env")]) == 2
+    assert "does not exist" in capsys.readouterr().err

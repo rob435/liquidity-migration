@@ -20,6 +20,7 @@ from liquidity_migration.demo_rule_probe import (
     probe_demo_instrument_rule,
 )
 from liquidity_migration.deterministic_serialization import canonical_json
+from liquidity_migration.venue_realm import VenueRealm
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -75,8 +76,9 @@ def test_candidate_symbol_source_uses_the_exact_descriptor_snapshot(
     source.chmod(0o600)
     source_bytes = source.read_bytes()
 
-    def load_candidate(_path: Path, *, snapshot: Any) -> SimpleNamespace:
+    def load_candidate(_path: Path, *, snapshot: Any, realm: Any) -> SimpleNamespace:
         assert snapshot.data == source_bytes
+        assert realm is VenueRealm.DEMO
         return SimpleNamespace(
             symbols=("AAAUSDT",),
             path=source.absolute(),

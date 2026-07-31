@@ -16,6 +16,7 @@ from .account_contracts import (
     OrderState,
 )
 from .account_kernel import (
+    AccountJournalDigest,
     read_account_journal,
     reduce_account_events,
 )
@@ -56,10 +57,9 @@ def canonical_entry_attempts(
 ) -> tuple[CanonicalEntryAttempt, ...]:
     """Project every stamped entry target, including account-risk rejections.
 
-    This is an attempt read model only. It never emits trade, order, fill, or
-    P&L rows. A TARGET and RISK_DECISION are written in one account-kernel
-    transaction, so a stamped target without its matching decision is treated
-    as journal corruption rather than as retry state.
+    An attempt read model only: no trade, order, fill, or P&L rows. TARGET and
+    RISK_DECISION are written in one transaction, so a stamped target without
+    its decision is journal corruption, not retry state.
     """
 
     events = (
@@ -182,9 +182,8 @@ def terminal_entry_attempt_keys(
 class _ComponentRevisionConvergence:
     """Execution evidence for the latest ordinary revision of one component.
 
-    Bybit exposes one net position per symbol.  This record therefore proves
-    only that the command delta caused by a component revision filled; it never
-    claims that the venue holds a separately identifiable component position.
+    The venue holds one net position per symbol, so this proves only that the
+    revision's command delta filled, not that a component position exists.
     """
 
     batch_id: str
@@ -196,11 +195,10 @@ class _ComponentRevisionConvergence:
 class CanonicalComponentExecutionAnchor:
     """Fill-backed lifecycle evidence for one accepted component target.
 
-    A component anchor is exact only when the component was the sole quantity
-    change for its symbol.  A same-direction batch of entirely new components
-    may share the batch's first fill and VWAP, but the explicit ``group`` scope
-    prevents those prices from being mistaken for component P&L attribution.
-    Ambiguous netted batches deliberately retain null fill clocks.
+    Exact only when the component was the sole quantity change for its symbol.
+    A same-direction batch of new components shares the batch's first fill and
+    VWAP under the ``group`` scope, which marks those prices as not component
+    P&L. Ambiguous netted batches keep null fill clocks.
     """
 
     target_key: str
@@ -223,9 +221,9 @@ class CanonicalComponentExecutionAnchor:
     entry_attribution_basis: str
     entry_attribution_status: str
     entry_group_target_keys: tuple[str, ...]
-    # True when every entry command reached a terminal venue status; with a
-    # nonzero observed fill this proves no entry remainder can still trade,
-    # which is what component stop/TP eligibility actually requires.
+    # Every entry command reached a terminal venue status. With a nonzero
+    # observed fill that proves no entry remainder can still trade, which is
+    # what component stop/TP eligibility requires.
     entry_commands_terminal: bool = False
     close_target_batch_id: str = ""
     close_execution_batch_id: str = ""
@@ -278,9 +276,9 @@ class CanonicalReductionEvent:
 class CanonicalAccountProjection:
     """One verified event/state snapshot shared by canonical read models.
 
-    The trusted state optimization is valid only while consumers run before
-    the account owner mutates again.  All durable evidence remains the event
-    tuple; count and terminal state hash bind the materialized state to it.
+    The trusted state is valid only while consumers run before the owner
+    mutates again. The event tuple is the durable evidence; the applied count
+    and terminal state hash bind the materialized state to it.
     """
 
     events: tuple[AccountEvent, ...]
@@ -316,10 +314,9 @@ def canonical_component_execution_anchors(
 ) -> tuple[CanonicalComponentExecutionAnchor, ...]:
     """Project component lifecycle clocks only from verified execution facts.
 
-    Target event timestamps remain available separately as target clocks.  They
-    are never substituted for a missing fill.  The first accepted transition
-    from flat to nonzero owns the entry anchor for a target key; later resizes
-    cannot reset it.
+    Target event timestamps stay separate as target clocks and never stand in
+    for a missing fill. The first accepted flat-to-nonzero transition owns the
+    entry anchor for a target key; later resizes cannot reset it.
     """
 
     if account_projection is not None:
@@ -365,9 +362,8 @@ def component_execution_anchors_from_snapshot(
 ) -> tuple[CanonicalComponentExecutionAnchor, ...]:
     """Project anchors from one verified coherent account snapshot.
 
-    The account owner uses this path with ``AccountJournal._snapshot_ref`` so
-    protection checks do not reopen and replay immutable history on every
-    heartbeat. Snapshot identity is checked before projection.
+    Used with ``AccountJournal._snapshot_ref`` so protection checks do not
+    replay history every heartbeat. Snapshot identity is checked first.
     """
 
     event_snapshot = tuple(events)
@@ -410,9 +406,8 @@ def canonical_reduction_events(
 ) -> tuple[CanonicalReductionEvent, ...]:
     """Return one verified symbol-reduction accounting row per ``pnl_key``.
 
-    The monetary fields remain account/symbol-batch facts.  Target keys are
-    causal ownership context only; the read model never copies the batch P&L to
-    individual components.
+    Monetary fields are account/symbol-batch facts; target keys are causal
+    context, never a basis for splitting the batch P&L per component.
     """
 
     events = (
@@ -535,9 +530,9 @@ def canonical_account_projection(
 ) -> CanonicalAccountProjection:
     """Build shared canonical inputs from one verified account snapshot.
 
-    ``trusted_account_state`` is an in-process optimization for the sole
-    account owner.  It is accepted only when its applied-event count and
-    rolling state hash exactly bind it to ``account_events``.
+    ``trusted_account_state`` is an in-process optimization for the account
+    owner, accepted only when its applied-event count and rolling state hash
+    bind it to ``account_events``.
     """
 
     events = tuple(
@@ -586,6 +581,71 @@ def canonical_account_projection(
     )
 
 
+#: Event types the canonical read models inspect directly; everything else
+#: reaches them through ``AccountState``, which the cursor folds over every
+#: event regardless. Keep in step with the ``AccountEventType`` filters below;
+#: ``tests/test_account_journal_cursor.py`` pins the equivalence.
+PROJECTION_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        AccountEventType.TARGET.value,
+        AccountEventType.RISK_DECISION.value,
+        AccountEventType.FILL.value,
+        AccountEventType.PNL.value,
+    }
+)
+
+
+def canonical_account_projection_from_digest(
+    digest: AccountJournalDigest,
+) -> CanonicalAccountProjection:
+    """Build canonical inputs from a cursor digest without re-reading the journal.
+
+    The digest's ``state`` folded every event while its ``events`` may be the
+    projection-relevant subset, which is the split the read models need.
+    :func:`canonical_account_projection` cannot be reused: its
+    ``trusted_account_state`` binding compares against ``len(events)`` and
+    would reject a filtered view. The binding here is that the state applied
+    every event the cursor folded.
+    """
+
+    if digest.state.events_applied != digest.events_folded:
+        raise RuntimeError(
+            "account journal digest state does not match its folded event count"
+        )
+    if digest.retained_event_types is not None and not (
+        PROJECTION_EVENT_TYPES <= digest.retained_event_types
+    ):
+        missing = sorted(PROJECTION_EVENT_TYPES - digest.retained_event_types)
+        raise RuntimeError(
+            f"account journal digest dropped event types the read models need: {missing}"
+        )
+    events = digest.events
+    state = digest.state
+    accepted_batches = _accepted_batches(events)
+    quantity_tolerance = _latest_account_quantity_tolerance(events)
+    batch_fill_index = _build_batch_fill_index(events, state=state)
+    return CanonicalAccountProjection(
+        events=events,
+        state=state,
+        accepted_batches=frozenset(accepted_batches),
+        quantity_tolerance=quantity_tolerance,
+        component_revisions=_latest_component_revision_convergence(
+            events,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=quantity_tolerance,
+            batch_fill_index=batch_fill_index,
+        ),
+        execution_anchors=_component_execution_anchors_from_events(
+            events,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=quantity_tolerance,
+            batch_fill_index=batch_fill_index,
+        ),
+    )
+
+
 def _batch_fill_summary(
     events: Sequence[AccountEvent],
     *,
@@ -597,8 +657,7 @@ def _batch_fill_summary(
 ) -> _BatchFillSummary:
     matching_orders: Iterable[OrderState]
     if batch_fill_index is None:
-        # Retain the direct scan as a small-input reference implementation.
-        # Canonical projections build and pass the equivalent index once.
+        # Direct scan for small inputs; canonical projections pass an index.
         matching_orders = (
             order
             for order in state.orders.values()
@@ -787,8 +846,8 @@ def _component_execution_anchors_from_events(
                 for event, _prior_qty, _new_qty in entries:
                     target_key = str(event.payload.get("target_key") or "")
                     if target_key in anchors:
-                        # Stable target keys represent one lifecycle. A resize or
-                        # accidental later re-entry cannot rewrite its first fill.
+                        # One target key is one lifecycle: a resize or later
+                        # re-entry cannot rewrite its first fill.
                         continue
                     payload = event.payload
                     if not entry_batch_is_clean or not command_matches:
@@ -1345,8 +1404,7 @@ def _canonical_reduction_events_from_events(
         if not pnl_key:
             raise RuntimeError("canonical symbol reduction P&L lacks pnl_key")
         if pnl_key in seen_pnl_keys:
-            # The verified journal should make this impossible. Refuse to turn a
-            # duplicated accounting key into duplicated strategy dollars.
+            # A duplicated accounting key must not become duplicated dollars.
             raise RuntimeError(f"duplicate canonical reduction pnl_key {pnl_key!r}")
         seen_pnl_keys.add(pnl_key)
         all_target_keys = tuple(sorted(
@@ -1459,11 +1517,10 @@ def canonical_strategy_trade_rows(
 ) -> pl.DataFrame:
     """Project accepted desires plus fill-backed component lifecycle rows.
 
-    Target clocks and execution clocks are deliberately separate.  An accepted
-    target reserves capacity, but only attributable fills create an ``open``
-    lifecycle or an entry clock.  Likewise, a zero target records a close
-    request, while only a terminal attributable reduction creates the close and
-    cooldown clock.
+    Target clocks and execution clocks stay separate: an accepted target
+    reserves capacity, but only attributable fills open a lifecycle or start an
+    entry clock, and a zero target records a close request while only a
+    terminal attributable reduction starts the close and cooldown clock.
     """
 
     if account_projection is not None:
@@ -1529,11 +1586,9 @@ def canonical_strategy_trade_rows(
         if not isinstance(metadata, Mapping):
             metadata = {}
         if metadata.get("account_convergence_retry") is True:
-            # Owner retries reassert an already-accepted desired target so a
-            # terminally rejected/cancelled residual can converge.  They are
-            # execution lifecycle events, not new strategy lifecycle revisions;
-            # using their synthetic reason/reference metadata here would erase
-            # the strategy's original entry/exit context.
+            # Owner retries reassert an accepted target so a rejected residual
+            # can converge. They are execution events, not strategy revisions,
+            # and their synthetic metadata would erase the original context.
             continue
         lifecycle = lifecycles.get(target_key)
         if lifecycle is None and _quantities_match(
@@ -1541,9 +1596,9 @@ def canonical_strategy_trade_rows(
             0.0,
             tolerance=quantity_tolerance,
         ):
-            # A risk-reducing flat target for a component the account never
-            # accepted as open is not a historical trade.  Keeping it would
-            # manufacture a closed row and contaminate cooldown/re-entry logic.
+            # A flat target for a component never accepted as open is not a
+            # trade; keeping it manufactures a closed row and pollutes
+            # cooldown/re-entry logic.
             continue
         if lifecycle is None:
             lifecycle = {
@@ -1565,9 +1620,8 @@ def canonical_strategy_trade_rows(
                 0.0,
                 tolerance=quantity_tolerance,
             ):
-                # The stable target identity contract expects a new component
-                # key for a new lifecycle. Keep the original execution anchor
-                # and make reuse visible rather than silently resetting time.
+                # A new lifecycle should get a new component key. Keep the
+                # original anchor and mark the reuse instead of resetting time.
                 lifecycle["target_key_reused_after_flat"] = True
             lifecycle["planning_metadata"].update(_planning_metadata(metadata))
         lifecycle["latest_event"] = event
@@ -1837,12 +1891,10 @@ def canonical_strategy_trade_rows(
                 latest_payload.get("reason") or "target_flat"
             )
         elif target_is_flat and entry_retry_unwound:
-            # The owner unwound a retry-exhausted entry whose commands went
-            # terminal with zero observed fill.  No entry clock ever started,
-            # so the lifecycle is terminal without a close or cooldown; the
-            # zero-fill requirement keeps this branch unreachable for any
-            # partially filled entry, which must stay reserved for the
-            # ordinary exit machinery.
+            # Retry-exhausted entry unwound with zero observed fill: no entry
+            # clock ever started, so the lifecycle is terminal without a close
+            # or cooldown. The zero-fill requirement keeps a partially filled
+            # entry out of this branch.
             row["status"] = "entry_retry_exhausted"
             row["account_execution_lifecycle_status"] = "entry_unfilled"
             row["target_action"] = "none"
@@ -1874,14 +1926,11 @@ def canonical_strategy_trade_rows(
 def target_reservation_rows(rows: pl.DataFrame) -> pl.DataFrame:
     """Return lifecycles that must suppress a replacement strategy proposal.
 
-    ``open`` means the accepted target has converged to reconstructed fills.
-    ``target_pending`` means an accepted open, resize, or close target is still
-    converging.  Both reserve the component/symbol for admission and capacity,
-    but callers must continue to use their filled/open view for exits, P&L, and
-    position reporting.  Keeping this as a separate read-model operation avoids
-    relabelling an unfilled desired target as a position.  A terminal
-    ``entry_retry_exhausted`` row — the owner unwound an entry whose commands
-    went terminal with zero observed fill — releases its reservation.
+    ``open`` is an accepted target converged to reconstructed fills;
+    ``target_pending`` is an accepted open/resize/close still converging. Both
+    reserve the component/symbol for admission and capacity, but exits, P&L,
+    and position reporting must still use the filled/open view. A terminal
+    ``entry_retry_exhausted`` row releases its reservation.
     """
 
     if rows.is_empty() or "status" not in rows.columns:
@@ -1970,19 +2019,17 @@ def _latest_component_revision_convergence(
 ) -> dict[str, _ComponentRevisionConvergence]:
     """Recover component-local execution evidence from accepted target batches.
 
-    Aggregate symbol convergence is insufficient here: a filled component A
-    must remain exit-visible while a later component B on the same symbol is
-    still working or awaiting retry.  Conversely, a symbol-level fill cannot be
-    attributed to one component when the command also repairs another
-    component's residual.  A revision is therefore independently filled only
-    when it is the sole quantity change for that symbol in the batch, every
-    command completed, and the commanded net delta exactly matches that one
+    Aggregate symbol convergence is not enough: a filled component A must stay
+    exit-visible while a later component B on the same symbol is still working,
+    and a symbol-level fill cannot be attributed to one component when the
+    command also repairs another's residual. A revision is independently filled
+    only when it is the sole quantity change for that symbol in the batch,
+    every command completed, and the commanded net delta matches that one
     component delta.
 
-    An unchanged target inherits its previous component evidence.  This covers
-    metadata refreshes without allowing a resize-then-supersede sequence to look
-    filled: the superseding quantity differs from the immediately preceding
-    desired revision and must converge again.
+    An unchanged target inherits its previous component evidence, covering
+    metadata refreshes. A resize-then-supersede does not look filled: the
+    superseding quantity differs from the preceding revision and reconverges.
     """
 
     targets_by_batch: dict[str, list[AccountEvent]] = {}

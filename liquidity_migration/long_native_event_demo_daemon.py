@@ -1,8 +1,7 @@
 """Long-running strategy/target producer for the v11a sleeve.
 
-Demo and paper routes publish desired targets to the account owner, which is the
-sole execution and account-state authority. The daemon consumes only public
-market data. SIGTERM drains the current cycle and exits cleanly.
+Publishes desired targets to the account owner, which owns execution and
+account state. SIGTERM drains the current cycle and exits cleanly.
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from .long_native_event_demo import (
     run_long_native_demo_cycle,
 )
 from .strategy_cycle_health import StrategyCycleHealth, write_strategy_cycle_health
+from .strategy_planning import new_planning_journal_cursor
 from .strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
@@ -118,6 +118,9 @@ class LongNativeDemoDaemon:
         self._long_target_producer = long_target_producer
         self.interval_seconds = float(interval_seconds)
         self._cycle_runner = cycle_runner
+        # Cross-cycle read position into the append-only account journal. A
+        # daemon owns exactly one; losing it (restart) costs one cold read.
+        self._journal_cursor = new_planning_journal_cursor()
         self._clock = clock or SystemClock()
         recorder = strategy_event_recorder or JsonlStrategyEventTape(self.data_root / "strategy_event_tape.jsonl")
         self._event_clock: DeterministicEventClock[PublishedTargetCyclePayload | None] = DeterministicEventClock(
@@ -166,10 +169,8 @@ class LongNativeDemoDaemon:
         self._cycle_overruns = 0
         self._max_cycle_seconds = 0.0
         self._next_cycle_at = 0.0
-        # WS-driven kline manager. Long sleeve's small universe makes the
-        # per-cycle REST burst manageable, but the consistency simplifies the
-        # operator model and the 90-day lookback bootstrap is worth doing once
-        # at startup rather than re-paying it.
+        # WS-driven kline manager: the 90-day lookback bootstrap is paid once at
+        # startup rather than re-paid as a per-cycle REST burst.
         self._kline_stream_manager: Any | None = kline_stream_manager
         self._kline_stream_manager_factory = _select_long_kline_stream_manager_factory(
             resolved_demo_config,
@@ -178,11 +179,9 @@ class LongNativeDemoDaemon:
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
         # Monotonic install time of the live ticker stream. A subscription that
-        # never delivered its first push leaves
-        # ``seconds_since_last_ws_event()`` at inf forever, which the health
-        # check skipped and the recovery path ignored (it only rebuilds when no
-        # stream object is installed): a born-silent subscription was neither
-        # warned about nor rebuilt (2026-07-27 audit L2).
+        # never delivers a first push leaves ``seconds_since_last_ws_event()``
+        # at inf, so the install time is what makes a born-silent stream visible
+        # to the health check and the recovery path.
         self._ticker_stream_installed_monotonic: float | None = None
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
         # so a race can't leak a second ticker WS (DAEM-002; see EventDemoDaemon).
@@ -319,10 +318,12 @@ class LongNativeDemoDaemon:
         }
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        """Extra kwargs a subclass injects into the cycle runner. Empty for the long sleeve; the
-        continuous sleeve overrides this to pass its Tier-2 ``panel_cache``. Keeping it a hook means
-        a subclass need not duplicate the whole telemetry-laden ``_run_one_cycle`` to add one kwarg."""
-        return {}
+        """Extra kwargs a subclass injects into the cycle runner. The long sleeve passes only its
+        resumable journal cursor; the continuous sleeve overrides this to add its Tier-2
+        ``panel_cache``, and the carry sleeve replaces it with a ``cycle_state`` that already owns a
+        cursor. Keeping it a hook means a subclass need not duplicate the whole telemetry-laden
+        ``_run_one_cycle`` to add one kwarg."""
+        return {"journal_cursor": self._journal_cursor}
 
     def _run_one_cycle(self) -> None:
         """Dispatch a live arrival through the shared replay/event-clock path."""
@@ -522,19 +523,16 @@ class LongNativeDemoDaemon:
         if self._ticker_cache.symbol_count() == 0:
             _logger.info("long ticker stream skipped: cache has no seeded symbols")
             return
-        # Fast-out if already live; build OUTSIDE the lock; install only if none is live,
-        # else close the loser so a seed/reconcile/watchdog race can't leak a second
-        # ticker WS (DAEM-002; see EventDemoDaemon).
+        # Fast-out if already live; build outside the lock; install only if none
+        # is live, else close the loser so a seed/reconcile/watchdog race cannot
+        # leak a second ticker WS.
         with self._ticker_stream_lock:
             if self._ticker_stream is not None:
                 return
-        # Scope WS subscriptions to the same top-N universe the kline
-        # manager bootstraps (default 50). The ticker cache itself still
-        # carries the full 567-symbol REST snapshot for universe ranking,
-        # but only the symbols the long sleeve might actually trade need
-        # realtime updates — the other ~500 USDT-perps would generate
-        # hundreds of msg/sec we'd never read. The seeder's 60s REST
-        # refresh keeps the rest of the cache fresh enough for ranking.
+        # Scope WS subscriptions to the same top-N universe the kline manager
+        # bootstraps. The cache still holds the full REST snapshot for universe
+        # ranking, refreshed every 60s, but only tradeable names need realtime
+        # updates; the rest would be hundreds of msg/sec nobody reads.
         symbols = self._select_ticker_subscription_symbols()
         if not symbols:
             _logger.info("long ticker subscribe skipped: no symbols in scoped universe")
@@ -775,10 +773,9 @@ class LongNativeDemoDaemon:
             self._pending_cycle_kind = "timer"
 
 
-# The strategy trades a 50-name median-turnover universe from a 120-name
-# 24h-turnover superset. Streaming the full venue universe breaches the small
-# VPS memory budget, so the manager follows that superset and retains REST
-# fallback for names that move into it between refreshes.
+# The strategy trades a 50-name median-turnover universe drawn from this
+# 24h-turnover superset. Streaming the full venue universe exceeds the VPS
+# memory budget; REST fallback covers names that move in between refreshes.
 _LONG_KLINE_UNIVERSE_SIZE = 120
 
 
@@ -849,9 +846,8 @@ def _select_long_kline_stream_manager_factory(
 
 
 def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTickerStream:
-    """Public ticker stream tuned for the long sleeve. Demo flag is False
-    because the public ticker endpoint is shared by demo and real-money
-    environments."""
+    """Public ticker stream tuned for the long sleeve. ``demo=False`` because
+    the public ticker endpoint is shared across environments."""
     return BybitPublicTickerStream(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
@@ -860,5 +856,5 @@ def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTi
 
 
 def _seed_long_public_ticker_cache(*, market_client: Any, ticker_cache: TickerCache) -> None:
-    """Refresh the public ticker cache without touching credentials or account state."""
+    """Refresh the public ticker cache."""
     ticker_cache.replace_with_rest_snapshot(market_client.get_tickers())

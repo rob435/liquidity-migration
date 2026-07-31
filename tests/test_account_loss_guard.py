@@ -1,8 +1,5 @@
-"""Account-level loss halt behaviour.
-
-The cases that matter are the ones where a naive implementation fails open:
-a restart forgetting the day's anchor, a stale feed being read as "flat", and a
-trip clearing itself on the next tick.
+"""Account-level loss halt behaviour: a restart keeps the day's anchor, a stale feed is
+not read as flat, and a trip does not clear itself on the next tick.
 """
 
 from __future__ import annotations

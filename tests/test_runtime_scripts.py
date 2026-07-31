@@ -6,25 +6,23 @@ import subprocess
 from pathlib import Path
 
 
-AUTHORIZED_UNITS = (
-    "liquidity-migration-account-execution.service",
-    "liquidity-migration-account-paper-execution.service",
-    "liquidity-migration-bybit-long-demo.service",
-    "liquidity-migration-bybit-long-paper.service",
-    "liquidity-migration-bybit-continuous-demo.service",
-    "liquidity-migration-bybit-continuous-paper.service",
-    "liquidity-migration-bybit-carry-demo.service",
-    "liquidity-migration-bybit-carry-paper.service",
-    "liquidity-migration-continuous-hedge.service",
-    "liquidity-migration-continuous-rmom-refresh.service",
-    "liquidity-migration-demo-liveness.service",
-)
-
-
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "scripts" / "deploy_vps_live.sh"
 WRAPPER = ROOT / "scripts" / "run_authorized_runtime.sh"
 SYSTEMD = ROOT / "deploy" / "systemd"
+
+# Read from the deploy library rather than restated: a second copy silently
+# stopped covering the mainnet owner, both mainnet producers, and the mirror.
+AUTHORIZED_UNITS = tuple(
+    re.findall(
+        r"(liquidity-migration-\S+\.service)",
+        re.findall(
+            r'^LM_AUTHORIZED_UNITS="([^"]*)"',
+            (ROOT / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8"),
+            re.M,
+        )[0],
+    )
+)
 
 
 def _read(path: str | Path) -> str:
@@ -103,10 +101,16 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
         unset = " ".join(line for line in fragment.splitlines() if line.startswith("UnsetEnvironment="))
         assert "BYBIT_DEMO_API_KEY" in unset
         assert "BYBIT_DEMO_API_SECRET" in unset
+    # The mainnet owner is the one deliberate carrier of the real pair; every
+    # other guarded unit strips it, in the directive rather than a comment.
     for unit in AUTHORIZED_UNITS:
-        fragment = _unit(unit)
-        assert "BYBIT_REAL_API_KEY" in fragment
-        assert "BYBIT_REAL_API_SECRET" in fragment
+        if unit == "liquidity-migration-account-execution-mainnet.service":
+            continue
+        unset = " ".join(
+            line for line in _unit(unit).splitlines() if line.startswith("UnsetEnvironment=")
+        )
+        assert "BYBIT_REAL_API_KEY" in unset, unit
+        assert "BYBIT_REAL_API_SECRET" in unset, unit
     for unit in (
         "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-long-paper.service",
@@ -142,11 +146,14 @@ def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> Non
 
 
 def test_liveness_timer_has_one_bounded_activation_grace() -> None:
-    timer = _unit("liquidity-migration-demo-liveness.timer")
-
-    assert "OnActiveSec=10min" in timer
-    assert "OnUnitActiveSec=3min" in timer
-    assert "OnBootSec=" not in timer
+    for name in (
+        "liquidity-migration-demo-liveness.timer",
+        "liquidity-migration-mainnet-liveness.timer",
+    ):
+        timer = _unit(name)
+        assert "OnActiveSec=10min" in timer
+        assert "OnUnitActiveSec=3min" in timer
+        assert "OnBootSec=" not in timer
 
 
 def test_producers_require_owner_readiness_and_never_hold_private_order_authority() -> None:
@@ -197,8 +204,12 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
 
 
 def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> None:
-    fragment = _unit("liquidity-migration-demo-liveness.service")
-    owner = "liquidity-migration-account-execution.service"
+    observers = {
+        "liquidity-migration-demo-liveness.service": "liquidity-migration-account-execution.service",
+        "liquidity-migration-mainnet-liveness.service": (
+            "liquidity-migration-account-execution-mainnet.service"
+        ),
+    }
     lifecycle_directives = {
         "After",
         "Before",
@@ -209,13 +220,44 @@ def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> 
         "Upholds",
         "Wants",
     }
-    for line in fragment.splitlines():
-        directive, separator, _value = line.partition("=")
-        if separator and directive in lifecycle_directives:
-            assert owner not in line
+    for observer, owner in observers.items():
+        fragment = _unit(observer)
+        for line in fragment.splitlines():
+            directive, separator, _value = line.partition("=")
+            if separator and directive in lifecycle_directives:
+                assert owner not in line, (observer, line)
 
-    assert "Wants=network-online.target" in fragment
-    assert "After=network-online.target" in fragment
+        assert "Wants=network-online.target" in fragment
+        assert "After=network-online.target" in fragment
+
+
+def test_mainnet_liveness_observer_pages_without_holding_trading_authority() -> None:
+    fragment = _unit("liquidity-migration-mainnet-liveness.service")
+    assert "EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env" in fragment
+    assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" in fragment
+    assert "EnvironmentFile=/etc/liquidity-migration/account-execution.env" not in fragment
+    assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in fragment
+    unset = next(line for line in fragment.splitlines() if line.startswith("UnsetEnvironment="))
+    assert unset == (
+        "UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET "
+        "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY"
+    )
+    environment = _environment("liquidity-migration-mainnet-liveness.service")
+    assert environment["ACCOUNT_LIVENESS_SCOPE"] == "mainnet"
+    assert environment["TELEGRAM_ENABLED"] == "1"
+
+    wrapper = _read(WRAPPER)
+    assert "scripts/check_demo_liveness.py" not in wrapper
+    start = wrapper.index("liquidity-migration-mainnet-liveness.service:main)")
+    case = wrapper[start : wrapper.index("\n        ;;", start)]
+    assert "scripts/check_fleet_liveness.py" in case
+    assert '--account-scope "${ACCOUNT_LIVENESS_SCOPE:?' in case
+    assert "--carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event" in case
+    assert "--long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event" in case
+    # A paper route file would point a funded-account observer at the wrong book.
+    assert "--account-paper-environment-file" not in case
+    # Funded accounts re-page well inside the demo watchdog's 6-hour cooldown.
+    assert "--cooldown-min 60" in case
 
 
 def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -> None:
@@ -270,9 +312,9 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
 
 
 def test_demo_account_notification_reads_no_retired_continuous_status_root() -> None:
-    # CONTINUOUS retired 2026-07-29. The status root is now deliberately unset,
-    # which is what removes the retired sleeve's line from the hourly digest;
-    # re-promotion must set it explicitly again.
+    # CONTINUOUS is retired. The status root is deliberately unset, which is what
+    # removes the sleeve's line from the hourly digest; re-promotion must set it
+    # explicitly again.
     demo_owner = _environment("liquidity-migration-account-execution.service")
     assert "CONTINUOUS_CYCLE_ROOT" not in demo_owner
     assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in demo_owner
@@ -345,7 +387,10 @@ def test_install_is_stopped_exact_commit_preparation_only() -> None:
     assert "systemctl start" not in install
     assert "systemctl enable --now" not in install
     assert "lm_write_resolved_sleeve_toggles" in install
-    assert "invalidate_operational_authorization" in install
+    # A host upgraded from an older release still has the old gate file on disk;
+    # install moves it aside so no operator later reads a dead receipt as a live
+    # control.
+    assert "retire_stale_operational_receipt" in install
     assert "units_started=0" in install
 
 
@@ -657,19 +702,31 @@ def test_resolved_sleeves_are_atomically_generated_then_group_bound() -> None:
 def test_workflow_runs_ci_on_push_and_only_manual_guarded_vps_modes() -> None:
     workflow = _read(".github/workflows/vps-deploy.yml")
     assert "pull_request:" in workflow and "push:" in workflow
-    assert "python -m pytest -q" in workflow
-    assert "python -m ruff check" in workflow
+    # CI runs the same gate the local check does, through one entry point, so
+    # the two cannot silently diverge on what they cover.
+    assert "scripts/dev.sh lint" in workflow
+    assert "scripts/dev.sh types" in workflow
+    assert "scripts/dev.sh test" in workflow
     assert "--only-binary=:all: -r requirements.lock" in workflow
     assert "if: github.event_name == 'workflow_dispatch'" in workflow
-    assert "options: [rollout, recover, install, activate, verify]" in workflow
+    # The workflow must offer only modes the deploy script has, and pass only
+    # flags it parses: rollout rejects anything but `--profile`, so a stale flag
+    # fails the dispatch outright.
+    assert "options: [rollout, install, activate, verify]" in workflow
+    assert "inputs.reset_receipt" not in workflow
+    assert "--reset-receipt" not in workflow
+    assert "--authorization-reference" not in workflow
+    assert "--owner-acknowledgement" not in workflow
+    # No dispatchable branch may name a mode the deploy script does not have.
+    assert "\n            recover)" not in workflow
     assert "authorize_demo_paper_operation:" in workflow
     assert "authorization_reference:" in workflow
-    assert "reset_receipt:" in workflow
     assert 'deploy_args=("$DEPLOY_MODE_INPUT")' in workflow
     assert 'scripts/deploy_vps_live.sh "${deploy_args[@]}"' in workflow
-    assert "AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION" in workflow
+    # The operator's confirmation in the dispatch UI gates a rollout; no script
+    # reads the acknowledgement token, so nothing asserts its presence.
     assert 'test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true' in workflow
-    assert '--reset-receipt "$DEPLOY_RESET_RECEIPT_INPUT"' in workflow
+    assert 'deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT")' in workflow
 
 
 def test_workflow_serializes_vps_operations_across_refs() -> None:
@@ -782,11 +839,10 @@ def test_paper_owner_owns_paper_telegram_notifications() -> None:
 
 
 def test_a_failing_nested_phase_aborts_the_rollout_instead_of_reporting_ok() -> None:
-    """Bash suppresses errexit for the whole dynamic extent of a function called
-    from a condition context.  Nesting a mode inside ``run_phase``'s ``if "$@"``
-    therefore used to demote every gate the mode runs (pip/ruff/mypy/pytest) to a
-    non-fatal warning: ``phase-failed name=ruff`` was followed by ``install-ok``
-    and ``rollout-ok``."""
+    """Bash suppresses errexit for the whole dynamic extent of a function called from a
+    condition context, so nesting a mode inside ``run_phase``'s ``if "$@"`` demotes
+    every gate the mode runs (pip/ruff/mypy/pytest) to a non-fatal warning.
+    """
     text = _read(DEPLOY)
     helpers = text[text.index("fail() {") : text.index("run_phase_pair() {")]
     script = (
@@ -878,6 +934,7 @@ def test_oneshot_units_have_explicit_start_timeouts_and_memory_bounds() -> None:
     # OnUnitActiveSec timer cannot re-trigger while its unit is activating.
     expected = {
         "liquidity-migration-demo-liveness.service": 120,
+        "liquidity-migration-mainnet-liveness.service": 120,
         "liquidity-migration-continuous-hedge.service": 300,
         "liquidity-migration-continuous-rmom-refresh.service": 900,
     }
@@ -899,9 +956,10 @@ def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> No
 
 
 def test_paper_runner_has_no_hidden_equity_fallback() -> None:
-    """A hidden 10,000 default silently ran the twin 25x under-scaled against the
-    deployed 250,000 capital reference after a hand-edited env file; every
-    sibling required input in this script already fails closed (audit M1)."""
+    """The paper runner must fail closed on a missing equity input, like every sibling
+    required input in this script: a hidden 10,000 default runs the twin 25x
+    under-scaled against the deployed 250,000 capital reference.
+    """
     script = _read("scripts/run_account_paper_execution_service.sh")
     assert 'PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"' in script
     assert "PAPER_EQUITY_USDT:-10000" not in script
@@ -911,11 +969,9 @@ def test_paper_runner_has_no_hidden_equity_fallback() -> None:
 
 
 def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
-    """A retired sleeve must leave no cycle root behind.
-
-    Otherwise the owners keep reading a dead sleeve's completion receipt and
-    every hourly Telegram digest carries a permanently growing
-    "CONTINUOUS BTC gate: STALE" line (observed 2026-07-29).
+    """A retired sleeve must leave no cycle root behind, or the owners keep reading a
+    dead sleeve's completion receipt and every hourly digest carries a permanently
+    growing staleness line.
     """
 
     for unit in (
@@ -931,3 +987,266 @@ def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
     assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in runner
     assert "data/bybit-continuous-demo-event" not in runner
     assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner
+
+
+def _mainnet_harness(carry: str, long_: str, preflight_status: int) -> str:
+    """The real mainnet functions over stub systemctl/python, so behavior is exercised
+    rather than pattern-matched.
+    """
+
+    text = _read(DEPLOY)
+    library = _read("deploy/lib_sleeves.sh")
+    return (
+        "set -u\n"
+        f"PYTHON=fake_python\nCARRY_MAINNET_SLEEVE={carry}\nLONG_MAINNET_SLEEVE={long_}\n"
+        f"PREFLIGHT_STATUS={preflight_status}\n"
+        'fail() { echo "fail:$*"; exit 9; }\n'
+        "require_checkout() { :; }\n"
+        "load_authorization() { :; }\n"
+        'verify_topology() { echo "verify_topology"; }\n'
+        "systemctl() {\n"
+        '    printf "systemctl:%s\\n" "$*"\n'
+        '    [ "$1" != is-active ] || return "$IS_ACTIVE_STATUS"\n'
+        "    return 0\n"
+        "}\n"
+        "IS_ACTIVE_STATUS=1\n"
+        "fake_python() {\n"
+        '    printf "python:%s\\n" "$*"\n'
+        '    case "$*" in *preflight*) return "$PREFLIGHT_STATUS" ;; esac\n'
+        "    return 0\n"
+        "}\n"
+        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + text[
+            text.index("any_mainnet_sleeve_on()") : text.index("expected_downstream_on()")
+        ]
+        + text[text.index("start_if() {") : text.index("seed_rmom()")]
+        + text[
+            text.index("MAINNET_OWNER_UNIT=") : text.index("ROLLOUT_DOWNSTREAM_UNITS=(")
+        ]
+    )
+
+
+def test_mainnet_activation_creates_roots_then_gates_on_preflight() -> None:
+    blocked = subprocess.run(
+        ["bash", "-c", _mainnet_harness("on", "off", 1) + "\nactivate_mainnet_mode\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "fail:mainnet preflight has outstanding steps" in combined
+    # Nothing mainnet may start while a precondition is outstanding.
+    assert "systemctl:enable" not in combined
+    assert "systemctl:start" not in combined
+
+    started = subprocess.run(
+        ["bash", "-c", _mainnet_harness("on", "off", 0) + "\nactivate_mainnet_mode\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = started.stdout + started.stderr
+    assert started.returncode == 0, combined
+    assert "python:-m liquidity_migration.real_money_arming create-state-roots --execute" in combined
+    assert combined.index("create-state-roots") < combined.index("preflight")
+    assert (
+        "systemctl:enable liquidity-migration-account-execution-mainnet.service" in combined
+    )
+    assert (
+        combined.index("systemctl:enable liquidity-migration-account-execution-mainnet.service")
+        < combined.index("systemctl:start liquidity-migration-bybit-carry-mainnet.service")
+    )
+    assert (
+        combined.index("systemctl:start liquidity-migration-bybit-carry-mainnet.service")
+        < combined.index("systemctl:enable --now liquidity-migration-mainnet-liveness.timer")
+    )
+    # A sleeve that is off is disabled, not started.
+    assert "systemctl:disable --now liquidity-migration-bybit-long-mainnet.service" in combined
+    assert "systemctl:start liquidity-migration-bybit-long-mainnet.service" not in combined
+    assert combined.index("mainnet-liveness.timer") < combined.index("verify_topology")
+    for foreign in ("-demo.service", "-paper", "account-execution.service"):
+        assert foreign not in combined, foreign
+
+
+def test_activate_mainnet_refuses_when_no_mainnet_sleeve_is_on() -> None:
+    result = subprocess.run(
+        ["bash", "-c", _mainnet_harness("off", "off", 0) + "\nactivate_mainnet_mode\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "no mainnet sleeve is on" in combined
+    assert "deploy/sleeves.env" in combined
+    assert "systemctl:" not in combined
+    assert "python:" not in combined
+
+
+def test_stop_mainnet_stops_only_mainnet_and_says_exposure_is_unchanged() -> None:
+    result = subprocess.run(
+        ["bash", "-c", _mainnet_harness("on", "on", 0) + "\nstop_mainnet_mode\n"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    for unit in (
+        "liquidity-migration-mainnet-liveness.timer",
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-account-execution-mainnet.service",
+    ):
+        assert f"systemctl:disable --now {unit}" in combined
+    # The owner stops last: the producers declare Requires=/After= on it.
+    assert combined.rindex("disable --now liquidity-migration-account-execution-mainnet.service") > (
+        combined.index("disable --now liquidity-migration-bybit-carry-mainnet.service")
+    )
+    assert "stop-mainnet-ok" in combined
+    assert "exposure is unchanged" in combined
+    for foreign in ("-demo.service", "-paper", "account-execution.service"):
+        assert foreign not in combined, foreign
+
+
+def test_stop_mainnet_fails_when_a_unit_survives_the_stop() -> None:
+    harness = _mainnet_harness("on", "on", 0).replace(
+        "IS_ACTIVE_STATUS=1", "IS_ACTIVE_STATUS=0"
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness + "\nstop_mainnet_mode\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "unit remained active after mainnet stop" in combined
+
+
+def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> None:
+    text = _read(DEPLOY)
+    verify = text[text.index("verify_topology()") : text.index("start_if()")]
+    assert "if any_mainnet_sleeve_on; then" in verify
+    assert "mainnet owner is not active and enabled" in verify
+    assert "timer_on liquidity-migration-mainnet-liveness.timer" in verify
+    assert "is active under demo/paper authorization" in verify
+    # The mirror unit is verified too, or a toggled-on mirror is invisible here.
+    assert "liquidity-migration-paper-target-mirror.service" in verify
+    assert "mainnet_carry=%s mainnet_long=%s" in verify
+
+    # An enabled timer is not a succeeding watchdog: without this the funded
+    # observer can fail every fire and verify still reads green. Scoped inside
+    # the mainnet branch so a stale failure cannot break demo/paper verify.
+    failed_check = "! systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service"
+    assert failed_check in verify
+    assert verify.index("if any_mainnet_sleeve_on; then") < verify.index(failed_check)
+    assert verify.index(failed_check) < verify.index("for oneshot in")
+
+
+def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
+    """``lm_load_group_systemd_environment`` unsets any key it was not asked for, so a
+    toggle missing from this allowlist is an unbound-variable abort under ``set -u``
+    at the next activation.
+    """
+
+    library = _read("deploy/lib_sleeves.sh")
+    writer = library[
+        library.index("lm_write_resolved_sleeve_toggles()") :
+        library.index("lm_verify_resolved_sleeve_toggles()")
+    ]
+    generated = set(re.findall(r"printf '([A-Z_]+)=%s", writer))
+    assert "PAPER_TARGET_MIRROR" in generated
+
+    text = _read(DEPLOY)
+    authorization = text[text.index("load_authorization()") : text.index("unit_on()")]
+    call = authorization[
+        authorization.index("sleeves.resolved.env") : authorization.index("# A resolved file")
+    ]
+    allowed = set(re.findall(r"\b([A-Z][A-Z0-9_]*)\b", call)) - {"PAPER_RUNTIME_GROUP"}
+    assert generated <= allowed, generated - allowed
+    for key in generated:
+        assert f'"${key}"' in authorization, key
+    # An older resolved file predates the newest keys; absent must mean off
+    # rather than a hard failure mid-rollout.
+    assert "mirror-mainnet-keys=absent treated-as=off" in authorization
+
+
+def test_routine_activation_restores_and_rollout_stops_the_funded_fleet() -> None:
+    text = _read(DEPLOY)
+    activate = text[text.index("activate_mode()") : text.index("MAINNET_OWNER_UNIT=")]
+    assert activate.index("liquidity-migration-demo-liveness.timer") < activate.index(
+        "if any_mainnet_sleeve_on; then\n        start_mainnet_fleet"
+    )
+    assert activate.index("start_mainnet_fleet") < activate.index("verify_topology")
+
+    downstream = text[
+        text.index("ROLLOUT_DOWNSTREAM_UNITS=(") : text.index("ROLLOUT_STOPPED=0")
+    ]
+    for unit in (
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-mainnet-liveness.timer",
+        "liquidity-migration-mainnet-liveness.service",
+    ):
+        assert unit in downstream.split("ROLLOUT_OWNER_UNITS=(")[0], unit
+    owners = downstream.split("ROLLOUT_OWNER_UNITS=(")[1]
+    assert "liquidity-migration-account-execution-mainnet.service" in owners
+
+    # The rollout that first installs one of these units must still be able to
+    # restore the prior topology from the cleanup path.
+    cleanup = text[
+        text.index("stop_all_rollout_units_best_effort()") : text.index("cleanup_notice()")
+    ]
+    assert 'systemctl cat "$unit" >/dev/null 2>&1 || continue' in cleanup
+
+
+def test_demo_rule_refresh_freezes_the_demo_realm_explicitly() -> None:
+    text = _read(DEPLOY)
+    refresh = text[
+        text.index("refresh_stale_demo_rules_if_requested()") : text.index("install_mode()")
+    ]
+    assert "freeze_account_candidate_universe.py \\\n        --realm demo --output" in refresh
+
+
+def test_deploy_rejects_an_unknown_mode_and_a_stray_mode_argument() -> None:
+    for argv, expected in (
+        (["activate-mainnnet"], "invalid deploy mode"),
+        (["stop"], "invalid deploy mode"),
+        (["activate-mainnet", "--profile", "operational"], "usage: deploy_vps_live.sh"),
+    ):
+        result = subprocess.run(
+            ["bash", str(DEPLOY), *argv], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 2, (argv, result.stdout, result.stderr)
+        assert expected in result.stderr, (argv, result.stderr)
+    usage = subprocess.run(
+        ["bash", str(DEPLOY), "verify", "--extra"], capture_output=True, text=True, check=False
+    ).stderr
+    for mode in ("install", "activate", "verify", "rollout", "activate-mainnet", "stop-mainnet"):
+        assert mode in usage, mode
+
+
+def test_stop_mainnet_says_the_sleeves_still_restart_the_fleet() -> None:
+    """`activate`/`rollout` restart the funded fleet from the sleeve toggles, so a
+    stop that leaves them on is undone by the next routine deploy.
+    """
+
+    result = subprocess.run(
+        ["bash", "-c", _mainnet_harness("on", "off", 0) + "\nstop_mainnet_mode\n"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    assert "the next activate or rollout restarts this fleet" in combined
+    assert "CARRY_MAINNET_SLEEVE/LONG_MAINNET_SLEEVE off" in combined
+
+
+def test_stop_mainnet_cannot_report_ok_without_systemctl() -> None:
+    harness = _mainnet_harness("on", "off", 0).replace("systemctl() {\n", "unused() {\n", 1)
+    result = subprocess.run(
+        ["bash", "-c", "PATH=/nonexistent\n" + harness + "\nstop_mainnet_mode\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0, combined
+    assert "systemctl is unavailable" in combined
+    assert "stop-mainnet-ok" not in combined

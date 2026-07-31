@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,7 @@ class _NoOpenOrdersClient:
 
 class Client(_NoOpenOrdersClient):
     demo = True
+    realm = "demo"
 
     def __init__(self, command_id: str, *, venue_positions: list[dict[str, str]] | None = None) -> None:
         self.command_id = command_id
@@ -152,6 +154,7 @@ def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicat
 
     class MismatchClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **_params: object):
             # CUSDT exists only at the venue, so its journal quantity is not a
@@ -181,7 +184,7 @@ def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicat
     ).reconcile_once()
 
     assert not report.healthy
-    # The call happened at all — before B6 a single mismatch skipped it entirely.
+    # The call happened at all: a single mismatch must not skip it entirely.
     assert calls == [frozenset({"CUSDT"})]
 
 
@@ -219,6 +222,7 @@ def test_protection_reverification_skips_a_symbol_with_an_ambiguous_submission(
 
     class FlatClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **_params: object):
             return []
@@ -259,6 +263,7 @@ def test_dual_side_venue_position_fails_closed_for_net_position_kernel(tmp_path:
 
     class DualClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **_params: object):
             return [
@@ -304,6 +309,7 @@ def test_malformed_venue_position_snapshot_fails_closed(
 
     class MalformedClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -329,6 +335,7 @@ def test_canonical_zero_venue_position_row_is_valid_flat_truth(tmp_path: Path) -
 
     class FlatClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -393,6 +400,7 @@ def test_reconciliation_marks_ack_lost_entry_without_venue_evidence_unhealthy(
 
     class NoEvidenceClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_trade_history(self, **params: object):
             assert params["order_link_id"] == command_id
@@ -435,6 +443,7 @@ def test_reconciliation_detects_unowned_order_appearing_after_clean_start(
 
     class MutableOrderClient:
         demo = True
+        realm = "demo"
 
         def __init__(self) -> None:
             self.all_kinds: list[dict[str, str]] = []
@@ -494,6 +503,7 @@ def test_reconciliation_blocks_when_open_order_snapshot_is_unknown(tmp_path: Pat
 
     class FailedOrderClient:
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -526,6 +536,7 @@ def test_reconciliation_accepts_exact_kernel_owned_open_order(tmp_path: Path) ->
 
     class OwnedOrderClient:
         demo = True
+        realm = "demo"
 
         def get_trade_history(self, **params: object):
             assert params["order_link_id"] == command_id
@@ -577,6 +588,7 @@ def test_reconciliation_rejects_malformed_kernel_order_identity_match(
 
     class ContradictoryOrderClient:
         demo = True
+        realm = "demo"
 
         def get_trade_history(self, **_params: object):
             return []
@@ -635,6 +647,7 @@ def test_reconciliation_accepts_journal_verified_native_open_order(tmp_path: Pat
 
     class NativeOrderClient:
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -683,6 +696,7 @@ def test_reconciliation_propagates_only_structured_native_breach_authority(
 
     class FlatClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -721,6 +735,7 @@ def test_position_truth_timestamp_is_taken_after_rest_response(tmp_path: Path) -
 
     class DelayedPositionClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -748,6 +763,7 @@ def test_noop_reconciliation_is_fresh_without_growing_journal_until_checkpoint(
 
     class FlatClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_positions(self, **params: object):
             assert params == {"settle_coin": "USDT"}
@@ -790,6 +806,7 @@ def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path)
 
     class MutableClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
         venue_positions: list[dict[str, str]] = []
 
         def get_positions(self, **params: object):
@@ -862,6 +879,7 @@ def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Pa
 
     class NativeClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def set_trading_stop(self, **_params: object):
             return {}
@@ -969,6 +987,7 @@ def test_rest_reconcile_queries_adopted_native_order_by_venue_id(
 
     class NativeInstallClient:
         demo = True
+        realm = "demo"
 
         def set_trading_stop(self, **_params: object):
             return {}
@@ -1005,6 +1024,7 @@ def test_rest_reconcile_queries_adopted_native_order_by_venue_id(
 
     class RecoveryClient(_NoOpenOrdersClient):
         demo = True
+        realm = "demo"
 
         def get_trade_history(self, **params: object):
             assert params == {
@@ -1087,3 +1107,184 @@ def test_position_health_floor_still_fails_a_wedged_reconciler(tmp_path: Path) -
         reconciler.require_recent_healthy(max_age_ns=4_000_000_000)
     with pytest.raises(AccountReconciliationStaleError, match="is stale"):
         reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=4_000_000_000)
+
+
+class _MainnetClient(Client):
+    demo = False
+    realm = "mainnet"
+
+
+def test_reconciler_refuses_a_client_that_names_no_parsable_realm() -> None:
+    class Realmless:
+        demo = True
+
+    class BadRealm:
+        demo = True
+        realm = "paper"
+
+    for client in (object(), Realmless(), BadRealm()):
+        with pytest.raises(ValueError, match="naming venue realm"):
+            BybitAccountReconciler(kernel=None, client=client, instrument_rules={})  # type: ignore[arg-type]
+
+
+def test_mainnet_reconcile_matches_demo_except_for_the_realm_label(tmp_path: Path) -> None:
+    """Same decisions, same journal payload; only the realm-derived labels move."""
+
+    reports = {}
+    events = {}
+    for realm, factory in (("demo", Client), ("mainnet", _MainnetClient)):
+        clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+        kernel, command_id = _kernel(tmp_path / realm, clock)
+        reconciler = BybitAccountReconciler(
+            kernel=kernel,
+            client=factory(command_id),
+            instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+            clock=clock,
+        )
+        assert reconciler.realm.value == realm
+        reports[realm] = reconciler.reconcile_once()
+        events[realm] = kernel.state().venue_snapshots[reports[realm].snapshot_key]
+
+    assert reports["demo"].snapshot_key.startswith("bybit-demo-position:")
+    assert reports["mainnet"].snapshot_key.startswith("bybit-mainnet-position:")
+    assert events["demo"]["metadata"]["source"] == "bybit_demo_rest_reconcile"
+    assert events["mainnet"]["metadata"]["source"] == "bybit_mainnet_rest_reconcile"
+    # The digest covers positions, ownership counts and mismatches. None of those
+    # names a realm on a clean pass, so the two agree here -- but a mismatch that
+    # quotes a realm-labelled venue fault does move it; see the next test.
+    assert reports["demo"].snapshot_key.split(":")[1] == reports["mainnet"].snapshot_key.split(":")[1]
+    for realm in ("demo", "mainnet"):
+        assert reports[realm].healthy
+        assert reports[realm].mismatches == ()
+        assert dict(reports[realm].venue_positions) == {"BUSDT": 1.0}
+        assert dict(reports[realm].reconstructed_positions) == {"BUSDT": 1.0}
+    # ``source`` is the only realm-derived name inside metadata, so drop that one
+    # key rather than the whole dict: metadata is where ``venue_order_ownership``
+    # records that the per-cycle ownership read -- the call that used to refuse a
+    # non-demo client outright -- ran clean on mainnet too.
+    normalized = {}
+    for realm in ("demo", "mainnet"):
+        event = dict(events[realm])
+        metadata = dict(event["metadata"])
+        del metadata["source"]
+        assert metadata["venue_order_ownership"]["status"] == "verified"
+        event["metadata"] = metadata
+        del event["snapshot_key"]
+        normalized[realm] = event
+    assert normalized["demo"] == normalized["mainnet"]
+
+
+def test_an_unreadable_order_book_puts_the_realm_into_the_mismatch_and_digest(
+    tmp_path: Path,
+) -> None:
+    """``mismatches`` is hashed into the snapshot key, and it quotes venue faults.
+
+    So the two realms agree on the digest only while no mismatch names one. The
+    demo text is unchanged; a mainnet operator reading the journal sees mainnet.
+    """
+
+    keys = {}
+    for realm, factory in (("demo", Client), ("mainnet", _MainnetClient)):
+        clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+        kernel, command_id = _kernel(tmp_path / realm, clock)
+        client = factory(command_id)
+        client.get_open_orders = _raise_venue_500  # type: ignore[method-assign]
+        reconciler = BybitAccountReconciler(
+            kernel=kernel,
+            client=client,
+            instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+            clock=clock,
+        )
+        report = reconciler.reconcile_once()
+        assert not report.healthy
+        assert report.mismatches == (
+            "venue_order_ownership:inspection_failed:RuntimeError:"
+            f"Bybit {realm} could not prove venue order ownership: "
+            "all-kinds open-order query failed: RuntimeError: venue 500",
+        )
+        keys[realm] = report.snapshot_key.split(":")[1]
+
+    assert keys["demo"] != keys["mainnet"]
+
+
+def _raise_venue_500(**_params: object) -> list[dict[str, str]]:
+    raise RuntimeError("venue 500")
+
+
+def test_mainnet_position_row_faults_name_the_mainnet_realm(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=_MainnetClient(command_id, venue_positions=[{"side": "Buy", "size": "1"}]),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    with pytest.raises(RuntimeError, match="Bybit mainnet position row 0 lacks symbol"):
+        reconciler.reconcile_once()
+
+
+def test_mainnet_hedge_mode_position_stays_a_named_unhealthy_mismatch(tmp_path: Path) -> None:
+    """Bybit hedge mode is unmodelled; both realms refuse it by name, never silently."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=_MainnetClient(
+            command_id,
+            venue_positions=[
+                {"symbol": "BUSDT", "side": "Buy", "size": "1"},
+                {"symbol": "BUSDT", "side": "Sell", "size": "1"},
+            ],
+        ),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    report = reconciler.reconcile_once()
+
+    assert not report.healthy
+    assert "BUSDT:dual_side_position_not_supported" in report.mismatches
+
+
+def test_demo_reconcile_labels_and_fault_text_are_pinned(tmp_path: Path) -> None:
+    """The demo journal key, source, and venue-fault text this change touched."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(command_id, venue_positions=[]),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    report = reconciler.reconcile_once()
+
+    assert report.snapshot_key.startswith("bybit-demo-position:")
+    snapshot = kernel.state().venue_snapshots[report.snapshot_key]
+    assert snapshot["metadata"]["source"] == "bybit_demo_rest_reconcile"
+    assert report.mismatches == ("BUSDT:venue=0:reconstructed=1:tol=0.05",)
+    with pytest.raises(RuntimeError, match="account reconciliation unhealthy: BUSDT:venue=0"):
+        reconciler.require_recent_healthy(max_age_ns=1)
+
+    for positions, message in (
+        ("nope", "Bybit demo position query returned a non-list payload"),
+        ([1], "Bybit demo position query returned a non-object row at index 0"),
+        ([{"side": "Buy", "size": "1"}], "Bybit demo position row 0 lacks symbol"),
+        ([{"symbol": "BUSDT", "side": "Buy"}], "Bybit demo position row 0 size must be numeric"),
+        (
+            [{"symbol": "BUSDT", "side": "Buy", "size": "nan"}],
+            "Bybit demo position row 0 size must be finite",
+        ),
+        (
+            [{"symbol": "BUSDT", "side": "Buy", "size": "-1"}],
+            "Bybit demo position row 0 size must be non-negative",
+        ),
+        (
+            [{"symbol": "BUSDT", "side": "Up", "size": "1"}],
+            "Bybit demo position row 0 has invalid side 'Up'",
+        ),
+    ):
+        reconciler.client = Client(command_id, venue_positions=positions)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match=re.escape(message)):
+            reconciler.reconcile_once()

@@ -1,7 +1,6 @@
-"""Tests for the daily-aligned Sharpe in trade_lifecycle.
-
-`summarize_trade_backtest` emits a single `sharpe_like` annualised off the
-daily equity curve, forward-filled onto the calendar-day grid.
+"""Tests for the daily-aligned Sharpe in trade_lifecycle: ``summarize_trade_backtest``
+emits a single ``sharpe_like`` annualised off the daily equity curve, forward-filled
+onto the calendar-day grid.
 """
 from __future__ import annotations
 
@@ -168,12 +167,11 @@ def test_daily_sharpe_single_diff_returns_zero() -> None:
 
 
 def test_daily_sharpe_buckets_by_calendar_day_not_intraday_exit_time() -> None:
-    """Regression (audit-iter1 event-demo-1): production exits carry intra-day
-    wall-clock timestamps (exit_ts_ms.max() per date), NOT midnight. The Sharpe must
-    forward-fill on TRUE calendar days. The old hand-rolled grid stepped MS_PER_DAY
-    off the first exit's clock time and mis-bucketed days, injecting spurious 0%-return
-    days. With non-midnight exits on three consecutive calendar days the correct daily
-    return series is [+50%, -20%]; the old grid produced [0%, +50%].
+    """Production exits carry intra-day wall-clock timestamps, not midnight, so the
+    Sharpe must forward-fill on TRUE calendar days. A hand-rolled grid stepping
+    MS_PER_DAY off the first exit's clock time mis-buckets and injects spurious 0%
+    days: with non-midnight exits on three consecutive days the correct series is
+    [+50%, -20%], the stepped grid gives [0%, +50%].
     """
     eq = pl.DataFrame(
         {
@@ -197,12 +195,9 @@ def test_daily_sharpe_buckets_by_calendar_day_not_intraday_exit_time() -> None:
 
 
 def test_sparse_strategy_daily_sharpe_is_finite_and_unbiased_by_firing_rate() -> None:
-    """Honest daily Sharpe should not depend on the assumed `rebalance_days`.
-
-    Two strategies with identical PnL on identical calendar days but
-    different `rebalance_days` config should produce the same `sharpe_like`,
-    confirming the metric annualises off the actual daily series rather than
-    the assumed firing rate.
+    """Two strategies with identical PnL on identical calendar days but different
+    ``rebalance_days`` must produce the same ``sharpe_like``: the metric annualises
+    off the actual daily series, not the assumed firing rate.
     """
     rows = []
     for i in range(24):

@@ -14,8 +14,7 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYB
 Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=REAL_MONEY=false
 Environment=TELEGRAM_ENABLED=1
-# CONTINUOUS retired 2026-07-29: no cycle root, so the twin reports no gate
-# line. Re-promotion must set CONTINUOUS_CYCLE_ROOT explicitly again.
+# No CONTINUOUS_CYCLE_ROOT: the twin then reports no CONTINUOUS gate line.
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-paper-execution.service main
 ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-paper-execution.service readiness

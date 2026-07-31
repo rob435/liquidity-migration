@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# One command -> standard equity curves.
-# LONG and CONTINUOUS come from their strategy modules. CONTINUOUS
-# output is demo/forward analysis, not a mainnet approval package.
+# One command -> standard equity curves, from the LONG and CONTINUOUS strategy
+# modules.
 #
 #   bash scripts/equity_curves.sh                 # the LONG sleeve, last 3 years
 #   bash scripts/equity_curves.sh --sleeves continuous

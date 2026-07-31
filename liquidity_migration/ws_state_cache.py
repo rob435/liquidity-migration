@@ -59,15 +59,12 @@ class TickerCache:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._rows_by_symbol: dict[str, dict[str, Any]] = {}
-        # Per-symbol freshness clock: monotonic time of THIS symbol's last update
-        # (WS push OR seed/REST-reconcile). The cache-level last_event_monotonic
-        # gate is GLOBAL — one fresh symbol keeps the whole cache 'fresh', so a
-        # symbol whose own price has gone stale (no WS tick AND missing from the 60s
-        # REST reconcile, e.g. a halted/delisting name) would still feed its last-good
-        # price into the cycle's stop/exit math. snapshot_list(max_age_seconds=...)
-        # uses this map to drop a symbol whose own last update is older than the bound
-        # (ws-dataplane-1). The 60s REST reconcile re-stamps every symbol, so an
-        # illiquid-but-healthy symbol that simply hasn't ticked stays fresh.
+        # Per-symbol freshness clock (WS push or seed/REST reconcile). The
+        # cache-level ``last_event_monotonic`` gate is global, so one fresh symbol
+        # would keep a halted name's last-good price flowing into the cycle's
+        # stop/exit math; ``snapshot_list(max_age_seconds=...)`` uses this map to
+        # drop it. The 60s REST reconcile re-stamps every symbol, so an illiquid
+        # but healthy symbol that has not ticked stays fresh.
         self._symbol_update_monotonic: dict[str, float] = {}
         self._stats = _TickerStats()
 
@@ -187,19 +184,14 @@ class TickerCache:
         symbol = str(row.get("symbol", "") or "")
         if not symbol:
             return
-        # ws-dataplane-1: stamp this symbol's per-symbol freshness clock on every WS
-        # push (covers both the new-symbol and delta-merge branches below).
         self._symbol_update_monotonic[symbol] = time.monotonic()
         existing = self._rows_by_symbol.get(symbol)
         if existing is None:
             self._rows_by_symbol[symbol] = dict(row)
             return
-        # pybit's _process_delta_ticker accumulates the deltas into a single
-        # snapshot under the same key, so by the time the callback runs the
-        # row is already complete — but if the upstream changes we still want
-        # to handle pure deltas correctly. Merge any non-None field over the
-        # existing row. COPY-then-REBIND (don't mutate the published dict in
-        # place), so readers never observe a partial delta merge.
+        # pybit already accumulates deltas into a complete row, but merge non-None
+        # fields anyway in case that changes. Copy then rebind rather than mutate
+        # in place, so readers never observe a partial merge.
         merged = dict(existing)
         for key, value in row.items():
             if value is None:

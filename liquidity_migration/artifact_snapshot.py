@@ -1,10 +1,9 @@
 """Descriptor-bound snapshots for immutable local evidence artifacts.
 
-Evidence readers must not authenticate one pathname target and then parse a
-second target reached by reopening the pathname.  ``read_stable_file`` opens a
-file exactly once, refuses symlinks and non-regular files, validates the
-pathname and descriptor identities before and after the read, and returns the
-captured bytes together with their metadata.
+``read_stable_file`` opens a file exactly once, refuses symlinks and
+non-regular files, validates pathname and descriptor identity before and after
+the read, and returns the bytes with their metadata -- so a reader cannot
+authenticate one target and then parse a second one reached by reopening.
 """
 
 from __future__ import annotations
@@ -154,8 +153,8 @@ def read_stable_file(
     if reject_empty and not data:
         raise ValueError(f"{label} is empty: {candidate}")
 
-    # ``absolute`` is lexical and therefore does not introduce a second
-    # pathname resolution after the descriptor identity has been validated.
+    # Lexical, so it adds no second pathname resolution after the descriptor
+    # identity was validated.
     absolute = Path(os.path.abspath(candidate))
     return StableFileSnapshot(path=absolute, data=data, metadata=after_descriptor)
 

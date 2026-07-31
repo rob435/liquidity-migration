@@ -7,17 +7,17 @@ streaming, cache refresh, lifecycle, and graceful-shutdown plumbing, and swaps i
     the FULL ~570-symbol store blew the long sleeve's 1G cap, so scope to the top-N by 24h turnover —
     which covers the liquid names the strategy actually trades).
 
-Startup is target-only: demo and paper routes publish to the canonical account
-owner and never construct a sleeve-private execution stream, router, or cache.
+Startup is target-only: both routes publish to the account owner and never
+construct a sleeve-private execution stream, router, or cache.
 
-The live entry profile uses confirmed-bar +1h selection. One normal planner
-cycle runs on the 60-second cadence (plus the inherited confirmed-kline wake),
-covering exits and newly eligible entries together. There is no protective
-worker thread, ticker-batch wake, or private-fill nudge.
+The live entry profile uses confirmed-bar +1h selection. One planner cycle runs
+on the 60-second cadence plus the inherited confirmed-kline wake, covering exits
+and newly eligible entries together; there is no protective worker thread,
+ticker-batch wake, or private-fill nudge.
 
-Separate producer roots and the continuous order-link namespace preserve strategy
-attribution. The account owner, rather than this producer ledger, owns combined
-account positions, orders, fills, and protection state.
+Separate producer roots and the continuous order-link namespace preserve
+attribution. The account owner, not this producer ledger, owns combined
+positions, orders, fills, and protection state.
 """
 
 from __future__ import annotations
@@ -44,16 +44,15 @@ from .long_native_event_demo_daemon import LongNativeDemoDaemon
 from .strategy_target_replay import PublishedTargetCyclePayload
 
 if TYPE_CHECKING:
-    # Only referenced in the cast annotations below (the base daemon's config type); the continuous
-    # sleeve has its own ContinuousDemoCycleConfig — see the __init__ note on the deliberate divergence.
+    # Only for the cast annotations below; the base daemon's config type.
     from .long_native_event_demo import LongNativeDemoCycleConfig
 
 _logger = logging.getLogger(__name__)
 
 
-# Broad enough for a meaningful cross-section, bounded enough to stay under the systemd memory cap.
-# The strategy only trades liquid names (>=$500k/h), which sit in the top-by-turnover band, so the
-# top-N decile boundaries closely track the full-universe ones. Tunable via the config / env.
+# Broad enough for a meaningful cross-section, bounded enough for the systemd
+# memory cap. The strategy trades only liquid names (>=$500k/h), which sit in the
+# top-by-turnover band, so top-N decile boundaries track the full-universe ones.
 _CONTINUOUS_KLINE_UNIVERSE_SIZE = 250
 
 
@@ -73,11 +72,10 @@ def _follower_continuous_kline_stream_manager_factory(
 ) -> FollowerKlineStreamManager:
     """Read-only follower of the leader root's flushed kline snapshot (no WS pool).
 
-    Selected when ``klines_follow_root`` is set — the paper shadow co-located with
-    the demo sleeve shares the demo daemon's market-data plane instead of running a
-    duplicate one. ``cache_root`` (the follower's own root) is only used to refuse
-    a circular self-follow: the follower writes nothing, so a daemon following its
-    OWN root would read a snapshot nobody updates — a frozen store from day one."""
+    Selected when ``klines_follow_root`` is set, so a co-located shadow shares the
+    leader's market-data plane instead of running a duplicate. ``cache_root`` is
+    used only to refuse a circular self-follow: the follower writes nothing, so
+    following its own root would read a snapshot nobody updates."""
     del config
     return build_kline_follower(
         leader_root=demo_config.klines_follow_root,
@@ -92,10 +90,9 @@ def _select_kline_stream_manager_factory(
     """An explicitly injected factory (tests) always wins; otherwise follow when
     ``klines_follow_root`` is set, else run the sleeve's own WS pool.
 
-    NOTE: the base daemon only invokes the selected factory when
-    ``ws_klines_enabled`` is True (`_start_kline_stream_manager` returns early
-    otherwise) — follow mode rides the same gate, so WS_KLINES_ENABLED=0 +
-    KLINES_FOLLOW_ROOT means NO manager at all (pure REST path), not a follower."""
+    The base daemon invokes the factory only when ``ws_klines_enabled`` is True,
+    and follow mode rides that same gate: WS_KLINES_ENABLED=0 with
+    KLINES_FOLLOW_ROOT means no manager at all (pure REST), not a follower."""
     if explicit is not None:
         return explicit
     if demo_config.klines_follow_root:
@@ -110,8 +107,7 @@ def _default_continuous_kline_stream_manager_factory(
 ) -> KlineStreamManager:
     market = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
 
-    # A nested def (vs the prior `lambda m=market:`) lets mypy type the zero-arg fetcher; behaviour is
-    # identical — `market` is captured here and never rebound, so the closure sees the same object.
+    # A nested def (not a lambda) so mypy can type the zero-arg fetcher.
     def universe_fetcher() -> list[str]:
         return _build_continuous_kline_universe(market)
 
@@ -211,9 +207,11 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         return super().run()
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        return {"panel_cache": self._panel_cache}
+        # Extend, never replace: dropping the base's journal cursor puts this
+        # sleeve back on a full account-history re-read every cycle.
+        return {**super()._extra_cycle_kwargs(), "panel_cache": self._panel_cache}
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
-        # CONT cycle payloads are flat; the inherited LONG formatter expects
-        # a nested cycle object.
+        # CONT payloads are flat; the inherited formatter expects a nested
+        # cycle object.
         return format_continuous_demo_cycle_summary(payload)

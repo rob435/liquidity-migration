@@ -1,10 +1,9 @@
 """Raw, sequence-aware Bybit L2 and public-trade capture.
 
-Pybit deliberately converts every orderbook callback into a reconstructed
-``snapshot`` and discards the raw delta type.  That is convenient for display,
-but insufficient for sequence-gap and latency evidence.  This module therefore
-accepts raw V5 messages and persists the original snapshot/delta payload before
-maintaining its own reconstructable book.
+Pybit converts every orderbook callback into a reconstructed ``snapshot`` and
+discards the raw delta type, which loses sequence-gap and latency evidence. This
+module accepts raw V5 messages and persists the original snapshot/delta payload
+before maintaining its own reconstructable book.
 
 Bybit's documented semantics used here:
 
@@ -54,12 +53,9 @@ OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
 OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
 DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS = 120.0
 DEFAULT_ORDERBOOK_WATCHDOG_INTERVAL_SECONDS = 10.0
-# Bybit answers a successful orderbook subscription with an immediate
-# snapshot, so a subscription that has NEVER produced a frame is a lost or
-# rejected subscribe, not a quiet market. Waiting the full silent-stream
-# window (120s) for that case left multi-minute queue-head stale_book blocks
-# around new-symbol entries; a tighter first-frame bound rebuilds the socket
-# before the external three-minute liveness alert can fire.
+# Bybit answers a successful orderbook subscription with an immediate snapshot,
+# so a subscription that has never produced a frame is a lost or rejected
+# subscribe, not a quiet market, and gets a tighter bound than silent-stream.
 DEFAULT_ORDERBOOK_FIRST_FRAME_RECONNECT_SECONDS = 30.0
 DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS = (
     1_000_000_000,
@@ -215,12 +211,10 @@ class OwnerCaptureReadinessSidecar:
 
 @dataclass(frozen=True, slots=True)
 class OwnerMarketReadinessSidecar:
-    """Bounded proof that one owner generation is receiving usable live L2.
+    """Bounded evidence that one owner generation is receiving usable live L2.
 
-    This sidecar is deliberately independent of raw-frame persistence.  It is
-    atomically replaced at most once per second and therefore proves live market
-    ingestion without turning an operational owner into a bulk research-data
-    collector.
+    Independent of raw-frame persistence, and atomically replaced at most once
+    per second.
     """
 
     owner_invocation_id: str
@@ -461,14 +455,9 @@ class SegmentedCaptureStore:
         if current is not None and current.day == day and current.bytes_written < self.config.segment_max_bytes:
             return current
         if current is not None:
-            # Retire the old segment from the registry BEFORE closing it. A raise
-            # anywhere between the close and the successful install of the
-            # replacement (EIO, EACCES, inode exhaustion -- none covered by the
-            # free-disk floor) previously left the registry pointing at a CLOSED
-            # file, so every later append re-entered rollover and raised
-            # "I/O operation on closed file" forever for that symbol, and
-            # ``close()`` then raised mid-iteration and left sibling segments
-            # unflushed (2026-07-27 audit M4).
+            # Retire from the registry BEFORE closing: a raise between the close
+            # and installing the replacement would otherwise leave the registry
+            # pointing at a closed file, wedging every later append.
             self._segments.pop(key, None)
             _close_segment_best_effort(current)
         directory = self.root / day / key
@@ -646,8 +635,7 @@ def _apply_levels(book: dict[float, float], updates: Iterable[tuple[float, float
 def capture_record_id(record: Mapping[str, Any]) -> str:
     """Return the stable identity used by raw-capture and decision-context rows.
 
-    The identity names an arrival; the segment SHA-256 in downstream receipts
-    binds the complete payload, including prices and sizes.
+    The identity names an arrival, not its payload.
     """
 
     material = {
@@ -661,9 +649,8 @@ def capture_record_id(record: Mapping[str, Any]) -> str:
             "trade_ids",
         )
     }
-    # These record kinds may share one market arrival across several fills and
-    # horizons. Their causal key must distinguish those observations without
-    # changing the established identity of legacy raw/decision records.
+    # These kinds can share one market arrival across several fills and horizons,
+    # so they need extra key material; raw/decision identities stay unchanged.
     if str(record.get("kind") or "") in {
         "post_fill_markout_schedule",
         "post_fill_markout",
@@ -859,11 +846,9 @@ class SequenceAwareMarketRecorder:
                 relative_path = location.path.relative_to(self.store.root).as_posix()
             except ValueError as exc:
                 raise MarketCaptureError("capture append escaped its configured root") from exc
-            # These locator fields describe the stored canonical JSON line but
-            # are deliberately not part of that line or its record identity.
-            # They let a later read-only diagnostic open one exact context
-            # without scanning a capture root. The content hash remains valid
-            # if the root is copied to another device.
+            # Locator fields describe the stored line without being part of it
+            # or of its record identity; the path is relative so a copied root
+            # keeps them valid.
             output.update(
                 {
                     "capture_segment_path": relative_path,
@@ -963,11 +948,8 @@ class SequenceAwareMarketRecorder:
             byte_offset=location.byte_offset,
             byte_length=location.byte_length,
         )
-        # Make the target row durable before atomically publishing a durable
-        # pointer to it. At most one such fsync and sidecar replace occurs per
-        # second; the first completed row is published immediately.
-        # Latch the attempt before I/O so even a post-replace directory-fsync
-        # error cannot cause another visible replace inside the same interval.
+        # Latch before I/O so a post-replace fsync error cannot loop inside the
+        # same interval; the row is synced before the pointer to it is published.
         self._last_readiness_publish_monotonic_ns = now_monotonic_ns
         self.store.sync(location)
         _atomic_write_owner_capture_readiness(self.store.root, sidecar)
@@ -1105,14 +1087,9 @@ class SequenceAwareMarketRecorder:
                 book_condition = ""
                 midpoint = bids[0][0] / 2.0 + asks[0][0] / 2.0
             else:
-                # The only route here is lateness overflow: an unhealthy book
-                # inside its lateness bound `continue`s above, waiting for a
-                # repaired book. The former crossed_book / no_snapshot / gap arms
-                # were unreachable and every missing markout got the generic
-                # reason anyway (2026-07-27 audit L4). Keep `missing_reason` as
-                # the one true cause and report WHY the book was unusable in its
-                # own field, so the diagnostic the dead arms were reaching for
-                # survives instead of being silently discarded.
+                # Only reachable by lateness overflow: an unhealthy book inside
+                # its bound `continue`s above. ``missing_reason`` is that one
+                # cause; ``book_condition`` reports why the book was unusable.
                 status = "missing"
                 midpoint = None
                 missing_reason = "healthy_book_not_observed_before_lateness_bound"
@@ -1254,10 +1231,9 @@ class SequenceAwareMarketRecorder:
     ) -> tuple[L2BookSnapshot | None, int]:
         """Return one locked book snapshot followed by its local observation time.
 
-        The shared lock prevents a WebSocket update from publishing a book with
-        a receive timestamp newer than the observation paired with that book.
-        A negative age can therefore only represent a real wall-clock
-        regression, not a read/update race.
+        The shared lock keeps a WebSocket update from publishing a book newer
+        than the observation paired with it, so a negative age is a real
+        wall-clock regression rather than a read/update race.
         """
 
         with self._lock:
@@ -1322,11 +1298,10 @@ class BybitRawPublicMarketStream:
         self._monotonic = monotonic_clock or time.monotonic
         self._symbols: set[str] = set()
         self._socket: Any | None = None
-        # ``WebSocketApp.run_forever`` can block before invoking ``on_open``.
-        # Publishing the socket object alone is therefore not evidence that it
-        # is writable or that any subscription timer exists.  Track the
-        # transport-open boundary and the connection attempt independently so
-        # the watchdog can rebuild a hung pre-open connection.
+        # ``run_forever`` can block before invoking ``on_open``, so the socket
+        # object existing is not evidence it is writable. The transport-open
+        # boundary and the connection attempt are tracked separately so the
+        # watchdog can rebuild a hung pre-open connection.
         self._socket_open = False
         self._connection_started_monotonic: float | None = None
         self._connection_generation = 0
@@ -1340,9 +1315,8 @@ class BybitRawPublicMarketStream:
         self._send_lock = threading.Lock()
         self._subscription_started_monotonic: dict[str, float] = {}
         self._last_orderbook_message_monotonic: dict[str, float] = {}
-        # Cumulative transport evidence that deliberately survives socket
-        # detach: per-attempt clocks reset on every reconnect, so a fast-fail
-        # reconnect loop would otherwise never cross any staleness bound.
+        # Cumulative clocks that survive socket detach: per-attempt clocks reset
+        # on reconnect, so a fast-fail loop would never cross a staleness bound.
         self._stream_started_monotonic: float | None = None
         self._last_frame_monotonic: float | None = None
         self._last_outage_warning_monotonic: float | None = None
@@ -1501,11 +1475,9 @@ class BybitRawPublicMarketStream:
                 prior_outage_warning: float | None = None
                 outage_recovered = False
                 with self._lock:
-                    # The watchdog may retire a generation while JSON parsing
-                    # is in flight. The lock orders frame acceptance against
-                    # socket retirement, but the external recorder callback
-                    # must run outside it: disk I/O must never prevent the
-                    # watchdog from detaching a hung generation.
+                    # The lock orders frame acceptance against socket retirement,
+                    # which the watchdog can do mid-parse. The recorder callback
+                    # runs outside it so disk I/O cannot block a detach.
                     if (
                         self._socket is not socket
                         or not self._socket_open
@@ -1530,17 +1502,12 @@ class BybitRawPublicMarketStream:
                         symbol,
                     )
                 try:
-                    # Capture receive time before parsing/storage work.
                     self.on_market_message({**message, "_local_receive_ts_ns": local_ns})
                 except Exception:
-                    # A callback failure did not produce usable market state.
-                    # Roll back the per-symbol clock AND the cumulative
-                    # transport-outage clock plus its warning latch: rolling back
-                    # only the per-symbol clock left `_last_frame_monotonic`
-                    # advancing on every failed frame, so under persistent
-                    # callback failure the "no accepted frame for Xs" warning
-                    # could never fire (2026-07-27 audit L1). A later successful
-                    # frame (if callbacks ever become concurrent) still wins.
+                    # A failed callback produced no usable market state, so roll
+                    # back the per-symbol clock, the cumulative outage clock, and
+                    # its warning latch — otherwise persistent callback failure
+                    # keeps advancing the clock and the outage warning never fires.
                     if symbol and observed_at is not None:
                         with self._lock:
                             if (
@@ -1579,13 +1546,9 @@ class BybitRawPublicMarketStream:
             if self._stop.is_set():
                 return ()
             now = self._monotonic()
-            # Cumulative transport-outage bound. Per-attempt clocks reset on
-            # every reconnect and the per-symbol maps are wiped on detach, so
-            # a dead socket followed by fast-failing reconnect attempts would
-            # otherwise never cross any threshold. This bound counts from the
-            # last accepted frame (or stream start) regardless of socket
-            # state, warns once per silent window, and force-closes whatever
-            # attempt is current so the loop cannot sit half-dead.
+            # Cumulative outage bound, counted from the last accepted frame (or
+            # stream start) regardless of socket state: per-attempt clocks reset
+            # on reconnect, so a fast-failing loop crosses no other threshold.
             outage_stale: tuple[str, ...] = ()
             outage_seconds = 0.0
             outage_socket: Any | None = None
@@ -1689,10 +1652,9 @@ class BybitRawPublicMarketStream:
             ) -> None:
                 self._on_message(opened, raw, generation=_generation)
 
-            # websocket-client routes transport failures (ping timeout, reset,
-            # refused reconnect) through these callbacks and then RETURNS from
-            # run_forever without raising, so without them every disconnect and
-            # failed reconnect attempt is invisible in the journal.
+            # websocket-client routes transport failures through these callbacks
+            # and then returns from run_forever without raising; without them
+            # every disconnect is invisible in the journal.
             def on_error(
                 opened: Any,
                 error: BaseException,

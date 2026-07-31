@@ -537,6 +537,7 @@ def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -
 
     class LostResponseClient:
         demo = True
+        realm = "demo"
 
         def __init__(self) -> None:
             self.command_id = ""
@@ -1001,10 +1002,9 @@ def test_committed_entry_resumes_after_crash_even_if_signal_expires(tmp_path: Pa
 def test_committed_batch_replays_instead_of_superseding_under_later_flat(tmp_path: Path) -> None:
     """A journal-committed batch must replay after a crash, never supersede.
 
-    Completing it as superseded would strand its journaled-but-unsubmitted
-    commands in working state forever: convergence then reports "working" for
-    the symbol and can never flatten the venue position the submitted part
-    opened.
+    Completing it as superseded would strand its journaled-but-unsubmitted commands
+    in working state forever: convergence then reports "working" for the symbol and
+    can never flatten the venue position the submitted part opened.
     """
 
     root = tmp_path / "account"
@@ -1598,13 +1598,10 @@ def test_convergence_steps_over_a_wedged_batch_instead_of_starving(tmp_path: Pat
 def test_crash_replay_resubmits_the_commanded_order_after_the_market_moved(
     tmp_path: Path,
 ) -> None:
-    """The crash-replay path recomputes the batch's request hash. Convergence
-    derives its targets from a *fresh* L2 book, so before the fix any price
-    movement between commit and replay turned the recomputed hash into an
-    ``AccountJournalIntegrityError`` -- the commanded reduce-only order was never
-    resubmitted and the raise aborted the whole plans loop (2026-07-27 audit
-    H5). The prior test passed only because its market returned a constant
-    price."""
+    """Crash replay recomputes the batch's request hash, and convergence derives its
+    targets from a fresh L2 book, so price movement between commit and replay must
+    not turn the recomputed hash into an ``AccountJournalIntegrityError``.
+    """
 
     root = tmp_path / "account"
     adapter = ScriptedExecutionAdapter("reject", "crash", "fill")
@@ -2652,10 +2649,10 @@ def test_queued_replacement_does_not_cross_an_outstanding_working_order(tmp_path
 
 
 def test_sub_minimum_residual_is_converged_within_venue_granularity(tmp_path: Path) -> None:
-    """A partial terminal fill can leave dust no venue-admissible order can
-    express (here 0.05 against a 0.1 qty step). Retrying an impossible order
-    only exhausts and pages; the item must classify as converged within venue
-    granularity and stay healthy without retries."""
+    """A partial terminal fill can leave dust no venue-admissible order can express
+    (here 0.05 against a 0.1 qty step). Retrying an impossible order only exhausts
+    and pages; the item must classify as converged and stay healthy without retries.
+    """
 
     adapter = ScriptedExecutionAdapter("partial_cancel", partial_qty=1.95)
     clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)

@@ -1,8 +1,5 @@
-"""Wedged-command detection.
-
-The state under test is the one where a symbol is frozen forever: the kernel
-suppresses all command generation while an order is working, and two ordinary
-events make "working" permanent. Nothing in the runtime notices today.
+"""Wedged-command detection: the kernel suppresses all command generation while an order is
+working, and two ordinary events make "working" permanent.
 """
 
 from __future__ import annotations

@@ -817,9 +817,8 @@ def build_execution_diagnostics(
         venue_order_id = str(ack.payload.get("venue_order_id") or "") if ack is not None else ""
         rejection_key = str(ack.payload.get("rejection_key") or "") if ack is not None else ""
         # A private fill can establish the semantic ACK before the HTTP create
-        # response returns. Prefer the supplemental create-response observation
-        # for request timing while keeping acceptance/order identity on the
-        # semantic ACK above.
+        # response returns, so timing comes from the create-response observation
+        # while acceptance and order identity stay on the semantic ACK above.
         local_ack_ts_ns = (
             _int_or_none(timing_event.payload.get("local_ack_ts_ns"))
             if timing_event is not None

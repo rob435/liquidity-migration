@@ -201,17 +201,16 @@ def _mtm_daily_curve(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame
     """Honest daily mark-to-market book curve.
 
     The engine books P&L on exit day only, which renders the sparse FC book as a
-    step function (2026-06-09 finding). This marks every open trade daily off the
-    symbol's daily close (entry day: close vs entry price; exit day: exit price vs
-    prior close, costs+funding booked there). Flat days are zero. Columns: date,
+    step function. This marks every open trade daily off the symbol's daily close
+    (entry day: close vs entry price; exit day: exit price vs prior close, with
+    costs and funding booked there). Flat days are zero. Columns: date,
     mtm_return, equity, drawdown.
 
-    NOTE: the daily marks do NOT telescope to the booked per-trade total once
-    ``notional_weight < 1``. The daily contributions are arithmetic returns scaled
-    by the weight, so they sum to the per-trade total only to O(nw*r^2) — material
-    for FC trades with 15-20% daily moves (2026-07-27 audit L20). The curve is
-    still the honest daily book path; it is not a per-trade reconciliation. Tie
-    the two out by distributing log-returns instead, if that is ever wanted.
+    The daily marks do NOT telescope to the booked per-trade total once
+    ``notional_weight < 1``: the contributions are arithmetic returns scaled by
+    the weight, so they sum to the per-trade total only to O(nw*r^2), which is
+    material at 15-20% daily moves. This is the daily book path, not a per-trade
+    reconciliation; distributing log-returns would tie the two out.
     """
     if trades.is_empty():
         return pl.DataFrame(
@@ -526,11 +525,8 @@ def run_long_native_research(
     except Exception:  # noqa: BLE001 - rendering must not fail the run
         mtm_metadata = {}
 
-    # Equity-vs-BTC PNG gives operators a comparable visual benchmark without a
-    # side-step renderer.
-    # The long-only sleeve fires sparse FOMO-chase setups so the strategy line is
-    # near-flat compared to BTC over the same window — that's the design (low DD,
-    # uncorrelated returns). For a purer view of strategy P&L use the CSVs.
+    # Equity-vs-BTC benchmark PNG. The sleeve fires sparse setups, so its line
+    # is near-flat against BTC by design; the CSVs show strategy P&L alone.
     chart_metadata: dict[str, Any] = {}
     if not equity.is_empty() and not raw_klines.is_empty():
         try:
@@ -1108,10 +1104,10 @@ def _run_long_pipeline(
         for symbol in list(open_positions):
             if _scan_position_exit(symbol, open_positions[symbol], through_ts):
                 exited.append(symbol)
-        # Keep every just-exited position available as a mark source while the
-        # chronological exit groups are submitted.  A wide scan can discover
-        # several exits at different timestamps; deleting them first makes the
-        # earliest account batch lose prices for positions that close later.
+        # Keep just-exited positions available as mark sources until the
+        # chronological exit groups are submitted: a wide scan can discover
+        # exits at several timestamps, and the earliest batch needs prices for
+        # the ones that close later.
         _flush_exits()
         for symbol in exited:
             del open_positions[symbol]
@@ -1246,14 +1242,9 @@ def _run_long_pipeline(
                     del open_positions[symbol]
 
     if open_positions:
-        # Mirror `_scan_all_positions`: collect the scan exits, flush every
-        # recorded exit ONCE, and only then drop them from `open_positions`.
-        # Deleting a scan-exited position immediately violated the mark-source
-        # invariant `_scan_all_positions` documents and enforces -- two positions
-        # scan-exiting at different timestamps in this final sweep made the
-        # earlier batch lack prices for the later symbol and
-        # `HistoricalAccountSession.submit_decisions` raised, aborting the whole
-        # research run (2026-07-27 audit M20).
+        # Same mark-source invariant as `_scan_all_positions`: collect the scan
+        # exits, flush every recorded exit once, and only then drop them from
+        # `open_positions`.
         force_closed: list[str] = []
         for symbol, pos in list(open_positions.items()):
             bars = bars_by_symbol.get(symbol)
@@ -1344,10 +1335,9 @@ def _finalize_trade(
         "funding_return": funding_return,
         "funding_mode": funding_mode,
         "funding_event_count": int(funding_event_count),
-        # The long sleeve does not track intra-hold price path, so MAE/MFE are
-        # NOT measured here. Emit NaN (not 0.0 — a fabricated zero reads as "no
-        # adverse excursion ever" and silently zeroes the H2 intra-hold MAE
-        # diagnostic; the consumer drops non-finite values as not-measured).
+        # No intra-hold price path is tracked, so MAE/MFE are unmeasured. NaN,
+        # not 0.0: consumers drop non-finite values, but a zero would read as
+        # "no adverse excursion ever".
         "net_return": net_return,
         "mae": float("nan"),
         "mfe": float("nan"),

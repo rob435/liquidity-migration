@@ -141,7 +141,7 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(2 * reference)
     assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.1 * reference)
     assert profile.account_risk.max_leverage == 2.0
-    # CARRY and LONG both carry real size now that B3 partitions the envelope.
+    # CARRY and LONG both carry real size because the envelope is partitioned.
     # CONTINUOUS is retired and shrunk to a token envelope rather than removed,
     # because the profile schema requires all three blocks.
     assert profile.carry.notional_multiplier == 1.0
@@ -172,8 +172,7 @@ def test_the_mainnet_partition_is_a_real_partition() -> None:
     assert sum(limit.max_initial_margin_usdt for limit in risk.sleeve_limits) <= (
         risk.max_initial_margin_usdt
     )
-    # Neither funded sleeve may reach the whole envelope on its own -- that is
-    # the entire content of B3.
+    # Neither funded sleeve may reach the whole envelope on its own.
     for sleeve in ("carry", "long"):
         assert shares[sleeve].max_gross_notional_usdt < risk.max_account_gross_notional_usdt
     # Retired CONTINUOUS has no mainnet unit; a token share, not an exemption.

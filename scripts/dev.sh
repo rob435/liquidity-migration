@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Non-operational developer entry point. This script never contacts a venue,
-# deploys, resets state, or grants runtime authority.
+# Non-operational developer entry point: doctor, lint, types, tests.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,6 +37,18 @@ EOF
 }
 
 cd "$ROOT_DIR"
+
+# One list, used by both `types` and `check`.
+MYPY_TARGETS=(
+  liquidity_migration
+  scripts/repo_doctor.py
+  scripts/build_trade_diagnostics.py
+  scripts/build_candidate_tape.py
+  scripts/check_fleet_liveness.py
+  scripts/check_demo_paper_agreement.py
+  scripts/measure_execution_twin_error.py
+)
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -54,12 +65,7 @@ case "$command" in
     exec "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests "$@"
     ;;
   types)
-    exec "$PYTHON_BIN" -m mypy \
-      liquidity_migration \
-      scripts/repo_doctor.py \
-      scripts/build_trade_diagnostics.py \
-      scripts/build_candidate_tape.py \
-      "$@"
+    exec "$PYTHON_BIN" -m mypy "${MYPY_TARGETS[@]}" "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest -q "$@"
@@ -70,11 +76,7 @@ case "$command" in
     echo "[dev] ruff"
     "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests
     echo "[dev] mypy"
-    "$PYTHON_BIN" -m mypy \
-      liquidity_migration \
-      scripts/repo_doctor.py \
-      scripts/build_trade_diagnostics.py \
-      scripts/build_candidate_tape.py
+    "$PYTHON_BIN" -m mypy "${MYPY_TARGETS[@]}"
     echo "[dev] pytest"
     "$PYTHON_BIN" -m pytest -q "$@"
     ;;

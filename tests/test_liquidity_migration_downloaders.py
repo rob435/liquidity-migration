@@ -183,7 +183,7 @@ def test_normalize_binance_open_interest_maps_period_and_values() -> None:
 
 
 def test_normalize_binance_open_interest_missing_values_are_null_not_zero() -> None:
-    # data-download-7: an ABSENT field must be null (genuinely-missing, dropped downstream), NOT a
+    # An ABSENT field must be null (genuinely-missing, dropped downstream), NOT a
     # fabricated 0.0 that would corrupt the OI-change series with a spurious 0->next jump.
     out = _normalize_binance_open_interest("BTCUSDT", [{"timestamp": "1000"}], period="1h")
     assert out[0]["open_interest"] is None
@@ -196,7 +196,7 @@ def test_normalize_binance_open_interest_missing_values_are_null_not_zero() -> N
 
 
 def test_normalize_binance_taker_flow_missing_side_is_null_not_zero() -> None:
-    # data-download-7: a malformed row (a side missing) emits nulls for the derived flow fields rather
+    # A malformed row (a side missing) emits nulls for the derived flow fields rather
     # than fabricating a zero buy/sell that would corrupt the signed-volume / imbalance series.
     out = _normalize_binance_taker_flow("BTCUSDT", [{"timestamp": "1000", "buyVol": "70"}], period="1h")
     row = out[0]
@@ -540,10 +540,10 @@ def test_download_symbol_dataset_skips_fetch_when_range_fully_cached(tmp_path) -
 
 
 def test_download_symbol_dataset_empty_fresh_fetch_is_not_marked_complete(tmp_path) -> None:
-    """data-download-4: a never-before-covered range that returns [] (a symbol that
-    lists mid-window, a transient empty REST response, or a provider hiccup) must
-    NOT be marked complete — otherwise it is skipped forever (permanent silent
-    coverage gap). The next refresh must re-fetch it."""
+    """A never-before-covered range that returns [] (mid-window listing, transient empty
+    REST response, provider hiccup) must not be marked complete, or it is skipped
+    forever. The next refresh must re-fetch it.
+    """
     calls: list[tuple[int, int]] = []
 
     def _fetch(s: int, e: int) -> list[dict]:
@@ -671,13 +671,11 @@ def test_download_symbol_dataset_fetches_full_range_when_no_coverage(tmp_path) -
 
 
 def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp_path, monkeypatch) -> None:
-    """data-download-1: Binance OI-hist / taker-flow only serve a rolling ~30-day
-    window (get_open_interest_hist / get_taker_buy_sell_volume clamp `start` to
-    now-30d internally). With clamp_window_days set, the success marker must be
-    keyed on the CLAMPED (actually-covered) start, NOT the full requested range —
-    otherwise the uncovered pre-30d prefix is claimed complete and skipped forever
-    (permanent silent coverage gap). The marker start must therefore be > the
-    requested start_ms when the request reaches before the rolling window."""
+    """Binance OI-hist / taker-flow only serve a rolling ~30-day window (``start`` is
+    clamped to now-30d internally). With ``clamp_window_days`` set, the success marker
+    must key on the CLAMPED range, not the full requested one, or the uncovered
+    pre-30d prefix is claimed complete and skipped forever.
+    """
     from liquidity_migration import binance
     from liquidity_migration.downloaders import _download_symbol_dataset, _marker_path
 
@@ -728,11 +726,11 @@ def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp
     assert covered_marker.exists()
 
 
-# --- audit2b: _normalize_binance_taker_flow non-finite / negative guard ------
+# --- _normalize_binance_taker_flow non-finite / negative guard --------------
 #
-# audit2b regression: _normalize_binance_taker_flow must guard non-finite /
-# negative taker volumes before computing the imbalance ratio, instead of
-# emitting a fabricated 0.0. A NaN/inf or negative buy/sell volume slips past the
+# _normalize_binance_taker_flow must guard non-finite / negative taker volumes
+# before computing the imbalance ratio, instead of emitting a fabricated 0.0.
+# A NaN/inf or negative buy/sell volume slips past the
 # `is None` check; `total = buy + sell` is then NaN or <= 0, so the
 # `(buy - sell) / total if total > 0 else 0.0` branch fabricates a 0.0 imbalance
 # (or a NaN) alongside a NaN/garbage signed volume — the spurious-zero corruption
@@ -791,7 +789,7 @@ def test_nan_volume_does_not_fabricate_zero_imbalance():
     )
     assert len(out) == 1
     r = out[0]
-    # OLD code: signed_volume_base is NaN and taker_imbalance is a fabricated 0.0.
+    # Unguarded, signed_volume_base is NaN and taker_imbalance a fabricated 0.0.
     assert r["taker_imbalance"] is None
     assert r["signed_volume_base"] is None
 
@@ -814,13 +812,12 @@ def test_negative_volume_does_not_fabricate_zero_imbalance():
         "BTCUSDT", [_row(9_000, "-3", "1")], period="1h"
     )
     r = out[0]
-    # OLD code: total = -2, total > 0 is False -> taker_imbalance fabricated as 0.0.
+    # Unguarded, total = -2, total > 0 is False -> taker_imbalance fabricated as 0.0.
     assert r["taker_imbalance"] is None
     assert r["signed_volume_base"] is None
 
 
-# --- relocated from test_audit_fix_b04.py (audit bucket b04) -----------------
-# ingestion-2: Bybit OI missing field is null, not a fabricated 0.0.
+# --- A missing Bybit OI field is null, not a fabricated 0.0 ------------------
 
 
 def test_bybit_open_interest_missing_field_is_null_not_zero() -> None:
@@ -846,7 +843,7 @@ def test_bybit_open_interest_value_falls_back_to_present_open_interest() -> None
     assert out[0]["open_interest_value"] == 42.0
 
 
-# --- ingestion-6: a literal "0" funding interval must not yield interval 0 --
+# --- A literal "0" funding interval must not yield interval 0 --
 def test_funding_interval_zero_string_falls_back_to_8h() -> None:
     # The `or 8` idiom failed here: int("0") == 0 is truthy as a STRING, so a 0h
     # interval would become 0 minutes and produce funding_rate_8h_equiv = inf.
@@ -869,9 +866,10 @@ def test_normalize_funding_zero_interval_does_not_emit_zero_minutes() -> None:
 
 
 def test_markers_supersede_instead_of_accumulating_forever(tmp_path: Path) -> None:
-    """Each daily refresh wrote a new marker per (symbol, dataset, suffix) and
-    never removed the one it supersedes: ~3.6k files a day, forever, all of them
-    re-scanned by every later coverage lookup (2026-07-27 audit L5)."""
+    """A new marker per (symbol, dataset, suffix) must supersede the one it replaces;
+    otherwise every daily refresh leaves thousands of files behind, all re-scanned by
+    every later coverage lookup.
+    """
 
     marker_dir = tmp_path / downloaders.MARKER_DIR / "klines_1h"
     for end_ms in (200, 300, 400):

@@ -1,12 +1,10 @@
 """Durable single-owner service boundary for account target execution.
 
-Strategy processes write immutable intent requests.  Exactly one account
-service claims them, obtains fresh market/account/rule snapshots, runs the
-shared kernel, and owns the execution adapter.  A crash after kernel commit is
-safe: replaying the request returns the same commands. Provider-capable
-adapters durably claim the pre-effect boundary; exposure commands with an
-ambiguous prior attempt are reconciled but never blindly resent, while
-reduce-only work remains retryable.
+Strategy processes write immutable intent requests; exactly one service claims
+them, takes fresh market/account/rule snapshots, runs the kernel, and owns the
+execution adapter. Replaying a request after a crash returns the same commands.
+Exposure commands with an ambiguous prior attempt are reconciled rather than
+resent; reduce-only work stays retryable.
 """
 
 from __future__ import annotations
@@ -168,10 +166,9 @@ class AccountTargetRequest:
     def replacement_intents(self) -> Mapping[tuple[str, str], RequestedIntent]:
         """Stable component identities used only for inbox coalescing.
 
-        Adapter kind identifies who authored a request, not the desired-state
-        component it replaces. In particular, a RISK-authored flat target must
-        supersede an older LONG/CONTINUOUS entry for the same target key and
-        symbol.
+        Keyed on the component replaced, not the authoring adapter, so a
+        RISK-authored flat supersedes an older LONG/CONTINUOUS entry for the
+        same target key and symbol.
         """
 
         return {
@@ -270,9 +267,7 @@ def prepare_account_request_intents(
 ) -> tuple[tuple[RequestedIntent, SleeveTargetIntent], ...]:
     """Apply the request provenance that the production owner journals.
 
-    Captured account replay must not maintain a second approximation of this
-    transformation.  Keeping it here gives the demo/paper service and the
-    offline production-kernel port one exact implementation.
+    Shared so replay and the live service cannot drift into two versions.
     """
 
     if type(request) is not AccountTargetRequest:
@@ -333,19 +328,17 @@ class AccountConvergenceItem:
     desired_since_ns: int
     age_ns: int
     retry_attempts: int
-    # ``None`` is deliberate for strict reductions: capital-preservation work
-    # remains durable and retryable, with a capped backoff, rather than being
-    # abandoned after an arbitrary number of definite non-fills.
+    # ``None`` for strict reductions: capital-preservation work stays durable
+    # and retryable with a capped backoff rather than being abandoned.
     retry_limit: int | None
     next_retry_ts_ns: int | None
     retryable: bool
     exhausted: bool
     reduce_only: bool
     status: str
-    # True when no venue-admissible order can express the residual (below
-    # minimum qty, or below minimum notional for an exposure increase). The
-    # position is as converged as venue granularity allows; retrying an
-    # inexpressible order could only exhaust and page.
+    # True when no venue-admissible order can express the residual (below min
+    # qty, or below min notional for an increase). As converged as venue
+    # granularity allows; retrying could only exhaust and page.
     venue_minimum_dust: bool = False
 
     @property
@@ -506,10 +499,9 @@ class AccountIntentInbox:
         if arrival_path.exists():
             return self._read_arrival_sequence_locked(filename=filename, request=request)
 
-        # Persist the high-water mark first. A crash before the sidecar merely
-        # leaves a gap; a retry allocates a later sequence. Persist the sidecar
-        # before exposing the request in pending, so a schedulable request can
-        # never exist without a durable local arrival order.
+        # High-water mark first (a crash before the sidecar just leaves a gap),
+        # then the sidecar before the request appears in pending, so nothing
+        # schedulable exists without a durable arrival order.
         sequence = self._read_arrival_counter_locked() + 1
         _atomic_replace(
             self._arrival_counter_path,
@@ -567,12 +559,11 @@ class AccountIntentInbox:
     ) -> DurableTargetRequestEvidence:
         """Re-read one exact publication under the inbox lock.
 
-        A publication path can move from pending through processing to a
-        terminal directory before its strategy callback returns.  Capture
-        evidence therefore cannot trust the originally returned pathname.  It
-        must locate exactly one current file, parse the request through the
+        A publication can move pending -> processing -> terminal before the
+        strategy callback returns, so the originally returned pathname is not
+        trustworthy: locate exactly one current file, parse it through the
         route-bound schema, compare every canonical field, and verify the
-        durable arrival sidecar while holding the same lock used for moves.
+        arrival sidecar, all under the same lock used for moves.
         """
 
         request.require_route(self.route)
@@ -636,11 +627,10 @@ class AccountIntentInbox:
     def unresolved_requests(self) -> tuple[AccountTargetRequest, ...]:
         """Return a locked snapshot of pending and claimed target requests.
 
-        Strategy producers use this only as a publication barrier for causal
-        stateful overlays.  Including ``processing`` is deliberate: a request
-        moved there may already be journal-accepted, but conservatively
-        blocking one extra producer cycle is safer than publishing a second
-        decision from the same predecessor state.
+        A publication barrier for causal stateful overlays. ``processing`` is
+        included: such a request may already be journal-accepted, and blocking
+        one extra producer cycle beats publishing a second decision from the
+        same predecessor state.
         """
 
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
@@ -758,12 +748,11 @@ class AccountIntentInbox:
     ) -> tuple[AccountTargetRequest, ...]:
         """Return the later request set whose final intents replace ``older``.
 
-        One atomic entry request may contain several components while safety
-        exits arrive as separate per-component requests. Requiring one later
-        request to cover the whole older batch lets that stale atomic entry
-        trade before the separate flats. Fold the later queue to its final
-        desired intent per component instead, while still preserving every
-        flat-to-reentry transition in queue order.
+        One atomic entry request may hold several components while safety exits
+        arrive as separate per-component requests, so requiring a single later
+        request to cover the whole older batch would let the stale entry trade
+        first. Fold the later queue to its final intent per component instead,
+        preserving flat-to-reentry transitions in queue order.
         """
 
         older_intents = older.replacement_intents
@@ -777,12 +766,10 @@ class AccountIntentInbox:
         for key in older_intents:
             replacement, request = latest[key]
             replacement_nonzero = float(replacement.intent.signed_notional_usdt) != 0.0
-            # A durable request to become flat is a safety transition, not a
-            # disposable intermediate state. Process it before any subsequent
-            # re-entry. Nonzero-to-nonzero changes also remain FIFO: arrival
-            # order alone cannot tell a genuine resize from a delayed stale
-            # producer. Processing both lets the kernel's creation revision
-            # accept the newer one and reject the stale one.
+            # A request to become flat is a safety transition, processed
+            # before any re-entry. Nonzero-to-nonzero stays FIFO too: arrival
+            # order cannot distinguish a real resize from a stale producer, so
+            # both go through and the kernel's revision rule decides.
             if replacement_nonzero:
                 return ()
             # Both nonzero-to-flat and duplicate flat-to-flat transitions are
@@ -857,9 +844,8 @@ class AccountIntentInbox:
             return processing, request, replacements
 
     def claim_next(self) -> tuple[Path, AccountTargetRequest] | None:
-        # Filenames, producer clocks, and exchange timestamps have no queue
-        # scheduling meaning. The inbox assigns a durable sequence under its
-        # own lock when each immutable request first arrives.
+        # Filenames, producer clocks, and exchange timestamps carry no
+        # scheduling meaning; the inbox assigns the arrival sequence.
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             for _, _, pending, request in self._queued():
                 processing = self.root / "processing" / pending.name
@@ -878,11 +864,10 @@ class AccountIntentInbox:
     ) -> tuple[Path, AccountTargetRequest] | None:
         """Claim the earliest risk-authored all-flat request safely out of FIFO.
 
-        A prior batch already committed to the journal may own commands whose
-        venue submission was interrupted. Never jump over that crash-replay
-        boundary. Uncommitted entries, however, cannot delay a later durable
-        safety flat; the flat's newer component revision makes those stale
-        entries non-reopenable when normal FIFO processing resumes.
+        Never jumps a batch already committed to the journal, whose commands
+        may have an interrupted venue submission. Uncommitted entries do not
+        delay the flat: its newer component revision makes them non-reopenable
+        when FIFO processing resumes.
         """
 
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
@@ -1112,18 +1097,12 @@ class PositionTruthProvider(Protocol):
 def _owner_batch_request_content_hash(*, batch_id: str, targets: Sequence[DesiredTarget]) -> str:
     """Stable idempotency identity for an owner-generated (non-strategy) batch.
 
-    Without an explicit ``request_content_hash`` the kernel falls back to hashing
-    the whole derived-target payload, which includes ``reference_price``.
-    Convergence and entry-unwind batches take that price from a fresh L2 book on
-    every call, so the documented crash-replay path -- same batch id, recomputed
-    hash -- raised ``AccountJournalIntegrityError`` on any price movement between
-    commit and replay instead of resubmitting the commanded order, aborting the
-    whole plans loop and leaving the owner BLOCKED with an open venue position
-    (2026-07-27 audit H5).
-
-    Hash only the commanded content. The reference price is evaluation evidence
-    recorded by the first transaction, exactly like the market, wallet, policy,
-    and rule snapshots the kernel already excludes for the same reason.
+    Hashes only the commanded content. The kernel's fallback hashes the derived
+    target payload including ``reference_price``, which convergence and
+    entry-unwind batches re-read from a fresh book each call, so crash replay
+    would raise ``AccountJournalIntegrityError`` on any price move. The
+    reference price is evaluation evidence, like the market/wallet/policy/rule
+    snapshots the kernel already excludes.
     """
 
     material = {
@@ -1154,9 +1133,9 @@ def _owner_batch_request_content_hash(*, batch_id: str, targets: Sequence[Desire
 class _ConvergencePlan:
     item: AccountConvergenceItem
     targets: tuple[Mapping[str, Any], ...]
-    # True only for a retry-exhausted, non-reduce-only desire whose symbol is
-    # flat with every command terminal and zero observed fill: the owner may
-    # unwind the desire to zero without touching any real exposure.
+    # Retry-exhausted, non-reduce-only desire whose symbol is flat with every
+    # command terminal and zero observed fill, so unwinding it to zero touches
+    # no real exposure.
     entry_unwind_eligible: bool = False
 
 
@@ -1214,12 +1193,11 @@ class AccountExecutionService:
         self.convergence_retry_backoff_ns = convergence_retry_backoff_ns
         self.convergence_retry_backoff_cap_ns = convergence_retry_backoff_cap_ns
         self.max_convergence_retries = max_convergence_retries
-        # First wall time each symbol was observed unconverged, cleared when it
-        # converges. Revision-based ages re-arm on every accepted desire
-        # republication, so periodic re-assertion of an unchanged target could
-        # suppress the grace-based health trip indefinitely; this latch cannot
-        # be reset by republication. In-memory: a restart grants one fresh
-        # grace window, which the ten-minute generation SLA already tolerates.
+        # First wall time each symbol was seen unconverged, cleared when it
+        # converges. Revision-based ages re-arm on every republication, so
+        # re-asserting an unchanged target could suppress the grace-based health
+        # trip forever; this latch cannot. In-memory, so a restart grants one
+        # fresh grace window.
         self._unconverged_first_observed_ns: dict[str, int] = {}
         if (
             max_market_age_ns < 0
@@ -1257,9 +1235,8 @@ class AccountExecutionService:
         )
 
     def _account_symbols(self, requested_symbols: set[str]) -> list[str]:
-        # Service-owned read path; copying the complete historical order map on
-        # every cycle makes long replays quadratic. Callers never receive or
-        # mutate this internal reference.
+        # Service-owned read path: copying the full order map every cycle makes
+        # long replays quadratic. The reference never escapes.
         state = self.kernel._state_ref()
         active_symbols = {
             str(target.get("symbol") or "").upper()
@@ -1416,10 +1393,9 @@ class AccountExecutionService:
 
     def handle(self, request: AccountTargetRequest) -> AccountServiceReceipt:
         request.require_route(self.route)
-        # Expiry is an admission rule for never-committed strategy work. Once
-        # the exact batch is durable in the kernel, replay must resume its
-        # commanded execution/convergence after a crash even if wall time has
-        # since crossed the original signal deadline.
+        # Expiry is an admission rule for never-committed work. Once the batch
+        # is durable, replay must resume its commanded execution even past the
+        # original signal deadline.
         batch_already_committed = request.batch_id in self.kernel._state_ref().processed_batches
         expiry_rejections: tuple[str, ...] = ()
         if not batch_already_committed:
@@ -1477,10 +1453,9 @@ class AccountExecutionService:
                         "breach_evidence_source": str(metadata.get("breach_evidence_source") or ""),
                     },
                 )
-        # First obtain only the books/rules named by this request. The kernel's
-        # state-derived proof then decides whether this is an exit-only batch.
-        # It repeats that proof inside the journal transaction, so this preview
-        # is an input-scope optimization, never authority to bypass entry risk.
+        # Fetch only the books/rules this request names; the kernel repeats its
+        # exit-only proof inside the transaction, so this is an input-scope
+        # optimization, not authority to bypass entry risk.
         market_inputs, snapshot, rules = self._execution_inputs(
             requested_symbols=requested_symbols,
             batch_id=request.batch_id,
@@ -1549,13 +1524,10 @@ class AccountExecutionService:
         )
 
     def _convergence_plans(self) -> tuple[_ConvergencePlan, ...]:
-        # `journal.events()` returns a full copy and the sequence->event dict was
-        # an O(journal) rebuild whose only consumer was a single lookup. On a
-        # long-lived journal at the deployed sizing that was two full scans per
-        # ~0.1s pass of the single-owner hot path (2026-07-27 audit M22). Journal
-        # verification already guarantees contiguous 1-based sequences, so the
-        # coherent owner-internal snapshot plus a bounds-checked direct index
-        # replaces both.
+        # `journal.events()` copies the whole journal, and a sequence->event
+        # dict is an O(journal) rebuild for a single lookup. Sequences are
+        # contiguous and 1-based, so the coherent owner-internal snapshot plus a
+        # bounds-checked direct index replaces both.
         events, state = self.kernel._snapshot_ref()
         now_ns = self.clock.wall_time_ns()
         tolerance = self.risk_policy.quantity_tolerance
@@ -1613,9 +1585,8 @@ class AccountExecutionService:
             if active:
                 selected = active
             else:
-                # Once every component is flat, retain only the zero targets
-                # from the latest accepted revision. They are sufficient to
-                # reassert flat without replaying an unbounded symbol history.
+                # All components flat: keep only the latest revision's zero
+                # targets, enough to reassert flat without replaying history.
                 selected = [
                     row
                     for row in symbol_desires
@@ -1625,9 +1596,8 @@ class AccountExecutionService:
                 dict(payload) for _, payload, _ in sorted(selected, key=lambda row: row[0])
             )
             if not target_rows and abs(target_qty) <= tolerance and abs(position_qty) > tolerance:
-                # Reconstructed exposure with no component owner is an orphan.
-                # Desired account state is flat; the only automatic action is a
-                # reducing target, never an inferred entry or sign flip.
+                # Orphan: reconstructed exposure with no component owner. The
+                # only automatic action is a reducing target.
                 target_rows = (
                     {
                         "decision_key": f"account-convergence:orphan:{symbol}",
@@ -1728,12 +1698,10 @@ class AccountExecutionService:
                 status = "retry_backoff"
             else:
                 status = "retry_due"
-            # A retry-exhausted entry residual is only safe to unwind when the
-            # accepted nonzero desires provably never filled: the symbol is
-            # flat, every command since the earliest active desire revision is
-            # terminal, and no fill was observed for the symbol since then.  A
-            # partially filled entry carries real exposure and must stay with
-            # the ordinary exit machinery, so it never qualifies.
+            # Only unwind a retry-exhausted entry residual when the nonzero
+            # desires provably never filled: symbol flat, every command since
+            # the earliest active desire revision terminal, no fill observed
+            # since. A partially filled entry carries real exposure.
             entry_unwind_eligible = (
                 exhausted
                 and can_rebuild
@@ -1759,12 +1727,10 @@ class AccountExecutionService:
                 projected_signed_qty=projected_qty,
                 residual_signed_qty=residual,
                 desired_since_ns=desired_since_ns,
-                # A future desire timestamp (wall-clock regression between the
-                # journal write and this read) must fail closed like every
-                # other freshness check, not report a fresh age-zero item.
-                # The age also honors the unconverged-first-observed latch so
-                # periodic republication of an unchanged desire cannot keep
-                # resetting the grace clock while a residual persists.
+                # A future desire timestamp (clock regression between journal
+                # write and read) fails closed rather than reporting age zero.
+                # The unconverged-first-observed latch also bounds this so
+                # republication cannot keep resetting the grace clock.
                 age_ns=max(
                     (now_ns - desired_since_ns if now_ns >= desired_since_ns else self.convergence_health_grace_ns),
                     now_ns - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
@@ -1801,11 +1767,10 @@ class AccountExecutionService:
     ) -> bool:
         """True when no venue-admissible order can express the residual.
 
-        A partial terminal fill can leave dust smaller than the venue's
-        minimum order (minimum qty always; minimum notional for an exposure
-        increase). The position is then as converged as venue granularity
-        allows, and retrying an inexpressible order could only exhaust and
-        page. Unknown rules or prices fail toward the ordinary retry path.
+        A partial terminal fill can leave dust below the venue minimum (qty
+        always; notional for an exposure increase), which is as converged as
+        venue granularity allows. Unknown rules or prices fall back to the
+        ordinary retry path.
         """
 
         try:
@@ -1842,11 +1807,9 @@ class AccountExecutionService:
     ) -> bool:
         """True when the symbol provably has zero entry fill since a revision.
 
-        Positions only change through FILL events, so the proof is direct: no
-        fill event for the symbol at or after ``since_sequence`` and every
-        command created since then terminal with zero filled quantity.  Any
-        non-terminal command or observed fill fails closed — the residual then
-        stays with the ordinary retry/exit machinery and manual recovery.
+        Positions only change through FILL events, so: no fill for the symbol
+        at or after ``since_sequence``, and every command created since then
+        terminal with zero filled quantity. Anything else fails closed.
         """
 
         for event in events:
@@ -1983,14 +1946,12 @@ class AccountExecutionService:
     ) -> TargetBatchResult:
         """Unwind a retry-exhausted, provably unfilled entry desire to zero.
 
-        Without this receipt the accepted nonzero desire reserves its symbol
-        and a capacity slot forever: the canonical row stays ``target_pending``
-        while nothing can ever fill it.  The unwind is an ordinary owner zero
-        revision — deliberately without the ``account_convergence_retry``
-        marker — so the kernel advances the durable desire registry and the
-        canonical projection maps the lifecycle to a terminal non-reserving
-        status.  It is journaled with an explicit reason and does not suppress
-        the convergence health trip that already fired for the exhaustion.
+        Otherwise the accepted nonzero desire reserves its symbol and capacity
+        slot forever at ``target_pending``. This is an ordinary owner zero
+        revision *without* the ``account_convergence_retry`` marker, so the
+        kernel advances the desire registry and the lifecycle reaches a
+        terminal non-reserving status. It does not suppress the convergence
+        health trip that fired for the exhaustion.
         """
 
         requested_symbols = {plan.item.symbol}
@@ -2026,9 +1987,9 @@ class AccountExecutionService:
                     },
                 )
             )
-        # Zero targets against a flat symbol are strictly risk reducing; the
-        # kernel re-proves that inside the transaction, so a fill or command
-        # racing this pass rejects the batch instead of zeroing exposure.
+        # Zero targets against a flat symbol are strictly risk reducing. The
+        # kernel re-proves it inside the transaction, so a racing fill rejects
+        # the batch instead of zeroing exposure.
         self._require_reduction_position_truth(requested_symbols)
         result = self.kernel.submit_targets(
             batch_id=batch_id,
@@ -2058,9 +2019,8 @@ class AccountExecutionService:
         plans = self._convergence_plans()
         now_ns = self.clock.wall_time_ns()
         # Crash after journal commit but before ACK: replay the exact batch and
-        # command id. The execution driver resubmits only work that is provably
-        # safe: reductions may retry, while a prior ambiguous entry attempt or
-        # an over-age never-attempted entry fails closed for reconciliation.
+        # command id. The driver resubmits only provably safe work -- reductions
+        # retry, an ambiguous or over-age entry fails closed.
         for plan in plans:
             item = plan.item
             if item.retry_attempts <= 0:
@@ -2076,17 +2036,15 @@ class AccountExecutionService:
             unresendable = [
                 wedge
                 for wedge in wedged_commands(commanded_orders, now_ns=now_ns)
-                # Reduce-only work stays retryable by design and must never be
-                # stepped over: the driver resends it deliberately.
+                # Reduce-only work is retryable and must not be stepped over.
                 if not wedge.reduce_only
             ]
             if unresendable:
-                # B15b. Replaying this plan raises AmbiguousExposureSubmission
-                # every pass, and because this loop returns on the first
-                # commanded plan, one wedged early-alphabet symbol starved
-                # convergence for every other symbol in the book. The wedge is
-                # not resolvable here — only an operator-authorized transition
-                # can terminalize it — so step over it and keep converging.
+                # Replaying this plan raises AmbiguousExposureSubmission every
+                # pass, and this loop returns on the first commanded plan, so
+                # one wedged symbol would starve the rest of the book. Only an
+                # operator-authorized transition can terminalize the wedge, so
+                # step over it and keep converging.
                 _logger.error(
                     "convergence skipped wedged batch %s (%s); it needs "
                     "`ops.sh wedged-command` to leave the commanded state",
@@ -2106,9 +2064,8 @@ class AccountExecutionService:
             if plan.item.retryable and plan.item.next_retry_ts_ns is not None and plan.item.next_retry_ts_ns <= now_ns
         ]
         if not due:
-            # With no risk-reducing or retryable work pending, retire at most
-            # one retry-exhausted entry that provably never filled. Anything
-            # partially filled or still ambiguous stays exhausted and loud.
+            # Nothing else due: retire at most one retry-exhausted entry that
+            # provably never filled. Partially filled or ambiguous stays loud.
             unwindable = [plan for plan in plans if plan.entry_unwind_eligible]
             if not unwindable:
                 return None
@@ -2116,8 +2073,8 @@ class AccountExecutionService:
             plan = unwindable[0]
             batch_id = f"account-convergence/{plan.item.symbol}/{plan.item.generation}/entry-unwind"
             return self._submit_entry_unwind(plan, batch_id=batch_id)
-        # Close/reduce risk before any retry that adds exposure, then preserve a
-        # stable age/symbol order for deterministic multi-symbol convergence.
+        # Reduce risk before any retry that adds exposure; age/symbol order
+        # keeps multi-symbol convergence deterministic.
         due.sort(
             key=lambda plan: (
                 not plan.item.reduce_only,
@@ -2143,10 +2100,9 @@ class AccountExecutionService:
         strict_arrival = expected_request_id is not None
         strict_claimed: tuple[Path, AccountTargetRequest] | None = None
         if strict_arrival and not expected_request_id:
-            # The readiness pass observed an empty inbox. A request may arrive
-            # before this call, but it has not had any book-readiness check and
-            # must remain pending until the next pass. Convergence retries are
-            # independent canonical work and remain safe to service.
+            # Readiness saw an empty inbox. Anything arriving since has had no
+            # book-readiness check and waits for the next pass; convergence
+            # retries are independent and stay safe to service.
             self.converge_once()
             return None
         committed_claim: tuple[Path, AccountTargetRequest] | None = None
@@ -2155,11 +2111,10 @@ class AccountExecutionService:
             if expected is None:
                 return None
             path, request, replacements = expected
-            # A request whose kernel batch already committed must REPLAY, never
-            # supersede: its journaled commands may be partially or wholly
-            # unsubmitted after a crash, and completing it as superseded would
-            # strand them in working state forever (convergence then reports
-            # "working" and can never flatten the venue position they opened).
+            # A request whose batch already committed must REPLAY, not
+            # supersede: its journaled commands may be unsubmitted after a
+            # crash, and completing it as superseded strands them working
+            # forever with no way to flatten the position they opened.
             if replacements and request.batch_id not in self.kernel._state_ref().processed_batches:
                 replacement_ids = tuple(item.request_id for item in replacements)
                 state = self.kernel._state_ref()
@@ -2187,8 +2142,8 @@ class AccountExecutionService:
                 break
             path, request, replacements = superseded
             if request.batch_id in self.kernel._state_ref().processed_batches:
-                # Same replay-over-supersede rule as the strict path: handle
-                # this committed request now; later queue entries wait their turn.
+                # Replay-over-supersede, as in the strict path: handle this
+                # committed request now, later entries wait.
                 committed_claim = (path, request)
                 break
             replacement_ids = tuple(item.request_id for item in replacements)
@@ -2222,10 +2177,9 @@ class AccountExecutionService:
                 inbox.fail(path, error=exc)
             else:
                 inbox.release(path)
-            # A deterministically failing queue head must not starve canonical
-            # convergence: pending reduce-only closes for other symbols are
-            # independent work and stay due while the head retries forever.
-            # Convergence failures here must not mask the original cause.
+            # A failing queue head must not starve convergence: reduce-only
+            # closes for other symbols stay due while it retries. A failure
+            # here must not mask the original cause.
             try:
                 self.converge_once()
             except Exception:  # noqa: BLE001 - reported via the raised head failure

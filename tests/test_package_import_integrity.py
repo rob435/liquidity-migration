@@ -1,14 +1,9 @@
 """Guards against circular-import regressions in the active module split.
 
-The public-data helpers and active standalone `volume_events_charts` /
-`volume_events_pit` helpers are imported by live long/continuous paths.
-Importing a sibling FIRST in a fresh process used to deadlock on partially
-initialized shared modules; `liquidity_migration/__init__.py` preloads the
-needed hubs/helpers to break it. These tests pin that contract.
-
-The imports MUST run in a subprocess: once a hub is loaded in the pytest process
-the cycle is masked, so an in-process `import` would pass even if the bug
-returned.
+Importing a sibling hub first in a fresh process deadlocks on partially initialized
+shared modules; ``liquidity_migration/__init__.py`` preloads the needed hubs to break
+it. The imports MUST run in a subprocess: once a hub is loaded in the pytest process the
+cycle is masked and an in-process import would pass even with the bug back.
 """
 
 from __future__ import annotations

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Append the financed-longs rolling forward ledger (one row per config-day).
 
-The Lane-2 recipe for the four registered financed-longs configs
-(``lane2_carry_hold_v1``, ``lane2_carry_hold_v2``,
-``lane2_financed_leaders_v1``, ``lane2_financed_leaders_binance_v1``) is one
+The Lane-2 recipe for the registered financed-longs configs (``DEFAULT_CONFIGS``
+below: ``lane2_carry_hold_v1``, ``lane2_carry_hold_v2``, ``lane2_carry_hold_v3``,
+``lane2_funding_spread_v1``, ``lane2_financed_leaders_v1``,
+``lane2_financed_leaders_binance_v1``) is one
 score row per completed UTC day; only days strictly after each config's
 registration commit date count as forward evidence. This tool materializes
 that ledger append-first from a cross-venue panel:
@@ -11,13 +12,12 @@ that ledger append-first from a cross-venue panel:
 * existing (date, config_id) rows are never rewritten — receipts, not state;
 * every scored panel day is written (seen-data rows carry
   ``forward_eligible=false``) so the ledger is self-describing;
-* the carry-hold sizing experiment gets a derived row
-  ``carry_hold_v2_minus_v1`` (paired daily differential, the primary v2
-  comparison per the v2 registration).
+* the carry-hold sizing experiments get derived rows (``DIFF_PAIRS``):
+  ``carry_hold_v2_minus_v1`` and ``carry_hold_v3_minus_v2``, paired daily
+  differentials, the primary comparison each registration declares.
 
-The panel is the input: extending it in time is ``scripts/ops.sh
-research-refresh`` + ``scripts/build_cross_venue_panel.py`` territory, not
-this tool's. Research-only; no venue access, no operational authority.
+Extending the input panel in time belongs to ``scripts/ops.sh research-refresh``
+and ``scripts/build_cross_venue_panel.py``, not here.
 """
 
 from __future__ import annotations

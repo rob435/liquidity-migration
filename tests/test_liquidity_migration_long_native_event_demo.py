@@ -81,7 +81,7 @@ def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
     strategy = long_v11a_profile()
     unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
-    # audit2c: worst case now also folds the 1.5x weekend tilt (and the <=1.0
+    # The worst case also folds the 1.5x weekend tilt (and the <=1.0
     # vol-parity weight), so the projection is 1.25 * 1.5 = 1.875, not 1.25.
     assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.875)
     with pytest.raises(ValueError, match="projected full-book initial margin"):
@@ -90,7 +90,7 @@ def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
 
 def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     strategy = long_v11a_profile()
-    # audit2c: the 4x config used to project exactly 0.50 and pass; once the 1.5x
+    # The 4x config projects exactly 0.50 without the tilt; with the 1.5x
     # weekend tilt is modeled it projects 0.75 and is correctly rejected. A 2x
     # config (0.10*2*1.25*1.5 = 0.375) is the new headroom-respecting "safe" case.
     safe = LongNativeDemoCycleConfig(
@@ -156,8 +156,7 @@ def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
 
 
 def test_vol_target_scale_volup125() -> None:
-    """volup125 (operator-promoted 2026-06-09): the cap is 1.25 — mild scale-UP in calm
-    regimes, de-risk unchanged. Receipt: long-volup-candidate-2026-06-09.md."""
+    """volup125: the cap is 1.25 -- mild scale-up in calm regimes, de-risk unchanged."""
     from liquidity_migration.long_native import _vol_target_scale
 
     cfg = long_v11a_profile()
@@ -246,8 +245,7 @@ def _build_features_without_fc_signal(*, symbol: str, signal_ts_ms: int, signal_
 
 
 def test_sniper_retrace_enters_when_live_price_reaches_threshold() -> None:
-    """signal_close=100, retrace_threshold=99 (1% below), live_price=98.5
-    → entry fires with reason='sniper_retrace'."""
+    """signal_close=100, retrace_threshold=99 (1% below), live_price=98.5 → entry fires with reason='sniper_retrace'."""
     strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000  # not too far in past
     now = signal_ts + 2 * MS_PER_HOUR  # 2h after signal, well inside 6h window
@@ -416,8 +414,7 @@ def test_stale_signal_beyond_24h_is_dropped() -> None:
         max_new_entries=5,
     )
     assert candidates == []
-    # audit-iter3: a >24h signal is now attributed to the stale_signal counter (it was
-    # previously mis-counted as no_signal, leaving stale_signal stuck at 0).
+    # A >24h signal is attributed to the stale_signal counter, not no_signal.
     assert skips["stale_signal"] == 1
     assert skips["no_signal"] == 0
 
@@ -589,8 +586,10 @@ def test_plan_time_stop_exits_only_for_expired_long_positions() -> None:
 
 
 def test_long_entry_excludes_incomplete_today_bar() -> None:
-    """long-sleeve-1: the current, still-forming daily bar has a FUTURE day-END ts and must NOT be
-    eligible — firing FC on a not-yet-closed bar is look-ahead vs the backtest's closed-bar signal."""
+    """The current, still-forming daily bar has a FUTURE day-END ts and must not be
+    eligible: firing on a not-yet-closed bar is look-ahead against the backtest's
+    closed-bar signal.
+    """
     from liquidity_migration.long_native import LongNativeConfig
     from liquidity_migration.long_native_event_demo import _select_long_entry_candidates
 
@@ -646,12 +645,9 @@ def test_long_demo_cycle_summary_includes_key_fields() -> None:
 
 
 def test_long_kline_universe_fetcher_scopes_to_top_n_by_turnover() -> None:
-    """Long daemon's kline manager must NOT bootstrap all 567 USDT-perps.
-
-    The long sleeve only trades the top-10 by 24h turnover; scoping the
-    kline universe to the top-50 keeps memory under the systemd cap (was
-    OOM-killing at 1G with the full universe) while leaving 5x rank-shift
-    headroom. Anything beyond the top-50 falls back to per-cycle REST.
+    """The long daemon's kline manager must not bootstrap all 567 USDT-perps: the
+    sleeve trades the top-10 by 24h turnover, so scoping to the top-50 keeps memory
+    under the systemd cap with 5x rank-shift headroom. Beyond that, per-cycle REST.
     """
     from liquidity_migration.long_native_event_demo_daemon import (
         _LONG_KLINE_UNIVERSE_SIZE,
@@ -680,9 +676,9 @@ def test_long_kline_universe_fetcher_scopes_to_top_n_by_turnover() -> None:
 
 
 def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
-    """Universe fetch errors must not crash the manager — empty list lets
-    the manager bootstrap nothing and the cycle's REST fallback supplies
-    everything that day."""
+    """A universe fetch error must not crash the manager: an empty list bootstraps
+    nothing and the cycle's REST fallback supplies everything that day.
+    """
     from liquidity_migration.long_native_event_demo_daemon import (
         _build_long_kline_universe,
     )
@@ -695,9 +691,10 @@ def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
 
 
 def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
-    """long-sleeve-9: the extracted ``_compute_long_order_sizing`` helper must reproduce the
-    prior inline block byte-for-byte — base per-position notional * the de-risk-only vol-target
-    scalar keyed on the LATEST non-null ``btc_rv_30`` (after sorting by ts_ms)."""
+    """``_compute_long_order_sizing`` reproduces the prior inline block byte-for-byte:
+    base per-position notional * the de-risk-only vol-target scalar keyed on the
+    latest non-null ``btc_rv_30`` after sorting by ts_ms.
+    """
     from liquidity_migration.long_native import _vol_target_scale
     from liquidity_migration.long_native_event_demo import (
         _compute_long_order_sizing,
@@ -856,10 +853,11 @@ def test_registered_long_profile_carries_live_kernel_identity_and_leverage() -> 
 
 
 def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
-    """ls-4: in steady state (every name has a finite 90d-median) the helper re-selects
-    the SAME top-N-by-median set that build_long_features already wrote to in_universe, so
-    it is a no-op byte-match (fallback_count == 0). This is the consistency guarantee with
-    the backtest's own universe selection."""
+    """In steady state (every name has a finite 90d median) the helper re-selects the
+    same top-N-by-median set ``build_long_features`` already wrote to ``in_universe``,
+    so it is a no-op byte match (fallback_count == 0) -- the consistency guarantee
+    with the backtest's own universe selection.
+    """
     from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
@@ -890,9 +888,10 @@ def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
 
 
 def test_median_universe_selection_cold_start_backfills_by_24h() -> None:
-    """ls-4 cold start: when fewer than N names have a finite median (warm-up, <90 daily
-    bars), the remainder is backfilled by 24h turnover so the book is never zeroed, and the
-    backfill count is surfaced (universe_fallback_24h > 0)."""
+    """Cold start: when fewer than N names have a finite median (<90 daily bars), the
+    remainder is backfilled by 24h turnover so the book is never zeroed, and the
+    backfill count is surfaced (universe_fallback_24h > 0).
+    """
     from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
@@ -913,8 +912,9 @@ def test_median_universe_selection_cold_start_backfills_by_24h() -> None:
 
 
 def test_median_universe_selection_noop_without_median_column() -> None:
-    """ls-4: a features frame lacking turnover_median_90d (degenerate) is returned unchanged
-    with fallback 0 — never crashes the cycle."""
+    """A features frame lacking ``turnover_median_90d`` is returned unchanged with
+    fallback 0, never crashing the cycle.
+    """
     from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
 
     feat = pl.DataFrame([{"ts_ms": 1, "symbol": "x", "turnover_quote": 1.0, "in_universe": True}])
@@ -923,13 +923,13 @@ def test_median_universe_selection_noop_without_median_column() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# audit2c — projected-IM guard models the LIVE worst-case per-position notional #
+# The projected-IM guard models the live worst-case per-position notional      #
 # --------------------------------------------------------------------------- #
 def test_guard_now_rejects_promoted_4x_config_that_used_to_pass() -> None:
-    """The promoted strategy (gross_exposure=1.0, max_concurrent_positions=10,
-    entry_leverage=10) with notional_multiplier=4.0 used to project EXACTLY 0.50
-    full-book IM and pass the 50% ceiling. With the 1.5x weekend tilt modeled it
-    projects 0.75 and must be rejected."""
+    """gross_exposure=1.0, max_concurrent_positions=10, entry_leverage=10 with
+    notional_multiplier=4.0 projects exactly 0.50 full-book IM without the weekend
+    tilt and 0.75 with it, so modeling the 1.5x tilt must reject it.
+    """
     strategy = long_v11a_profile()
     assert strategy.gross_exposure == pytest.approx(1.0)
     assert strategy.max_concurrent_positions == 10
@@ -948,16 +948,15 @@ def test_guard_now_rejects_promoted_4x_config_that_used_to_pass() -> None:
     # full book = 0.75 * 10 positions / 10x leverage = 0.75 (was 0.50).
     assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.75)
 
-    # The guard now correctly REJECTS what it previously approved at exactly 0.50.
+    # The guard rejects what an untilted projection puts at exactly 0.50.
     with pytest.raises(ValueError, match="projected full-book initial margin"):
         _validate_long_demo_config(demo, strategy)
 
 
 def test_guard_models_weekend_and_unit_position_weight_factors() -> None:
-    """Worst-case order notional = per_order * vol_scale * weekend_mult * 1.0.
-
-    Pins each factor so a regression that drops the weekend tilt (the old bug) or
-    the unit position-weight assumption fails here."""
+    """Worst-case order notional = per_order * vol_scale * weekend_mult * 1.0; each
+    factor is pinned so a regression that drops the weekend tilt fails here.
+    """
     strategy = long_v11a_profile()
     demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
     projection = projected_long_initial_margin_pct_equity(demo, strategy)
@@ -972,9 +971,9 @@ def test_guard_models_weekend_and_unit_position_weight_factors() -> None:
 
 
 def test_weekend_mult_one_low_multiplier_still_passes() -> None:
-    """A config with weekend_size_mult=1.0 and a low multiplier is below the
-    ceiling and must still be accepted (the guard only tightens where the live
-    book is actually levered up by the weekend tilt)."""
+    """A config with weekend_size_mult=1.0 and a low multiplier is below the ceiling and
+    still accepted -- the guard only tightens where the book is actually levered up.
+    """
     strategy = replace(long_v11a_profile(), weekend_size_mult=1.0)
     demo = LongNativeDemoCycleConfig(
         notional_multiplier=2.0,
@@ -994,9 +993,9 @@ def test_weekend_mult_one_low_multiplier_still_passes() -> None:
 
 
 def test_weekend_mult_below_one_does_not_relax_guard() -> None:
-    """A weekend tilt < 1.0 would size DOWN, but a guard must never use it to
-    relax the worst case below the no-tilt baseline — the max(1.0, ...) floor
-    keeps the projection conservative."""
+    """A weekend tilt < 1.0 sizes DOWN, but the max(1.0, ...) floor keeps the worst-case
+    projection at or above the no-tilt baseline.
+    """
     strategy = replace(long_v11a_profile(), weekend_size_mult=0.5)
     demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
     projection = projected_long_initial_margin_pct_equity(demo, strategy)
@@ -1452,8 +1451,7 @@ def test_paper_cycle_uses_account_inbox_and_never_writes_idealized_fill(
 
 
 def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
-    """Minimal feature row that passes detect_pattern_fomo_chase (mirrors the
-    long_native_event_demo test fixture)."""
+    """Minimal feature row that passes detect_pattern_fomo_chase (mirrors the long_native_event_demo test fixture)."""
     return pl.DataFrame(
         [
             {
@@ -1521,10 +1519,10 @@ def test_live_weekend_size_tilt_matches_backtest() -> None:
 
 
 def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() -> None:
-    """audit-iter1 long-3: a daily feature row is stamped at the day END, so a still-
-    forming UTC day yields a FUTURE-stamped bar (> snapshot_ts_ms). Entries fire from
-    the latest CLOSED bar, so the re-selection (and its telemetry) must target that
-    bar, not the future partial one. The old code keyed on the unconditional max ts."""
+    """A daily feature row is stamped at the day END, so a still-forming UTC day yields
+    a bar stamped after ``snapshot_ts_ms``. Entries fire from the latest CLOSED bar,
+    so the re-selection and its telemetry must target that bar, not the partial one.
+    """
     from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000

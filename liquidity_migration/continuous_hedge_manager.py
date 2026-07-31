@@ -1,16 +1,14 @@
 """Pure BTC/ETH beta-hedge target calculator for the continuous book.
 
-A periodic target-position manager that holds small LONG BTC/ETH positions sized to the continuous
-short book's causal rolling beta, market-neutralizing its uncompensated alt-season
-exposure. The module only calculates targets. The account execution owner handles
-venue rules, orders, fills, protection, and attribution.
+Holds small LONG BTC/ETH positions sized to the continuous short book's causal
+rolling beta, neutralizing its uncompensated alt-season exposure. This module
+only calculates targets; the account execution owner handles venue rules,
+orders, fills, protection, and attribution.
 
 Sizing uses the profile's two-factor hedge rule and a commit-owned immutable
 historical model prior. The runtime does not extend that prior: the bounded demo
 data and current account projection do not reconstruct the strategy's causal
 per-unit daily return, funding, and costs.
-
-This is a sizing model, not alpha proof or venue authorization.
 """
 
 from __future__ import annotations
@@ -217,13 +215,12 @@ def _beta_window_joint_observation_count(
     eth_returns: list[float | None],
     hedge_rule: ContinuousHedgeRule,
 ) -> int:
-    """Joint BTC+ETH observation count over the trailing window the 2f beta
-    actually uses (``compute_hedge_betas_2f``: rows in ``[lo, end)`` where both legs
-    are known, with ``end = len - beta_extra_lag_days`` and
-    ``lo = max(0, end - beta_window_days)``).
+    """Joint BTC+ETH observation count over the trailing window the 2f beta uses
+    (rows in ``[lo, end)`` where both legs are known, ``end = len -
+    beta_extra_lag_days``, ``lo = max(0, end - beta_window_days)``).
 
-    Using the full-series count can miss a sparse trailing window and leave the
-    book unhedged when the two-factor estimator returns zero betas."""
+    A full-series count can miss a sparse trailing window and leave the book
+    unhedged when the two-factor estimator returns zero betas."""
     end = len(btc_returns) - int(hedge_rule.beta_extra_lag_days)
     if end <= 0:
         return 0
@@ -266,14 +263,13 @@ def compute_hedge_decision_2f(
 ) -> HedgeDecision2F:
     """Pure two-leg hedge sizing for one target reconciliation (no orders, no I/O).
 
-    Per-leg ratios come from ``compute_continuous_hedge_ratios_2f``. If the joint
-    BTC+ETH observation count WITHIN THE TRAILING BETA WINDOW is below
-    ``beta_min_obs`` the twin returns (0, 0); in that case this falls back to the
-    single-leg BTC decision so a thin ETH window can never leave the book unhedged.
-    The fallback gate is measured over the same trailing window the beta uses (not
-    the full series) so an ETH-thin window with a deep full history still falls
-    back instead of silently producing a zero hedge. The total is
-    hard-capped at ``max_hedge_equity_frac`` (legs scaled proportionally).
+    Per-leg ratios come from ``compute_continuous_hedge_ratios_2f``. When the
+    joint BTC+ETH count within the trailing beta window is below
+    ``beta_min_obs`` the twin returns (0, 0) and this falls back to the
+    single-leg BTC decision, so a thin ETH window cannot leave the book
+    unhedged. The gate uses that same trailing window, not the full series, so
+    an ETH-thin window with deep history still falls back. The total is capped
+    at ``max_hedge_equity_frac`` with legs scaled proportionally.
     """
     from .continuous_rebalance import plan_continuous_hedge_resize
 

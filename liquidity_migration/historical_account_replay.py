@@ -607,11 +607,9 @@ class HistoricalAccountSession:
                 return tuple(results)
             results.append(result)
             if not result.accepted:
-                # Exposure-increasing residual convergence is entry-like.  A
-                # capital, health, market, or rules gate may validly leave the
-                # already-accepted desired state unresolved for a later owner
-                # pass; do not relabel that admission decision as an exit
-                # failure or force it through.
+                # Residual convergence is entry-like, so a capital, health,
+                # market, or rules gate may validly leave the accepted desired
+                # state for a later owner pass. Not an exit failure.
                 return tuple(results)
             state = self.kernel._state_ref() if self.kernel is not None else None
             execution_rejection_keys: list[str] = []

@@ -111,12 +111,9 @@ class AccountProtectionEngine:
             if bool(market.metadata.get("sequence_gap")):
                 continue
             anchor = anchors.get(target_key)
-            # A strategy TARGET is not a fill. Require the component's entry
-            # commands to be beyond racing before a software component close
-            # can supersede them: either completely filled, or terminal with a
-            # real observed fill (a partially-filled-then-cancelled entry holds
-            # a live position that must not lose stop/TP evaluation forever —
-            # no working remainder can trade after a terminal status).
+            # A close may only supersede entry commands that are past racing:
+            # fully filled, or terminal with an observed fill (a partially
+            # filled then cancelled entry still holds a live position).
             if (
                 anchor is None
                 or not (
@@ -169,10 +166,8 @@ class AccountProtectionEngine:
             request = AccountTargetRequest(
                 request_id=request_id,
                 batch_id=request_id,
-                # Inbox scheduling is based on its own durable arrival sequence,
-                # while the target revision records actual local request
-                # creation. Never reuse the older exchange tick as the
-                # revision of this safety-flat decision.
+                # The revision records local request creation, not the older
+                # exchange tick; inbox scheduling uses its own arrival sequence.
                 created_ts_ns=max(
                     self.kernel.clock.wall_time_ns(),
                     market.local_receive_ts_ns,
@@ -187,12 +182,9 @@ class AccountProtectionEngine:
                         intent=SleeveTargetIntent(
                             decision_key=f"risk:{source_decision}:{reason}",
                             target_key=target_key,
-                            # The zero target is a risk-authored decision, but it is
-                            # still a lifecycle replacement for the original
-                            # strategy component. Keeping the owner's strategy id
-                            # lets canonical sleeve projections apply the close to
-                            # the row they opened instead of manufacturing a second
-                            # account-protection lifecycle.
+                            # Keep the owner's strategy id so sleeve projections
+                            # apply the close to the row they opened rather than
+                            # opening a second lifecycle.
                             strategy_id=owner_strategy_id,
                             component_id=str(target.get("component_id") or "risk"),
                             symbol=symbol,
@@ -252,10 +244,9 @@ class AccountProtectionEngine:
     ) -> tuple[AccountTargetRequest, ...]:
         """Publish atomic software flats for authenticated native-stop breaches.
 
-        Include both accepted components and not-yet-processed nonzero intents
-        for the breached symbol. The latter is essential: a queued newer
-        component entry must receive a still-newer zero revision or it could
-        reopen the symbol after the emergency close.
+        Covers accepted components and not-yet-processed nonzero intents for the
+        breached symbol: a queued newer entry needs a still-newer zero revision
+        or it reopens the symbol after the close.
         """
 
         published: list[AccountTargetRequest] = []
@@ -471,12 +462,10 @@ def _protection_trigger_reason(
 
 
 def _optional_fraction(value: object) -> float | None:
-    """Absent means no configured protection; present-but-invalid fails closed.
+    """Absent means no configured protection; present-but-invalid raises.
 
-    Silently mapping an out-of-range value (e.g. ``8`` meaning 8 percent) to
-    None disabled the intended component stop/TP with no operator-visible
-    signal anywhere in the chain. The raise surfaces through protection
-    evaluation as blocked owner health, never as a crash.
+    Mapping an out-of-range value (``8`` meaning 8 percent) to None would
+    disable the stop/TP silently. The raise surfaces as blocked owner health.
     """
 
     if value is None:

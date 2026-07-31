@@ -1,32 +1,26 @@
 """Paper-only passive-execution A/B adapter (registered experiment arm B).
 
-Implements `docs/research_findings.md`
-on the paper owner: eligible CONTINUOUS entry commands are deterministically
-assigned by component (trade) id hash parity to arm A (the unchanged
-market-IOC twin) or arm B (post-only limit at the touch, re-pegged on touch
-moves, falling back to a market walk after the frozen timeout or an adverse
+Implements `docs/research_findings.md` on the paper owner: eligible CONTINUOUS
+entry commands are assigned by component (trade) id hash parity to arm A (the
+unchanged market-IOC twin) or arm B (post-only limit at the touch, re-pegged on
+touch moves, falling back to a market walk after the frozen timeout or an adverse
 move through the initial limit). Everything else — exits, reductions,
 non-CONTINUOUS sleeves, unresolvable components — takes arm A unchanged.
 
-Model honesty:
+Fill model:
 
-- The passive fill condition is strict crossing: the opposite touch must
-  reach the resting limit price. This grants no queue-position credit for
-  level exhaustion, so it *understates* arm B's fill rate — conservative in
-  the direction that penalizes the hypothesis under test.
-- A passive fill takes the full remaining quantity at the limit; at paper
-  sizes (hundreds of USDT against touch depth) size effects are second
-  order, and the registered metrics carry the touch quantity for later
-  scrutiny.
-- The fallback market walk reproduces the arm-A twin's fill model exactly
-  (same taker fee, residual slippage, depth policy) so the arms differ only
-  in the passive attempt.
+- Strict crossing: the opposite touch must reach the resting limit price. No
+  queue-position credit for level exhaustion, so arm B's fill rate is
+  understated.
+- A passive fill takes the full remaining quantity at the limit; the registered
+  metrics carry the touch quantity so size effects stay checkable.
+- The fallback market walk reproduces the arm-A twin exactly (same taker fee,
+  residual slippage, depth policy), so the arms differ only in the passive
+  attempt.
 
-Pending state is in-memory. On restart the paper owner cancels every
-non-terminal working order first (`recover_orphaned_working_orders`) and the
-normal convergence loop re-plans; nothing is ever left phantom-working.
-This is the integration-only uncalibrated paper surface — no demo or
-real-money authority.
+Pending state is in-memory. On restart the paper owner cancels every non-terminal
+working order (`recover_orphaned_working_orders`) and the convergence loop
+re-plans, so nothing is left phantom-working.
 """
 
 from __future__ import annotations
@@ -453,10 +447,9 @@ def recover_orphaned_working_orders(
 ) -> tuple[ExecutionObservation, ...]:
     """Terminal-cancel paper working orders left by a restart.
 
-    Passive pending state is in-memory; after a paper-owner restart any
-    non-terminal acknowledged order has no live manager and would otherwise
-    stay phantom-working forever. The paper surface has no real venue, so a
-    blanket cancel is exact — the convergence loop re-plans the remainder.
+    Passive pending state is in-memory, so after a restart any non-terminal
+    acknowledged order has no live manager. A blanket cancel is exact here and
+    the convergence loop re-plans the remainder.
     """
 
     observations: list[ExecutionObservation] = []

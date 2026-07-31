@@ -1,29 +1,20 @@
 #!/usr/bin/env python3
 """Passive-vs-taker execution A/B probe on the Bybit demo account (operator-run).
 
-Answers one question with real orders: **is the 5.40 bp passive floor
-mechanically reachable, or is the measured 15.56 bp taker basis the true
-cost?** The protocol, metric, sample size and kill criteria are pre-declared in
-``liquidity_migration/passive_fill_probe.py`` — read that docstring first,
-including its relationship to the registered in-flow experiment
-(``docs/research_findings.md``): this
-probe bounds the mechanism quickly; only the in-flow A/B grades the flow at
-signal times.
+Answers one question with real orders: is the 5.40 bp passive floor mechanically
+reachable, or is the measured 15.56 bp taker basis the true cost? Protocol,
+metric and sample size are pre-declared in
+``liquidity_migration/passive_fill_probe.py``; read that first. This probe bounds
+the mechanism quickly — only the in-flow A/B grades the flow at signal times.
 
-Safety model (inherited from scripts/probe_bybit_demo_rules.py):
-- Demo credentials only; ``validate_demo_order_permission`` and a demo-only
-  private client. Mainnet and REAL_MONEY are structurally unreachable here.
-- ``DemoAccountMutationLease`` — refuses to run beside any other mutator,
+Operating constraints:
+- Demo credentials only, via ``validate_demo_order_permission``.
+- ``DemoAccountMutationLease`` refuses to run beside any other mutator,
   including the account owner. Run with the fleet stopped.
-- Preflight requires a completely flat account; every attempt closes its own
-  min-notional position before the next begins; cleanup + final flatness are
-  verified and recorded in the receipt either way.
-- Positions are transient (seconds), sequential (never more than one), and
-  bounded at the registered ``REGISTERED_MAX_ATTEMPT_NOTIONAL_USDT``.
-
-This box note: written and unit-tested on the Windows research box, which holds
-no demo credentials — the first live run happens wherever
-``BYBIT_DEMO_API_KEY``/``BYBIT_DEMO_API_SECRET`` exist, with the fleet stopped.
+- Preflight requires a flat account; every attempt closes its own min-notional
+  position before the next begins, and final flatness lands in the receipt.
+- Positions are transient, sequential, and bounded at
+  ``REGISTERED_MAX_ATTEMPT_NOTIONAL_USDT``.
 
 Usage:
   python scripts/probe_passive_fill_ab.py \
@@ -80,8 +71,8 @@ from liquidity_migration.passive_fill_probe import (  # noqa: E402
 RECEIPT_KIND = "liquidity_migration_passive_fill_ab_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 PROBE_LINK_PREFIX = "lm-pfab-"
-# §12's measured per-side taker cost: the ITT fallback fee and the basis the
-# passive arm must beat.
+# Measured per-side taker cost: the ITT fallback fee and the basis the passive
+# arm must beat.
 MEASURED_TAKER_FEE_BP_PER_SIDE = 7.78
 POLL_SECONDS = 1.0
 

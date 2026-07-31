@@ -68,8 +68,11 @@ DEFAULT_APPEND_OVERLAP_DAYS = 14
 
 
 def _default_end() -> str:
-    """Exclusive end = TOMORROW (UTC) so today's causal residual_momentum row is produced. Over-running
-    the data is harmless: roots whose klines stop earlier simply produce no rows past their data."""
+    """Tomorrow UTC, exclusive, so today's causal row is produced.
+
+    Over-running the data is harmless: a root whose klines stop earlier just
+    produces no rows past its data.
+    """
     return (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
 
 
@@ -120,10 +123,9 @@ def _compute_signal(
         )
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
-    # Append null residual rows through the exclusive boundary so shift(3) emits
-    # today's exact-join key. Polars ignores those nulls inside the rolling sum.
-    # Tail rows remain provisional until every delayed input has matured; stable
-    # history is immutable while provisional keys may be refreshed.
+    # Appends null residual rows through the exclusive boundary so shift(3) emits
+    # today's exact-join key; the rolling sum ignores them. Tail rows stay
+    # provisional (refreshable) until every delayed input has matured.
     return residual_momentum_from_residuals(resid, end=end)
 
 

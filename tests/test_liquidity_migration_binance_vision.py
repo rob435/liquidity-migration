@@ -1,8 +1,6 @@
-"""Tests for the Binance Vision OOS acquisition module.
-
-Network functions (discovery, download) are not exercised here — only the pure
-parsing and the manifest coverage filter, which are the parts that can break
-silently.
+"""Tests for the Binance Vision OOS acquisition module: the pure parsing and the manifest
+coverage filter, which are the parts that can break silently. Network discovery and
+download are not exercised here.
 """
 
 from __future__ import annotations
@@ -33,8 +31,9 @@ MS_PER_HOUR = 3_600_000
 
 
 def test_assert_download_completeness_raises_above_tolerance(tmp_path):
-    """M5: too many failed monthly downloads must abort the build (no silent
-    survivorship-biased universe) and persist the failed-jobs artifact."""
+    """Too many failed monthly downloads must abort the build, so no
+    survivorship-biased universe is produced, and the failed-jobs artifact persists.
+    """
     failed = [("AAAUSDT", "2023-01"), ("BBBUSDT", "2023-02")]
     artifact = tmp_path / "failed.json"
     with pytest.raises(RuntimeError, match="survivorship-biased"):
@@ -58,7 +57,7 @@ def test_assert_download_completeness_passes_within_tolerance(tmp_path):
         max_failure_ratio=0.005,
         artifact_path=artifact,
     )
-    # Artifact still written (empty-ish) for audit even when within tolerance.
+    # The artifact is still written (empty-ish) even when within tolerance.
     assert artifact.exists()
 
 
@@ -372,8 +371,9 @@ def test_coverage_rewrite_refuses_independent_bybit_membership(tmp_path):
 
 def test_rewrite_manifest_to_coverage_extends_stale_manifest_tail(tmp_path):
     """A narrow REST/current-month top-up can add covered kline days after the
-    persisted manifest's old end. The coverage rewrite must synthesize those
-    newly covered rows instead of clipping the manifest at its stale boundary."""
+    persisted manifest's old end; the coverage rewrite must synthesize those rows
+    instead of clipping at the stale boundary.
+    """
     root = tmp_path / "root"
     jan01 = 1704067200000
     jan02 = jan01 + 24 * MS_PER_HOUR
@@ -470,7 +470,7 @@ def test_topup_binance_daily_klines_appends_and_extends_manifest(tmp_path, monke
 
 
 # --------------------------------------------------------------------------
-# audit2b: valid-but-empty month must NOT count as a download failure.
+# A valid-but-empty month must NOT count as a download failure.
 # --------------------------------------------------------------------------
 
 
@@ -479,13 +479,9 @@ def _patch_listing(monkeypatch, inventory):
 
 
 def test_valid_empty_month_not_counted_as_failed_job(tmp_path, monkeypatch):
-    """audit2b defect-1: one month parses to rows, one is a VALID header-only
-    month (empty parse). With a 0% failure tolerance the build must still
-    succeed — the empty-but-valid month is NOT a failed job.
-
-    OLD code: fetch_month_klines returned [] for the empty month, the caller
-    appended it to failed_jobs, ratio = 1/2 = 50% > 0% -> RuntimeError. NEW
-    code: the empty month is success-with-no-rows and is not counted."""
+    """A valid header-only month parses to no rows and is success-with-no-rows, not a
+    failed job -- otherwise a 0% failure tolerance trips on it.
+    """
     root = tmp_path / "root"
     jan01 = 1704067200000  # 2024-01-01 00:00 UTC
 
@@ -523,9 +519,7 @@ def test_valid_empty_month_not_counted_as_failed_job(tmp_path, monkeypatch):
 
 
 def test_real_download_failure_still_counted(tmp_path, monkeypatch):
-    """audit2b defect-1: a genuine hard failure (None) is still a failed job and
-    still trips the survivorship gate — the fix narrows what counts as failure,
-    it does not stop counting real failures."""
+    """A genuine hard failure (None) is still a failed job and still trips the survivorship gate."""
     root = tmp_path / "root"
     jan01 = 1704067200000
 
@@ -556,8 +550,7 @@ def test_real_download_failure_still_counted(tmp_path, monkeypatch):
 
 
 def test_fetch_month_klines_returns_empty_list_on_valid_empty_zip(monkeypatch):
-    """audit2b defect-1: a successful fetch of a header-only month returns an
-    empty *list* (success), never None. A network failure returns None."""
+    """A successful fetch of a header-only month returns an empty *list* (success); a network failure returns None."""
 
     class _Resp:
         def __init__(self, body):
@@ -585,9 +578,9 @@ def test_fetch_month_klines_returns_empty_list_on_valid_empty_zip(monkeypatch):
 
 
 def test_normal_input_unchanged_happy_path(tmp_path, monkeypatch):
-    """audit2b: NORMAL (non-defective) input is numerically unchanged — a build
-    where every month has rows produces exactly the same klines and zero failed
-    files as before the fix (the happy path is untouched)."""
+    """A build where every month has rows produces exactly the same klines and zero
+    failed files -- the happy path is untouched.
+    """
     root = tmp_path / "root"
     jan01 = 1704067200000
 
@@ -624,14 +617,14 @@ def test_normal_input_unchanged_happy_path(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# audit2b: document the CURRENT _verify_download contract.
+# The _verify_download contract.
 # --------------------------------------------------------------------------
 
 
 def test_verify_download_no_checksum_no_length_requires_valid_zip():
-    """audit2c (operator-approved) SUPERSEDES the earlier audit2b 'flagged-not-fixed'
-    note: _verify_download now requires a valid non-empty zip when BOTH the .CHECKSUM
-    sidecar and the Content-Length header are absent, instead of being a no-op."""
+    """``_verify_download`` requires a valid non-empty zip when BOTH the .CHECKSUM
+    sidecar and the Content-Length header are absent.
+    """
     # Both signals absent + a non-zip body -> now RAISES (was a silent no-op).
     with pytest.raises(ValueError):
         bv._verify_download(b"not-a-zip-but-no-signals", expected_sha256=None, content_length=None)
@@ -645,7 +638,7 @@ def test_verify_download_no_checksum_no_length_requires_valid_zip():
 
 
 # --------------------------------------------------------------------------
-# audit2c (binance_floor): _verify_download both-absent fail-closed contract.
+# _verify_download both-absent fail-closed contract.
 # --------------------------------------------------------------------------
 
 
@@ -657,29 +650,28 @@ def _valid_zip_bytes() -> bytes:
 
 
 def test_non_zip_body_with_no_checksum_no_length_raises() -> None:
-    """audit2c: a non-zip body with no .CHECKSUM and no Content-Length must now
-    raise (the old both-absent path was a no-op that let garbage into the root)."""
+    """A non-zip body with no .CHECKSUM and no Content-Length must raise rather than let garbage into the root."""
     raw = b"truncated-garbage-not-a-zip"
     with pytest.raises(ValueError, match="unverifiable body rejected"):
         bv._verify_download(raw, expected_sha256=None, content_length=None)
 
 
 def test_empty_body_with_no_checksum_no_length_raises() -> None:
-    """audit2c: an empty body is also rejected on the both-absent path."""
+    """An empty body is also rejected on the both-absent path."""
     with pytest.raises(ValueError, match="unverifiable body rejected"):
         bv._verify_download(b"", expected_sha256=None, content_length=None)
 
 
 def test_valid_zip_with_no_checksum_no_length_passes() -> None:
-    """audit2c: a genuine, structurally-valid zip with neither integrity signal
-    still passes — the fix only rejects unverifiable corruption, not real archives
-    from older months that publish no sidecar/header."""
+    """A structurally-valid zip with neither integrity signal still passes: only
+    unverifiable corruption is rejected, not real archives from older months that
+    publish no sidecar or header.
+    """
     bv._verify_download(_valid_zip_bytes(), expected_sha256=None, content_length=None)
 
 
 def test_checksum_and_length_branches_unchanged() -> None:
-    """audit2c guardrail: the sha256 and Content-Length branches are NOT weakened
-    by the new fail-closed both-absent path."""
+    """The sha256 and Content-Length branches are not weakened by the fail-closed both-absent path."""
     import hashlib
 
     raw = _valid_zip_bytes()
@@ -696,16 +688,12 @@ def test_checksum_and_length_branches_unchanged() -> None:
     bv._verify_download(b"anything", expected_sha256=None, content_length=len(b"anything"))
 
 
-# ==========================================================================
-# Relocated from test_audit_fix_b14.py (archive-integrity-2, ingestion-3,
-# ingestion-4 — 2026-06-14 audit bucket b14).
-# ==========================================================================
 
 
 def test_verify_download_raises_on_sha256_mismatch() -> None:
-    """archive-integrity-2: a body whose sha256 disagrees with the published
-    CHECKSUM must raise (the caller turns this into a retryable/failed job), so a
-    corrupt-but-parseable archive never silently enters the PIT root."""
+    """A body whose sha256 disagrees with the published CHECKSUM must raise, so a
+    corrupt-but-parseable archive never silently enters the PIT root.
+    """
     raw = b"corrupt-but-parseable-zip-bytes"
     wrong_sha = "0" * 64
     with pytest.raises(ValueError, match="sha256 mismatch"):
@@ -713,7 +701,7 @@ def test_verify_download_raises_on_sha256_mismatch() -> None:
 
 
 def test_verify_download_passes_on_sha256_match() -> None:
-    """archive-integrity-2: a body matching the published sha256 passes."""
+    """A body matching the published sha256 passes."""
     import hashlib
 
     raw = b"the-real-archive-bytes"
@@ -724,15 +712,16 @@ def test_verify_download_passes_on_sha256_match() -> None:
 
 
 def test_verify_download_falls_back_to_content_length_when_no_checksum() -> None:
-    """archive-integrity-2: when the .CHECKSUM sidecar is absent (older months),
-    a truncated body is still caught via the advertised Content-Length."""
+    """When the .CHECKSUM sidecar is absent (older months), a truncated body is still
+    caught via the advertised Content-Length.
+    """
     raw = b"only-half-here"
     with pytest.raises(ValueError, match="Content-Length mismatch"):
         bv._verify_download(raw, expected_sha256=None, content_length=len(raw) + 100)
     # Matching length passes.
     bv._verify_download(raw, expected_sha256=None, content_length=len(raw))
-    # audit2c: with NEITHER checksum NOR Content-Length, the both-absent path is no
-    # longer a no-op — a non-zip body is now rejected as unverifiable corruption.
+    # With NEITHER checksum NOR Content-Length, a non-zip body is rejected as
+    # unverifiable corruption.
     with pytest.raises(ValueError, match="unverifiable body rejected"):
         bv._verify_download(raw, expected_sha256=None, content_length=None)
     # A genuine valid zip with no checksum/length still passes.
@@ -746,8 +735,7 @@ def test_verify_download_falls_back_to_content_length_when_no_checksum() -> None
 
 
 def test_fetch_expected_sha256_parses_leading_hex(monkeypatch) -> None:
-    """archive-integrity-2: the CHECKSUM sidecar's leading sha256 hex token is
-    parsed (Binance Vision format: '<hex>  <filename>')."""
+    """The CHECKSUM sidecar's leading sha256 hex token is parsed (Binance Vision format: '<hex> <filename>')."""
     digest = "a" * 64
     body = f"{digest}  AAAUSDT-1h-2024-01.zip\n".encode()
 
@@ -766,9 +754,9 @@ def test_fetch_expected_sha256_parses_leading_hex(monkeypatch) -> None:
 
 
 def test_discover_tolerates_a_transient_listing_failure(monkeypatch) -> None:
-    """ingestion-3: a single transient per-symbol S3 listing failure must NOT
-    crash the whole build — it is accumulated and ratio-gated. With one failure in
-    many symbols, discover returns the surviving inventory instead of raising."""
+    """A single transient per-symbol S3 listing failure is accumulated and ratio-gated,
+    not fatal: discover returns the surviving inventory.
+    """
     symbols = [f"S{i:02d}USDT" for i in range(50)]
     monkeypatch.setattr(bv, "list_usdm_usdt_symbols", lambda: symbols)
 
@@ -785,8 +773,7 @@ def test_discover_tolerates_a_transient_listing_failure(monkeypatch) -> None:
 
 
 def test_discover_aborts_when_listing_failures_exceed_ratio(monkeypatch) -> None:
-    """ingestion-3: too many transient listing failures still abort (survivorship
-    gate) rather than silently producing an under-enumerated universe."""
+    """Too many transient listing failures still abort rather than silently produce an under-enumerated universe."""
     symbols = [f"S{i:02d}USDT" for i in range(10)]
     monkeypatch.setattr(bv, "list_usdm_usdt_symbols", lambda: symbols)
 
@@ -799,8 +786,7 @@ def test_discover_aborts_when_listing_failures_exceed_ratio(monkeypatch) -> None
 
 
 def test_persisted_kline_symbols_reads_partition_dirs(tmp_path) -> None:
-    """ingestion-4 support: the persisted-universe probe enumerates on-disk
-    symbols from the klines_1h partition directories."""
+    """The persisted-universe probe enumerates on-disk symbols from the klines_1h partition directories."""
     root = tmp_path / "root"
     jan01 = 1704067200000  # 2024-01-01 00:00 UTC
     _write_klines(root, "AAAUSDT", jan01, 24)
@@ -843,10 +829,10 @@ def test_build_rejects_unsafe_discovered_symbol_before_fetch_or_mutation(
 
 
 def test_build_binance_oos_refuses_universe_shrink_without_override(tmp_path, monkeypatch) -> None:
-    """ingestion-4: a rerun that discovers FEWER symbols than the persisted
-    klines_1h must refuse (would otherwise strand the dropped symbols' partitions
-    on disk, which rewrite_manifest_to_coverage then silently retains). The
-    original append=True build had no such guard."""
+    """A rerun that discovers FEWER symbols than the persisted klines_1h must refuse --
+    it would strand the dropped symbols' partitions on disk, which
+    ``rewrite_manifest_to_coverage`` then silently retains.
+    """
     root = tmp_path / "root"
     jan01 = 1704067200000
     # Prior wider build on disk: AAA + BBB.
@@ -995,9 +981,9 @@ def test_daily_inventory_cannot_mask_missing_older_monthly_history(
 
 
 def test_build_binance_oos_clean_rewrite_drops_stale_partitions(tmp_path, monkeypatch) -> None:
-    """ingestion-4: with allow_degraded, the narrower rerun OVERWRITES klines_1h
-    cleanly — the dropped symbol's stale partition must NOT survive. The original
-    append=True write left it behind."""
+    """With ``allow_degraded`` the narrower rerun overwrites klines_1h cleanly: the
+    dropped symbol's stale partition must not survive.
+    """
     root = tmp_path / "root"
     jan01 = 1704067200000
     _write_klines(root, "AAAUSDT", jan01, 24)

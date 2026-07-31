@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Build the measured per-fill execution-cost report from one account root.
 
-Read-only observer over the verified journal + capture root: per-fill
-effective spread, price impact, and realized spread anchored to the
-decision-time midpoint, plus a notional-weighted summary. See
-liquidity_migration/execution_cost_model.py for the decomposition and
-docs/research_findings.md for how the
-realized-spread numbers feed the passive-execution experiment.
+Per-fill effective spread, price impact, and realized spread anchored to the
+decision-time midpoint, plus a notional-weighted summary. The decomposition
+lives in liquidity_migration/execution_cost_model.py.
 """
 
 from __future__ import annotations

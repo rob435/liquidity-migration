@@ -1,10 +1,10 @@
 """Freeze and enforce the operational strategy candidate population.
 
-The artifact is deliberately a forward, point-in-time population contract.  It
-does not claim historical PIT membership.  LONG and CONT keep their own ranking
-and signal logic; this module prevents a post-freeze listing from entering the
-evidence window. Venue-announced retirements are recorded prospectively and may
-leave the entry population only while the bound account is provably flat.
+The artifact is a forward population contract, not a claim of historical PIT
+membership: it stops a post-freeze listing from entering the evidence window,
+while LONG and CONT keep their own ranking and signal logic. Venue-announced
+retirements are recorded prospectively and leave the entry population only
+while the bound account is provably flat.
 """
 
 from __future__ import annotations
@@ -31,9 +31,8 @@ from .universe import CRYPTO_LINEAR_SYMBOL_TYPES, build_current_universe_table
 
 _LOGGER = logging.getLogger(__name__)
 
-# Schema 4 (2026-07-29): the artifact gains the required "carry" profile
-# beside "long" and "continuous" (CARRY sleeve wiring). Older two-profile
-# artifacts are a different contract and must be re-frozen, not reinterpreted.
+# Schema 4 requires all three profiles. Older two-profile artifacts are a
+# different contract and must be re-frozen, not reinterpreted.
 CANDIDATE_UNIVERSE_SCHEMA_VERSION = 4
 CANDIDATE_UNIVERSE_KIND = "account_execution_candidate_universe"
 _PROFILE_NAMES = ("long", "continuous", "carry")
@@ -165,11 +164,10 @@ def _partition_ticker_rows(
 ) -> tuple[dict[str, Mapping[str, Any]], list[dict[str, Any]]]:
     """Separate canonical candidate tickers from out-of-domain source rows.
 
-    Bybit's linear ticker endpoint can contain synthetic rows that are absent
-    from the complete linear instrument snapshot and whose venue label is not a
-    valid strategy symbol. They cannot enter the instrument/ticker inner join,
-    but they remain raw source evidence. Missing symbols, duplicate labels, and
-    every row that maps to a validated instrument continue to fail closed.
+    Bybit's linear ticker endpoint can carry synthetic rows absent from the
+    instrument snapshot whose label is not a valid strategy symbol; they are
+    kept as raw source evidence but excluded from the join. Missing symbols,
+    duplicate labels, and rows mapping to a validated instrument fail closed.
     """
 
     output: dict[str, Mapping[str, Any]] = {}
@@ -271,13 +269,10 @@ def continuous_profile_universe_inputs(continuous_config: object) -> dict[str, A
 def carry_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
     """Pre-signal population for the CARRY sleeve (lane2_carry_hold_v3).
 
-    The registered runtime universe is the top 100 names by trailing 24h
-    turnover; the enforcement population is a top-150 turnover-ranked superset
-    so routine rank churn cannot starve the deployed book between freezes.
-    The maturity floor is 7 days (the engine needs 168h of settled-funding
-    history before a name is decidable), the turnover floor is shared with the
-    continuous profile's effective config, and the standard stablecoin
-    exclusions apply as they do for both sibling profiles.
+    Runtime universe is the top 100 by trailing 24h turnover; enforcement uses a
+    top-150 superset so rank churn cannot starve the book between freezes. The
+    7-day maturity floor is the 168h of settled funding the engine needs before
+    a name is decidable.
     """
 
     return {
@@ -482,9 +477,7 @@ def build_candidate_universe_artifact(
     """Build the self-hashed population artifact from one venue snapshot.
 
     ``realm`` is recorded in the artifact and pins the endpoint it must have
-    been read from. It was previously hardcoded to demo, so a universe frozen
-    from the funded account would have been labelled — and later loaded as —
-    demo evidence.
+    been read from.
     """
 
     selected = venue_realm(realm)
@@ -1018,9 +1011,8 @@ def _temporary_ineligibility_reasons(
 ) -> tuple[str, ...] | None:
     """Explain reversible live-filter drift without masking input corruption.
 
-    A frozen candidate is an admission boundary, not a promise that its current
-    turnover or liquidity rank can never change. Missing venue rows, malformed
-    market data, and structural contract changes remain hard failures.
+    Missing venue rows, malformed market data, and structural contract changes
+    remain hard failures.
     """
 
     if instrument is None or ticker is None:
@@ -1109,10 +1101,8 @@ def enforce_frozen_candidate_frames(
     changed = False
     reactivated = sorted(set(registry) & current)
     if reactivated:
-        # A venue can cancel or move a delisting; that is external reality,
-        # not a reason to halt the sleeve. The symbol stays non-tradable (its
-        # prospective delivery evidence stands until it retires or the record
-        # is deliberately revisited) and the cycle continues.
+        # A venue can cancel or move a delisting. The symbol stays non-tradable
+        # on its recorded delivery evidence and the cycle continues.
         _LOGGER.warning(
             "%s: scheduled retirement re-entered current eligibility; kept "
             "non-tradable: %s",
@@ -1135,9 +1125,8 @@ def enforce_frozen_candidate_frames(
         prior = registry.get(symbol)
         if prior is not None and delivery_time_ms > 0:
             if prior.delivery_time_ms != delivery_time_ms:
-                # The venue moved the delivery date. Track the latest venue
-                # observation, keep the original first-observed timestamp as
-                # the causal anchor, and continue.
+                # Venue moved the delivery date: take the new one but keep the
+                # original first-observed timestamp as the causal anchor.
                 _LOGGER.warning(
                     "%s: %s delivery time changed from %d to %d; registry updated",
                     context,
@@ -1172,8 +1161,8 @@ def enforce_frozen_candidate_frames(
             retirements[symbol] = observed
             changed = True
         elif row is None and prior is not None:
-            # Once the venue removes the instrument row, the prospectively
-            # captured delivery-time observation remains the causal evidence.
+            # Instrument row gone: the earlier delivery-time observation is
+            # still the causal evidence.
             retirements[symbol] = prior
         else:
             temporary_reasons = _temporary_ineligibility_reasons(
@@ -1192,10 +1181,8 @@ def enforce_frozen_candidate_frames(
                 )
     if unexplained:
         # A symbol vanishing without delivery evidence (abrupt delist, rename,
-        # venue hiccup) drops to temporarily-ineligible — journaled every
-        # cycle, active again automatically if it returns — instead of
-        # halting the sleeve. The population contract is unchanged: nothing
-        # post-freeze can enter.
+        # venue hiccup) drops to temporarily-ineligible and returns on its own
+        # if the venue restores it.
         preview = ",".join(unexplained[:20])
         suffix = "..." if len(unexplained) > 20 else ""
         _LOGGER.warning(

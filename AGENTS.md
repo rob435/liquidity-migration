@@ -1,9 +1,8 @@
 ## Do Not Build Safety Machinery
 
 Do not add safety features, guards, gates, receipts, or proofs on your own
-initiative. Propose them; the owner decides. About 10,500 lines of ceremony that
-merely demonstrated work happened were stripped on 2026-07-31 — fix a fault
-instead of proving it absent.
+initiative. Propose them; the owner decides. Fix a fault instead of proving it
+absent.
 
 Existing capital-preservation controls stay and are not yours to remove either:
 `account_loss_guard.py`, `equity_anchored_envelope.py`, `venue_protection.py`,
@@ -12,9 +11,10 @@ the per-sleeve capital partition in `account_kernel.py`.
 ## Runtime Safety
 
 - Default to offline, shadow, paper, or demo operation.
-- Never set `REAL_MONEY`, never use mainnet credentials, never activate a live
-  account. Those are the owner's own acts, on a separate instruction naming the
-  deployment and its risk boundary.
+- Arming real money — setting `REAL_MONEY`, installing mainnet credentials,
+  starting a funded unit — is the owner's own act, on a separate instruction
+  naming the deployment and its risk boundary. Building and testing that tooling
+  is in scope.
 - Unknown safety-critical state fails closed. Alpha metrics never justify
   dropping a capital-preservation control for real money.
 
@@ -41,8 +41,6 @@ When sources disagree, read the primary artifact and fix the stale source.
 
 ## Evidence
 
-- Every fill in every record here is simulated. No code in this repository has
-  ever made a mainnet API call. Say so wherever performance is quoted.
 - A number is real by physics, not process: causal inputs, executable economics,
   reconstructable accounting, an honest shaped-versus-graded data note. A miss
   makes the result a diagnostic.
@@ -52,6 +50,8 @@ When sources disagree, read the primary artifact and fix the stale source.
 - Grade a rule on data it did not shape. Report every grid cell and era split.
   Put costs next to gross. Negative results are priors, not prohibitions, and
   `docs/backtesting_errors_we_never_repeat.md` is a failure-mode reference.
+- The full Progressive Evidence Model — two lanes, the six-item evidence note,
+  the five-line promotion note — is [`docs/governance.md`](docs/governance.md).
 
 ## Change Discipline
 

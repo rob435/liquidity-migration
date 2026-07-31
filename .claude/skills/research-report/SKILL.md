@@ -1,19 +1,21 @@
 ---
 name: research-report
-description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence rules in AGENTS.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
+description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence rules in docs/governance.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
 ---
 
 # Interpret research reports
 
-Read `AGENTS.md`, then inspect the report and its referenced raw
+Read `docs/governance.md`, then inspect the report and its referenced raw
 artifacts directly. A helper summary or attractive chart is not a substitute for
 the ledger, event rows, config, or data identity behind the claim.
 
 ## Establish context
 
-- Identify the exact claim, intended decision, study mode, and preregistration.
+- Identify the exact claim, the decision it informs, which lane it belongs to,
+  and the commit that registers it (`docs/governance.md` §5 — the commit is the
+  registration; there is no separate filing).
 - Locate Markdown/JSON summaries, ledgers/event rows, equity/accounting outputs,
-  configs, receipts, and logs under the run root.
+  configs, manifests, and logs under the run root.
 - Record venue, population, window, scale, data exposure, and every variant that
   influenced selection.
 - Check that compared runs use compatible windows, populations, capital, costs,
@@ -40,11 +42,11 @@ metrics merely because an older template listed them.
 
 ## Write the conclusion
 
-Produce the evidence card from `AGENTS.md`:
+Produce the evidence card from `docs/governance.md`:
 
 - claim;
 - validity: valid, limited, or invalid;
-- study mode and result;
+- which data shaped the result and which data graded it;
 - scope and non-generalizable boundaries;
 - deployment and authorization state;
 - effect sizes, uncertainty, concentration, and material caveats;

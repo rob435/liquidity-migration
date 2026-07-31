@@ -30,9 +30,13 @@ from .account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
 )
+from .account_kernel import AccountJournalCursor
 from .account_route import AccountRoute
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import (
+    PROJECTION_EVENT_TYPES,
+    canonical_account_projection,
+    canonical_account_projection_from_digest,
     canonical_strategy_trade_rows,
     terminal_entry_attempt_keys,
 )
@@ -89,32 +93,60 @@ class SleevePlanningSnapshot:
     terminal_entry_attempts: frozenset[str]
 
 
+def new_planning_journal_cursor() -> AccountJournalCursor:
+    """A cycle runner's resumable reader for :func:`sleeve_planning_snapshot`.
+
+    Retains only the event types the canonical read models inspect; every other
+    event is still verified and folded into account state, just not kept.  One
+    cursor belongs to one daemon and is reused across its cycles — sharing one
+    between roots or threads is not supported.
+    """
+
+    return AccountJournalCursor(retain_event_types=PROJECTION_EVENT_TYPES)
+
+
 def sleeve_planning_snapshot(
     route: AccountRoute,
     *,
     sleeve: SleeveAdapterKind,
     strategy_ids: tuple[str, ...] | list[str] | set[str],
+    journal_cursor: AccountJournalCursor | None = None,
 ) -> SleevePlanningSnapshot:
     """Snapshot publisher, unresolved work, trades, and terminal attempts.
 
     The ordering is causal: unresolved durable work is snapshotted before the
     accepted journal is projected.  A request completing in between is
     therefore visible in the later journal read.
+
+    Both read models below derive from ONE journal read.  They used to take a
+    full verified read each, so every cycle paid for the whole account history
+    twice to learn about a handful of live components.  Passing a
+    ``journal_cursor`` (see :func:`new_planning_journal_cursor`) additionally
+    re-reads only segments written since the previous cycle; without one the
+    read is cold but still happens once.
     """
 
     publisher = AccountTargetPublisher(route)
     unresolved = unresolved_target_snapshot(publisher.inbox, sleeve=sleeve)
     account_root: Path = route.account_path
+    if journal_cursor is None:
+        projection = canonical_account_projection(account_root)
+    else:
+        projection = canonical_account_projection_from_digest(
+            journal_cursor.read(account_root)
+        )
     canonical_trades = canonical_strategy_trade_rows(
         account_root,
         sleeve=sleeve.value,
         strategy_ids=strategy_ids,
+        account_projection=projection,
     )
     terminal_attempts = terminal_entry_attempt_keys(
         account_root,
         sleeve=sleeve.value,
         strategy_ids=strategy_ids,
         inbox=publisher.inbox,
+        account_events=projection.events,
     )
     return SleevePlanningSnapshot(
         publisher=publisher,

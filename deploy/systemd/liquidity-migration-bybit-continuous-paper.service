@@ -15,17 +15,15 @@ Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=REAL_MONEY=false
 Environment=DATA_ROOT=data/bybit-continuous-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# Publishes component targets to the paper owner; it never touches the venue.
 Environment=EXECUTION_ENVIRONMENT=paper
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
-# Component selection and sizing come from the isolated byte-exact paper copy
-# of ACCOUNT_RISK_POLICY_FILE. There is no paper hedge service, so this unit
-# alone is not full portfolio parity.
-# Follow the demo producer's bounded public store read-only. Paper retains its
-# own strategy/journal roots and falls back to public REST for missing bars.
+# Selection and sizing come from the paper copy of ACCOUNT_RISK_POLICY_FILE.
+# There is no paper hedge service, so this unit alone is not portfolio parity.
+# Follow the demo producer's public store read-only. Paper keeps its own
+# strategy/journal roots and falls back to public REST for missing bars.
 Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1

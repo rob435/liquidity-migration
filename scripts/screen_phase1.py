@@ -18,13 +18,10 @@ direction:
    is ``2 x round_trip``. The repository convention charged one, which
    understates cost by 2x independently of the fee error.
 
-Both conventions are printed side by side so the correction is auditable rather
-than asserted. `repo_1x` reproduces the historical numbers; `honest_2x` is the
-one that means something.
+Both conventions are printed side by side. `repo_1x` reproduces the historical
+numbers; `honest_2x` is the one that means something.
 
-Research-only: reads a panel built by ``scripts/build_cross_venue_panel.py``,
-has no venue access, no account journal, and no operational authority. Lane-1 on
-seen data — this grades nothing (``AGENTS.md``).
+Input: a panel built by ``scripts/build_cross_venue_panel.py``.
 """
 
 from __future__ import annotations
@@ -73,8 +70,7 @@ def load_panel(root: Path) -> pl.DataFrame:
 
 #: Columns that make a venue the *traded* venue. ``prepare`` is written against
 #: the Bybit names, so a Binance read is the same code over a renamed view —
-#: which is the point: arm A and arm B of the replication must not be two
-#: different implementations.
+#: both arms of the replication run one implementation.
 BINANCE_VIEW = {
     "bn_close": "by_close",
     "bn_turnover_quote": "by_turnover_quote",
@@ -86,10 +82,10 @@ BINANCE_VIEW = {
 def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
     """Return the panel with ``venue`` as the traded venue.
 
-    ``premium_diff_bp`` stays as built — it is a cross-venue difference and is the
-    same observable on either side. What changes is whose price you realise and
-    whose funding you pay, which is exactly the §9.4 correction: comparing a
-    Bybit leg net of funding against a gross Binance leg is not a comparison.
+    ``premium_diff_bp`` stays as built — a cross-venue difference is the same
+    observable on either side. What changes is whose price you realise and whose
+    funding you pay; a Bybit leg net of funding against a gross Binance leg is
+    not a comparison.
     """
     if venue == "bybit":
         return panel
@@ -105,8 +101,7 @@ def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
 def _disjoint(universe: pl.DataFrame, hold_hours: int) -> pl.DataFrame:
     """Sample entries every ``hold_hours`` so holding windows never overlap.
 
-    Overlapping entries do not bias the mean but badly inflate its t-statistic,
-    which is how an earlier draft convinced itself a weekly hold was better.
+    Overlapping entries do not bias the mean but badly inflate its t-statistic.
     """
     origin = int(universe["bar_ts_ms"].min())  # type: ignore[arg-type]
     return universe.with_columns(
@@ -134,8 +129,8 @@ def btc_trend(panel: pl.DataFrame, lookback_days: int = 30) -> pl.DataFrame:
 def basket_short_book(universe: pl.DataFrame, signal: str, cut: float) -> pl.DataFrame:
     """Long the favoured decile, short an equal-notional basket of the universe.
 
-    §11.2 variant B. The tail of a decile short is ~95% idiosyncratic, so a short
-    leg with no single-name exposure cannot carry it.
+    The tail of a decile short is ~95% idiosyncratic, so a short leg with no
+    single-name exposure cannot carry it.
     """
     d = universe.select("bar_ts_ms", signal, "net_return").drop_nulls()
     return (
@@ -157,10 +152,10 @@ def basket_short_book(universe: pl.DataFrame, signal: str, cut: float) -> pl.Dat
 def conditional_short_book(
     universe: pl.DataFrame, *, drop_threshold: float, require_btc_uptrend: bool
 ) -> pl.DataFrame:
-    """§14's shape: short names that fell hard, optionally only in a BTC uptrend.
+    """Short names that fell hard, optionally only in a BTC uptrend.
 
-    Short-only and therefore **directional** — it carries market exposure the
-    decile books do not, and it is reported as such.
+    Short-only and therefore directional: it carries market exposure the decile
+    books do not.
     """
     d = universe.filter(pl.col("drop_4d") < drop_threshold)
     if require_btc_uptrend:
@@ -198,16 +193,14 @@ def _leg_weights(universe: pl.DataFrame, signal: str, cut: float, sign: int) -> 
 def measure_turnover(universe: pl.DataFrame, specs: list[tuple[str, int, float]], cut: float) -> float:
     """Mean one-way notional traded per period, measured from actual positions.
 
-    This replaces an assumption with a measurement. A full rebalance into a
-    disjoint name set trades **4.0 units** of notional per period (close both
-    legs, open both legs), which at 7.78 bp/side is 31.12 bp — i.e. 2x the round
-    trip, not the 1x the repository convention charged. But consecutive deciles
-    overlap, and a name held through pays nothing, so the honest charge is
-    ``turnover x fee_per_side`` with the turnover measured.
+    A full rebalance into a disjoint name set trades 4.0 units per period (close
+    both legs, open both), 31.12 bp at 7.78 bp/side. Consecutive deciles overlap
+    and a name held through pays nothing, so the charge is
+    ``turnover x fee_per_side`` with turnover measured rather than assumed.
 
     ``specs`` is a list of ``(signal, sign, weight)`` so a blended book's netted
     positions are measured, not approximated by averaging two separate books.
-    Returns units of notional per period; 4.0 means "no overlap at all".
+    Returns units of notional per period; 4.0 means no overlap at all.
     """
     combined: pl.DataFrame | None = None
     for signal, sign, weight in specs:
@@ -268,10 +261,9 @@ def build_cells(
 ) -> tuple[list[Cell], set[tuple[int, str]]]:
     """Score every Phase 1 mechanism on one venue, gated and ungated.
 
-    Also returns the ungated universe as ``{(bar_ts_ms, symbol)}`` so the 2A
-    replication can report how much of the name set the two venues share --
-    each arm ranks liquidity on the venue it trades, so the universes are
-    close but not identical, and that should be a number rather than a caveat.
+    Also returns the ungated universe as ``{(bar_ts_ms, symbol)}``: each arm
+    ranks liquidity on the venue it trades, so the replication can report the
+    shared name-set fraction as a number.
     """
     view = venue_view(panel, venue)
     prepared = prepare(view, cfg)

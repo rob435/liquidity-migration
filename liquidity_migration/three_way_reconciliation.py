@@ -247,9 +247,8 @@ def extract_account_entry_records(
         elif not accepted:
             execution_state = "risk_rejected"
         elif any(command_id in filled_commands for command_id in command_ids):
-            # Commands are net-symbol facts. This proves that the accepted batch
-            # changed the symbol and received a fill, not that a component had a
-            # separately identifiable venue fill.
+            # Commands are net-symbol facts: this says the accepted batch changed
+            # the symbol and got a fill, not that a component did.
             execution_state = "accepted_batch_symbol_filled"
         elif command_ids and all(ack_by_command.get(command_id) is False for command_id in command_ids):
             execution_state = "accepted_target_command_rejected"
@@ -425,11 +424,9 @@ def load_backtest_entry_records(
         metadata["reports"]["continuous_components"] = component_reports
 
     if "carry" in selected:
-        # The carry research render (equity_curves --sleeves carry / the
-        # --research-config path) produces a daily score series, not a
+        # The carry research render produces a daily score series, not a
         # per-entry trade export, so entry-level carry reconciliation has no
-        # model side yet. Report the absence loudly instead of silently
-        # treating the carry model book as empty.
+        # model side yet; the absence is reported rather than read as empty.
         trades_path = root / "carry" / "carry_hold_trades.csv"
         report_path = root / "carry" / "lane2_carry_hold_v3_summary.json"
         if not trades_path.is_file():

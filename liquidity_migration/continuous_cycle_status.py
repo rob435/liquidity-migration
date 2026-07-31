@@ -1,10 +1,9 @@
 """Small, receipt-bound CONTINUOUS status projection for account notifications.
 
-The cycle ledger remains the durable analytical record.  This module publishes
-only the handful of fields needed by the account owner's hourly notification so
-that the latency-sensitive owner never scans a growing Parquet ledger.  A
-consumer reads the producer's completion receipt first and accepts the status
-projection only when both artifacts name the same cycle.
+Publishes only the fields the account owner's hourly notification needs, so the
+owner never scans the growing Parquet cycle ledger. A consumer reads the
+producer's completion receipt first and accepts this projection only when both
+artifacts name the same cycle.
 """
 
 from __future__ import annotations
@@ -25,8 +24,7 @@ from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from .strategy_cycle_health import read_strategy_cycle_health
 
 
-# v2: funnel rows gained the settled-funding admission stage ("funding"),
-# 2026-07-26 single-component profile change point.
+# v2: funnel rows gained the settled-funding admission stage ("funding").
 CONTINUOUS_CYCLE_STATUS_SCHEMA_VERSION = 2
 CONTINUOUS_CYCLE_STATUS_FILENAME = "continuous_cycle_status.json"
 CONTINUOUS_CYCLE_STATUS_MAX_BYTES = 64 * 1024

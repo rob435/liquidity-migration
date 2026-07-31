@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Read-only repository and developer-environment diagnostics.
 
-This intentionally does not inspect credentials, contact a venue, mutate Git,
-or infer operational authority.  It reports the local facts that commonly make
-repository work misleading: a dirty tree, dependency drift, broken skill
-mirrors, or missing navigation tooling.
+Reports the local facts that commonly make repository work misleading: a dirty
+tree, dependency drift, broken skill mirrors, missing navigation tooling.
 """
 
 from __future__ import annotations
@@ -150,8 +148,8 @@ def _git_output(repository: Path, *arguments: str, allow_failure: bool = False) 
     if completed.returncode != 0 and not allow_failure:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
         raise RuntimeError(detail)
-    # Preserve the leading status columns from ``git status --short`` while
-    # removing only line terminators shared by the scalar Git queries.
+    # Strip only line terminators: ``git status --short`` needs its leading
+    # status columns preserved.
     return completed.stdout.rstrip("\r\n")
 
 

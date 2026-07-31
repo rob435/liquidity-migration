@@ -1,13 +1,9 @@
 """LONG strategy target producer - forward counterpart to long_native research.
 
 Mirrors event_demo.py for the v11a long sleeve (uni50 FC sniper retrace 1%/6h
-fall-through). It publishes desired component targets to the single account owner;
-it has no credentials, private account snapshot, order submission, fill recovery,
-or sleeve-local Telegram path.
-
-The human-readable active-profile guide, including where LONG differs from
-CONTINUOUS, is ``docs/active_trading_logic.md``. This module owns target-planning
-mechanics; the account owner owns execution and accounting.
+fall-through), publishing desired component targets to the account owner. This
+module owns target-planning mechanics; the account owner owns execution and
+accounting. Profile guide: ``docs/trading_logic.md``.
 
 Operating model
 ---------------
@@ -49,6 +45,7 @@ from .account_candidate_universe import (
     require_scheduled_retirements_flat,
     require_profile_binding,
 )
+from .account_kernel import AccountJournalCursor
 from .account_route import require_account_route
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import target_reservation_rows
@@ -72,6 +69,7 @@ from .event_demo_data import (
 from .execution_environment import (
     ExecutionEnvironment,
     account_id_for_environment,
+    candidate_universe_realm,
     execution_environment,
 )
 from .long_native import (
@@ -127,23 +125,19 @@ class LongNativeDemoCycleConfig:
     # No default is intentional: runtime callers must select exactly one
     # target owner. This producer has no order-submission capability.
     execution_environment: str = ""
-    # Demo and paper publish targets to the selected account owner; this sleeve
-    # never receives credentials or execution authority.
+    # Targets are published to the selected account owner.
     account_intent_inbox_root: str | None = None
     # Canonical journal read model paired with the inbox above.  Both are
     # required together so planning cannot mix account targets with stale
     # sleeve-owned open rows.
     account_execution_root: str | None = None
-    # Optional bounded-evidence population contract. When set, post-freeze
-    # listings never enter; a frozen symbol that disappears drops to journaled
-    # temporary ineligibility (or scheduled retirement on delivery evidence)
-    # and the cycle continues.
+    # Optional frozen-population contract: post-freeze listings never enter, and
+    # a frozen symbol that disappears becomes temporarily ineligible (or
+    # scheduled for retirement on delivery evidence) without stopping the cycle.
     candidate_universe_file: str = ""
     data_name: str = "long-native-event-demo"
-    # Daemon constructs a KlineStreamManager to feed an in-memory store. The
-    # long sleeve's small universe makes this less critical than continuous, but
-    # consistency simplifies operator mental model and lookback_days=90 makes
-    # the bootstrap the dominant startup cost worth doing once.
+    # Daemon builds a KlineStreamManager to feed an in-memory store. The long
+    # sleeve's universe is small, but the 90-day bootstrap is worth paying once.
     ws_klines_enabled: bool = True
     # A co-located paper producer follows the demo producer's flushed snapshot
     # read-only, avoiding a second 120-symbol, 100-day bootstrap and WS pool.
@@ -157,9 +151,8 @@ class LongNativeDemoCycleConfig:
 
 
 def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
-    # Named per environment, not per "is it paper". A mainnet cycle written
-    # into the demo dataset is exactly the mislabelling B11 closed elsewhere:
-    # later readers would load real evidence as demo evidence.
+    # Named per environment so a later reader cannot mistake one environment's
+    # cycles for another's.
     return {
         ExecutionEnvironment.PAPER: "long_native_paper_cycles",
         ExecutionEnvironment.MAINNET: "long_native_mainnet_cycles",
@@ -297,6 +290,7 @@ def run_long_native_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
     funnel_observer: DecisionFunnelObserver | None = None,
+    journal_cursor: AccountJournalCursor | None = None,
 ) -> PublishedTargetCyclePayload:
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or long_v11a_profile()
@@ -348,7 +342,10 @@ def run_long_native_demo_cycle(
         candidate_universe = None
         candidate_reconciliation = None
         if demo.candidate_universe_file:
-            candidate_universe = load_candidate_universe(demo.candidate_universe_file)
+            candidate_universe = load_candidate_universe(
+                demo.candidate_universe_file,
+                realm=candidate_universe_realm(owner_environment),
+            )
             require_profile_binding(
                 candidate_universe,
                 profile="long",
@@ -401,10 +398,8 @@ def run_long_native_demo_cycle(
         )
         mark_stage("klines")
 
-        # `build_long_features` expects a `date` column on the 1h klines
-        # (research data layer adds it; the demo path doesn't). Derive it
-        # cheaply from the day-start of `ts_ms`. Otherwise the intraday-pump
-        # group_by inside build_long_features raises ColumnNotFoundError.
+        # `build_long_features` needs a `date` column that the research data
+        # layer adds and the demo path does not; derive it from ts_ms.
         if not klines.is_empty() and "date" not in klines.columns:
             klines = klines.with_columns(
                 pl.from_epoch(
@@ -415,11 +410,10 @@ def run_long_native_demo_cycle(
                 .alias("date")
             )
         features = build_long_features(klines, config=strategy)
-        # ls-4: re-select in_universe on the latest bar to the top-N by 90d-MEDIAN turnover
-        # (the key the backtest ranks on), now that _build_long_universe fetches a superset
-        # instead of the 50-by-24h truncation that neutered the median gate. Keyed on
-        # strategy.universe_size — the SAME value build_long_features used — so steady state
-        # is a no-op byte-match; cold start backfills by 24h (universe_fallback_24h > 0).
+        # Re-select in_universe on the latest bar to the top-N by 90d MEDIAN
+        # turnover, the key the backtest ranks on. Keyed on the same
+        # strategy.universe_size build_long_features used, so steady state is a
+        # no-op; cold start falls back to 24h turnover.
         features, universe_fallback_24h = _apply_median_universe_selection(
             features, universe_size=strategy.universe_size, snapshot_ts_ms=cycle_now_ms
         )
@@ -429,6 +423,7 @@ def run_long_native_demo_cycle(
             route,
             sleeve=SleeveAdapterKind.LONG,
             strategy_ids=(strategy_id,),
+            journal_cursor=journal_cursor,
         )
         target_publisher = planning.publisher
         unresolved_targets = planning.unresolved_targets
@@ -450,10 +445,8 @@ def run_long_native_demo_cycle(
         )
         mark_stage("exit_targets")
 
-        # Entry detection: derive FC candidates from the latest closed daily
-        # bar per symbol, then check sniper retrace condition against live 1h
-        # bars. Each candidate carries enough state to publish a desired
-        # component notional without touching venue quantity/order state.
+        # Derive FC candidates from the latest closed daily bar per symbol, then
+        # check the sniper retrace condition against live 1h bars.
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
             all_trades=all_trades,
@@ -606,12 +599,8 @@ def run_long_native_demo_cycle(
             "report_dir": str(report_dir),
         }
 
-        # Persist cycle telemetry using the standard partitioned cycle path.
-        # Without this the long sleeve has zero observability: no cycle history,
-        # no skip diagnostics, no per-cycle equity tracking. Found 2026-05-24:
-        # the reports/long-native-event-demo/ dir stayed empty for the entire
-        # 11+h service runtime because the function returned the payload without
-        # ever writing it. Partition by date to cap per-write cost like the short.
+        # Persist cycle telemetry on the standard partitioned cycle path.
+        # Partitioned by date to cap per-write cost.
         cycle_date = datetime.fromtimestamp(cycle_now_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
         cycle_row_with_date = dict(cycle_row, date=cycle_date)
         persist_perf_start = time.perf_counter()
@@ -720,10 +709,9 @@ def _build_long_universe(
 def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty() or "status" not in trades.columns:
         return trades
-    # Direct-route trade rows carry open/closed. The canonical account read model
-    # also carries target_pending, which is deliberately excluded here: accepted
-    # desire is not reconstructed fill evidence. Admission reserves those rows via
-    # _long_target_reservations instead. "submitted" remains an ORDER-row status.
+    # Direct-route trade rows carry open/closed. The account read model also
+    # carries target_pending, excluded here because accepted desire is not fill
+    # evidence; admission reserves those via _long_target_reservations.
     open_only = trades.filter(pl.col("status") == "open")
     if open_only.is_empty():
         return open_only
@@ -806,11 +794,9 @@ def _select_long_entry_candidates(
     open_symbols = set(_column_values(_long_target_reservations(all_trades), "symbol"))
     cooldown_until = _cooldown_until_long(all_trades, cooldown_days=strategy.cooldown_days)
 
-    # Look at the last 2 closed daily bars so we catch a signal that fired
-    # yesterday and is still in its 6h sniper window today.
-    # A daily signal is end-stamped, so require a closed bar at or before now.
-    # Count stale drops only for actual recent FC signals. Old historical feature
-    # rows without FC should not make a flat cycle look stale-signal blocked.
+    # Last 2 closed daily bars, so a signal that fired yesterday and is still in
+    # its 6h sniper window today is caught. Daily signals are end-stamped, hence
+    # the closed-bar-at-or-before-now requirement.
     closed_ts = sorted(int(ts) for ts in features["ts_ms"].unique().to_list() if ts is not None and int(ts) <= now_ms)
     recent_closed_ts = closed_ts[-2:]
     rows_by_ts = {ts: features.filter(pl.col("ts_ms") == ts).to_dicts() for ts in recent_closed_ts}

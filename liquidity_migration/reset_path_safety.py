@@ -962,12 +962,9 @@ def normalize_paper_runtime_roots(
             finally:
                 context.release_transient_directories()
 
-        # The inspection plan already binds every entry by descriptor, inode,
-        # mount, ownership, and mode. Only open and sync objects whose metadata
-        # actually needs repair; the complete final descriptor-rooted rescan
-        # below still proves that skipped entries and the tree shape did not
-        # change. This makes an already-normalized large paper tree a read-only
-        # verification pass instead of tens of thousands of fsync calls.
+        # Only open and sync entries whose metadata needs repair; the final
+        # rescan still covers the skipped ones. This keeps an already-normalized
+        # tree a read-only pass instead of tens of thousands of fsyncs.
         regular_entries = [
             entry
             for entry in plan.entries

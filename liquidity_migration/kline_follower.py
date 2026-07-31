@@ -1,24 +1,14 @@
-"""Read-only kline FOLLOWER — share one WS kline data plane across co-located sleeves.
+"""Read-only kline follower — share one WS kline data plane across co-located sleeves.
 
-The continuous DEMO daemon runs the real ``KlineStreamManager`` (WS pool +
-``KlineStore`` + atomic snapshot flush to
-``<leader_root>/.cache/ws_klines/store.parquet``). The paper shadow on the SAME
-box previously ran a second identical pool over the same public market data —
-twice the WS decode CPU and a duplicate on-disk store, purely to read bars that
-were already on local disk.
+Instead of running its own WS pool, this stat-polls the leader's snapshot at
+``<leader_root>/.cache/ws_klines/store.parquet`` and, when (mtime, size) change,
+re-runs ``KlineStore.recover_from_disk()`` — an idempotent keyed merge — into its
+own in-memory store. The leader flushes via temp file + atomic rename, so a
+reader sees the old or the new snapshot, never a partial one.
 
-``FollowerKlineStreamManager`` replaces the shadow's pool: it stat-polls the
-leader snapshot's (mtime, size) and, when it changes, re-runs
-``KlineStore.recover_from_disk()`` — an idempotent keyed merge — against its own
-in-memory store. The leader's flush is temp-file + atomic rename, so a reader
-sees the old or the new snapshot, never a partial file. Confirmed bars land
-hourly, so steady state is one ~seconds-long read per hour plus free stat calls.
-
-READ-ONLY by construction: the follower never starts the store's flush thread
-and never calls ``flush_to_disk``, so the leader's snapshot is never written by
-this process. Freshness lag is bounded by the leader's flush interval plus
-``poll_seconds``; the cycle's REST fallback transparently covers the brief
-post-bar-close window where the snapshot trails the venue.
+The follower never starts the flush thread and never calls ``flush_to_disk``.
+Freshness lag is the leader's flush interval plus ``poll_seconds``; the cycle's
+REST fallback covers the window where the snapshot trails the venue.
 
 Duck-types the ``KlineStreamManager`` surface the demo daemon consumes:
 ``start(shutdown_event=)`` / ``stop()`` / ``store()`` / ``stats()`` /
@@ -48,10 +38,8 @@ DEFAULT_POLL_SECONDS = 5.0
 # mid-write or briefly gapped from flapping out of the ticker set.
 _UNIVERSE_COVERAGE_SLACK_MS = exact_duration_ms(hours=3)
 
-# Confirmed bars land hourly, so the leader snapshot normally changes at least
-# once an hour. An age beyond this means the LEADER daemon is down or wedged —
-# the follower keeps serving (the cycle's coverage check + REST fallback keep
-# the data correct) but the operator should hear about the silent degradation.
+# Confirmed bars land hourly, so a snapshot older than this means the leader
+# daemon is down or wedged.
 DEFAULT_STALE_WARNING_SECONDS = 3 * 3600.0
 
 
@@ -70,8 +58,7 @@ class FollowerKlineStreamManager:
         self._leader_root = Path(leader_root).expanduser()
         self._poll_seconds = float(poll_seconds)
         self._stale_warning_seconds = float(stale_warning_seconds)
-        # cache_root=leader_root points recover_from_disk() at the LEADER's
-        # snapshot; nothing in the follower ever calls the write path.
+        # cache_root=leader_root points recover_from_disk() at the LEADER's snapshot.
         self._store = KlineStore(cache_root=self._leader_root)
         self._snapshot_path = self._leader_root / ".cache" / "ws_klines" / "store.parquet"
         self._cycle_wake_event: threading.Event | None = None
@@ -96,9 +83,8 @@ class FollowerKlineStreamManager:
         self._cycle_wake_event = event
 
     def start(self, *, shutdown_event: threading.Event | None = None) -> dict[str, Any]:
-        """Initial snapshot read + start the poll thread. Never blocks on a
-        bootstrap: a missing snapshot just means the poll loop keeps watching
-        (and the cycle's REST fallback carries the sleeve meanwhile)."""
+        """Initial snapshot read + start the poll thread. A missing snapshot is
+        not an error: the poll loop keeps watching for it."""
         del shutdown_event  # no blocking bootstrap to abort; stop() is immediate
         self._refresh()
         self._thread = threading.Thread(
@@ -163,10 +149,7 @@ class FollowerKlineStreamManager:
         return max(0.0, time.time() - sig[0] / 1e9)
 
     def _check_snapshot_staleness(self) -> None:
-        """Warn ONCE per staleness episode when the leader snapshot stops moving —
-        the leader daemon is down/wedged. Data stays correct regardless (the
-        cycle's coverage check sends lagging symbols to the REST fallback), but
-        the degradation is silent + expensive, so the operator should hear it."""
+        """Warn once per staleness episode when the leader snapshot stops moving."""
         age = self._snapshot_age_seconds()
         if age is None:
             return
@@ -183,12 +166,12 @@ class FollowerKlineStreamManager:
             self._stale_warned = False
 
     def _prune_to_snapshot(self) -> int:
-        """Drop follower-side symbols that are no longer in the leader snapshot
-        (the leader trims its universe on restart/refresh; recovery only ever
-        ADDS, so without this the follower would keep departed symbols until
-        their bars age out — polluting universe_symbols() and memory). Reads
-        just the symbol column; skipped on any read error (never wipe the
-        store on a transient failure)."""
+        """Drop follower-side symbols no longer in the leader snapshot.
+
+        Recovery only ever ADDS, so departed symbols would otherwise linger
+        until their bars age out. Skipped on any read error rather than wiping
+        the store on a transient failure.
+        """
         try:
             snapshot_symbols = set(
                 pl.scan_parquet(self._snapshot_path)
@@ -227,21 +210,14 @@ class FollowerKlineStreamManager:
             return False
         rows = self._store.recover_from_disk()
         if rows == 0 and self._store.last_recovery_failed():
-            # A FAILED read is not a consumed generation. Leaving `_last_sig`
-            # untouched retries on the next poll instead of waiting for the
-            # leader's next flush to change the file (audit L3).
+            # A failed read is not a consumed generation: leave `_last_sig` so
+            # the next poll retries instead of waiting for the leader to flush.
             self._recovery_failures += 1
             self._check_snapshot_staleness()
             return False
-        # Re-stat AFTER the read and record THAT signature, not the pre-read one.
-        # recover_from_disk() re-reads the file directly, so if the leader flushed
-        # between our stat above and that read (atomic rename → we still see a whole
-        # old-or-new file, never a partial), the merged content can be a NEWER
-        # generation than `sig`. Storing the pre-read `sig` would (a) make
-        # _snapshot_age_seconds() report a generation older than what we actually
-        # merged, and (b) cost a redundant re-read on the next poll when the post-
-        # read signature differs. Falling back to the pre-read `sig` keeps the old
-        # behaviour if the file vanished mid-refresh.
+        # Re-stat AFTER the read: if the leader flushed between the stat above
+        # and recover_from_disk(), what we merged is a newer generation than
+        # `sig`. Fall back to `sig` if the file vanished mid-refresh.
         self._last_sig = self._snapshot_signature() or sig
         self._refreshes += 1
         self._last_recover_rows = rows

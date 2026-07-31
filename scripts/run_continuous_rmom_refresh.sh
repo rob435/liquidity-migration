@@ -24,10 +24,9 @@ fi
 # Demo owns the one bounded kline/RMOM plane. The co-located paper producer
 # follows this root read-only, so computing a second identical gate is waste.
 if sleeve_on "${CONTINUOUS_SLEEVE:-off}" || sleeve_on "${CONTINUOUS_PAPER_SLEEVE:-off}"; then
-    # Live event_demo_klines_1h roots are rolling operational stores, not stable
-    # research archives. Append-mode overlap equivalence is correct for stable
-    # roots, but these live roots should rebuild the gate from the current store
-    # instead of parking the daily timer in FAILED when old overlap rows drift.
+    # Live event_demo_klines_1h roots are rolling stores, not stable archives:
+    # rebuild the gate from the current store rather than fail the daily timer
+    # on drifting append-mode overlap rows.
     "$PYTHON_BIN" -u scripts/precompute_residual_momentum.py \
         --root "$CONTINUOUS_DEMO_DATA_ROOT" --full-rewrite
     rmom_path="$CONTINUOUS_DEMO_DATA_ROOT/residual_momentum.parquet"

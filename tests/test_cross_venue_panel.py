@@ -1,9 +1,6 @@
-"""Synthetic timing, mapping, and coverage tests for the P0 cross-venue panel.
-
-These fixtures are deliberately tiny and hand-computed. The properties under
-test are the ones that decide whether a downstream anomaly result means
-anything: no future leakage, no backward fill, honest coverage flags, and
-identity failures that raise instead of silently merging.
+"""Synthetic timing, mapping, and coverage tests for the cross-venue panel: no future
+leakage, no backward fill, honest coverage flags, and identity failures that raise
+instead of silently merging.
 """
 
 from __future__ import annotations
@@ -157,10 +154,8 @@ class TestTiming:
     def test_legacy_funding_partitions_without_event_kind_are_read_as_settled(
         self, roots: tuple[Path, Path]
     ) -> None:
-        """Almost all real history predates the ``funding_event_kind`` column.
-
-        A partition lacking it must still contribute its settlements, not be
-        skipped for failing a filter on a column that does not exist.
+        """Almost all real history predates the ``funding_event_kind`` column; a partition
+        lacking it must still contribute its settlements.
         """
 
         bybit, _ = roots

@@ -13,16 +13,15 @@ from typing import Any, Mapping
 from .account_candidate_universe import load_candidate_universe
 from .artifact_snapshot import StableFileSnapshot, read_stable_file
 from .deterministic_serialization import canonical_json
+from .venue_realm import VenueRealm
 
 
 CANDIDATE_RULE_COVERAGE_SCHEMA_VERSION = 1
 CANDIDATE_RULE_COVERAGE_KIND = "account_candidate_demo_rule_coverage"
 REGISTERED_MAX_RULE_AGE_SECONDS = 7 * 24 * 60 * 60
-# Rollouts re-probe once a receipt is past this age, so freshness renewal is
-# a side effect of ordinary deployment instead of a timed operator deadline.
-# The hard runtime bound above is unchanged; this only schedules renewal
-# earlier. Half the hard bound keeps at least a full half-life of margin
-# between any refreshing rollout and the fail-closed cliff.
+# Rollouts re-probe once a receipt is past this age, so renewal is a side effect
+# of deployment rather than a timed deadline. Half the hard bound above leaves a
+# full half-life of margin before the fail-closed cliff.
 REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS = REGISTERED_MAX_RULE_AGE_SECONDS // 2
 
 
@@ -171,11 +170,9 @@ def project_demo_rules_to_candidate_subset(
 ) -> Path:
     """Rebind fresh probe evidence when a new candidate set only removes symbols.
 
-    A local ledger reset does not change the authenticated demo account or the
-    venue observations already made for retained symbols.  This projection
-    keeps every empirical timestamp and evidence row unchanged, drops only
-    retired symbols, and binds the result to the new candidate artifact.  Any
-    candidate addition requires a fresh venue probe instead.
+    Keeps every empirical timestamp and evidence row, drops the retired symbols,
+    and binds the result to the new candidate artifact. Any candidate *addition*
+    requires a fresh venue probe.
     """
 
     from .account_execution_config import load_demo_rules_bytes
@@ -191,7 +188,11 @@ def project_demo_rules_to_candidate_subset(
         label="projected candidate-universe artifact",
         require_private=True,
     )
-    target = load_candidate_universe(target_snapshot.path, snapshot=target_snapshot)
+    # Projection carries a demo-rule receipt forward, and demo rules only exist
+    # on demo; mainnet freezes its rules from get_instruments_info instead.
+    target = load_candidate_universe(
+        target_snapshot.path, snapshot=target_snapshot, realm=VenueRealm.DEMO
+    )
     rules_snapshot = _read_regular(
         prior_rules_path,
         label="source demo-rule receipt",
@@ -215,12 +216,9 @@ def project_demo_rules_to_candidate_subset(
     source_candidate_raw = source_binding.get("path")
     if type(source_candidate_raw) is not str or not source_candidate_raw:
         raise ValueError("source demo-rule receipt candidate path is invalid")
-    # The prior receipt's evidence is only projectable when its bound
-    # candidate artifact still validates under the code doing the
-    # projection. A candidate schema bump (or a vanished/corrupt source
-    # artifact) is structural drift, not an operator error: the projection
-    # cannot prove the subset relationship, so the caller must fall through
-    # to a complete fresh probe — exactly the exit-3 contract.
+    # Projectable only while the bound candidate artifact still validates here.
+    # A schema bump or a vanished artifact means the subset relationship cannot
+    # be proved, so the caller falls through to a complete fresh probe.
     try:
         source_candidate_snapshot = _read_regular(
             source_candidate_raw,
@@ -230,6 +228,7 @@ def project_demo_rules_to_candidate_subset(
         source_candidate = load_candidate_universe(
             source_candidate_snapshot.path,
             snapshot=source_candidate_snapshot,
+            realm=VenueRealm.DEMO,
         )
         build_candidate_rule_coverage(
             source_candidate.path,
@@ -410,12 +409,10 @@ def build_candidate_rule_coverage(
 ) -> dict[str, Any]:
     """Reopen both sources and prove one accepted rule per frozen symbol.
 
-    ``realm`` selects which rules receipt is admissible. Demo's comes from the
-    order-placing probe; every other realm's comes from the read-only
-    instruments-info freeze (B17). The coverage proof itself — one rule per
-    frozen symbol, bound to this exact universe artifact — is identical, and
-    deliberately so: the evidence standard differs, the coverage requirement
-    does not.
+    ``realm`` selects which rules receipt is admissible: demo's comes from the
+    order-placing probe, every other realm's from the read-only
+    instruments-info freeze. The coverage proof is the same either way -- one
+    rule per frozen symbol, bound to this exact universe artifact.
     """
 
     from .account_execution_config import load_demo_rules_bytes
@@ -435,10 +432,8 @@ def build_candidate_rule_coverage(
     candidate = load_candidate_universe(
         candidate_snapshot.path,
         snapshot=candidate_snapshot,
-        # B11: the universe artifact records the realm it was frozen from, and
-        # its loader refuses the other one. Passing the realm through is what
-        # lets a mainnet universe be proved at all -- and what keeps a demo
-        # universe from being accepted as mainnet evidence.
+        # The universe artifact records the realm it was frozen from and its
+        # loader refuses the other, so the realm has to be passed through.
         realm=selected_realm,
     )
     rules_snapshot = _use_snapshot(

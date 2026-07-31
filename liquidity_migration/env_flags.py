@@ -1,11 +1,7 @@
 """Canonical boolean environment-flag semantics.
 
-Safety-critical toggles (``REAL_MONEY`` above all) are validated independently
-at several fail-closed layers by design — credential resolution, paper-runtime
-isolation, operational-authority issuance, and runtime verification each keep
-their own check.  What must never diverge between those layers is the meaning
-of "true" and "false": every layer imports these sets and helpers so an
-operator value is interpreted identically everywhere.
+Several layers validate the same toggle independently; all of them import these
+sets so an operator value is interpreted identically everywhere.
 """
 
 from __future__ import annotations
@@ -22,8 +18,7 @@ def env_flag(name: str, *, environ: Mapping[str, str] | None = None) -> bool:
     """True when ``name`` is set to an explicitly truthy value.
 
     Ambiguous values are NOT truthy; pair with :func:`reject_ambiguous_flag`
-    when a typo'd high-stakes toggle must fail startup instead of silently
-    coercing to the default.
+    when a typo should fail startup rather than coerce to the default.
     """
 
     source = os.environ if environ is None else environ
@@ -43,9 +38,7 @@ def explicitly_false_or_unset(value: str | None) -> bool:
 
 def reject_ambiguous_flag(name: str, *, environ: Mapping[str, str] | None = None) -> None:
     """Raise if ``name`` is set to a value that is neither clearly true nor
-    clearly false. Keeps the fail-safe direction (an unrecognised value never
-    silently means 'on'), but surfaces a typo'd high-stakes toggle at startup
-    instead of letting it coerce to the default."""
+    clearly false, so a typo surfaces at startup instead of coercing."""
 
     source = os.environ if environ is None else environ
     raw = source.get(name)

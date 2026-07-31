@@ -23,14 +23,12 @@ def filter_klines_to_pit_membership(
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Semi-join hourly bars to contemporaneous manifest membership.
 
-    This helper is intentionally applied *before* any per-symbol rolling
-    feature or cross-sectional rank.  A later membership gate can stop an
-    ineligible symbol from trading, but it cannot undo that symbol's earlier
-    influence on ranks, universe cut-offs, or rolling state.
+    Must be applied *before* any per-symbol rolling feature or cross-sectional
+    rank: a later membership gate can stop an ineligible symbol from trading, but
+    cannot undo its earlier influence on ranks, cut-offs, or rolling state.
 
-    The returned frame preserves the input schema and row order.  The receipt
-    contains structural counts only; it deliberately carries no prices,
-    returns, signals, or other outcome-bearing values.
+    The returned frame preserves the input schema and row order; the receipt
+    carries structural counts only.
     """
 
     required_manifest = {"date", "symbol"}
@@ -405,13 +403,10 @@ def _full_pit_universe_pass(
 def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
     if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
         return set()
-    # Counts all rows, including densified padding -- intentionally. This is a
-    # data-PRESENCE gate ("is the archive kline partition downloaded?"), not a
-    # liquidity gate: densify only runs on dates that have a real archive file,
-    # so a 24-row day means the data exists. Counting only real-volume bars
-    # instead fails every symbol's genuine partial listing day (~1 per symbol),
-    # which the strategy already excludes via its 30-day min-age filter -- so
-    # that stricter count breaks the full-PIT gate for no real risk reduction.
+    # Counts all rows, densified padding included: this is a data-presence gate
+    # ("is the archive kline partition downloaded?"), not a liquidity gate, and
+    # densify only runs on dates that have a real archive file. Counting only
+    # real-volume bars would fail every symbol's genuine partial listing day.
     covered = (
         klines.group_by(["date", "symbol"])
         .agg(pl.len().alias("hourly_bars"))

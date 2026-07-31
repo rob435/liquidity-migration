@@ -1,33 +1,27 @@
 """Executable form of the three ``lane2_*financed*`` / ``lane2_carry_hold`` configs.
 
-Research-only. Reads a cross-venue panel (``scripts/build_cross_venue_panel.py``)
-and produces daily score rows. No venue access, no order path, no runtime
-surface; nothing here can open the real-money door.
+Reads a cross-venue panel (``scripts/build_cross_venue_panel.py``) and produces
+daily score rows. Two mechanisms, both long-only expressions of one premium: the
+market pays longs while the short side is paying funding.
 
-Two mechanisms, selected in the 2026-07-26 Lane-1 program
-(``docs/research_findings.md``), both long-only expressions of
-one macro-premium: the market pays longs while the short side is paying funding.
-
-* **Carry-hold** — a per-name hysteresis state machine on the settled funding
-  rate: enter LONG when funding prints below ``-enter_bp``, stay while it stays
-  below ``-exit_bp``. Payment = funding received plus the squeeze pressure on
-  crowded shorts; measured attribution is ~3.4 units funding per -1 unit price.
-* **Financed leaders** — the top momentum decile, admitted only while the
-  name's own funding is at-or-below the financing cap (longs not paying above
-  baseline) and BTC's prior-30d return clears the regime gate. Rationale: ride
-  leaders only while shorts finance the move; a leader whose longs are paying
-  is crowded and reverts (the D3a result, same document).
+* Carry-hold — a per-name hysteresis state machine on the settled funding rate:
+  enter LONG when funding prints below ``-enter_bp``, stay while it stays below
+  ``-exit_bp``. Payment is funding received plus squeeze pressure on crowded
+  shorts; measured attribution ~3.4 units funding per -1 unit price.
+* Financed leaders — the top momentum decile, admitted only while the name's own
+  funding is at-or-below the financing cap and BTC's prior-30d return clears the
+  regime gate: ride leaders only while shorts finance the move.
 
 Accounting conventions shared with the rest of the research surface:
 
 * Decisions on a fixed 24h grid of hourly-close bars; entry at the decision
-  close (``execution_delay_ms=0`` on top of bar completion — the house
-  convention; both books strengthen, not weaken, under +1h/+4h entry delays).
+  close (``execution_delay_ms=0`` on top of bar completion). Both books
+  strengthen under +1h/+4h entry delays.
 * Funding accrues settlement-exact (``lane2_blend.settlement_exact_funding``).
-* Costs are charged as measured one-way turnover x the measured per-side fee,
-  not a flat round trip per period (docs/research_findings.md).
-* Per-name weight cap plus a total gross cap: the uncapped book trebles gross
-  exactly during cascades, which is the opposite of the design intent.
+* Costs are measured one-way turnover x the measured per-side fee, not a flat
+  round trip per period.
+* Per-name weight cap plus a total gross cap; uncapped, gross trebles during
+  cascades.
 """
 
 from __future__ import annotations
@@ -77,10 +71,9 @@ class FinancedLongsError(ValueError):
 class CarryHoldConfig:
     """Committed carry-hold rule. Field names mirror the JSON.
 
-    ``depth_ref_bp_per_day`` is the v2 sizing refinement (2026-07-28 review):
-    when set, a held name's weight is ``per_name_cap * clip(|trailing 24h
-    settled funding| / ref, depth_floor, 1.0)`` — bet size proportional to the
-    premium currently being paid. ``None`` (v1) keeps the flat per-name cap.
+    ``depth_ref_bp_per_day``: when set, a held name's weight is ``per_name_cap *
+    clip(|trailing 24h settled funding| / ref, depth_floor, 1.0)`` — bet size
+    proportional to the premium being paid. ``None`` keeps the flat per-name cap.
     """
 
     config_id: str
@@ -96,13 +89,12 @@ class CarryHoldConfig:
     max_leverage: float
     depth_ref_bp_per_day: float | None = None
     depth_floor: float = 0.25
-    #: v3 filters (2026-07-28 wave-2 review). All default OFF so v1/v2 are
-    #: bit-identical. toxic_band: no entry, and holds suspend to zero weight,
-    #: while the trailing 3d return sits in [lo, hi) — the moderate-grind-down
-    #: cohort where shorts are slowly right. min_vol30: no entry while the
-    #: trailing 30d daily vol is below the floor (pinned price, no squeeze
-    #: fuel). trail_recovery_exit: state ends when the trailing daily funding
-    #: rate has RECOVERED by more than this many bp over 2 days (squeeze over).
+    #: v3 filters, all default OFF so v1/v2 stay bit-identical.
+    #: toxic_band: no entry, and holds suspend to zero weight, while the
+    #: trailing 3d return sits in [lo, hi) — shorts are slowly right there.
+    #: min_vol30: no entry while trailing 30d daily vol is below the floor
+    #: (pinned price, no squeeze fuel). trail_recovery_exit: state ends when
+    #: the trailing daily funding rate recovers by more than this over 2 days.
     toxic_band_ret3d: tuple[float, float] | None = None
     min_vol30_daily: float | None = None
     trail_recovery_exit_bp_2d: float | None = None
@@ -207,15 +199,11 @@ def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
 def _settlement_flag() -> pl.Expr:
     """True on bars whose funding print settled at this bar's close.
 
-    A bar carries a settlement iff the print's age just reset: either the age
-    is ~0 (settlement at this bar's close — ages are exact 0.0 on-hour) or it
-    dropped versus the prior bar (the settlement bar itself is missing from
-    the panel). The panel's age values carry float-epsilon noise — one hour
-    after a settlement the age is 0.9999999999999999, not 1.0 — so the old
-    ``age < 1.0`` predicate marked TWO bars per 8h/4h/2h settlement and
-    charged every such print twice (2026-07-28 correction; 1h-interval
-    symbols were counted once because the next print overwrote the epsilon
-    bar).
+    A bar carries a settlement iff the print's age just reset: age ~0
+    (settlement at this bar's close) or an age drop versus the prior bar (the
+    settlement bar itself is missing from the panel). Ages carry float-epsilon
+    noise — an hour after a settlement the age reads 0.9999999999999999 — so
+    the threshold must be well below 1.0 or every print is charged twice.
     """
     age = pl.col("by_funding_age_h")
     return (age < 0.5) | (age < age.shift(1).over("symbol")).fill_null(False)
@@ -285,17 +273,14 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
 def prepare_decision(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataFrame:
     """The LIVE frame: every bar whose backward-looking signals are mature.
 
-    Identical signal construction to :func:`prepare` (shared expressions),
-    but rows are kept whenever the 168h momentum lookback is satisfied —
-    forward-looking columns (``price_return``, ``funding_paid``,
-    ``contiguous``) may be null/non-finite and carry no meaning here. A live
-    decision cannot condition on the next 24h existing, so this frame keeps
-    the bars the research frame drops: each symbol's terminal 24h and bars
-    ahead of data holes. That difference IS the registered terminal-day
-    frame caveat (v3 registration ``honesty_notes.frame_caveat``, ~+0.13
-    Sharpe in the research frame's favor); the runtime trades without the
-    dodge, and scored-vs-live divergence around symbol deaths is expected,
-    documented behavior — not drift.
+    Identical signal construction to :func:`prepare`, but rows are kept
+    whenever the 168h momentum lookback is satisfied; the forward-looking
+    columns (``price_return``, ``funding_paid``, ``contiguous``) may be
+    null here. A live decision cannot condition on the next 24h existing, so
+    this frame keeps the bars the research frame drops: each symbol's terminal
+    24h and bars ahead of data holes. That is the registered terminal-day frame
+    caveat (~+0.13 Sharpe in the research frame's favor), so scored-vs-live
+    divergence around symbol deaths is expected.
     """
     frame = _signal_frame(panel, momentum_lookback_hours)
     return frame.filter(pl.col("momentum").is_finite())
@@ -466,11 +451,9 @@ def daily_scores(
         for k, v in weights.partition_by("bar_ts_ms", as_dict=True).items()
     }
     # Iterate every DECISION bar in the record, not only the bars that produced
-    # weights. A gate-flip day selects nothing and so contributed no weight row:
-    # the exit into it and the re-entry out of it were both uncharged while
-    # gross correctly treated the book as liquidated, and the flat day vanished
-    # from the day count entirely (2026-07-27 audit M19). The record still spans
-    # first-weighted to last-weighted bar; only the interior is now complete.
+    # weights: a gate-flip day selects nothing, so its exit and re-entry would
+    # go uncharged and the flat day would vanish from the day count. The record
+    # still spans first-weighted to last-weighted bar.
     weighted_bars = sorted(pivot)
     ts_sorted: list[int] = []
     if weighted_bars:
@@ -573,13 +556,12 @@ def score_financed_leaders(panel: pl.DataFrame, cfg: FinancedLeadersConfig) -> d
 
 @dataclasses.dataclass(frozen=True)
 class FundingSpreadConfig:
-    """Committed cross-venue neutral funding-spread rule (2026-07-28 wave 3).
+    """Committed cross-venue neutral funding-spread rule.
 
     Long the perp on the venue whose funding is more negative, short the same
-    symbol's perp on the other venue: the price legs cancel to basis noise and
-    the P&L identity keeps the funding DIFFERENTIAL. Hysteresis on the
-    trailing 24h settled spread (bybit minus binance, bp/day); costs are
-    charged on BOTH legs (2x the per-side fee per unit one-way).
+    symbol's perp on the other: the price legs cancel to basis noise and the
+    P&L keeps the funding differential. Hysteresis on the trailing 24h settled
+    spread (bybit minus binance, bp/day); costs charged on BOTH legs.
     """
 
     config_id: str
@@ -753,14 +735,10 @@ def research_equity_chart(
     start: str,
     end: str,
 ) -> dict[str, Any]:
-    """Render a registered financed-longs config through the STANDARD equity
-    chart (the same renderer the deployed sleeves use), labelled as research.
+    """Render a registered financed-longs config through the standard equity
+    chart renderer, labelled as research.
 
-    This is the wrapper-supported path for putting a Lane-2 research config in
-    the standard format. Never hand-build a lookalike of the standard layout:
-    the equity-curve skill's rule is to add a tested wrapper option instead of
-    creating a second format (this function, 2026-07-28). ``end`` is
-    exclusive; the daily series is the corrected settlement-exact scorer's
+    ``end`` is exclusive; the daily series is the settlement-exact scorer's
     full-calendar record clipped to ``[start, end)`` and compounded at native
     raw-book size (no presentation leverage).
     """

@@ -515,16 +515,11 @@ def validate_demo_rule_probe_evidence(
 
 
 def require_demo_probe_realm(client: Any, *, realm: object = None) -> None:
-    """Hard-refuse the order-placing probe anywhere but demo (B17).
+    """Refuse the order-placing probe anywhere but demo.
 
-    This probe submits and cancels real PostOnly orders up to 200 USDT per
-    symbol, and ``deploy_vps_live.sh`` triggers it automatically once the bound
-    receipt passes half its lifetime. On a funded account that turns shipping
-    code into a way to spend money as a side effect of a deploy.
-
-    The client-level guard (a demo transport plus ``REAL_MONEY`` unset) already
-    made this unreachable in practice. This makes it unreachable *by name*, so
-    the refusal does not depend on someone else's invariant holding.
+    The probe submits and cancels real PostOnly orders up to 200 USDT per
+    symbol, and deploys trigger it automatically, so the realm check must not
+    depend on another layer's invariant holding.
     """
 
     from .venue_realm import VenueRealm, venue_realm  # noqa: PLC0415 - avoids a cycle
@@ -597,11 +592,10 @@ def probe_demo_instrument_rule(
     distance = Decimal(str(probe_distance_bps))
     if not distance.is_finite() or distance <= 0 or distance >= Decimal("10000"):
         raise ValueError("probe_distance_bps must be finite and in (0, 10000)")
-    # One tick off the bid is unnecessarily risky when a full candidate
-    # universe is probed serially. Move the buy away from the touch by a
-    # recorded fixed percentage, rounded down to a tick. This is conservative
-    # for quantity/notional discovery: the same quantity has no less notional
-    # at the current touch. Any fill still fails the final flatness gate.
+    # Move the buy away from the touch by a fixed percentage, rounded down to a
+    # tick: one tick off the bid is risky across a serially probed universe.
+    # Conservative for notional discovery — the same quantity has no less
+    # notional at the touch — and any fill still fails the flatness gate.
     raw_probe_price = bid * (Decimal("1") - distance / Decimal("10000"))
     probe_price = (raw_probe_price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
     if probe_price <= 0:
@@ -1027,11 +1021,10 @@ def probe_demo_instrument_rule(
         )
         raise AssertionError("unreachable")
 
-    # Search hints only choose which fresh orders to try first. The current
-    # structural minNotionalValue is the cheapest adjacent guess, while a prior
-    # source-bound receipt supplies a wider price-rescaled fallback bracket.
-    # Neither source becomes evidence until its current endpoints are submitted
-    # and the remaining interval is bisected to one quantity step.
+    # Search hints only order which fresh orders to try first: structural
+    # minNotionalValue is the cheapest adjacent guess, a prior receipt gives a
+    # wider price-rescaled bracket. Neither is evidence until its endpoints are
+    # submitted and the interval is bisected to one quantity step.
     step_candidates: list[tuple[int, int]] = []
     unit_notional = step * probe_price
     structural_notional = Decimal(0)
@@ -1082,10 +1075,9 @@ def probe_demo_instrument_rule(
                 and prior_rejected_notional >= 0
                 and prior_accepted_notional > prior_rejected_notional
             ):
-                # ``min_steps - 1`` is a non-submittable lower sentinel when
-                # the rescaled rejected notional sits below structural minQty.
-                # Binary search then starts at minQty without pretending that
-                # the sentinel is fresh venue evidence.
+                # ``min_steps - 1`` is a non-submittable lower sentinel for a
+                # rescaled rejection below structural minQty, so the search
+                # starts at minQty without treating it as venue evidence.
                 prior_rejected_steps = max(
                     prior_rejected_steps,
                     min_steps - 1,

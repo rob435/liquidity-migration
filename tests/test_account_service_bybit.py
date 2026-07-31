@@ -9,6 +9,7 @@ import pytest
 
 import liquidity_migration.account_service_runner as account_service_runner_module
 from liquidity_migration.account_kernel import (
+    AccountExecutionKernel,
     AccountState,
     InstrumentRules,
     MarketInputRef,
@@ -17,16 +18,24 @@ from liquidity_migration.account_kernel import (
 )
 from liquidity_migration.account_execution_config import load_demo_rules, load_risk_policy
 from liquidity_migration.account_service_bybit import (
-    BybitDemoAccountSnapshotProvider,
+    BybitAccountSnapshotProvider,
     CapturedBybitMarketProvider,
     CapturedPaperExecutionAdapter,
     VerifiedBybitDemoRulesProvider,
+    inspect_bybit_order_ownership,
     instrument_rules_from_bybit_row,
-    require_bybit_demo_order_ownership,
+    require_bybit_order_ownership,
+)
+from liquidity_migration.account_reconcile import (
+    BybitAccountFundingReconciler,
+    BybitAccountReconciler,
 )
 from liquidity_migration.account_service_runner import (
     require_order_submit_permission,
+    require_startup_reconciliation_safe,
 )
+from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
+from liquidity_migration.venue_protection import BybitNativeProtectionManager
 from liquidity_migration.account_paper_runner import (
     PAPER_EXECUTION_BOOK_DEPTH,
     PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG,
@@ -398,26 +407,86 @@ def test_paper_execution_model_is_commit_owned_and_explicitly_uncalibrated() -> 
     assert config.model_scope == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 
 
-def test_demo_snapshot_provider_refuses_mainnet_and_reads_equity_available_margin() -> None:
-    class Mainnet:
-        demo = False
+class _WalletClient:
+    demo = True
+    realm = "demo"
 
-    with pytest.raises(ValueError, match="non-demo"):
-        BybitDemoAccountSnapshotProvider(Mainnet())
+    def __init__(self, account: dict[str, str]) -> None:
+        self.account = account
 
-    class Demo:
+    def get_wallet_balance(self, **params: str):
+        assert params == {"account_type": "UNIFIED", "coin": "USDT"}
+        return {"list": [self.account]}
+
+
+class _MainnetWalletClient(_WalletClient):
+    demo = False
+    realm = "mainnet"
+
+
+def test_snapshot_provider_refuses_a_client_that_names_no_parsable_realm() -> None:
+    class Realmless:
         demo = True
 
-        def get_wallet_balance(self, **params: str):
-            assert params == {"account_type": "UNIFIED", "coin": "USDT"}
-            return {"list": [{"totalEquity": "100.5", "totalAvailableBalance": "80.25"}]}
+    class BadRealm:
+        demo = False
+        realm = "paper"
+
+    for client in (object(), Realmless(), BadRealm()):
+        with pytest.raises(ValueError, match="naming venue realm"):
+            BybitAccountSnapshotProvider(client)
+
+
+def test_snapshot_provider_reads_the_same_equity_in_both_realms() -> None:
+    account = {"totalEquity": "100.5", "totalAvailableBalance": "80.25"}
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
+
+    demo = BybitAccountSnapshotProvider(_WalletClient(account), clock=clock).current(batch_id="b1")
+    mainnet = BybitAccountSnapshotProvider(
+        _MainnetWalletClient(account), clock=clock
+    ).current(batch_id="b1")
+
+    assert demo.equity_usdt == mainnet.equity_usdt == 100.5
+    assert demo.available_margin_usdt == mainnet.available_margin_usdt == 80.25
+    assert demo.snapshot_ts_ns == mainnet.snapshot_ts_ns == 2_000_000_000
+    assert demo.snapshot_key.startswith("bybit-demo:")
+    assert mainnet.snapshot_key.startswith("bybit-mainnet:")
+    # The digest covers realm-free material, so only the label differs.
+    assert demo.snapshot_key.split(":")[1] == mainnet.snapshot_key.split(":")[1]
+
+
+def test_snapshot_provider_names_the_realm_in_its_wallet_faults() -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
+    provider = BybitAccountSnapshotProvider(
+        _MainnetWalletClient({"totalEquity": "0", "totalAvailableBalance": "1"}), clock=clock
+    )
+    with pytest.raises(RuntimeError, match="Bybit mainnet wallet snapshot has nonpositive equity"):
+        provider.current(batch_id="b1")
+
+
+def test_snapshot_provider_names_an_all_blank_account_wide_row() -> None:
+    """The named refusal only reaches a fully blank row; a partial one keeps the
+    per-field message, so neither text may claim a venue account mode.
+    """
 
     clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
-    snapshot = BybitDemoAccountSnapshotProvider(Demo(), clock=clock).current(batch_id="b1")
-    assert snapshot.equity_usdt == 100.5
-    assert snapshot.available_margin_usdt == 80.25
-    assert snapshot.snapshot_ts_ns == 2_000_000_000
-    assert snapshot.snapshot_key.startswith("bybit-demo:")
+    account = {
+        "totalEquity": "",
+        "totalAvailableBalance": "",
+        "totalMarginBalance": "",
+        "totalInitialMargin": "",
+    }
+    provider = BybitAccountSnapshotProvider(_MainnetWalletClient(account), clock=clock)
+
+    with pytest.raises(RuntimeError, match="blanks every account-wide field"):
+        provider.current(batch_id="b1")
+
+    partial = BybitAccountSnapshotProvider(
+        _MainnetWalletClient({**account, "totalEquity": "100", "totalMarginBalance": "100"}),
+        clock=clock,
+    )
+    with pytest.raises(RuntimeError, match="Bybit totalInitialMargin is missing/non-numeric"):
+        partial.current(batch_id="b1")
 
 
 def test_account_owner_startup_requires_order_submit_permission() -> None:
@@ -449,6 +518,7 @@ def test_account_owner_startup_requires_order_submit_permission() -> None:
 
 class _StartupOpenOrderClient:
     demo = True
+    realm = "demo"
 
     def __init__(
         self,
@@ -498,7 +568,7 @@ def test_demo_owner_startup_rejects_flat_journal_stray_regular_or_conditional_or
     )
 
     with pytest.raises(RuntimeError, match="refused .*venue order"):
-        require_bybit_demo_order_ownership(
+        require_bybit_order_ownership(
             client=client,
             kernel=_StaticKernel(AccountState(events_applied=events_applied)),  # type: ignore[arg-type]
             # An empty journal must reject even if a verifier were accidentally
@@ -517,7 +587,7 @@ def test_demo_owner_startup_rejects_flat_journal_stray_regular_or_conditional_or
 def test_demo_owner_startup_accepts_clean_empty_venue_order_snapshot() -> None:
     client = _StartupOpenOrderClient()
 
-    require_bybit_demo_order_ownership(
+    require_bybit_order_ownership(
         client=client,
         kernel=_StaticKernel(AccountState()),  # type: ignore[arg-type]
     )
@@ -566,7 +636,7 @@ def test_demo_owner_startup_accepts_exact_kernel_owned_restart_orders() -> None:
         },
     ])
 
-    require_bybit_demo_order_ownership(
+    require_bybit_order_ownership(
         client=client,
         kernel=_StaticKernel(state),  # type: ignore[arg-type]
     )
@@ -585,7 +655,7 @@ def test_demo_owner_startup_accepts_journal_verified_native_restart_order() -> N
     client = _StartupOpenOrderClient(all_kinds=[row], conditional=[row])
     verified: list[str] = []
 
-    require_bybit_demo_order_ownership(
+    require_bybit_order_ownership(
         client=client,
         kernel=_StaticKernel(state),  # type: ignore[arg-type]
         native_order_verifier=lambda order: not verified.append(str(order["orderId"])),
@@ -602,7 +672,7 @@ def test_demo_owner_startup_fails_closed_when_either_order_query_fails(
     client = _StartupOpenOrderClient(fail_query=fail_query)
 
     with pytest.raises(RuntimeError, match=rf"{fail_query} open-order query failed"):
-        require_bybit_demo_order_ownership(
+        require_bybit_order_ownership(
             client=client,
             kernel=_StaticKernel(AccountState()),  # type: ignore[arg-type]
         )
@@ -819,3 +889,165 @@ def test_runner_loaders_require_explicit_demo_rules_and_absolute_risk_limits(tmp
     policy = load_risk_policy(policy_path)
     assert policy.max_leverage == 10.0
     assert policy.max_symbol_notional_usdt == 100.0
+
+
+def test_order_ownership_classifies_identically_in_both_realms() -> None:
+    class _MainnetStartupClient(_StartupOpenOrderClient):
+        demo = False
+        realm = "mainnet"
+
+    stray = {
+        "symbol": "BUSDT",
+        "orderId": "stray-1",
+        "orderLinkId": "manual-order",
+        "orderStatus": "New",
+    }
+    snapshots = {
+        factory.realm: inspect_bybit_order_ownership(
+            client=factory(all_kinds=[stray]),
+            state=AccountState(events_applied=4),
+            native_order_verifier=lambda _row: False,
+        )
+        for factory in (_StartupOpenOrderClient, _MainnetStartupClient)
+    }
+
+    assert snapshots["demo"] == snapshots["mainnet"]
+    assert [order.description for order in snapshots["mainnet"].unowned_orders] == [
+        "regular BUSDT orderId=stray-1 orderLinkId=manual-order"
+    ]
+
+
+def test_order_ownership_refuses_a_client_that_names_no_parsable_realm() -> None:
+    class Realmless(_StartupOpenOrderClient):
+        realm = None
+
+    with pytest.raises(ValueError, match="naming venue realm"):
+        inspect_bybit_order_ownership(client=Realmless(), state=AccountState())
+    with pytest.raises(ValueError, match="naming venue realm"):
+        require_bybit_order_ownership(
+            client=Realmless(),
+            kernel=_StaticKernel(AccountState()),  # type: ignore[arg-type]
+        )
+
+
+def test_mainnet_owner_startup_refuses_an_unowned_venue_order_by_realm_name() -> None:
+    class _MainnetStartupClient(_StartupOpenOrderClient):
+        demo = False
+        realm = "mainnet"
+
+    client = _MainnetStartupClient(all_kinds=[{"symbol": "BUSDT", "orderId": "manual-1"}])
+
+    with pytest.raises(RuntimeError, match="Bybit mainnet startup refused venue orders"):
+        require_bybit_order_ownership(
+            client=client,
+            kernel=_StaticKernel(AccountState()),  # type: ignore[arg-type]
+        )
+    assert client.calls == [
+        {"settle_coin": "USDT"},
+        {"settle_coin": "USDT", "order_filter": "StopOrder"},
+    ]
+
+
+class _MainnetOwnerClient:
+    """One mainnet-realm private client answering every read the owner start-up makes."""
+
+    demo = False
+    realm = "mainnet"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def get_open_orders(self, **_params: Any) -> list[dict[str, Any]]:
+        self.calls.append("get_open_orders")
+        return []
+
+    def get_positions(self, **_params: Any) -> list[dict[str, Any]]:
+        self.calls.append("get_positions")
+        return []
+
+    def get_trade_history(self, **_params: Any) -> list[dict[str, Any]]:
+        self.calls.append("get_trade_history")
+        return []
+
+    def get_order_history(self, **_params: Any) -> list[dict[str, Any]]:
+        self.calls.append("get_order_history")
+        return []
+
+    def get_account_transactions(self, **_params: Any) -> list[dict[str, Any]]:
+        self.calls.append("get_account_transactions")
+        return []
+
+    def get_wallet_balance(self, **_params: Any) -> dict[str, Any]:
+        self.calls.append("get_wallet_balance")
+        return {"list": [{"totalEquity": "2500", "totalAvailableBalance": "2400"}]}
+
+
+def test_mainnet_owner_start_up_reads_get_past_construction(tmp_path: Path) -> None:
+    """The defect this closes: on mainnet none of these could even be built.
+
+    Same order as ``run_account_execution_service``: ownership check, bootstrap
+    reconcile, funding reconcile, wallet snapshot.
+    """
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="mainnet-owner", clock=clock)
+    client = _MainnetOwnerClient()
+
+    require_bybit_order_ownership(client=client, kernel=kernel)
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    bootstrap = reconciler.reconcile_once()
+    require_startup_reconciliation_safe(bootstrap)
+    assert bootstrap.healthy
+    assert bootstrap.snapshot_key.startswith("bybit-mainnet-position:")
+
+    funding_reconciler = BybitAccountFundingReconciler(kernel=kernel, client=client, clock=clock)
+    clock.advance_ns(1_000_000_000)
+    assert funding_reconciler.reconcile_once().healthy
+
+    snapshot = BybitAccountSnapshotProvider(client, clock=clock).current(batch_id="owner-health/bootstrap")
+    assert snapshot.equity_usdt == 2500.0
+    assert snapshot.snapshot_key.startswith("bybit-mainnet:")
+
+    reconciler.require_recent_healthy(max_age_ns=1)
+    funding_reconciler.require_recent_healthy(max_age_ns=1)
+    # Every leg must have reached the venue. A funding pass whose window has not
+    # opened yet returns healthy without one REST call, so assert the call, not
+    # the verdict.
+    assert client.calls == [
+        # startup ownership: all-kinds, then the explicit StopOrder query
+        "get_open_orders",
+        "get_open_orders",
+        # reconcile: position truth, then the same ownership pair again
+        "get_positions",
+        "get_open_orders",
+        "get_open_orders",
+        "get_account_transactions",
+        "get_wallet_balance",
+    ]
+
+
+def test_mainnet_owner_still_blocked_by_two_realm_fences_outside_this_change() -> None:
+    """Named so the residual blocker is discoverable, not implicit.
+
+    ``BybitNativeProtectionManager`` is built at ``account_service_runner.py:716``,
+    before every gate above, and supplies the ownership check's native verifier.
+    ``BybitDemoExecutionAdapter`` is built after them. Both still refuse mainnet.
+    """
+
+    client = _MainnetOwnerClient()
+
+    with pytest.raises(ValueError, match="non-demo client"):
+        BybitNativeProtectionManager(
+            kernel=None,  # type: ignore[arg-type]
+            client=client,
+            instrument_rules={},
+            fallback_stop_fraction=0.35,
+        )
+    with pytest.raises(ValueError, match="requires a demo client"):
+        BybitDemoExecutionAdapter(client)

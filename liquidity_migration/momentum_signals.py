@@ -1,13 +1,10 @@
+"""Daily-bar helpers shared with ``long_native.py``."""
+
 from __future__ import annotations
 
 import polars as pl
 
 from ._common import MS_PER_DAY, calendar_shift
-
-
-# Shared daily-bar helpers used by ``long_native.py``. Earlier unused momentum
-# exports were removed; recover them from git history if a future strategy
-# needs those building blocks.
 
 
 def daily_bars(klines_1h: pl.DataFrame, *, min_hourly_bars: int = 20) -> pl.DataFrame:

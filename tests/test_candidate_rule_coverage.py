@@ -590,11 +590,10 @@ def test_rollout_refresh_threshold_is_half_the_hard_bound_and_tightens_only(
 def test_prior_receipt_bound_to_older_candidate_schema_requires_fresh_probe(
     tmp_path: Path,
 ) -> None:
-    # The 2026-07-29 carry rollout: the prior rules receipt binds a candidate
-    # artifact frozen under an older schema. The projection cannot validate
-    # the subset relationship against evidence it can no longer load — that
-    # is structural drift and must fall through to the full probe (exit 3),
-    # never crash the rollout.
+    # When the prior rules receipt binds a candidate artifact frozen under an
+    # older schema, the projection cannot validate the subset relationship
+    # against evidence it can no longer load. That structural drift must fall
+    # through to the full probe (exit 3), never crash the rollout.
     source_candidate = _candidate_symbols(
         tmp_path,
         ("AAAUSDT", "BBBUSDT"),

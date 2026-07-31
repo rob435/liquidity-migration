@@ -1,10 +1,9 @@
 """Process runner for the single-owner account execution service.
 
-One owner per venue realm. ``--realm`` selects it, defaults to demo, and
-never reaches mainnet by omission; the realm is then carried through the
-durable route identity, the credential pair, the mutation lease, both
-transports, and the instrument-rule environment, so a single flag cannot
-leave any one of them pointing at the other account.
+One owner per venue realm. ``--realm`` selects it and defaults to demo; the
+realm is then carried through the route identity, the credential pair, the
+mutation lease, both transports, and the instrument-rule environment, so one
+flag cannot leave any of them pointing at the other account.
 """
 
 from __future__ import annotations
@@ -67,10 +66,10 @@ from .account_owner_health import (
 from .account_owner_lease import DemoAccountIdentity, DemoAccountMutationLease
 from .account_service import AccountExecutionService, AccountIntentInbox
 from .account_service_bybit import (
-    BybitDemoAccountSnapshotProvider,
+    BybitAccountSnapshotProvider,
     CapturedBybitMarketProvider,
     VerifiedBybitDemoRulesProvider,
-    require_bybit_demo_order_ownership,
+    require_bybit_order_ownership,
 )
 from .bybit import (
     BybitPrivateClient,
@@ -120,9 +119,8 @@ def _run_reconciliation_cycle(
 ) -> tuple[AccountReconciliationReport, AccountFundingReconciliationReport]:
     """Refresh position truth after slower funding/journal recovery.
 
-    Reduction admission consumes the account reconciler's direct position
-    timestamp. Running it last prevents unrelated accounting work from aging a
-    just-completed venue snapshot before the owner can inspect an intent.
+    Reduction admission consumes the position timestamp, so running it last
+    keeps accounting work from aging a just-taken venue snapshot.
     """
 
     funding_report = funding_reconciler.reconcile_once()
@@ -137,11 +135,10 @@ def run_periodic_reconciliation(
 ) -> tuple[AccountReconciliationReport | None, AccountFundingReconciliationReport | None]:
     """One tolerated refresh attempt for the owner loop.
 
-    A lone REST timeout on a read is retryable without giving up
-    position-truth guarantees: the health chain's recency requirement fails
-    closed on its own if refreshes keep failing, while a process death here
-    would take down execution, protection, and health publishing at once.
-    Startup reconciliation stays strict and does not use this wrapper.
+    A single REST read timeout is retryable: the health chain's recency
+    requirement fails closed on its own if refreshes keep failing, whereas
+    dying here would take down execution, protection, and health publishing
+    together. Startup reconciliation stays strict and skips this wrapper.
     """
 
     try:
@@ -160,9 +157,9 @@ def require_startup_reconciliation_safe(
     """Allow only the native-breach condition the owner can safely reduce.
 
     Position drift, unknown orders, malformed venue facts, and ordinary native
-    sync failures still abort startup. A definite crossed-stop breach is
-    different: refusing to start would disable the only owner authorized to
-    publish and execute the strict reduce-only recovery request.
+    sync failures still abort startup. A definite crossed-stop breach does not:
+    refusing to start would disable the only owner able to execute the strict
+    reduce-only recovery request.
     """
 
     if report.healthy:
@@ -190,9 +187,8 @@ def account_has_open_exposure(
 ) -> bool:
     """Whether anything is open that a stopped owner would leave unmanaged.
 
-    Deliberately generous: a journal position, a venue position, or a working
-    order all count, and an unreadable venue is treated as exposure rather than
-    as proof of flatness.
+    Generous: a journal position, a venue position, or a working order all
+    count, and an unreadable venue counts as exposure.
     """
 
     state = kernel._state_ref()
@@ -214,20 +210,18 @@ def degrade_or_raise(
 ) -> StartupDegradation:
     """Stay alive when exiting would strand a live book; otherwise fail loudly.
 
-    B16. ``Restart=always`` plus a strict startup check is a 2-second crash
-    loop, and during it *nothing* runs: no reconciliation, no protection sync,
-    no health publication, and — the part that actually costs money — no exit
-    path. The position sits at the venue behind only its native stop with no
-    process able to close it.
+    ``Restart=always`` plus a strict startup check is a 2-second crash loop
+    during which nothing runs -- no reconciliation, no protection sync, no
+    health publication, and no exit path -- while the position sits at the
+    venue behind only its native stop.
 
-    Exiting is still the right answer when there is nothing open: a flat
-    account with a broken startup check should fail loudly so the deploy
-    notices, not limp along publishing BLOCKED forever.
+    With nothing open, exiting is right: a flat account with a broken startup
+    check should fail loudly rather than publish BLOCKED forever.
 
-    Degrading is not adoption and not permission. The owner enters its normal
-    loop with the failure latched into health, which is what already refuses
-    every exposure-increasing batch; risk-reducing batches and the safety-flat
-    path stay available by design, which is the whole point of staying up.
+    Degrading is not adoption. The owner enters its normal loop with the
+    failure latched into health, which already refuses every
+    exposure-increasing batch, while reductions and the safety flat stay
+    available.
     """
 
     if not account_has_open_exposure(kernel=kernel, report=report):
@@ -245,11 +239,9 @@ def degrade_or_raise(
 
 
 #: Freshness bound for the book a software stop/take-profit is decided against.
-#: Deliberately looser than the order-placement bound: placing an order against
-#: a stale mark mis-prices a fill, while evaluating a stop against one merely
-#: delays a decision that the venue-native stop still backstops. It has to sit
-#: well above ordinary reconnect jitter and far below the multi-minute scale of
-#: a real outage. Tune it on observed gap durations rather than by taste.
+#: Looser than the order-placement bound: a stale mark mis-prices a fill, but
+#: only delays a stop decision the venue-native stop still backstops. Sits above
+#: ordinary reconnect jitter and well below the scale of a real outage.
 PROTECTION_MAX_BOOK_AGE_NS = 15 * 1_000_000_000
 
 
@@ -261,26 +253,19 @@ def protection_market_refs(
 ) -> tuple[dict[str, MarketInputRef], dict[str, str]]:
     """Build component-protection market refs, skipping unusable or stale books.
 
-    ``L2BookSnapshot.market_ref`` fails closed (ValueError) for gapped,
-    crossed, empty, or otherwise invalid books. The protection loop must
-    skip that symbol for one cycle — the venue-native disaster stop stays
-    armed independently — instead of letting the exception kill the owner
-    process, which would stop execution, reconciliation, health publishing,
-    and every protection at once.
+    ``L2BookSnapshot.market_ref`` raises for gapped, crossed, empty, or invalid
+    books; skip the symbol for one cycle (the venue-native stop stays armed)
+    rather than letting the exception kill the owner process.
 
-    Age is checked here because **a frozen book passes every structural check**.
-    A dropped WebSocket delivers no deltas at all, so ``BookReconstruction``
-    stays healthy and ``sequence_gap`` stays false while the real price walks
-    away from the last snapshot. The public stream times out on ping/pong
-    roughly every five minutes in normal operation (observed 2026-07-30), so
-    without a bound the stop and take-profit engine repeatedly decides against a
-    mark minutes old — silently failing to fire while price runs through the
-    level, with no error, no health change, and no alert. Every other consumer
-    in the owner loop already applies a freshness bound; this one did not.
+    Age matters because a frozen book passes every structural check: a dropped
+    WebSocket delivers no deltas, so reconstruction stays healthy and
+    ``sequence_gap`` stays false while price walks away. Without the bound the
+    stop/take-profit engine decides against a minutes-old mark with no error,
+    no health change, and no alert.
 
-    Age is measured as ``observed_wall_ns - book.local_receive_ts_ns`` under the
-    recorder's lock, so a negative value is a real clock regression rather than
-    a read/update race, and is treated as unusable.
+    Age is ``observed_wall_ns - book.local_receive_ts_ns`` under the recorder's
+    lock, so a negative value is a clock regression, not a read race, and
+    counts as unusable.
     """
 
     refs: dict[str, MarketInputRef] = {}
@@ -317,8 +302,8 @@ def notification_position_truth(
 ) -> tuple[bool, str, str]:
     """Evaluate quantity truth without conflating unrelated owner health.
 
-    Native-protection health can be blocked while the venue and local position
-    quantities still agree. Telegram must report those as two distinct facts.
+    Native-protection health can be blocked while venue and local quantities
+    agree; those are two distinct facts.
     """
 
     if report is None:
@@ -339,9 +324,8 @@ def notification_position_truth(
     return True, "", "healthy"
 
 
-#: How many reconciliation passes a fresh venue/local disagreement is given to
-#: resolve itself before Telegram calls it a fault, and the floor that bound
-#: never drops below.
+#: Reconciliation passes a fresh venue/local disagreement gets to resolve
+#: itself before it is reported as a fault, and the floor for that bound.
 POSITION_TRUTH_SETTLE_RECONCILE_PASSES = 15
 POSITION_TRUTH_SETTLE_FLOOR_NS = 30 * 1_000_000_000
 
@@ -349,31 +333,24 @@ POSITION_TRUTH_SETTLE_FLOOR_NS = 30 * 1_000_000_000
 class PositionTruthSettling:
     """Hold a fresh venue/local disagreement briefly before calling it a fault.
 
-    The venue's REST position view lags a fill. The kernel journals the fill
-    the moment it reconstructs it, while Bybit keeps returning the pre-fill
-    quantity for a few seconds after. ``require_recent_symbols_consistent``
-    compares the CURRENT kernel position against the LAST venue snapshot, so
-    that gap reads as a contradiction even though nothing is wrong — and it
-    reads that way after every single fill, by construction.
+    The venue's REST position view lags a fill: the kernel journals it on
+    reconstruction while Bybit returns the pre-fill quantity for a few seconds.
+    ``require_recent_symbols_consistent`` compares the CURRENT kernel position
+    against the LAST venue snapshot, so that gap reads as a contradiction after
+    every fill even though nothing is wrong.
 
-    The reduction admission gate must keep treating it as a hard stop: it is
-    about to send a reduce-only order against evidence it does not have. A
-    Telegram lifecycle message must not. Sharing one predicate between the two
-    made the account owner announce every reduction twice — once as
-    ``⚠️ Local journal reduction … awaiting venue reconciliation`` and once,
-    seconds later, as its retraction. On 2026-07-30 that was 108 alarms and 86
-    retractions before 13:00 UTC.
+    The reduction admission gate still treats it as a hard stop -- it is about
+    to trade against evidence it does not have -- but a lifecycle message must
+    not, or every reduction is announced and then retracted seconds later.
 
     The window is wall time since the disagreement began, reset only by
-    agreement, so a disagreement whose *details* keep changing (a book being
-    resized name by name) cannot hold the clock open indefinitely. Anything
-    that survives the window is reported in full, with its original cause. A
-    clock that runs backwards fails closed and reports immediately.
+    agreement, so a disagreement whose details keep changing cannot hold the
+    clock open. Anything surviving the window is reported in full with its
+    original cause, and a backwards clock reports immediately.
 
-    Measured basis: every one of the 2026-07-30 alarms was retracted within 14
-    seconds, median 7. The 30-second floor is a bit over twice the worst
-    observed case; the pass-count bound scales it if reconciliation is ever
-    slowed down.
+    Observed retractions ran under 14s, median 7; the 30-second floor is about
+    twice the worst case, and the pass-count bound scales it if reconciliation
+    slows down.
     """
 
     __slots__ = ("settle_ns", "_since_ns")
@@ -433,10 +410,8 @@ def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
 def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
     """Gross notional of the reconstructed book at the freshest observed marks.
 
-    Deliberately computed from *positions*, not from target quantities: the
-    hardening note in docs/real_money.md flags that account_gross is
-    derived from targets, which cannot see exposure the book acquired outside
-    the kernel's own commands.
+    From *positions*, not target quantities: targets cannot see exposure the
+    book acquired outside the kernel's own commands.
     """
 
     total = 0.0
@@ -466,8 +441,7 @@ def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
 def _load_equity_anchored_envelope(path: str) -> EquityAnchoredEnvelope | None:
     """Build the envelope when the risk policy is a full operational profile.
 
-    Isolated tools and tests still pass the legacy flat policy shape, which has
-    no ratios to anchor and keeps the historical fixed caps.
+    The flat policy shape has no ratios to anchor and keeps its fixed caps.
     """
 
     try:
@@ -496,10 +470,8 @@ def publish_demo_owner_health(
 ) -> AccountOwnerHealth:
     """Publish owner health bound to canonical state and wallet capital.
 
-    ``environment`` labels which owner this is. It defaults to demo — the same
-    direction every other fallback in the realm plumbing takes — but a mainnet
-    owner must pass its own, or its health would be published, read, and
-    alerted on as if it were the demo fleet's.
+    ``environment`` labels which owner this is and defaults to demo, so a
+    mainnet owner must pass its own or be alerted on as part of the demo fleet.
     """
 
     state = kernel._state_ref()
@@ -536,12 +508,11 @@ def owner_health_publish_decision(
 ) -> tuple[bool, bool]:
     """Decide whether to publish health and whether wallet capital is due.
 
-    Reconciliation and private execution can advance the immutable journal more
-    often than the ordinary health interval. Exact-head consumers must not have
-    to win a timing race against journal traffic, so any new head
-    republishes health. Journal-only refreshes reuse the last wallet snapshot;
-    only a completed request, status change, or elapsed interval spends another
-    wallet REST call.
+    Reconciliation and private execution advance the journal faster than the
+    health interval, so any new head republishes health rather than making
+    exact-head consumers race journal traffic. Journal-only refreshes reuse the
+    last wallet snapshot; only a completed request, status change, or elapsed
+    interval spends another wallet REST call.
     """
 
     if health_interval_seconds <= 0.0:
@@ -647,10 +618,9 @@ def main(argv: list[str] | None = None) -> int:
     invocation_id = require_systemd_invocation_id()
 
     realm = venue_realm(args.realm)
-    # The realm is baked into the durable on-disk route identity and
-    # ensure_account_route refuses to rewrite an existing one, so the mainnet
-    # owner necessarily gets its own journal root. There is no adoption or
-    # migration path from the demo journal, by construction rather than policy.
+    # The realm is baked into the on-disk route identity and
+    # ensure_account_route refuses to rewrite an existing one, so each realm
+    # gets its own journal root with no migration path between them.
     requested_route = derive_account_route(
         account_id=args.account_id,
         environment=realm.value,
@@ -702,9 +672,9 @@ def main(argv: list[str] | None = None) -> int:
             max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
         )
     else:
-        # B17. The demo receipt is produced by an order-placing probe. Off demo
-        # the rules come from the read-only instruments-info endpoint instead,
-        # and the loader refuses a receipt bound to any other realm.
+        # The demo receipt comes from an order-placing probe. Off demo, rules
+        # come from read-only instruments-info, and the loader refuses a
+        # receipt bound to any other realm.
         rules = load_venue_rules_bytes(
             read_stable_file(
                 Path(args.demo_rules_file).expanduser(),
@@ -716,9 +686,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     policy = load_risk_policy(args.risk_policy_file)
     # In ``account_equity`` mode the six absolute caps are a fraction of the
-    # observed wallet rather than a number someone has to remember to update
-    # after a deposit. The envelope owns the rebase discipline; the policy the
-    # kernel enforces is re-read from it after every capital refresh.
+    # observed wallet. The envelope owns the rebase discipline; the kernel's
+    # policy is re-read from it after every capital refresh.
     envelope = _load_equity_anchored_envelope(args.risk_policy_file)
     if envelope is not None:
         policy = envelope.policy()
@@ -750,12 +719,11 @@ def main(argv: list[str] | None = None) -> int:
         instrument_rules=rules,
         fallback_stop_fraction=native_protection_policy.fallback_stop_fraction,
     )
-    # Prove the venue has no unowned regular or conditional order before any
-    # stream starts or any strategy request can be claimed. An empty/new journal
-    # therefore requires a completely empty venue order book.
+    # No unowned regular or conditional order may exist before a stream starts
+    # or a request is claimed, so a new journal requires an empty venue book.
     startup_degradations: list[StartupDegradation] = []
     try:
-        require_bybit_demo_order_ownership(
+        require_bybit_order_ownership(
             client=private_client,
             kernel=kernel,
             native_order_verifier=native_protection.is_verified_native_order,
@@ -821,8 +789,8 @@ def main(argv: list[str] | None = None) -> int:
         native_protection_manager=native_protection,
         fill_observer=markout_observer.notify,
     )
-    # Bootstrap venue truth before the service can claim any request. Existing
-    # venue exposure with an empty kernel is a hard mismatch, never auto-adopted.
+    # Bootstrap venue truth before any request is claimed. Venue exposure with
+    # an empty kernel is a hard mismatch, never auto-adopted.
     bootstrap_reconciliation = reconciler.reconcile_once()
     try:
         require_startup_reconciliation_safe(bootstrap_reconciliation)
@@ -880,7 +848,7 @@ def main(argv: list[str] | None = None) -> int:
             native_protection,
         )
     )
-    snapshot_provider = BybitDemoAccountSnapshotProvider(private_client)
+    snapshot_provider = BybitAccountSnapshotProvider(private_client)
     service = AccountExecutionService(
         route=route,
         kernel=kernel,
@@ -890,8 +858,8 @@ def main(argv: list[str] | None = None) -> int:
         risk_policy=policy,
         execution_adapter=BybitDemoExecutionAdapter(
             private_client,
-            # B5: read position truth back at the create boundary instead of
-            # trusting Bybit's atomic-arming promise until the next reconcile.
+            # Read position truth back at the create boundary instead of
+            # trusting atomic arming until the next reconcile.
             entry_stop_verifier=native_protection.verify_entry_attached_stop,
         ),
         native_protection_policy=native_protection_policy,
@@ -949,11 +917,9 @@ def main(argv: list[str] | None = None) -> int:
     last_request_failure_signature = ""
     latest_reconcile_report = reconciler.last_report
     last_capital_snapshot = snapshot_provider.current(batch_id="owner-health/bootstrap")
-    # Account-level daily loss halt. The ceiling rides on the risk policy, so it
-    # is bound into the operational profile and hashed into the authority
-    # receipt: it cannot be raised without invalidating the deploy authority.
-    # Absent/zero leaves the machinery running and observable but never tripping,
-    # which is how it is exercised on demo long before it guards anything real.
+    # Account-level daily loss halt; the ceiling rides on the risk policy.
+    # Absent or zero leaves the machinery running and observable but never
+    # tripping.
     loss_guard = AccountLossGuard(
         max_daily_loss_usdt=(
             policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
@@ -1007,8 +973,8 @@ def main(argv: list[str] | None = None) -> int:
                         "requested symbols lack verified demo rules: %s",
                         missing_rules,
                     )
-                # Warm every queued symbol in parallel while the strict
-                # queue-head gate below preserves the registered 30s timeout.
+                # Warm all queued symbols in parallel; the queue-head gate
+                # below still holds the registered 30s timeout.
                 recorder.set_required_symbols(desired)
                 public_stream.update_symbols(desired)
                 last_symbol_refresh = now
@@ -1039,11 +1005,9 @@ def main(argv: list[str] | None = None) -> int:
                     skipped_detail,
                 )
                 # A skipped symbol means its software stop and take-profit did
-                # not run. That is exactly the state in which no new exposure
-                # should be opened, so it has to reach health rather than only
-                # journald — the owner previously published HEALTHY while a
-                # symbol's component protection was inoperative, cycle after
-                # cycle. The venue-native stop is unaffected either way.
+                # not run, which is exactly when no new exposure should open, so
+                # it must reach health and not only journald. The venue-native
+                # stop is unaffected either way.
                 protection_evaluation_error = _append_health_error(
                     protection_evaluation_error,
                     f"component protection did not evaluate: {skipped_detail}",
@@ -1087,11 +1051,10 @@ def main(argv: list[str] | None = None) -> int:
             if private_stream_status is not True:
                 health_details.append(private_stream_supervisor.health_detail)
             if startup_degradations:
-                # B16. A startup check failed over open exposure and the owner
-                # stayed up rather than crash-looping. One fully healthy pass
-                # supersedes it — the account is now understood — and until then
-                # the failure rides on health, which is what refuses new
-                # exposure while leaving exits and the safety flat available.
+                # A startup check failed over open exposure and the owner
+                # stayed up. One fully healthy pass supersedes it; until then
+                # the failure rides on health, refusing new exposure while
+                # exits and the safety flat stay available.
                 if health_status is AccountOwnerHealthStatus.HEALTHY:
                     _logger.warning(
                         "startup degradation cleared by a healthy pass: %s",
@@ -1121,10 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
                             ]
                         )
                     except Exception as exc:  # noqa: BLE001 - receipt is already durable
-                        # Never misreport a completed request as returned to
-                        # pending merely because post-request native protection
-                        # is still converging (notably while a breach-flat fill
-                        # is in flight). Reconciliation owns the next proof.
+                        # Do not report a completed request as returned to
+                        # pending just because native protection is still
+                        # converging; reconciliation owns the next proof.
                         _logger.error(
                             "account request completed but native protection remains unhealthy: %s: %s",
                             type(exc).__name__,
@@ -1142,9 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
                         receipt.final_state_hash[:12],
                     )
             except Exception as exc:  # noqa: BLE001 - request was released for retry
-                # A persistently blocked request retries every few seconds; one
-                # full traceback per distinct cause keeps the journal usable
-                # while each blocked pass still leaves a one-line record.
+                # A blocked request retries every few seconds: one traceback
+                # per distinct cause, one line per pass.
                 failure_signature = f"{type(exc).__name__}: {exc}"[:500]
                 if failure_signature != last_request_failure_signature:
                     last_request_failure_signature = failure_signature
@@ -1209,9 +1170,9 @@ def main(argv: list[str] | None = None) -> int:
                     if rebase is not None:
                         service.risk_policy = envelope.policy()
                         policy = service.risk_policy
-                        # The daily ceiling scales with the envelope, but the
-                        # guard keeps its own day anchor: rebasing must not
-                        # refresh a loss budget that is already partly spent.
+                        # The ceiling scales with the envelope, but the guard
+                        # keeps its own day anchor: rebasing must not refresh a
+                        # partly spent loss budget.
                         loss_guard.max_daily_loss_usdt = (
                             policy.max_daily_loss_usdt
                             if policy.max_daily_loss_usdt > 0.0
@@ -1244,11 +1205,9 @@ def main(argv: list[str] | None = None) -> int:
                         requested_symbols_ready,
                     )
                 if loss_state == LOSS_GUARD_TRIPPED and not loss_guard_flat_published:
-                    # Publish once. run_safety_flat_once is the same durable
-                    # all-flat path a native-protection breach uses: reductions
-                    # bypass every notional cap and the health chain, so a
-                    # BLOCKED owner can still close. Republishing every cycle
-                    # would queue redundant flats behind the first.
+                    # Publish once: republishing would queue redundant flats.
+                    # run_safety_flat_once is the same all-flat path a native
+                    # breach uses, so a BLOCKED owner can still close.
                     _logger.critical("account loss ceiling reached: %s", loss_detail)
                     try:
                         service.run_safety_flat_once(inbox)
@@ -1312,10 +1271,9 @@ def main(argv: list[str] | None = None) -> int:
                     health_chain.require_recent_healthy(max_age_ns=reconcile_health_max_age_ns)
                 except Exception as exc:  # noqa: BLE001 - rendered hourly, not spammed per cycle
                     notification_health_errors.append(str(exc)[:240])
-                # Position truth is narrower than general owner health. A
-                # missing native stop should block health, but must not make a
-                # matching venue/local quantity report claim that the two
-                # disagree. Derive this flag from reconciliation alone.
+                # Narrower than owner health: a missing native stop blocks
+                # health but must not make matching quantities report a
+                # disagreement. From reconciliation alone.
                 (
                     position_truth_healthy,
                     position_truth_error,
@@ -1326,8 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
                     report=latest_reconcile_report,
                     max_age_ns=reconcile_health_max_age_ns,
                 )
-                # Reporting only. The reduction admission gate calls the
-                # reconciler directly and is never softened by this.
+                # Reporting only; the admission gate calls the reconciler.
                 (
                     position_truth_healthy,
                     position_truth_error,
@@ -1369,9 +1326,8 @@ def main(argv: list[str] | None = None) -> int:
                         continuous_status_reader.render(now_ns=notification_now_ns)
                         if continuous_status_reader is not None
                         # No configured cycle root means the sleeve is not
-                        # running (CONTINUOUS retired 2026-07-29). Render no
-                        # line at all rather than a permanent "unavailable" or
-                        # ever-growing "STALE" fault for a sleeve nobody runs.
+                        # running, so render no line rather than a permanent
+                        # "unavailable" or ever-growing "STALE" fault.
                         else ""
                     ),
                     now_ns=notification_now_ns,

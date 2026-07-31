@@ -1,43 +1,25 @@
 """Account-level loss halt.
 
-The deployed kill criteria (``sleeve_kill_criteria``) are weekly, read-only, and
-carry no operational authority — "a trip is executed by the operator". The only
-automatic loss control in the runtime is the per-position venue-native stop at
-``declared_stop_loss_fraction`` (0.35 for CARRY as of 2026-07-30). That is
-adequate for a demo account, where the worst case is an embarrassing log line.
-It is not adequate for real capital, where nothing would stand between a
-correlated drawdown and the account except a human happening to look.
-
-This guard closes that gap. It is deliberately **account-level** rather than
-per-sleeve, because the failure that matters is the whole book moving together —
-which is exactly what per-position stops cannot see. CARRY holds a basket of
-squeezed small-cap alts selected *because* their funding is extreme; their price
+Account-level rather than per-sleeve: the failure that matters is the whole
+book moving together, which per-position venue stops cannot see. CARRY holds a
+basket of small-cap alts selected because their funding is extreme, so their
 moves are far from independent.
-
-Three states, because "I do not know" and "I know it is bad" deserve different
-answers:
 
 ``OK``
     Trade normally.
 ``BLOCKED``
-    Take no new risk. Leave existing positions standing under their venue
-    stops. Entered when equity is too stale to judge. Flattening on missing data
-    would itself be a risky action taken blind, and the public feed drops for
-    minutes at a time in normal operation (``ping/pong timed out`` roughly every
-    five minutes as of 2026-07-30), so a staleness-triggered flatten would fire
-    constantly and destroy the book it was meant to protect.
+    Take no new risk; leave existing positions under their venue stops. Entered
+    when equity is too stale to judge. Flattening on missing data is itself a
+    blind risky action, and the public feed drops for minutes at a time in
+    normal operation, so a staleness flatten would fire constantly.
 ``TRIPPED``
     The daily loss ceiling was breached against a *fresh* reading. Flatten and
     stop. Never clears on its own.
 
-The anchor is the day's opening equity, not its high-water mark: this is a daily
-loss limit, not a trailing drawdown stop. A trailing variant would ratchet the
-halt threshold up after a profitable morning and stop the sleeve out on ordinary
-give-back.
-
-The anchor is snapshotable so a process restart cannot silently refresh the
-day's loss budget. A guard that forgot its anchor on restart would convert a
-crash-loop into unlimited daily loss, one restart at a time.
+The anchor is the day's opening equity, not its high-water mark: a trailing
+variant would ratchet the threshold up after a profitable morning and stop out
+on ordinary give-back. It is snapshotable so a restart cannot refresh the day's
+loss budget and turn a crash-loop into unlimited daily loss.
 """
 
 from __future__ import annotations
@@ -56,10 +38,9 @@ LOSS_GUARD_OK = "ok"
 LOSS_GUARD_BLOCKED = "blocked"
 LOSS_GUARD_TRIPPED = "tripped"
 
-#: Equity older than this is not evidence about the account right now. Set well
-#: above the 2s reconcile cadence so an ordinary feed hiccup does not block
-#: trading, and well below any horizon over which a real drawdown could develop
-#: unseen.
+#: Equity older than this is not evidence about the account now. Well above the
+#: 2s reconcile cadence so a feed hiccup does not block trading, well below any
+#: horizon over which a real drawdown could develop unseen.
 DEFAULT_MAX_EQUITY_STALENESS_NS = 120 * 1_000_000_000
 
 

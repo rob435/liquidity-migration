@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """Stop-level counterfactual on the CONTINUOUS reconstruction's own trades.
 
-Method (docs/research_findings.md): take every modelled trade,
-and for each candidate stop fraction, any trade whose recorded ``mae`` breaches
-the stop is closed at exactly the stop instead of its modelled exit. Costs and
-funding are held at their recorded values, and the trade stays attributed to its
-recorded exit date; §16.3 lists why both are second-order against a sign flip.
+For each candidate stop fraction, any modelled trade whose recorded ``mae``
+breaches the stop is closed at exactly the stop instead of its modelled exit.
+Costs and funding stay at their recorded values and the trade keeps its recorded
+exit date; both are second-order against a sign flip.
 
-Known optimism, restated: ``mae`` comes from hourly bar extremes while the
-native stop triggers on MarkPrice, and a triggered stop is a market order that
-slips in a squeeze — every stopped row here fills at exactly the stop. Numbers
-at tight stops are therefore ceilings.
+Known optimism: ``mae`` comes from hourly bar extremes while the native stop
+triggers on MarkPrice, and a real triggered stop is a market order that slips in
+a squeeze. Tight-stop numbers are therefore ceilings.
 
-Purpose: choose the declared ``stop_loss_pct`` for the CONTINUOUS sleeve so the
-deployed exit rule and the backtest model the same book (§16.5 item 4: wide
-native backstop + the strategy's own TP/max-hold exits). Lane-1 on seen data;
-grades nothing (AGENTS.md).
+Purpose: choose the declared ``stop_loss_pct`` so the deployed exit rule and the
+backtest model the same book — a wide native backstop plus the strategy's own
+TP/max-hold exits. Method and caveats: docs/research_findings.md.
 
 Usage:
   python scripts/continuous_stop_counterfactual.py \
@@ -40,15 +37,13 @@ if str(REPO_ROOT) not in sys.path:
 
 from liquidity_migration.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS  # noqa: E402
 
-# Deployed blend weights by artifact cell — §16.3 published this convention
-# (verified: the "none" row reproduces +18.24% / Sharpe 2.50 / t 4.56 exactly).
+# Deployed blend weights by artifact cell.
 COMPONENT_WEIGHTS = {
     component.artifact_cell: component.weight for component in ACTIVE_CONTINUOUS_COMPONENTS
 }
 
-# The published §16.3 rows first (validation against the recorded table), then
-# the wide-backstop candidates the declared stop will be chosen from. Levels
-# above ~45% never bind before 2x-leverage liquidation, so 40% is the ceiling.
+# Above ~45% a stop never binds before 2x-leverage liquidation, so 40% is the
+# ceiling; ``None`` is the unstopped control row.
 GRID: tuple[float | None, ...] = (
     None, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.12, 0.10, 0.08, 0.05, 0.03, 0.02,
 )

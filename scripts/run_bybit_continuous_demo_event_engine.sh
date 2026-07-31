@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # Continuous-fade demo sleeve — sub-hourly target producer.
 #
-# Continuous fade runner. The target-publishing demo service uses this script; whether
-# it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE — the single
-# source of truth, don't hardcode its state here). The paper service uses the same
-# runner with EXECUTION_ENVIRONMENT=paper. The shared account owners exclusively
-# handle execution, fills, reconciliation, and notifications.
-# The daemon wakes every INTERVAL_SECONDS, but the active continuous_ensemble_v2
-# entries come from confirmed-bar +1h membership, not intra-hour live-decile membership.
+# Whether it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE).
+# The paper service uses the same runner with EXECUTION_ENVIRONMENT=paper. The
+# account owners handle execution and fills.
 #
-# Hard gate: EXECUTION_ENVIRONMENT is explicit and requires its account-owner route.
-# The signal needs a fresh data/bybit-continuous-demo-event/residual_momentum.parquet
-# (the rmom gate); the continuous-rmom-refresh.timer keeps it current.
+# The daemon wakes every INTERVAL_SECONDS, but active continuous_ensemble_v2
+# entries come from confirmed-bar +1h membership, not intra-hour live deciles.
+#
+# EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. The
+# signal needs a fresh data/bybit-continuous-demo-event/residual_momentum.parquet
+# (the rmom gate), kept current by continuous-rmom-refresh.timer.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -97,12 +96,12 @@ if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
 # KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
-# snapshot (+rmom gate) read-only instead of running a second WS pool — one
-# shared market-data plane per box. Empty = this sleeve runs its own pool.
+# snapshot (+rmom gate) read-only instead of running a second WS pool, giving
+# one market-data plane per box. Empty = this sleeve runs its own pool.
 if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
     if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        # A follower never writes the snapshot — following your own root means a
-        # permanently frozen kline store. Only the SHADOW sleeve sets this.
+        # A follower never writes the snapshot, so self-following freezes its
+        # kline store permanently.
         echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
         exit 2
     fi

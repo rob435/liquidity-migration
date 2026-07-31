@@ -1,9 +1,8 @@
 """Strategy-side client for the durable account target inbox.
 
-This is the write-only boundary available to sleeve processes.  A sleeve may
-publish explicit desired targets, but it cannot receive a venue client or infer
-fills from the request receipt.  The account service remains the sole owner of
-sequencing, risk, order submission, fills, positions, and P&L.
+The write-only boundary for sleeve processes: a sleeve publishes desired
+targets and gets no venue client and no fill information from the receipt. The
+account service owns sequencing, risk, submission, fills, positions, and P&L.
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ class TargetPublicationError:
 
 @dataclass(frozen=True, slots=True)
 class ExitFirstPublication:
-    """Publication receipts without implying orders, fills, or acceptance."""
+    """Publication receipts. They carry no order, fill, or acceptance claim."""
 
     exit_requests: tuple[PublishedTargetRequest, ...]
     entry_requests: tuple[PublishedTargetRequest, ...]
@@ -89,7 +88,7 @@ class ExitFirstPublication:
         return tuple(item.request.request_id for item in self.entry_requests)
 
 class AccountTargetPublisher:
-    """Publish immutable target batches without exposing execution authority."""
+    """Publish immutable target batches to the inbox."""
 
     def __init__(self, route: AccountRoute, *, clock: Clock | None = None) -> None:
         if not isinstance(route, AccountRoute):
@@ -176,10 +175,10 @@ def unresolved_target_snapshot(
 ) -> UnresolvedTargetSnapshot:
     """Snapshot unresolved target keys for one sleeve.
 
-    Target ownership, rather than adapter authorship, is authoritative here:
-    a RISK-authored flat for a LONG/CONTINUOUS component must also suppress a
-    duplicate strategy publication. ``entry_request_count`` retains the
-    continuous BTC overlay's stronger global pending-entry causal barrier.
+    Keyed on target ownership, not adapter authorship, so a RISK-authored flat
+    for a LONG/CONTINUOUS component also suppresses a duplicate strategy
+    publication. ``entry_request_count`` feeds the continuous BTC overlay's
+    global pending-entry barrier.
     """
 
     normalized_sleeve = SleeveAdapterKind(sleeve).value
@@ -237,8 +236,8 @@ def completed_expired_entry_attempt_keys(
             metadata = target.metadata
             observed = str(metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
             if not observed and "/entry/" not in str(target.decision_key):
-                # A nonzero resize may share the request. It is not an entry
-                # attempt and remains eligible on the next planning cycle.
+                # A nonzero resize sharing the request is not an entry attempt
+                # and stays eligible next cycle.
                 continue
             expected = entry_attempt_key(target_key)
             if observed != expected:
@@ -259,15 +258,12 @@ def publish_exit_first_target_requests(
 ) -> ExitFirstPublication:
     """Publish independent risk-reducing exits before entry requests.
 
-    Every exit is an immutable one-intent request, so one malformed or
-    unavailable exit cannot prevent the other exits from reaching the inbox.
-    Any exit publication failure blocks all risk-increasing requests for this
-    cycle. By default all entry intents retain the existing atomic grouped
-    request. ``independent_entry_requests`` instead publishes one immutable
-    request per intent in caller-provided order and stops at the first entry
-    publication error. A retry can then omit target keys already visible in
-    the unresolved inbox snapshot. Publication receipts intentionally make no
-    execution claim.
+    Each exit is a one-intent request, so a malformed exit cannot hold back the
+    others; any exit failure blocks all risk-increasing requests this cycle.
+    Entry intents default to one atomic grouped request;
+    ``independent_entry_requests`` publishes one request per intent in caller
+    order and stops at the first error, so a retry can skip target keys already
+    visible in the unresolved snapshot.
     """
 
     normalized_prefix = str(batch_prefix).strip()

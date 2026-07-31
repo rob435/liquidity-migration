@@ -53,12 +53,10 @@ class ContinuousHedgeRule:
     hedge_cap: float = 2.0
     cost_bps: float = 5.0
     beta_extra_lag_days: int = 0
-    # Statistical shrinkage of estimated betas toward a registered prior
-    # coefficient vector: beta = (1-w)*OLS + w*prior. The default 0.0
-    # reproduces plain OLS exactly. Shrinkage applies only to coefficients the
-    # window can estimate; insufficient-sample and degenerate paths still
-    # return zero (no hedge) rather than falling back to the prior blind.
-    # Policy and guardrails: docs/trading_logic.md.
+    # Shrinkage of estimated betas toward a registered prior:
+    # beta = (1-w)*OLS + w*prior; 0.0 is plain OLS. Applies only to
+    # coefficients the window can estimate -- insufficient-sample and
+    # degenerate paths still return zero (no hedge). See docs/trading_logic.md.
     shrinkage_weight: float = 0.0
     prior_beta_1: float = 0.0
     prior_beta_2: float = 0.0
@@ -112,11 +110,8 @@ class ContinuousRebalanceScaleState:
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
-    # Delegates to the canonical finite-guarded _common.finite_float (quality-dup-1
-    # consolidation, code-quality-5) so the NaN/inf-out-of-size/PnL-math policy has a
-    # single source of truth. Keeps the positional ``default`` and float (never None)
-    # return so every existing caller stays a drop-in; finite_float returns
-    # ``default`` (here a float) on a missing/non-finite value.
+    # Wraps _common.finite_float, keeping the positional ``default`` and a
+    # float (never None) return so callers stay drop-in.
     out = finite_float(value, default=default)
     return out if out is not None else default
 
@@ -560,26 +555,22 @@ def apply_rebalance_rule(
         hedge_cost_return = 0.0
         r1 = 0.0
         r2 = 0.0
-        # Regime-hedge hook (default None -> byte-identical): a causal,
-        # per-day hedge-intensity multiplier on the hedge leg(s) only — the book
-        # gross/funding/cost scale is untouched, so entries/breadth are unchanged and
-        # only the hedge notional (and its cost) is reallocated across regimes.
+        # Regime-hedge hook (None -> byte-identical): a causal per-day
+        # intensity multiplier on the hedge leg(s) only, so entries and breadth
+        # are unchanged and only hedge notional moves across regimes.
         hedge_scale = scale * (float(hedge_intensity.get(day, 1.0)) if hedge_intensity else 1.0)
         if two_leg:
             assert hedge_rule is not None
             b1, b2 = compute_hedge_betas_2f(raw_rets, hedge_rets, hedge_rets2, idx, hedge_rule)
             day_h1 = hedge_rets[idx]
             day_h2 = hedge_rets2[idx]
-            # sizing-rebalance-1: size each leg from beta UNCONDITIONALLY so the
-            # backtest engine matches the parity-tested live twin
-            # (compute_continuous_hedge_ratios_2f passes True,True). A missing-today
-            # hedge return no longer zeroes the held position and books a spurious
-            # full close+reopen turnover — the live book holds the hedge through a
-            # data-gap day. Only the realized PnL/funding CONTRIBUTION is gated on
-            # the day's value being present. On fully-populated series (all days
-            # known) this is numerically identical to the prior per-leg gating, so
-            # the parity tests are unchanged. ``hedge_scale`` carries the regime
-            # intensity multiplier and reduces to ``scale`` when intensity is None.
+            # Size each leg from beta UNCONDITIONALLY, matching the live twin
+            # (compute_continuous_hedge_ratios_2f passes True,True): a
+            # missing-today hedge return must not zero the held position and
+            # book a phantom close+reopen, since the live book holds through a
+            # data gap. Only the realized PnL/funding CONTRIBUTION is gated on
+            # the day's value. ``hedge_scale`` carries the regime intensity and
+            # reduces to ``scale`` when intensity is None.
             r1, r2 = _capped_hedge_legs(b1, b2, hedge_scale, float(hedge_rule.hedge_cap), True, True)
             hedge_ratio = r1 + r2
             if day_h1 is not None:
@@ -602,14 +593,11 @@ def apply_rebalance_rule(
             assert hedge_rule is not None
             beta = compute_hedge_beta(raw_rets, hedge_rets, idx, hedge_rule)
             day_h = hedge_rets[idx]
-            # sizing-rebalance-1: hold the hedge from beta UNCONDITIONALLY to match
-            # compute_continuous_hedge_ratio (the parity-tested twin), which sizes
-            # off the prior series alone and has no 'today' gate. Previously a None
-            # most-recent (or interior) hedge return left hedge_ratio=0.0 here while
-            # the live book held a full hedge, and the turnover logic then charged a
-            # phantom close+reopen for the gap day. Only the realized PnL/funding
-            # contribution stays gated on the day's value. Identical to the old code
-            # on fully-populated series, so parity tests are unchanged.
+            # Hold the hedge from beta UNCONDITIONALLY, matching
+            # compute_continuous_hedge_ratio, which sizes off the prior series
+            # alone with no 'today' gate. A None hedge return must not zero the
+            # ratio and charge a phantom close+reopen for the gap day; only the
+            # realized PnL/funding contribution stays gated on the day's value.
             hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * hedge_scale
             if day_h is not None:
                 hedge_return = hedge_ratio * float(day_h)

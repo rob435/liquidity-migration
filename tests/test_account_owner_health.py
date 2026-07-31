@@ -698,11 +698,8 @@ def test_settling_reports_a_disagreement_that_outlives_the_window() -> None:
 
 
 def test_settling_clock_is_not_restarted_by_changing_detail() -> None:
-    """A book resized name by name must not hold the window open forever.
-
-    The window measures continuous disagreement, not disagreement about one
-    unchanging thing, so a mismatch whose text changes every cycle still
-    reports on schedule.
+    """A book resized name by name must not hold the window open forever: the window
+    measures continuous disagreement, not disagreement about one unchanging thing.
     """
 
     settling = PositionTruthSettling(settle_ns=SETTLE_NS)
@@ -1070,10 +1067,8 @@ def test_exact_binding_remains_the_default_for_sizing_consumers(tmp_path: Path) 
 def test_paper_scope_annotation_does_not_hide_queue_head_warmup(tmp_path: Path) -> None:
     """The paper twin's scope annotation must not turn warmup into a CRITICAL page.
 
-    Observed live 2026-07-29: the paper owner's detail always begins with
-    ``execution_model_scope=integration_only_uncalibrated;``, so the strict
-    prefix test never matched and the bounded queue-head warmup paged CRITICAL
-    every hour and self-resolved minutes later.
+    Its detail always begins with ``execution_model_scope=...``, so a strict prefix
+    test never matches and the bounded queue-head warmup pages every hour.
     """
 
     waiting = AccountOwnerHealth(

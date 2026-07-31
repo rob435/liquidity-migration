@@ -1,9 +1,8 @@
 """Correctness tests for the trade lifecycle module.
 
-The lifecycle helpers convert raw bars and trades into exit decisions,
-basket aggregates, and equity curves. Each of those steps is a candidate
-for silent accounting bugs, so the tests below pin the behaviour with
-hand-built polars fixtures whose right answer is known by inspection.
+The helpers convert raw bars and trades into exit decisions, basket aggregates, and
+equity curves; each step is a candidate for silent accounting bugs, so the behaviour is
+pinned with hand-built polars fixtures whose right answer is known by inspection.
 """
 from __future__ import annotations
 
@@ -221,10 +220,9 @@ def test_funding_lookup_returns_none_without_rate_column():
 
 
 def test_funding_lookup_preserves_temporary_hourly_settlement_cadence():
-    """A symbol can switch 8h -> 1h -> 8h during stressed funding.
-
-    The long calm regimes make 8h the modal gap, but every hourly history row is
-    still a real settlement and must be charged. This is the BLAST regression.
+    """A symbol can switch 8h -> 1h -> 8h during stressed funding. The long calm regimes
+    make 8h the modal gap, but every hourly history row is a real settlement and must
+    be charged.
     """
     hour = 3_600_000
     before = [h * 8 * hour for h in range(30)]
@@ -354,10 +352,11 @@ def test_funding_lookup_deduplicates_overlap_and_rejects_conflicting_rates():
 
 
 def test_funding_4h_settlements_not_undercounted():
-    """A real 4h-settling alt (one row per 4h settlement) must charge ALL six daily settlements.
-    The old code bucketed by the stored funding_interval_min (hardcoded/defaulted to 8h) and merged
-    each pair into one — charging HALF the funding and inflating short MAR (funding-undercount, fixed
-    2026-06-03). The default exact-stamp dedup now counts every distinct settlement."""
+    """A real 4h-settling alt must charge all six daily settlements. Bucketing by the
+    stored ``funding_interval_min`` (defaulted to 8h) merges each pair into one,
+    charging half the funding and inflating short MAR; the exact-stamp dedup counts
+    every distinct settlement.
+    """
     hour = 3_600_000
     funding = pl.DataFrame(
         {
@@ -655,9 +654,10 @@ def test_summarize_trade_backtest_empty_returns_default_position_weight_stats() 
 
 
 def test_intrahold_and_gross_stats_surface_hidden_risk_and_gross() -> None:
-    """H2: per-position max-adverse-excursion stats surface intra-hold risk that
-    realised-at-exit drawdown hides. M3: per-basket realised gross is reported so
-    a floating-gross (risk_equal) confound is auditable."""
+    """Per-position max-adverse-excursion stats surface intra-hold risk that
+    realised-at-exit drawdown hides, and per-basket realised gross is reported so a
+    floating-gross (risk_equal) confound is auditable.
+    """
     trades = pl.DataFrame(
         [
             # basket A: two concurrent names, gross share 0.5 + 0.5 = 1.0
@@ -749,7 +749,7 @@ def test_worst_volume_day_return_matches_build_equity_curve_definition() -> None
     assert tl._worst_volume_day_return(baskets) == pytest.approx(min(day_rets))
 
 
-# cost-funding-3: notional-weighted funding_modeled_fraction surfaced
+# Notional-weighted funding_modeled_fraction surfaced
 def _funding_trades(modes_and_weights: list[tuple[str, float]]) -> pl.DataFrame:
     return pl.DataFrame(
         {

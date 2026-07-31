@@ -2,11 +2,10 @@
 
 The durable record of what this repository's strategy research established, replacing six dated documents.
 Current interpretation: [docs/strategy_program.md](strategy_program.md). Evidence rules:
-[docs/governance.md](../AGENTS.md). Failure taxonomy: [docs/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
-Data tiers and roots: [docs/data_roots.md](data.md). PIT membership: [docs/pit_gate.md](data.md).
+[AGENTS.md](../AGENTS.md). Failure taxonomy: [docs/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
+Data tiers, roots, and PIT membership: [docs/data.md](data.md).
 
-**Reading these numbers.** Every fill in every record here is simulated; no code in this repository has ever
-made a mainnet API call. All screening figures are Lane-1 selection on seen data and grade nothing. Any
+**Reading these numbers.** All screening figures are Lane-1 selection on seen data and grade nothing. Any
 pre-2026-07-28 figure whose funding leg came through the cross-venue panel is non-citable unless re-derived
 on the corrected scorer (§3).
 
@@ -101,6 +100,24 @@ queue credit, so measured rates are lower bounds
 ([passive_execution.py](../liquidity_migration/passive_execution.py)). Capacity is small: v3's held names have
 median $33M trailing-24h turnover ($3.2M at p05), and p95 entry participation crosses 1% at a ~$1.1M book and
 5% at ~$5.5M post-2025.
+
+**The registered A/B's read thresholds, and why nothing is accruing.** H: for CONTINUOUS entries, a post-only
+limit at the touch with a bounded chase-and-timeout fallback reaches ≥ 60% passive fill rate and improves
+all-in cost by ≥ 10 bp/side against market-IOC, without degrading signal capture (fills inside the same
+decision hour). Any read beyond mechanics needs ≥ 100 **fills** per arm — not the standalone demo probe's
+≥ 100 **attempts** per arm (`REGISTERED_MIN_ATTEMPTS_PER_ARM` in
+[passive_fill_probe.py](../liquidity_migration/passive_fill_probe.py), a separate instrument with its own
+40% fill-rate kill); the two are easily confused. Kill rule: stop early if arm B's missed-fill opportunity
+cost exceeds its measured cost saving over any 50-entry window, where **missed-fill opportunity cost** is the
+signal P&L of entries whose passive order never filled, measured at the decision-hour close.
+
+**The A/B is dormant, not live.** `passive_execution.py:140` makes an entry arm-eligible only when
+`sleeve == "continuous"`, and CONTINUOUS is off on both routes (`CONTINUOUS_SLEEVE=off`,
+`CONTINUOUS_PAPER_SLEEVE=off`, retired 2026-07-29); paper's carry book now arrives through
+`PAPER_TARGET_MIRROR=on`, which republishes the demo fleet's targets. No fills accrue to either arm until a
+CONTINUOUS sleeve runs again. `execution_arm` appears only in `passive_execution.py` and its test —
+[execution_cost_model.py](../liquidity_migration/execution_cost_model.py) has no arm grouping, so the cost
+report does not split by arm.
 
 ## 2. Do-not-retest ledger
 
@@ -360,4 +377,5 @@ that this research was replacing a broken deployed book was wrong.
   a filter buys sample: the momentum BTC gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives
   n 1,247, **t 2.78**, Sharpe 1.50.
 - Registered experiment definitions live in code, not prose — passive A/B arm parameters in
-  [passive_execution.py](../liquidity_migration/passive_execution.py).
+  [passive_execution.py](../liquidity_migration/passive_execution.py). Its read thresholds, sample target and
+  kill rule are not in code and are recorded in §1, with the reason the arm currently accrues nothing.

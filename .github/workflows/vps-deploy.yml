@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Guarded rollout/recovery, staged install/activation, or read-only verification.
+        description: Guarded rollout, staged install/activation, or read-only verification.
         required: true
         default: verify
         type: choice
-        options: [rollout, recover, install, activate, verify]
+        options: [rollout, install, activate, verify]
       profile:
         description: Demo-only or demo plus integration-only paper topology.
         required: true
@@ -19,18 +19,16 @@ on:
         type: choice
         options: [operational, demo-operational]
       authorization_reference:
-        description: Required owner/task reference for rollout or recovery.
+        description: >-
+          Required owner/task reference for a rollout. Recorded in the dispatch
+          record only; the deploy script takes no such flag.
         required: false
         type: string
       authorize_demo_paper_operation:
-        description: Explicitly authorize bounded demo/paper operation; never REAL_MONEY.
+        description: Explicitly authorize bounded demo/paper operation.
         required: true
         default: false
         type: boolean
-      reset_receipt:
-        description: Absolute full-scope leave-stopped reset receipt; recovery only.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -51,21 +49,22 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check --no-deps
           --only-binary=:all: -r requirements.lock
+      # Through scripts/dev.sh so CI and the local gate check the same targets.
+      # dev.sh falls back to `python3` when there is no .venv, which here is the
+      # runner's setup-python interpreter.
       - name: Ruff
-        run: python -m ruff check liquidity_migration scripts tests
+        run: scripts/dev.sh lint
       - name: Mypy
-        run: python -m mypy liquidity_migration
+        run: scripts/dev.sh types
       - name: Pytest
-        run: python -m pytest -q
+        run: scripts/dev.sh test
 
   vps:
     if: github.event_name == 'workflow_dispatch'
     needs: ci
     runs-on: ubuntu-latest
-    # A rollout that stops the fleet and reinstalls takes single-digit minutes;
-    # the 6-hour job default would hold a half-stopped fleet for hours before the
-    # runner cancelled it (and a cancellation is exactly the disconnect the
-    # remote HUP/PIPE traps now catch).
+    # A rollout takes single-digit minutes; the 6-hour job default would hold a
+    # half-stopped fleet for hours before the runner cancelled it.
     timeout-minutes: 45
     concurrency:
       group: liquidity-migration-vps
@@ -100,36 +99,21 @@ jobs:
           DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
           DEPLOY_AUTHORIZATION_REFERENCE_INPUT: ${{ inputs.authorization_reference }}
           DEPLOY_OWNER_ACKNOWLEDGED_INPUT: ${{ inputs.authorize_demo_paper_operation }}
-          DEPLOY_RESET_RECEIPT_INPUT: ${{ inputs.reset_receipt }}
         run: |
           set -euo pipefail
           deploy_args=("$DEPLOY_MODE_INPUT")
+          # The assertions below are the operator's confirmation in the GitHub
+          # UI. The deploy script itself accepts only `--profile` on rollout and
+          # rejects any other flag outright.
           case "$DEPLOY_MODE_INPUT" in
             rollout)
               test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true
               test -n "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-              test -z "$DEPLOY_RESET_RECEIPT_INPUT"
-              deploy_args+=(
-                --profile "$DEPLOY_PROFILE_INPUT"
-                --authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-                --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
-              )
-              ;;
-            recover)
-              test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true
-              test -n "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-              test -n "$DEPLOY_RESET_RECEIPT_INPUT"
-              deploy_args+=(
-                --profile "$DEPLOY_PROFILE_INPUT"
-                --authorization-reference "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-                --owner-acknowledgement AUTHORIZE_DEMO_PAPER_OPERATION_WITHOUT_RESEARCH_PROMOTION
-                --reset-receipt "$DEPLOY_RESET_RECEIPT_INPUT"
-              )
+              deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT")
               ;;
             install|activate|verify)
               test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = false
               test -z "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-              test -z "$DEPLOY_RESET_RECEIPT_INPUT"
               ;;
             *) exit 2 ;;
           esac

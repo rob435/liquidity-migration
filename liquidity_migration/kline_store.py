@@ -1,37 +1,24 @@
 """In-memory 1h kline store for the WS-driven kline-delivery path.
 
-The cross-sectional momentum strategy fires at daily-bar close; its alpha
-decays within ~1h. A full-universe REST pull takes hours to deliver fresh
-1h klines to the feature pipeline (one REST round-trip per ~400 universe
-symbols, rate-limited), so entries fire 3-4h after ready_ts and trade away
-most of the post-pump reversion edge.
+The receiving end of the WS push path: a thread-safe store keyed by
+(symbol, ts_ms) that the WS pool writes to as confirmed bars land and the
+cycle's feature build reads instead of REST-fetching. A full-universe REST
+pull takes hours, which is longer than the strategy's alpha survives.
 
-This module is the receiving end of the WS push path: a thread-safe in-memory
-store keyed by (symbol, ts_ms) that the WS pool writes to as confirmed bars
-land, and the cycle's feature build reads from instead of REST-fetching.
+Guarantees:
 
-The store guarantees:
+- ``add_bar`` is idempotent on ``(symbol, ts_ms)``: a re-delivered bar is an
+  overwrite, never a duplicate row.
+- Bounded memory: bars older than ``retain_days`` are evicted on add.
+- One ``threading.RLock`` guards both the per-symbol bar dicts and the metadata
+  maps; read and write paths are short.
+- A background thread serialises the store to a single parquet file every
+  ``flush_interval_seconds``; ``recover_from_disk()`` repopulates from it.
 
-- Idempotent ``add_bar`` on ``(symbol, ts_ms)``. A bar that arrives twice
-  (e.g. a reconnect that re-flushes the last bar of the previous slice) is a
-  no-op overwrite, never a duplicate row.
-- Bounded memory: bars older than ``retain_days`` are evicted on every add,
-  so a long-running daemon's heap stays flat.
-- Single-lock concurrency: one ``threading.RLock`` guards both the per-symbol
-  bar dicts and the metadata maps. Read and write paths are short, so the
-  lock is held for microseconds and contention is negligible at the ~673
-  symbols × 24 bars/day × 30s flush cadence we operate at.
-- Persistence round-trip: a background thread serialises the entire store to
-  a single parquet file every ``flush_interval_seconds``. On restart, the
-  store calls ``recover_from_disk()`` to repopulate from that file before the
-  WS pool starts catching up.
-
-The output schema of ``get_klines`` is intentionally identical to the schema
-``_download_recent_1h_klines`` returns (``_empty_klines`` in event_demo_data.py):
-columns ``ts_ms``, ``symbol``, ``open``, ``high``, ``low``, ``close``,
-``volume_base``, ``turnover_quote``, ``source``. The integration in
-``_download_recent_1h_klines`` is then a drop-in: hit the store for covered
-symbols, REST-fall-back for the rest, concat.
+``get_klines`` returns the same schema as ``_download_recent_1h_klines``
+(``_empty_klines`` in event_demo_data.py) — ``ts_ms``, ``symbol``, ``open``,
+``high``, ``low``, ``close``, ``volume_base``, ``turnover_quote``, ``source``
+— so the two are interchangeable per symbol.
 """
 
 from __future__ import annotations
@@ -52,25 +39,16 @@ from ._common import MS_PER_HOUR, exact_duration_ms
 
 _logger = logging.getLogger("liquidity_migration.kline_store")
 
-# Eviction is amortized: each insert only re-scans for stale bars when the
-# global newest_ts has advanced by at least this many ms since the last
-# eviction. At the WS path's 1-bar-per-symbol-per-hour cadence this fires
-# every hour; in bootstrap (which inserts bars OLDER than the current max)
-# it never fires per-bar, so a 1083-bar symbol load is O(bars) instead of
-# O(bars * symbols * bars_per_symbol). Stale bars accumulate for up to one
-# eviction-window before being purged — at 1h that's a single hour of
-# unrelated symbols × 567 symbols ≈ 567 bars ≈ 50KB of slack, acceptable.
+# Eviction is amortized: an insert re-scans for stale bars only once the global
+# newest_ts has advanced this far since the last sweep. Bootstrap inserts bars
+# OLDER than the current max, so it never sweeps per-bar. Cost is up to one
+# window of stale bars held longer than retain_days.
 _EVICTION_INTERVAL_MS = MS_PER_HOUR
 
-# A bar timestamped implausibly far in the future is corrupt (bad upstream
-# parse, venue glitch, malformed WS frame). Accepting one advances
-# ``_global_max_ts_ms``, which makes ``_evict_old_locked``'s cutoff
-# (= reference - retain) future-dated too — evicting EVERY legitimate bar in
-# the store (total loss → silent reversion to the slow REST path the WS
-# pipeline exists to avoid). Reject such bars at the insert boundary and clamp
-# the eviction reference so a single bad frame can never run the evictor away.
-# 1h bars can legitimately carry a start time up to the current/next boundary
-# plus clock skew, so 2h of slack is comfortably permissive.
+# A bar timestamped implausibly far in the future is corrupt. Accepting one
+# advances ``_global_max_ts_ms``, pushing ``_evict_old_locked``'s cutoff
+# (reference - retain) into the future and evicting the entire store. 1h bars
+# can legitimately start up to the next boundary plus clock skew ahead.
 _MAX_FUTURE_TS_SLACK_MS = exact_duration_ms(hours=2)
 
 
@@ -208,24 +186,16 @@ class KlineStore:
         self._adds_skipped_unconfirmed = 0
         self._adds_evicted = 0
         self._reads_total = 0
-        # Single-entry materialized-window cache. get_klines rebuilds a large
-        # rectangular frame (~611k rows) on every call; on the steady-state hot
-        # path the same (symbols, window) is re-read every heartbeat with no new
-        # bar, so the result is identical. Key on (sorted symbols, start, end,
-        # mutation-version): _adds_total + _adds_evicted changes IFF _bars changes
-        # on every mutation path EXCEPT recover_from_disk (startup-only), which
-        # invalidates the cache explicitly. A hit therefore provably reflects the
-        # current store; a clone keeps the cached frame immutable to callers.
+        # Single-entry materialized-window cache keyed on (sorted symbols, start,
+        # end, mutation-version). _adds_total + _adds_evicted change IFF _bars
+        # changes on every mutation path EXCEPT recover_from_disk, which must
+        # invalidate the cache explicitly. Callers get a clone.
         self._window_cache: tuple[tuple, pl.DataFrame] | None = None
-        # (version, oldest_ts_ms, row_count) cache for stats() — keyed on the
-        # same _adds_total+_adds_evicted mutation version as _window_cache so a
-        # hit provably reflects the current store (ws-dataplane-7). recovery
-        # adds bars without bumping _adds_total, so it must invalidate this too.
+        # (version, oldest_ts_ms, row_count) cache for stats(), on the same
+        # mutation version — recovery must invalidate this too.
         self._stats_scan_cache: tuple[int, int | None, int] | None = None
-        # Skip a periodic flush when nothing changed since the last one (quiet
-        # periods / between hourly bars): re-serializing the whole store every
-        # ~30s with no new bars is wasted CPU + lock contention. -1 forces the
-        # first flush. Uses the same mutation version as the window cache.
+        # Skip a periodic flush when nothing changed since the last one. -1
+        # forces the first flush. Same mutation version as the window cache.
         self._last_flush_version = -1
         self._cache_root: Path | None = Path(cache_root).expanduser() if cache_root is not None else None
         self._flush_dir: Path | None
@@ -238,28 +208,19 @@ class KlineStore:
             self._flush_path = None
         self._flush_thread: threading.Thread | None = None
         self._flush_stop = threading.Event()
-        # Serialize the WHOLE flush (snapshot + parquet write + atomic rename +
-        # bookkeeping). stop_flush_thread() joins with a timeout and returns even
-        # if the loop's flush is still in-flight on a slow disk; stop() then calls
-        # flush_to_disk() directly, so two flushes can overlap. The atomic rename
-        # keeps the on-disk file consistent, but the two would race on the
-        # _last_flush_version/_last_flush_rows bookkeeping (last-replace-wins could
-        # install an older snapshot or skip a later legitimate flush). This lock
-        # makes them strictly sequential (ws-pool-5). Distinct from the data RLock:
-        # WS inserts must never block on a multi-hundred-MB parquet write.
+        # Serializes a whole flush (snapshot + write + rename + bookkeeping).
+        # stop_flush_thread() can return while the loop's flush is still in
+        # flight, and stop() then flushes directly, so two can overlap and race
+        # on _last_flush_version/_last_flush_rows. Distinct from the data RLock:
+        # WS inserts must never block on a parquet write.
         self._flush_io_lock = threading.Lock()
         self._flushes_total = 0
         self._last_recovery_failed = False
         self._flush_errors = 0
         self._last_flush_rows = 0
-        # Incremental newest-ts cache: maintained in _insert_bar / recovery
-        # so _max_ts_with_new is O(1) instead of O(symbols * bars). At 567
-        # symbols × ~1000 bars/symbol this took the bootstrap hot path from
-        # tens of minutes to a few seconds.
+        # Incremental newest-ts cache maintained in _insert_bar / recovery so
+        # _max_ts_with_new is O(1) instead of O(symbols * bars).
         self._global_max_ts_ms: int = 0
-        # Eviction is only rescanned when global_max_ts has advanced by at
-        # least _EVICTION_INTERVAL_MS since the last sweep — see the constant
-        # above for why this matters during bootstrap.
         self._last_eviction_ref_ts_ms: int = 0
 
     # -- write path -----------------------------------------------------
@@ -285,21 +246,12 @@ class KlineStore:
         """Bulk-load historical bars for ``symbol``. Caller is responsible for
         confirming every bar is fully closed (REST-returned bars always are).
 
-        Bootstrap never overwrites a ts_ms already present in the store —
-        the live WS path is the authoritative source for any bar it has
-        already delivered. At cold start the bootstrap REST backfill and
-        the live WS stream race: a freshly closed bar can land on the WS
-        side first, then the bootstrap fetches the same hour from REST.
-        Without this guard the older REST snapshot would silently
-        overwrite the fresh WS row. For fully-closed bars the values are
-        normally identical, but the WS feed always reflects the most
-        recent venue state (final settlement / matching engine flushes),
-        so prefer it on ties.
+        Bootstrap never overwrites a ts_ms already present: the REST backfill
+        and the live WS stream race at cold start, and the WS feed reflects the
+        most recent venue state, so it wins on ties.
 
-        Single lock acquire + single deferred eviction sweep at the end —
-        per-bar eviction here was the bootstrap hot-spot before this
-        rewrite (each insert ran a full-store scan; 1083 bars × 567
-        symbols × O(N²) made the daemon take 20+ minutes per cold start).
+        One lock acquire and one deferred eviction sweep at the end; per-bar
+        eviction here is O(N^2) over the whole store and dominates cold start.
         """
         if not symbol:
             return 0
@@ -314,8 +266,7 @@ class KlineStore:
         accepted = 0
         with self._lock:
             reference_ts = max(self._global_max_ts_ms, max(p.ts_ms for p in parsed_bars))
-            # Self-heal a previously-poisoned global max: never let the
-            # eviction reference exceed now + slack.
+            # Never let the eviction reference exceed now + slack.
             reference_ts = min(reference_ts, max_acceptable_ts)
             symbol_bars = self._bars.setdefault(symbol, {})
             for parsed in parsed_bars:
@@ -328,10 +279,8 @@ class KlineStore:
             self._adds_total += accepted
             if reference_ts > self._global_max_ts_ms:
                 self._global_max_ts_ms = reference_ts
-            # Single amortized eviction at the end of the bulk load. During
-            # cold-start bootstrap this is the only sweep for the whole
-            # symbol; without it the loop above was effectively serialized
-            # under the store lock and starved every other worker.
+            # Single amortized eviction at the end of the bulk load; per-bar
+            # sweeps here serialize every other worker under the store lock.
             if reference_ts - self._last_eviction_ref_ts_ms >= _EVICTION_INTERVAL_MS:
                 self._evict_old_locked(reference_ts_ms=reference_ts)
                 self._last_eviction_ref_ts_ms = reference_ts
@@ -346,13 +295,11 @@ class KlineStore:
             # protects every other symbol's bars from mass-eviction.
             return False
         with self._lock:
-            # Cached global newest_ts replaces the prior O(symbols * bars)
-            # scan. Reads + writes to _global_max_ts_ms happen only under
-            # the store lock so the value is always consistent with _bars.
+            # _global_max_ts_ms is read and written only under the store lock,
+            # so it stays consistent with _bars.
             reference_ts = self._global_max_ts_ms
             if bar.ts_ms > reference_ts:
                 reference_ts = bar.ts_ms
-            # Self-heal a previously-poisoned global max.
             reference_ts = min(reference_ts, max_acceptable_ts)
             if reference_ts - bar.ts_ms > self._retain_ms:
                 return False
@@ -361,10 +308,7 @@ class KlineStore:
             self._adds_total += 1
             if reference_ts > self._global_max_ts_ms:
                 self._global_max_ts_ms = reference_ts
-            # Amortized eviction — see _EVICTION_INTERVAL_MS comment. The WS
-            # path inserts 1 bar/symbol/hour so this fires every hour; the
-            # bootstrap path uses bootstrap_symbol() instead and only runs
-            # one sweep per symbol.
+            # Amortized eviction — see _EVICTION_INTERVAL_MS.
             if reference_ts - self._last_eviction_ref_ts_ms >= _EVICTION_INTERVAL_MS:
                 self._evict_old_locked(reference_ts_ms=reference_ts)
                 self._last_eviction_ref_ts_ms = reference_ts
@@ -373,14 +317,10 @@ class KlineStore:
     def _recompute_global_max_locked(self) -> None:
         """Recompute _global_max_ts_ms from the bars actually present.
 
-        _global_max_ts_ms is advanced incrementally on insert/recovery and is
-        never decreased on the hot paths (that O(1) cache is the whole point).
-        But any path that REMOVES bars — eviction-by-age, keep_only_symbols —
-        can drop the lone symbol that held the global max, leaving the cache
-        too fresh. newest_ts_ms() (and so the manager's newest_ts_lag metric +
-        the follower's coverage cutoff) would then over-report freshness and
-        mask a stalled feed. Re-derive the max from the surviving bars; cheap
-        relative to the trim/eviction that just ran. Must hold self._lock.
+        The hot paths only ever advance _global_max_ts_ms, so a path that
+        REMOVES bars (eviction-by-age, keep_only_symbols) can drop the lone
+        symbol holding the max and leave the cache reporting stale data as
+        fresh. Cheap relative to the trim that just ran. Must hold self._lock.
         """
         self._global_max_ts_ms = max(
             (max(symbol_bars) for symbol_bars in self._bars.values() if symbol_bars),
@@ -425,11 +365,8 @@ class KlineStore:
         """
         if end_ms < start_ms:
             return _empty_klines_frame()
-        # Column-major collection: building lists of primitives and handing
-        # them to polars is ~3x faster than allocating one dict per bar and
-        # then re-shaping in the DataFrame constructor. For a 584K-bar read
-        # this drops from ~900ms → ~300ms — the cycle's klines stage was the
-        # single largest item before the optimization.
+        # Column-major collection: lists of primitives handed to polars are
+        # ~3x faster than a dict per bar re-shaped by the DataFrame constructor.
         ts_col: list[int] = []
         symbol_col: list[str] = []
         open_col: list[float] = []
@@ -444,10 +381,8 @@ class KlineStore:
         sorted_symbols = sorted(symbols)
         with self._lock:
             self._reads_total += 1
-            # Materialized-window cache: a hit means the mutation-version is
-            # unchanged since the cached frame was built, so the store data is
-            # identical and the cached frame is current. Return a clone so the
-            # caller can never mutate the cached object.
+            # A cache hit means the mutation version is unchanged, so the
+            # cached frame is current. Callers get a clone.
             version = self._adds_total + self._adds_evicted
             cache_key = (tuple(sorted_symbols), start_ms, end_ms, version)
             cached = self._window_cache
@@ -474,10 +409,8 @@ class KlineStore:
                     source_col.append(bar.source)
         if not ts_col:
             return _empty_klines_frame()
-        # We iterated outer-keyed by `symbols` and inner-keyed by sorted
-        # ts_ms, so the columns are already in (symbol, ts_ms) order. Skip
-        # the explicit .sort() — it would otherwise re-pay an O(N log N)
-        # cost on the same data we just emitted in order.
+        # Already emitted in (symbol, ts_ms) order by the loop above, so no
+        # .sort() — it would re-pay O(N log N) on sorted data.
         frame = pl.DataFrame(
             {
                 "ts_ms": ts_col,
@@ -492,10 +425,8 @@ class KlineStore:
             },
             schema=_KLINE_SCHEMA,
         )
-        # Cache for the next same-version read; return a clone so the cached
-        # frame stays immutable. (cache_key holds the build-time version: if the
-        # store mutated during the build, the next read computes a newer version
-        # and misses, so a stale frame is never served.)
+        # cache_key holds the build-time version, so a store mutation during
+        # the build makes the next read miss rather than serve a stale frame.
         self._window_cache = (cache_key, frame)
         return frame.clone()
 
@@ -578,13 +509,9 @@ class KlineStore:
         with self._lock:
             symbol_count = len(self._bars)
             newest = self.newest_ts_ms()
-            # oldest_ts_ms + row_count are an O(symbols x bars) scan (a min() per
-            # symbol). stats() is polled on every daemon heartbeat, so the scan ran
-            # every poll against a ~600-symbol store. Cache the (oldest, row_count)
-            # pair keyed on the same mutation-version as the window cache
-            # (_adds_total + _adds_evicted bump on every insert/eviction/trim, the
-            # only paths that change oldest or the row total). A version hit provably
-            # reflects the current store, so the scan now runs only when the store
+            # oldest_ts_ms + row_count cost an O(symbols x bars) scan and
+            # stats() is polled every heartbeat, so cache the pair on the same
+            # mutation version as the window cache. The scan then runs only
             # actually changed (ws-dataplane-7).
             version = self._adds_total + self._adds_evicted
             cached = self._stats_scan_cache
@@ -650,15 +577,11 @@ class KlineStore:
         write never leaves a corrupt file in place for the next recovery.
 
         Snapshot collection holds the store lock only long enough to copy
-        primitive values into column lists — ~400ms before, ~50ms now for
-        614K rows. Dict construction + DataFrame build + parquet write all
-        happen WITHOUT the store lock so WS bar inserts aren't stalled by the
-        ~30s flush cadence.
+        primitives into column lists; the DataFrame build and parquet write
+        happen without it so WS inserts are not stalled by the flush cadence.
 
-        The whole flush is serialized by _flush_io_lock so the final stop()
-        flush can never overlap a lingering loop flush whose join timed out
-        (ws-pool-5): two concurrent flushes would race on the version/rows
-        bookkeeping and last-replace-wins could install an older snapshot.
+        _flush_io_lock serializes whole flushes so the final stop() flush cannot
+        overlap a lingering loop flush and race on the version/rows bookkeeping.
         """
         with self._flush_io_lock:
             return self._flush_to_disk_locked()
@@ -747,12 +670,10 @@ class KlineStore:
 
     def last_recovery_failed(self) -> bool:
         """True when the last ``recover_from_disk`` returned 0 because the read
-        or validation FAILED, rather than because there was nothing to recover.
+        or validation failed, rather than because there was nothing to recover.
 
-        The follower treats a failed read as consumed otherwise: it recorded the
-        new snapshot signature and only retried once the leader's next flush
-        changed the file, up to an hour later, with REST fallback paying the
-        difference and ``_refreshes`` misreporting (2026-07-27 audit L3).
+        The follower needs the distinction: a failed read must be retried on the
+        next poll, not treated as a consumed snapshot generation.
         """
 
         return self._last_recovery_failed
@@ -796,12 +717,9 @@ class KlineStore:
         with self._lock:
             recovered = 0
             max_ts = self._global_max_ts_ms
-            # Clamp recovery to the same future-ts bound as _insert_bar: a corrupt
-            # far-future bar in the flush file would otherwise advance
-            # _global_max_ts_ms, push _evict_old_locked's (reference - retain)
-            # cutoff into the future, and mass-evict every legitimate bar on
-            # startup (the documented total-loss scenario). The insert path drops
-            # such bars; recovery must too.
+            # Same future-ts bound as _insert_bar: a corrupt far-future bar in
+            # the flush file would advance _global_max_ts_ms and mass-evict the
+            # store on startup.
             max_acceptable_ts = _utc_now_ms() + self._max_future_ts_slack_ms
             for row in frame.iter_rows(named=True):
                 symbol = str(row.get("symbol", "") or "")

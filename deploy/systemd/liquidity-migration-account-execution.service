@@ -14,8 +14,7 @@ EnvironmentFile=/etc/liquidity-migration/account-execution.env
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
-# CONTINUOUS retired 2026-07-29: no cycle root, so the owner reports no gate
-# line. Re-promotion must set CONTINUOUS_CYCLE_ROOT explicitly again.
+# No CONTINUOUS_CYCLE_ROOT: the owner then reports no CONTINUOUS gate line.
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution.service main
 ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution.service readiness

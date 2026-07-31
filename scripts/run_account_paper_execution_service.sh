@@ -14,11 +14,9 @@ ACCOUNT_CAPTURE_ROOT="${ACCOUNT_PAPER_CAPTURE_ROOT:-}"
 ACCOUNT_SYMBOLS_FILE="${ACCOUNT_SYMBOLS_FILE:-/etc/liquidity-migration/account-paper-execution/symbols.txt}"
 ACCOUNT_DEMO_RULES_FILE="${ACCOUNT_DEMO_RULES_FILE:-/etc/liquidity-migration/account-paper-execution/demo-rules.json}"
 ACCOUNT_RISK_POLICY_FILE="${ACCOUNT_RISK_POLICY_FILE:-/etc/liquidity-migration/account-paper-execution/risk-policy.json}"
-# No fallback: the deploy path derives PAPER_EQUITY_USDT from the committed
-# operational profile's capital_reference_usdt (see prepare_paper_runtime_boundary),
-# and a hidden 10,000 default silently ran the twin 25x under-scaled against the
-# deployed 250,000 reference after a hand-edited env file (2026-07-27 audit M1).
-# Every sibling required input in this script fails closed the same way.
+# No fallback: the deploy path derives this from the committed operational
+# profile's capital_reference_usdt (prepare_paper_runtime_boundary). A default
+# would silently mis-scale the twin against the deployed reference.
 PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"
 MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"

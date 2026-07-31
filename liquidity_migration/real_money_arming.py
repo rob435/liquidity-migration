@@ -1,28 +1,11 @@
-"""Tell the owner exactly what is left before real money can trade.
+"""Report every remaining arming precondition in one read-only pass.
 
-Arming used to be an eight-step runbook where every step failed in its own
-vocabulary and half of them only failed at start-up, over a funded account.
-This turns the whole checklist into one read-only command that reports every
-step at once — what passes, what does not, and the exact fix for each — so the
-owner discovers a missing file or a mistyped dial on a terminal instead of
-discovering it as a crash loop next to an open position.
-
-What it deliberately does **not** do:
-
-* It never prints a secret. A credential is reported as present or absent, by
-  variable name, and its value is never read into the report at all.
-* It never writes a credential, sets ``REAL_MONEY``, or
-  starts a unit. Every one of those is the owner's act, and a tool that could
-  do them on the owner's behalf would be a tool that could do them by accident.
-* It is not itself a safety layer. Every check here is re-run, independently
-  and fail-closed, by the credential resolver and the owner runner. This
-  exists so the owner is not the one discovering those failures one at a
-  time.
-
-``render-profile`` is the one mutating command, and it writes exactly one
-non-secret artifact: the operational profile, derived from the dials in the
-owner's env file and refused unless it passes the same load-time envelope proof
-the account owner will apply to it.
+``preflight`` reports each step, its status, and its fix. Two commands mutate:
+``render-profile`` writes the operational profile derived from the env-file
+dials, refusing dials that fail the same envelope proof the account owner
+applies at load time, and ``create-state-roots`` creates the mainnet journal
+directories. Credentials are reported present/absent by variable name; their
+values are never read into the report.
 """
 
 from __future__ import annotations
@@ -49,9 +32,16 @@ __all__ = ["CheckResult", "preflight", "main"]
 
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
 MAINNET_OWNER_ENV = Path("/etc/liquidity-migration/account-execution-mainnet.env")
+DEMO_OWNER_ENV = Path("/etc/liquidity-migration/account-execution.env")
+PAPER_OWNER_ENV = Path("/etc/liquidity-migration/account-paper-execution.env")
 
-#: Reported by name only. Their values are never read into the report.
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
+
+_STATE_ROOT_KEYS = (
+    "ACCOUNT_EXECUTION_ROOT",
+    "ACCOUNT_INTENT_INBOX_ROOT",
+    "ACCOUNT_CAPTURE_ROOT",
+)
 
 _OWNER_ENV_KEYS = (
     "ACCOUNT_EXECUTION_KERNEL_REQUIRED",
@@ -97,10 +87,8 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
     if not stat.S_ISREG(metadata.st_mode):
         return None, CheckResult(path.name, False, f"{path} is not a regular file", "")
     mode = stat.S_IMODE(metadata.st_mode)
-    # Root-owned or caller-owned, so a
-    # non-root dry run on a workstation reports the same thing the VPS will.
-    # The deployed file is read by a root service and must be root-owned there;
-    # the owner runner is what enforces that, fail-closed.
+    # Caller-owned is accepted so a non-root dry run reports what the VPS will;
+    # root ownership on the deployed host is enforced by the owner runner.
     if metadata.st_uid not in {0, os.geteuid()} or mode != 0o600:
         return None, CheckResult(
             path.name,
@@ -121,7 +109,7 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
 
 
 def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
-    """Presence only. The values are never read into the report."""
+    """Report credential presence by variable name; values are never read."""
 
     results: list[CheckResult] = []
     for key in _CREDENTIAL_KEYS:
@@ -161,11 +149,8 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
         detail = "not armed -- this is the switch that means 'trade my money'"
         fix = "set REAL_MONEY=true, by hand, when you intend to trade real capital"
     results.append(CheckResult("REAL_MONEY", armed, detail, fix))
-    # The mainnet owner unit sets TELEGRAM_ENABLED=1 and its runner exits
-    # rather than start half-notified. Without this check the owner discovers
-    # an empty token as a start-up failure *after* arming, which is the worst
-    # possible moment to learn it. There is no mainnet watchdog unit, so this
-    # is also the only channel that reports the owner is alive.
+    # Both the mainnet owner and the mainnet liveness watchdog set
+    # TELEGRAM_ENABLED=1 and read this pair, so an empty one silences both.
     telegram = [
         key for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not values.get(key, "").strip()
     ]
@@ -232,13 +217,10 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
 def _installed_profile_matches_dials(
     *, dial_values: Mapping[str, str], installed_path: str
 ) -> CheckResult:
-    """The single most likely arming mistake: edit a dial, forget to re-render.
+    """Check the installed profile is the render of the current dials.
 
-    Reporting the dial-derived envelope as a PASS row while the *installed*
-    profile enforces something else is worse than not reporting it at all: the
-    owner reads a 2x envelope off the terminal and arms a 4x one. The receipt
-    does not catch it either — it hashes the env file and the profile
-    independently and never checks that one is the render of the other.
+    Otherwise the report shows a dial-derived envelope while a different one is
+    enforced (dial edited, re-render forgotten).
     """
 
     path = Path(installed_path)
@@ -302,13 +284,9 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "they must name the same frozen artifact",
             )
         )
-    # Issuance hard-requires these to exist, be directories, and be owned by
-    # the issuing user. Nothing in the repository creates them, so without this
-    # the owner discovers it as an issuance failure *after* arming.
+    # Issuance requires these directories to exist and be owned by the issuing user.
     missing_roots = [
-        key
-        for key in ("ACCOUNT_EXECUTION_ROOT", "ACCOUNT_INTENT_INBOX_ROOT", "ACCOUNT_CAPTURE_ROOT")
-        if values.get(key, "").strip() and not Path(values[key]).is_dir()
+        key for key in _STATE_ROOT_KEYS if values.get(key, "").strip() and not Path(values[key]).is_dir()
     ]
     results.append(
         CheckResult(
@@ -319,16 +297,13 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
             else f"missing directories: {', '.join(missing_roots)}",
             ""
             if not missing_roots
-            else (
-                "create them root-owned: mkdir -p "
-                + " ".join(values[key] for key in missing_roots)
-            ),
+            else "create them: scripts/ops.sh real-money create-state-roots --execute",
         )
     )
     artifacts = {
         "candidate universe": (
             values.get("ACCOUNT_SYMBOLS_FILE", ""),
-            "scripts/freeze_account_candidate_universe.py (mainnet endpoint)",
+            "scripts/freeze_account_candidate_universe.py --realm mainnet",
         ),
         "instrument rules": (
             values.get("ACCOUNT_DEMO_RULES_FILE", ""),
@@ -419,6 +394,110 @@ def preflight(
     return results
 
 
+def _declared_roots(path: Path) -> list[Path]:
+    """Absolute ``*_ROOT`` values from another realm's env file. Not installed: none."""
+
+    if not path.exists():
+        return []
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"{path} is installed but unreadable, so its roots cannot be excluded: {exc}"
+        ) from exc
+    values = parse_systemd_environment_bytes(data, label=str(path))
+    return [
+        Path(value)
+        for key, value in values.items()
+        if key.endswith("_ROOT") and value.startswith("/")
+    ]
+
+
+def _state_root_targets(values: Mapping[str, str]) -> list[Path]:
+    targets: list[Path] = []
+    for key in _STATE_ROOT_KEYS:
+        raw = values.get(key, "").strip()
+        if not raw:
+            raise ValueError(f"{key} is not declared in the owner env file")
+        if not Path(raw).is_absolute():
+            raise ValueError(f"{key}={raw} is not an absolute path")
+        targets.append(Path(raw))
+    # A file path: its parent is ours to create, the file itself never is.
+    capture = values.get("STRATEGY_TARGET_CAPTURE_PATH", "").strip()
+    if capture:
+        if not Path(capture).is_absolute():
+            raise ValueError(f"STRATEGY_TARGET_CAPTURE_PATH={capture} is not an absolute path")
+        targets.append(Path(capture).parent)
+    ordered: list[Path] = []
+    for target in targets:
+        if target not in ordered:
+            ordered.append(target)
+    return ordered
+
+
+def _create_state_roots(args: argparse.Namespace) -> int:
+    owner_env = Path(args.owner_env)
+    values, result = _read_environment(owner_env)
+    if values is None:
+        print(result.render(), file=sys.stderr)
+        return 2
+    targets = _state_root_targets(values)
+    # Resolved on both sides: a lexical compare misses a symlinked or ``..`` path
+    # that lands in another realm's tree.
+    resolved = {target: target.resolve() for target in targets}
+    for other in (DEMO_OWNER_ENV, PAPER_OWNER_ENV):
+        for root in _declared_roots(other):
+            here = root.resolve()
+            for target, full in resolved.items():
+                if full == here or here in full.parents:
+                    raise ValueError(f"{target} is at or inside {root}, declared in {other.name}")
+
+    existing: list[Path] = []
+    missing: list[Path] = []
+    for target in targets:
+        try:
+            metadata = target.stat()  # follows symlinks, as the preflight check does
+        except FileNotFoundError:
+            if target.is_symlink():
+                raise ValueError(f"{target} is a symlink to nothing; repoint it by hand") from None
+            missing.append(target)
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"{target} exists and is not a directory; move it aside by hand")
+        existing.append(target)
+
+    if not args.execute:
+        for target in existing:
+            print(f"[have] {target}")
+        for target in missing:
+            print(f"[make] {target} mode 0700")
+        print(
+            f"\n# dry run -- {len(missing)} directory(ies) to create; pass --execute",
+            file=sys.stderr,
+        )
+        return 0
+
+    for target in missing:
+        # exist_ok: one missing root can be the parent of another, and creating the
+        # child materialises it first. A non-directory still raises.
+        target.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.chmod(0o700)  # mkdir's mode is masked by the umask; chmod is not
+    summary: dict[str, Any] = {
+        "owner_env": str(owner_env),
+        "created": [str(target) for target in missing],
+        "already_present": [str(target) for target in existing],
+        "roots": {
+            str(target): {
+                "mode": f"{stat.S_IMODE(target.stat().st_mode):04o}",
+                "uid": target.stat().st_uid,
+            }
+            for target in targets
+        },
+    }
+    print(json.dumps(summary, sort_keys=True, indent=2))
+    return 0
+
+
 def _render(args: argparse.Namespace) -> int:
     dials = RealMoneyDials()
     source = "committed defaults"
@@ -489,7 +568,20 @@ def main(argv: list[str] | None = None) -> int:
     render.add_argument("--output", default="")
     render.add_argument("--overwrite", action="store_true")
 
+    roots = subparsers.add_parser(
+        "create-state-roots",
+        help="Create the mainnet journal directories the owner env file declares.",
+    )
+    roots.add_argument("--owner-env", default=str(MAINNET_OWNER_ENV))
+    roots.add_argument("--execute", action="store_true")
+
     args = parser.parse_args(argv)
+    if args.command == "create-state-roots":
+        try:
+            return _create_state_roots(args)
+        except (OSError, ValueError) as exc:
+            print(f"create-state-roots failed: {exc}", file=sys.stderr)
+            return 2
     if args.command == "render-profile":
         if args.execute and not args.output:
             parser.error("--execute requires --output")

@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: Produce and interpret the repository-standard equity curves for the active LONG and CONTINUOUS profiles. Use scripts/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
+description: Produce and interpret the repository-standard equity curves for the LONG and CONTINUOUS profiles, and for a registered Lane-2 carry config through the same chart. Use scripts/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
 # Produce equity curves
@@ -17,7 +17,8 @@ Use the standard wrapper for outputs intended to be compared or cited:
 ```bash
 bash scripts/equity_curves.sh --sleeves long
 bash scripts/equity_curves.sh --sleeves continuous
-bash scripts/equity_curves.sh --sleeves long,continuous
+bash scripts/equity_curves.sh --sleeves carry
+bash scripts/equity_curves.sh --sleeves long,continuous,carry
 bash scripts/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit --venue bybit
 bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 ```
@@ -29,11 +30,17 @@ contract. Do not assume a default window is OOS or that both venues are required
 
 - `long` loads the active LONG profile and runs the long-native research
   engine.
-- `continuous` reconstructs the active continuous component book and hedge
-  through `scripts/continuous_deployed_equity_refresh.py`.
+- `continuous` reconstructs the continuous component book and hedge through
+  `scripts/continuous_deployed_equity_refresh.py`. The sleeve was retired from
+  demo and paper on 2026-07-29, so that curve is a research reconstruction of a
+  dormant profile, never a live record.
+- `carry` renders the registered research config
+  `configs/lane2_carry_hold_v3.json` from the cross-venue panel, through the
+  same `--research-config` path (below). It is the registered research shape,
+  not a demo/paper daemon replay.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,
   netting, optional overlays, order lifecycle, and deploy environment can differ.
-  Read `docs/active_trading_logic.md` and the emitted config before claiming
+  Read `docs/trading_logic.md` and the emitted config before claiming
   parity.
 - Runtime profile names confer no evidence status.
 
@@ -65,7 +72,8 @@ State:
 - modeled costs/funding and coverage;
 - reconstruction gaps versus runtime;
 - modeled versus presentation leverage;
-- validity, study mode, and justified conclusion under `AGENTS.md`.
+- which data shaped the result and which graded it, and the justified
+  conclusion, under `docs/governance.md`.
 
 Ad hoc plots are allowed for diagnostics only when they are visually DISTINCT
 from the standard layout, clearly labelled non-standard, and never compared as

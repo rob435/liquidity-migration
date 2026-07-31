@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Build one bounded, read-only Strategy Overhaul V2 candidate-tape partition.
+"""Build one bounded Strategy Overhaul V2 candidate-tape partition.
 
-The command reads existing PIT data and writes only a run-scoped diagnostic
-directory.  It does not refresh data/features, run an active strategy
-backtest, build a portfolio curve, or print outcome values.
+Reads existing PIT data and writes a run-scoped diagnostic directory. It does
+not refresh data/features, backtest, or build a portfolio curve.
 """
 
 from __future__ import annotations
@@ -30,14 +29,11 @@ sys.path.insert(0, str(REPO))
 
 
 def _install_import_only_windows_fcntl_guard() -> None:
-    """Let this read-only command import POSIX-owned strategy modules on Windows.
+    """Stub :mod:`fcntl` so POSIX-owned strategy modules import on Windows.
 
-    The transitive account imports require :mod:`fcntl`, although candidate
-    projection never enters a lock, journal, or account path.  Keep that
-    boundary fail-closed: an unexpected lock call raises instead of silently
-    pretending that Windows has POSIX flock semantics.
+    Candidate projection never takes a lock, so the stubbed ``flock`` raises
+    rather than pretend Windows has POSIX flock semantics.
     """
-
     if os.name != "nt" or "fcntl" in sys.modules:
         return
     module = types.ModuleType("fcntl")
@@ -775,9 +771,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     read_end = args.end + dt.timedelta(days=PATH_TAIL_DAYS)
     dates = _date_range(read_start, read_end)
     kline_files = _dataset_files(root, "klines_1h", dates)
-    # Membership must cover the complete warm-up and path-tail read interval:
-    # filtering only the decision window would still let nonmembers influence
-    # trailing features before the first evaluated timestamp.
+    # Membership spans the whole warm-up and path-tail interval; filtering only
+    # the decision window lets nonmembers influence trailing features.
     membership_dates = dates
     manifest_files = _dataset_files(root, "archive_trade_manifest", membership_dates)
     rmom_path = root / "residual_momentum.parquet"

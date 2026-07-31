@@ -1,15 +1,13 @@
 """CONTINUOUS signal planner and account-target producer.
 
 The sleeve owns causal market features, selection, sizing, and desired component
-targets. The account owner alone owns venue orders, fills, positions, P&L,
-protection, and operator notifications. The backtest is a prior; forward demo
-and paper evidence are separate claims.
+targets; the account owner owns venue orders, fills, positions, P&L, protection,
+and notifications.
 
-The active ensemble enters from the confirmed-bar +1h path. The decile pipeline is the shared
-`continuous_events.compute_continuous_decile_panel`.
-
-The sole `continuous_ensemble_v2` profile uses inverse-vol component entry
-sizing, a fill-anchored account-owned TP, and a fill-anchored 24h max hold.
+The active ensemble enters from the confirmed-bar +1h path, over the shared
+`continuous_events.compute_continuous_decile_panel`. The sole
+`continuous_ensemble_v2` profile uses inverse-vol component entry sizing, a
+fill-anchored account-owned TP, and a fill-anchored 24h max hold.
 """
 
 from __future__ import annotations
@@ -38,6 +36,7 @@ from .account_candidate_universe import (
     load_candidate_universe,
     require_scheduled_retirements_flat,
 )
+from .account_kernel import AccountJournalCursor
 from .account_route import require_account_route
 from .account_service import RequestedIntent, SleeveAdapterKind
 from .account_strategy_state import (
@@ -87,6 +86,7 @@ from .event_demo_data import (
 from .execution_environment import (
     ExecutionEnvironment,
     account_id_for_environment,
+    candidate_universe_realm,
     execution_environment,
 )
 from .storage import exclusive_file_lock, write_dataset
@@ -153,29 +153,25 @@ class ContinuousDemoCycleConfig:
     max_active: int = 25
     max_new_entries_per_cycle: int = 5
     max_hold_hours: int = 48  # force-exit cap if a name never leaves the decile
-    # Research parity: the engine that produced the active profile's equity
-    # evidence skips any fresh entry within hold_ms of the symbol's last entry
+    # Research parity: the engine behind the active profile's equity evidence
+    # skips a fresh entry within hold_ms of the symbol's last entry
     # (cooldown_ms = hold_ms) and skips ALL of a component's fresh signals when
-    # more than entry_crowding_max_fresh share one signal_ts.  The live sleeve
-    # mirrors both; the validated record contains no faster re-entries and no
-    # crowded-hour books.
+    # more than entry_crowding_max_fresh share one signal_ts. Both are mirrored
+    # here.
     entry_reentry_cooldown_enabled: bool = True
     entry_crowding_max_fresh: int = 2  # 0 disables the crowding gate
     # The active profile selects from a confirmed close and enters one hour later.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"  # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
-    # The live profile is the uptrend-gated object. Keep the CLI/config
-    # default aligned with the runner + systemd units; explicit overrides remain
-    # available for diagnostics.
+    # The live profile is uptrend-gated; keep this default aligned with the
+    # runner and systemd units. Overrides stay available for diagnostics.
     btc_trend_gate: str = "uptrend"  # off | uptrend | downtrend; causal prior-30d BTC return gate.
     btc_trend_lookback_days: int = 30
-    # Portfolio circuit breaker (correlated-squeeze defense): PAUSE new entries when the sleeve has had
-    # >= entry_pause_after_adverse_exits adverse covers (stop_approach / failed_fade / any net-negative
-    # cover — the footprint of a market-wide alt melt-up squeezing many shorts at once) within the last
-    # entry_pause_window_minutes. Stateless (recomputed from the ledger each cycle), so the pause lifts
-    # automatically as the cluster ages out of the window. NEVER adds risk — it only stops opening fresh
-    # shorts into a squeeze. The current w24/n8 setting is a deliberate
-    # de-risking choice. Set entry_pause_after_adverse_exits=0 to disable.
+    # Correlated-squeeze breaker: pause new entries after
+    # >= entry_pause_after_adverse_exits adverse covers (stop_approach,
+    # failed_fade, any net-negative cover) within entry_pause_window_minutes.
+    # Recomputed from the ledger each cycle, so the pause lifts as the cluster
+    # ages out. 0 disables.
     entry_pause_after_adverse_exits: int = 8
     entry_pause_window_minutes: int = 1440
     entry_leverage: float = 2.0
@@ -201,36 +197,32 @@ class ContinuousDemoCycleConfig:
     universe_max_symbols: int = 0
     universe_min_turnover_24h: float = 0.0
     # --- environment / wiring ---
-    # No default is intentional. Runtime callers must name exactly one target
-    # owner; the producer never carries an order-submission boolean.
+    # No default: runtime callers must name exactly one target owner.
     execution_environment: str = ""
-    # Demo and paper both publish immutable DesiredTarget batches; only the
-    # selected account service may mutate venue or canonical state.
+    # Immutable DesiredTarget batches; only the selected account service may
+    # mutate venue or canonical state.
     account_intent_inbox_root: str | None = None
-    # Canonical accepted-target journal used as the planning read model.  It is
-    # inseparable from the inbox route to prevent split-brain open positions.
+    # Canonical accepted-target journal used as the planning read model,
+    # inseparable from the inbox route to prevent split-brain positions.
     account_execution_root: str | None = None
-    # Optional frozen candidate population, enforced before signal selection in
-    # demo and paper alike.
+    # Optional frozen candidate population, enforced before signal selection.
     candidate_universe_file: str = ""
     strategy_profile: str = CONTINUOUS_V2_PROFILE
     # --- continuous_ensemble_v2 active component book ---
     # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight,
-    # stop_loss_pct, funding_min_at_entry|None). Non-empty => the cycle selects
-    # entries PER COMPONENT (each with its own event trigger, age floor,
-    # settled-funding admission floor, account-owned TP and declared wide stop
-    # backstop) and sizes each entry by weight x the base per-position notional.
+    # stop_loss_pct, funding_min_at_entry|None). Non-empty selects entries PER
+    # COMPONENT, each with its own trigger, age floor, funding floor, TP and
+    # declared stop, sized by weight x the base per-position notional.
     ensemble_components: tuple[tuple[str, str, int, float, float, float, float | None], ...] = (
         CONTINUOUS_COMPONENTS
     )
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
-    # Follow ANOTHER root's flushed WS kline snapshot (read-only) instead of running a
-    # second WS pool — the paper shadow co-located with the demo sleeve sets this to the
-    # demo root so both sleeves share one market-data plane AND decide on identical
-    # signal inputs: the rmom gate is read from the followed root too (it is derived
-    # purely from that root's klines). Empty = run the sleeve's own pool (default).
+    # Follow ANOTHER root's flushed WS kline snapshot (read-only) instead of a
+    # second WS pool, so a co-located shadow shares one market-data plane and
+    # identical signal inputs (the rmom gate is read from that root too, being
+    # derived purely from its klines). Empty runs the sleeve's own pool.
     klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 45
@@ -386,12 +378,11 @@ def _attach_prior_bar_state(
 ) -> pl.DataFrame:
     """Carry the previous confirmed bar's decile/event columns onto each row.
 
-    The equity-evidence engine counts crowding on *fresh* decile entrants
-    (``_fresh_entries``: no qualifying appearance in the preceding hour). One
-    deciding-bar snapshot cannot express that, so the previous bar's state
-    travels with the current one and ``_fresh_entrant_expr`` reproduces the rule
-    exactly. Symbols absent from the previous bar get nulls, which read as fresh
-    — the same as the engine's ``fill_null(True)`` on the first appearance.
+    The engine counts crowding on *fresh* decile entrants (no qualifying
+    appearance in the preceding hour), which one deciding-bar snapshot cannot
+    express, so the previous bar's state travels with the current one.
+    Symbols absent from the previous bar get nulls, which read as fresh --
+    matching the engine's ``fill_null(True)`` on first appearance.
     """
 
     prior = panel.filter(pl.col("ts_ms") == int(prior_ts_ms))
@@ -429,9 +420,8 @@ def _fresh_entrants(
     """``frame`` restricted to fresh entrants, or unchanged when the previous
     bar's state is unavailable.
 
-    Falling back to "every row is fresh" overstates the crowd count, which skips
-    more entries rather than fewer — the conservative direction for a gate whose
-    whole purpose is refusing fresh-listing-squeeze windows.
+    The fallback treats every row as fresh, overstating the crowd count and so
+    skipping more entries rather than fewer.
     """
 
     if frame.is_empty() or f"{PRIOR_BAR_COLUMN_PREFIX}decile" not in frame.columns:
@@ -539,22 +529,22 @@ def _rmom_identity_payload_fields(
 class LivePanelCache:
     """Tier 2 — within-hour static-feature cache for the live continuous decile.
 
-    `build_live_continuous_state` re-runs the FULL trailing-window feature pipeline (rv_168h, vov,
-    dist_low, xsret7/3) over the whole ~45d×N-symbol history on every wake. But those windows are
-    trailing aggregates over CONFIRMED hourly bars — they do not change between bar closes; only the
-    in-progress ("current") bar's live-price term moves intra-hour. This cache computes the heavy
-    per-symbol confirmed-bar part ONCE per bar close (`_refresh`) and, on each wake, computes only
-    the current bar's features from the cached carry + the live price and re-ranks the cross-section
-    (`_live_panel`). That turns the per-wake cost from a full O(N×history) recompute into an
-    O(N) carry-update + O(N log N) re-rank, which is what makes sub-minute triggers affordable.
+    `build_live_continuous_state` re-runs the full trailing-window feature
+    pipeline (rv_168h, vov, dist_low, xsret7/3) over ~45d x N symbols on every
+    wake, but those windows aggregate CONFIRMED hourly bars and only the
+    in-progress bar's live-price term moves intra-hour. This cache computes the
+    confirmed-bar part once per bar close (`_refresh`) and, per wake, only the
+    current bar's features from the carry plus the live price, then re-ranks
+    (`_live_panel`): O(N) carry-update + O(N log N) re-rank instead of a full
+    O(N x history) recompute.
 
-    EQUIVALENCE (the repo's `np.allclose` gate): the cross-sectional half is the SHARED
-    `cross_sectional_decile`, and the per-symbol current-bar feature values are computed to reproduce
-    exactly what `per_symbol_timeseries_features` produces for the appended synthetic bar — so
-    `state(...)` is `np.allclose` on `composite` and exact on `decile`/membership vs
-    `build_live_continuous_state(...)`. `tests/test_liquidity_migration_continuous_demo.py` pins it
-    (incl. a young-symbol and a gapped-symbol case). The full recompute remains the always-available
-    fallback in the cycle, so a cache bug degrades to "slower", never "wrong".
+    EQUIVALENCE: the cross-sectional half is the shared `cross_sectional_decile`
+    and the current-bar features reproduce what `per_symbol_timeseries_features`
+    gives for the appended synthetic bar, so `state(...)` is `np.allclose` on
+    `composite` and exact on `decile`/membership against
+    `build_live_continuous_state(...)`.
+    `tests/test_liquidity_migration_continuous_demo.py` pins it. The full
+    recompute stays available as the cycle's fallback.
     """
 
     __slots__ = ("_rmom_quantile", "_feature_set", "_exclude", "_cur_ts", "_sig", "_carry")
@@ -581,21 +571,19 @@ class LivePanelCache:
     ) -> tuple[int, int, int, int]:
         """A cheap, collision-resistant content fingerprint of the confirmed bars feeding the carry.
 
-        It catches NOT JUST the hour rolling over but also a confirmed bar being BACKFILLED or
-        RE-DELIVERED with corrected values mid-hour (Bybit re-pushes a just-closed bar after late
-        trades; ``KlineStore.add_bar`` overwrites it in place) — without that, the carry would silently
-        go stale within the hour.
+        It catches the hour rolling over AND a confirmed bar being backfilled or
+        re-delivered with corrected values mid-hour (Bybit re-pushes a
+        just-closed bar after late trades and ``KlineStore.add_bar`` overwrites
+        it in place), which would otherwise leave the carry stale within the
+        hour.
 
-        pit-engine-3: the previous fingerprint was ``(row_count, max_ts, close_sum, turnover_sum)``. A
-        value-preserving multi-symbol backfill that conserved BOTH float sums (e.g. one symbol's close
-        corrected +X while another's is -X, same count/max_ts) left the fingerprint unchanged → the
-        refresh was skipped and the live decile reranked off a stale per-symbol carry, with no exception
-        so the cycle's full-recompute fallback never fired. We now fold an order-independent hash of
-        each row's ``(symbol, ts_ms, close, turnover_quote)`` tuple into the signature (a wrapping SUM
-        and a wrapping SUM-OF-SQUARES of polars' per-row 64-bit hashes — two different-degree
-        reductions), so a per-symbol value change moves the fingerprint even when the cross-sectional
-        float sums are preserved. Order-independent because the bar set has no inherent order. Still an
-        O(N) scan (no rolling), far cheaper than ``_refresh``."""
+        Aggregate float sums are not enough: a value-preserving multi-symbol
+        backfill (one close +X, another -X, same count/max_ts) leaves them
+        unchanged, so the refresh is skipped and the decile reranks off a stale
+        carry with no exception to trigger the fallback. The signature folds in
+        an order-independent hash of each row's
+        ``(symbol, ts_ms, close, turnover_quote)``. Still an O(N) scan, far
+        cheaper than ``_refresh``."""
         exclude = self._exclude or config.exclude_symbols
         lf = klines_recent.lazy().select("ts_ms", "symbol", "close", "turnover_quote").filter(pl.col("ts_ms") < cur_ts)
         if exclude:
@@ -607,11 +595,10 @@ class LivePanelCache:
         row_count = confirmed.height
         max_ts = coerce_int(confirmed.get_column("ts_ms").max())
         mod = 1 << 64
-        # Two order-independent reductions of the per-row 64-bit hashes: a linear SUM and a
-        # quadratic SUM-OF-SQUARES. Both move when any row's (symbol, ts_ms, close, turnover_quote)
-        # changes; using two different-degree polynomials means a backfill whose per-row hash deltas
-        # happened to cancel in the linear sum (mod 2^64) is overwhelmingly unlikely to ALSO cancel in
-        # the quadratic sum, so the pair is collision-resistant where a plain float-sum was not.
+        # Two order-independent reductions of the per-row 64-bit hashes: a
+        # linear SUM and a quadratic SUM-OF-SQUARES. Different degrees, so a
+        # backfill whose deltas cancel in the linear sum (mod 2^64) is very
+        # unlikely to also cancel in the quadratic one.
         hashes = row_hashes.to_list()
         hash_sum = sum(hashes) % mod
         hash_sq_sum = sum((h * h) % mod for h in hashes) % mod
@@ -1178,11 +1165,9 @@ def _component_funnel_state(
         settled_funding_probe=settled_funding_probe,
     )
     # Crowding base (engine parity). `_run_trades` counts every funding-admitted
-    # FRESH entry sharing a signal_ts and skips the whole stack past the cap; its
-    # per-entry age gate runs AFTER that count. Counting on the age-filtered
-    # `funded` frame instead made the live book take entries the validated engine
-    # crowd-skipped, in exactly the fresh-listing-squeeze hours the two gates were
-    # designed around (2026-07-27 audit M2).
+    # FRESH entry sharing a signal_ts and skips the whole stack past the cap,
+    # with its per-entry age gate running AFTER that count. Counting on the
+    # age-filtered `funded` frame instead admits entries the engine skips.
     crowding_base, _, _, _ = _funding_admitted(
         _fresh_entrants(event, component_config=component_config),
         funding_min_at_entry=funding_min_at_entry,
@@ -1343,18 +1328,15 @@ def _observe_continuous_component_selection(
         funding_admission_unknown_admitted += funding_unknown
         # Research parity (entry_crowding_max_fresh): more fresh qualifying
         # signals than the cap at one signal_ts skips the component's ENTIRE
-        # stack for the window, exactly like the equity-evidence engine. The
-        # engine counts on its funding-admitted FRESH entries before its
-        # per-entry age gate, so `crowding_base` — not the age-filtered `funded`
-        # frame — is the counting base here (audit M2).
+        # stack for that window. The engine counts funding-admitted FRESH
+        # entries before its age gate, so `crowding_base` is the counting base.
         component_crowded = 0 < config.entry_crowding_max_fresh < crowding_base.height
         if component_crowded:
             observed_crowding += funded.height
         if funding_rejected:
-            # Name the funding-rejected symbols. Without them the operator saw a
-            # funnel with funding=0 next to "first rejection capacity" — the two
-            # channels contradicting each other for the signature rejection mode
-            # of the deployed funding-gated profile (2026-07-27 audit M3).
+            # Name the funding-rejected symbols, or the funnel reports
+            # funding=0 next to "first rejection capacity" and the two channels
+            # contradict each other.
             admitted_symbols = set(funded["symbol"].to_list())
             for symbol in age["symbol"].to_list():
                 if str(symbol) in admitted_symbols:
@@ -1549,9 +1531,8 @@ def _first_entry_rejection_reason(
         return preselection_reason or "entry_observer_error"
     if preselection_reason:
         # A cycle-level gate (health, pause, capacity, BTC trend) disabled
-        # entries before any admission ran.  _qualified_block_reasons names the
-        # same gate for every qualified symbol; both channels must agree or an
-        # operator chases funnel-stage plumbing that never ran.
+        # entries before any admission ran. _qualified_block_reasons names the
+        # same gate per symbol; both channels must agree.
         return preselection_reason
     totals = {
         field: sum(int(row[field]) for row in observation.funnel_rows)
@@ -1576,8 +1557,7 @@ def _first_entry_rejection_reason(
     if totals["age"] == 0:
         return "age"
     # The settled-funding floor sits between the age gate and the lifecycle
-    # guards. Omitting it let a cycle where every age-qualified candidate was
-    # funding-rejected fall through the cascade and report "capacity".
+    # guards; omitting it makes an all-funding-rejected cycle report "capacity".
     if totals["funding"] == 0:
         return "funding_admission"
     if totals["available"] == 0:
@@ -1624,9 +1604,8 @@ def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
     """Resolve the active demo/paper profile into explicit knobs.
 
-    It uses the shared code-defined component book (single funding-gated
-    turn3_pop3 cell since 2026-07-26), inverse-vol sizing, TP12, and a
-    24-hour maximum hold.
+    Uses the shared code-defined component book (a single funding-gated
+    turn3_pop3 cell), inverse-vol sizing, TP12, and a 24-hour maximum hold.
     """
     if config.strategy_profile != CONTINUOUS_V2_PROFILE:
         return config
@@ -1638,15 +1617,14 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
         max_hold_hours=24,
         entry_confirm_delay_hours=1,
         entry_event_trigger="none",
-        # btc_trend_gate is NOT pinned here: it is the single-source-of-truth
-        # CLI/env knob (`--btc-trend-gate` / `BTC_TREND_GATE`), so the deploy
-        # layer controls it (units pin `uptrend`; runner defaults `uptrend`).
+        # btc_trend_gate is NOT pinned here: `--btc-trend-gate` /
+        # `BTC_TREND_GATE` own it, so the deploy layer controls it.
         sizing_mode="inverse_vol",
         target_vol_per_name=0.01,
         vol_weight_clamp=2.0,
-        # After 50 prior accepted decisions, multiply all
-        # component entries for a `(symbol, signal_ts)` by 0.35 when the causal
-        # V0 BTC-risk score is in [0.70, 0.90).
+        # After 50 prior accepted decisions, scale all component entries for a
+        # `(symbol, signal_ts)` by 0.35 when the causal V0 BTC-risk score is in
+        # [0.70, 0.90).
         entry_btc_risk_sizing_enabled=True,
         entry_btc_risk_arm_id=CTRL_BTC_RISK_70_90_35_ID,
         entry_btc_risk_low=0.70,
@@ -1950,9 +1928,8 @@ def _btc_risk_sizing_payload_fields(stats: dict[str, Any]) -> dict[str, Any]:
         "btc_risk_sizing_accepted_duplicates": stats.get("accepted_duplicates", 0),
         "btc_risk_sizing_accepted_ignored": stats.get("accepted_ignored", 0),
         "btc_risk_sizing_accepted_authoritative_rows": stats.get("accepted_authoritative_rows", 0),
-        # A rebase that drops prior-epoch decisions must be journaled per
-        # cycle, not only logged: state_rows collapsing with no recorded cause
-        # is exactly the unreconstructable mutation incident reviews fight.
+        # Journaled per cycle, not only logged, so a collapse in state_rows
+        # always has a recorded cause.
         "btc_risk_sizing_accepted_orphaned_dropped": stats.get("accepted_orphaned_dropped", 0),
         "btc_risk_sizing_unresolved_entry_requests": stats.get("unresolved_entry_requests", 0),
         "btc_risk_sizing_entry_blocked": stats.get("entry_blocked", False),
@@ -2014,12 +1991,10 @@ def _continuous_target_reservations(
 
 
 def _finite_or_none(value: Any) -> float | None:
-    """NaN/inf-guarded float coercion, None on missing/invalid (default=None variant).
+    """NaN/inf-guarded float coercion; None on missing/invalid.
 
-    code-quality-5: routes through the canonical ``_common.finite_float`` so a
-    future tightening of the NaN/inf policy lives in one place.
-    ``finite_float(value, default=None)`` is behavior-preserving:
-    None/unparseable -> None (old: float(None) raised TypeError -> None), NaN/+-inf -> None."""
+    Routes through ``_common.finite_float`` so the NaN/inf policy lives in one
+    place. None/unparseable -> None, NaN/+-inf -> None."""
     return finite_float(value, default=None)
 
 
@@ -2115,7 +2090,7 @@ def _continuous_entry_target_intents(
                     "decision_reference_price": price,
                     "take_profit_pct": take_profit_pct,
                     # Declared wide backstop: the account places the venue stop
-                    # here instead of its 2% disaster fallback (§16.3 parity).
+                    # here instead of its 2% disaster fallback.
                     **({"stop_loss_pct": stop_loss_pct} if stop_loss_pct > 0.0 else {}),
                     "max_hold_duration_ms": max_hold_duration_ms,
                     "signal_ts_ms": int(candidate.get("signal_ts_ms") or 0),
@@ -2127,8 +2102,7 @@ def _continuous_entry_target_intents(
                     "quantity_authority": "account_kernel_demo_rules",
                     **({BTC_RISK_EVIDENCE_METADATA_KEY: btc_risk_evidence} if btc_risk_evidence is not None else {}),
                     # Settled-funding admission evidence: the last settled print
-                    # observed at the decision cutoff (null = unknown-admitted),
-                    # journaled so the forward record can revisit unknown-admits.
+                    # at the decision cutoff (null = unknown-admitted).
                     **(
                         {
                             "funding_min_at_entry": _float(candidate.get("funding_min_at_entry")),
@@ -2165,13 +2139,10 @@ def _load_rmom_snapshot(root: Path) -> ResidualMomentumSnapshot | None:
             source_mtime_ns=snapshot.mtime_ns,
         )
     except Exception as exc:  # noqa: BLE001 - a corrupt rmom file must DEGRADE, not crash the cycle
-        # A partially-written/corrupt parquet (mid-write crash, disk issue) or a
-        # schema drift (missing ts_ms) would otherwise raise out of the cycle,
-        # writing NO cycle row -- so the persisted max_rmom_day_ts telemetry never
-        # updates and the watchdog cannot tell "cycle crashing on a bad rmom file"
-        # from "merely quiet". Degrade to rmom-absent (the watchdog already pages
-        # on the silent-blackout that produces), keeping the staleness guard
-        # authoritative even on a corrupted file.
+        # A torn parquet or a schema drift would otherwise raise out of the
+        # cycle, writing NO cycle row, so max_rmom_day_ts never updates and the
+        # watchdog cannot tell a crashing cycle from a quiet one. Degrading to
+        # rmom-absent keeps the staleness guard authoritative.
         _logger.warning("continuous: failed to load rmom table %s: %s; degrading to rmom-absent", path, exc)
         return None
 
@@ -2263,9 +2234,8 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             if config.entry_confirm_delay_hours <= 0:
                 raise ValueError("ensemble component entry_event_trigger requires confirmed-bar entry timing")
             _entry_event_expr(comp_trigger)
-        # Declared stop is the venue backstop the account will place; a value
-        # outside (0, 1) would be rejected downstream by the kernel's
-        # provisional-stop contract, so fail at startup instead.
+        # The declared stop is the venue backstop the account places. A value
+        # outside (0, 1) is rejected by the kernel, so fail at startup instead.
         comp_stop = float(comp[5])
         if not 0.0 < comp_stop < 1.0:
             raise ValueError("ensemble component stop_loss_pct must be a fraction in (0, 1)")
@@ -2329,6 +2299,7 @@ def run_continuous_demo_cycle(
     state_cache_stale_seconds: float = 120.0,
     panel_cache: "LivePanelCache | None" = None,
     funnel_observer: DecisionFunnelObserver | None = None,
+    journal_cursor: AccountJournalCursor | None = None,
 ) -> PublishedTargetCyclePayload:
     """Plan one CONT cycle and publish immutable account targets.
 
@@ -2363,7 +2334,12 @@ def run_continuous_demo_cycle(
             testnet=config.exchange.testnet,
         )
         candidate_universe = (
-            load_candidate_universe(demo.candidate_universe_file) if demo.candidate_universe_file else None
+            load_candidate_universe(
+                demo.candidate_universe_file,
+                realm=candidate_universe_realm(demo.execution_environment),
+            )
+            if demo.candidate_universe_file
+            else None
         )
         (
             universe,
@@ -2464,6 +2440,7 @@ def run_continuous_demo_cycle(
             account_route,
             sleeve=SleeveAdapterKind.CONTINUOUS,
             strategy_ids=managed_strategy_ids,
+            journal_cursor=journal_cursor,
         )
         target_publisher = planning.publisher
         unresolved_targets = planning.unresolved_targets
@@ -2565,9 +2542,8 @@ def run_continuous_demo_cycle(
                 settled_funding_probe=settled_funding_probe,
             )
         except Exception as exc:
-            # The observer path must never turn a pre-existing hard block into a
-            # cycle failure.  When entries are enabled, preserve the legacy
-            # behavior and surface selection failures normally.
+            # The observer must not turn a pre-existing hard block into a cycle
+            # failure; with entries enabled, selection failures still surface.
             if not preselection_reason:
                 raise
             observer_error = f"{type(exc).__name__}: {exc}"[:500]
@@ -2790,8 +2766,8 @@ def run_continuous_demo_cycle(
             "open_positions": len(held_symbols),
             "open_components": open_trades.height,
             "target_reservations": reservations.height,
-            # Position events and P&L are emitted by the account notification
-            # projector, never inferred from strategy publication receipts.
+            # Position events and P&L come from the account notification
+            # projector, not from publication receipts.
             "entries": 0,
             "exits": 0,
             "candidates": len(candidates),

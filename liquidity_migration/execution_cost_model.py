@@ -9,16 +9,14 @@ decision-time midpoint ``M0`` so the classical decomposition holds exactly:
     realized_spread_h = effective_spread − price_impact_h
                       = 2·s·(P_fill − M_h)/M0
 
-with ``s`` = +1 for buys and −1 for sells, ``M_h`` the captured L2 midpoint
-at horizon ``h``. Effective spread is what the taker paid at arrival;
-price impact is the adverse-selection component that persisted to ``h``;
-realized spread is what a passive counterparty would have earned — the direct
-measure of what a maker-first execution experiment can recover.
+with ``s`` = +1 for buys and −1 for sells, ``M_h`` the captured L2 midpoint at
+horizon ``h``. Effective spread is what the taker paid at arrival; price impact
+is the adverse-selection component that persisted to ``h``; realized spread is
+what a passive counterparty would have earned.
 
-Inputs are the verified journal events, the decision `book_context` records
-(keyed by market-input key), and the per-``(execution_id, horizon)`` markout
-observations — exactly the loaders `trade_diagnostics` already provides.
-Observer-only: nothing here feeds sizing, admission, or execution authority.
+Inputs are the journal events, the decision `book_context` records (keyed by
+market-input key), and the per-``(execution_id, horizon)`` markout observations
+that `trade_diagnostics` already loads. Nothing here feeds sizing or execution.
 """
 
 from __future__ import annotations

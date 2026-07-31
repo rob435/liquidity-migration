@@ -12,7 +12,7 @@ negatives carry most of the information.
 registered configurations and therefore cannot grade them. The registrations
 (`configs/lane2_carry_hold_v1.json`, `configs/lane2_financed_leaders_v1.json`,
 `configs/lane2_financed_leaders_binance_v1.json`) grade forward from their
-commit. Nothing here authorizes a deployment or touches the real-money door.
+commit.
 
 ---
 
@@ -325,7 +325,7 @@ Structural findings worth more than the individual results:
   deep-negative-funding / financed-leader subset of the top-100, adequate for
   the current risk envelope, not for a larger book.
 - The 2026 eras of both books ride the structural funding inversion
-  (`docs/audit/2026-07-24-repo-and-strategy-audit.md` §5). A normalization of
+  (`docs/research_findings.md` §4). A normalization of
   funding shrinks deployment frequency and edge together — the books go to
   cash rather than short, but the forward record would flatten.
 - The deployed CONTINUOUS sleeve is not modified, demoted, or replaced by

@@ -21,11 +21,11 @@ if [ "$MODE" = rollout ]; then
         *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
     esac
 elif [ "$#" -ne 0 ]; then
-    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout}" >&2
+    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout|activate-mainnet|stop-mainnet}" >&2
     exit 2
 fi
 case "$MODE" in
-    install|activate|verify|rollout) ;;
+    install|activate|verify|rollout|activate-mainnet|stop-mainnet) ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
 esac
 
@@ -126,20 +126,15 @@ export PATH
 
 fail() { report_strict_phase_failure 1; echo "deploy failed: $*" >&2; exit 1; }
 
-# Bash disables `set -e` (and the ERR trap) for the entire dynamic extent of a
-# function invoked from a condition context (`if`, `&&`, `||`), and an explicit
-# `set -e` inside that extent has no effect until the enclosing command
-# finishes.  Nesting a whole mode inside `run_phase`'s `if "$@"` therefore
-# silently demoted every gate the mode runs — pip, ruff, mypy, the focused
-# tests, the demo-rule probe — to a non-fatal warning.  Two guards close that:
-#
-#   * `run_strict_phase` brackets a payload without ever putting it in a
-#     condition context, so errexit stays lethal for every command the payload
-#     and its callees run.  The ERR trap emits the same `phase-failed` line.
-#   * `run_phase` (leaf commands, which may legitimately run under a suppressed
-#     errexit) aborts explicitly on a non-zero payload; `exit` is honoured
-#     regardless of the errexit context.  `RUN_PHASE_COLLECT_STATUS=1` opts a
-#     caller into aggregating the status itself — only `run_phase_pair` does.
+# Bash disables `set -e` (and the ERR trap) for the whole dynamic extent of a
+# function invoked from a condition context (`if`, `&&`, `||`); a nested
+# `set -e` does not restore it until the enclosing command finishes. So:
+#   * `run_strict_phase` never puts its payload in a condition context, keeping
+#     errexit lethal for the payload and everything it calls.
+#   * `run_phase` (leaf commands, which may run under suppressed errexit) aborts
+#     explicitly on non-zero; `exit` is honoured in any errexit context.
+#     `RUN_PHASE_COLLECT_STATUS=1` opts a caller into aggregating the status
+#     itself — only `run_phase_pair` does.
 RUN_PHASE_COLLECT_STATUS=0
 STRICT_PHASE_LABEL=""
 STRICT_PHASE_STARTED=0
@@ -240,9 +235,8 @@ safe_git_with_index() {
 acquire_maintenance_locks() {
     local lock_dir=/run/liquidity-migration helper_output
     local maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode
-    # maintenance.lock is the canonical cross-operation mutex. The two retired
-    # leaves stay nested during migration so this version also excludes an old
-    # deploy or reset process that started from the previously installed code.
+    # maintenance.lock is the canonical mutex; the two retired leaves stay
+    # nested so an old deploy or reset process is still excluded.
     helper_output="$(maintenance_lock_helper prepare-host)" \
         || fail "cannot prepare persistent host maintenance locks safely"
     IFS=$'\t' read -r \
@@ -345,12 +339,16 @@ prepare_paper_runtime_boundary() {
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
         ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE ACCOUNT_CAPTURE_ROOT
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE ACCOUNT_CAPTURE_ROOT \
+        ACCOUNT_EXECUTION_ROOT
     demo_symbols="$ACCOUNT_SYMBOLS_FILE"
     demo_candidate="${CANDIDATE_UNIVERSE_FILE:-}"
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     demo_risk="$ACCOUNT_RISK_POLICY_FILE"
     demo_capture="$ACCOUNT_CAPTURE_ROOT"
+    demo_account_root="$ACCOUNT_EXECUTION_ROOT"
+    [ "${demo_account_root#/}" != "$demo_account_root" ] \
+        || fail "demo account root must be absolute: $demo_account_root"
     [ "${demo_capture#/}" != "$demo_capture" ] \
         || fail "demo account capture root must be absolute: $demo_capture"
     [ -d "$demo_capture" ] && [ ! -L "$demo_capture" ] \
@@ -370,9 +368,8 @@ from liquidity_migration.operational_profile import load_operational_profile
 
 load_operational_profile(sys.argv[1])
 PY
-    # Install only while every managed unit is quiescent (install_mode enforces
-    # that before this boundary). The account owner and all target producers
-    # subsequently consume these exact bytes through ACCOUNT_RISK_POLICY_FILE.
+    # Install only while units are quiescent (install_mode enforces that). The
+    # owner and all producers then read these bytes via ACCOUNT_RISK_POLICY_FILE.
     install -o root -g root -m 0600 "$operational_profile_source" "$demo_risk"
     "$PYTHON" - "$demo_risk" <<'PY'
 import sys
@@ -458,9 +455,8 @@ PY
     install -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0600 \
         "$demo_risk" "$PAPER_RISK_FILE"
 
-    # Rebuild the non-secret paper route as strict data. An existing file may
-    # contribute benign tuning values, but credentials and alternate roots are
-    # never migrated across this boundary.
+    # Rebuild the non-secret paper route as strict data: an existing file may
+    # contribute tuning values only, never credentials or alternate roots.
     if [ -e "$PAPER_ENVIRONMENT" ] || [ -L "$PAPER_ENVIRONMENT" ]; then
         [ -f "$PAPER_ENVIRONMENT" ] && [ ! -L "$PAPER_ENVIRONMENT" ] \
             || fail "paper environment must be a real regular file"
@@ -472,7 +468,8 @@ PY
     "$PYTHON" - "$PAPER_ENVIRONMENT" \
         "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
         "$PAPER_SYMBOLS_FILE" "$PAPER_RULES_FILE" "$PAPER_RISK_FILE" \
-        "$REPO_DIR/configs/operational.demo.json" <<'PY'
+        "$REPO_DIR/configs/operational.demo.json" \
+        "$demo_capture" "$demo_account_root" <<'PY'
 import os
 import shlex
 import sys
@@ -501,14 +498,12 @@ allowed_tuning = {
     "ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS",
 }
 values = {key: value for key, value in existing.items() if key in allowed_tuning}
-# The paper twin's fixed capital base always tracks the committed operational
-# profile's capital reference, so the integration record stays comparable to
-# the demo book without a hidden per-host tuning value.
+# The paper twin's capital base tracks the committed profile's capital
+# reference, keeping it comparable to the demo book with no per-host tuning.
 values["PAPER_EQUITY_USDT"] = f"{load_operational_profile(sys.argv[8]).capital_reference_usdt:g}"
-# The paper owner unit enables Telegram, so provisioning must either keep the
-# operator-provided notification credentials or seed them from the demo
-# notification channel. Venue credentials remain forbidden above; these two
-# keys are notification transport only.
+# The paper owner unit enables Telegram: keep operator-provided notification
+# credentials or seed them from the demo channel. Transport keys only; venue
+# credentials stay forbidden above.
 telegram_keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 telegram = {key: existing.get(key, "").strip() for key in telegram_keys}
 if not all(telegram.values()):
@@ -536,6 +531,10 @@ values.update(
         "CANDIDATE_UNIVERSE_FILE": sys.argv[5],
         "ACCOUNT_DEMO_RULES_FILE": sys.argv[6],
         "ACCOUNT_RISK_POLICY_FILE": sys.argv[7],
+        # Read-only demo roots for the paper target mirror: the demo capture
+        # tape, and the demo owner's health projection for equity-ratio scaling.
+        "DEMO_ACCOUNT_CAPTURE_ROOT": sys.argv[9],
+        "DEMO_ACCOUNT_EXECUTION_ROOT": sys.argv[10],
     }
 )
 descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -634,8 +633,7 @@ verify_paper_runtime_boundary() {
         "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
         if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
             # A root introduced by the commit being deployed does not exist
-            # before its own install phase creates it; the post-install
-            # boundary check enforces it strictly.
+            # until its install phase creates it; the post-install check is strict.
             echo "paper-boundary-pending root=$root reason=created-by-this-install"
             continue
         fi
@@ -645,8 +643,8 @@ verify_paper_runtime_boundary() {
             || fail "paper runtime cannot write its persistent lock directory: $root/.locks"
     done
     # The carry paper producer follows the carry demo market plane read-only
-    # (CARRY_MARKET_FOLLOW_ROOT). Carry has no WS kline plane, but the shared
-    # normalize-demo contract still provisions the traversable cache tree.
+    # (CARRY_MARKET_FOLLOW_ROOT). Carry has no WS kline plane, but normalize-demo
+    # still provisions the traversable cache tree.
     for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
         if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
             echo "paper-boundary-pending root=$root reason=created-by-this-install"
@@ -670,11 +668,6 @@ verify_paper_runtime_boundary() {
     fi
     runuser -u "$PAPER_RUNTIME_USER" -- test ! -w "$REPO_DIR/liquidity_migration" \
         || fail "paper runtime can write repository code"
-    if [ -e /etc/liquidity-migration/account-execution-operational-ready ]; then
-        runuser -u "$PAPER_RUNTIME_USER" -- \
-            test -r /etc/liquidity-migration/account-execution-operational-ready \
-            || fail "paper runtime cannot read the operational receipt"
-    fi
 }
 
 require_checkout() {
@@ -759,13 +752,10 @@ require_quiescent() {
 
 git_fetch() {
     if [ -n "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
-        # Keep the credential OFF argv. `GIT_ENV` begins with `/usr/bin/env -i`,
-        # so a `GIT_CONFIG_VALUE_0=...` prefix is an argv word of env and is
-        # world-readable via /proc/<pid>/cmdline for the fork-exec window — and
-        # on a locally dispatched rollout that value carries the operator's
-        # long-lived `gh auth token` (2026-07-27 audit L16). Every other secret
-        # path in this repo already keeps credentials off argv. A 0600 config
-        # file written by a shell builtin puts only its PATH on argv.
+        # Keep the credential off argv: `GIT_ENV` starts with `/usr/bin/env -i`,
+        # so a `GIT_CONFIG_VALUE_0=...` prefix becomes an argv word of env and is
+        # world-readable via /proc/<pid>/cmdline. A 0600 config file written by a
+        # shell builtin puts only its path on argv.
         local auth config_file status=0
         auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
         config_file="$(mktemp)" || fail "cannot create the authenticated git config"
@@ -783,21 +773,21 @@ git_fetch() {
     fi
 }
 
-invalidate_operational_authorization() {
+retire_stale_operational_receipt() {
+    # Hosts upgraded from an older commit still carry the operational-ready
+    # receipt; no unit consults it, so archive it rather than leave a dead gate.
     local path=/etc/liquidity-migration/account-execution-operational-ready archive stamp
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     [ -e "$path" ] || [ -L "$path" ] || return 0
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     archive="/var/lib/liquidity-migration/retired-authority/$stamp"
     install -d -m 0700 "$archive"
     mv "$path" "$archive/$(basename "$path")"
-    echo "invalidated prior operational authorization: $archive"
+    echo "retired stale operational receipt: $archive"
 }
 
-# Rollout sets this itself. A staged `install` completing a
-# failed rollout may request the same maintenance explicitly via the
-# environment — without it, a recovery whose failure happened inside rule
-# maintenance can never rebind the candidate/rules and authority issuance
-# stays impossible (2026-07-29 carry rollout 30411203410).
+# Rollout sets this itself. A staged `install` completing a failed rollout may
+# request the same maintenance explicitly; without it, a recovery that failed
+# inside rule maintenance can never rebind the candidate/rules.
 ROLLOUT_REFRESH_STALE_DEMO_RULES="${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
 case "$ROLLOUT_REFRESH_STALE_DEMO_RULES" in 0|1) ;; *)
     echo "ROLLOUT_REFRESH_STALE_DEMO_RULES must be 0 or 1" >&2; exit 2 ;;
@@ -849,11 +839,9 @@ PY
     [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] || [ "$freshness_status" -eq 4 ] \
         || fail "configured demo-rule receipt failed validation for a reason other than age"
 
-    # A candidate-universe schema bump makes the installed artifact unreadable
-    # by the code being deployed; reusing it would fail closed later at
-    # preflight with the fleet already stopped. Detect that here and force the
-    # freeze+projection path instead (a candidate addition then exits 3 and
-    # falls through to the complete fresh probe, exactly like a stale receipt).
+    # A candidate-universe schema bump makes the installed artifact unreadable by
+    # the code being deployed, which would otherwise fail closed at preflight with
+    # the fleet already stopped. Force the freeze+projection path here instead.
     candidate_readable=1
     "$PYTHON" - "$ACCOUNT_SYMBOLS_FILE" <<'PY' || candidate_readable=0
 import sys
@@ -877,7 +865,7 @@ PY
     install -d -o root -g root -m 0700 "$candidate_dir" "$receipt_dir"
     refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
     "$PYTHON" scripts/freeze_account_candidate_universe.py \
-        --output "$refreshed_candidate"
+        --realm demo --output "$refreshed_candidate"
     printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
 
     if [ "$freshness_status" -eq 0 ]; then
@@ -924,13 +912,9 @@ PY
             0|false|FALSE|no|NO|off|OFF|'') ;;
             *) fail "demo-rule refresh refuses REAL_MONEY" ;;
         esac
-        # B17. This probe places live PostOnly orders up to 200 USDT per symbol
-        # across the whole candidate universe, and the branch above reaches it
-        # automatically once the bound receipt passes half its lifetime. On a
-        # funded account that would make shipping code spend money as a side
-        # effect. The checks above already refuse mainnet credentials and
-        # REAL_MONEY; this names the refusal instead of leaving it implicit, and
-        # says what to run instead.
+        # This probe places live PostOnly orders up to 200 USDT per symbol across
+        # the candidate universe, and the branch above reaches it automatically
+        # once the bound receipt passes half its lifetime, so keep it demo-only.
         [ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ] \
             || fail "the order-placing rule probe is demo-only; freeze rules with scripts/freeze_venue_instrument_rules.py --realm ${DEPLOY_VENUE_REALM}"
         refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
@@ -1033,9 +1017,8 @@ install_mode() {
         tests/test_strategy_planning.py \
         tests/test_runtime_scripts.py
 
-    # Host log/secret hygiene (2026-07-27 audit): bound journald so unbounded
-    # logs can never crowd the data roots, and keep at most the single newest
-    # timestamped backup of the demo credential file.
+    # Bound journald so logs cannot crowd the data roots, and keep at most the
+    # newest timestamped backup of the demo credential file.
     install -d -m 0755 /etc/systemd/journald.conf.d
     printf '[Journal]\nSystemMaxUse=1G\n' \
         > /etc/systemd/journald.conf.d/liquidity-migration.conf
@@ -1053,7 +1036,7 @@ install_mode() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     require_quiescent
-    invalidate_operational_authorization
+    retire_stale_operational_receipt
     run_phase refresh-stale-demo-rules refresh_stale_demo_rules_if_requested
 
     lm_load_sleeve_toggles
@@ -1086,7 +1069,7 @@ PY
     run_phase verify-paper-runtime-boundary verify_paper_runtime_boundary
     require_clean_head
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
-    echo "next: issue a new operational authorization for this stopped exact checkout, then run activate"
+    echo "next: run activate to start the sleeves this checkout enables"
 }
 
 load_authorization() {
@@ -1113,18 +1096,26 @@ load_authorization() {
     lm_load_group_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/sleeves.resolved.env "$PAPER_RUNTIME_GROUP" \
         LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
-        CARRY_SLEEVE CARRY_PAPER_SLEEVE CONTINUOUS_HEDGE_TIMER
-    # Transition tolerance: a resolved file written by a pre-carry install
-    # legitimately lacks the carry keys — absent means the sleeve was never
-    # deployed, i.e. off. This only bridges the rollout that introduces the
-    # keys; the post-install resolved-file verifier requires them present.
+        CARRY_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR \
+        CARRY_MAINNET_SLEEVE LONG_MAINNET_SLEEVE CONTINUOUS_HEDGE_TIMER
+    # A resolved file written by a pre-carry install lacks the carry keys;
+    # absent means never deployed, i.e. off. Bridges only the rollout that
+    # introduces them — the post-install verifier requires them present.
     if [ -z "${CARRY_SLEEVE:-}" ] || [ -z "${CARRY_PAPER_SLEEVE:-}" ]; then
         echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
         CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
         CARRY_PAPER_SLEEVE="${CARRY_PAPER_SLEEVE:-off}"
     fi
+    if [ -z "${PAPER_TARGET_MIRROR:-}" ] || [ -z "${CARRY_MAINNET_SLEEVE:-}" ] \
+        || [ -z "${LONG_MAINNET_SLEEVE:-}" ]; then
+        echo "sleeves-resolved-transition mirror-mainnet-keys=absent treated-as=off reason=pre-mirror-install"
+        PAPER_TARGET_MIRROR="${PAPER_TARGET_MIRROR:-off}"
+        CARRY_MAINNET_SLEEVE="${CARRY_MAINNET_SLEEVE:-off}"
+        LONG_MAINNET_SLEEVE="${LONG_MAINNET_SLEEVE:-off}"
+    fi
     for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CONTINUOUS_PAPER_SLEEVE" \
-        "$CARRY_SLEEVE" "$CARRY_PAPER_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
+        "$CARRY_SLEEVE" "$CARRY_PAPER_SLEEVE" "$PAPER_TARGET_MIRROR" \
+        "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
     if [ "$AUTH_PROFILE" = demo-operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
@@ -1149,6 +1140,10 @@ unit_off() {
 
 timer_on() { unit_on "$1"; }
 timer_off() { unit_off "$1"; }
+
+any_mainnet_sleeve_on() {
+    sleeve_on "${CARRY_MAINNET_SLEEVE:-off}" || sleeve_on "${LONG_MAINNET_SLEEVE:-off}"
+}
 
 expected_downstream_on() {
     local unit="$1"
@@ -1260,6 +1255,12 @@ verify_topology() {
     else
         unit_off liquidity-migration-bybit-carry-paper.service || fail "carry paper producer is not off"
     fi
+    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$PAPER_TARGET_MIRROR"; then
+        expected_downstream_on liquidity-migration-paper-target-mirror.service \
+            || fail "paper target mirror is not active"
+    else
+        unit_off liquidity-migration-paper-target-mirror.service || fail "paper target mirror is not off"
+    fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
@@ -1275,17 +1276,42 @@ verify_topology() {
     else
         timer_off liquidity-migration-continuous-hedge.timer || fail "hedge timer is not off"
     fi
-    # This entrypoint is demo/paper only and stays that way. It never starts a
-    # mainnet unit -- but silence is not proof, so verify asserts each one is
-    # off rather than leaving a running real-money owner invisible to a green
-    # demo verification.
-    for mainnet_unit in \
-        liquidity-migration-account-execution-mainnet.service \
-        liquidity-migration-bybit-carry-mainnet.service \
-        liquidity-migration-bybit-long-mainnet.service; do
-        unit_off "$mainnet_unit" \
-            || fail "$mainnet_unit is active under demo/paper authorization"
-    done
+    # With no mainnet sleeve on, a running mainnet unit must not hide behind a
+    # green demo/paper verification; with one on, the funded fleet is verified
+    # exactly like the others.
+    if any_mainnet_sleeve_on; then
+        unit_on liquidity-migration-account-execution-mainnet.service \
+            || fail "mainnet owner is not active and enabled"
+        if sleeve_on "$CARRY_MAINNET_SLEEVE"; then
+            expected_downstream_on liquidity-migration-bybit-carry-mainnet.service \
+                || fail "carry mainnet producer is not active"
+        else
+            unit_off liquidity-migration-bybit-carry-mainnet.service \
+                || fail "carry mainnet producer is not off"
+        fi
+        if sleeve_on "$LONG_MAINNET_SLEEVE"; then
+            expected_downstream_on liquidity-migration-bybit-long-mainnet.service \
+                || fail "LONG mainnet producer is not active"
+        else
+            unit_off liquidity-migration-bybit-long-mainnet.service \
+                || fail "LONG mainnet producer is not off"
+        fi
+        timer_on liquidity-migration-mainnet-liveness.timer \
+            || fail "mainnet liveness timer is not active"
+        # An enabled timer says nothing about the run it fires. A watchdog that
+        # fails every fire is the silence it exists to break.
+        ! systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service \
+            || fail "liquidity-migration-mainnet-liveness.service is failed"
+    else
+        for mainnet_unit in \
+            liquidity-migration-account-execution-mainnet.service \
+            liquidity-migration-bybit-carry-mainnet.service \
+            liquidity-migration-bybit-long-mainnet.service \
+            liquidity-migration-mainnet-liveness.timer; do
+            unit_off "$mainnet_unit" \
+                || fail "$mainnet_unit is active under demo/paper authorization"
+        done
+    fi
     expected_downstream_on liquidity-migration-demo-liveness.timer \
         || fail "liveness timer is not active"
     for oneshot in \
@@ -1306,7 +1332,8 @@ verify_topology() {
     done
     check_demo_order_permissions verify \
         || fail "demo order permission verification failed"
-    echo "verify-ok commit=$EXPECTED_COMMIT profile=$AUTH_PROFILE"
+    printf 'verify-ok commit=%s profile=%s mainnet_carry=%s mainnet_long=%s\n' \
+        "$EXPECTED_COMMIT" "$AUTH_PROFILE" "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE"
 }
 
 start_if() {
@@ -1323,12 +1350,9 @@ seed_rmom() {
     local deadline gate_path ok
     gate_path=data/bybit-continuous-demo-event/residual_momentum.parquet
 
-    # The reset contract deliberately preserves this signal artifact.  A full
-    # schema/freshness/cross-section check is sufficient for activation; the
-    # daily timer owns normal recomputation.  Do not spend roughly a minute
-    # rebuilding an already-valid gate on every unrelated code deployment.
-    # A failed prior refresh remains actionable and therefore forces the repair
-    # path even if the last successfully written artifact is still usable.
+    # Reset preserves this artifact, and the daily timer owns recomputation, so
+    # a valid gate is reused rather than rebuilt (~1 min) on every deployment.
+    # A failed prior refresh still forces the repair path.
     if ! systemctl is-failed --quiet liquidity-migration-continuous-rmom-refresh.service \
         && "$PYTHON" scripts/check_residual_momentum_gate.py --path "$gate_path"; then
         echo "rmom-bootstrap path=reuse reason=current-valid-gate"
@@ -1381,6 +1405,7 @@ activate_mode() {
     start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
     if [ "$AUTH_PROFILE" = operational ]; then
         start_if "$CARRY_PAPER_SLEEVE" liquidity-migration-bybit-carry-paper.service
+        start_if "$PAPER_TARGET_MIRROR" liquidity-migration-paper-target-mirror.service
     fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
@@ -1392,26 +1417,104 @@ activate_mode() {
         systemctl enable --now liquidity-migration-continuous-hedge.timer
     fi
     systemctl enable --now liquidity-migration-demo-liveness.timer
+    if any_mainnet_sleeve_on; then
+        start_mainnet_fleet
+    fi
     verify_topology
+}
+
+MAINNET_OWNER_UNIT=liquidity-migration-account-execution-mainnet.service
+MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
+MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
+
+ensure_mainnet_state_roots() {
+    "$PYTHON" -m liquidity_migration.real_money_arming create-state-roots --execute \
+        || fail "mainnet state root creation failed"
+}
+
+# The single gate between a code change and a funded account: every remaining
+# precondition is reported, and any one of them outstanding stops the deploy.
+require_mainnet_preflight() {
+    local report status=0
+    report="$("$PYTHON" -m liquidity_migration.real_money_arming preflight 2>&1)" || status=$?
+    printf '%s\n' "$report"
+    [ "$status" -eq 0 ] || fail "mainnet preflight has outstanding steps (status $status)"
+}
+
+start_mainnet_fleet() {
+    ensure_mainnet_state_roots
+    require_mainnet_preflight
+    systemctl enable "$MAINNET_OWNER_UNIT"
+    systemctl start "$MAINNET_OWNER_UNIT"
+    start_if "$CARRY_MAINNET_SLEEVE" liquidity-migration-bybit-carry-mainnet.service
+    start_if "$LONG_MAINNET_SLEEVE" liquidity-migration-bybit-long-mainnet.service
+    systemctl enable --now "$MAINNET_LIVENESS_TIMER"
+}
+
+activate_mainnet_mode() {
+    load_authorization
+    any_mainnet_sleeve_on \
+        || fail "no mainnet sleeve is on; turn CARRY_MAINNET_SLEEVE and/or LONG_MAINNET_SLEEVE on in deploy/sleeves.env, then install"
+    start_mainnet_fleet
+    verify_topology
+}
+
+stop_mainnet_mode() {
+    require_checkout
+    # Without this, every systemctl below fails silently and the mode still
+    # reports stop-mainnet-ok having stopped nothing.
+    command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
+    local unit
+    local -a units=(
+        "$MAINNET_LIVENESS_TIMER"
+        "$MAINNET_LIVENESS_SERVICE"
+        liquidity-migration-bybit-carry-mainnet.service
+        liquidity-migration-bybit-long-mainnet.service
+        "$MAINNET_OWNER_UNIT"
+    )
+    for unit in "${units[@]}"; do
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            systemctl disable --now "$unit" 2>/dev/null || true
+            printf 'stopped unit=%s\n' "$unit"
+        else
+            printf 'stop-skipped unit=%s reason=not-installed\n' "$unit"
+        fi
+    done
+    for unit in "${units[@]}"; do
+        ! systemctl is-active --quiet "$unit" \
+            || fail "unit remained active after mainnet stop: $unit"
+        systemctl reset-failed "$unit" 2>/dev/null || true
+    done
+    echo "stop-mainnet-ok"
+    echo "note: this stopped publication only; exposure is unchanged. Flatten through the account owner."
+    echo "note: the mainnet sleeves are still on, so verify now fails and the next activate or rollout restarts this fleet. Turn CARRY_MAINNET_SLEEVE/LONG_MAINNET_SLEEVE off and install to make the stop stick."
 }
 
 ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-demo-liveness.timer
+    liquidity-migration-mainnet-liveness.timer
     liquidity-migration-continuous-hedge.timer
     liquidity-migration-continuous-rmom-refresh.timer
     liquidity-migration-bybit-long-demo.service
     liquidity-migration-bybit-long-paper.service
+    liquidity-migration-bybit-long-mainnet.service
     liquidity-migration-bybit-continuous-demo.service
     liquidity-migration-bybit-continuous-paper.service
     liquidity-migration-bybit-carry-demo.service
     liquidity-migration-bybit-carry-paper.service
+    liquidity-migration-bybit-carry-mainnet.service
+    liquidity-migration-paper-target-mirror.service
     liquidity-migration-continuous-hedge.service
     liquidity-migration-continuous-rmom-refresh.service
     liquidity-migration-demo-liveness.service
+    liquidity-migration-mainnet-liveness.service
 )
+# Owners stop last and start first: every mainnet producer declares
+# Requires=/After= on the mainnet owner.
 ROLLOUT_OWNER_UNITS=(
     liquidity-migration-account-execution.service
     liquidity-migration-account-paper-execution.service
+    liquidity-migration-account-execution-mainnet.service
 )
 ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0
@@ -1427,19 +1530,16 @@ stop_rollout_units() {
             printf 'stopped unit=%s\n' "$unit"
         else
             # A unit introduced by the commit being deployed is not installed
-            # yet and cannot be running; the systemd manifest install adds it
-            # before anything could ever start it.
+            # yet and cannot be running; the manifest install adds it later.
             printf 'stop-skipped unit=%s reason=not-installed\n' "$unit"
         fi
     done
     for unit in "$@"; do
         ! systemctl is-active --quiet "$unit" \
             || fail "unit remained active after rollout stop: $unit"
-        # A stop that escalated past TimeoutStopSec leaves the dead unit
-        # flagged `failed` (Result=timeout), which the authority-issuance
-        # quiescence gate later rejects (it requires exactly `inactive`;
-        # 2026-07-26 rollout 30207186469). The unit is verifiably stopped
-        # here, so clear the stale flag rather than abort minutes later.
+        # A stop that escalated past TimeoutStopSec leaves the dead unit flagged
+        # `failed` (Result=timeout), which the later quiescence gate rejects — it
+        # requires exactly `inactive`. The unit is verifiably stopped here.
         systemctl reset-failed "$unit" 2>/dev/null || true
     done
 }
@@ -1447,6 +1547,10 @@ stop_rollout_units() {
 stop_all_rollout_units_best_effort() {
     local unit failed=0
     for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
+        # A unit introduced by the commit being deployed is not installed yet;
+        # counting its stop as a failure would demote a recoverable pre-install
+        # abort into a forced full-fleet stop.
+        systemctl cat "$unit" >/dev/null 2>&1 || continue
         if ! systemctl stop "$unit"; then
             cleanup_notice "failed-to-stop unit=$unit"
             failed=1
@@ -1457,20 +1561,17 @@ stop_all_rollout_units_best_effort() {
             cleanup_notice "still-active unit=$unit"
             failed=1
         else
-            # Leave the forced-stop end state clean for staged recovery: a
-            # verifiably stopped unit must not carry a stale `failed` flag
-            # into the next authority issuance.
+            # A verifiably stopped unit must not carry a stale `failed` flag
+            # into staged recovery.
             systemctl reset-failed "$unit" 2>/dev/null || true
         fi
     done
     return "$failed"
 }
 
-# Cleanup diagnostics must survive the transport dying underneath the rollout
-# (laptop sleep, network drop, Actions cancellation): sshd HUPs the remote
-# process group and every write to the dead pipe raises SIGPIPE. Mirror each
-# line into the host journal so the record outlives stdout/stderr, and never let
-# a failed write abort the stop sequence.
+# If the transport dies mid-rollout, sshd HUPs the remote process group and
+# every write to the dead pipe raises SIGPIPE. Mirror each line into the host
+# journal, and never let a failed write abort the stop sequence.
 cleanup_notice() {
     logger -t liquidity-migration-deploy -p daemon.err -- "$*" 2>/dev/null || true
     printf '%s\n' "$*" >&2 2>/dev/null || true
@@ -1480,7 +1581,7 @@ rollout_cleanup() {
     local status="$?"
     trap - EXIT INT TERM HUP
     # A second signal, or a write to a dead stdout, must not interrupt the
-    # fail-closed handoff; SIGKILL remains inherently untrappable.
+    # fail-closed handoff.
     trap '' INT TERM HUP PIPE
     set +e
     if [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
@@ -1564,9 +1665,8 @@ rollout_mode() {
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
 
     if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
-        # Strict runtime verification cannot restart the old topology once its
-        # demo-rule evidence has expired.  Make that loss of rollback explicit
-        # before stopping anything; all failure paths from here force stopped.
+        # The old topology cannot restart once its demo-rule evidence expired,
+        # so every failure path from here forces the fleet stopped.
         ROLLOUT_IRREVERSIBLE=1
         echo "rollout-recovery-boundary rollback=unavailable reason=expired-demo-rules"
     fi
@@ -1575,8 +1675,7 @@ rollout_mode() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
-    # death (HUP on the remote process group, SIGPIPE on the next write) would
-    # otherwise leave the fleet half-stopped with no cleanup at all.
+    # death (HUP, then SIGPIPE) would leave the fleet half-stopped uncleaned.
     trap 'exit 129' HUP
     trap 'exit 141' PIPE
 
@@ -1591,9 +1690,8 @@ rollout_mode() {
     run_strict_phase final-stopped-flat-account-proof rollout_flat_check none
     require_quiescent
 
-    # From checkout mutation onward the old create-only receipt cannot be used
-    # as rollback authority. Any failure therefore leaves every managed unit
-    # stopped instead of guessing across commits.
+    # From checkout mutation onward there is no rollback authority, so any
+    # failure leaves every managed unit stopped rather than guessing.
     ROLLOUT_IRREVERSIBLE=1
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_strict_phase stopped-install install_mode
@@ -1612,6 +1710,8 @@ acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
+    activate-mainnet) activate_mainnet_mode ;;
+    stop-mainnet) stop_mainnet_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;
 esac

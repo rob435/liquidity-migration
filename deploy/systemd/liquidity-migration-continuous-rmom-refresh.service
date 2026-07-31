@@ -5,9 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# A hung refresh must not stall a rollout indefinitely: `seed_rmom`'s bounded
-# retry deadline cannot fire while a synchronous `systemctl start` is still
-# activating, and the oneshot default is TimeoutStartSec=infinity.
+# The oneshot default is TimeoutStartSec=infinity, and `seed_rmom`'s retry
+# deadline cannot fire while a synchronous `systemctl start` is still activating.
 TimeoutStartSec=900
 User=root
 Group=root
@@ -28,10 +27,9 @@ ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
 # The full-rewrite refresh (POLARS_MAX_THREADS=8) is the heaviest managed
-# workload and was the only one without a ceiling, so it could pressure the
-# global OOM killer against the co-resident account owners on the 4 GiB host.
-# MemoryHigh throttles first; MemoryMax is a guard bound, not a target — retighten
-# it from `systemctl show ... -p MemoryPeak` once several refreshes are observed.
+# workload; without a ceiling it pressures the global OOM killer against the
+# co-resident account owners on the 4 GiB host. MemoryHigh throttles first;
+# MemoryMax is a guard bound, not a target.
 MemoryHigh=1G
 MemoryMax=1536M
 

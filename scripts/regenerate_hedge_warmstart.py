@@ -17,10 +17,10 @@ drift, a shorter series, or a disjoint replacement unless explicitly forced.
         [--validate-only] [--days 200] \
         [--max-unit-drift 1e-3] [--force]
 
-``--component-root`` should point at the ``components`` directory emitted by
-the standard continuous equity runner. Those historical base-component
-artifacts intentionally do not reproduce the stateful accepted-decision
-BTC-risk sizing overlay used by the forward target producer.
+``--component-root`` points at the ``components`` directory emitted by the
+standard continuous equity runner. Those historical base-component artifacts do
+not reproduce the stateful accepted-decision BTC-risk sizing overlay the forward
+target producer applies.
 """
 
 from __future__ import annotations
@@ -89,10 +89,9 @@ def _component_funding_failures_before(
 ) -> list[str]:
     """Return component funding defects that can enter the model prior.
 
-    A standard run may aggregate to ``partial`` solely because its final rows
-    represent positions that are still open today.  Those rows are excluded by
-    ``regenerate``.  Any non-modeled trade whose exit day is already complete is
-    a real historical coverage defect and remains a hard failure.
+    ``partial`` aggregation from still-open positions is fine — ``regenerate``
+    excludes those rows. A non-modeled trade whose exit day is already complete
+    is a real coverage defect and stays a hard failure.
     """
     failures: list[str] = []
     seen_cells: set[str] = set()
@@ -392,10 +391,9 @@ def _series_betas(rows: list[dict]) -> tuple[float, float]:
 def _beta_drift(reference_rows: list[dict], candidate_rows: list[dict]) -> float:
     """Max coefficient move between the deployed and regenerated priors.
 
-    The unit-return drift gate catches input revisions; this catches the
-    consequence that actually resizes the live hedge — the estimated betas
-    jumping between vintages — even when every overlapping input row agrees
-    (for example a window that merely slides forward over a regime break).
+    The unit-return gate catches input revisions; this catches betas jumping
+    between vintages even when every overlapping input row agrees — e.g. a
+    window sliding forward over a regime break.
     """
     old_b1, old_b2 = _series_betas(reference_rows)
     new_b1, new_b2 = _series_betas(candidate_rows)
@@ -415,10 +413,9 @@ def component_tape_metadata(component_root: Path, payload: dict) -> dict[str, st
 def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool) -> str | None:
     """Reason the overwrite must be refused, or None to allow it.
 
-    Guards the runtime 2f hedge model prior: a regenerated
-    series that diverges materially from the deployed one, or that has fewer rows
-    (a short/regressed run), must not silently overwrite + auto-deploy. --force
-    is the explicit escape hatch for a known-good data-vintage shift.
+    A regenerated series that diverges materially from the deployed one, or that
+    is shorter, must not silently overwrite and auto-deploy. ``--force`` is the
+    escape hatch for a known-good data-vintage shift.
     """
     if force:
         return None

@@ -244,16 +244,11 @@ def test_beta_extra_lag_changes_estimation_not_position_day() -> None:
     assert df0["hedge_ratio"].to_list() != df1["hedge_ratio"].to_list()
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b03.py (sizing-rebalance-1). Reuses the
-# module-level `_components`, `_rule`, `_hedge_rule` helpers above.
-# ---------------------------------------------------------------------------
 def test_hedge_engine_holds_position_on_none_today_like_the_live_twin() -> None:
-    """sizing-rebalance-1: when the most-recent hedge return is None (a data-gap day),
-    the backtest engine used to report hedge_ratio=0.0 (and charge a phantom
-    close+reopen) while the parity-tested live twin holds a fully-sized hedge. The fix
-    sizes the engine from beta UNCONDITIONALLY (matching the twin) and only gates the
-    realized PnL contribution on the day's value."""
+    """On a data-gap day (most-recent hedge return None) the engine sizes from beta
+    unconditionally, matching the live twin, and gates only the realized PnL
+    contribution on the day's value -- no phantom close+reopen.
+    """
     n = 30
     days = [T0 + i * MS_PER_DAY for i in range(n)]
     h_vals = [0.01 if i % 2 == 0 else -0.01 for i in range(n)]
@@ -286,8 +281,9 @@ def test_hedge_engine_holds_position_on_none_today_like_the_live_twin() -> None:
 
 
 def test_hedge_engine_unchanged_on_fully_populated_series() -> None:
-    """sizing-rebalance-1 guard: the fix must be numerically identical to the prior
-    behaviour when every day has a hedge return (the parity-tested contiguous case)."""
+    """When every day has a hedge return (the parity-tested contiguous case), the
+    unconditional beta sizing is numerically identical to the prior behaviour.
+    """
     n = 30
     days = [T0 + i * MS_PER_DAY for i in range(n)]
     h_vals = [0.01 if i % 2 == 0 else -0.01 for i in range(n)]

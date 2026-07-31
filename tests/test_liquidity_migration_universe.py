@@ -83,12 +83,11 @@ def test_universe_report_contains_symbol_csv() -> None:
 
 
 def test_current_universe_table_excludes_non_perp_and_non_usdt_contracts() -> None:
-    """universe-pit-2: the 'perpetuals-only, USDT-settled by construction' invariant
-    (docs/data.md; backtesting_errors_we_never_repeat.md rule 12, instrument
-    lifecycle) must hold at the universe.py boundary. The positive test only ever fed
-    LinearPerpetual/USDT rows, so a refactor could silently let a dated-delivery future,
-    an inverse/USDC contract, or a row with a missing contractType through. Inject one of
-    each alongside two clean perps and assert ONLY the clean perps survive."""
+    """The perpetuals-only, USDT-settled invariant must hold at the universe.py
+    boundary: a dated-delivery future, an inverse/USDC contract, and a row with a
+    missing contractType are injected alongside two clean perps, and only the clean
+    perps may survive.
+    """
     snapshot_ts_ms = 1_800_000_000_000
     old = snapshot_ts_ms - 100 * MS_PER_DAY
     instruments = pl.DataFrame(
@@ -173,8 +172,7 @@ def _ticker(symbol: str, turnover_24h: float) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# universe-pit-2 — non-perp / non-USDT / missing-contractType rows excluded     #
-# (relocated from tests/test_audit_fix_b00.py; reuses _instrument/_ticker)      #
+# Non-perp / non-USDT / missing-contractType rows excluded                     #
 # --------------------------------------------------------------------------- #
 def test_universepit2_excludes_dated_inverse_usdc_and_missing_contract_type() -> None:
     snapshot = 1_800_000_000_000
@@ -246,10 +244,9 @@ def test_universe_excludes_non_crypto_symbol_types_before_ranking() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# audit bucket b10 (relocated from test_audit_fix_b10.py)                       #
-# universe-pit-1 / -3 / -5 — these carry their own `_univ_*` helpers because    #
-# they need extra columns (delivery_time_ms, null launch) the local            #
-# `_instrument`/`_ticker` fixtures above don't take.                            #
+# These carry their own `_univ_*` helpers: they need extra columns             #
+# (delivery_time_ms, null launch) the `_instrument`/`_ticker` fixtures above   #
+# do not take.                                                                 #
 # --------------------------------------------------------------------------- #
 def _univ_instrument(symbol, launch_ms, *, contract_type="LinearPerpetual", settle_coin="USDT", **extra):
     row = {
@@ -271,10 +268,10 @@ def _univ_ticker(symbol, turnover):
 
 
 def test_universepit1_missing_contract_type_column_raises() -> None:
-    """contract_type is now a HARD required column. A frame missing it must raise
-    RuntimeError instead of silently no-op'ing the only perpetuals-only barrier.
-    Before the fix the perp filter was `if "contract_type" in columns` and a frame
-    lacking the column passed dated-delivery futures straight through."""
+    """``contract_type`` is a hard required column: a frame missing it must raise rather
+    than no-op the only perpetuals-only barrier and pass dated-delivery futures
+    straight through.
+    """
     snapshot = 1_800_000_000_000
     old = snapshot - 100 * MS_PER_DAY
     instruments = pl.DataFrame([_univ_instrument("AAAUSDT", old)]).drop("contract_type")
@@ -332,9 +329,10 @@ def test_universepit1_dated_delivery_excluded_by_delivery_time() -> None:
 
 
 def test_universepit3_join_drop_is_logged(caplog) -> None:
-    """A symbol present in instruments but missing from the tickers snapshot is
-    silently dropped by the inner join. The drop count must be surfaced (info log)
-    so a partial/throttled get_tickers fetch is observable per cycle."""
+    """A symbol present in instruments but missing from the tickers snapshot is silently
+    dropped by the inner join, so the drop count must be surfaced (info log) to make a
+    partial or throttled ``get_tickers`` fetch observable per cycle.
+    """
     snapshot = 1_800_000_000_000
     old = snapshot - 100 * MS_PER_DAY
     instruments = pl.DataFrame([
@@ -355,10 +353,10 @@ def test_universepit3_join_drop_is_logged(caplog) -> None:
 
 
 def test_universepit5_null_launch_time_surfaced_in_unlimited_mode(caplog) -> None:
-    """In unlimited-universe mode (no age gate) a symbol with null launch_time_ms
-    has a null listing_age_days and passes through silently. The count of such
-    unknown-age symbols must be surfaced so the operator sees how many entered the
-    candidate pool."""
+    """In unlimited-universe mode a symbol with null ``launch_time_ms`` has a null
+    listing age and passes through silently, so the count of unknown-age symbols must
+    be surfaced.
+    """
     snapshot = 1_800_000_000_000
     old = snapshot - 100 * MS_PER_DAY
     instruments = pl.DataFrame([

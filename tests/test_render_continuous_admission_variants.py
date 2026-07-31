@@ -1,9 +1,6 @@
-"""Hermetic tests for the registered `fund0_venue_scoped` forward scorer.
-
-The committed scorer for the registered Lane-2 venue-scoped-admission lead was
-entirely unpinned: silent drift in the patched admission filter (the +1 h bisect
-boundary, the concat ordering, the counter names) corrupts the forward
-comparison any promotion depends on (2026-07-27 audit L18).
+"""Hermetic tests for the registered ``fund0_venue_scoped`` forward scorer: the +1h bisect
+boundary, the concat ordering, and the counter names in the patched admission filter,
+which any forward comparison depends on.
 """
 
 from __future__ import annotations
@@ -130,9 +127,10 @@ class TestRejectUnknown:
         assert counters["unknown_admitted"] == 0
 
     def test_the_as_of_cutoff_is_the_signal_bar_close_plus_one_hour(self) -> None:
-        """A settlement stamped inside (ts_ms, ts_ms + 1h] is visible at the
-        decision; one stamped after it is not. Moving this boundary silently
-        changes what the forward comparison scored."""
+        """A settlement stamped inside (ts_ms, ts_ms + 1h] is visible at the decision; one
+        stamped after it is not. Moving this boundary changes what the forward comparison
+        scored.
+        """
         patched = M.admission_variant_filter("reject_unknown", _funding_admission_filter, set())
         entries = _entries([("AUSDT", 0)])
 

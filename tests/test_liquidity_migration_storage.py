@@ -200,10 +200,9 @@ def test_exclusive_file_lock_adopts_legacy_payload_without_unlink(
 
 
 def test_thread_lock_for_returns_same_lock_per_path() -> None:
-    """The per-process thread-lock layer must return a STABLE Lock object
-    per lock-path; otherwise two threads coming in for the same dataset
-    grab different Locks and don't actually serialise. Companion to the
-    8-writer concurrent test."""
+    """The per-process thread-lock layer must return a stable Lock object per lock-path,
+    or two threads on the same dataset grab different Locks and do not serialise.
+    """
     from liquidity_migration.storage import _thread_lock_for
 
     path_a = Path("/tmp/sweep_test_thread_lock_a.lock")
@@ -705,9 +704,10 @@ def test_non_ledger_dataset_is_not_month_bucketed(tmp_path: Path) -> None:
 
 
 def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Path) -> None:
-    """CROS-1: if an external unlink lets a successor recreate the path with a NEW
-    inode while we're still in the critical section, release must NOT delete the successor's
-    lock (an unconditional unlink-by-path would admit a second concurrent writer)."""
+    """If an external unlink lets a successor recreate the path with a NEW inode while
+    we are still in the critical section, release must not delete the successor's
+    lock -- an unconditional unlink-by-path admits a second concurrent writer.
+    """
     lock = tmp_path / "x.lock"
     with exclusive_file_lock(lock, stale_seconds=600):
         os.unlink(lock)
@@ -763,21 +763,19 @@ def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
     assert read_dataset(tmp_path, "funding").is_empty()
 
 
-# --- audit bucket b10 (relocated from test_audit_fix_b10.py) -----------------
-# pit-data-6 / storage-concurrency-2 / -4 / -5: funding-fallback gating, the
-# reused-pid stale singleton-lock eviction, orphaned `.*.tmp` sweeping, and the
-# parent-dir fsync after the atomic rename. Each FAILs on the original bug.
+# --- Funding-fallback gating, reused-pid stale singleton-lock eviction, orphaned
+# `.*.tmp` sweeping, and the parent-dir fsync after the atomic rename ---------
 from liquidity_migration.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
 
 
 def test_canonical_klines_root_with_binance_variant_resolves_to_binance_funding(tmp_path: Path) -> None:
-    """A Binance full-PIT root stores klines under the canonical ``klines_1h/`` name
-    AND its funding as ``binance_usdm_funding/`` with NO canonical ``funding/``.
-    resolve_dataset_name must use the present venue-variant (a binance_usdm_* dir only
-    ever exists on a Binance root), matching _autodetect_dataset_names. The old code
-    suppressed this on ANY root carrying a canonical kline marker and silently returned
-    empty funding -> funding_mode missing on a fully populated dataset (the 2026-06-15
-    resolver regression)."""
+    """A Binance full-PIT root stores klines under the canonical ``klines_1h/`` name AND
+    its funding as ``binance_usdm_funding/`` with no canonical ``funding/``.
+    ``resolve_dataset_name`` must use the present venue variant (a ``binance_usdm_*``
+    dir only ever exists on a Binance root), matching ``_autodetect_dataset_names``;
+    suppressing it on any root carrying a canonical kline marker returns empty funding
+    on a fully populated dataset.
+    """
     write_dataset(
         pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
         tmp_path,
@@ -795,12 +793,11 @@ def test_canonical_klines_root_with_binance_variant_resolves_to_binance_funding(
 
 
 def test_pitdata6_bybit_root_canonical_funding_wins_over_binance_proxy(tmp_path: Path) -> None:
-    """pit-data-6 safety, preserved by canonical-precedence: a real Bybit root ALWAYS
-    has its own canonical ``funding/`` dir, which takes precedence over any
-    ``binance_usdm_*`` PROXY dataset on the same root — the wrong-venue curve is never
-    served. (A real Bybit root never lacks canonical funding/, so the variant fallback
-    cannot mis-substitute; the only roots without canonical funding/ are Binance-native
-    roots, which SHOULD use the variant.)"""
+    """A real Bybit root always has its own canonical ``funding/`` dir, which takes
+    precedence over any ``binance_usdm_*`` proxy dataset on the same root, so the
+    wrong-venue curve is never served. Only Binance-native roots lack canonical
+    funding/, and those should use the variant.
+    """
     write_dataset(
         pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "close": [1.0]}),
         tmp_path,
@@ -887,11 +884,11 @@ def test_exclusive_file_lock_refuses_aliased_or_nonregular_leaf(
 
 
 def test_storageconcurrency4_orphaned_tmp_swept_on_next_write(tmp_path: Path) -> None:
-    """A SIGKILL between write_parquet and the atomic rename orphans a
-    `.{name}.{pid}.{ns}.tmp` file (the finally unlink never runs). The next
-    write_dataset must sweep stale `.*.tmp` files so a Restart=always daemon does
-    not accumulate orphans until the disk fills. Before the fix there was no sweep
-    anywhere, so the orphan survived every subsequent write."""
+    """A SIGKILL between ``write_parquet`` and the atomic rename orphans a
+    ``.{name}.{pid}.{ns}.tmp`` file (the finally-unlink never runs). The next
+    ``write_dataset`` must sweep stale ``.*.tmp`` files so a Restart=always daemon
+    does not accumulate orphans until the disk fills.
+    """
     dataset = "funding"
     # Seed the dataset so its dir exists.
     write_dataset(
@@ -926,9 +923,10 @@ def test_storageconcurrency4_orphaned_tmp_swept_on_next_write(tmp_path: Path) ->
 
 
 def test_storageconcurrency4_full_tmp_sweep_is_throttled(tmp_path: Path, monkeypatch) -> None:
-    """The broad orphan-temp sweep must not recursively walk a large dataset on
-    every partition write; the target partition directory is still checked every
-    time so same-partition orphans are cleaned promptly."""
+    """The broad orphan-temp sweep must not recursively walk a large dataset on every
+    partition write; the target partition directory is still checked every time so
+    same-partition orphans are cleaned promptly.
+    """
     storage._DATASET_TMP_SWEEP_LAST.clear()
     real_sweep = storage._sweep_orphaned_tmp_parts
     full_sweeps: list[Path] = []
@@ -965,10 +963,10 @@ def test_storageconcurrency4_full_tmp_sweep_is_throttled(tmp_path: Path, monkeyp
 
 
 def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, monkeypatch) -> None:
-    """_write_part must fsync the PARENT DIRECTORY fd after temp_path.replace(path),
-    not just the temp file — otherwise the rename is not power-loss durable. Pin it
-    by recording every os.fsync target and asserting a directory fd is fsync'd.
-    Before the fix only the temp file was fsync'd."""
+    """``_write_part`` must fsync the PARENT DIRECTORY fd after
+    ``temp_path.replace(path)``, not just the temp file, or the rename is not
+    power-loss durable. Pinned by recording every ``os.fsync`` target.
+    """
     import stat as stat_module
 
     fsynced_kinds: list[str] = []
@@ -997,10 +995,11 @@ def test_storageconcurrency5_parent_dir_fsynced_after_rename(tmp_path: Path, mon
 
 
 def test_replace_dataset_swaps_atomically_and_holds_the_reader_lock(tmp_path: Path) -> None:
-    """`rewrite_manifest_to_coverage` used to rmtree the dataset OUTSIDE the lock
-    readers take for a consistent snapshot, then write it back: a concurrent
-    reader could collect a half-deleted dataset and a kill between the two steps
-    left the PIT membership dataset gone (2026-07-27 audit M5)."""
+    """``rewrite_manifest_to_coverage`` must not rmtree the dataset outside the lock
+    readers take for a consistent snapshot: a concurrent reader could collect a
+    half-deleted dataset, and a kill between the two steps leaves the PIT membership
+    dataset gone.
+    """
 
     old = pl.DataFrame({"date": ["2026-07-01", "2026-07-02"], "symbol": ["A", "B"], "value": [1, 2]})
     write_dataset(old, tmp_path, "archive_trade_manifest", partition_by=("date",))

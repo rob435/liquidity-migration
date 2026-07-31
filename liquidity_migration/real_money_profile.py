@@ -1,28 +1,13 @@
 """Render the real-money operational profile from one env file of dials.
 
-The owner asked for the deployment knobs — leverage, sleeve shares, the stop
-distance — to live in the environment file they already have to edit, next to
-the credentials, instead of in a JSON document they have to hand-calibrate.
-That is an ergonomics change and deliberately **not** a safety change, so it is
-built as a renderer rather than as a runtime override:
+The knobs live in the owner's env file; this renders them into the single
+profile document the owner and every producer read. No dial reaches the kernel
+directly — a combination the load-time proof rejects fails here, at render time.
+``configs/operational.mainnet.json`` is the render of the defaults below, held
+to that by a test.
 
-``env dials  ->  rendered profile bytes  ->  the same load-time proof  ->  SHA-256 in the receipt``
-
-Every property the guards depend on survives that shape:
-
-* The account owner and every producer still read *one* profile file, and its
-  bytes are still hashed into the authority receipt. Limits cannot change
-  without invalidating authority — changing a dial changes the rendered bytes,
-  which is exactly what re-issuance is for.
-* No dial reaches the kernel directly. A combination that produces an envelope
-  the proof rejects is refused at render time with the proof's own message, so
-  the failure lands on the owner's terminal instead of on a live book.
-* The committed ``configs/operational.mainnet.json`` is the render of the
-  defaults below, checked by a test. The file and the renderer cannot drift.
-
-The dials are ratios, never money. The capital reference tracks observed venue
-equity (B4), so "how much" is answered by the wallet and these answer "in what
-proportion".
+The dials are ratios, never money: the capital reference tracks observed venue
+equity, so the wallet answers "how much" and these answer "in what proportion".
 """
 
 from __future__ import annotations
@@ -51,18 +36,13 @@ __all__ = [
 #: Every dial is one environment variable named ``RM_<FIELD>`` in upper case.
 REAL_MONEY_DIAL_PREFIX = "RM_"
 
-#: The retired CONTINUOUS sleeve has no mainnet unit and no share to spend, but
-#: the profile schema still requires its block and the block cannot be sized to
-#: exactly zero. It therefore gets a token partition rather than an
-#: unpartitioned exemption: bounded at a fraction of a percent instead of at
-#: the whole envelope.
+#: The retired CONTINUOUS sleeve has no mainnet unit, but the profile schema
+#: requires its block and the block cannot be sized to exactly zero.
 _CONTINUOUS_NOTIONAL_MULTIPLIER = 0.001
 _CONTINUOUS_GROSS_SHARE = 0.01
 
-#: Hard ceiling on the leverage dial. Matches the real-money authority
-#: receipt's own ``account_equity_multiple`` bound: above 2x the wallet, what
-#: stops the book is the venue's margin engine rather than anything recorded
-#: here, and a limit that does not bind is theatre.
+#: Ceiling on the leverage dial. Above 2x the wallet, what stops the book is the
+#: venue's margin engine rather than anything in this profile.
 MAX_REAL_MONEY_LEVERAGE = 2.0
 
 
@@ -78,8 +58,7 @@ class RealMoneyDials:
     #: Fraction of observed wallet equity the whole envelope is scaled to.
     equity_fraction: float = 1.0
     #: Reference floor, in USDT, so a momentarily unreadable or near-zero
-    #: balance cannot produce a degenerate envelope. The one dial that is a
-    #: money amount, because a floor has no ratio to be a fraction of.
+    #: balance cannot produce a degenerate envelope. The only dial in money.
     equity_floor_usdt: float = 100.0
     #: Expansion-only dead band; contraction always follows equity down.
     expand_dead_band_fraction: float = 0.05
@@ -99,8 +78,8 @@ class RealMoneyDials:
     #: Daily realised-loss halt, as a fraction of the reference.
     daily_loss_fraction: float = 0.1
 
-    #: B3 partition. Shares of the account gross cap; CARRY plus LONG plus the
-    #: token CONTINUOUS share must not exceed 1.
+    #: Shares of the account gross cap; CARRY plus LONG plus the token
+    #: CONTINUOUS share must not exceed 1.
     carry_gross_share: float = 0.55
     long_gross_share: float = 0.40
 
@@ -125,11 +104,8 @@ def dial_environment_keys() -> tuple[str, ...]:
 def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
     """Read the dials out of one environment mapping.
 
-    An absent variable takes the committed default. A *present but unreadable*
-    one is an error rather than a silent fall back to the default: an operator
-    who typed ``RM_MAX_LEVERAGE=2x`` meant to change the leverage, and running
-    at the default while believing otherwise is the failure mode this whole
-    module exists to avoid.
+    An absent variable takes the committed default; a present but unparseable
+    one raises rather than silently falling back to it.
     """
 
     values: dict[str, Any] = {}
@@ -157,12 +133,10 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
 
 
 def _validate_dials(dials: RealMoneyDials) -> None:
-    """Refuse a dial set before it can produce a profile at all.
+    """Refuse a dial set before it can produce a profile.
 
-    These are the checks the profile proof cannot make for us, because by the
-    time it runs the dials have already been turned into absolute numbers and
-    the *intent* — "this is a partition", "producers stay under the ceiling" —
-    is no longer visible.
+    Checks the profile proof cannot make: once rendered, the dials are absolute
+    numbers and the intent ("this is a partition") is no longer visible.
     """
 
     positive = {
@@ -197,10 +171,8 @@ def _validate_dials(dials: RealMoneyDials) -> None:
     if dials.equity_fraction > 1.0:
         raise ValueError("RM_EQUITY_FRACTION cannot exceed 1: the wallet is the envelope")
     if dials.max_leverage > MAX_REAL_MONEY_LEVERAGE:
-        # Every other cap is expressed as a multiple of the reference and
-        # bounded by this one, so an unbounded leverage dial is an unbounded
-        # notional envelope wearing ratios. Above this the venue's liquidation
-        # engine, not the profile, is what stops the book.
+        # Every other cap is a multiple of the reference bounded by this one, so
+        # an unbounded leverage dial is an unbounded notional envelope.
         raise ValueError(
             f"RM_MAX_LEVERAGE cannot exceed {MAX_REAL_MONEY_LEVERAGE:g} on a funded account"
         )
@@ -219,9 +191,8 @@ def _validate_dials(dials: RealMoneyDials) -> None:
             "reference x leverage is not reachable within the margin the account has"
         )
     if dials.account_gross_multiple > dials.entry_leverage * dials.initial_margin_fraction + 1e-12:
-        # Holding this much gross at this leverage would post more margin than
-        # the margin cap allows. The sleeve-level proof would catch it, but it
-        # would name a sleeve rather than the dial the owner has to move.
+        # The sleeve-level proof catches this too, but names a sleeve rather
+        # than the dial the owner has to move.
         raise ValueError(
             f"RM_ACCOUNT_GROSS_MULTIPLE ({dials.account_gross_multiple:g}) cannot exceed "
             f"RM_ENTRY_LEVERAGE x RM_INITIAL_MARGIN_FRACTION "
@@ -250,9 +221,9 @@ def render_real_money_profile_json(
 ) -> dict[str, Any]:
     """Build the profile document. ``capital_reference_usdt`` is only a scale.
 
-    The reference is a declared starting scale for the load-time proof, not a
-    limit: ``capital_reference.mode = account_equity`` makes the runtime
-    reference track the wallet, and every number below is a ratio of it.
+    It is the starting scale for the load-time proof, not a limit:
+    ``capital_reference.mode = account_equity`` makes the runtime reference
+    track the wallet, and every number below is a ratio of it.
     """
 
     dials = RealMoneyDials() if dials is None else dials
@@ -267,12 +238,10 @@ def render_real_money_profile_json(
     margin_cap = reference * dials.initial_margin_fraction
 
     def _share(gross_share: float) -> dict[str, float]:
-        # The same fraction of each account cap. Deriving the margin share as
-        # ``gross / entry_leverage`` instead looks natural and is wrong: below
-        # ``account_gross_multiple`` leverage the shares then sum *above* the
-        # account margin cap, so what the profile calls a partition would not
-        # be one. Taking the same fraction of both caps makes "the shares sum
-        # inside the account" true by construction, at any leverage.
+        # The same fraction of *each* account cap, so the shares sum inside the
+        # account at any leverage. Deriving margin as ``gross / entry_leverage``
+        # instead makes them sum above the account margin cap below
+        # ``account_gross_multiple`` leverage.
         return {
             "max_gross_notional_usdt": account_gross * gross_share,
             "max_initial_margin_usdt": margin_cap * gross_share,
@@ -334,11 +303,7 @@ def render_real_money_profile(
     *,
     capital_reference_usdt: float = 2_500.0,
 ) -> tuple[bytes, OperationalProfile]:
-    """Render and immediately prove. Returns the exact bytes to install.
-
-    Rendering without proving would let a dial set reach disk and fail later,
-    at owner start-up, over a funded account. It fails here instead.
-    """
+    """Render, prove, and return the exact bytes to install."""
 
     document = render_real_money_profile_json(
         dials, capital_reference_usdt=capital_reference_usdt

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .account_execution_stream import BybitAccountExecutionConsumer
-from .account_service_bybit import inspect_bybit_demo_order_ownership
+from .account_service_bybit import inspect_bybit_order_ownership, require_named_realm
 from .account_contracts import (
     AccountEvent,
     AccountEventType,
@@ -17,27 +17,21 @@ from .account_contracts import (
 from .account_kernel import AccountExecutionKernel
 from .deterministic_serialization import canonical_json
 from .deterministic_runtime import Clock, SystemClock
+from .venue_realm import VenueRealm
 
 NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS = 5_000_000_000
 BYBIT_ACCOUNTING_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
-# Funding settlements are discrete venue accounting events (hourly at the
-# fastest), and one recovery pass issues several paginated REST calls before
-# the slower position-truth reconciliation runs. Holding that pass to the
-# 2x-reconcile-cadence position bound turned one slow venue response into a
-# false staleness page while accounting stayed correct. This floor still fails
-# a wedged funding-recovery loop well inside one liveness cycle; position and
-# order truth keep their own tight bound.
+# Funding settles hourly at the fastest and one recovery pass makes several
+# paginated REST calls, so the 2x-reconcile-cadence bound turned a slow venue
+# response into a false staleness page. This floor still fails a wedged
+# funding-recovery loop well inside one liveness cycle.
 FUNDING_HEALTH_MAX_AGE_FLOOR_NS = 30 * 1_000_000_000
-# Position truth shares the failure mode: one reconciliation cycle runs the
-# multi-page funding recovery pass first (deliberately, so position truth is
-# refreshed last and freshest), so the previous position report legitimately
-# ages by cadence + funding duration + position duration. The 2x-cadence bound
-# (4s at the 2s default) turned that ordinary sequencing into false
-# "age_ns=~4-5s" staleness pages and BLOCKED execution health while venue and
-# local truth agreed. This floor absorbs one slow pass while still failing a
-# wedged reconciler well inside the 60s venue-fact liveness bound; it is half
-# the funding floor because position truth gates reduction admission.
+# Same failure mode: a cycle runs funding recovery first (so position truth is
+# freshest), and the previous position report legitimately ages by cadence +
+# funding duration + position duration. This floor absorbs one slow pass while
+# still failing a wedged reconciler inside the 60s venue-fact liveness bound.
+# Half the funding floor because position truth gates reduction admission.
 POSITION_HEALTH_MAX_AGE_FLOOR_NS = 15 * 1_000_000_000
 # The watchdog requires a journaled venue fact younger than one minute. A
 # 30-second checkpoint leaves room for one delayed reconciliation cycle.
@@ -85,8 +79,7 @@ class BybitAccountReconciler:
         settle_coin: str = "USDT",
         health_max_age_floor_ns: int = POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     ) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("Bybit account reconciler is demo-only")
+        self.realm = require_named_realm(client, label="account reconciler")
         if int(health_max_age_floor_ns) <= 0:
             raise ValueError("position health max-age floor must be positive")
         self.kernel = kernel
@@ -108,10 +101,8 @@ class BybitAccountReconciler:
 
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
-        # Journal cache snapshots are immutable after publication. This owner-
-        # internal read avoids deep-copying a long venue-snapshot history at
-        # every reconciliation pass while transactions continue to publish a
-        # new snapshot atomically.
+        # Cache snapshots are immutable after publication, so this
+        # owner-internal read skips deep-copying the venue-snapshot history.
         state = self.kernel._state_ref()
         pending = [order for order in state.orders.values() if order.status in pending_statuses]
         execution_rows = 0
@@ -157,10 +148,9 @@ class BybitAccountReconciler:
                     local_receive_ts_ns=self.clock.wall_time_ns(),
                 )
 
-        # Exchange-native TP/SL orders have no kernel orderLinkId. Recover any
-        # execution newer than the active native protection installation and
-        # let the same consumer atomically adopt it. Older account history is
-        # ignored so a pre-cutover/manual fill cannot be mistaken for this stop.
+        # Exchange-native TP/SL orders carry no kernel orderLinkId. Recover
+        # executions newer than the active protection installation only, so an
+        # older manual fill cannot be mistaken for this stop.
         if self.native_protection_manager is not None:
             current = self.kernel._state_ref()
             protected_symbols = sorted({
@@ -207,11 +197,10 @@ class BybitAccountReconciler:
                     )
 
         raw_positions = self.client.get_positions(settle_coin=self.settle_coin)
-        # Freshness begins when direct position truth is actually received, not
-        # before preceding REST recovery or journal work. Reduction admission
-        # must age the venue fact itself.
+        # Freshness starts when position truth is received, not before the
+        # preceding REST recovery: admission must age the venue fact itself.
         observed_ns = self.clock.wall_time_ns()
-        position_rows = _validated_venue_position_rows(raw_positions)
+        position_rows = _validated_venue_position_rows(raw_positions, realm=self.realm)
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}
         for _row, symbol, side, size in position_rows:
@@ -226,10 +215,9 @@ class BybitAccountReconciler:
             if abs(position.signed_qty) > 1e-12
         }
         post_recovery_state = self.kernel._state_ref()
-        # Track *which* symbols a mismatch implicates, not merely that one
-        # exists. Protection re-verification is suspended only for the symbols
-        # whose venue row this pass cannot read against the journal; every other
-        # symbol still has its stop proved (B6).
+        # Track which symbols a mismatch implicates: protection
+        # re-verification is suspended only for those, so every other symbol
+        # still has its stop proved.
         illegible_symbols: set[str] = set()
         mismatches: list[str] = []
         for order in sorted(
@@ -246,9 +234,8 @@ class BybitAccountReconciler:
                 f"{order.symbol}:ambiguous_submission_unresolved:"
                 f"command={order.command_id}:attempts={order.submission_attempts}"
             )
-            # An ambiguous exposure-creating submission may land at any moment,
-            # so this symbol's reconstructed quantity is not a stable basis for
-            # a stop plan.
+            # An ambiguous exposure-creating submission may land at any time,
+            # so the reconstructed quantity cannot anchor a stop plan.
             illegible_symbols.add(str(order.symbol).upper())
         native_protection_breach_only = False
         for symbol, sides in sorted(active_sides.items()):
@@ -266,11 +253,7 @@ class BybitAccountReconciler:
                 )
                 illegible_symbols.add(symbol)
         if self.native_protection_manager is not None:
-            # Previously this whole call was gated on ``not mismatches``, so
-            # protection verification stopped for the entire account exactly
-            # when one symbol was least understood — every other open position
-            # silently lost its stop proof. Per-symbol skipping keeps the
-            # account-wide freshness contract honest: a skipped symbol simply
+            # Skip per symbol, not for the whole account: a skipped symbol
             # ages out of ``last_sync_ns_by_symbol`` and fails
             # ``require_recent_healthy`` on its own.
             try:
@@ -283,7 +266,7 @@ class BybitAccountReconciler:
                 native_protection_breach_only = bool(getattr(exc, "breaches_only", False))
         order_ownership = None
         try:
-            order_ownership = inspect_bybit_demo_order_ownership(
+            order_ownership = inspect_bybit_order_ownership(
                 client=self.client,
                 state=self.kernel._state_ref(),
                 native_order_verifier=(
@@ -334,7 +317,10 @@ class BybitAccountReconciler:
             "observed_ts_ns": observed_ns,
             **snapshot_semantics,
         }
-        snapshot_key = "bybit-demo-position:" + hashlib.sha256(canonical_json(snapshot_material)).hexdigest()[:20]
+        snapshot_key = (
+            f"bybit-{self.realm.value}-position:"
+            + hashlib.sha256(canonical_json(snapshot_material)).hexdigest()[:20]
+        )
         semantic_hash = hashlib.sha256(canonical_json(snapshot_semantics)).hexdigest()
         checkpoint_monotonic_ns = self.clock.monotonic_ns()
         last_checkpoint_ns = self._last_journal_checkpoint_monotonic_ns
@@ -344,8 +330,7 @@ class BybitAccountReconciler:
             or checkpoint_monotonic_ns - last_checkpoint_ns
             >= VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS
         )
-        # The in-process report is refreshed by every REST response. Persist
-        # semantic transitions immediately and only heartbeat unchanged truth.
+        # Persist semantic transitions immediately; heartbeat unchanged truth.
         if semantic_hash != self._last_journaled_semantic_hash or checkpoint_due:
             self.kernel.record_venue_snapshot(
                 snapshot_key=snapshot_key,
@@ -360,7 +345,7 @@ class BybitAccountReconciler:
                     "order_rows_observed": order_rows,
                     "position_rows_observed": len(position_rows),
                     "venue_order_ownership": ownership_semantics,
-                    "source": "bybit_demo_rest_reconcile",
+                    "source": f"bybit_{self.realm.value}_rest_reconcile",
                 },
             )
             self._last_journaled_semantic_hash = semantic_hash
@@ -404,12 +389,11 @@ class BybitAccountReconciler:
     ) -> None:
         """Require fresh direct venue agreement only for requested symbols.
 
-        A strictly reducing order is allowed through unrelated account-health
-        failures, but never through a same-symbol position contradiction. The
-        comparison uses the *current* kernel position rather than the position
-        captured in the report, so a locally reconstructed fill after the last
-        REST snapshot must wait for the next reconciliation instead of sending
-        a reduce-only order against stale venue-flat evidence.
+        A strictly reducing order passes unrelated account-health failures but
+        never a same-symbol position contradiction. The comparison uses the
+        *current* kernel position, not the one captured in the report, so a
+        fill reconstructed after the last REST snapshot waits for the next
+        reconciliation instead of trading against stale venue-flat evidence.
         """
 
         report = self.last_report
@@ -459,11 +443,9 @@ class BybitAccountReconciler:
 class AccountFundingReconciliationReport:
     """One strict, bounded transaction-log recovery pass.
 
-    ``query_end_ms`` is the recovered-through bound sampled before the venue
-    queries; ``observed_ts_ns`` is when the pass completed. They differ by the
-    REST recovery duration: freshness measures how recently a full recovery
-    pass finished, not when its query window was chosen, so a slow venue
-    response cannot birth an already-stale report.
+    ``query_end_ms`` is the recovered-through bound sampled before the queries;
+    ``observed_ts_ns`` is when the pass completed. Freshness measures the
+    latter, so a slow venue response cannot birth an already-stale report.
     """
 
     healthy: bool
@@ -479,12 +461,12 @@ class AccountFundingReconciliationReport:
 
 
 class BybitAccountFundingReconciler:
-    """Recover immutable Bybit demo funding settlements into the account journal.
+    """Recover immutable Bybit funding settlements into the account journal.
 
-    Startup replays the complete fresh-ledger epoch in API-sized chunks. Later
-    passes retain an overlap so a delayed transaction-log row is not skipped.
-    Existing transaction identities are compared to their immutable canonical
-    P&L event before being treated as idempotently recovered.
+    Startup replays the whole ledger epoch in API-sized chunks; later passes
+    keep an overlap so a delayed transaction-log row is not skipped. An
+    existing transaction identity is compared to its canonical P&L event before
+    counting as already recovered.
     """
 
     def __init__(
@@ -496,8 +478,7 @@ class BybitAccountFundingReconciler:
         overlap_ms: int = DEFAULT_FUNDING_OVERLAP_MS,
         health_max_age_floor_ns: int = FUNDING_HEALTH_MAX_AGE_FLOOR_NS,
     ) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("Bybit account funding reconciler is demo-only")
+        self.realm = require_named_realm(client, label="account funding reconciler")
         if int(overlap_ms) <= 0 or int(overlap_ms) > BYBIT_ACCOUNTING_MAX_WINDOW_MS:
             raise ValueError("funding reconciliation overlap must be in (0, 7 days]")
         if int(health_max_age_floor_ns) <= 0:
@@ -509,11 +490,9 @@ class BybitAccountFundingReconciler:
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self._next_query_start_ms: int | None = None
         self.last_report: AccountFundingReconciliationReport | None = None
-        # Incremental canonical-settlement index. Scanning the complete
-        # journal for funding events on every short poll grew pass latency
-        # with journal age; the committed event list only ever extends, so
-        # the index advances from the last verified position and rebuilds
-        # whenever the remembered tail no longer matches (reset/replacement).
+        # Incremental settlement index: the committed event list only extends,
+        # so this advances from the last verified position and rebuilds if the
+        # remembered tail stops matching (reset/replacement).
         self._funding_index: dict[str, AccountEvent] = {}
         self._funding_index_count = 0
         self._funding_index_tail_hash = ""
@@ -553,9 +532,8 @@ class BybitAccountFundingReconciler:
         return self._funding_index
 
     def reconcile_once(self) -> AccountFundingReconciliationReport:
-        # AccountJournal owns a verified immutable cache and invalidates it on
-        # any storage-signature change. Re-reading every transaction segment on
-        # every short funding poll made owner latency grow with journal age.
+        # AccountJournal caches a verified read and invalidates it on any
+        # storage-signature change, so this does not re-read every segment.
         events = self.kernel.journal.events()
         if not events:
             raise RuntimeError(
@@ -612,7 +590,7 @@ class BybitAccountFundingReconciler:
         normalized: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
         seen: set[str] = set()
         for row, source_start_ms, source_end_ms in sourced_rows:
-            identity, transaction_ms, values = _validated_funding_row(row)
+            identity, transaction_ms, values = _validated_funding_row(row, realm=self.realm)
             if identity in seen:
                 raise RuntimeError(
                     f"Bybit SETTLEMENT recovery returned duplicate id {identity!r}"
@@ -737,6 +715,8 @@ def _funding_row_material(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validated_funding_row(
     row: Mapping[str, Any],
+    *,
+    realm: VenueRealm,
 ) -> tuple[str, int, dict[str, float | str]]:
     identity = str(row.get("id") or "")
     if not identity:
@@ -786,6 +766,14 @@ def _validated_funding_row(
     ):
         raise RuntimeError(
             f"Bybit SETTLEMENT {identity!r} violates change=cashFlow+funding-fee"
+        )
+    # ``cashFlow`` lands in ``gross_pnl_usdt``, which fill reconstruction already
+    # books, so a settlement carrying cash would be counted twice. Demo has only
+    # ever returned funding-only rows; off demo the shape is unproven.
+    if realm is not VenueRealm.DEMO and cash_flow != 0.0:
+        raise RuntimeError(
+            f"Bybit SETTLEMENT {identity!r} carries cashFlow this reconciler would "
+            "double-count against reconstructed fill P&L"
         )
     return identity, transaction_ms, {
         "symbol": symbol,
@@ -847,41 +835,43 @@ def _finite_or_zero(value: Any) -> float:
 
 def _validated_venue_position_rows(
     value: Any,
+    *,
+    realm: VenueRealm,
 ) -> tuple[tuple[Mapping[str, Any], str, str, float], ...]:
     """Validate one complete authenticated Bybit position response.
 
-    An empty list is authoritative flatness. Any returned row must retain the
-    structural and numeric fields needed to prove that claim; malformed rows
-    cannot be normalized to zero because that would erase unknown exposure.
+    An empty list is authoritative flatness. A returned row must carry the
+    fields needed to prove that; normalizing a malformed row to zero would
+    erase unknown exposure.
     """
 
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise RuntimeError("Bybit demo position query returned a non-list payload")
+        raise RuntimeError(f"Bybit {realm.value} position query returned a non-list payload")
     output: list[tuple[Mapping[str, Any], str, str, float]] = []
     for index, row in enumerate(value):
         if not isinstance(row, Mapping):
             raise RuntimeError(
-                f"Bybit demo position query returned a non-object row at index {index}"
+                f"Bybit {realm.value} position query returned a non-object row at index {index}"
             )
         raw_symbol = row.get("symbol")
         symbol = raw_symbol.strip().upper() if type(raw_symbol) is str else ""
         if not symbol:
-            raise RuntimeError(f"Bybit demo position row {index} lacks symbol")
+            raise RuntimeError(f"Bybit {realm.value} position row {index} lacks symbol")
 
         raw_size = row.get("size")
         if raw_size is None or type(raw_size) is bool:
-            raise RuntimeError(f"Bybit demo position row {index} size must be numeric")
+            raise RuntimeError(f"Bybit {realm.value} position row {index} size must be numeric")
         try:
             size = float(raw_size)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"Bybit demo position row {index} size must be numeric"
+                f"Bybit {realm.value} position row {index} size must be numeric"
             ) from exc
         if not math.isfinite(size):
-            raise RuntimeError(f"Bybit demo position row {index} size must be finite")
+            raise RuntimeError(f"Bybit {realm.value} position row {index} size must be finite")
         if size < 0.0:
             raise RuntimeError(
-                f"Bybit demo position row {index} size must be non-negative"
+                f"Bybit {realm.value} position row {index} size must be non-negative"
             )
 
         raw_side = row.get("side")
@@ -889,7 +879,7 @@ def _validated_venue_position_rows(
         allowed_sides = {"", "buy", "sell"} if size == 0.0 else {"buy", "sell"}
         if side not in allowed_sides:
             raise RuntimeError(
-                f"Bybit demo position row {index} has invalid side {raw_side!r}"
+                f"Bybit {realm.value} position row {index} has invalid side {raw_side!r}"
             )
         output.append((row, symbol, side, size))
     return tuple(output)

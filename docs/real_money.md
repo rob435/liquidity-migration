@@ -27,6 +27,9 @@ to its share on every exposure-increasing batch and refuses a sleeve the
 partition does not name ([`account_kernel.py:2367`](../liquidity_migration/account_kernel.py)).
 Risk-reducing batches bypass every cap, so exits are always possible.
 
+A dedicated subaccount would put the ceiling at the venue instead of in
+software. Declined, so these caps are what hold size.
+
 ## Dials
 
 One file: [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)
@@ -63,7 +66,8 @@ there, naming the dial to move, instead of at start-up over a funded account.
 | Daily loss halt → `run_safety_flat_once` | [`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py) |
 | Venue-native stop armed in the same `place_order` call, read back after create | [`venue_protection.py`](../liquidity_migration/venue_protection.py), [`bybit_execution_adapter.py`](../liquidity_migration/bybit_execution_adapter.py) |
 | One owner per account; journal ↔ venue reconciliation | [`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py), [`account_reconcile.py`](../liquidity_migration/account_reconcile.py) |
-| Mainnet client refuses to construct while `REAL_MONEY` is unset | [`bybit.py:227`](../liquidity_migration/bybit.py) |
+| Independent watchdog: owner, producers, strategy inputs and venue snapshot every 3 min, paging Telegram; no credential, no ordering edge to the owner it watches | `liquidity-migration-mainnet-liveness.timer` → [`check_fleet_liveness.py --account-scope mainnet`](../scripts/check_fleet_liveness.py) |
+| Mainnet client refuses to construct while `REAL_MONEY` is unset | [`bybit.py:204-209`](../liquidity_migration/bybit.py) (private WebSocket: `:875-878`) |
 | Producers get no credentials and no arming switch in any realm; order authority is the account owner's alone | the mainnet units `UnsetEnvironment` both |
 
 ## Arming (owner-executed)
@@ -71,12 +75,17 @@ there, naming the dial to move, instead of at start-up over a funded account.
 Run `scripts/ops.sh real-money preflight` at any point to see which of these is
 still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
 
-1. **Confirm the account is flat.** No manual position, no open order.
+1. **Confirm the account is flat by hand.** No manual position, no open order. The owner's
+   startup check for this (`require_bybit_order_ownership`,
+   [`account_service_bybit.py`](../liquidity_migration/account_service_bybit.py)) now runs in
+   both realms, but it and the reconciler see USDT-settled linear only, so anything else on the
+   UID stays invisible to both — see *What is still unproven*.
 2. **Create the API key** on the funded account: contract trading only,
    **withdrawal disabled**, IP-allowlisted to the VPS.
 3. **Fill in the credential file.** Copy
    [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template) to
-   `/etc/liquidity-migration/bybit-mainnet.env`, root-owned `0600`. Paste into
+   `/etc/liquidity-migration/bybit-mainnet.env`, root-owned `0600`, edited on the
+   VPS by hand — the key and secret never enter an agent session. Paste into
    `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` — deliberately different
    variables from the demo pair — set the dials, and set `REAL_MONEY=true`, the
    single act that means "trade my money".
@@ -84,15 +93,21 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
    [`deploy/account-execution-mainnet.env.template`](../deploy/account-execution-mainnet.env.template)
    to `/etc/liquidity-migration/account-execution-mainnet.env`, root-owned `0600`.
    Its roots are disjoint from demo and paper.
-5. **Create the state roots**, root-owned:
-   `mkdir -p /var/lib/liquidity-migration/{account,inbox,capture}-mainnet`.
+5. **Create the state roots** from the route file just copied:
+   ```bash
+   scripts/ops.sh real-money create-state-roots            # lists what it would create
+   scripts/ops.sh real-money create-state-roots --execute  # creates them, mode 0700
+   ```
+   It refuses a relative root, a root that is not a directory, and any root at or
+   inside a directory the demo or paper owner env declares.
 6. **Render the profile** (`D=/etc/liquidity-migration/account-execution-mainnet`):
    ```bash
    scripts/ops.sh real-money render-profile --execute --output $D/risk-policy.json
    ```
 7. **Freeze the inputs.** Universe first, then rules against it:
    ```bash
-   scripts/freeze_account_candidate_universe.py --output $D/candidate-universe.json
+   scripts/freeze_account_candidate_universe.py --realm mainnet \
+     --output $D/candidate-universe.json
    scripts/freeze_venue_instrument_rules.py --realm mainnet \
      --symbols-file $D/candidate-universe.json --output $D/venue-rules.json
    ```
@@ -104,8 +119,13 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
    and commit — repo-off is a ceiling a host override cannot lift. Then
    `scripts/ops.sh deploy --execute install`, which puts every unit file on disk
    and leaves all of them disabled.
-9. **Start the mainnet units by hand**, at Tier 1 size. No deploy mode does it.
+9. **Start the fleet**, at Tier 1 size: `scripts/ops.sh deploy --execute activate-mainnet`.
+   It re-runs preflight and refuses while anything above is outstanding. To stop
+   it again: `scripts/ops.sh deploy --execute stop-mainnet` — publication only,
+   exposure unchanged.
 
+Steps 8 and 9 are deploy modes, so they need `EXPECTED_COMMIT` set to the full
+40-character commit like every other one ([`operations.md`](operations.md)).
 Changing any dial afterwards means re-rendering the profile and reinstalling.
 
 ## What preflight checks
@@ -125,28 +145,94 @@ exits 1 while anything is outstanding.
 | Profile matches dials | The installed profile is byte-identical to the render of the current dials — the likeliest arming mistake is editing a dial and forgetting to re-render |
 | Sleeve toggles | At least one mainnet sleeve `on` in `/etc/liquidity-migration/sleeves.resolved.env` |
 
-## What is missing before this could run live
+## What is still unproven
 
-- **No mainnet activation path.** `deploy_vps_live.sh activate` starts demo and
-  paper units only; `verify` asserts all three mainnet units are *off* and fails
-  if any is active. Starting them is manual `systemctl`, and the next `verify`
-  then fails on purpose.
-- **Nothing creates the mainnet state roots.** Preflight reports them missing and
-  prints the `mkdir`; the owner runs it.
-- **No mainnet watchdog.** `liquidity-migration-demo-liveness.timer` scopes itself
-  to `demo`/`demo-paper`. The owner's Telegram is the only alive signal, and an
-  absent process cannot report its own absence. Watch it during Tier 1.
-- **The candidate universe is not mainnet-sourced.**
-  `freeze_account_candidate_universe.py` reads the public *demo* endpoint and
-  stamps the artifact `demo`; producers load it with that default. Same linear
-  perpetual set on both realms, but not evidence of the mainnet listing.
+The owner's four Bybit REST components — wallet snapshot, start-up
+order-ownership check, position reconciler, funding reconciler — each refused a
+non-demo client outright until 2026-07-31 and now construct and run under either
+named realm. Every step above exists and is tested, none of it has run against a
+funded account, and the first bullet is a blocker rather than a caveat: two
+demo-only client fences remain, the first of them ahead of all four, so a
+mainnet owner still does not start.
+
+- **Two demo-only client fences still block mainnet startup.**
+  `BybitNativeProtectionManager` refuses a non-demo client
+  ([`venue_protection.py:151`](../liquidity_migration/venue_protection.py)) and is built at
+  [`account_service_runner.py:716`](../liquidity_migration/account_service_runner.py), before
+  every other start-up read; `BybitDemoExecutionAdapter` refuses one too
+  ([`bybit_execution_adapter.py:91`](../liquidity_migration/bybit_execution_adapter.py)) and is
+  built after them. Both are the same arbitrary realm fence the wallet snapshot, order-ownership
+  and reconciler gates carried until they were made realm-aware, but the protection manager also
+  supplies the ownership check's native verifier, so un-fencing it changes what a mainnet owner
+  treats as its own stop. Owner decision.
+- **The ownership and position reads are realm-aware but narrow, and fail open.** Both run in
+  both realms now, and both ask Bybit for `category=linear, settleCoin=USDT` only. A USDC-settled,
+  inverse, spot or options order *or position* on the same UID is therefore invisible: startup
+  passes, the reconciler reports `healthy` with that exposure omitted, and nothing detects it —
+  while `totalEquity` (below) does count it, so the caps and the daily loss halt size against
+  exposure the owner cannot see or close. Flatten and keep the UID to USDT-linear by hand.
+  Bybit's own liquidation and ADL orders carry no kernel
+  `orderLinkId` and no stop provenance, so they classify unowned — that makes the account
+  unhealthy and, through `require_recent_symbols_consistent`, blocks the owner's own reduce-only
+  close on the symbol being liquidated. Hedge mode is unsupported and shows up as
+  `dual_side_position_not_supported`, not as a named precondition failure.
+- **Preflight never reads the wallet.** `real_money_arming.preflight` checks files, dials and
+  routes; the first authenticated wallet read happens at owner bootstrap. So a UNIFIED row that
+  blanks every account-wide equity field (the owner refuses to start and names the blank
+  fields), a non-UTA account, or a hedge-mode account surfaces as a `Restart=always` loop rather
+  than a preflight line. Which account or margin modes blank that row is unverified against a
+  funded account, so no message here names one. The snapshot also needs
+  `totalAvailableBalance`, or `totalMarginBalance` and `totalInitialMargin`, so a row blanking
+  only some of them still fails on the opaque per-field message instead.
+- **Wallet equity counts non-USDT collateral.** `totalEquity` and `totalAvailableBalance` are
+  account-wide USD aggregates over every asset, so on a mixed-collateral account the envelope
+  scales the whole profile off assets the strategy neither trades nor can post as USDT margin —
+  and a collateral drawdown alone rescales the caps and can trip the daily loss halt. The
+  kernel's available-margin rejection bounds the damage to blocked batches. `RM_EQUITY_FRACTION`
+  is the dial for it; 1.0 is only right on a USDT-only account.
+- **Three funding shapes stop the owner permanently, outside the degrade path.** A
+  `category=linear` settlement row in any currency but USDT raises
+  ([`account_reconcile.py:728`](../liquidity_migration/account_reconcile.py)); the epoch replay
+  paginates at 2,500 rows per 7-day chunk — about 357 settlements/day — above which every
+  restart fails; and off demo a settlement row carrying nonzero `cashFlow`, which would be
+  double-counted against reconstructed fill P&L, is refused rather than booked (`:773`). The
+  first two apply in both realms; only the third is realm-gated. All three raise out of
+  `reconcile_once`, and the runner calls that at
+  [`account_service_runner.py:794`](../liquidity_migration/account_service_runner.py) and
+  `:810` outside `degrade_or_raise` — so each is a `Restart=always` crash loop with the
+  book unmanaged, not the exit-only degradation the wrapped start-up checks fall back to. Venue
+  rows are immutable and every restart replays the epoch from the first journal event, so one
+  such row is permanent until it is dealt with by hand.
+- **Demo still books a `cashFlow`-bearing settlement, and would double-count it.** The refusal
+  above is mainnet-only because demo behaviour was held fixed across the realm change. Demo
+  has only ever returned funding-only rows, so the double count is latent rather than
+  observed, and a test now pins the demo booking. Whether demo should refuse too — trading an
+  accounting defect for a crash loop — is an open owner decision, and it is the same trade the
+  mainnet refusal already makes.
+- **Nothing refreshes the mainnet candidate universe.** `--realm mainnet` freezes
+  it from `api.bybit.com` and the mainnet producers load it under that realm, but
+  the automatic refreeze in `deploy_vps_live.sh` is demo-only. Re-freeze by hand
+  to admit a new listing; a retirement is handled in-cycle.
+- **The watchdog's mainnet scope is unexercised.**
+  `liquidity-migration-mainnet-liveness.timer` runs `check_fleet_liveness.py
+  --account-scope mainnet` every three minutes and pages over the mainnet
+  credential file's Telegram pair, holding no trading authority. Its thresholds
+  were chosen, not measured against a funded account. Watch it during Tier 1
+  rather than relying on it.
+- **`stop-mainnet` stops publication, not exposure.** It leaves positions and the
+  sleeve toggles alone, so `verify` fails afterwards and the next `activate` or
+  `rollout` restarts the fleet. Flatten through the account owner and turn the
+  toggles off to make a stop stick.
 - **Untried against a real venue.** The post-create stop assertion, the
   reconciler, and the wedged-command path have never run against a mainnet key.
   The code is tested; the venue behaviour it asserts is not.
 - **Known rough edges.** Reconcile staleness floors are 30 s for funding and
-  15 s for positions (`account_reconcile.py`) and may still trip on mainnet
-  latency; release-to-pending retries without a ceiling; `account_gross` comes
-  from target quantities, not venue position value; margin tiers unmodelled.
+  15 s for positions (`account_reconcile.py`) and the owner's health-age bound is
+  `reconcile_seconds × 2` (4 s as shipped); all three may trip on mainnet
+  latency. A stale protection sync raises exactly like an absent stop, so the
+  alarm cannot tell unverified from unprotected. Release-to-pending retries
+  without a ceiling; `account_gross` comes from target quantities, not venue
+  position value; margin tiers unmodelled.
 
 ## Record
 
@@ -156,6 +242,35 @@ demo-only. `carry_hold`'s benchmark Sharpe is **1.21 (t 2.31)** and does not
 beat the CONTINUOUS benchmark; the superseded 2.57 / t 4.87 figures were
 double-counted funding ([`carry_hold.md`](carry_hold.md),
 [`../AGENTS.md`](../AGENTS.md), [`strategy_program.md`](strategy_program.md)).
+
+### Measured on the demo account, 2026-07-30
+
+Read from the venue, not from a backtest. 266 closes over 2026-06-05 → 07-30
+total **+$3,200.21**, but +$2,902.11 of that booked on 07-30 alone: 133 of the
+day's closes were `carry resize: depth rescale`, the mark-to-market sizing
+defect fixed in `b13cbfac3` moving unrealised gain into the realised column.
+The price-return record is **+$298 over eight weeks on a $250,000 reference**.
+
+Funding is the thesis and it is real, checked against public rate history:
+lifetime settlement **+$3,048.83**, of which −$148.88 predates CARRY v3, when
+the account was paying. Rates that high come from squeezed small-cap alts, so
+the payoff is negative-skew and regime-dependent — `LAUSDT` paid 6.355%/day
+(worst 4h −1.96%) while its price fell 7.6% since entry.
+
+Fees: $85.68 lifetime, $70.78 of it in the 1.5 days after CARRY v3, mostly the
+same defect. Verify the post-fix run rate before any ramp.
+
+Exit capacity on a calm book, all filling inside 200 levels:
+
+| Symbol | Held | Spread | Full-position exit |
+| --- | --- | --- | --- |
+| `VANRYUSDT` | $9,409 | 2.5bp | 12.9bp |
+| `LAUSDT` | $25,677 | 1.9bp | 27.7bp |
+| `ESPUSDT` | $25,537 | 1.4bp | 23.4bp |
+
+The 15.56bp round-trip model is about right, mildly optimistic for `LAUSDT`.
+It is not a stress estimate: depth into a 35% gap-down is a fraction of this and
+slippage scales superlinearly with size.
 
 ## Ramp
 

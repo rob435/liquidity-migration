@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Long-sleeve (LongV11aDivWeekendVol, v11a uni50 sniper retrace 1%/6h fall-through)
-# forward-testing target producer. The shared account owner exclusively handles
-# venue credentials, order placement, fills, reconciliation, and Telegram.
-#
-# Hard gate: EXECUTION_ENVIRONMENT is explicit and requires its account-owner route.
+# target producer. The account owner handles credentials, orders, fills, and
+# Telegram. EXECUTION_ENVIRONMENT is explicit and requires its owner route.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,9 +54,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
             echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
-        # A producer has no execution authority and must never hold either.
-        # The unit strips both; this is the check that says so out loud if the
-        # strip ever fails.
+        # The unit strips these; fail loudly if the strip ever misses.
         if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
             echo "A target producer must not receive venue credentials." >&2
             exit 2
@@ -149,9 +145,8 @@ echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 
 mkdir -p "$DATA_ROOT/.locks"
 
-# USE_DAEMON=1 (default): long-running target producer with a reused public
-# market-data plane. The account owner handles every private execution event.
-# SIGTERM drains the current cycle and exits cleanly (systemctl stop is safe).
+# USE_DAEMON=1 (default): long-running producer reusing one public market-data
+# plane. SIGTERM drains the current cycle, so `systemctl stop` is safe.
 if [[ "${USE_DAEMON:-1}" == "1" ]]; then
     echo "long-native demo engine: daemon mode"
     exec "$PYTHON_BIN" -m liquidity_migration \

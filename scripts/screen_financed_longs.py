@@ -7,9 +7,8 @@ Runs the three committed configs (``lane2_carry_hold_v1``,
 full-sample and benchmark-window rows next to the deployed CONTINUOUS sl35
 render they were compared against.
 
-Research-only: no venue access, no account journal, no operational authority.
-Lane-1 on seen data before each config's registration commit; forward rows
-after the commit are the evidence (``AGENTS.md``).
+Rows before each config's registration commit are seen-data; forward rows after
+the commit are the evidence.
 """
 
 from __future__ import annotations
@@ -40,8 +39,8 @@ from liquidity_migration.financed_longs import (  # noqa: E402
     venue_view,
 )
 
-#: The deployed benchmark: CONTINUOUS sl35 render, regenerated 2026-07-26
-#: (reports/equity_curves_sl35_2026-07-26; window 2023-03-13 -> 2026-07-16).
+#: The deployed benchmark: CONTINUOUS sl35 render over BENCH_START..BENCH_END
+#: (reports/equity_curves_sl35_2026-07-26).
 BENCHMARK = {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85}
 BENCH_START = "2023-03-13"
 BENCH_END = "2026-07-17"

@@ -15,7 +15,6 @@ Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=1
 Environment=REAL_MONEY=false
 Environment=DATA_ROOT=data/bybit-carry-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# Publishes component targets to the paper owner; it never touches the venue.
 Environment=EXECUTION_ENVIRONMENT=paper
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -24,9 +23,8 @@ Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2
 # Carry has no WS kline plane; market data arrives via bounded public REST.
 Environment=WS_KLINES_ENABLED=0
-# Follow the demo producer's bounded public market store read-only. Paper
-# retains its own strategy/journal roots and falls back to public REST for
-# missing bars.
+# Follow the demo producer's public market store read-only. Paper keeps its own
+# strategy/journal roots and falls back to public REST for missing bars.
 Environment=CARRY_MARKET_FOLLOW_ROOT=data/bybit-carry-demo-event
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1

@@ -1,8 +1,5 @@
-"""Contracts for the committed Lane-2 blend.
-
-The tests that matter here are the causality ones. A cross-sectional research
-book fails silently: a lookahead in the funding accrual or the volatility scale
-produces a *better* number, not an exception, so these are pinned explicitly.
+"""Contracts for the committed Lane-2 blend, chiefly causality: a lookahead in the funding
+accrual or the volatility scale produces a better number, not an exception.
 """
 
 from __future__ import annotations
@@ -82,11 +79,9 @@ class TestConfig:
 
 
 class TestCostBasis:
-    """The default cost basis is the measured round trip, not the registered 4 bp.
-
-    Roadmap task 0.1: a result that only survives at 4 bp is not a result. The
-    registered maker figure stays loadable so the as-registered record remains
-    reproducible, but it is never what a fresh score is charged at.
+    """The default cost basis is the measured round trip, not the registered 4 bp: a
+    result that only survives at 4 bp is not a result. The registered maker figure
+    stays loadable so the as-registered record remains reproducible.
     """
 
     def test_default_basis_is_measured_not_maker(self, cfg: BlendConfig) -> None:
@@ -114,12 +109,9 @@ class TestCostBasis:
 
 class TestFundingCausality:
     def test_epsilon_age_bar_is_not_a_second_settlement(self) -> None:
-        """Regression on REAL panel age shapes (2026-07-28 correction).
-
-        One hour after a settlement the production panel's age reads
-        0.9999999999999999, not 1.0; the old ``age < 1.0`` predicate counted
-        that bar as a second settlement and charged every 8h/4h/2h print
-        twice.
+        """One hour after a settlement the production panel's age reads
+        0.9999999999999999, not 1.0, so an ``age < 1.0`` predicate counts that bar as a
+        second settlement and charges every 8h/4h/2h print twice.
         """
         from liquidity_migration.lane2_blend import settlement_exact_funding
 

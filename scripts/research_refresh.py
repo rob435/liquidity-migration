@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Append-first market refresh, derived-feature refresh, backtest, and reconciliation.
 
-Routine runs use ``--data-mode tail``: current data is refreshed with an
-overlap, Bybit's independent manifest is rebuilt over its canonical history,
-and all-root manifest validation remains mandatory.  ``--data-mode canonical``
-uses the repository's full-PIT builders and is the appropriate mode when a
-registered claim requires a complete rebuild.
+Routine runs use ``--data-mode tail``: current data is refreshed with an overlap,
+Bybit's independent manifest is rebuilt over its canonical history, and all-root
+manifest validation stays mandatory. ``--data-mode canonical`` uses the full-PIT
+builders and is the mode for a complete rebuild.
 
-The optional demo/paper/backtest reconciliation compares accepted entry keys.
-It deliberately keeps execution/accounting evidence separate from historical
-performance.
+The optional demo/paper/backtest reconciliation compares accepted entry keys and
+keeps execution/accounting evidence separate from historical performance.
 """
 
 from __future__ import annotations
@@ -183,8 +181,7 @@ def tail_start(
     if not latest:
         return base_start
     candidate = min(latest) - dt.timedelta(days=overlap_days)
-    # Never create an empty range when a root happens to contain a future or
-    # accidentally over-padded partition.
+    # Clamp so a future or over-padded partition cannot produce an empty range.
     return max(base_start, min(candidate, end - dt.timedelta(days=1)))
 
 
@@ -819,8 +816,6 @@ def _backtest_step(
     if sleeve == "long":
         expected = report_root / "long" / "long_native_research_report.json"
     elif sleeve == "carry":
-        # equity_curves --sleeves carry renders the registered research config
-        # through the shared --research-config path (see scripts/equity_curves.py).
         expected = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
     else:
         expected = report_root / "continuous" / venue / "continuous_equity_summary.json"
@@ -853,9 +848,8 @@ def _validate_backtest_report(
             raise RuntimeError(f"LONG report window mismatch under {path}")
         return
     if sleeve == "carry":
-        # The research-config summary carries identity but no window keys
-        # (financed_longs.research_equity_chart); the window is validated by
-        # the step arguments, so pin the registered config identity here.
+        # The research-config summary carries identity but no window keys, so
+        # check the config identity here; the window is pinned by step arguments.
         path = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("config_id") != "lane2_carry_hold_v3":

@@ -137,9 +137,8 @@ DATASET_KEYS = {
     "carry_hold_demo_cycles": ("cycle_id",),
     "carry_hold_paper_cycles": ("cycle_id",),
     "carry_hold_mainnet_cycles": ("cycle_id",),
-    # Settled prints are naturally keyed by their settlement instant; the
-    # dedup makes the carry sleeve's overlap-window incremental appends
-    # idempotent at the storage layer too.
+    # Keyed by settlement instant, so the carry sleeve's overlap-window
+    # incremental appends are idempotent at the storage layer.
     "carry_funding_events": ("symbol", "funding_ts_ms"),
     "binance_usdm_klines_1h": ("ts_ms", "symbol"),
     "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
@@ -151,22 +150,13 @@ DATASET_KEYS = {
 }
 
 
-# Canonical-name fallbacks: when a root stores a dataset under a venue-specific
-# name instead of the canonical one, reads of the canonical name transparently
-# resolve to whichever venue variant is actually present. This is why a raw
-# per-venue root (e.g. binance_full_pit, which stores funding as
-# binance_usdm_funding) is funding-modeled with NO symlink/rename — read_dataset
-# (root, "funding") finds binance_usdm_funding on its own. Extend per venue.
+# Canonical-name fallbacks: a root that stores a dataset under a venue-specific
+# name still answers reads of the canonical name, with no symlink or rename.
 _DATASET_FALLBACKS: dict[str, tuple[str, ...]] = {
     "funding": ("binance_usdm_funding",),
     "open_interest": ("binance_usdm_open_interest",),
 }
 
-
-# pit-data-6 is now enforced by canonical-precedence in resolve_dataset_name (a real
-# Bybit root always carries its own canonical funding/ dir, which wins over any
-# binance_usdm_* proxy on the same root) rather than a klines-name marker — the marker
-# false-positived on Binance full-PIT roots that store klines under the canonical name.
 
 def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     """Map a canonical dataset request to the variant actually present in ``root``.
@@ -176,11 +166,10 @@ def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     disk. The returned name is always a member of :data:`DATASETS`, so the lock
     and path helpers stay valid.
 
-    pit-data-6: a missing canonical funding/OI dir must never silently resolve to
-    the WRONG venue's modeled cost curve. The safety invariant used here is that a
-    ``binance_usdm_*`` variant dir only ever exists on a Binance root, so a present
-    variant is authoritative and a Bybit root (which never carries one) falls back
-    to the canonical (empty) name -> funding_mode=missing.
+    A missing canonical funding/OI dir must never resolve to another venue's cost
+    curve. A ``binance_usdm_*`` variant only ever exists on a Binance root, so a
+    present variant is authoritative and a Bybit root falls back to the canonical
+    (empty) name -> ``funding_mode=missing``.
     """
     fallbacks = _DATASET_FALLBACKS.get(dataset)
     if not fallbacks:
@@ -188,20 +177,11 @@ def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
     root = Path(data_root).expanduser()
     if (root / dataset).exists():
         return dataset
-    # A present venue-variant dataset is AUTHORITATIVE: a ``binance_usdm_*`` dir only
-    # ever exists on a Binance root, so prefer it even when the root stores klines
-    # under the canonical ``klines_1h/`` name. The old code suppressed this whenever
-    # a Bybit-native kline marker was present, which false-positived on Binance
-    # full-PIT roots that use canonical kline naming -> funding/OI silently uncosted
-    # (the 2026-06-15 resolver regression: funding_mode=missing on a fully populated
-    # binance_usdm_funding).
+    # A present venue variant is authoritative, even on a root that also stores
+    # klines under the canonical name.
     for alt in fallbacks:
         if (root / alt).exists():
             return alt
-    # No variant present. A Bybit root whose funding/OI dir is simply absent returns
-    # the canonical (empty) name -> funding_mode=missing, never substituting a
-    # wrong-venue cost curve (pit-data-6 safety preserved: a Bybit root never carries
-    # a binance_usdm_* dir, so the loop above cannot mis-substitute).
     return dataset
 
 
@@ -704,13 +684,9 @@ def _with_ledger_month(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
         .alias(_LEDGER_MONTH_COL)
     )
 
-# storage-concurrency-4: how stale an orphaned `.*.tmp` part file must be before
-# the sweep removes it. The temp file only exists for the brief window between
-# write_parquet and the atomic rename in _write_part; any `.tmp` older than this
-# is from a process that was SIGKILLed (OOM / TimeoutStopSec->SIGKILL / hard
-# crash) mid-write, whose `finally: temp_path.unlink()` never ran. Generous so a
-# slow in-flight write on another (impossible here — we hold the dataset lock)
-# path is never clobbered.
+# How stale an orphaned `.*.tmp` part file must be before the sweep removes it.
+# A temp file only exists between write_parquet and the rename in _write_part, so
+# anything older came from a process killed mid-write.
 _STALE_TMP_SECONDS = 600.0
 _TMP_SWEEP_INTERVAL_SECONDS = 600.0
 
@@ -724,17 +700,12 @@ def _sweep_orphaned_tmp_parts(
     """Remove orphaned `.*.tmp` part files left by a crash between
     ``write_parquet`` and the atomic rename in :func:`_write_part`.
 
-    _write_part writes to ``.{name}.{pid}.{ns}.tmp`` then renames; a SIGKILL in
-    that window orphans the temp file because the ``finally`` unlink never runs.
-    Readers never consume them (``glob('**/*.parquet')`` cannot match a leading-
-    dot `.tmp` name), so this is a pure resource leak — but a long-lived
-    Restart=always daemon that occasionally crashes accumulates them until the
-    disk fills, which then fails the very ledger writes that record live orders.
+    Readers never consume them, so this is a resource leak rather than a
+    correctness problem — but a Restart=always daemon accumulates them until the
+    disk fills.
 
-    MUST be called while holding the dataset lock (every caller is inside
-    :func:`write_dataset`'s ``exclusive_file_lock``), so there is no live writer
-    whose in-flight temp could be deleted. The age gate is a second belt: only
-    temp files older than ``stale_seconds`` are removed."""
+    Must be called while holding the dataset lock, so no live writer's in-flight
+    temp can be deleted; the ``stale_seconds`` age gate is the second belt."""
     if not path.exists():
         return
     now = time.time()
@@ -797,15 +768,10 @@ def replace_dataset(
     """Replace a dataset's ENTIRE contents atomically, under its own lock.
 
     ``write_dataset(append=False)`` still merges per surviving partition, so a
-    true replacement used to mean ``rmtree`` followed by ``write_dataset`` -- with
-    the ``rmtree`` outside the lock. A concurrent reader (which takes this lock
-    precisely so it sees a consistent snapshot) could then collect a half-deleted
-    dataset, and a kill between the two steps left the dataset gone or partial
-    (2026-07-27 audit M5).
-
-    Staging under the lock and swapping directories keeps every reader on either
-    the complete previous generation or the complete new one, and a kill at any
-    point leaves the previous generation intact plus a hidden staging directory.
+    true replacement needs a full swap. Staging under the lock and renaming
+    directories keeps every reader on either the complete previous generation or
+    the complete new one; a kill at any point leaves the previous generation
+    intact plus a hidden staging directory.
     """
 
     root = ensure_data_root(data_root)
@@ -858,9 +824,7 @@ def _write_dataset_unlocked(
     target: Path | None = None,
 ) -> Path:
     path = dataset_path(root, dataset) if target is None else target
-    # storage-concurrency-4: opportunistically sweep orphaned `.*.tmp` part files
-    # left by a prior crash before this write. Safe here because we hold the
-    # dataset lock (no concurrent writer's in-flight temp can be clobbered).
+    # Safe under the dataset lock: no concurrent writer's in-flight temp exists.
     _sweep_orphaned_tmp_parts(path, recursive=False)
     _sweep_orphaned_tmp_parts_if_due(path)
     if df.is_empty():
@@ -871,10 +835,8 @@ def _write_dataset_unlocked(
         df = with_date_column(df)
     path.mkdir(parents=True, exist_ok=True)
 
-    # Month-bucket the demo/paper ledgers regardless of the partition_by the caller
-    # passed (every ledger writer passes partition_by=()): force the immutable-keyed
-    # _ledger_month partition so the hot-path write touches only the current month,
-    # not the whole-history monolith (reconcile-ledger-5). See LEDGER_BUCKET_SOURCE.
+    # Month-bucket the demo/paper ledgers regardless of the caller's partition_by,
+    # so the hot-path write touches the current month, not the whole history.
     if dataset in LEDGER_BUCKET_SOURCE:
         df = _with_ledger_month(df, dataset)
         if _LEDGER_MONTH_COL in df.columns:
@@ -939,22 +901,14 @@ def read_dataset_columns(
     path = dataset_path(data_root, dataset)
     if not path.exists():
         return pl.DataFrame()
-    # Take the same per-dataset lock that writers hold. write_dataset performs
-    # read-modify-write under this lock, and writers replace files atomically
-    # via temp-file rename; without a reader-side lock, a reader's
-    # scan_parquet -> collect can straddle a rename and observe a torn file
-    # ("Invalid thrift: end of file"). Acquiring the lock here serialises with
-    # writers cheaply (<10ms typical) and guarantees readers see a consistent
-    # snapshot of the dataset. The collect() below MUST stay inside the lock so
-    # the actual file reads complete before a writer can rename underneath us.
+    # Readers take the writers' per-dataset lock: writers replace files by
+    # rename, so an unlocked scan_parquet -> collect can straddle one and read a
+    # torn file. The collect() below must stay inside the lock.
     #
-    # ``lock=False`` is for cross-boundary FOLLOWERS ONLY: a reader of a
-    # leader root it must not (and cannot) write — taking the lock would
-    # create a lock file under the leader's ``.locks``, which a sandboxed
-    # follower user is rightly forbidden to do (2026-07-29: the carry paper
-    # producer reading the carry demo market plane). The torn-read race is
-    # accepted and self-limiting there: a straddled rename raises, the
-    # follower's cycle holds its standing book, and the next cycle retries.
+    # ``lock=False`` is for cross-boundary followers reading a leader root they
+    # must not write, since locking would create a file under the leader's
+    # ``.locks``. The torn-read race is accepted there: it raises, the follower's
+    # cycle holds its standing book, and the next cycle retries.
     lock_ctx = (
         exclusive_file_lock(
             dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01
@@ -963,10 +917,8 @@ def read_dataset_columns(
         else contextlib.nullcontext()
     )
     with lock_ctx:
-        # When since_date is set and the dataset is top-level `date=`-partitioned,
-        # prune at the DIRECTORY level before globbing: a full `**/*.parquet` walk of
-        # a (date,symbol)-partitioned root is ~500k files / tens of seconds, almost
-        # all of it discarded. Globbing only the kept date dirs avoids that walk.
+        # Prune at the directory level before globbing: a full `**/*.parquet`
+        # walk of a (date,symbol)-partitioned root is ~500k files.
         if since_date:
             top_date_dirs = [d for d in path.glob("date=*") if d.is_dir()]
             if top_date_dirs:
@@ -1017,11 +969,9 @@ def _collect_files(
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:
-    # Invariant: only ever called from inside write_dataset, which holds
-    # `exclusive_file_lock(dataset_lock_path(...))`. The pid + nanosecond temp
-    # filename therefore can't collide with a concurrent writer — there ISN'T
-    # one. If this is ever called from outside that lock, switch to a uuid4
-    # temp name and re-derive the dedup story per dataset.
+    # Only called from write_dataset, under the dataset lock, so the pid +
+    # nanosecond temp name cannot collide. Called outside that lock it would need
+    # a uuid4 temp name and a re-derived dedup story.
     _sweep_orphaned_tmp_parts(path.parent, recursive=False)
     output = df
     if append and path.exists():
@@ -1040,26 +990,18 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         output.write_parquet(temp_path)
-        # fsync before the rename (round 4): the rename is atomic against a
-        # PROCESS crash, but a hard power loss inside the page-cache window can
-        # surface a truncated part file — and because this is a read-modify-
-        # rewrite, that file is the only copy of the bucket's whole history
-        # (the demo-forward evidence record). Cost is negligible at ledger
-        # write rates.
+        # fsync before the rename: the rename is atomic against a process crash,
+        # but a power loss in the page-cache window can surface a truncated part
+        # file, and this read-modify-rewrite file is the bucket's only copy.
         fd = os.open(temp_path, os.O_RDWR)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
         temp_path.replace(path)
-        # storage-concurrency-5: fsync the PARENT DIRECTORY after the rename.
-        # The file-fsync above makes the temp file's CONTENTS durable, but on
-        # POSIX the rename itself (the directory entry now pointing `path` at the
-        # new inode) is only durable after fsync of the containing directory fd.
-        # Without it a hard power loss after replace() can revert the name to the
-        # OLD inode, losing the most recent ledger update on a read-modify-rewrite
-        # single-copy part file. Unsupported directory fsync failures are
-        # swallowed; file-content durability is already established above.
+        # The file fsync makes the contents durable; on POSIX the rename itself
+        # is only durable after an fsync of the parent directory. Failures are
+        # swallowed since content durability is already established.
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
             try:

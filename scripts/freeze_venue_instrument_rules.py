@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Freeze instrument rules from Bybit's read-only instruments-info endpoint.
 
-This is the off-demo replacement for ``probe_bybit_demo_rules.py``, which finds
-demo's empirical minimum notional by submitting and cancelling real PostOnly
-orders up to 200 USDT per symbol. On a funded account that technique makes a
-deploy spend money, so it is refused there outright (B17) and this script reads
-the venue's declared rules instead.
-
-It places no orders. ``get_instruments_info`` is an authenticated read-only
-call: it needs no mutation lease and creates no exposure.
+The off-demo counterpart to ``probe_bybit_demo_rules.py``, which finds demo's
+empirical minimum notional by submitting and cancelling real PostOnly orders —
+a technique that costs money on a funded account. This reads the venue's
+declared rules instead and places no orders.
 """
 
 from __future__ import annotations
@@ -100,10 +96,8 @@ def main(argv: list[str] | None = None) -> int:
                 label="candidate-universe artifact",
                 require_single_link=False,
             )
-            # The realm matters here: the universe artifact records the realm
-            # it was frozen from and its loader refuses any other, so omitting
-            # this made a mainnet freeze impossible -- it demanded a demo
-            # universe while the coverage proof demanded a mainnet one.
+            # The universe artifact records the realm it was frozen from and its
+            # loader refuses any other, so ``realm`` must be passed through.
             candidate = load_candidate_universe(
                 symbols_path, snapshot=snapshot, realm=realm
             )

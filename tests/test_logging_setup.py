@@ -1,14 +1,10 @@
 """Entrypoint logging must reach stderr with level and logger name.
 
-Service entrypoints run as ``python -m liquidity_migration.<module>``, so their
-module logger is ``__main__`` and sits outside the package tree. A
-package-only handler dropped every INFO record those entrypoints emit — the
-account owners' Telegram-delivery audit line among them — and rendered their
-WARNING/ERROR records through ``logging.lastResort`` unformatted.
-
-These run in child processes on purpose: logging state is process-global and
-pytest installs its own root handler, so only a fresh interpreter reproduces
-what systemd actually starts.
+Service entrypoints run as ``python -m liquidity_migration.<module>``, so their module
+logger is ``__main__`` and sits outside the package tree; a package-only handler drops
+their INFO records and renders WARNING/ERROR through ``logging.lastResort`` unformatted.
+These run in child processes because logging state is process-global and pytest installs
+its own root handler, so only a fresh interpreter reproduces what systemd starts.
 """
 
 from __future__ import annotations

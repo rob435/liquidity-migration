@@ -81,18 +81,20 @@ def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path
 
 def test_loaded_toggles_match_committed_sleeve_state(tmp_path: Path) -> None:
     # Loaded toggles must equal the committed deploy/sleeves.env: LONG on,
-    # CONTINUOUS retired from demo AND paper (2026-07-29 owner override),
-    # CARRY on for demo AND paper as its replacement. One `test` per toggle:
-    # a failing inner member of one `&&` chain is ignored by `set -e` (only
-    # the LAST member's status escapes), which previously made this test
-    # vacuous for every toggle but the final one.
+    # CONTINUOUS is retired from demo AND paper,
+    # CARRY on for demo. The paper CARRY producer is off and replaced by
+    # PAPER_TARGET_MIRROR: two producers deciding independently off a raced read
+    # of one data store cannot be made to agree. One `test` per toggle -- a
+    # failing inner member of one `&&` chain is ignored by `set -e`, since only
+    # the LAST member's status escapes.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = on
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = off
         test "$CARRY_SLEEVE" = on
-        test "$CARRY_PAPER_SLEEVE" = on
+        test "$CARRY_PAPER_SLEEVE" = off
+        test "$PAPER_TARGET_MIRROR" = on
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
@@ -205,13 +207,12 @@ def test_host_override_is_parsed_as_data_not_shell_source(tmp_path: Path) -> Non
 
 
 def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
-    """Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):
-    EVERY sleeve defaults OFF since audit 2026-06-12 round 3 — LONG previously
-    failed OPEN, so an accidentally deleted/renamed sleeves.env would have
-    enabled and restarted the order-submitting long demo against the operator's
-    LONG=off intent. A missing config disables everything; it can never
-    resurrect a sleeve. Exercises the lib's ACTUAL lm_load_sleeve_toggles
-    against a copy with no sleeves.env beside it."""
+    """Last-resort fallback with NEITHER sleeves.env present (a stripped checkout): every
+    sleeve defaults OFF, so a deleted or renamed sleeves.env can never enable and
+    restart an order-submitting sleeve against the operator's intent. Exercises the
+    lib's actual ``lm_load_sleeve_toggles`` against a copy with no sleeves.env beside
+    it.
+    """
     lib_dir = tmp_path / "lib"
     lib_dir.mkdir()
     host_env = tmp_path / "missing-host-sleeves.env"
@@ -236,19 +237,19 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
 
 
 def test_committed_sleeves_env_continuous_retired() -> None:
-    # The committed file is the source of truth. The CONTINUOUS sleeve was
-    # retired from demo AND paper by owner override on 2026-07-29 (see
-    # docs/preregistration/sleeve_kill_criteria_2026-07-20.md, retirement
-    # note); LONG stays on, and CARRY (lane2_carry_hold_v3, registered
-    # 2026-07-29) replaces CONTINUOUS on demo AND paper. Each line must be
-    # systemd-EnvironmentFile-safe (plain KEY=value, no inline comment).
+    # The committed file is the source of truth. CONTINUOUS is retired from demo
+    # and paper; LONG stays on; CARRY replaces CONTINUOUS on demo; paper CARRY is
+    # served by PAPER_TARGET_MIRROR so one fleet decides and both execute. Each
+    # line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
+    # comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
         "LONG_SLEEVE": "on",
         "CONTINUOUS_SLEEVE": "off",
         "CONTINUOUS_PAPER_SLEEVE": "off",
         "CARRY_SLEEVE": "on",
-        "CARRY_PAPER_SLEEVE": "on",
+        "CARRY_PAPER_SLEEVE": "off",
+        "PAPER_TARGET_MIRROR": "on",
         # Real-money producers. Repo-off is a hard ceiling a host override
         # cannot lift, so arming them is a committed change and not a host edit.
         "CARRY_MAINNET_SLEEVE": "off",

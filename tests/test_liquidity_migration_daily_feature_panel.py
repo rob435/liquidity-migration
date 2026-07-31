@@ -1,15 +1,15 @@
 """Pin the daily feature-panel builders.
 
-Causality is the only thing that matters in this module: if a feature for
-(symbol, date=D) ever uses data from after D's EOD-close, residual momentum
-and risk-model consumers become invalid. These tests pin:
+Causality is the only thing that matters here: a feature for (symbol, date=D) that reads
+anything after D's EOD close invalidates residual momentum and risk-model consumers.
+Pinned:
 
-  * forward returns match the entry+1h fill-model exactly (D's signal trades
-    at D+1's first-bar close; exit N days later at D+1+N's first-bar close)
-  * each feature is causal at its EOD — explicitly tested on a synthetic
-    fixture where a future-only price spike would be detectable if leaked
+  * forward returns match the entry+1h fill model exactly (D's signal trades at D+1's
+    first-bar close; exit N days later at D+1+N's first-bar close)
+  * each feature is causal at its EOD, on a fixture where a future-only price spike
+    would be detectable if leaked
   * cross-sectional ranks are per-day and dense
-  * registry has all 20 features the plan listed
+  * the registry has all 20 features
 """
 from __future__ import annotations
 
@@ -50,7 +50,6 @@ def _date_ms(date_str: str) -> int:
 
 
 def _daily_returns_frame(symbol: str, day_indices: list[int], closes: list[float]) -> pl.DataFrame:
-    # Provenance: relocated from tests/test_audit_fix_b09.py (audit bucket b09).
     base = _date_ms("2025-01-01")
     return pl.DataFrame(
         {
@@ -71,9 +70,9 @@ def _make_hourly_klines(
 ) -> pl.DataFrame:
     """Synthetic hourly klines with deterministic per-symbol price paths.
 
-    If ``price_paths[sym]`` is provided, it must have ``days * 24 + 1`` floats
-    representing the close after each hour (the first value is the open of
-    hour 0 of day 0). Otherwise a flat-then-drift path is generated.
+    ``price_paths[sym]``, if given, must have ``days * 24 + 1`` floats: the close
+    after each hour, the first value being the open of hour 0 of day 0. Otherwise a
+    flat-then-drift path is generated.
     """
     import random
     rng = random.Random(seed)
@@ -148,11 +147,9 @@ def test_aggregate_daily_klines_sums_turnover_and_volume() -> None:
 
 
 def test_forward_returns_use_entry_plus_one_hour_close() -> None:
-    """fwd_ret_3d for decision date D = close[first bar of D+1+3] / close[first bar of D+1] - 1.
-
-    Build a hand-rigged path where the first-bar close on each day is exactly
-    the day index plus 10, so forward returns are deterministic and easy to
-    check by hand."""
+    """fwd_ret_3d for decision date D = close[first bar of D+1+3] / close[first bar of
+    D+1] - 1, checked on a path whose first-bar close each day is the day index + 10.
+    """
     days = 12
     # closes[hour_index] — we only care about the FIRST bar of each day.
     # First bar of day d is hour_index d*24+0. Set that bar's close to (d+10).
@@ -187,11 +184,10 @@ def test_forward_returns_are_null_past_window_end() -> None:
 
 
 def test_forward_returns_calendar_correct_across_missing_day() -> None:
-    """M4: a missing calendar day must not be skipped positionally. A row whose
-    entry (D+1) or exit (D+1+N) calendar day is absent gets a NULL forward
-    return, not a misaligned one. With a positional shift, day-2 below would
-    have wrongly produced close[D4]/close[D... ] — a 2-calendar-day return
-    mislabeled as fwd_ret_1d."""
+    """A missing calendar day must not be skipped positionally: a row whose entry (D+1)
+    or exit (D+1+N) calendar day is absent gets a NULL forward return, not a
+    misaligned one.
+    """
     base = _date_ms("2025-01-01")
     present = [0, 1, 2, 4, 5, 6]  # 2025-01-04 (day 3) is MISSING
     daily = pl.DataFrame(
@@ -226,10 +222,11 @@ def _make_deterministic_klines(
     price_paths: dict[str, list[float]],
     turnover_paths: dict[str, list[float]] | None = None,
 ) -> pl.DataFrame:
-    """Hand-rigged hourly klines with NO RNG. Each symbol's hourly close path
-    comes from ``price_paths[symbol]`` (must have days*24 entries). Optional
-    ``turnover_paths`` per symbol; defaults to 1000 per hour for every symbol
-    so cross-sectional rank features have no per-symbol noise."""
+    """Hand-rigged hourly klines with no RNG. Each symbol's hourly close path comes from
+    ``price_paths[symbol]`` (must have days*24 entries). Optional ``turnover_paths``
+    per symbol default to 1000 per hour so cross-sectional rank features carry no
+    per-symbol noise.
+    """
     start_ms = _date_ms(start_date)
     rows: list[dict] = []
     for symbol in symbols:
@@ -280,15 +277,13 @@ def _features_for_klines(klines: pl.DataFrame) -> dict[str, pl.DataFrame]:
 
 
 def test_no_feature_can_see_a_future_price_spike() -> None:
-    """Causality contract: plant a +50% price spike on day 10's first bar in
-    universe A only. Universe B is identical except the spike isn't there.
-    For SPIKE on any date D < spike_day, the feature value in A must equal
-    the feature value in B — bit-identical input up to D's EOD means
-    bit-identical output, otherwise the feature is reading from the future.
+    """Plant a +50% price spike on day 10's first bar in universe A only; universe B is
+    identical without it. For any date D < spike_day the feature value must be
+    bit-identical across universes, otherwise the feature reads from the future.
 
-    Comparing same-symbol-across-universes (rather than cross-symbol within
-    one universe) avoids false positives from ordinal tie-breaking in
-    rank-based features like ``liquidity_rank``."""
+    Comparing the same symbol across universes (rather than across symbols within
+    one) avoids false positives from ordinal tie-breaking in rank-based features.
+    """
     days = 15
     spike_day = 10
     flat = [100.0] * (days * 24)
@@ -444,8 +439,7 @@ def test_resolve_feature_specs_accepts_all_string_list_and_specs() -> None:
 
 
 def _write_fixture_data_root(root: Path, *, days: int = 35) -> None:
-    """Write a minimal data root (klines_1h only) to ``root`` so
-    build_feature_panel can read it via read_dataset."""
+    """Write a minimal data root (klines_1h only) to ``root`` so build_feature_panel can read it via read_dataset."""
     hourly = _make_hourly_klines(["AAA", "BBB", "CCC"], "2025-01-01", days=days, seed=7)
     # Storage convention: partitioned by date=YYYY-MM-DD, single file 'part.parquet'.
     klines_dir = root / "klines_1h"
@@ -510,12 +504,11 @@ def test_build_feature_panel_filters_pit_membership_before_features_and_ranks(
 
 
 def test_autodetect_dataset_names_picks_binance_when_prefixed_subdirs_exist(tmp_path: Path) -> None:
-    """Binance roots use binance_usdm_-prefixed dataset dirs; Bybit roots
-    use plain names. Phase 5a hit this — dispatch passed default Bybit
-    names against the Binance root, the panel silently produced 100%-null
-    funding/oi/premium-derived features, and Phase 5b IC returned all NaN
-    for those features. The autodetector picks the right convention by
-    sniffing which subdirs exist."""
+    """Binance roots use ``binance_usdm_``-prefixed dataset dirs; Bybit roots use plain
+    names. Passing Bybit names against a Binance root produces 100%-null
+    funding/oi/premium-derived features and an all-NaN IC, so the autodetector picks
+    the convention by sniffing which subdirs exist.
+    """
     from liquidity_migration.daily_feature_panel import _autodetect_dataset_names
 
     # Bybit-shaped root: plain dataset dirs
@@ -563,9 +556,9 @@ def test_build_feature_panel_universe_filter_drops_low_turnover_rows(tmp_path: P
 
 
 def test_attach_daily_returns_is_calendar_exact_across_gaps() -> None:
-    """ret_1d must be calendar-exact: a symbol with a missing calendar day gets a
-    NULL return on the post-gap day, NOT a positional 2-day return mislabeled 1d
-    (the gap-blind shift(1) hazard the M4 forward-return join was built to avoid)."""
+    """ret_1d must be calendar-exact: a symbol with a missing calendar day gets a NULL
+    return on the post-gap day, not a positional 2-day return mislabeled 1d.
+    """
     _DAY = 86_400_000
     # Day 2 missing for X: present days 0, 1, 3.
     df = pl.DataFrame({
@@ -581,15 +574,13 @@ def test_attach_daily_returns_is_calendar_exact_across_gaps() -> None:
 
 
 # ============================================================================
-# audit2c: daily-aggregation day-key snap
+# Daily-aggregation day-key snap
 # ============================================================================
 
 
 def _gap_edge_intraday(value_col: str, *, extra: dict[str, list] | None = None) -> pl.DataFrame:
-    """Intraday rows for one symbol/day whose first ts is OFF the 00:00 grid.
-
-    The day's 00:00 bar is missing (a gap edge); the first observation is at
-    01:00 UTC. ``min(ts_ms)`` is therefore the day floor + 1h, not the floor.
+    """Intraday rows for one symbol/day whose first ts is OFF the 00:00 grid: the day's
+    00:00 bar is missing, so ``min(ts_ms)`` is the day floor + 1h.
     """
     day_floor = _date_ms("2025-03-02")
     hours = [1, 2, 23]  # 00:00 bar absent
@@ -651,11 +642,9 @@ def test_premium_day_key_snapped_to_day_floor() -> None:
 
 
 def test_snapped_key_joins_kline_grid() -> None:
-    """The snapped daily key joins a kline-grid row keyed at 00:00 (fix #2).
-
-    The kline daily grid keys each day at the 00:00 floor. The un-snapped OI
-    key (first intraday ts = floor + 1h) would miss this join; the snapped key
-    lands exactly on the grid and the join keeps the day.
+    """The kline daily grid keys each day at the 00:00 floor, so the un-snapped OI key
+    (first intraday ts = floor + 1h) would miss the join; the snapped key lands on
+    the grid and keeps the day.
     """
     day_floor = _date_ms("2025-03-02")
     oi_daily = _aggregate_daily_open_interest(_gap_edge_intraday("open_interest"))
@@ -666,19 +655,15 @@ def test_snapped_key_joins_kline_grid() -> None:
 
 
 # ============================================================================
-# Relocated from tests/test_audit_fix_b09.py (audit bucket b09).
-# pit-signals-3 / research-methodology-2 / test-gaps-3 — gap-blind N-day builders
+# Gap-blind N-day builders
 # ============================================================================
 
 
 def test_xs_rank_ret_Nd_is_calendar_exact_across_a_gap() -> None:
-    """A symbol present on days {0,1,2,5,6} then ranked: the day-5/6 rows must NOT
-    treat shift(3) as a clean 3-calendar-day return. With the positional bug the
-    day-5 row's "ret_3d" used day-2's close (a 3-CALENDAR-day-misaligned span);
-    calendar_shift nulls it because there is no row exactly 3 days back.
-
-    Two contiguous control symbols keep the cross-section non-degenerate so the
-    rank denominator and ordering are well defined.
+    """A symbol present on days {0,1,2,5,6}: the day-5/6 rows must not treat shift(3) as
+    a clean 3-calendar-day return. ``calendar_shift`` nulls it because there is no row
+    exactly 3 days back. Two contiguous control symbols keep the cross-section
+    non-degenerate so the rank denominator and ordering stay well defined.
     """
     builder = _make_xs_rank_ret_Nd(3)
     # GAPPED symbol: missing days 3 and 4.
@@ -717,9 +702,9 @@ def test_xs_rank_ret_Nd_is_calendar_exact_across_a_gap() -> None:
 
 
 def test_xs_rank_ret_Nd_matches_positional_shift_on_contiguous_data() -> None:
-    """Numerical-equivalence gate: on a CONTIGUOUS series calendar_shift(n) is
-    byte-identical to the old close/close.shift(n)-1, so the fix moves no number
-    on the happy path."""
+    """On a contiguous series ``calendar_shift(n)`` is byte-identical to
+    ``close/close.shift(n)-1``, so the calendar fix moves no number on the happy path.
+    """
     builder = _make_xs_rank_ret_Nd(3)
     days = list(range(8))
     a = _daily_returns_frame("AAA", days, [100.0 * (1.0 + 0.01 * d) for d in days])
@@ -751,9 +736,10 @@ def test_xs_rank_ret_Nd_matches_positional_shift_on_contiguous_data() -> None:
 
 
 def test_turnover_delta_window_shrinks_across_a_gap_not_stretches() -> None:
-    """turnover_delta_7d's prior-mean is now calendar-bounded: a gapped symbol's
-    prior window covers <=7 CALENDAR days, never positionally back-filled rows from
-    >7 days ago. We assert the post-gap row's prior mean uses only in-window days."""
+    """``turnover_delta_7d``'s prior mean is calendar-bounded: a gapped symbol's prior
+    window covers at most 7 CALENDAR days, never positionally back-filled rows from
+    further back.
+    """
     builder = _make_turnover_delta(7)
     base = _date_ms("2025-01-01")
     # Present days 0,1,2 (turnover 100) then a long gap, relist day 30 (turnover 100).

@@ -5,7 +5,8 @@ description: Orient in the liquidity-migration codebase, locate ownership, and t
 
 # Navigate the repository
 
-Read `docs/repository_map.md` for stable subsystem ownership and entry points.
+Read `docs/architecture.md` (Subsystem map) for stable subsystem ownership
+and entry points.
 Before broad work, run `scripts/dev.sh doctor --json` when selected-Python,
 worktree, dependency-lock, skill-mirror, or Graphify state could affect the
 result. Treat diagnostics as local facts, never as runtime authorization.
@@ -14,18 +15,21 @@ Start from the source that owns the question:
 
 - Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
   environment/config.
-- Evidence policy: `AGENTS.md`.
+- Evidence policy: `AGENTS.md` for the standing rules, `docs/governance.md` for
+  the Progressive Evidence Model itself.
 - Research decisions and queue: `docs/strategy_program.md` and raw run
   artifacts.
-- Active profile contract: `docs/active_trading_logic.md`, then the strategy
+- Active profile contract: `docs/trading_logic.md`, then the strategy
   modules, target producers, account owner, and deploy overrides it cites.
 - CLI ownership: `liquidity_migration/cli.py`, parser modules, and current
   `--help`.
 - Data/PIT: `storage.py`, `ingestion.py`, `archive_manifest.py`,
-  `volume_events_pit.py`, `docs/data_roots.md`, and `docs/pit_gate.md`.
-- Execution lifecycle: continuous/long target producers,
-  `account_service.py`, `account_kernel.py`, `account_reconcile.py`,
-  `trade_lifecycle.py`, the demo/paper account-owner launchers, and their tests.
+  `volume_events_pit.py`, and `docs/data.md` (Research roots, Point-in-time
+  membership).
+- Execution lifecycle: the long/carry/continuous target producers and the paper
+  target mirror, `account_service.py`, `account_kernel.py`,
+  `account_reconcile.py`, `trade_lifecycle.py`, the demo/paper/mainnet
+  account-owner launchers, and their tests.
 
 Use `rg --files` and `rg` for direct discovery.
 

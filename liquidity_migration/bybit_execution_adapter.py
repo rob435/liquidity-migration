@@ -43,8 +43,8 @@ def bybit_private_execution_metadata(
         cross_sequence = 0
     return {
         "cross_sequence": cross_sequence,
-        # Missing execFee is not evidence of a zero fee. The reducer still
-        # needs a numeric placeholder, so retain explicit unresolved provenance.
+        # Missing execFee is not a zero fee, but the reducer needs a numeric
+        # placeholder, so the provenance stays explicit.
         "fee_observed": fee_observed,
         "fee_status": ("observed_execution_fee" if fee_observed else "pending_missing_execution_fee"),
         "fee_source": "bybit_private_execution.execFee",
@@ -72,10 +72,9 @@ def bybit_private_execution_metadata(
 class BybitDemoExecutionAdapter:
     """Thin, demo-only Bybit command adapter.
 
-    Submission yields the create acknowledgement only. Actual executions must
-    arrive through the private execution stream and be passed to the shared
-    kernel driver; the adapter never invents fills from a successful create
-    response.
+    Submission yields the create acknowledgement only; executions arrive through
+    the private execution stream and go to the kernel driver. No fill is ever
+    inferred from a successful create response.
     """
 
     name = "bybit_demo"
@@ -99,9 +98,8 @@ class BybitDemoExecutionAdapter:
         self.client = client
         self.clock = clock or SystemClock()
         self.max_unsubmitted_exposure_age_ns = max_unsubmitted_exposure_age_ns
-        # B5. Atomic arming is a Bybit behaviour, not a guarantee this system
-        # owns. Without a verifier the create is trusted, which is only tolerable
-        # on demo where the worst case is a log line.
+        # Atomic arming is a Bybit behaviour, not something this system owns.
+        # Without a verifier the create is simply trusted.
         self.entry_stop_verifier = entry_stop_verifier
 
     @staticmethod
@@ -131,9 +129,9 @@ class BybitDemoExecutionAdapter:
                 or not command.entry_stop_source
                 or command.entry_stop_trigger_by != "MarkPrice"
             ):
-                # This is an internal invariant breach, not a venue rejection.
-                # Raise before leverage or order mutation so a legacy/corrupt
-                # command can never be replayed as a naked entry.
+                # Internal invariant breach, not a venue rejection: raise before
+                # any mutation so a corrupt command cannot replay as a naked
+                # entry.
                 raise RuntimeError("Bybit exposure-increasing command lacks durable entry-attached protection")
             if command.signed_qty > 0.0 and stop_price >= command.reference_price:
                 raise RuntimeError("long entry stop is not below its durable reference price")
@@ -180,17 +178,14 @@ class BybitDemoExecutionAdapter:
     ) -> Iterable[ExecutionObservation]:
         """Validate the command and negotiate idempotent leverage.
 
-        This phase cannot create exposure. The execution driver therefore runs
-        it before claiming the durable order-create attempt, allowing a lost
-        leverage response to retry without being confused with an ACK-lost
-        market order.
+        This phase cannot create exposure, so the driver runs it before claiming
+        the durable order-create attempt: a lost leverage response can retry
+        without being confused with an ACK-lost market order.
         """
 
         entry_protection_metadata = self._entry_protection_metadata(command)
-        # Build all deterministic request fields before the durable attempt.
-        # The immutable command makes the second build in ``submit_prepared``
-        # equivalent, while keeping this public phase free of cached secrets or
-        # mutable provider payloads.
+        # Build the deterministic request fields before the durable attempt.
+        # The command is immutable, so ``submit_prepared``'s rebuild matches.
         self._order_params(command)
         if not command.reduce_only:
             try:
@@ -231,9 +226,8 @@ class BybitDemoExecutionAdapter:
 
         entry_protection_metadata = self._entry_protection_metadata(command)
         params = self._order_params(command)
-        # Measure the create-order request itself. Entry leverage negotiation is
-        # intentionally outside request/ack RTT but remains inside the broader
-        # command-decision-to-socket delay.
+        # Measures the create-order request only; leverage negotiation sits
+        # outside request/ack RTT but inside command-decision-to-socket delay.
         send_ts_ns = self.clock.wall_time_ns()
         try:
             result = self.client.place_order(**params)
@@ -257,10 +251,9 @@ class BybitDemoExecutionAdapter:
                     },
                 ),
             )
-        # Transport failures and duplicate-link visibility races are ambiguous:
-        # the venue may already own this command. Let the service release the
-        # request while the command remains ``commanded``. REST reconciliation
-        # queries the same orderLinkId before any safe idempotent retry.
+        # Transport failures and duplicate-link races are ambiguous: the venue
+        # may already own this command, so the request is released with the
+        # command still ``commanded`` and reconciliation probes the orderLinkId.
         local_ack_ts_ns = self.clock.wall_time_ns()
         idempotent_existing_order = bool(result.get("_idempotent_existing_order"))
         exchange_ack_ms = 0
@@ -294,13 +287,13 @@ class BybitDemoExecutionAdapter:
         )
 
     def _verify_entry_attached_stop(self, command: OrderCommand) -> str:
-        """Prove the venue applied the attached stop, right after the create (B5).
+        """Prove the venue applied the attached stop, right after the create.
 
-        Never raises: the order is already at the venue and losing this
-        acknowledgement would orphan a live position, which is strictly worse
-        than an unverified one. The verifier owns the fail-closed consequence —
-        it repairs the stop where it can and latches a breach where it cannot,
-        which blocks new exposure and flattens through the software-flat path.
+        Never raises: the order is already at the venue, and losing this
+        acknowledgement would orphan a live position. The verifier owns the
+        fail-closed consequence -- repair where it can, latch a breach where it
+        cannot, which blocks new exposure and flattens via the software-flat
+        path.
         """
 
         if command.reduce_only or self.entry_stop_verifier is None:

@@ -1,34 +1,21 @@
 """Detect order commands that can no longer make progress, and escalate them.
 
-The account kernel suppresses *all* command generation for a symbol while any
-order for it is working (``account_kernel.py`` — ``if symbol in working_symbols:
-continue``). That is correct while a submission is genuinely in flight: emitting
-an offsetting market order against an ambiguous one would double the exposure it
-was meant to cancel.
-
-The defect is that two ordinary events make "in flight" permanent:
+The account kernel suppresses all command generation for a symbol while any order
+for it is working, which is correct while a submission is genuinely in flight.
+Two events make "in flight" permanent:
 
 * ``BybitSubmissionUncertain`` on the exposure-creating ``place_order`` — the
   attempt is journaled *before* the call, so ``submission_attempts >= 1`` and
   every retry raises ``AmbiguousExposureSubmission`` rather than resending.
 * ``StaleUnsubmittedExposureCommand`` — a ``commanded`` order with
-  ``submission_attempts == 0`` left by a SIGKILL in the millisecond window
-  between journal commit and submit. An OOM at ``MemoryMax=512M``, a deploy
-  restart, or a host reboot all reach it.
+  ``submission_attempts == 0``, left by a kill between journal commit and submit.
 
-In either state the symbol is frozen: no producer request, no convergence pass,
-and **no exit** can ever be emitted for it again, while the real position sits at
-the venue behind only its native stop. Nothing in the runtime expires, cancels,
-or escalates such a command — it simply retries every ~2s forever.
+Either way the symbol is frozen: no producer request, no convergence pass, and no
+exit, while the real position sits at the venue behind only its native stop.
 
-This module does not resolve the wedge. Resolving it needs an operator-authorized
-journal transition recording what actually happened at the venue, and inventing
-that silently would be exactly the blind resend the design refuses. What it does
-is end the silence: a wedged command becomes a named, aging, reportable fact
-instead of an invisible one.
-
-The no-blind-resend rule is untouched. The missing piece was an exit from the
-state, not the refusal to resend.
+This module reports the wedge; it does not resolve it. Resolution needs an
+operator-authorized journal transition recording what actually happened at the
+venue.
 """
 
 from __future__ import annotations
@@ -51,10 +38,9 @@ WEDGE_AMBIGUOUS_SUBMISSION = "ambiguous_submission"
 #: only an operator-authorized transition may say so.
 WEDGE_NEVER_SUBMITTED = "never_submitted"
 
-#: How long a ``commanded`` order may sit before it is treated as wedged rather
-#: than in flight. A healthy submission resolves in well under a second; the
-#: reconcile loop runs every ~2s. Minutes here, not seconds, so ordinary venue
-#: slowness and a single restart never page anyone.
+#: How long a ``commanded`` order may sit before it counts as wedged rather than
+#: in flight. Healthy submissions resolve in under a second; minutes here so
+#: ordinary venue slowness and a single restart do not page anyone.
 DEFAULT_WEDGE_AFTER_NS = 300 * 1_000_000_000
 
 
@@ -73,9 +59,7 @@ class WedgedCommand:
     def blocks_exit(self) -> bool:
         """Whether this wedge is also preventing the position from being closed.
 
-        Every wedge freezes its symbol, so a non-reduce-only wedge is strictly
-        worse than a stuck exit: the position it froze is still open and the
-        system can no longer act on it.
+        A non-reduce-only wedge froze a symbol whose position is still open.
         """
 
         return not self.reduce_only

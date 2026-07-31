@@ -1,8 +1,7 @@
 """Causal BTC-volatility regime intensity for the continuous-book hedge.
 
-This module owns the code-defined regime signal used by the demo hedge
-and standard historical refresh. Parameters are active defaults, not an
-evidence verdict or authorization.
+The code-defined regime signal used by the demo hedge and the standard
+historical refresh; its parameters are defaults, not an evidence verdict.
 
 ``intensity[d]`` uses BTC returns strictly BEFORE day ``d`` only. The trailing vol
 for day ``d`` is the population stdev of the ``vol_window`` returns preceding ``d``

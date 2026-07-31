@@ -1,5 +1,6 @@
-"""audit2b regression: _strategy_equity_series must not crash on a date-only
-frame (no ts_ms) and must leave the ts_ms happy path unchanged."""
+"""``_strategy_equity_series`` must handle a date-only frame (no ts_ms) and leave the
+ts_ms path unchanged.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def test_date_only_frame_does_not_crash():
 
 
 def test_ts_ms_happy_path_unchanged():
-    # ts_ms present: ordering comes from ts_ms exactly as before the fix.
+    # ts_ms present: ordering comes from ts_ms.
     frame = pl.DataFrame(
         {
             "ts_ms": [2000, 1000, 3000],
@@ -76,15 +77,15 @@ def test_non_finite_and_unparseable_rows_dropped():
 
 
 # ---------------------------------------------------------------------------
-# audit b07 reports-charts-3: y-axis floor follows the data when it goes negative
-# (relocated from tests/test_audit_fix_b07.py)
+# The y-axis floor follows the data when it goes negative
 # ---------------------------------------------------------------------------
 
 
 def test_nice_axis_floor_follows_negative_data() -> None:
-    """reports-charts-3: a levered (e.g. 4x) equity curve blowing through zero must
-    not have its y-floor pinned at 0 — that draws the wipeout below the plot floor,
-    hiding it. When min < 0 the floor follows the data."""
+    """A levered equity curve blowing through zero must not have its y-floor pinned at
+    0, which draws the wipeout below the plot floor; when min < 0 the floor follows
+    the data.
+    """
     from liquidity_migration.volume_events_charts import _nice_axis
 
     low, _high, ticks = _nice_axis(-0.27, 2.0, target_ticks=12)
@@ -94,10 +95,9 @@ def test_nice_axis_floor_follows_negative_data() -> None:
 
 
 def test_nice_axis_still_clamps_floor_at_zero_for_nonnegative_data() -> None:
-    """The common case (a $1-normalised curve that never drops below 0) keeps the
-    floor clamped at 0 — the fix is scoped to negative data only, so a non-negative
-    series whose padded floor would dip below 0 is still pinned at 0 (the axis never
-    invents negative territory the curve never visited)."""
+    """A non-negative series whose padded floor would dip below 0 is still pinned at 0 --
+    the axis never invents negative territory the curve never visited.
+    """
     from liquidity_migration.volume_events_charts import _nice_axis
 
     # min near zero: the 5% pad would push floor_candidate below 0; the clamp holds it at 0.
@@ -110,14 +110,15 @@ def test_nice_axis_still_clamps_floor_at_zero_for_nonnegative_data() -> None:
 
 
 # ---------------------------------------------------------------------------
-# audit b07 reports-charts-4: "Trades" header only when a real trades column present
+# "Trades" header only when a real trades column is present
 # ---------------------------------------------------------------------------
 
 
 def test_monthly_table_labels_days_when_no_trades_column() -> None:
-    """reports-charts-4: a monthly frame carrying only month+strategy_return has NO
-    trade counts. The rows must NOT claim "Trades: 0" for every month — the count is
-    derived from per-month equity DAYS and the caller labels it "Days"."""
+    """A monthly frame carrying only month+strategy_return has no trade counts, so the
+    rows must not claim "Trades: 0": the count is derived from per-month equity DAYS
+    and labelled "Days".
+    """
     from liquidity_migration.volume_events_charts import _has_columns, _monthly_table_rows
 
     monthly = pl.DataFrame(
@@ -152,14 +153,15 @@ def test_monthly_table_labels_trades_when_trades_column_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# audit b07 reports-charts-5: legend multiples read over the common (earliest-end) window
+# Legend multiples read over the common (earliest-end) window
 # ---------------------------------------------------------------------------
 
 
 def test_chart_final_values_uses_common_end_window() -> None:
-    """reports-charts-5: when BTC ends before the (flat-extended) strategy curve, the
-    legend multiple for EACH series must be read at the last date COMMON to all series
-    — not each series' own last point, which compared spans of different length."""
+    """When BTC ends before the flat-extended strategy curve, the legend multiple for
+    EACH series is read at the last date common to all series, not each series' own
+    last point, which compared spans of different length.
+    """
     from liquidity_migration.volume_events_charts import _chart_final_values
 
     series = [

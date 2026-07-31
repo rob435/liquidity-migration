@@ -1,9 +1,10 @@
-"""Tests for the PIT membership / full-PIT universe gate — the methodology-critical
-no-look-ahead / no-survivorship boundary in liquidity_migration/volume_events_pit.py.
+"""Tests for the PIT membership / full-PIT universe gate in
+liquidity_migration/volume_events_pit.py.
 
-These pin the exact survivorship semantics: pre-listing and post-delisting empty
-manifest claims are NOT required (false tripwires), but a genuine mid-history gap
-within a symbol's traded lifespan IS required (real survivorship protection)."""
+Survivorship semantics: pre-listing and post-delisting empty manifest claims are NOT
+required (they would be false tripwires), but a genuine mid-history gap within a
+symbol's traded lifespan IS.
+"""
 from __future__ import annotations
 
 import polars as pl

@@ -499,7 +499,7 @@ def test_startup_allows_only_typed_native_breach_recovery() -> None:
 
 
 class _ExposureKernel:
-    """Minimal kernel stand-in for the B16 startup classification."""
+    """Minimal kernel stand-in for the startup exposure classification."""
 
     def __init__(self, *, positions: dict[str, float], working: set[str] | None = None) -> None:
         self._state = SimpleNamespace(
@@ -528,7 +528,7 @@ def _report(*, venue_positions: dict[str, float]) -> AccountReconciliationReport
 
 
 def test_startup_failure_over_a_flat_account_still_aborts_loudly() -> None:
-    """B16 does not soften a failure that strands nothing."""
+    """Degrading a startup failure must not soften one that strands nothing."""
 
     error = RuntimeError("account reconciliation unhealthy: BUSDT:venue=-2")
     with pytest.raises(RuntimeError, match="venue=-2"):
@@ -553,7 +553,9 @@ def test_startup_failure_over_open_exposure_degrades_instead_of_crash_looping(
     kernel: _ExposureKernel,
     report: AccountReconciliationReport,
 ) -> None:
-    """B16: exiting here is a 2s crash loop with the book unmanaged."""
+    """Exiting on a startup failure over open exposure is a 2s crash loop with the book
+    unmanaged, so the runner degrades instead.
+    """
 
     degradation = degrade_or_raise(
         stage="startup reconciliation",
@@ -577,7 +579,7 @@ def test_open_exposure_detection_treats_an_unread_venue_as_flat_only_when_the_jo
 
 
 def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
-    """Each startup check that can strand a live book routes through B16."""
+    """Each startup check that can strand a live book routes through the degrade path."""
 
     source = (
         Path(__file__).resolve().parents[1]
@@ -594,9 +596,16 @@ def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
         assert stage in source, stage
     # The bare raising forms must not survive at function level (they are only
     # reachable now from inside a try that hands the error to degrade_or_raise).
-    assert "\n    require_startup_reconciliation_safe(" not in source
+    # Each pair is load-bearing together: the "not in" alone passes vacuously the
+    # day one of these is renamed, which is exactly what happened to the ownership
+    # check, so pin the guarded form too.
+    for guarded in (
+        "require_startup_reconciliation_safe(",
+        "require_bybit_order_ownership(",
+    ):
+        assert f"\n    {guarded}" not in source, guarded
+        assert f"\n        {guarded}" in source, guarded
     assert "\n    startup_funding_reconciliation.require_healthy()" not in source
-    assert "\n    require_bybit_demo_order_ownership(" not in source
     # ...and the latch is folded into published health rather than only logged.
     assert "if startup_degradations:" in source
     assert "startup_degradations.clear()" in source
@@ -665,17 +674,18 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
-    # CONTINUOUS retired 2026-07-29: the cycle root is unset by default and the
-    # flag is only passed when an operator configures a running sleeve again.
+    # CONTINUOUS is retired: the cycle root is unset by default and the flag is
+    # only passed when an operator configures a running sleeve again.
     assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in wrapper
     assert '--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"' in wrapper
     assert '"${continuous_cycle_args[@]}"' in wrapper
 
 
 def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
-    """A dropped L2 delta must cost one protection cycle, never the owner
-    process: market_ref raises for gapped books and the runner's protection
-    loop has no other handler between it and process exit."""
+    """A dropped L2 delta must cost one protection cycle, never the owner process:
+    ``market_ref`` raises for gapped books and the runner's protection loop has no
+    other handler between it and process exit.
+    """
 
     from liquidity_migration.account_service_runner import protection_market_refs
     from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
@@ -732,10 +742,10 @@ def _protection_book(symbol: str, local_receive_ts_ns: int):
 
 
 def test_protection_market_refs_rejects_a_frozen_book() -> None:
-    """The defect this closes: a dropped WebSocket delivers no deltas at all, so
-    the reconstruction stays healthy and sequence_gap stays false while the real
-    price walks away. A frozen book passes every structural check, and the stop
-    engine would decide against a mark minutes old without firing."""
+    """A dropped WebSocket delivers no deltas at all, so reconstruction stays healthy
+    and ``sequence_gap`` stays false while the real price walks away. A frozen book
+    passes every structural check, so it must be rejected on staleness.
+    """
 
     from liquidity_migration.account_service_runner import (
         PROTECTION_MAX_BOOK_AGE_NS,
@@ -776,9 +786,9 @@ def test_protection_market_refs_accepts_a_book_inside_the_bound() -> None:
 
 
 def test_protection_market_refs_treats_a_backwards_clock_as_unusable() -> None:
-    """Age is measured under the recorder's lock, so a negative age cannot be a
-    read/update race — it is a real wall-clock regression, and an unknown
-    safety-critical state fails closed."""
+    """Age is measured under the recorder's lock, so a negative age is a real
+    wall-clock regression rather than a read/update race, and fails closed.
+    """
 
     from liquidity_migration.account_service_runner import protection_market_refs
 

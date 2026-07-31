@@ -1,43 +1,31 @@
-"""The missing exit from a wedged ``commanded`` order (B15b).
+"""The operator-authorized exit from a wedged ``commanded`` order.
 
-``wedged_command_watch`` names and ranks a command that can no longer progress.
-It deliberately stops there: resolving one needs an operator-authorized journal
-transition recording what actually happened at the venue, and inventing that
-silently would be exactly the blind resend the design refuses.
-
-This module supplies the transition, and the evidence standard it must clear.
-
-**The no-blind-resend rule is untouched.** Nothing here resubmits, retries, or
-recreates an order. The only journal effect is terminalizing a command that the
-venue demonstrably does not hold, which unfreezes the symbol so ordinary
-convergence can act on the position again.
+``wedged_command_watch`` names and ranks a command that can no longer progress;
+this module supplies the journal transition that resolves one, and the evidence
+standard it must clear. Nothing here resubmits, retries, or recreates an order:
+the only journal effect is terminalizing a command the venue demonstrably does
+not hold, which unfreezes the symbol for ordinary convergence.
 
 The evidence standard, in order of strictness:
 
 ``live``
-    The venue reports a working order under this ``orderLinkId``. Resolution is
-    **refused**. The command is not wedged in any sense that a journal edit can
-    fix — the order is real and its executions are still coming.
+    The venue reports a working order under this ``orderLinkId``. Refused: the
+    order is real and its executions are still coming.
 ``unreadable``
-    Any of the three queries failed. Refused: an absent answer is not evidence
-    of an absent order, and this is precisely the state that fails closed.
+    A query failed. Refused: an absent answer is not evidence of an absent order.
 ``unreconstructed_fills``
-    Executions exist for this command that the journal has not reduced yet.
-    Refused until reconciliation catches up; terminalizing first would lose
-    fills and corrupt position truth.
+    Executions exist that the journal has not reduced yet. Refused until
+    reconciliation catches up; terminalizing first would lose fills.
 ``terminal``
-    The venue's own order history reports Cancelled/Rejected/Filled/
-    PartiallyFilledCanceled. The venue has already answered; the resolution
-    simply records the answer it gave.
+    The venue's order history reports Cancelled/Rejected/Filled/
+    PartiallyFilledCanceled. The resolution records the answer the venue gave.
 ``absent``
-    Nothing at the venue under this id, anywhere, and the command is older than
-    Bybit's own visibility lag. This is the genuinely ambiguous case and the
-    only one that consumes operator authorization: a human states, on the
-    record, that they have checked the account and the order does not exist.
+    Nothing at the venue under this id, and the command is older than Bybit's own
+    visibility lag. The genuinely ambiguous case, and the only one that consumes
+    operator authorization.
 
-A ``never_submitted`` wedge (``submission_attempts == 0``) is journal-proven to
-have never left the process — the attempt is committed *before* the call — but
-it is still probed, because a durable claim is cheap and a wrong one is not.
+A ``never_submitted`` wedge (``submission_attempts == 0``) is journal-proven never
+to have left the process, but is still probed.
 """
 
 from __future__ import annotations
@@ -263,9 +251,9 @@ def resolve_wedged_command(
 ) -> WedgeEvidence:
     """Terminalize one wedged command, on evidence, under a named operator.
 
-    Returns the evidence that justified it. Raises
+    Returns the evidence that justified it, or raises
     :class:`WedgedCommandResolutionRefused` when the evidence does not support
-    the transition — which is the common case and is meant to be.
+    the transition.
     """
 
     operator = str(operator).strip()
@@ -449,8 +437,7 @@ def main(argv: Any = None) -> int:
     if not api_key or not api_secret:
         print("realm credentials are not present in this environment", file=sys.stderr)
         return 2
-    # Read-only: no mutation lease is passed, so this client cannot place,
-    # cancel, or amend anything even if a later edit tried to.
+    # No mutation lease is passed, so this client cannot place, cancel, or amend.
     client = BybitPrivateClient(
         category="linear",
         testnet=False,

@@ -37,10 +37,8 @@ class BinanceUSDMData:
     retries: int = 3
     retry_sleep_seconds: float = 0.75
     timeout_seconds: float = 15.0
-    # Fallback wait on a 429/418 with no usable Retry-After header, and the hard
-    # cap on any Retry-After value (server-specified windows can be tens of
-    # seconds to minutes; a capped wait keeps an offline build from stalling
-    # indefinitely on a hostile/huge header). See ratelimit-rest-6.
+    # Fallback wait on a 429/418 with no usable Retry-After header, and the cap
+    # on any Retry-After value so a huge one cannot stall a build.
     rate_limit_backoff_seconds: float = 30.0
     max_retry_after_seconds: float = 120.0
     calls: int = field(init=False, default=0)
@@ -121,12 +119,10 @@ class BinanceUSDMData:
         rows_by_ts: dict[int, list[Any]] = {}
         cursor = start
         prev_page_full = False
-        # `end` is EXCLUSIVE (see --end in cli_parsers and the [start..end)
-        # the downloader prints); Binance's endTime is inclusive, so both the
-        # request and the row filter cap at end - 1. Writing the 00:00 bar of
-        # the excluded day made pit_coverage read kline coverage one day
-        # fresher than reality and turned that single bar into a bogus daily
-        # close at the panel tail (2026-07-27 audit M6).
+        # `end` is EXCLUSIVE while Binance's endTime is inclusive, so both the
+        # request and the row filter cap at end - 1. Writing the excluded day's
+        # 00:00 bar makes pit_coverage read one day fresher than reality and
+        # puts a bogus daily close at the panel tail.
         while cursor < end:
             params: dict[str, Any] = {
                 "interval": interval,
@@ -139,17 +135,9 @@ class BinanceUSDMData:
             if not isinstance(batch, list):
                 raise BinanceDataError(f"Binance {path} returned non-list payload")
             if not batch:
-                # Distinguish a benign terminal empty page from a SUSPICIOUS
-                # mid-range empty page: the provider returns [] (a rate-limit /
-                # load hiccup that does not raise) right after a FULL page while
-                # the cursor is still more than one interval short of end_ms.
-                # That silently truncates the fetch; the downloader then writes a
-                # full-range completeness marker over a permanent gap that is
-                # never re-fetched. Raise a transient error so the symbol is
-                # retried / recorded failed instead of marked complete. A full
-                # prior page is the unambiguous "there is more data" signal, so
-                # this never false-positives on a genuinely sparse/short symbol
-                # whose last page was partial. (ingestion-1)
+                # An empty page right after a FULL one, with the cursor still
+                # short of end_ms, is a provider hiccup rather than end-of-data;
+                # accepting it would mark a permanent gap complete.
                 _raise_if_suspicious_empty_page(
                     path, symbol, cursor=cursor, end=end, step_ms=interval_ms, prev_page_full=prev_page_full
                 )
@@ -194,12 +182,10 @@ class BinanceUSDMData:
             if not isinstance(batch, list):
                 raise BinanceDataError(f"Binance {path} returned non-list payload")
             if not batch:
-                # See _paged_kline: a mid-range empty page after a FULL page is a
-                # silent-truncation signal, not end-of-data. Raise so the funding
-                # / open-interest / taker fetch is retried rather than the gap
-                # being marked complete. step_ms may be None (e.g. funding, whose
-                # cadence is irregular); the prev-page-full guard alone still
-                # distinguishes truncation from a genuine terminal empty page.
+                # See _paged_kline: an empty page after a full one is silent
+                # truncation, not end-of-data. ``step_ms`` may be None for
+                # irregular cadences (funding); the prev-page-full guard alone
+                # still separates truncation from a genuine terminal page.
                 _raise_if_suspicious_empty_page(
                     path, symbol, cursor=cursor, end=end, step_ms=step_ms, prev_page_full=prev_page_full
                 )
@@ -236,14 +222,11 @@ class BinanceUSDMData:
                 self.error_events += 1
                 self.last_error = str(exc)[:500]
                 if isinstance(exc, HTTPError):
-                    # Permanent client errors (e.g. -1121 invalid symbol, -1100
-                    # illegal chars) arrive as HTTP 4xx, not as an HTTP-200 JSON
-                    # body, so the code<0 check above never sees them. Retrying
-                    # burns the whole budget + backoff sleeps on a request that
-                    # can never succeed. Fail fast with the parsed Binance error
-                    # code, mirroring the 200-path handling. 429 (rate limit) and
-                    # 418 (IP ban) are the exception: they ARE transient, so we
-                    # honor Retry-After and keep retrying. (ingestion-5)
+                    # Permanent client errors (-1121 invalid symbol, -1100
+                    # illegal chars) arrive as HTTP 4xx, not an HTTP-200 JSON
+                    # body, so the code<0 check above misses them; retrying
+                    # burns the whole budget. 429/418 are transient and keep
+                    # retrying under Retry-After.
                     if exc.code not in (418, 429) and 400 <= exc.code < 500:
                         raise BinanceDataError(
                             f"Binance {path} failed with HTTP {exc.code}: {_http_error_detail(exc)}"
@@ -252,9 +235,8 @@ class BinanceUSDMData:
                 if attempt + 1 >= self.retries:
                     break
                 self.retry_events += 1
-                # On 429/418 the server tells us how long to wait; honor it
-                # (capped) instead of burning the fixed exponential backoff in a
-                # couple of seconds and then dropping the symbol. (ratelimit-rest-6)
+                # On 429/418 honor the server's (capped) wait instead of
+                # burning the exponential backoff and dropping the symbol.
                 backoff = self.retry_sleep_seconds * (2**attempt)
                 if isinstance(exc, HTTPError) and exc.code in (418, 429):
                     backoff = max(backoff, self._retry_after_seconds(exc))
@@ -293,9 +275,8 @@ class BinanceUSDMData:
 def _http_error_detail(exc: HTTPError) -> str:
     """Best-effort detail string from an HTTPError body (the Binance error JSON).
 
-    Binance returns ``{"code": -1121, "msg": "Invalid symbol."}`` in the 4xx body;
-    surfacing it makes the fast-fail error actionable. Reading the body must never
-    itself raise (the connection may already be closed).
+    Binance puts ``{"code": -1121, "msg": "Invalid symbol."}`` in the 4xx body.
+    Reading it must never raise; the connection may already be closed.
     """
     try:
         body = exc.read().decode("utf-8", errors="replace")
@@ -316,23 +297,19 @@ def _raise_if_suspicious_empty_page(
 ) -> None:
     """Raise on a mid-range empty page that indicates silent truncation.
 
-    A page that comes back ``[]`` is only a benign end-of-range terminator when
-    the previous page was NOT full. A full previous page means the provider
-    capped the response at the page limit and there is definitely more data
-    after it; a subsequent empty page is then a transient hiccup (the provider
-    returned ``[]`` instead of raising), which would otherwise truncate the
-    fetch and let the downloader mark a permanent coverage gap as complete.
+    An empty page is a benign end-of-range terminator only when the previous
+    page was NOT full. A full previous page means the provider capped at the
+    page limit and more data exists, so the empty successor is a hiccup that
+    would otherwise mark a permanent coverage gap complete.
 
-    When ``step_ms`` is known we additionally require the cursor to be more than
-    one step short of ``end`` (a full page whose successor genuinely lands at the
-    end of the range is legitimate). When ``step_ms`` is None (irregular cadence,
-    e.g. funding) the full-prior-page signal alone is used.
+    With ``step_ms`` known, the cursor must also be more than one step short of
+    ``end``. With ``step_ms`` None (irregular cadence, e.g. funding) the
+    full-prior-page signal alone is used.
     """
     if not prev_page_full:
         return
     if step_ms is not None and cursor > end - step_ms:
-        # The next bar would land beyond the requested end anyway — nothing was
-        # truncated.
+        # The next bar would land past ``end``; nothing was truncated.
         return
     raise BinanceDataError(
         f"Binance {path} returned an empty page for {symbol} at startTime={cursor} "

@@ -71,16 +71,14 @@ class DemoAccountIdentity:
     ) -> "DemoAccountIdentity":
         """Build identity from the authenticated ``query-api`` response.
 
-        ``userID`` is the venue account identity.  The key fingerprint binds a
-        held lease capability to the credential that produced that response
-        without writing the credential itself to disk.
+        ``userID`` is the venue account identity; the key fingerprint binds the
+        lease to the credential that produced the response without writing the
+        credential to disk.
         """
 
-        # ``environment`` here names a venue *realm*, not an execution
-        # environment: ``paper`` holds no credentials and can never reach this
-        # code. Both realms are accepted, and the value is baked into the
-        # canonical lease path so a demo and a mainnet owner can never share a
-        # lock — or mistake one another's held capability for their own.
+        # ``environment`` names a venue *realm*, not an execution environment,
+        # and is baked into the canonical lease path so two realms cannot share
+        # a lock.
         normalized_environment = venue_realm(environment).value
         normalized_api_key = str(api_key).strip()
         reported_api_key = str(api_key_info.get("apiKey") or "").strip()
@@ -585,9 +583,9 @@ def acquire_inherited_account_owner_lease(
 ) -> None:
     """Acquire and annotate a shell-owned lease descriptor without reopening it.
 
-    The caller must retain its duplicate of ``descriptor`` after this function
-    (or helper subprocess) returns. ``flock`` then remains attached to that
-    shared open-file description until the caller closes its final duplicate.
+    The caller must retain its duplicate of ``descriptor``: ``flock`` stays
+    attached to that shared open-file description until the last duplicate
+    closes.
     """
 
     normalized = Path(os.path.abspath(Path(path).expanduser()))
@@ -739,9 +737,8 @@ def revalidate_inherited_account_owner_lease(
 class AccountOwnerLease:
     """Kernel-enforced advisory lock held for a local owner's entire lifetime.
 
-    This path-based lease remains appropriate for the paper account, whose
-    identity is its canonical local route.  It is deliberately *not* accepted
-    as Bybit mutation authority; venue mutation requires the subclass below.
+    Path-based, which suits the paper account whose identity is its local
+    route. Venue mutation requires the credential-bound subclass below.
     """
 
     def __init__(
@@ -750,8 +747,8 @@ class AccountOwnerLease:
         *,
         allow_private_parent_mount_boundary: bool = False,
     ) -> None:
-        # Keep the lexical path rather than resolving it: a symlink must be
-        # refused, not normalized into an apparently canonical lease target.
+        # Lexical, not resolved: a symlink must be refused, not normalized
+        # into an apparently canonical lease target.
         self.path = Path(os.path.abspath(Path(path).expanduser()))
         self._allow_private_parent_mount_boundary = (
             allow_private_parent_mount_boundary
@@ -861,11 +858,8 @@ class AccountOwnerLease:
         if handle is None:
             return
         if holder_pid != os.getpid():
-            # A fork child inherits the descriptor and its shared open-file
-            # description, but not ownership of the parent's lease capability.
-            # Explicit LOCK_UN here would release the kernel lock for the parent
-            # as well. Closing only the child's duplicate keeps the parent's
-            # descriptor—and therefore its lease—intact.
+            # A fork child shares the open-file description, so LOCK_UN here
+            # would release the parent's lock too. Close only the duplicate.
             handle.close()
             return
         try:

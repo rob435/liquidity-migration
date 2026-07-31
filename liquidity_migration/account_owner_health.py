@@ -1,8 +1,7 @@
 """Durable liveness evidence for a single account-execution owner.
 
-The health projection is deliberately separate from the canonical account
-journal.  A process heartbeat is operational evidence, not a trading-domain
-event, and must not change execution state hashes or paper/demo parity.
+Kept out of the canonical journal: a process heartbeat is operational
+evidence, not a trading-domain event, and must not move execution state hashes.
 """
 
 from __future__ import annotations
@@ -29,21 +28,16 @@ from .execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
 ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 2
 ACCOUNT_OWNER_HEALTH_FILENAME = "account_owner_health.json"
-# Stable test value for fixtures. Production construction must always provide
-# systemd's actual INVOCATION_ID explicitly; there is deliberately no dataclass
-# default that could hide a missing generation binding.
+# Fixtures only. Production must pass systemd's real INVOCATION_ID; there is no
+# dataclass default that could hide a missing generation binding.
 TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
-# Risk-increasing target producers require a much tighter bound than the
-# operator-facing watchdog. Owners normally publish every five seconds.
+# Tighter than the operator-facing watchdog. Owners publish every ~5s.
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS = 3
 QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX = "waiting for queue-head market data:"
-# The paper twin prefixes every health detail with its execution-model scope
-# annotation, which is not a blocking reason. Strip that leading annotation
-# before classifying the first real reason, or the bounded warmup transition
-# pages CRITICAL on paper and self-resolves minutes later, every time
-# (observed hourly on 2026-07-29: "execution_model_scope=…; waiting for
-# queue-head market data: TLMUSDT:stale_book").
+# The paper twin prefixes health details with a scope annotation that is not a
+# blocking reason. Strip it before classifying the first real reason, or a
+# bounded warmup transition pages CRITICAL and self-resolves minutes later.
 _HEALTH_DETAIL_ANNOTATION_PREFIXES = ("execution_model_scope=",)
 
 
@@ -106,9 +100,8 @@ def require_systemd_invocation_id(
 def format_convergence_health(report: Any, *, max_items: int = 3) -> str:
     """Render stable, human-readable desired-vs-executed owner health.
 
-    Ages deliberately stay out of the text so a pending transition does not
-    rewrite the health artifact on every owner loop.  The report's ``healthy``
-    flag still applies the configured age SLA.
+    Ages stay out of the text so a pending transition does not rewrite the
+    health artifact every loop; ``report.healthy`` still applies the age SLA.
     """
 
     items = tuple(report.items)
@@ -333,22 +326,17 @@ def require_recent_account_owner_health(
 ) -> AccountOwnerHealth:
     """Require fresh health bound to a current authoritative journal head.
 
-    The owner verifies and reconstructs the full journal before publishing any
-    health for its systemd generation. Hot-path consumers bind that health to
-    the latest immutable transaction segment without parsing and reducing every
-    historical payload. Full journal audits remain separate and are not
-    weakened by this metadata-only head read.
+    The owner reconstructs the full journal before publishing health for its
+    systemd generation; this binds that health to the latest transaction
+    segment with a metadata-only head read.
 
     ``head_binding`` selects the consumer contract. ``"exact"`` (default)
-    requires the health snapshot to name the exact current head — a genuine
-    safety property for sizing consumers, whose capital evidence must not
-    predate a fill that already changed the balance. ``"allow_behind"`` is
-    for liveness consumers: the background execution consumer appends fills
-    independently of the owner loop, so during active trading the on-disk
-    health ordinarily lags the live head by one transaction until the next
-    republish. A fresh, healthy snapshot strictly behind an advancing journal
-    is that ordinary race, not corruption; staleness stays bounded by
-    ``max_age_ns`` and a health *ahead* of the journal still fails closed.
+    requires the snapshot to name the current head, which sizing consumers need
+    so their capital evidence cannot predate a fill. ``"allow_behind"`` is for
+    liveness consumers: the execution consumer appends fills independently of
+    the owner loop, so on-disk health normally lags the head by one transaction
+    until the next republish. Staleness stays bounded by ``max_age_ns``, and
+    health *ahead* of the journal still fails closed.
     """
 
     if environment not in EXECUTION_ENVIRONMENT_VALUES:
@@ -387,9 +375,8 @@ def require_recent_account_owner_health(
                 f"account-owner health account_id is {health.account_id!r}, "
                 f"expected {expected_account_id!r}"
             )
-        # Freshness and generation precede status detail. Otherwise a process
-        # that hangs while blocked can leave a nonterminal message masking a
-        # stale heartbeat indefinitely from the watchdog.
+        # Freshness and generation precede status detail, or a process that
+        # hangs while blocked masks its stale heartbeat from the watchdog.
         if AccountOwnerHealthStatus(health.status) is not AccountOwnerHealthStatus.HEALTHY:
             detail = health.detail or "no detail"
             error = f"account owner is blocked: {detail}"
@@ -411,11 +398,10 @@ def require_recent_account_owner_health(
             and (head is None or candidate.account_id == head.account_id)
         )
 
-    # Health publication follows the journal transaction it names. Read a
-    # health/head/health triplet so either health observation may bind to the
-    # immutable head's linearization point. Ordinary heartbeat replacement and
-    # a concurrent append are harmless; a head with no matching fresh health
-    # still fails closed after bounded retries.
+    # Health publication follows the transaction it names, so read a
+    # health/head/health triplet and let either observation bind to the head's
+    # linearization point. A head with no matching fresh health still fails
+    # closed after bounded retries.
     saw_churn = False
     health: AccountOwnerHealth | None = None
     head: AccountEvent | None = None
@@ -438,19 +424,17 @@ def require_recent_account_owner_health(
         and health.journal_sequence < journal_sequence
         and (head is None or health.account_id == head.account_id)
     ):
-        # Fresh, healthy, and strictly behind a live advancing journal: the
-        # ordinary fill-thread publish race. Equal-sequence hash disagreement
-        # still falls through to the corruption raises below.
+        # Fresh, healthy, strictly behind an advancing journal: the ordinary
+        # fill-thread publish race. Equal-sequence hash disagreement still
+        # falls through to the corruption raises below.
         return health
     if (
         health.journal_sequence < journal_sequence
         and head is not None
         and health.account_id == head.account_id
     ):
-        # Exact-head sizing consumers must not use the older capital snapshot,
-        # but this ordinary publication race is retryable. Keep it distinct
-        # from a health snapshot ahead of the journal or an equal-sequence hash
-        # contradiction, which remain terminal integrity failures.
+        # Retryable publication race. Distinct from health ahead of the journal
+        # or an equal-sequence hash contradiction, which are terminal.
         raise AccountOwnerHealthHeadPending(
             "account-owner health journal sequence mismatch: "
             f"health={health.journal_sequence}, journal={journal_sequence}"

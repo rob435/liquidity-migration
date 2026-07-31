@@ -971,12 +971,10 @@ def test_raw_stream_failed_recorder_callback_does_not_refresh_watchdog(
 
 
 def test_raw_stream_rebuilds_lost_new_subscription_at_first_frame_bound() -> None:
-    """A subscribe that never yields a frame is rebuilt at the tight bound.
-
-    Bybit answers a successful orderbook subscribe with an immediate snapshot,
-    so a frameless subscription is a lost/rejected subscribe. Waiting the full
-    silent-stream window for it left multi-minute queue-head stale_book blocks
-    around new-symbol entries.
+    """A subscribe that never yields a frame is rebuilt at the tight bound: Bybit answers
+    a successful orderbook subscribe with an immediate snapshot, so a frameless
+    subscription is a lost or rejected subscribe, and waiting the full silent-stream
+    window blocks new-symbol entries on stale_book for minutes.
     """
 
     class Socket:
@@ -1296,11 +1294,11 @@ def test_cumulative_outage_counts_from_last_accepted_frame_and_clears_on_recover
 def test_a_failed_segment_rollover_does_not_wedge_the_symbol_forever(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rollover closed the live segment before opening its replacement and only
-    swapped the registry entry on success, so any raise in between (EIO, EACCES,
-    inode exhaustion — none covered by the free-disk floor) left the registry
-    pointing at a CLOSED file. Every later append then re-entered rollover and
-    raised "I/O operation on closed file" forever (2026-07-27 audit M4)."""
+    """Rollover must not close the live segment before its replacement is open: any raise
+    in between (EIO, EACCES, inode exhaustion -- none covered by the free-disk floor)
+    leaves the registry pointing at a closed file, and every later append re-enters
+    rollover and raises "I/O operation on closed file" forever.
+    """
 
     store = SegmentedCaptureStore(tmp_path, config=_config(segment_max_bytes=200))
     for index in range(3):
@@ -1332,8 +1330,9 @@ def test_a_failed_segment_rollover_does_not_wedge_the_symbol_forever(
 def test_close_flushes_every_segment_even_when_one_descriptor_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`close()` iterated a dict and let the first failing descriptor abort the
-    loop, leaving every later segment open and unflushed (audit M4)."""
+    """``close()`` must not let the first failing descriptor abort the loop, leaving
+    every later segment open and unflushed.
+    """
 
     store = SegmentedCaptureStore(tmp_path, config=_config())
     store.append({"symbol": "BTCUSDT", "local_receive_ts_ns": 1_000_000_000})

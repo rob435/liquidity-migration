@@ -243,8 +243,7 @@ def test_demo_kline_compact_cache_opt_out_preserves_existing_window(tmp_path: Pa
 
 
 def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
-    """With a fully-covering kline_store, REST is never called and the output
-    is sourced entirely from the store."""
+    """With a fully-covering kline_store, REST is never called and the output is sourced entirely from the store."""
     from liquidity_migration.kline_store import KlineStore
 
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
@@ -279,11 +278,10 @@ def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
 
 
 def test_download_recent_1h_klines_store_full_coverage_skips_disk_cache(tmp_path: Path) -> None:
-    """When the WS store fully covers the universe at end_ms, the cycle
-    must skip the on-disk parquet cache read entirely. Reading the full
-    dataset costs 5-10s on a populated cache; the store serves the same
-    in <50ms. Asserted by writing a SENTINEL row to the disk cache that
-    would corrupt the output if read — the fast path must skip it."""
+    """When the WS store fully covers the universe at end_ms, the cycle must skip the
+    on-disk parquet cache read entirely (5-10s versus <50ms). A SENTINEL row written
+    to the disk cache would corrupt the output if read.
+    """
     from liquidity_migration.kline_store import KlineStore
     from liquidity_migration.storage import write_dataset
 
@@ -394,7 +392,7 @@ def test_download_recent_1h_klines_backfills_store_midwindow_hole(tmp_path: Path
     )
     # The hole forced a REST fetch (the fast path would have skipped REST).
     assert "AAAUSDT" in {call[0] for call in market.calls}
-    # The previously-missing 1h bar is now present in the merged output.
+    # The missing 1h bar is present in the merged output.
     aaa_ts = set(output.filter(pl.col("symbol") == "AAAUSDT")["ts_ms"].to_list())
     assert {0, MS_PER_HOUR, 2 * MS_PER_HOUR} <= aaa_ts
 
@@ -478,9 +476,9 @@ def test_resolve_ticker_snapshot_falls_back_to_rest_when_unseeded() -> None:
 
 
 def test_resolve_ticker_snapshot_falls_back_when_cache_stale() -> None:
-    """An old seed (stale) must trigger REST fallback even if the cache has
-    rows. Critical for safety: trading on a stale price snapshot is worse
-    than waiting one REST roundtrip."""
+    """An old seed must trigger REST fallback even if the cache has rows -- trading on
+    a stale price snapshot is worse than waiting one REST roundtrip.
+    """
     import time as _time
     from liquidity_migration.ws_state_cache import TickerCache
 
@@ -586,11 +584,10 @@ def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Pat
 
 
 def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() -> None:
-    """With universe_rank_end == universe_max_symbols == 0 the demo's
-    universe is every Trading USDT-perp (ex the hard exclusion list).
-    No turnover floor, no rank cap, no 30-day age filter — symbols are
-    only filtered out via the strategy's own rank/turnover/age gates
-    downstream (matching the backtest's path).
+    """With universe_rank_end == universe_max_symbols == 0 the universe is every Trading
+    USDT-perp except the hard exclusion list: no turnover floor, rank cap, or 30-day
+    age filter. Symbols are filtered downstream by the strategy's own gates, matching
+    the backtest's path.
     """
     snapshot_ts_ms = 1_779_440_000_000  # 2026-05-22-ish, past NEWUSDT's launch
     demo_config = _public_config(
@@ -786,11 +783,10 @@ def test_build_demo_universe_leaves_age_filter_to_component_profile(monkeypatch)
 
 
 def test_demo_kline_fetch_ranges_backfills_a_missing_window_head() -> None:
-    """The hole check was interior-only and the fallback fetched tail-only from
-    the latest bar, so a symbol whose window HEAD is absent (widening
-    lookback_days past the pruned retention, or a partially bootstrapped WS
-    store) was never repaired and every warm-up-dependent feature silently
-    degraded (2026-07-27 audit M8)."""
+    """A symbol whose window HEAD is absent (widened lookback past the pruned retention,
+    or a partially bootstrapped WS store) must be repaired: an interior-only hole
+    check with a tail-only fallback leaves every warm-up-dependent feature degraded.
+    """
 
     cached = pl.DataFrame(
         [{"symbol": "HEADUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(2, 4)]

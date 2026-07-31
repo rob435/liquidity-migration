@@ -799,9 +799,9 @@ def test_missing_date_request_windows_cover_required_hours_without_extra_calls()
 # --- v5 instruments-info supplement ----------------------------------------
 #
 # Pin the synthesis logic that turns Bybit v5 listings into manifest rows for
-# (symbol, date) pairs absent from the public archive scrape. Closes the gap
-# discovered 2026-05-25 where BANUSDT/TRUSTUSDT were demo-tradeable but never
-# reached the universe, plus the archive's ~24h current-day publishing lag.
+# (symbol, date) pairs absent from the public archive scrape: symbols that are
+# demo-tradeable but never reach the universe, plus the archive's ~24h
+# current-day publishing lag.
 
 
 def test_parse_v5_listing_page_is_pure_and_retains_exact_cursor() -> None:
@@ -1022,9 +1022,9 @@ def test_synthesize_v5_listing_handles_launch_in_the_future() -> None:
 
 
 def test_synthesize_v5_listing_fills_archive_lag_tail_for_existing_symbol() -> None:
-    # Closes the bug surfaced 2026-05-26: public.bybit.com/trading publishes
-    # the prior day's CSV ~24h after close, so a same-day archive-manifest
-    # build has a one-day gap for every symbol. Without this tail-fill,
+    # public.bybit.com/trading publishes the prior day's CSV ~24h after close,
+    # so a same-day archive-manifest build has a one-day gap for every symbol.
+    # Without this tail-fill,
     # tradable_membership_flag is silently False on the current day and the
     # strategy treats DRIFTUSDT (and every other recently-traded symbol) as
     # non-tradable, even when klines + v5 listings both confirm Trading.
@@ -1050,12 +1050,9 @@ def test_synthesize_v5_listing_fills_archive_lag_tail_for_existing_symbol() -> N
     assert rows[0]["source"] == V5_LISTING_SOURCE
 
 
-# ---------------------------------------------------------------------------
-# Relocated from tests/test_audit_fix_b11.py (audit bucket b11).
-# ---------------------------------------------------------------------------
 
 
-# pit-data-7: scrape download paths SKIP v5-listing sentinel rows
+# Scrape download paths SKIP v5-listing sentinel rows
 def test_is_v5_listing_row_matches_sentinel_url_or_source() -> None:
     assert am._is_v5_listing_row({"url": am.V5_LISTING_URL_SENTINEL, "source": "x"})
     assert am._is_v5_listing_row({"url": "x", "source": am.V5_LISTING_SOURCE})
@@ -1094,7 +1091,7 @@ def test_archive_klines_report_surfaces_skipped_count() -> None:
     assert "| Skipped (v5 listing) | 2 |" in report
 
 
-# pit-data-4: a narrow rebuild UNIONs with the persisted manifest (no PIT data loss)
+# A narrow rebuild UNIONs with the persisted manifest (no PIT data loss)
 def _manifest(rows: list[tuple[str, str, str]]) -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -1171,8 +1168,9 @@ def test_union_with_persisted_manifest_preserves_new_provenance_column(tmp_path)
 
 
 def test_run_archive_manifest_persist_is_non_destructive(tmp_path, monkeypatch) -> None:
-    """End-to-end: a narrow rebuild persisted via run_archive_manifest must not
-    drop another symbol's date partition (pit-data-4)."""
+    """End to end: a narrow rebuild persisted via ``run_archive_manifest`` must not drop
+    another symbol's date partition.
+    """
     # Seed a persisted manifest covering BTC + ETH on a shared date.
     seed = _manifest([
         ("BTCUSDT", "2024-01-01", "btc.csv.gz"),

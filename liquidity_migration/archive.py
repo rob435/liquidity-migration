@@ -115,11 +115,9 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
                 .sort(["symbol", "ts_ms", "trade_id"])
             )
     except (pl.exceptions.PolarsError, OSError, UnicodeDecodeError):
-        # Only fall through to the byte-reader for failures that legitimately
-        # mean "this is not a plain polars-readable CSV" — a malformed/empty
-        # CSV, a schema/cast mismatch, a compressed (.gz/.zip) archive, or an
-        # IO/decode error. Unexpected errors (e.g. MemoryError, real bugs) must
-        # propagate rather than be masked by a possibly-mis-parsing fallback.
+        # Fall through to the byte-reader only for "not a plain polars-readable
+        # CSV" failures. Anything else (MemoryError, real bugs) must propagate
+        # rather than be masked by a possibly-mis-parsing fallback.
         pass
 
     data = file_path.read_bytes()
@@ -142,10 +140,8 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
         try:
             return _read_public_trade_archive_klines_1h_vectorized(file_path, symbol=symbol)
         except Exception as exc:  # noqa: BLE001 - the scalar path below is the correct fallback
-            # code-quality-8: log the swallowed fast-path fault before falling back. The
-            # fallback preserves correctness, but a PERSISTENT vectorized failure (schema
-            # drift, a polars regression, a real parse error) on a builder feeding the
-            # full-PIT roots must be observable, not a silent permanent slow-path.
+            # The fallback is correct, but a persistent vectorized failure must
+            # be observable rather than a silent permanent slow path.
             _logger.warning(
                 "archive: vectorized 1h-kline fast path failed for %s, falling back to scalar: %r",
                 file_path, exc,
@@ -199,9 +195,7 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
                 return pl.DataFrame()
             return pl.DataFrame(list(bars.values())).sort(["symbol", "ts_ms"])
     except Exception as exc:  # noqa: BLE001 - aggregate_trade_klines_1h is the correct fallback
-        # code-quality-8: log the swallowed scalar fast-path fault before falling back to
-        # the read_public_trade_archive + aggregate_trade_klines_1h slow path. Correctness
-        # is preserved, but a persistent fault here must surface rather than run silently.
+        # Correct but slower; a persistent fault here must surface.
         _logger.warning(
             "archive: scalar 1h-kline fast path failed for %s, falling back to aggregate: %r",
             file_path, exc,
@@ -340,9 +334,8 @@ def download_public_trade_archive(
             temp_output.replace(output)
             return output
         except ArchiveFileNotFoundError:
-            # 404 is permanent (symbol didn't trade on that date) — don't
-            # burn the retry budget hammering a URL that will keep 404'ing.
-            # Let the caller catch this and skip the symbol/date.
+            # 404 is permanent (symbol did not trade that date); the caller
+            # skips the symbol/date rather than burning the retry budget.
             raise
         except Exception as exc:  # noqa: BLE001 - network failures vary by platform
             last_error = exc

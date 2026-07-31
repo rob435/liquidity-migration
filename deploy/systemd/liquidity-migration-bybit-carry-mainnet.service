@@ -11,9 +11,6 @@ Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
-# A producer publishes targets and submits nothing. It gets no credentials and
-# no arming switch in any realm; the runner refuses to start if either reaches
-# it anyway.
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-carry-mainnet-event

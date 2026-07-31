@@ -1,9 +1,6 @@
-"""Contracts for the Phase 1 re-screen.
-
-The failure modes here are silent: a look-ahead in the BTC gate, an overlapping
-hold that inflates a t-statistic, or a basket leg that is not actually the
-universe mean all produce a *better* number rather than an error. Each is pinned
-against a hand-computable answer.
+"""Contracts for the Phase 1 re-screen. A look-ahead in the BTC gate, an overlapping hold
+that inflates a t-statistic, or a basket leg that is not the universe mean each produce a
+better number rather than an error, so each is pinned against a hand-computable answer.
 """
 
 from __future__ import annotations
@@ -41,10 +38,8 @@ class TestBonferroniThreshold:
 
 class TestBtcTrendCausality:
     def test_current_bar_is_excluded_from_its_own_gate(self) -> None:
-        """The gate value on bar t must not contain bar t's own return.
-
-        A 30-day window that includes the current bar is a look-ahead: it gates a
-        signal on information the signal itself produced.
+        """The gate value on bar t must not contain bar t's own return: a 30-day window that
+        includes the current bar gates a signal on information the signal produced.
         """
         h = 2 * 24
         n = h + 5
@@ -215,10 +210,7 @@ class TestMeasureTurnover:
         return pl.DataFrame(rows)
 
     def test_full_rebalance_into_a_disjoint_set_trades_four_units(self) -> None:
-        """Close both legs, open both legs = 4.0 units one-way = 2x the round trip.
-
-        This is the number the repository convention was charging 1x for.
-        """
+        """Close both legs, open both legs = 4.0 units one-way = 2x the round trip."""
         # 4 names, cut=0.25 -> 1 long (lowest) + 1 short (highest) each period.
         # Period 0 longs S0 / shorts S3; period 1 longs S3 / shorts S0 — disjoint.
         u = self._universe([[1.0, 2.0, 3.0, 4.0], [4.0, 2.0, 3.0, 1.0]])

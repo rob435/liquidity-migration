@@ -1,8 +1,7 @@
 """Public market-data plane shared by demo and paper target producers.
 
-This module has no private credentials, account snapshots, order methods, fill
-recovery, or venue-mutation imports.  LONG and CONTINUOUS use these helpers in
-both environments; the selected account owner is a separate route.
+LONG and CONTINUOUS use these helpers in both environments; the selected
+account owner is a separate route.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ from .bybit_market_data import BybitMarketData, BybitRestRateLimiter
 from .artifact_snapshot import read_stable_file
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
+from .execution_environment import candidate_universe_realm
 from .storage import dataset_path, read_dataset, write_dataset
 from .universe import build_current_universe_table
 from ._common import MS_PER_DAY, MS_PER_HOUR, coerce_int, exact_duration_ms, finite_float
@@ -44,6 +44,9 @@ _MATCH_BACKTEST_UNIVERSE_FLOOR = 300
 
 class MarketUniverseConfig(Protocol):
     """Structural public-data config implemented by both strategy configs."""
+
+    @property
+    def execution_environment(self) -> str: ...
 
     @property
     def universe_rank_end(self) -> int: ...
@@ -306,14 +309,11 @@ def _write_demo_instruments_cache(cache_root: Path, instruments: pl.DataFrame, f
 def _demo_instruments(public: Any, *, cache_root: Path, now_ms: int) -> pl.DataFrame:
     """Normalised Bybit instruments, cached with a TTL.
 
-    Contract specs (tick size, lot step, listing date, status) change roughly
-    daily, but get_instruments_info is a large multi-hundred-symbol REST call
-    otherwise made on every ~60s cycle. A 1h TTL removes it from ~99% of
-    cycles. Membership stays correct: the universe is instruments INNER JOIN
-    the always-fresh tickers snapshot, so a symbol that stops trading drops out
-    via tickers even while its cached instruments row lingers. On a fetch
-    failure with a cache present we serve the stale specs rather than failing
-    the whole cycle."""
+    Specs change roughly daily while get_instruments_info is a large REST call
+    otherwise made every ~60s cycle. Membership stays correct because the
+    universe is instruments INNER JOIN the always-fresh tickers snapshot, so a
+    symbol that stops trading drops out via tickers regardless of the cache. A
+    fetch failure with a cache present serves stale specs rather than failing."""
     cached, fetched_ts_ms = _read_demo_instruments_cache(cache_root)
     if cached is not None and 0 <= now_ms - fetched_ts_ms < _DEMO_INSTRUMENTS_CACHE_TTL_MS:
         return cached
@@ -414,7 +414,10 @@ def _resolve_cycle_universe(
     candidate_path = str(getattr(demo, "candidate_universe_file", "") or "").strip()
     candidate_reconciliation = None
     if candidate_path:
-        frozen = frozen_candidate_universe or load_candidate_universe(candidate_path)
+        frozen = frozen_candidate_universe or load_candidate_universe(
+            candidate_path,
+            realm=candidate_universe_realm(demo.execution_environment),
+        )
         if frozen.path != Path(candidate_path).expanduser().absolute():
             raise ValueError("CONT candidate-universe snapshot belongs to another path")
         require_profile_binding(
@@ -506,13 +509,10 @@ def _download_recent_1h_klines(
                 store_frame = _empty_klines()
                 covered_symbols = []
             else:
-                # `symbols_with_coverage_through` only checks the LATEST bar, so a
-                # symbol can read as "covered" while carrying a mid-window hole a
-                # WS reconnect dropped (pybit never replays confirmed bars). Drop
-                # those from the store fast path so the REST fallback below
-                # backfills the hole — otherwise the gappy day silently falls
-                # below the >=20-hourly-bar filter and that coin's daily features
-                # vanish for the day.
+                # `symbols_with_coverage_through` only checks the LATEST bar, so
+                # a symbol can read as covered while carrying a mid-window hole
+                # from a WS reconnect. Drop those so the REST fallback backfills
+                # them; otherwise the gappy day fails the >=20-bar filter.
                 incomplete = _window_incomplete_symbols(
                     store_frame,
                     start_ms=start_ms,
@@ -528,22 +528,11 @@ def _download_recent_1h_klines(
             stats["store_symbols"] = store_frame.select("symbol").unique().height
             stats["store_max_ts_ms"] = int(store_frame.select(pl.col("ts_ms").max()).item() or 0)
 
-    # FAST PATH: if the WS store fully covers the universe at end_ms,
-    # skip the on-disk cache read entirely. Reading the full parquet
-    # dataset costs 5-10s for ~400 symbols × 45 days; the store
-    # serves the same data in <50ms. Only matters once the bootstrap
-    # has populated the store — until then we still hit the disk cache.
-    #
-    # Two further optimizations:
-    #   1. KlineStore.get_klines() already returns (symbol, ts_ms) sorted
-    #      + dedup'd (the store keys bars by ts_ms, so duplicates are
-    #      impossible by construction). Re-running unique()+sort() here is
-    #      a 100-300ms tax on the cycle's hot loop.
-    #   2. The on-disk compact cache is only read on the SLOW path (when
-    #      the store doesn't cover everything). On the fast path we don't
-    #      consume it, so writing it every cycle is pure I/O cost — the
-    #      store has its own flush file that bootstrap recovers from on
-    #      restart. Skip the write entirely under full coverage.
+    # Fast path: full store coverage skips the on-disk cache entirely (a full
+    # parquet read is 5-10s for ~400 symbols x 45 days; the store is <50ms).
+    # get_klines already returns (symbol, ts_ms) sorted and dedup'd, so no
+    # unique()+sort() here, and the compact cache is only read on the slow path,
+    # so writing it here would be pure I/O.
     if store_fully_covers and not store_frame.is_empty():
         stats["fetch_symbols"] = 0
         stats["output_rows"] = store_frame.height
@@ -585,12 +574,9 @@ def _download_recent_1h_klines(
     stats["fetched_rows"] = fetched.height
     if cache_root is not None and not fetched.is_empty():
         write_dataset(fetched, cache_root, "event_demo_klines_1h")
-        # After a successful write, drop date= partitions the cycle can never
-        # read again. The clock is anchored to end_ms (== now snapped to the
-        # latest closed hour in the live cycle — at most 1h behind wall clock,
-        # dwarfed by the 3-day safety margin) so the prune is deterministic
-        # under test windows. max() with the actual requested window keeps a
-        # wider-than-default lookback config safe from its own prune.
+        # Drop date= partitions the cycle can never read again. Anchored to
+        # end_ms rather than wall clock so the prune is deterministic under test
+        # windows; max() with the requested window protects a wider lookback.
         window_days = int(-(-(end_ms - start_ms) // MS_PER_DAY))
         _prune_event_demo_kline_cache(
             cache_root,
@@ -638,10 +624,8 @@ def _read_demo_kline_cache(
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return _empty_klines()
     output = cached.filter(pl.col("symbol").is_in(symbols) & pl.col("ts_ms").is_between(start_ms, end_ms))
-    # Don't write the compact cache here (EVE-7): the sole caller (_download_recent_1h_klines)
-    # always rewrites a same-key SUPERSET right after — at the no-fetch path or post-REST-merge —
-    # so this write would be immediately overwritten. Skipping it saves one full-window parquet
-    # serialization per slow-path cache-miss cycle.
+    # No compact-cache write here: the sole caller always rewrites a same-key
+    # superset immediately after, so it would be overwritten.
     return output
 
 _KLINE_CACHE_PRUNE_SAFETY_MARGIN_DAYS = 3
@@ -662,20 +646,14 @@ def _prune_event_demo_kline_cache(
 ) -> list[str]:
     """Delete ``date=YYYY-MM-DD`` partitions older than the demo lookback window.
 
-    The REST writer appends date= partitions to event_demo_klines_1h forever
-    (~6.8MB/day/root; live box reached 49 partitions vs a 45-day lookback,
-    ~5GB/yr across demo+paper) while nothing ever reads past the trailing
-    ``lookback_days``. Cutoff = today - lookback_days - a 3-day safety margin.
+    The REST writer appends date= partitions forever (~6.8MB/day/root) while
+    nothing reads past the trailing ``lookback_days``. Cutoff is today minus
+    lookback_days minus a 3-day safety margin.
 
-    Constraints honoured here:
-      - only directories named ``date=<parseable ISO date>`` directly under this
-        ONE dataset dir are deleted; symlinks are never followed (skipped);
-      - any failure is logged and swallowed — pruning must never break the
-        write path;
-      - cheap per cycle: the scan is skipped entirely unless the UTC date
-        changed since the last prune of this dataset dir.
-
-    Returns the deleted partition dir names (for logging/tests).
+    Only ``date=<ISO date>`` dirs directly under this one dataset dir are
+    deleted, symlinks are skipped, failures are logged and swallowed so pruning
+    cannot break the write path, and the scan is skipped unless the UTC date
+    changed since the last prune. Returns the deleted partition dir names.
     """
     deleted: list[str] = []
     try:
@@ -816,8 +794,7 @@ def _launch_time_ms_by_symbol(universe: pl.DataFrame) -> dict[str, int]:
     """Listing time per symbol, for the kline head-completeness check.
 
     Without it a symbol listed inside the lookback window looks permanently
-    head-incomplete and is refetched every cycle; with it the absent head is
-    explained and only genuine gaps are refetched (audit M8).
+    head-incomplete and is refetched every cycle.
     """
 
     if universe.is_empty() or "symbol" not in universe.columns or "launch_time_ms" not in universe.columns:
@@ -858,18 +835,15 @@ def _window_incomplete_symbols(
 ) -> set[str]:
     """Symbols in ``klines`` whose ``[start, end]`` window has a 1h hole.
 
-    1h bars are keyed uniquely on the hour grid, so a symbol's in-window bars are
-    contiguous iff their count equals ``(max - min) / 1h + 1``. A WS reconnect
-    drops confirmed bars that pybit never replays, leaving a hole BELOW the latest
-    bar — invisible to a latest-bar coverage check. Returned symbols are forced
-    off the store fast path so REST backfills the hole.
+    1h bars are keyed uniquely on the hour grid, so in-window bars are contiguous
+    iff their count equals ``(max - min) / 1h + 1``. A WS reconnect drops
+    confirmed bars pybit never replays, leaving a hole BELOW the latest bar that
+    a latest-bar coverage check cannot see. Returned symbols are forced off the
+    store fast path so REST backfills.
 
-    The check is deliberately NOT interior-only. Widening ``lookback_days`` past
-    the pruned retention, or a partially-bootstrapped WS store, leaves the head of
-    the window absent while the interior is perfectly contiguous; the old
-    interior-only test read that as fully covered and nothing ever backfilled it,
-    silently degrading every warm-up-dependent feature (2026-07-27 audit M8). A
-    head that is explained by the symbol's listing time is not a hole.
+    Not interior-only: a widened ``lookback_days`` or a partially bootstrapped
+    store leaves the window HEAD absent while the interior is contiguous. A head
+    explained by the symbol's listing time is not a hole.
     """
     if klines.is_empty() or "symbol" not in klines.columns or "ts_ms" not in klines.columns:
         return set()
@@ -926,23 +900,19 @@ def _demo_kline_fetch_ranges(
             continue
         lo, hi, n = info
         if n < (hi - lo) // MS_PER_HOUR + 1:
-            # Mid-window hole (a WS-reconnect dropout pybit never replays): refetch
-            # the FULL window so REST backfills the missing interior hours; the
-            # dedupe merge drops the overlap. A latest-bar-only tail fetch
-            # (max+1h..end) would leave the hole forever and the gappy day would
-            # silently fail the >=20-hourly-bar filter.
+            # Mid-window hole: refetch the FULL window so REST backfills the
+            # interior hours (the dedupe merge drops the overlap). A tail-only
+            # fetch from max+1h would leave the hole forever.
             ranges[symbol] = (start_ms, end_ms)
             continue
         head = _expected_window_head_ms(
             symbol, start_ms=start_ms, launch_time_ms_by_symbol=launch_time_ms_by_symbol
         )
         if lo > head + MS_PER_HOUR:
-            # Missing HEAD. The interior can be perfectly contiguous while the
-            # start of the window is simply absent — widening lookback_days past
-            # the pruned retention does exactly that, and a tail-only fetch from
-            # `hi` never repairs it (audit M8). Fetch the head explicitly; the
-            # dedupe merge drops the overlap, and a symbol whose head is
-            # explained by its listing time never reaches here.
+            # Missing head: the interior can be contiguous while the window
+            # start is absent (widening lookback_days past the pruned retention
+            # does this), and a tail-only fetch from `hi` never repairs it. A
+            # head explained by the listing time never reaches here.
             ranges[symbol] = (start_ms, min(lo, end_ms))
             continue
         fetch_start = max(hi + MS_PER_HOUR, start_ms)
@@ -971,11 +941,9 @@ def _fetch_recent_1h_klines(
             rows.extend(fetch_with_client(client, symbol, window))
         return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
 
-    # Share one rate limiter across all worker threads. Each thread instantiates
-    # its own BybitMarketData but routes _get() through this shared limiter so
-    # the process as a whole stays under Bybit's public REST budget
-    # (~120 req/5s per IP per category). Without this, 8 workers x 300 symbols
-    # saturate the budget in seconds and pybit then sleeps 2s per 429.
+    # One rate limiter shared across worker threads: each builds its own
+    # BybitMarketData but routes _get() through this, keeping the process under
+    # Bybit's public REST budget (~120 req/5s per IP per category).
     shared_limiter = BybitRestRateLimiter(
         max_requests=_demo_rest_rate_limit_per_second(),
         per_seconds=1.0,

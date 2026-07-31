@@ -1,15 +1,14 @@
 """Strict filesystem identity for one account owner and its target inbox.
 
-The canonical account journal and the strategy target inbox are separate roots.
-That separation makes a configuration typo dangerous: a healthy producer can
-otherwise publish into an inbox consumed by a different account owner.  This
-module binds the exact resolved root pair, account id, and demo/paper
-environment in one self-derived manifest mirrored at both roots.
+The journal and the target inbox are separate roots, so a configuration typo
+could have a producer publishing into an inbox consumed by a different owner.
+This binds the resolved root pair, account id, and environment into one
+self-derived manifest mirrored at both roots.
 
-Each mirror is created atomically.  Filesystems cannot atomically commit two
-directory entries in different roots, so owner initialization deliberately
-supports the only safe crash recovery: one valid mirror may create its missing
-peer when, and only when, it exactly equals the requested route.
+Each mirror is created atomically, but two directory entries in different roots
+cannot commit atomically together, so the only supported crash recovery is: one
+valid mirror may create its missing peer, and only when it exactly equals the
+requested route.
 """
 
 from __future__ import annotations
@@ -204,9 +203,8 @@ def account_route_manifest_path(root: str | Path) -> Path:
 def read_account_route_manifest(root: str | Path) -> AccountRoute:
     """Strictly read one mirror.
 
-    This verifies canonical bytes and the self-derived id, but one mirror alone
-    is not proof that the peer root agrees.  Runtime callers should use
-    :func:`require_account_route`.
+    Verifies canonical bytes and the self-derived id; one mirror is not proof
+    the peer agrees, so runtime callers want :func:`require_account_route`.
     """
 
     return _read_manifest(account_route_manifest_path(root))
@@ -222,10 +220,9 @@ def require_account_route(
 ) -> AccountRoute:
     """Read-only, fail-closed validation for producers and privileged tools.
 
-    Runtime callers normally leave ``expected_owner_uid`` unset, preserving
-    the invariant that both manifests belong to the current process owner. A
-    root-only observer may instead bind the read to the already-established
-    owner UID of another isolated runtime account.
+    Leave ``expected_owner_uid`` unset to require both manifests to belong to
+    the current process owner; a root-only observer can instead bind the read
+    to another runtime account's established owner UID.
     """
 
     if expected_owner_uid is not None and (
@@ -272,11 +269,9 @@ def ensure_account_route(
 ) -> AccountRoute:
     """Owner-side initialization and exact one-mirror crash recovery.
 
-    Existing manifests are immutable.  The function never rewrites a route,
-    adopts values from disk, or repairs malformed/disagreeing evidence.  A
-    wholly unbound root pair must be structurally empty, and a missing recovery
-    side must still be empty; legacy journal/queue state requires an explicit
-    cutover outside this initializer.
+    Existing manifests are immutable: never rewritten, adopted from disk, or
+    repaired. An unbound root pair must be structurally empty, and so must a
+    missing recovery side; prior journal/queue state needs an explicit cutover.
     """
 
     expected = derive_account_route(
@@ -346,8 +341,7 @@ def _ensure_account_route_locked(expected: AccountRoute) -> AccountRoute:
         if path not in existing:
             _atomic_create(path, data)
 
-    # Re-read both durable mirrors instead of treating successful syscalls as
-    # identity evidence.  This also catches interference by non-cooperating
+    # Re-read both mirrors rather than trusting the syscalls; this also catches
     # writers that ignore the initialization locks.
     account_manifest = _read_manifest(account_manifest_path)
     inbox_manifest = _read_manifest(inbox_manifest_path)
@@ -480,8 +474,7 @@ def _meaningful_unbound_artifacts(root: Path) -> tuple[str, ...]:
                 if entry.is_dir(follow_symlinks=False):
                     visit(path)
                 else:
-                    # Regular files, symlinks, sockets, and other filesystem
-                    # objects all carry possible prior route/account meaning.
+                    # Any non-directory entry may carry prior route meaning.
                     artifacts.append(relative.as_posix())
         except OSError as exc:
             raise AccountRouteCutoverRequiredError(f"cannot inspect unbound account route root {root}: {exc}") from exc
@@ -555,9 +548,8 @@ def _atomic_create(path: Path, data: bytes) -> None:
             )
             published = True
         except FileExistsError:
-            # A non-cooperating same-route initializer may have won the final
-            # create race.  Exact canonical bytes are safe; anything else is
-            # immutable conflicting evidence.
+            # Another same-route initializer won the create race. Exact
+            # canonical bytes are safe; anything else is conflicting evidence.
             observed = _read_manifest(path)
             if _manifest_bytes(observed) != data:
                 raise AccountRouteMismatchError(f"account route manifest appeared with conflicting content: {path}")

@@ -85,15 +85,12 @@ def test_the_durable_route_identity_carries_the_realm(tmp_path: Path) -> None:
 
 
 def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
-    """B10 was a dozen two-valued literals, not one enum. Keep it one enum."""
+    """The environment arity is one enum, not a scatter of two-valued literals."""
 
     offenders: list[str] = []
     for path in sorted((REPO / "liquidity_migration").glob("*.py")):
         if path.name in {
             "execution_environment.py",
-            # The reset receipt deliberately scopes itself to demo|paper: it
-            # drives a destructive ledger wipe and must not reach mainnet.
-            "account_reset_receipt.py",
             # Producer choices are asserted precisely by the test below.
             "cli_parsers.py",
         }:
@@ -106,11 +103,9 @@ def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
 
 
 def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() -> None:
-    """CARRY and LONG may address the mainnet owner; nothing defaults to it.
-
-    LONG joined once B3 closed: the profile's ``sleeve_limits`` partition means
-    LONG cannot spend CARRY's share. CONTINUOUS is retired and stays
-    ``demo|paper``, so it cannot be pointed at real capital by a flag.
+    """CARRY and LONG may address the mainnet owner; nothing defaults to it. LONG can
+    only join because the profile's ``sleeve_limits`` partition means it cannot spend
+    CARRY's share. CONTINUOUS is retired and stays ``demo|paper``.
     """
 
     partitioned = {

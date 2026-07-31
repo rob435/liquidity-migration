@@ -1,50 +1,32 @@
 """Passive-vs-taker execution A/B probe: pure measurement logic (no venue I/O).
 
-Purpose (docs/roadmap_2026-07-25.md follow-up): every research surface is priced
-at the measured 15.56 bp round trip because §12 measured the deployed flow
-filling on Bybit's taker tiers. The passive floor is 5.40 bp. Whether that floor
-is *reachable* is an execution question, not a signal question — answering it
-re-prices the whole ledger without adding one hypothesis to the multiple-testing
-budget.
+Research surfaces are priced at the measured 15.56 bp taker round trip; the
+passive floor is 5.40 bp. Whether that floor is reachable is an execution
+question, and this probe manufactures a powered sample in hours by placing its
+own min-notional orders. The in-flow A/B (arm B in
+``passive_execution.py``; read thresholds in ``docs/research_findings.md`` §1)
+is the higher-fidelity instrument but accrues slowly. Probe attempts sample
+ordinary market states while CONTINUOUS entries sample pumps, so a probe result bounds the
+mechanism; only the in-flow experiment grades the flow.
 
-Relationship to the registered experiment
-(``docs/preregistration/passive_execution_experiment_2026-07-20.md``): that A/B
-runs **in-flow on the paper owner's real entries** — the highest-fidelity
-measurement, gated on fill accrual that §16.3 showed is slow (~1 position on
-38% of days). This probe is the fast, complementary instrument: it manufactures
-a powered sample in hours by placing its own min-notional orders at arbitrary
-times. The price of that speed is stated below and cannot be waived: probe
-attempts sample ordinary market states, while CONTINUOUS entries sample pumps,
-where queue dynamics and adverse selection are different. A probe result
-therefore bounds the mechanism; only the in-flow experiment grades the flow.
+Design (the commit of this file is the registration):
 
-Design, pre-declared (the commit of this file is the registration):
-
-- Paired arms, deterministic allocation: each attempt hashes
-  ``sha256(salt:symbol:attempt_index)`` to TAKER or POST_ONLY. No operator
-  discretion, no peeking-based reallocation.
-- Primary metric: **intention-to-treat per-side execution cost in bp vs the
-  decision mid**, including fees. A post-only attempt that fails to fill is
-  charged the taker fallback at the terminal quote — the drift while waiting is
-  part of passive execution's true cost, not an excludable inconvenience.
+- Paired arms: each attempt hashes ``sha256(salt:symbol:attempt_index)`` to TAKER
+  or POST_ONLY.
+- Primary metric: intention-to-treat per-side execution cost in bp vs the
+  decision mid, including fees. An unfilled post-only attempt is charged the
+  taker fallback at the terminal quote, so waiting drift is counted.
 - Powered sample: ``REGISTERED_MIN_ATTEMPTS_PER_ARM`` resolved attempts per arm
-  before any conclusion is stated.
-- Kill criteria, written before the first order:
-  1. post-only fill rate < ``KILL_MIN_FILL_RATE`` within the registered timeout
-     -> passive execution is infeasible for this flow; keep the taker basis.
-  2. ITT cost difference (post_only - taker) >= 0 at the powered sample ->
-     no passive edge; keep the taker basis.
-  3. Anything else -> re-price the ledger at the measured passive cost and
-     record the change point.
+  before any conclusion.
+- Kill criteria: post-only fill rate < ``KILL_MIN_FILL_RATE`` within the timeout,
+  or ITT cost difference (post_only - taker) >= 0 at the powered sample, keeps
+  the taker basis. Anything else re-prices the ledger and records a change point.
 
-Scope limits, stated honestly: probes are minimum-notional, so queue dynamics at
-deployed size are strictly worse; the measured number is a *floor* on passive
-cost, exactly as 5.40 bp was. Sell-side entries are probed because every
-deployed and researched book enters short. Demo-venue fills may be more
-generous than mainnet; the result grades the demo flow it measures. The
-registered timeout (60 s) deliberately exceeds the in-flow arm B's 20 s chase
-window so fill-rate-at-20s is derivable from the recorded time-to-fill curve
-and the two instruments stay comparable.
+Scope limits: probes are minimum-notional, so the measured number is a floor on
+passive cost at deployed size. Sell-side entries are probed because every
+deployed and researched book enters short. The result grades the demo flow it
+measures. The 60 s timeout exceeds the in-flow arm B's 20 s chase window so
+fill-rate-at-20s is derivable from the recorded time-to-fill curve.
 """
 
 from __future__ import annotations
@@ -65,9 +47,8 @@ REGISTERED_MIN_ATTEMPTS_PER_ARM = 100
 REGISTERED_MAX_ATTEMPT_NOTIONAL_USDT = 25.0
 KILL_MIN_FILL_RATE = 0.40
 
-# Terminal states an attempt can reach. "rejected_would_cross" is a Bybit
-# post-only order that would have taken liquidity and was refused at create
-# time; it is a legitimate passive failure, not an error.
+# "rejected_would_cross" is a post-only order Bybit refused at create time for
+# taking liquidity: a passive failure, not an error.
 TERMINAL_FILLED = "filled"
 TERMINAL_TIMEOUT_CANCELLED = "timeout_cancelled"
 TERMINAL_REJECTED_WOULD_CROSS = "rejected_would_cross"
@@ -197,7 +178,7 @@ def summarize(
     *,
     taker_fee_bp_fallback: float,
 ) -> dict[str, Any]:
-    """Pre-declared summary: per-arm ITT cost, fill rate, kill-criteria verdicts."""
+    """Per-arm ITT cost and fill rate."""
     rows = list(records)
     out: dict[str, Any] = {"n_total": len(rows), "arms": {}}
     costs: dict[str, list[float]] = {ARM_TAKER: [], ARM_POST_ONLY: []}

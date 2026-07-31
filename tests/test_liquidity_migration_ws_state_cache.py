@@ -169,7 +169,7 @@ def test_ticker_event_does_not_bump_last_event_when_every_row_drops() -> None:
     assert stats["seconds_since_last_event"] >= 0.005
 
 
-# -- WS-silence watchdog clock (audit 2026-06-02 #2) ----------------------------
+# -- WS-silence watchdog clock --------------------------------------------------
 
 def test_ticker_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
     import liquidity_migration.ws_state_cache as wsc
@@ -192,10 +192,11 @@ def test_ticker_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
 
 
 def test_ticker_snapshot_list_drops_per_symbol_stale_rows(monkeypatch) -> None:
-    """ws-dataplane-1: the GLOBAL staleness gate keeps the whole cache 'fresh'
-    when ANY symbol ticks. A per-symbol stale price (no WS tick, missing from
-    the REST reconcile) must be excluded from snapshot_list(max_age_seconds=...)
-    so it cannot feed the cycle's stop/exit math."""
+    """The global staleness gate keeps the whole cache fresh when any symbol ticks, so a
+    per-symbol stale price (no WS tick, missing from the REST reconcile) must be
+    excluded from ``snapshot_list(max_age_seconds=...)`` and cannot feed the cycle's
+    stop/exit math.
+    """
     import liquidity_migration.ws_state_cache as wsc
 
     clock = {"t": 1000.0}

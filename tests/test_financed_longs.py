@@ -1,10 +1,8 @@
 """Contracts for the committed financed-longs configs.
 
-The failure mode of a funding-conditioned long book is silent flattery: a
-lookahead in the hysteresis state, a gross cap that levers instead of
-diluting, or a funding accrual with the wrong sign all make the number
-*better*, not raise. Those contracts are pinned here on deterministic
-synthetic frames.
+A lookahead in the hysteresis state, a gross cap that levers instead of diluting, or a
+funding accrual with the wrong sign each make the number better rather than raise, so
+each is pinned on deterministic synthetic frames.
 """
 
 from __future__ import annotations
@@ -132,8 +130,8 @@ class TestCarryHoldState:
 class TestDepthScaling:
     """v2 sizing: w = cap * clip(|trail_fund_24h| / ref, floor, 1.0).
 
-    The state machine is v1's; only the size of a held name changes. v1
-    configs carry no depth block and must keep the flat cap bit-for-bit.
+    The state machine is v1's; only the size of a held name changes. v1 configs carry
+    no depth block and must keep the flat cap bit-for-bit.
     """
 
     def test_v1_config_has_no_depth_scaling_and_keeps_flat_cap(
@@ -210,10 +208,9 @@ class TestDepthScaling:
 class TestV3Filters:
     """v3: toxic-band block/suspend, dead-name vol floor, recovery-velocity exit.
 
-    Each feature is exercised in isolation via dataclasses.replace so a failure
-    names its filter; the committed JSON is round-tripped and run end-to-end.
-    v1/v2 behaviour is pinned unchanged by the existing classes (all v3 fields
-    default off).
+    Each feature is exercised in isolation via ``dataclasses.replace`` so a failure
+    names its filter; the committed JSON is round-tripped and run end-to-end. All v3
+    fields default off, so v1/v2 behaviour is pinned unchanged by the other classes.
     """
 
     def test_v3_config_round_trip(self) -> None:
@@ -354,9 +351,9 @@ class TestPrepareDecision:
 class TestFundingSpread:
     """Cross-venue neutral spread book: sign convention, hysteresis, fees.
 
-    The fixture ties bn_funding = by_funding / 2, so a deep bybit print of
-    -60 bp gives an 8h-settled spread of 3 x (-60 + 30) = -90 bp/day: long
-    bybit / short binance, receiving the differential.
+    The fixture ties bn_funding = by_funding / 2, so a deep bybit print of -60 bp
+    gives an 8h-settled spread of 3 x (-60 + 30) = -90 bp/day: long bybit / short
+    binance, receiving the differential.
     """
 
     def test_config_round_trip_and_dispatch(self) -> None:
@@ -456,8 +453,8 @@ class TestFinancedLeaders:
 #: The exact age sequence the production panel carries across one 8h funding
 #: cycle (captured from cross_venue_panel_v1, BTCUSDT): float-ms arithmetic
 #: leaves epsilon on several steps, and the bar after a settlement reads
-#: 0.9999999999999999 — which `age < 1.0` wrongly counted as a second
-#: settlement, charging every 8h/4h/2h print twice (2026-07-28 correction).
+#: 0.9999999999999999, which an `age < 1.0` predicate counts as a second
+#: settlement, charging every 8h/4h/2h print twice.
 PRODUCTION_AGE_CYCLE = [
     0.0,
     0.9999999999999999,
@@ -482,7 +479,7 @@ def _funding_frame(ages: list[float], rate: float = -10.0 / 1e4) -> pl.DataFrame
 
 
 class TestSettlementDetector:
-    """Regression contracts on REAL panel age shapes, not idealized ones."""
+    """Settlement-detector contracts on real panel age shapes, not idealized ones."""
 
     def test_epsilon_age_bar_is_not_a_second_settlement(self) -> None:
         # 33 hourly bars = 4 settlements (h=0,8,16,24,32) with the production
@@ -512,10 +509,8 @@ class TestSettlementDetector:
 
 
 class TestResearchEquityChart:
-    """The wrapper-supported standard-format render for registered configs.
-
-    Exists so a Lane-2 config never needs a hand-built lookalike chart (the
-    equity-curve skill forbids second formats; 2026-07-28).
+    """The wrapper-supported standard-format render for registered configs, so a Lane-2
+    config never needs a hand-built lookalike chart.
     """
 
     def test_renders_standard_chart_with_research_label(self, tmp_path: Path) -> None:
@@ -569,9 +564,9 @@ class TestAccounting:
         # first held day pays entry on 0.10 notional
         assert scores["cost_bp"][0] == pytest.approx(0.10 * carry_cfg.fee_side_bp, rel=1e-6)
         # Total one-way turnover must be even: every entry has a matching exit.
-        # Turnover used to iterate only bars PRESENT in `weights`, so a flat
-        # decision day charged neither the exit into it nor the re-entry out of
-        # it while gross treated the book as liquidated (2026-07-27 audit M19).
+        # Iterating only bars PRESENT in `weights` leaves a flat decision day
+        # charging neither the exit into it nor the re-entry out of it, while
+        # gross treats the book as liquidated.
         held = {int(value) for value in w["bar_ts_ms"].unique().to_list()}
         decision_bars = sorted(
             value

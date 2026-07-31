@@ -141,9 +141,9 @@ def test_strict_accounting_queries_reject_malformed_payloads(monkeypatch) -> Non
 
 
 def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
-    """A re-entered symbol's closures can exceed one 100-row page; the orphan-close
-    backfill must follow nextPageCursor or it could miss the real closing record
-    (audit pass2 #6). Single-page behaviour (no cursor) is unchanged."""
+    """A re-entered symbol's closures can exceed one 100-row page, so the orphan-close
+    backfill must follow ``nextPageCursor``. Single-page behaviour is unchanged.
+    """
     pages = {
         None: {"retCode": 0, "result": {"list": [{"orderId": "c1"}, {"orderId": "c2"}], "nextPageCursor": "p2"}},
         "p2": {"retCode": 0, "result": {"list": [{"orderId": "c3"}], "nextPageCursor": ""}},
@@ -970,7 +970,7 @@ def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkey
     assert max(int(call["end"]) - int(call["start"]) for call in client._client.calls) <= interval_ms * 2
 
     # The excluded bound is genuinely excluded: the 00:00 bar of the end day
-    # must not be written into a date=<end> partition (audit M6).
+    # must not be written into a date=<end> partition.
     exclusive = bybit_market_data.BybitMarketData()
     kept = exclusive.get_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
     assert [int(row[0]) for row in kept] == timestamps[:-1]
@@ -1070,10 +1070,9 @@ def test_bybit_rest_rate_limiter_no_throttle_under_budget() -> None:
 
 
 def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
-    """BybitMarketData must call rate_limiter.acquire() before each pybit HTTP
-    call. This is the only way concurrent kline workers stay under Bybit's
-    public REST budget; without it, pybit handles the 429 by sleeping 2s per
-    retry, which previously caused ~30 spam lines per demo entry cycle.
+    """``BybitMarketData`` must call ``rate_limiter.acquire()`` before each pybit HTTP
+    call -- the only way concurrent kline workers stay under Bybit's public REST
+    budget.
     """
 
     class FakeHTTP:
@@ -1106,10 +1105,8 @@ def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
 def test_bybit_private_client_routes_call_through_rate_limiter(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """BybitPrivateClient must acquire the shared rate limiter before every
-    pybit HTTP call on BOTH _call and _call_once paths. Mirrors the public-side
-    test. Without this, parallel place_orders bypass the budget that protects
-    against Bybit's per-account REST throttles.
+    """``BybitPrivateClient`` must acquire the shared rate limiter before every pybit
+    HTTP call on BOTH the ``_call`` and ``_call_once`` paths.
     """
 
     class FakeHTTP:
@@ -1152,10 +1149,7 @@ def test_bybit_private_client_routes_call_through_rate_limiter(
 
 
 def test_bybit_private_client_rate_limiter_acquires_each_retry(monkeypatch) -> None:
-    """When _call retries on a failed pybit call, each attempt must hit the
-    limiter — otherwise a tight retry burst escapes the budget that's there to
-    protect us.
-    """
+    """Every retry attempt must hit the limiter, or a tight retry burst escapes the budget."""
     attempt_counter = {"n": 0}
 
     class FlakyHTTP:
@@ -1308,11 +1302,11 @@ def test_bybit_market_data_still_retries_rate_limit(monkeypatch) -> None:
 def test_private_call_definite_reject_no_retry_and_message_preserved(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """REGRESSION (audit 2026-06-12, live-measured): pybit 5.x raises InvalidRequestError
-    for a non-zero retCode BEFORE the wrapper's own retCode check, so definite venue
-    rejects were retried with backoff (846ms on a cancel-nonexistent) and the final
-    raise dropped the retCode/retMsg — every ledgered error read a bare
-    'failed after retries'. Rejects must raise immediately WITH the venue message."""
+    """pybit 5.x raises ``InvalidRequestError`` for a non-zero retCode before the
+    wrapper's own retCode check, so definite venue rejects would be retried with
+    backoff and the final raise would drop retCode/retMsg. Rejects must raise
+    immediately WITH the venue message.
+    """
     InvalidRequestError = type("InvalidRequestError", (Exception,), {})  # pybit shape, no hard dep
 
     class FakeHTTP:
@@ -1366,8 +1360,7 @@ def test_private_call_transport_retries_and_final_message_carries_cause(
 
 
 # ---------------------------------------------------------------------------
-# audit2
-# B2 bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
+# bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
 # ---------------------------------------------------------------------------
 
 
@@ -1392,14 +1385,10 @@ def test_is_rate_limit_string_fallback() -> None:
     assert bybit._is_rate_limit("position closed") is False
 
 
-# ==========================================================================
-# Relocated from the audit bucket b01 (exec-router, ratelimit-rest,
-# realmoney-safety, ws-pool findings).
-# ==========================================================================
 
 
 # --------------------------------------------------------------------------
-# exec-router-2 / exec-router-5 : BybitPrivateClient.place_order idempotency
+# BybitPrivateClient.place_order idempotency
 # --------------------------------------------------------------------------
 
 
@@ -1420,11 +1409,10 @@ def _make_private_client(
 def test_place_order_duplicate_link_returns_existing_open_order(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """exec-router-2: a 110089 duplicate-orderLinkId reject must NOT raise; the
-    order is already at Bybit under this idempotency key, so place_order probes
-    by orderLinkId and returns the existing order. Pre-fix this raised
-    BybitDataError -> the caller recorded an error and wrote no ledger row while
-    the position was live (an orphan)."""
+    """A 110089 duplicate-orderLinkId reject must not raise: the order is already at
+    Bybit under this idempotency key, so ``place_order`` probes by orderLinkId and
+    returns the existing order rather than leaving an orphan position unledgered.
+    """
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1485,9 +1473,9 @@ def test_place_order_preserves_v5_response_envelope_time(
 def test_place_order_duplicate_link_raises_when_order_not_findable(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """exec-router-2: if Bybit reports a duplicate but the order cannot be found
-    on either open-orders or history, surface the original reject rather than
-    silently swallowing it (returning a phantom success would be worse)."""
+    """If Bybit reports a duplicate but the order is on neither open-orders nor
+    history, surface the original reject -- a phantom success would be worse.
+    """
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1516,8 +1504,9 @@ def test_place_order_duplicate_link_raises_when_order_not_findable(
 def test_place_order_non_duplicate_reject_still_raises(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """exec-router-2: only 110089 is treated as idempotent success; any other
-    non-zero retCode must still raise so genuine rejects are not masked."""
+    """Only 110089 is treated as idempotent success; any other non-zero retCode must
+    still raise so genuine rejects are not masked.
+    """
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1561,9 +1550,9 @@ def test_place_order_transport_failure_is_outcome_unknown(
 def test_place_order_duplicate_link_uses_history_only_for_active_status(
     monkeypatch, held_demo_mutation_lease
 ) -> None:
-    """exec-router-2: a Rejected/Cancelled history row does NOT count as present
-    (the submit did not take), so the dup-link path must fall through to raise
-    rather than returning a dead order."""
+    """A Rejected/Cancelled history row does not count as present (the submit did not
+    take), so the dup-link path must raise rather than return a dead order.
+    """
 
     class FakeHTTP:
         def __init__(self, **kwargs):
@@ -1625,8 +1614,7 @@ def test_place_order_duplicate_link_ignores_wrong_history_link(
 
 
 def test_is_duplicate_order_link_matches_code_and_message() -> None:
-    """exec-router-2: classify by retCode 110089 AND by message text so a
-    re-worded retMsg still resolves as a duplicate."""
+    """Classify by retCode 110089 AND by message text, so a re-worded retMsg still resolves as a duplicate."""
     assert bybit._is_duplicate_order_link("Bybit place_order failed: {'retCode': 110089}")
     assert bybit._is_duplicate_order_link("orderLinkID exists, duplicate")
     assert not bybit._is_duplicate_order_link("retCode 110007 insufficient balance")
@@ -1642,15 +1630,15 @@ def test_safe_int_degrades_on_malformed_error_code() -> None:
 
 
 # --------------------------------------------------------------------------
-# ratelimit-rest-2 : shared BybitMarketData counters are lock-guarded
+# Shared BybitMarketData counters are lock-guarded
 # --------------------------------------------------------------------------
 
 
 def test_market_data_counters_no_lost_update_under_threads(monkeypatch) -> None:
-    """ratelimit-rest-2: the bootstrap pool shares ONE BybitMarketData across 16
-    threads. Concurrent _get / _record_call must not lose counter increments.
-    Pre-fix the unlocked read-modify-write dropped increments; the lock makes
-    logical_calls/http_calls/total_call_ms exact."""
+    """The bootstrap pool shares one ``BybitMarketData`` across 16 threads; concurrent
+    ``_get``/``_record_call`` must not lose counter increments, so the lock keeps
+    logical_calls/http_calls/total_call_ms exact.
+    """
 
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
@@ -1683,14 +1671,12 @@ def test_market_data_counters_no_lost_update_under_threads(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# ratelimit-rest-3 : get_instruments_info bounds its cursor walk
+# Get_instruments_info bounds its cursor walk
 # --------------------------------------------------------------------------
 
 
 def test_get_instruments_info_bounds_non_advancing_cursor(monkeypatch) -> None:
-    """ratelimit-rest-3: a stable, non-empty nextPageCursor must NOT loop
-    forever. The walk breaks on a non-advancing cursor. Pre-fix the unbounded
-    `while True` hung whatever thread called it."""
+    """A stable, non-empty ``nextPageCursor`` must not loop forever: the walk breaks on a non-advancing cursor."""
 
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
@@ -1710,14 +1696,15 @@ def test_get_instruments_info_bounds_non_advancing_cursor(monkeypatch) -> None:
     rows = market.get_instruments_info()
     # A stable cursor is detected as non-advancing on the SECOND fetch (the new
     # cursor equals the previous), so the walk stops at 2 calls rather than
-    # looping forever. Pre-fix this `while True` never terminated.
+    # looping forever; an unguarded `while True` never terminates.
     assert market._client.calls == 2
     assert len(rows) == 2
 
 
 def test_get_instruments_info_caps_at_max_pages(monkeypatch) -> None:
-    """ratelimit-rest-3: even with an always-advancing cursor the walk is capped
-    at max_pages so a pathological venue response cannot spin unbounded."""
+    """Even with an always-advancing cursor the walk is capped at ``max_pages`` so a
+    pathological venue response cannot spin unbounded.
+    """
 
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
@@ -1785,16 +1772,15 @@ def test_get_instruments_info_complete_mode_rejects_stuck_cursor(monkeypatch) ->
 
 
 # --------------------------------------------------------------------------
-# ratelimit-rest-5 : throttle counted once + no busy-spin at window edge
+# Throttle counted once + no busy-spin at window edge
 # --------------------------------------------------------------------------
 
 
 def test_rate_limiter_counts_throttle_once_per_blocked_acquire(monkeypatch) -> None:
-    """ratelimit-rest-5: a single blocked acquire records exactly ONE
-    throttle_event and accumulates the real slept time once. Pre-fix the
-    per-loop counting inflated throttle_events/throttled_seconds when the loop
-    re-evaluated still-full. We drive a deterministic clock + sleep so the
-    re-loop is forced, proving the count stays at one."""
+    """A single blocked acquire records exactly one throttle event and accumulates the
+    slept time once, even when the wait loop re-evaluates. A deterministic clock and
+    sleep force the re-loop.
+    """
     clock = {"t": 1000.0}
     slept: list[float] = []
 
@@ -1827,10 +1813,10 @@ def test_rate_limiter_counts_throttle_once_per_blocked_acquire(monkeypatch) -> N
 
 
 def test_rate_limiter_no_busy_spin_at_window_boundary(monkeypatch) -> None:
-    """ratelimit-rest-5: an oldest slot exactly AT the window cutoff is popped
-    (<= cutoff), so the limiter never enters the wait<=0 continue-loop that
-    busy-spun until the clock advanced. We hold the clock fixed at the boundary
-    and require the acquire to complete (a spin would hang)."""
+    """An oldest slot exactly AT the window cutoff is popped (<= cutoff), so the
+    limiter never busy-spins waiting for the clock. The clock is held fixed at the
+    boundary, so a spin would hang.
+    """
     clock = {"t": 500.0}
 
     def fake_monotonic() -> float:
@@ -1854,7 +1840,7 @@ def test_rate_limiter_no_busy_spin_at_window_boundary(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# realmoney-safety-1 : the signing client refuses real-money submits by default
+# The signing client refuses real-money submits by default
 # --------------------------------------------------------------------------
 
 
@@ -1953,14 +1939,14 @@ def test_private_client_demo_submit_requires_held_capability(
 
 
 # --------------------------------------------------------------------------
-# realmoney-safety-3 : malformed REAL_MONEY toggle fails loud
+# Malformed REAL_MONEY toggle fails loud
 # --------------------------------------------------------------------------
 
 
 def test_resolve_credentials_rejects_ambiguous_real_money(monkeypatch) -> None:
-    """realmoney-safety-3: a set-but-unrecognised REAL_MONEY value (e.g.
-    'enabled') must raise at resolution rather than silently coercing to demo.
-    Pre-fix the operator who typed REAL_MONEY=enabled got demo with no warning."""
+    """A set-but-unrecognised ``REAL_MONEY`` value (e.g. 'enabled') must raise at
+    resolution rather than silently coercing to demo.
+    """
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
     monkeypatch.delenv("DEMO", raising=False)
@@ -1970,8 +1956,9 @@ def test_resolve_credentials_rejects_ambiguous_real_money(monkeypatch) -> None:
 
 
 def test_resolve_credentials_accepts_recognised_falsey_values(monkeypatch) -> None:
-    """realmoney-safety-3: explicit falsey values (false/0/off/empty) stay demo
-    without raising — the fail-safe whitelist remains permissive."""
+    """Explicit falsey values (false/0/off/empty) stay demo without raising -- the
+    fail-safe whitelist remains permissive.
+    """
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
     monkeypatch.delenv("DEMO", raising=False)
@@ -1981,9 +1968,9 @@ def test_resolve_credentials_accepts_recognised_falsey_values(monkeypatch) -> No
 
 
 def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
-    """realmoney-safety-3: resolution emits a single INFO line naming the
-    resolved account so 'which account did this process use' is auditable from
-    the log. Pre-fix there was no resolved-account telemetry anywhere."""
+    """Resolution emits a single INFO line naming the resolved account, so "which
+    account did this process use" is answerable from the log.
+    """
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
     monkeypatch.delenv("DEMO", raising=False)
@@ -1994,15 +1981,15 @@ def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
 
 
 # --------------------------------------------------------------------------
-# ws-pool-3 : ping-timer patch cancels priors; _close_ws_client cleans either
+# Ping-timer patch cancels priors; _close_ws_client cleans either
 # --------------------------------------------------------------------------
 
 
 def test_ping_timer_patch_cancels_prior_timer_on_reconnect(monkeypatch) -> None:
-    """ws-pool-3: a reconnect re-invokes _send_initial_ping. The patched version
-    must cancel the prior timer before installing a new one, so reconnects do
-    not accumulate orphan daemon Timer threads. Pre-fix each reconnect overwrote
-    _agc_ping_timer without cancelling it."""
+    """A reconnect re-invokes ``_send_initial_ping``; the patched version cancels the
+    prior timer before installing a new one so reconnects do not accumulate orphan
+    daemon Timer threads.
+    """
 
     class FakeManager:
         ping_interval = 1000
@@ -2028,7 +2015,7 @@ def test_ping_timer_patch_cancels_prior_timer_on_reconnect(monkeypatch) -> None:
     second = manager._agc_ping_timer
     assert second is not first
     # The prior timer was cancelled (not orphaned): a cancelled Timer's thread
-    # winds down promptly, so a short join completes. Pre-fix the prior timer was
+    # winds down promptly, so a short join completes. An uncancelled prior timer was
     # overwritten WITHOUT cancel and would have run its full ping_interval.
     first.join(timeout=2.0)
     assert not first.is_alive()
@@ -2037,10 +2024,10 @@ def test_ping_timer_patch_cancels_prior_timer_on_reconnect(monkeypatch) -> None:
 
 
 def test_close_ws_client_cancels_stock_custom_ping_timer() -> None:
-    """ws-pool-3: _close_ws_client must cancel the ping timer even when only the
-    STOCK pybit attribute (custom_ping_timer) is set — so a pybit bump that
-    stops calling our patched _send_initial_ping cannot silently turn the cancel
-    into a no-op and reintroduce a shutdown-blocking timer thread."""
+    """``_close_ws_client`` must cancel the ping timer even when only the stock pybit
+    attribute (``custom_ping_timer``) is set, so a pybit bump that stops calling our
+    patched ``_send_initial_ping`` cannot turn the cancel into a no-op.
+    """
     cancelled = {"v": False}
 
     class FakeTimer:
@@ -2061,7 +2048,7 @@ def test_close_ws_client_cancels_stock_custom_ping_timer() -> None:
 
 
 # --------------------------------------------------------------------------
-# ws-pool-4 : a callback swap re-routes bars on already-subscribed connections
+# A callback swap re-routes bars on already-subscribed connections
 # --------------------------------------------------------------------------
 
 
@@ -2101,11 +2088,10 @@ class _SwapFactory:
 
 
 def test_callback_swap_reroutes_existing_connection() -> None:
-    """ws-pool-4: after subscribe() replaces the callback, an ALREADY-subscribed
-    connection must fire the NEW sink (the closure dereferences self._on_bar
-    live, not at build time). Pre-fix the closure captured the old on_bar, so
-    bars on the existing connection kept hitting the OLD sink — contradicting the
-    documented 'replaces for every connection' guarantee."""
+    """After ``subscribe()`` replaces the callback, an already-subscribed connection
+    must fire the NEW sink -- the closure dereferences ``self._on_bar`` live, not at
+    build time.
+    """
     factory = _SwapFactory()
     pool = BybitKlineStreamPool(
         interval_minutes=60,
@@ -2133,23 +2119,19 @@ def test_callback_swap_reroutes_existing_connection() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _paged_time_range mid-pagination empty-page guard (relocated from audit
-# bucket iD). An empty mid-range page must NOT silently truncate a
-# ``_paged_time_range`` fetch: the Bybit funding-rate / open-interest paths walk
-# ``endTime`` backwards; if the provider returns an empty list *after* a full
-# page (a transient hiccup that returns ``[]`` instead of raising), the old code
-# ``break``-ed and returned only the rows fetched before the hole. Downstream,
-# ``_download_symbol_dataset`` would see ``frame.height > 0`` and write the
-# FULL-requested-range completeness marker, producing a permanent silent gap in
-# funding / open_interest that ``_marked_complete`` never re-fetches. The fix
-# raises ``BybitDataError`` on a mid-range empty page so the symbol-range is
-# retried rather than marked complete, while a *first-page* empty (genuine
+# _paged_time_range mid-pagination empty-page guard. The Bybit funding-rate and
+# open-interest paths walk ``endTime`` backwards; an empty list returned after a
+# full page is a transient hole, and truncating there lets
+# ``_download_symbol_dataset`` see ``frame.height > 0`` and write the
+# full-requested-range completeness marker, a permanent silent gap
+# ``_marked_complete`` never re-fetches. A mid-range empty page raises
+# ``BybitDataError`` so the symbol-range is retried; a first-page empty (genuine
 # "no data in range") still returns cleanly.
 # ---------------------------------------------------------------------------
 
 
 def _make_market_data(monkeypatch, responses_by_end_time):
-    """Build a BybitMarketData whose FakeHTTP serves canned funding/OI pages.
+    """Build a ``BybitMarketData`` whose FakeHTTP serves canned funding/OI pages.
 
     ``responses_by_end_time`` maps the per-request ``endTime`` (the backwards
     pagination cursor) to the ``result.list`` payload to return for that call.
@@ -2185,11 +2167,10 @@ def _funding_row(ts: int) -> dict[str, str]:
 def test_mid_range_empty_page_raises_instead_of_truncating(monkeypatch) -> None:
     """A full page followed by an empty page mid-range must raise, not truncate.
 
-    limit=2, range [0, 10]. First request (endTime=10) returns a FULL page
-    (ts 9, 8) so pagination continues with endTime = 8 - 1 = 7. The second
-    request (endTime=7) returns [] -- a transient hole. Old behaviour: break and
-    return only [8, 9]. New behaviour: raise BybitDataError so the fetch fails
-    and the downloader retries rather than writing a full-range marker.
+    limit=2, range [0, 10]. The first request (endTime=10) returns a FULL page
+    (ts 9, 8) so pagination continues with endTime = 8 - 1 = 7; the second
+    (endTime=7) returns [] -- a transient hole. Raising makes the downloader retry
+    instead of writing a full-range marker over a short read.
     """
     responses = {
         10: [_funding_row(9), _funding_row(8)],  # full page -> keep paginating
@@ -2234,10 +2215,7 @@ def test_full_then_short_page_completes_normally(monkeypatch) -> None:
 
 
 def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
-    """open_interest shares _paged_time_range, so the same guard must apply.
-
-    Its timestamp key is "timestamp"; reproduce the full-then-empty hole.
-    """
+    """``open_interest`` shares ``_paged_time_range``, so the same guard applies; its timestamp key is "timestamp"."""
 
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
@@ -2511,10 +2489,11 @@ def test_bybit_private_client_still_rejects_other_trading_stop_errors(
 
 
 def test_kline_window_pager_raises_on_a_bracketed_empty_window(monkeypatch) -> None:
-    """`get_klines`/`_get_price_index_klines` had no mid-range hole guard at all,
-    unlike `_paged_time_range` and every Binance pager: a transient retCode-0
-    empty window silently dropped up to limit x interval bars and the downloader
-    then sealed the gap with a full-range completeness marker (audit M7)."""
+    """``get_klines``/``_get_price_index_klines`` need the mid-range hole guard that
+    ``_paged_time_range`` and the Binance pagers have: a transient retCode-0 empty
+    window silently drops up to limit x interval bars, and the downloader then seals
+    the gap with a full-range completeness marker.
+    """
 
     interval_ms = bybit_market_data.INTERVAL_MS["60"]
     # The hole must be wider than one window span (limit-1 intervals) so at
@@ -2598,12 +2577,9 @@ def test_kline_window_pager_reretries_a_transient_empty_window(monkeypatch) -> N
 
 
 def test_pybit_still_exposes_the_demo_endpoint() -> None:
-    """Pins the third-party half of the realm contract.
-
-    ``_require_demo_endpoint`` can only assert a host that pybit still reports.
-    If an upgrade renames or drops ``endpoint``, the guard would quietly become a
-    no-op in production and nothing else would notice — so the removal has to
-    fail here instead.
+    """``_require_demo_endpoint`` can only assert a host that pybit still reports, so a
+    pybit upgrade that renames or drops ``endpoint`` has to fail here rather than
+    turn the guard into a silent no-op.
     """
 
     from pybit.unified_trading import HTTP
@@ -2618,8 +2594,7 @@ def test_pybit_still_exposes_the_demo_endpoint() -> None:
 
 
 def test_private_client_refuses_a_transport_that_resolved_to_mainnet() -> None:
-    """The failure this guard exists for: every local flag still reads 'demo'
-    while the transport addresses mainnet."""
+    """The failure this guard exists for: every local flag still reads 'demo' while the transport addresses mainnet."""
 
     import pytest
 

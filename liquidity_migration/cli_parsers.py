@@ -212,11 +212,10 @@ def _add_archive_download_klines_1h_api_parser(subparsers) -> None:
 def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the v11a long sleeve target-production cycle.
 
-    Profile is `LongV11aDivWeekendVol` (v11a uni50 sniper retrace 1%/6h fall-through).
-    Per-position notional defaults to 1x research sizing; levered demo sizing
-    must be passed explicitly and must satisfy the projected initial-margin cap.
-    Runs on the same Bybit demo account; the account-owner route receives desired
-    targets through the configured inbox instead of granting this cycle execution authority.
+    Profile is `LongV11aDivWeekendVol` (v11a uni50 sniper retrace 1%/6h
+    fall-through). Per-position notional defaults to 1x research sizing; levered
+    sizing must be passed explicitly and satisfy the projected initial-margin
+    cap. Desired targets go to the account owner through the configured inbox.
     """
     from .long_native_event_demo import LongNativeDemoCycleConfig
 
@@ -276,11 +275,8 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     long_demo.add_argument(
         "--execution-environment",
         required=True,
-        # LONG reaches the mainnet owner only because B3 is closed: the
-        # profile's sleeve partition means LONG cannot spend CARRY's share and
-        # CARRY cannot spend LONG's. Selecting mainnet remains necessary and
-        # never sufficient -- REAL_MONEY and the real-money authority receipt
-        # are separate owner acts.
+        # The profile's sleeve partition means LONG cannot spend CARRY's share
+        # and CARRY cannot spend LONG's.
         choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )
@@ -444,10 +440,9 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
 def _add_carry_demo_cycle_parser(subparsers) -> None:
     """CLI for the daily-decision carry target producer.
 
-    Unlike the other sleeves, the operational profile is REQUIRED here: the
-    carry rule's parameters live in an immutable Lane-2 registration, so the
-    only runtime dials are the profile's ``carry`` sizing block — there are
-    deliberately no per-flag sizing overrides that could drift from it.
+    The operational profile is REQUIRED here: the rule's parameters live in the
+    registered Lane-2 config, so the only runtime dials are the profile's
+    ``carry`` sizing block. There are no per-flag sizing overrides.
     """
     from .carry_demo import CarryDemoCycleConfig
 
@@ -480,10 +475,8 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--execution-environment",
         required=True,
-        # CARRY and LONG are cleared for the mainnet owner now that the profile
-        # partitions the envelope between them (B3). CONTINUOUS is retired and
-        # stays demo|paper: it cannot be pointed at real capital by a flag,
-        # which is a stronger gate than a comment.
+        # CARRY and LONG share the partitioned envelope; CONTINUOUS is retired
+        # and its choices stay demo|paper.
         choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )

@@ -1,20 +1,16 @@
 """Point-in-time coverage / staleness diagnostics for a data root.
 
-The recurring operational failure this guards against: the ``archive_trade_manifest``
-(PIT membership, sourced from Bybit's ~1-day-lagged public trade archive) silently
-drifts behind the kline data because ``download-data`` refreshes klines/funding but
-NOT the manifest. A recent signal then hard-rejects with ``pit_membership_fail`` and
-the backtest<->paper reconciliation breaks for no obvious reason.
+``download-data`` refreshes klines and funding but NOT the
+``archive_trade_manifest`` (PIT membership, from Bybit's ~1-day-lagged public
+trade archive), so the manifest drifts behind the klines and a recent signal
+then hard-rejects with ``pit_membership_fail``. These helpers surface that drift.
+Coverage is read from ``date=YYYY-MM-DD`` partition directory names, so no
+parquet is parsed.
 
-These helpers turn that silent drift into a loud, actionable diagnostic. They are
-deliberately cheap: coverage is read from the dataset's ``date=YYYY-MM-DD``
-partition directory names, so no parquet is parsed.
-
-Membership is keyed on the signal's TRADING DAY (the day whose close produced the
-signal); the gate lives in ``volume_events_pit.py`` (consumed by the active
-long/continuous engines) and ``docs/data.md``. The most recent fully-closed daily bar as of ``now`` has
-trading day ``today_utc - 1``; that is the latest trading day a daily-close signal
-can reference, so the manifest must cover at least that day for a strict reconcile.
+Membership is keyed on the signal's trading day (the day whose close produced
+it); the gate lives in ``volume_events_pit.py`` and ``docs/data.md``. The most
+recent fully-closed daily bar as of ``now`` has trading day ``today_utc - 1``, so
+the manifest must cover at least that day for a strict reconcile.
 """
 
 from __future__ import annotations
@@ -44,10 +40,9 @@ def _max_partition_date(dataset_dir: Path) -> _dt.date | None:
     if not dataset_dir.exists():
         return None
     best: _dt.date | None = None
-    # Coverage is a diagnostic — it must never crash the operation it annotates
-    # (a download, a reconcile). Any filesystem / glob quirk degrades to "unknown"
-    # (None), not an exception. We scan the immediate children for ``date=*`` dirs
-    # (the canonical layout) and fall back to a recursive scan otherwise.
+    # A diagnostic must not crash the operation it annotates, so any filesystem
+    # quirk degrades to "unknown" (None). Immediate ``date=*`` children are the
+    # canonical layout; a recursive scan is the fallback.
     try:
         candidates = [c for c in dataset_dir.iterdir() if c.name.startswith("date=")]
         if not candidates:
@@ -64,10 +59,9 @@ def _max_partition_date(dataset_dir: Path) -> _dt.date | None:
             d = _dt.date.fromisoformat(m.group(1))
         except ValueError:
             continue
-        # An EMPTY date= partition must not count as coverage: write_dataset
-        # mkdir's date=X/symbol=Y BEFORE writing the part, so a crashed / refused
-        # / interrupted build leaves an empty partition dir. Counting its name
-        # would report a stale manifest as FRESH. Require a real parquet under it.
+        # write_dataset mkdirs date=X/symbol=Y before writing the part, so an
+        # interrupted build leaves an empty partition. Require a real parquet,
+        # or a stale manifest reads as fresh.
         try:
             has_parquet = next(child.rglob("*.parquet"), None) is not None
         except OSError:

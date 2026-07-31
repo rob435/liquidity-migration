@@ -74,8 +74,7 @@ class ContinuousEventConfig:
     hold_hours: int = 24
     take_profit_pct: float = 0.12
     # Declared wide backstop, mirrored from the active profile so the modeled
-    # exit rule matches what the account places at the venue (§16.3 parity).
-    # Zero disables it; the pre-sl35 reconstruction is stop_loss_pct=0.0.
+    # exit rule matches the venue stop. Zero disables it.
     stop_loss_pct: float = 0.35
     gross_exposure: float = 0.5
     max_active: int = 25
@@ -94,10 +93,9 @@ class ContinuousEventConfig:
     entry_crowding_max_fresh: int = 2
     use_funding: bool = True
     # Entry-admission floor on the candidate's last SETTLED funding print at the
-    # decision timestamp (signal-bar close): admit only when rate >= floor.
-    # None disables the admission entirely (exact pre-2026-07-26 behavior).
-    # Settled history only — never a predicted/next rate. A candidate with no
-    # settled print admits and is counted (unknown-admits, the research basis).
+    # signal-bar close: admit only when rate >= floor; None disables it.
+    # Settled history only, never a predicted rate. A candidate with no settled
+    # print admits and is counted as an unknown-admit.
     funding_min_at_entry: float | None = None
     split_date: str = "2025-06-01"
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
@@ -245,11 +243,11 @@ def require_stable_residual_momentum(
 def _assert_rmom_covers_window(
     rmom: pl.DataFrame, klines: pl.DataFrame, *, start_ms: int, root: Path
 ) -> None:
-    """Fail loudly when residual_momentum lags the klines window instead of silently truncating.
+    """Fail loudly when residual_momentum lags the klines window.
 
-    The decile build left-joins rmom on (symbol, day_ts) and filters to non-null rmom, so a
-    stale table drops every symbol on recent days and understates exposure and
-    return. Runtime has an equivalent freshness guard.
+    The decile build left-joins rmom on (symbol, day_ts) and keeps non-null rmom,
+    so a stale table drops every symbol on recent days and understates exposure
+    and return. Runtime has an equivalent freshness guard.
     """
     in_window = klines.filter(pl.col("ts_ms") >= start_ms)
     if in_window.is_empty() or rmom.is_empty() or "day_ts" not in rmom.columns:
@@ -343,18 +341,18 @@ def build_continuous_panel(
 
 
 def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
-    """Per-symbol trailing-window features (NO cross-section): the rolling parts that depend only
-    on a symbol's own closed-bar history (ret1, rv_168h, ret72, ret168, min720, max720, vov,
-    dist_low). Split out of `compute_continuous_decile_panel` so the live demo can recompute these
-    once per bar close and cache them (see `continuous_demo.LivePanelCache`); the expressions and
-    their order are byte-for-byte the original inline version, so behaviour is unchanged."""
+    """Per-symbol trailing-window features (NO cross-section): the rolling parts
+    that depend only on a symbol's own closed-bar history (ret1, rv_168h, ret72,
+    ret168, min720, max720, vov, dist_low). Split out of
+    `compute_continuous_decile_panel` so the live demo can recompute them once
+    per bar close and cache them (see `continuous_demo.LivePanelCache`)."""
     k = k.filter(pl.col("close") > 0).unique(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
     k = k.with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret1"))
     k = k.with_columns(
         pl.col("ret1").rolling_std(window_size=168, min_samples=48).over("symbol").alias("rv_168h"),
-        # max single-hour return over the trailing week (the MAX / lottery-demand feature, Bali et al.) —
-        # always computed but only enters the composite when feature_set includes it, so the default
-        # signal (and the live↔backtest equivalence) is unchanged. Research lever for the MAX base.
+        # Max single-hour return over the trailing week (the MAX /
+        # lottery-demand feature). Always computed, but only enters the
+        # composite when feature_set includes it.
         pl.col("ret1").rolling_max(window_size=168, min_samples=48).over("symbol").alias("max_ret168"),
         (pl.col("close") / pl.col("close").shift(72).over("symbol") - 1.0).alias("ret72"),
         (pl.col("close") / pl.col("close").shift(168).over("symbol") - 1.0).alias("ret168"),
@@ -401,16 +399,16 @@ def cross_sectional_decile(
     funnel_venue: str = "unknown",
     funnel_signal_ts_ms: int | None = None,
 ) -> pl.DataFrame:
-    """Cross-sectional composite -> decile from per-symbol features. `k` must already carry
-    [symbol, ts_ms, turnover_quote, rv_168h, vov, dist_low, ret72, ret168]; the backtest passes the
-    full multi-ts panel, the live cache assembles a single current-ts frame from cached carry +
-    the live price. This is the EXACT tail of the original `compute_continuous_decile_panel`, so
-    the live signal that flows through it is provably identical to the verified backtest signal.
+    """Cross-sectional composite -> decile from per-symbol features. `k` must
+    already carry [symbol, ts_ms, turnover_quote, rv_168h, vov, dist_low, ret72,
+    ret168]; the backtest passes the full multi-ts panel while the live cache
+    assembles a single current-ts frame from cached carry plus the live price,
+    so both run the identical tail.
 
-    Cross-sectional ops (`xsret*`, `_rr`, `_n_*`, decile) rank WITHIN each `ts_ms` group, so they
-    are unaffected by which other timestamps are present — hence computing them here (after the
-    backtest's start_ms filter) matches computing them before it (start_ms drops whole timestamps,
-    never individual symbols within a surviving timestamp)."""
+    Cross-sectional ops (`xsret*`, `_rr`, `_n_*`, decile) rank WITHIN each
+    `ts_ms` group, so computing them here (after the backtest's start_ms filter)
+    matches computing them before it: start_ms drops whole timestamps, never
+    individual symbols inside a surviving one."""
     k = k.with_columns(
         pl.col("ret168").rank().over("ts_ms").alias("xsret7"),
         pl.col("ret72").rank().over("ts_ms").alias("xsret3"),
@@ -663,14 +661,15 @@ def compute_continuous_decile_panel(
     funnel_venue: str = "unknown",
     funnel_signal_ts_ms: int | None = None,
 ) -> pl.DataFrame:
-    """Shared feature -> composite -> decile pipeline (used by BOTH the backtest panel and the
-    live demo state, so the live signal is provably identical to the verified backtest).
+    """Shared feature -> composite -> decile pipeline, used by both the backtest
+    panel and the live demo state.
 
-    `k`: hourly klines [ts_ms, symbol, close, turnover_quote] (closed bars; the live caller appends
-    a synthetic current bar per symbol at `now` with close = live ticker price). `rmom`: the daily
-    residual-momentum table [symbol, day_ts, residual_momentum] (day-floored ts). All features are
-    trailing closed-bar windows; the rmom join is a causal day-floor lag1. Returns
-    [symbol, ts_ms, decile, composite, turnover_quote]. Thin composition of the two halves above."""
+    `k`: hourly klines [ts_ms, symbol, close, turnover_quote] on closed bars (the
+    live caller appends a synthetic current bar per symbol with close = live
+    ticker price). `rmom`: the daily residual-momentum table
+    [symbol, day_ts, residual_momentum]. All features are trailing closed-bar
+    windows and the rmom join is a causal day-floor lag1. Returns
+    [symbol, ts_ms, decile, composite, turnover_quote]."""
     k = per_symbol_timeseries_features(k)
     if start_ms:
         k = k.filter(pl.col("ts_ms") >= start_ms)
@@ -733,13 +732,11 @@ def _funding_admission_filter(
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Admit fresh entries whose last settled funding print clears the floor.
 
-    The rate is the last settlement at-or-before each entry's decision
-    timestamp (signal-bar close, ``ts_ms + 1h``) — the same backward as-of
-    semantics as the cross-venue panel join that produced the V3 evidence
-    (docs/research_findings.md). Entries with no settled print
-    admit and are counted. The filter runs BEFORE ``_run_trades`` so crowding,
-    cooldown, and capacity see only admitted candidates, exactly like the
-    research render that produced the adopted numbers.
+    The rate is the last settlement at-or-before each entry's decision timestamp
+    (signal-bar close, ``ts_ms + 1h``) -- the same backward as-of semantics as
+    the cross-venue panel join. Entries with no settled print admit and are
+    counted. Runs BEFORE ``_run_trades`` so crowding, cooldown, and capacity see
+    only admitted candidates.
     """
     counters = {"checked": 0, "rejected": 0, "unknown_admitted": 0}
     if config.funding_min_at_entry is None or entries.is_empty():
@@ -1025,13 +1022,11 @@ def _run_trades(
             ):
                 last_index = position.end_bar_index - 1
                 boundary_ts_ms = int(bars["bar_end_ts_ms"][last_index])
-                # All bars eligible for this trade have now been consumed. If
-                # the symbol tape ends (or has no bar at the planned boundary),
-                # retain the existing ``data_end`` exit at the final observable
-                # bar, but finalize it now while account decisions are still
-                # chronological. Deferring it until the whole replay ends can
-                # leave a delisted symbol open for months and then submit an old
-                # exit after newer account cycles.
+                # Every eligible bar is consumed. Keep the ``data_end`` exit at
+                # the final observable bar but finalize it now, while account
+                # decisions are still chronological: deferring it to the end of
+                # the replay leaves a delisted symbol open for months and then
+                # submits a stale exit after newer cycles.
                 state.close_at_boundary(
                     close=float(bars["close"][last_index]),
                     bar_end_ts_ms=boundary_ts_ms,
@@ -1228,12 +1223,12 @@ def _run_trades(
 def _additive_equity(trades: pl.DataFrame) -> pl.DataFrame:
     """Fixed-capital ADDITIVE daily equity (NOT compounding).
 
-    For a capacity-capped book whose impact is sized off a FIXED deploy capital, additive PnL is
-    the consistent accounting -- compounding implies a growing book that would face growing impact
-    the fixed-capital model does not charge. `net_return` is already the fraction-of-capital PnL of
-    each trade (notional_weight applied); sum it onto its exit day, then cumulative-SUM across days.
-    Schema matches build_equity_curve so the same plot/CSV helpers work; equity = 1 + cum PnL,
-    drawdown = equity - running-max (<=0, in return units)."""
+    For a capacity-capped book whose impact is sized off a FIXED deploy capital,
+    additive PnL is the consistent accounting: compounding implies a growing book
+    facing growing impact the fixed-capital model does not charge. `net_return`
+    is already each trade's fraction-of-capital PnL, summed onto its exit day and
+    then cumulative-summed. Schema matches build_equity_curve; equity = 1 + cum
+    PnL, drawdown = equity - running-max (<=0, in return units)."""
     if trades.is_empty():
         return pl.DataFrame(
             {"ts_ms": pl.Series([], dtype=pl.Int64), "equity": pl.Series([], dtype=pl.Float64),
@@ -1252,9 +1247,8 @@ def _additive_equity(trades: pl.DataFrame) -> pl.DataFrame:
 
 def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> dict[str, Any]:
     equity = _additive_equity(trades)
-    # Headline DD/MAR/Sharpe/return metrics come from the shared `_daily_pnl_metrics` helper
-    # (single source of truth — see code-quality-6: a divergent second copy would silently
-    # report a different number for the same sleeve). Only the additive-specific split is local.
+    # Headline DD/MAR/Sharpe/return metrics come from the shared
+    # `_daily_pnl_metrics`; only the additive-specific split is local.
     base = _daily_pnl_metrics(equity)
     if equity.is_empty():
         return {"n_trades": 0, **base}
@@ -1263,7 +1257,7 @@ def _additive_summary(trades: pl.DataFrame, config: ContinuousEventConfig) -> di
     funding_modes = set(str(m) for m in trades["funding_mode"].to_list()) if "funding_mode" in trades.columns else set()
     fmode = "missing" if (not funding_modes or funding_modes == {"missing"}) else (
         "modeled" if funding_modes == {"modeled"} else "partial")
-    # Compounding reference from the lifecycle accounting; shown for transparency, NOT headline.
+    # Compounding reference from the lifecycle accounting, not the headline.
     comp = float((pl.Series([p + 1.0 for p in pnl]).cum_prod()[-1]) - 1.0) if pnl else 0.0
     return {
         "n_trades": int(trades.height),
@@ -1300,19 +1294,18 @@ def _daily_pnl_metrics(equity: pl.DataFrame) -> dict[str, Any]:
 def _portfolio_mtm_equity(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame:
     """Daily portfolio MARK-TO-MARKET equity (additive, fixed-capital).
 
-    Realized-PnL-at-exit (`_additive_equity`) only books a trade's whole PnL on its exit day, so a
-    day where 25 still-open alt shorts all move against you shows nothing until they exit. This marks
-    every OPEN position to the daily close, distributing each trade's gross PnL across the calendar
-    days it is held; cost is booked on the entry day, funding on the exit day. Concurrent correlated
-    moves therefore aggregate into the daily series → a real portfolio drawdown. Gross daily marks
-    telescope to the trade's realized gross, so total return is unchanged; only the PATH (and thus DD
-    and Sharpe) differ.
+    `_additive_equity` books a trade's whole PnL on its exit day, so a day where
+    25 still-open shorts all move against you shows nothing until they exit. This
+    marks every OPEN position to the daily close, spreading gross PnL across the
+    held days, with cost on the entry day and funding on the exit day, so
+    concurrent correlated moves aggregate into a real portfolio drawdown. Gross
+    daily marks telescope to the realized gross, so total return is unchanged and
+    only the PATH (hence DD and Sharpe) differs.
 
-    Do not calendar-fill this computational series. Rebalance windows are defined over ledger
-    rows and the hedge is applied to every input row; inserting flat days changes volatility
-    scaling and fabricates hedge PnL while exposure is zero. Flat-tail presentation belongs to
-    the chart layer
-    (`_extend_equity_flat_for_chart`, `_step_fill_daily`, monthly gap-fill)."""
+    Do not calendar-fill this series: rebalance windows are defined over ledger
+    rows and the hedge applies to every input row, so inserting flat days changes
+    volatility scaling and fabricates hedge PnL at zero exposure. Flat-tail
+    presentation belongs to the chart layer."""
     if trades.is_empty() or klines.is_empty():
         return _additive_equity(trades)  # empty-safe schema
     dc = (
@@ -1351,11 +1344,10 @@ def _portfolio_mtm_equity(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.Data
 
 
 def _extend_equity_flat_for_chart(equity: pl.DataFrame, *, through_ts_ms: int) -> pl.DataFrame:
-    """CHART-ONLY flat-tail extension: append zero-return days (equity/drawdown carried) through
-    ``through_ts_ms`` so a book that goes flat near the data end renders as a flat line to the
-    boundary (and the final months appear on the axis) instead of the curve silently truncating
-    at the last exit. Never persist this shape — the stored mtm CSV must keep ledger-day rows
-    (see `_portfolio_mtm_equity`)."""
+    """CHART-ONLY flat-tail extension: append zero-return days through
+    ``through_ts_ms`` so a book that goes flat near the data end renders to the
+    boundary instead of truncating at the last exit. Never persist this shape;
+    the stored mtm CSV keeps ledger-day rows (see `_portfolio_mtm_equity`)."""
     if equity.is_empty():
         return equity
     last_ts = int(equity["ts_ms"].max())
@@ -1449,9 +1441,9 @@ def _prepare_inputs(
     if config.use_funding or config.funding_min_at_entry is not None:
         fname = _autodetect_dataset_names(root)["funding_dataset"]
         funding = _read_window(root, fname, start_ms=start_ms - 10 * MS_PER_DAY, end_ms=end_ms + pad_fwd)
-        # Canonical funding datasets come from venue funding-history endpoints:
-        # each distinct timestamp is a realized settlement. Exact stamps preserve
-        # temporary cadence changes during stressed funding regimes.
+        # Each distinct timestamp in a venue funding-history dataset is a
+        # realized settlement; exact stamps preserve cadence changes during
+        # stressed funding regimes.
         funding_lookup = _funding_lookup(funding)
     entries, funding_admission = _funding_admission_filter(entries, funding_lookup, config)
 
@@ -1459,8 +1451,9 @@ def _prepare_inputs(
     if config.btc_trend_gate != "off" and not klines.is_empty():
         btc_trend_daily = _btc_trend_returns(klines, lookback_days=btc_trend_lookback_days)
 
-    # Authoritative per-symbol PIT listing (first-ever bar under the root), read independently of the
-    # run window so the age gate does not infer listing from the clamped window start (pit-engine-2).
+    # Per-symbol PIT listing (first-ever bar under the root), read independently
+    # of the run window so the age gate cannot infer listing from the clamped
+    # window start.
     listing_ts_by_symbol = _listing_ts_by_symbol(root) if config.age_days_min > 0 else None
 
     return {
@@ -1599,9 +1592,9 @@ def run_continuous_equity_component(
     equity.write_csv(out_dir / "continuous_equity.csv")
     mtm_equity.write_csv(out_dir / "continuous_mtm_equity.csv")
     if not trades.is_empty():
-        # Charts render an extended copy so a book that goes flat near the end (e.g. the
-        # BTC-trend gate blocking all entries) draws as a flat line through the data
-        # boundary; the persisted CSVs above keep the computational ledger-day shape.
+        # Charts render an extended copy so a book that goes flat near the end
+        # draws as a flat line through the data boundary; the CSVs above keep
+        # the ledger-day shape.
         chart_boundary = end_ms - MS_PER_DAY
         if not klines.is_empty():
             chart_boundary = min(chart_boundary, (int(klines["ts_ms"].max()) // MS_PER_DAY) * MS_PER_DAY)
@@ -1626,10 +1619,9 @@ def run_continuous_equity_component(
                 klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
                 if not klines.is_empty() else klines
             )
-            # Real per-month aggregation: trade counts by ENTRY month (not equity rows — the
-            # shared renderer's None-fallback counts pl.len() of daily marks ≈ ~30/month) +
-            # MTM monthly return. Without this the table shows ~days, not the ~hundreds of
-            # trades/month a high-turnover book actually opens.
+            # Trade counts by ENTRY month plus MTM monthly return. The shared
+            # renderer's fallback counts daily marks (~30/month) instead of the
+            # hundreds of trades a high-turnover book opens.
             trades_m = (
                 trades.with_columns(pl.col("entry_date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
                 .group_by("month").agg(pl.len().alias("trades"))

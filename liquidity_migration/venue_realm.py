@@ -1,25 +1,11 @@
-"""Which Bybit account a private credential actually addresses.
+"""Which Bybit venue a private credential authenticates against: ``demo`` or ``mainnet``.
 
-``ExecutionEnvironment`` answers a different question — *which owner process a
-producer publishes to* (``demo`` and ``paper`` are two owners; the paper one
-holds no venue credentials at all). This answers *which venue realm a private
-credential authenticates against*, and there are exactly two of those.
+Distinct from ``ExecutionEnvironment``, which names the owner process a producer
+publishes to (``paper`` is an owner with no venue credentials at all).
 
-Keeping them separate matters. ``paper`` is not a venue: it is a
-credential-free twin of the demo owner. Folding a third value into
-``ExecutionEnvironment`` without this distinction would make ``paper`` and
-``mainnet`` look like siblings when one has no venue at all.
-
-Three properties hold everywhere this type is used:
-
-* **The realm is named, never inferred.** Credential resolution takes it as a
-  required argument with no default.
-* **Mainnet is unreachable by omission.** Every place that can fall back falls
-  back to ``demo``; reaching ``mainnet`` always requires someone to have typed
-  it, and ``REAL_MONEY`` to be explicitly armed on top of that.
-* **The realm is asserted after construction, never before.** The endpoint the
-  transport actually resolved to is read back and compared to the realm that
-  was selected — for both realms. See ``bybit._require_realm_endpoint``.
+The realm is always named explicitly — credential resolution takes it as a
+required argument — and the endpoint the transport resolved to is read back and
+compared to it after construction (``bybit._require_realm_endpoint``).
 """
 
 from __future__ import annotations
@@ -40,7 +26,6 @@ class VenueRealm(StrEnum):
     MAINNET = "mainnet"
 
 
-#: The only REST hosts this repository may address with private credentials.
 DEMO_REST_ENDPOINT = "https://api-demo.bybit.com"
 MAINNET_REST_ENDPOINT = "https://api.bybit.com"
 
@@ -49,9 +34,8 @@ REALM_REST_ENDPOINTS: dict[VenueRealm, str] = {
     VenueRealm.MAINNET: MAINNET_REST_ENDPOINT,
 }
 
-#: Credential variables per realm. The two realms read *different* variables on
-#: purpose: a demo key left in the environment can never authenticate a mainnet
-#: run by accident, and vice versa.
+#: The two realms read different variables on purpose, so a key left in the
+#: environment for one can never authenticate the other.
 REALM_CREDENTIAL_VARIABLES: dict[VenueRealm, tuple[str, str]] = {
     VenueRealm.DEMO: ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"),
     VenueRealm.MAINNET: ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET"),

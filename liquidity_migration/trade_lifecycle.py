@@ -56,13 +56,11 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
                 "basket_return": pl.Series([], dtype=pl.Float64),
             }
         )
-    # Compound the portfolio on a daily grid. Each basket is a fractional slice
-    # (weight ~ 1/max_active), so baskets realised on the same day are additive
-    # and equity only compounds across days. Per-basket cum_prod in exit order
-    # instead multiplied overlapping positions onto one another -- inventing
-    # spurious cross-terms and a path-dependent drawdown. (This is realised-PnL
-    # accounting: a basket's whole return lands on its exit day; intra-hold
-    # mark-to-market would additionally need a daily price path.)
+    # Compound on a daily grid. Each basket is a fractional slice
+    # (weight ~ 1/max_active), so same-day baskets are additive and equity only
+    # compounds across days; a per-basket cum_prod in exit order would multiply
+    # overlapping positions together. Realised-PnL accounting: a basket's whole
+    # return lands on its exit day.
     return (
         baskets.with_columns(
             pl.from_epoch(pl.col("exit_ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
@@ -210,9 +208,8 @@ def _intrahold_and_gross_stats(trades: pl.DataFrame) -> dict[str, float]:
     if trades.is_empty():
         return out
     if "mae" in trades.columns:
-        # Drop non-finite mae: a sleeve that does not track intra-hold path (e.g.
-        # the long sleeve) emits NaN, which must read as "not measured" — not a
-        # spurious 0 — and must never poison min()/mean() of a sleeve that does.
+        # A sleeve that does not track the intra-hold path emits NaN, meaning
+        # "not measured" rather than 0; it must not enter min()/mean().
         finite_mae = trades.filter(pl.col("mae").is_finite())
         mae = finite_mae["mae"]
         if not mae.is_empty():
@@ -483,9 +480,8 @@ def _perp_funding_return(
     series = funding_lookup.get(symbol)
     if series is None:
         return 0.0, "missing", 0
-    # A trade whose window extends past the funding dataset is still charged the
-    # funding that IS covered, and flagged "partial" -- zeroing the whole trade
-    # would silently drop a real cost/credit from total_return.
+    # A trade extending past the funding dataset is still charged the funding
+    # that is covered and flagged "partial"; zeroing it would drop a real cost.
     fully_covered = entry_ts_ms >= int(series["start_ts_ms"]) and exit_ts_ms <= int(series["end_ts_ms"])
     mode = "modeled" if fully_covered else "partial"
     # Bisect the pre-sorted ts_list to slice the in-window events in O(log n).
@@ -499,11 +495,8 @@ def _perp_funding_return(
 
 
 def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, np.ndarray]]:
-    # Parallel numpy arrays per symbol: ts_ms / bar_end_ts_ms / open / high /
-    # low / close. Replaces an earlier dict-of-dicts layout that materialized
-    # ~12M Python dicts up front and forced float() casts on every hot-loop
-    # read; arrays let consumers index by position in C without a per-bar dict
-    # build or attribute access.
+    # Parallel numpy arrays per symbol (ts_ms / bar_end_ts_ms / OHLC), so hot
+    # loops index by position instead of building ~12M per-bar dicts.
     required = {"ts_ms", "symbol", "open", "high", "low", "close"}
     missing = required - set(klines.columns)
     if missing:

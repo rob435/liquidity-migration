@@ -1,11 +1,10 @@
 """Tests for the read-only kline follower (shared WS data planes across sleeves).
 
-The leader (continuous DEMO daemon) flushes its KlineStore to an atomic
-store.parquet snapshot; the follower (paper shadow) stat-polls that file and
-re-runs the idempotent recover merge. These tests pin the contract: snapshot
-recovery + parity, refresh-on-change only, wake-event firing on a new confirmed
-bar, strict read-only behaviour, graceful degradation while the snapshot is
-missing, and the daemon-side factory selection."""
+The leader flushes its KlineStore to an atomic store.parquet snapshot; the follower
+stat-polls that file and re-runs the idempotent recover merge. Pinned: snapshot recovery
+and parity, refresh-on-change only, wake-event firing on a new confirmed bar, read-only
+behaviour, degradation while the snapshot is missing, and daemon-side factory selection.
+"""
 from __future__ import annotations
 
 import threading
@@ -133,9 +132,9 @@ def test_follower_degrades_gracefully_while_snapshot_missing(tmp_path: Path) -> 
 
 
 def test_follower_prunes_symbols_the_leader_trimmed(tmp_path: Path) -> None:
-    """Leader universe trims (restart/refresh) -> the departed symbol must leave the
-    follower too: recovery only ADDS, so without the prune the stale symbol would
-    pollute universe_symbols() and memory until its bars age out."""
+    """Recovery only ADDS, so a symbol the leader trimmed must be pruned explicitly or
+    it pollutes ``universe_symbols()`` and memory until its bars age out.
+    """
     leader = _leader_with_bars(tmp_path, symbols=("AAAUSDT", "BBBUSDT", "OLDUSDT"))
     follower = FollowerKlineStreamManager(leader_root=tmp_path, poll_seconds=3600.0)
     try:
@@ -154,9 +153,10 @@ def test_follower_prunes_symbols_the_leader_trimmed(tmp_path: Path) -> None:
 
 
 def test_follower_warns_once_when_leader_snapshot_goes_stale(tmp_path: Path, caplog) -> None:
-    """Leader daemon down -> snapshot freezes -> the follower keeps serving (REST
-    fallback covers correctness) but must surface the degradation exactly once
-    per episode, and expose snapshot_age_seconds for telemetry."""
+    """A frozen snapshot (leader down) keeps serving via the REST fallback, but must
+    surface the degradation exactly once per episode and expose
+    ``snapshot_age_seconds``.
+    """
     import logging
     import os
 
@@ -321,17 +321,15 @@ def test_rmom_parquet_is_read_from_the_followed_root(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# ws-pool-6 : follower _last_sig matches the generation actually merged
-# (relocated from the audit bucket b01)
+# Follower _last_sig matches the generation actually merged
 # --------------------------------------------------------------------------
 
 
 def test_follower_refresh_records_post_read_signature(tmp_path: Path) -> None:
-    """ws-pool-6: if the leader flushes a NEWER generation between the follower's
-    stat and recover_from_disk's read, the follower must record the signature of
-    the generation it actually merged (post-read), not the stale pre-read one.
-    Pre-fix _last_sig held the pre-read sig, so _snapshot_age_seconds lagged a
-    generation and the next poll did a redundant re-read."""
+    """If the leader flushes a newer generation between the follower's stat and
+    ``recover_from_disk``'s read, the follower records the signature of the
+    generation it actually merged, so the age does not lag a generation.
+    """
     base = _hour_floor_now_ms() - 4 * MS_PER_HOUR
 
     leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
@@ -371,8 +369,7 @@ def test_follower_refresh_records_post_read_signature(tmp_path: Path) -> None:
 
 
 def test_follower_refresh_no_change_is_noop(tmp_path: Path) -> None:
-    """ws-pool-6 guard: an unchanged snapshot is still a clean no-op (the
-    re-stat-after-read change must not break the steady-state path)."""
+    """An unchanged snapshot is a clean no-op: the re-stat-after-read must not perturb the steady-state path."""
     base = _hour_floor_now_ms() - 2 * MS_PER_HOUR
     leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     for i in range(2):

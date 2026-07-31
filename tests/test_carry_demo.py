@@ -1,15 +1,11 @@
-"""Target-only decision contract for the CARRY demo and paper producer.
+"""Target-only decision contract for the CARRY demo and paper producer: close-keyed venue
+view, fail-closed data guards, diff-based target planner, account-owner publication.
 
-These tests cover the close-keyed venue view, the fail-closed data guards,
-the diff-based target planner, and the strict account-owner publication
-boundary. Venue orders, fills, P&L, protection, and notifications belong to
-the account service and are intentionally absent from this suite.
-
-The integration tests replay the REAL registered rule (decide_book over
-``configs/lane2_carry_hold_v3.json``) on a deterministic synthetic market:
-period-3 price pattern (ret_3d exactly 0 so the toxic-band filter never
-engages; 30d daily vol ~6.5% so the dead-name floor passes) and 8h funding
-prints that are benign except for the named deep symbols.
+The integration tests replay the registered rule (``decide_book`` over
+``configs/lane2_carry_hold_v3.json``) on a deterministic synthetic market: period-3
+price pattern (ret_3d exactly 0 so the toxic-band filter never engages; 30d daily vol
+~6.5% so the dead-name floor passes) and 8h funding prints that are benign except for
+the named deep symbols.
 """
 
 from __future__ import annotations
@@ -208,9 +204,8 @@ def _patch_planning(
 def _patch_demo_market_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route the heavy kline path through the synthetic generator.
 
-    The shim honours the real downloader's boundary contract (opens in
-    [start, end)); the funding cache, venue view, and decision replay all run
-    for real on top of it.
+    The shim honours the real downloader's boundary contract (opens in [start, end));
+    the funding cache, venue view, and decision replay all run for real on top of it.
     """
 
     def download(symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
@@ -318,6 +313,20 @@ def test_view_health_guards_refuse_broken_funding_inputs() -> None:
     _validate_carry_view_health(stale_standing, decision_ts_ms=D0, standing_symbols={"B"})
 
 
+def _rows(
+    standing_notional: dict[str, float], *, price: float = 1.0
+) -> dict[str, tuple[float, float]]:
+    """Planner standing book: {symbol: (notional, signed_qty)}.
+
+    The planner needs the accepted quantity too, so it can tell real exposure from a
+    zero-quantity reservation (a completed exit desire with nothing left to reduce).
+    """
+
+    return {
+        symbol: (notional, notional / price) for symbol, notional in standing_notional.items()
+    }
+
+
 def _plan_kwargs(**overrides: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "decision": CarryDecision(
@@ -328,7 +337,7 @@ def _plan_kwargs(**overrides: Any) -> dict[str, Any]:
             gross=0.12,
         ),
         "rule": load_carry_config(),
-        "standing_notional": {},
+        "standing_rows": {},
         "trail_by_symbol": {"AUSDT": -0.0020, "BUSDT": -0.0045, "CUSDT": -0.0010},
         "demo": CarryDemoCycleConfig(max_new_entries_per_cycle=2),
         "equity_usdt": EQUITY,
@@ -361,11 +370,11 @@ class TestCarryTargetPlan:
     def test_diff_emits_exit_resize_and_respects_dead_band(self) -> None:
         plan = _carry_target_plan(
             **_plan_kwargs(
-                standing_notional={
+                standing_rows=_rows({
                     "AUSDT": 0.05 * EQUITY,  # matches target: no action
                     "CUSDT": 100.0,  # resize up to 0.03 * equity
                     "GONEUSDT": 250.0,  # not desired: exit
-                },
+                }),
             )
         )
 
@@ -381,7 +390,7 @@ class TestCarryTargetPlan:
     def test_owner_health_error_blocks_entries_but_not_exits(self) -> None:
         plan = _carry_target_plan(
             **_plan_kwargs(
-                standing_notional={"GONEUSDT": 250.0, "CUSDT": 100.0},
+                standing_rows=_rows({"GONEUSDT": 250.0, "CUSDT": 100.0}),
                 equity_usdt=0.0,
                 account_owner_health_error="AccountOwnerHealthHeadPending: stale",
             )
@@ -400,13 +409,8 @@ class TestCarryTargetPlan:
         assert plan.entry_validity_expired_skips == 3
 
     def test_intraday_equity_drift_alone_never_publishes_a_resize(self) -> None:
-        """The regression: a converged book must stay silent while the mark moves.
-
-        On 2026-07-30 this produced 133 involuntary reductions and $84.7k of
-        traded notional against a ~$30k book in thirteen hours, with no
-        strategy exit and no weight change -- the sleeve was rebalancing to
-        its own unrealized P&L. Sizing is anchored to the decision, so equity
-        moving is not, by itself, an instruction to trade.
+        """A converged book stays silent while the mark moves: sizing is anchored to the
+        decision, so equity moving is not by itself an instruction to trade.
         """
 
         state = CarryCycleState()
@@ -416,7 +420,7 @@ class TestCarryTargetPlan:
             "CUSDT": 0.03 * EQUITY,
         }
         first = _carry_target_plan(
-            **_plan_kwargs(standing_notional=converged, cycle_state=state)
+            **_plan_kwargs(standing_rows=_rows(converged), cycle_state=state)
         )
         assert first.resize_intents == []
 
@@ -424,7 +428,7 @@ class TestCarryTargetPlan:
         for drift in (1.02, 0.97, 1.05, 0.93):
             plan = _carry_target_plan(
                 **_plan_kwargs(
-                    standing_notional=converged,
+                    standing_rows=_rows(converged),
                     equity_usdt=EQUITY * drift,
                     cycle_state=state,
                 )
@@ -432,11 +436,10 @@ class TestCarryTargetPlan:
             assert plan.resize_intents == [], f"drift {drift} published a resize"
 
     def test_sizing_is_clamped_to_the_capital_reference(self) -> None:
-        """The owner's six pre-trade caps are absolute USDT numbers calibrated
-        against capital_reference_usdt, but sizing reads live venue equity.
-        Without this clamp the two drift apart and the load-time envelope proof
-        -- that worst-case producer notional fits inside those caps -- silently
-        stops being true the moment the account grows past the reference.
+        """The owner's six pre-trade caps are absolute USDT numbers calibrated against
+        ``capital_reference_usdt``, but sizing reads live venue equity. Without this
+        clamp the load-time envelope proof stops being true once the account grows past
+        the reference.
         """
 
         demo = CarryDemoCycleConfig(
@@ -529,7 +532,7 @@ class TestCarryTargetPlan:
         state = CarryCycleState()
         plan = _carry_target_plan(
             **_plan_kwargs(
-                standing_notional={"CUSDT": 0.03 * EQUITY * 0.5},
+                standing_rows=_rows({"CUSDT": 0.03 * EQUITY * 0.5}),
                 cycle_state=state,
             )
         )
@@ -540,11 +543,114 @@ class TestCarryTargetPlan:
 
     def test_missing_decision_plans_nothing(self) -> None:
         plan = _carry_target_plan(
-            **_plan_kwargs(decision=None, standing_notional={"GONEUSDT": 250.0})
+            **_plan_kwargs(decision=None, standing_rows=_rows({"GONEUSDT": 250.0}))
         )
 
         assert plan.exit_intents == [] and plan.entry_intents == [] and plan.resize_intents == []
         assert plan.entry_blocked_reason == "decision_unavailable"
+
+    def test_a_zero_quantity_reservation_is_never_re_exited(self) -> None:
+        """Once a position has closed, its accepted zero target is a reservation with
+        nothing left to reduce, so re-planning its exit must publish nothing.
+        """
+
+        plan = _carry_target_plan(
+            **_plan_kwargs(standing_rows={"STRANDEDUSDT": (0.0, 0.0)})
+        )
+
+        assert plan.exit_intents == []
+        assert plan.planned_exits == 0
+        assert plan.stranded_zero_quantity_reservations == 1
+
+    def test_a_stranded_reservation_is_inert_on_every_path(self) -> None:
+        """Not re-exiting is not the same as forgetting.
+
+        The symbol must not be re-entered underneath its own unconverged target, and it
+        must not escape through the RESIZE branch either: a zero standing notional
+        clears any dead-band, so a still-desired stranded name would otherwise republish
+        its whole target every cycle.
+        """
+
+        decision = CarryDecision(
+            decision_ts_ms=D0,
+            weights={"STRANDEDUSDT": 0.05},
+            universe_size=100,
+            replay_days=90,
+            gross=0.05,
+        )
+        plan = _carry_target_plan(
+            **_plan_kwargs(
+                decision=decision,
+                standing_rows={"STRANDEDUSDT": (0.0, 0.0)},
+                trail_by_symbol={"STRANDEDUSDT": -0.002},
+            )
+        )
+
+        assert plan.entry_intents == []
+        assert plan.exit_intents == []
+        assert plan.resize_intents == []
+        assert plan.planned_entries == 0
+        assert plan.planned_resizes == 0
+        # Counted whether or not it is still desired: an operator has to clear it.
+        assert plan.stranded_zero_quantity_reservations == 1
+
+    def test_real_exposure_is_still_exited(self) -> None:
+        plan = _carry_target_plan(**_plan_kwargs(standing_rows=_rows({"GONEUSDT": 250.0})))
+
+        assert [item.intent.symbol for item in plan.exit_intents] == ["GONEUSDT"]
+        assert plan.stranded_zero_quantity_reservations == 0
+
+
+class TestFrozenDailyDecision:
+    def _decision(self, weights: dict[str, float]) -> CarryDecision:
+        return CarryDecision(
+            decision_ts_ms=D0,
+            weights=weights,
+            universe_size=100,
+            replay_days=90,
+            gross=sum(weights.values()),
+        )
+
+    def test_a_bar_keeps_the_first_book_it_computed(self) -> None:
+        state = CarryCycleState()
+        first = self._decision({"AUSDT": 0.1, "BUSDT": 0.1})
+        state.freeze_decision(
+            decision_ts_ms=D0, decision=first, trail_by_symbol={"AUSDT": -0.02}, universe_eligible=103
+        )
+
+        frozen = state.frozen_decision(D0)
+
+        assert frozen is not None
+        decision, trail, eligible = frozen
+        assert decision is first
+        assert trail == {"AUSDT": -0.02}
+        assert eligible == 103
+
+    def test_a_new_bar_is_not_served_the_previous_book(self) -> None:
+        state = CarryCycleState()
+        state.freeze_decision(
+            decision_ts_ms=D0,
+            decision=self._decision({"AUSDT": 0.1}),
+            trail_by_symbol={},
+            universe_eligible=100,
+        )
+
+        assert state.frozen_decision(D0 + MS_PER_DAY) is None
+
+    def test_the_frozen_trail_is_a_copy(self) -> None:
+        state = CarryCycleState()
+        trail = {"AUSDT": -0.02}
+        state.freeze_decision(
+            decision_ts_ms=D0,
+            decision=self._decision({"AUSDT": 0.1}),
+            trail_by_symbol=trail,
+            universe_eligible=100,
+        )
+        trail["AUSDT"] = 0.0
+
+        frozen = state.frozen_decision(D0)
+        assert frozen is not None
+        assert frozen[1] == {"AUSDT": -0.02}
 
 
 def test_validate_carry_demo_config_rejections(tmp_path: Path) -> None:
@@ -835,6 +941,96 @@ def test_cycle_state_throttles_funding_sweep_to_hour_boundaries(
     assert second["decision_error"] is None
 
 
+def test_a_later_cycle_never_changes_the_days_book(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registered rule decides once per 00:00 UTC bar and holds.
+
+    The funding data is rewritten between two same-bar cycles so a recomputation
+    WOULD move the book; the frozen decision must ignore it until the next bar.
+    """
+
+    _route(tmp_path / "route")
+    _patch_demo_market_data(monkeypatch)
+    _patch_planning(monkeypatch)
+    state = CarryCycleState()
+
+    first = run_carry_demo_cycle(
+        tmp_path / "producer",
+        config=ResearchConfig(),
+        demo_config=_routed_config(tmp_path / "route"),
+        market_client=_FakeCarryMarket(),
+        now_ms=NOW_MS,
+        cycle_state=state,
+    )
+    assert first["decision_frozen"] is False
+    assert first["desired_book_size"] > 0
+
+    # Make every symbol's crowd payment benign: a fresh decision on this data
+    # would empty the book and flatten everything the sleeve holds.
+    monkeypatch.setattr(module, "_trailing_settled_funding", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        module, "decide_book", lambda *_a, **_k: pytest.fail("froze bar was recomputed")
+    )
+
+    second = run_carry_demo_cycle(
+        tmp_path / "producer",
+        config=ResearchConfig(),
+        demo_config=_routed_config(tmp_path / "route"),
+        market_client=_FakeCarryMarket(),
+        now_ms=NOW_MS + 60_000,
+        cycle_state=state,
+    )
+
+    assert second["decision_frozen"] is True
+    assert second["desired_book_size"] == first["desired_book_size"]
+    assert second["desired_gross_weight"] == first["desired_gross_weight"]
+    assert second["exit_targets_queued"] == 0
+
+
+def test_a_failed_decision_is_not_frozen_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A data hiccup at 00:20 must keep retrying, not pin an error for the day."""
+
+    _route(tmp_path / "route")
+    _patch_demo_market_data(monkeypatch)
+    _patch_planning(monkeypatch)
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise CarrySleeveError("synthetic build failure")
+
+    monkeypatch.setattr(module, "decide_book", boom)
+    state = CarryCycleState()
+    failed = run_carry_demo_cycle(
+        tmp_path / "producer",
+        config=ResearchConfig(),
+        demo_config=_routed_config(tmp_path / "route"),
+        market_client=_FakeCarryMarket(),
+        now_ms=NOW_MS,
+        cycle_state=state,
+    )
+    assert failed["decision_error"] is not None
+    assert state.frozen_decision(carry_decision_ts_ms(NOW_MS)) is None
+
+    monkeypatch.undo()
+    _patch_demo_market_data(monkeypatch)
+    _patch_planning(monkeypatch)
+    recovered = run_carry_demo_cycle(
+        tmp_path / "producer",
+        config=ResearchConfig(),
+        demo_config=_routed_config(tmp_path / "route"),
+        market_client=_FakeCarryMarket(),
+        now_ms=NOW_MS + 60_000,
+        cycle_state=state,
+    )
+    assert recovered["decision_error"] is None
+    assert recovered["decision_frozen"] is False
+    assert recovered["desired_book_size"] > 0
+
+
 def test_summary_formatter_renders_flat_payload() -> None:
     line = format_carry_demo_cycle_summary(
         {
@@ -861,10 +1057,9 @@ def test_summary_formatter_renders_flat_payload() -> None:
 
 
 def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
-    # A cold-started cache begins at the bootstrap hour; the first cycle's
-    # view then opens mid-day and decide_book's phase guard refuses it
-    # (observed live 2026-07-29: window starting 03:00 UTC). The cycle layer
-    # must trim to the first 00:00 UTC key so the daily grid keeps the
+    # A cold-started cache begins at the bootstrap hour, so the first cycle's
+    # view opens mid-day and decide_book's phase guard refuses it. The cycle
+    # layer must trim to the first 00:00 UTC key so the daily grid keeps the
     # registered decision clock. Replicates the trim expression directly.
     day_ms = 86_400_000
     hour_ms = 3_600_000
@@ -881,3 +1076,77 @@ def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
     assert int(trimmed.get_column("bar_ts_ms").min()) % day_ms == 0
     # nothing beyond the partial day is lost
     assert trimmed.height == bars.height - (24 - 3)
+
+
+class TestFundingFollowSnapshot:
+    """The follower must never decide on a half-written leader sweep.
+
+    The leader writes funding as a per-symbol partitioned dataset under an exclusive
+    lock the follower cannot take (it has no write access to the leader's root), and
+    a partitioned write lands one symbol at a time. The single-file snapshot is
+    replaced by rename, which is atomic.
+    """
+
+    def _funding(self, rate: float) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": ["AUSDT", "BUSDT"],
+                "funding_ts_ms": [D0, D0],
+                "funding_rate": [rate, rate],
+            }
+        )
+
+    def test_follower_prefers_the_atomic_snapshot(self, tmp_path: Path) -> None:
+        leader = tmp_path / "leader"
+        leader.mkdir()
+        # The partitioned dataset carries the OLD sweep; the snapshot the NEW one.
+        write_dataset(self._funding(-0.001), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
+        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
+
+        read = module._read_leader_funding(leader)
+
+        assert sorted(read.get_column("funding_rate").to_list()) == [-0.009, -0.009]
+
+    def test_a_digest_mismatch_falls_back_instead_of_deciding_on_torn_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        leader = tmp_path / "leader"
+        leader.mkdir()
+        write_dataset(self._funding(-0.001), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
+        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
+        parquet_path, _metadata_path = module._funding_follow_snapshot_paths(leader)
+        parquet_path.write_bytes(b"truncated")
+
+        read = module._read_leader_funding(leader)
+
+        assert sorted(read.get_column("funding_rate").to_list()) == [-0.001, -0.001]
+
+    def test_a_missing_snapshot_falls_back_to_the_partitioned_dataset(
+        self, tmp_path: Path
+    ) -> None:
+        leader = tmp_path / "leader"
+        leader.mkdir()
+        write_dataset(self._funding(-0.004), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
+
+        read = module._read_leader_funding(leader)
+
+        assert sorted(read.get_column("funding_rate").to_list()) == [-0.004, -0.004]
+
+    def test_a_failed_snapshot_write_leaves_the_previous_one_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        leader = tmp_path / "leader"
+        leader.mkdir()
+        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
+
+        def boom(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pl.DataFrame, "write_parquet", boom)
+        # Never fatal: a follower with a stale-but-whole snapshot is safe; a
+        # follower with a torn one is not.
+        module._write_funding_follow_snapshot(leader, self._funding(-0.002))
+        monkeypatch.undo()
+
+        read = module._read_leader_funding(leader)
+        assert sorted(read.get_column("funding_rate").to_list()) == [-0.009, -0.009]

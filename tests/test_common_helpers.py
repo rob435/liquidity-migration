@@ -17,15 +17,14 @@ from liquidity_migration._common import (
 
 
 def _date_ms(date_str: str) -> int:
-    # Provenance: relocated from tests/test_audit_fix_b09.py (audit bucket b09).
     return int(datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def test_calendar_shift_nulls_across_a_gap_but_matches_shift_when_contiguous() -> None:
-    """calendar_shift is the gap-aware no-look-ahead primitive: it returns the
-    value exactly ``periods`` CALENDAR days back, or NULL if that row is missing.
-    A plain shift(periods) would silently reach across a gap and mislabel the
-    lookback (e.g. a '1d' return computed over 2+ calendar days)."""
+    """``calendar_shift`` returns the value exactly ``periods`` CALENDAR days back, or
+    NULL if that row is missing; a plain ``shift(periods)`` reaches across a gap and
+    mislabels the lookback.
+    """
     df = pl.DataFrame(
         {
             "symbol": ["X", "X", "X"],
@@ -99,11 +98,7 @@ def test_is_weekend_ms() -> None:
 
 
 def test_is_weekend_ms_matches_old_inline_formula() -> None:
-    """Numerical-equivalence gate: the helper is byte-identical to the inline math
-    it replaced, so the weekend tilt's selection is unchanged.
-
-    Relocated from tests/test_audit_fix_b09.py (audit bucket b09, long-sleeve-5).
-    """
+    """The helper is byte-identical to the inline math it replaced, so the weekend tilt's selection is unchanged."""
     base = _date_ms("2025-01-01")
     for d in range(14):
         ts = base + d * MS_PER_DAY + 12 * 3_600_000

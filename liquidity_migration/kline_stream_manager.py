@@ -1,33 +1,27 @@
 """Orchestrator for the WS-driven kline pipeline.
 
-Wires three independent components into a single lifecycle:
+Wires four components into a single lifecycle:
 
 - ``KlineStore`` (in-memory bars, periodic disk flush)
 - ``BybitKlineStreamPool`` (multi-connection WS subscriptions)
 - A bootstrap path that parallel-REST-fills history at startup
-- A universe-refresh thread that polls instruments every hour for new
-  listings + delistings and reconciles the pool's subscriptions
+- A universe-refresh thread that polls instruments hourly for listings and
+  delistings and reconciles the pool's subscriptions
 
-The cycle's ``_download_recent_1h_klines`` does NOT call this module
-directly; it consumes the store via ``manager.store()``. The store is the
-contract; the manager is the wiring that keeps it fresh.
+The cycle's ``_download_recent_1h_klines`` consumes the store via
+``manager.store()`` rather than calling this module. The store is the contract;
+the manager is the wiring that keeps it fresh.
 
 Lifecycle:
 
-  1. ``start()``:
-     - recover from the flush file if present
-     - subscribe the WS pool to the current symbol universe so live bars
-       start flowing immediately
-     - in parallel, bootstrap historical bars (last ``lookback_days``) for
-       any symbol the store does not already cover. Block until
-       ``bootstrap_completion_threshold`` of the universe is covered.
-     - start the universe-refresh thread
-     - start the watchdog + flush threads
-  2. cycle reads via ``manager.store()`` — store has the data, REST fallback
-     covers any symbol not yet present
-  3. ``stop()`` tears everything down cleanly: refresh thread, watchdog,
-     flush thread, pool, then one final flush so the next process restart
-     recovers the latest state.
+  1. ``start()``: recover from the flush file, trim to the universe, bootstrap
+     the last ``lookback_days`` for uncovered symbols (blocking until
+     ``bootstrap_completion_threshold`` or timeout), subscribe the WS pool, then
+     start the flush, watchdog, and universe-refresh threads.
+  2. The cycle reads via ``manager.store()``; REST fallback covers any symbol
+     not yet present.
+  3. ``stop()`` tears down refresh thread, watchdog, flush thread, and pool,
+     then flushes once so the next process restart recovers the latest state.
 """
 
 from __future__ import annotations
@@ -86,10 +80,8 @@ class KlineStreamManager:
     bootstrap_completion_threshold: float = 0.95
     bootstrap_timeout_seconds: float = 1200.0
     bootstrap_max_attempts_per_symbol: int = 2
-    # Per-IP REST budget the bootstrap (and cycle REST fallback) must stay under.
-    # get_klines paginates: a >1000-bar lookback issues 2+ HTTP calls per symbol,
-    # so the limiter has to be wired into the market client (one acquire per HTTP
-    # call), not acquired once per symbol, or pagination can exceed the budget.
+    # Per-IP REST budget for the bootstrap. get_klines paginates, so the limiter
+    # must sit on the market client (one acquire per HTTP call), not per symbol.
     bootstrap_rest_max_requests: int = 12
     bootstrap_rest_per_seconds: float = 1.0
     flush_interval_seconds: float = 30.0
@@ -115,11 +107,8 @@ class KlineStreamManager:
     _universe_refresh_errors: int = field(init=False, repr=False, default=0)
     _last_universe_refresh_ms: int = field(init=False, repr=False, default=0)
     _lock: threading.RLock = field(init=False, repr=False)
-    # Cycle-wake signal: an Event the daemon's run loop waits on, set when a
-    # NEW confirmed bar boundary lands (first symbol to deliver a new hour),
-    # so the daemon fires its cycle the instant fresh data arrives (WS-event-
-    # driven) instead of polling on a wall-clock timer. None means the daemon
-    # has not wired its event yet.
+    # Set when a NEW confirmed bar boundary lands, so the daemon's run loop
+    # fires on fresh data instead of a wall-clock timer. None until wired.
     _cycle_wake_event: threading.Event | None = field(init=False, repr=False, default=None)
     _max_confirmed_ts_ms: int = field(init=False, repr=False, default=0)
     # Shared REST limiter wired onto the market client so EACH paginated _get
@@ -146,11 +135,8 @@ class KlineStreamManager:
         self._universe = set()
         self._bootstrap_result = _BootstrapResult()
         self._lock = threading.RLock()
-        # Wire a shared REST rate-limiter onto the market client so every paginated
-        # get_klines HTTP call (not just one-per-symbol) is throttled under the
-        # per-IP budget. The bootstrap market client is built with no limiter
-        # (acquire() would otherwise be a no-op), so the manager owns it. Respect a
-        # limiter the caller already attached.
+        # Shared REST limiter on the market client so every paginated
+        # get_klines call is throttled. A caller-supplied limiter wins.
         self._bootstrap_limiter = BybitRestRateLimiter(
             max_requests=self.bootstrap_rest_max_requests,
             per_seconds=self.bootstrap_rest_per_seconds,
@@ -186,13 +172,9 @@ class KlineStreamManager:
         the method returns early so the daemon can stop responsively
         instead of waiting for systemd's TimeoutStopSec to expire.
 
-        **Ordering is intentional:** bootstrap runs BEFORE pool subscribe.
-        Earlier ordering (pool first, then bootstrap) starved the REST
-        bootstrap workers via WS event GIL pressure — 567 symbols took
-        383s and only 100 succeeded before the deadline cancelled the
-        remaining 467. Bootstrap-first lets REST run uncontested in
-        ~100s; the brief window where a bar closes during bootstrap is
-        recovered by the cycle's REST fallback on the next tick.
+        Ordering matters: bootstrap runs BEFORE the pool subscribe, because WS
+        event GIL pressure starves the REST bootstrap workers otherwise. A bar
+        closing during bootstrap is recovered by the cycle's REST fallback.
         """
         if self._started:
             return self._start_stats(blocked=False)
@@ -203,14 +185,10 @@ class KlineStreamManager:
         universe = self._fetch_universe()
         with self._lock:
             self._universe = set(universe)
-        # Trim the recovered store to the active universe — a prior
-        # daemon run may have subscribed a wider universe (e.g. before
-        # universe scoping landed on the long sleeve), and those out-of-scope
-        # bars would otherwise sit in memory for 90 days waiting on
-        # retain_days eviction. Skipped when the universe is empty so
-        # a transient REST blip on the universe fetch doesn't blow the
-        # store away — the empty-universe-fetch protection in
-        # force_refresh_universe applies the same logic at runtime.
+        # Trim the recovered store to the active universe: a prior run may have
+        # subscribed a wider one, and those bars would otherwise wait out
+        # retain_days in memory. Skipped on an empty universe so a transient
+        # REST blip cannot wipe the store.
         if self._universe:
             dropped = self._store.keep_only_symbols(self._universe)
             if dropped:
@@ -276,14 +254,9 @@ class KlineStreamManager:
         # fetch error already recorded by the default fetcher.
         errors_before_fetch = self._universe_refresh_errors
         new_universe = set(self._fetch_universe())
-        # An empty fetch is almost always a transient REST failure (the
-        # default fetcher returns [] on exception, the long fetcher
-        # returns [] when the tickers REST call fails). Treating "no
-        # symbols" as "all symbols delisted" would unsubscribe the pool
-        # from every kline topic, killing the live feed until the next
-        # refresh succeeds — a single REST blip would silently sever
-        # the WS pipeline. Skip the diff in that case; existing
-        # subscriptions stay live, and the next refresh tick retries.
+        # An empty fetch is almost always a transient REST failure; reading it
+        # as "all symbols delisted" would unsubscribe the pool from every kline
+        # topic. Skip the diff, keep the subscriptions, retry next tick.
         if not new_universe:
             with self._lock:
                 size = len(self._universe)
@@ -306,11 +279,8 @@ class KlineStreamManager:
                 self.pool.update_subscriptions(new_universe)
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("pool.update_subscriptions failed: %s", exc)
-        # Bootstrap any newly-added symbols. Thread the manager's refresh-stop
-        # Event in as the shutdown signal so a SIGTERM mid-refresh-bootstrap (which
-        # sets _refresh_stop in stop()) cancels the in-flight REST worker pool
-        # promptly instead of leaving an orphaned 16-worker pool hammering the
-        # venue after the daemon reports stopped.
+        # Bootstrap newly-added symbols. Passing _refresh_stop lets a SIGTERM
+        # mid-refresh cancel the in-flight REST worker pool instead of orphaning it.
         if additions:
             self._bootstrap_universe(
                 additions, label="universe-refresh", shutdown_event=self._refresh_stop,
@@ -367,12 +337,10 @@ class KlineStreamManager:
     def _on_bar(self, symbol: str, bar: dict[str, Any], confirmed: bool) -> None:
         """Pool → store fan-in. One call per WS bar.
 
-        When a CONFIRMED bar lands that advances to a NEW bar boundary (i.e. the
-        first symbol to deliver a fresh hour), set the cycle-wake Event so the
-        daemon fires its cycle immediately. Gating on the boundary advance means
-        the ~566-symbol burst at each hour close coalesces into a SINGLE wake,
-        not one per symbol — no debounce storm. Runs on pybit's WS thread, so
-        the work is just an int compare + an O(1) Event.set()."""
+        A confirmed bar that advances to a NEW bar boundary sets the cycle-wake
+        Event. Gating on the boundary coalesces the hourly whole-universe burst
+        into a single wake. Runs on pybit's WS thread, so the work is one int
+        compare plus an O(1) Event.set()."""
         inserted = self._store.add_bar(symbol, bar, confirmed=confirmed)
         if not (confirmed and inserted) or self._cycle_wake_event is None:
             return
@@ -381,15 +349,10 @@ class KlineStreamManager:
         except (TypeError, ValueError):
             return
         # Only advance the wake high-water mark for a boundary at/behind the
-        # present hour. A bar timestamped > 1h ahead (clock skew / malformed frame
-        # — the store accepts up to 2h ahead for storage) would otherwise poison
-        # _max_confirmed_ts_ms and suppress every genuine boundary wake until
-        # wall-clock caught up (degrading to heartbeat cadence). Such a bar was
-        # still stored above; it just must not gate the cycle-wake.
-        # _on_bar runs on N pybit WS threads (one per pooled connection), so the
-        # high-water-mark compare-and-set must be atomic — an unlocked read-modify-
-        # write could lose a boundary advance under the hourly multi-connection
-        # burst. Set the thread-safe Event outside the lock.
+        # present hour: a bar >1h ahead (clock skew, malformed frame) is still
+        # stored but would otherwise suppress every genuine wake until wall
+        # clock caught up. _on_bar runs on N pybit WS threads, so the
+        # compare-and-set must be under the lock; set the Event outside it.
         wake = False
         with self._lock:
             if self._max_confirmed_ts_ms < bar_ts <= _utc_now_ms() + MS_PER_HOUR:
@@ -420,11 +383,9 @@ class KlineStreamManager:
             return
         symbols_list = sorted(symbols)
         start = time.monotonic()
-        # "Already covered" must mean coverage of the FULL lookback window,
-        # not just the most recent bar. A daemon that just recovered a flush
-        # file with the latest hour but nothing older would otherwise skip
-        # bootstrap and operate on a near-empty store indefinitely. Check
-        # both ends of the window so bootstrap re-fills any historical gap.
+        # "Already covered" means the FULL lookback window, not just the most
+        # recent bar: a store holding only the latest hour would otherwise skip
+        # bootstrap forever. Check both ends so historical gaps get re-filled.
         now_ms = _utc_now_ms()
         recent_bar_ts_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
         lookback_ms = exact_duration_ms(days=self.lookback_days)
@@ -444,17 +405,10 @@ class KlineStreamManager:
             )
             return
         deadline = start + self.bootstrap_timeout_seconds
-        # The shared REST limiter is wired onto the market client (__post_init__),
-        # so each paginated get_klines HTTP call acquires once — bootstrap stays
-        # under the per-IP budget even when a symbol's lookback spans multiple
-        # pages. Conservative defaults use ~half the per-IP budget.
-        # Completion threshold is measured against the set ACTUALLY being
-        # bootstrapped (``targets``), not the full universe (ws-dataplane-6).
-        # On the universe-refresh path ``symbols`` is just the new listings,
-        # so a full-universe denominator made the "completion reached" log fire
-        # immediately and misleadingly (the rest of the universe is already
-        # covered in the store) or unreachable when only a couple of names are
-        # being added. Counting coverage within ``targets`` makes the log truthful.
+        # Completion threshold is measured against the set actually being
+        # bootstrapped (``targets``), not the full universe: on the
+        # universe-refresh path ``symbols`` is only the new listings, and a
+        # full-universe denominator is either trivially met or unreachable.
         target_set = set(targets)
         threshold_count = max(
             int(len(targets) * self.bootstrap_completion_threshold),
@@ -465,13 +419,11 @@ class KlineStreamManager:
         bars_inserted = 0
         last_error = ""
         threshold_logged = False
-        # ThreadPoolExecutor with as_completed iterates through every result
-        # so the stats accurately reflect what's in the store. The "early
-        # exit" log is informational only — the executor's `with` block
-        # blocks until every future completes regardless of `break`, so an
-        # early-exit-then-break would only undercount stats without saving
-        # time. If true non-blocking start is needed, the executor would
-        # have to live past this method (significant refactor).
+        # as_completed iterates every result so the stats reflect the store.
+        # The "early exit" log is informational: the `with` block blocks until
+        # every future completes regardless, so breaking early would only
+        # undercount stats. A non-blocking start needs the executor to outlive
+        # this method.
         with ThreadPoolExecutor(
             max_workers=self.bootstrap_workers,
             thread_name_prefix="kline-bootstrap",
@@ -490,10 +442,9 @@ class KlineStreamManager:
                 futures, deadline, shutdown_event=shutdown_event,
             ):
                 if shutdown_event is not None and shutdown_event.is_set():
-                    # Daemon shutdown requested mid-bootstrap. Cancel every
-                    # remaining future so the executor's `with` block exits
-                    # quickly instead of waiting on slow REST calls — this
-                    # is what was triggering systemd's 90s SIGKILL.
+                    # Shutdown mid-bootstrap: cancel the remaining futures so
+                    # the `with` block exits before systemd's SIGKILL timeout
+                    # rather than waiting on slow REST calls.
                     shutdown_triggered = True
                     for f in list(futures):
                         f.cancel()
@@ -656,10 +607,8 @@ def _as_completed_with_deadline(
     deadline is past.
 
     Caps the per-call ``wait`` timeout at 1s and (when given a
-    ``shutdown_event``) checks it on every poll tick so a stalled REST
-    burst can't leave the bootstrap unresponsive to SIGTERM until the
-    next completion. The caller's per-yield shutdown check only fires
-    when a future is yielded — without this internal check, a worker
+    ``shutdown_event``) checks it every poll tick, because the caller's
+    per-yield shutdown check only fires when a future is yielded — a worker
     pool stuck in a slow REST batch could delay shutdown by tens of
     seconds (each REST call's full duration)."""
     remaining = set(futures)

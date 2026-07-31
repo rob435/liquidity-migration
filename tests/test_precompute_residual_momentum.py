@@ -1,9 +1,8 @@
 """Causality tests for the residual-momentum precompute (scripts/precompute_residual_momentum.py).
 
-These pin the fix for the CRITICAL rmom look-ahead (audit 2026-06-03): the residual is fit against a
-FORWARD return that only completes ~2 days late, so residual_momentum[D] must be a rolling sum shifted
-far enough that its NEWEST term is knowable strictly before the live consumer's earliest decision at
-D 00:00 UTC. They fail under the old shift(1).
+The residual is fit against a forward return that only completes ~2 days late, so
+residual_momentum[D] must be a rolling sum shifted far enough that its newest term is
+knowable strictly before the live consumer's earliest decision at D 00:00 UTC.
 """
 from __future__ import annotations
 
@@ -57,9 +56,9 @@ def test_residual_momentum_is_causal_shift3() -> None:
 
 
 def test_residual_momentum_does_not_read_future_residuals() -> None:
-    """Look-ahead guard: residual_momentum[D] must be INVARIANT to residual_return at d in
-    {D-2, D-1, D} — those forward residuals only complete AFTER D's decision. (Fails under shift(1),
-    which summed residual_return[D-1].)"""
+    """residual_momentum[D] must be invariant to residual_return at d in {D-2, D-1, D}:
+    those forward residuals only complete after D's decision.
+    """
     n = 16
     d_decision = 12
     base = [float(i) for i in range(n)]
@@ -91,12 +90,10 @@ def test_residual_owner_exposes_stable_and_provisional_tail_explicitly() -> None
 
 
 def test_residual_owner_keeps_final_causal_keys_after_symbol_ages_out() -> None:
-    """A later global end must not erase a delisted symbol's final signals.
-
-    With a seven-row window, four required samples, and shift three, six null
-    calendar rows are enough to emit every final causal value.  A prior
-    end-relative cutoff dropped these rows once the symbol was more than eight
-    days behind the global end, making full and incremental builds disagree.
+    """A later global end must not erase a delisted symbol's final signals. With a
+    seven-row window, four required samples, and shift three, six null calendar rows
+    are enough to emit every final causal value; an end-relative cutoff drops these
+    rows and makes full and incremental builds disagree.
     """
     start_ms = MOD._date_str_to_ms("2025-01-01")
     last_real = start_ms + 9 * DAY_MS
@@ -304,9 +301,9 @@ def test_precompute_append_refreshes_overlap_when_output_already_current(
 def test_precompute_append_allows_provisional_tail_to_mature(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Forward targets arrive late: a padded tail value may legitimately
-    change once its newest causal residual appears, while stable history must
-    remain numerically identical."""
+    """Forward targets arrive late: a padded tail value may legitimately change once its
+    newest causal residual appears, while stable history stays numerically identical.
+    """
     def fake_build_factor_panel(
         root: Path, *, start: str, end: str, klines_dataset: str | None = None
     ) -> pl.DataFrame:
@@ -428,10 +425,10 @@ def test_precompute_append_refuses_overlap_drift(monkeypatch: pytest.MonkeyPatch
 
 
 def test_residual_momentum_uses_the_registered_calendar_window_across_a_gap() -> None:
-    """`rolling_sum(7).shift(3)` is ROW-positional: for a gapped symbol it reached
-    the 10th present row rather than calendar D-9..D-3, so the value stopped
-    being the registered definition and a later backfill would change an already
-    "stable" number (2026-07-27 audit M21)."""
+    """``rolling_sum(7).shift(3)`` is row-positional: for a gapped symbol it reaches the
+    10th present row rather than calendar D-9..D-3, so the value stops being the
+    registered definition and a later backfill changes an already-stable number.
+    """
 
     day = DAY_MS
     # A contiguous symbol and a symbol missing three interior days, with the same
@@ -465,10 +462,9 @@ def test_residual_momentum_uses_the_registered_calendar_window_across_a_gap() ->
 
 
 def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
-    """The 2026-07-27 calendar-window correction (audit M21) changes stable
-    residual-momentum values for GAPPED symbols. The append path must fail closed
-    on that rather than silently mixing two definitions in one artifact; the
-    deployed daily refresh is unaffected because it already runs --full-rewrite.
+    """The calendar-window definition changes stable residual-momentum values for GAPPED
+    symbols, so the append path must fail closed rather than mix two definitions in
+    one artifact. The daily refresh is unaffected: it runs --full-rewrite.
     """
 
     import liquidity_migration.residual_momentum as rm
@@ -483,7 +479,7 @@ def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
     )
     rebuilt = MOD.residual_momentum_from_residuals(resid, end="1970-02-05")
 
-    # The pre-fix, row-positional definition.
+    # The row-positional definition, for contrast.
     original = rm._densify_daily_grid
     rm._densify_daily_grid = lambda frame: frame
     try:

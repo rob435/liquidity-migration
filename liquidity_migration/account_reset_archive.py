@@ -1,10 +1,9 @@
 """Descriptor-bound archive publication for the destructive account reset.
 
-The reset shell owns service quiescence and the account leases.  This module
-owns the narrower archive durability boundary: it creates a private archive
-inode exclusively, streams ``tar`` output into that already-open descriptor,
-publishes an exclusive digest sidecar, and can revalidate the exact artifacts
-immediately before live state is removed.
+Creates a private archive inode exclusively, streams ``tar`` into that open
+descriptor, publishes a digest sidecar, and can revalidate the exact artifacts
+just before live state is removed. Service quiescence and the account leases
+belong to the reset shell.
 """
 
 from __future__ import annotations
@@ -248,11 +247,9 @@ def _validate_archive_mount_relation(
 ) -> None:
     """Reject alternate mount views of the filesystem holding reset targets.
 
-    Resolved lexical paths prove ordinary same-mount disjointness, while every
-    selected target is separately required to stay on the data anchor's mount.
-    A bind alias preserves ``st_dev`` but receives a distinct Linux mount ID,
-    so refusing alternate mount views closes hidden same/nested/ancestor aliases
-    without preventing an archive directory on an independent filesystem.
+    A bind alias keeps ``st_dev`` but gets a distinct Linux mount ID, so
+    refusing alternate mount views closes hidden same/nested/ancestor aliases
+    while still allowing an archive directory on another filesystem.
     """
 
     try:
@@ -466,9 +463,8 @@ def create_reset_archive(
             "PATH": _TRUSTED_EXECUTABLE_PATH,
             "LANG": "C",
             "LC_ALL": "C",
-            # BSD tar otherwise emits AppleDouble metadata on macOS. More
-            # importantly, never inherit TAR_OPTIONS such as --dereference
-            # from the invoking operator's environment.
+            # Suppresses macOS AppleDouble metadata; the fixed env also stops
+            # TAR_OPTIONS (e.g. --dereference) being inherited.
             "COPYFILE_DISABLE": "1",
         }
         try:

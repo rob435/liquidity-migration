@@ -55,8 +55,7 @@ def test_binance_negative_error_payload_is_not_retried(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Relocated from tests/test_audit_fix_b12.py (audit bucket b12 regressions):
-# ingestion-1 / ingestion-5 / ratelimit-rest-6 paged-kline + retry + rate-limit.
+# Paged klines, retry, and rate limiting.
 # --------------------------------------------------------------------------- #
 class _FakeJsonResponse:
     def __init__(self, payload: bytes) -> None:
@@ -77,7 +76,7 @@ def _kline_row(ts: int) -> list:
     return [ts, "1", "1", "1", "1", "1", ts + 1, "1", 0, "1", "1", "0"]
 
 
-# ingestion-1: a mid-range empty page after a full page must NOT silently
+# A mid-range empty page after a full page must NOT silently
 # truncate; it raises so the downloader does not mark an incomplete range done.
 def test_paged_kline_raises_on_suspicious_mid_range_empty_page(monkeypatch) -> None:
     import json
@@ -152,7 +151,7 @@ def test_raise_if_suspicious_empty_page_signal_logic() -> None:
         )
 
 
-# ingestion-5: a permanent 4xx (non-429) error must fail fast, not burn retries.
+# A permanent 4xx (non-429) error must fail fast, not burn retries.
 def _http_error(code: int, body: bytes = b"", headers=None) -> HTTPError:
     return HTTPError(
         url="http://x",
@@ -201,7 +200,7 @@ def test_http_500_is_still_retried(monkeypatch) -> None:
     assert client.retry_events == 2
 
 
-# ratelimit-rest-6: 429/418 must honor Retry-After (capped) before retrying.
+# 429/418 must honor Retry-After (capped) before retrying.
 class _Headers:
     def __init__(self, mapping):
         self._m = mapping

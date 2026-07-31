@@ -1,9 +1,8 @@
 """Reusable cross-sectional evaluation primitives for Lane-1 anomaly reads.
 
-The panel is the durable artifact and individual probes are disposable, but the
-*scoring* should not be rewritten per probe — that is where silent
-inconsistencies (a missing funding leg, a different cut, an overlapping-sample
-t-stat) creep in and make two reads incomparable.
+The panel is the durable artifact and probes are disposable, but the *scoring*
+must not be rewritten per probe: that is where a missing funding leg, a
+different cut, or an overlapping-sample t-stat makes two reads incomparable.
 
 Conventions, fixed here so every read means the same thing:
 
@@ -38,26 +37,16 @@ DEFAULT_CUT = 0.10
 #: Measured round-trip execution cost in basis points, and the default cost basis
 #: for every Lane-1 read in this repository.
 #:
-#: Provenance: measured 2026-07-25 from the archived pre-reset demo account
-#: journal (the 2026-07-22 owner-authorized reset), read through
-#: ``liquidity_migration.account_kernel``. 85 fills, 4,406.62 USDT notional,
-#: 7.78 bp/side notional-weighted (median 11.00, range 5.50-11.00) => a 15.56 bp
-#: round trip. The distribution sits exactly on Bybit's taker tiers, i.e. fills
-#: price as **taker**, not maker.
-#:
-#: This replaces the 4.00 bp maker assumption used by the cross-venue anomaly
-#: reads and by ``configs/lane2_premium_momentum_blend_v1.json``. A result that
-#: only survives at 4 bp is not a result
-#: (``docs/research_findings.md``, task 0.1).
-#:
-#: Note this is NOT a repo-wide correction: the LONG and CONTINUOUS engine
-#: surfaces were never priced at 4 bp. See ``docs/research_findings.md``
-#: §16.1 for the per-surface audit.
+#: Provenance: 85 fills over 4,406.62 USDT notional from an archived account
+#: journal, 7.78 bp/side notional-weighted (median 11.00, range 5.50-11.00) =>
+#: a 15.56 bp round trip. The distribution sits on Bybit's taker tiers, so fills
+#: price as taker, not maker. Replaces the older 4.00 bp maker assumption; see
+#: ``docs/research_findings.md`` §16.1 for the per-surface audit.
 MEASURED_ROUND_TRIP_BP = 15.56
 
-#: Round trip a perfect passive book would pay, from the paper passive-execution
-#: A/B (``docs/research_findings.md``): 2.70 bp/side implied at a
-#: 100% passive fill rate. The floor, never an achieved cost.
+#: Round trip a perfect passive book would pay: 2.70 bp/side implied at a 100%
+#: passive fill rate (``docs/research_findings.md``). A floor, not an achieved
+#: cost.
 PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40
 
 
@@ -159,11 +148,9 @@ def summary(
     rebalances each period. That is the pessimistic reading; a book that
     turns over less should model its own turnover rather than lowering this.
 
-    The default is :data:`MEASURED_ROUND_TRIP_BP`, not zero. A caller that omits
-    the argument gets the honest cost basis rather than a gross number, because
-    a gross number is a diagnostic and not a result (``AGENTS.md``).
-    Pass ``cost_bp=0.0`` explicitly when a gross read is genuinely what is
-    wanted, and label it as such.
+    The default is :data:`MEASURED_ROUND_TRIP_BP`, not zero, so an omitted
+    argument gets the real cost basis rather than a gross number. Pass
+    ``cost_bp=0.0`` explicitly for a gross read, and label it as such.
     """
 
     r = np.asarray(returns_bp, dtype=float)
@@ -221,10 +208,8 @@ def lag_screen(
     survives a delay; a stale-print artifact collapses. ``build(lag)`` must
     return a frame with the signal already shifted by ``lag`` periods.
 
-    Every scoring knob is explicit. The previous ``**kwargs`` forwarded straight
-    into ``long_short`` — which takes no ``**kwargs`` — so supplying
-    ``periods_per_year`` (the one key the next line read) raised TypeError, and
-    omitting it silently scored at the daily default (2026-07-27 audit L19).
+    Every scoring knob is explicit rather than forwarded through ``**kwargs``,
+    so a mistyped one cannot silently fall back to the daily default.
     """
 
     out: dict[int, Summary] = {}

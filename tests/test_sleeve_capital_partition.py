@@ -1,17 +1,11 @@
-"""B3: one sleeve cannot spend another sleeve's capital.
+"""One sleeve cannot spend another sleeve's capital.
 
-``max_component_gross_notional_usdt`` is account-wide despite its name, so
-before this a single sleeve could consume the whole envelope and leave the
-others unable to enter at all — which is exactly why LONG could not be funded
-alongside CARRY. The partition is what makes running both real.
-
-Two properties matter and are tested separately, because they fail differently:
-
-* the **kernel** refuses an exposure-increasing batch that puts one sleeve over
-  its own share, while exits stay available;
-* the **profile** refuses at load time a partition that is not a partition, or
-  a producer sized outside the share it was given — so the failure lands on an
-  operator's terminal, not on a live book.
+``max_component_gross_notional_usdt`` is account-wide despite its name, so without the
+partition a single sleeve consumes the whole envelope and leaves the others unable to
+enter. Two properties fail differently and are tested separately: the kernel refuses an
+exposure-increasing batch that puts one sleeve over its own share while exits stay
+available; the profile refuses at load time a partition that is not a partition, or a
+producer sized outside the share it was given.
 """
 
 from __future__ import annotations
@@ -383,12 +377,10 @@ def test_a_sleeve_over_its_share_cannot_veto_another_sleeve_shrinking(
 ) -> None:
     """The partition must never be the reason a book cannot come down.
 
-    Found by adversarial review. The check judged every sleeve in the projected
-    book, so a sleeve already over its share rejected *another* sleeve's
-    de-risking batch whenever strict risk reduction could not be proven -- and
-    it cannot be proven while a submission is live, because the aggregate then
-    sits above the reconstructed position. A partial exit was blocked by a
-    limit that exists to bound entries.
+    Judging every sleeve in the projected book lets a sleeve already over its share
+    reject another sleeve's de-risking batch whenever strict risk reduction cannot be
+    proven -- and it cannot be proven while a submission is live, because the
+    aggregate then sits above the reconstructed position.
     """
 
     kernel = _kernel(tmp_path)

@@ -2,22 +2,23 @@
 
 [`scripts/ops.sh`](../scripts/ops.sh) is the operator router and
 [`scripts/deploy_vps_live.sh`](../scripts/deploy_vps_live.sh) the deploy engine behind it;
-both act on one VPS over SSH. `scripts/ops.sh help` is the current surface. Mainnet arming
-is out of scope here — see [`real_money.md`](real_money.md).
+both act on one VPS over SSH. `scripts/ops.sh help` is the current surface. The funded
+fleet's start/stop modes are below; what arming a funded account requires beforehand is in
+[`real_money.md`](real_money.md).
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
 | `status` | Read-only topology verification (`deploy_vps_live.sh verify`). No arguments. |
-| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,continuous`, `--years N`, `--chart-leverage X`. |
+| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,continuous,carry` (`carry` renders `configs/lane2_carry_hold_v3.json` from the cross-venue panel, not a daemon replay), `--years N`, `--chart-leverage X`. |
 | `research-refresh {plan,run,reconcile}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
 | `reset [ARGS]` | Demo/paper ledger reset. Preview unless `--execute`. |
 | `venue-accounting --account-root R --start-time-ms N --output PATH` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Read-only. |
 | `wedged-command {report,probe}`, `--execute resolve` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. |
-| `real-money {preflight,render-profile}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file). Starts nothing. |
+| `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
 | `test [PYTEST_ARGS]` | Local pytest. |
-| `deploy --execute {install,activate,rollout}` | Staged deploy or guarded rollout. |
+| `deploy --execute {install,activate,rollout,activate-mainnet,stop-mainnet}` | Staged deploy, guarded rollout, or the funded-fleet start/stop. |
 
 `SSH_TARGET` (`root@116.202.15.128`), `REPO_DIR` (`/opt/liquidity-migration`) and `PYTHON`
 override the defaults; `LOCAL=1` runs `real-money` against this checkout. Every deploy mode
@@ -49,10 +50,13 @@ write the profile marker; only `rollout` does.
 absent), checks demo-key order permission, validates the hedge model prior when the hedge
 timer is on, starts owners before producers, seeds residual momentum and enables the RMOM
 timer when a CONTINUOUS sleeve is on, enables the liveness timer, then verifies. **verify**
-asserts owners, producers and timers match the profile and resolved toggles; all three
-mainnet units inactive and disabled; no failed oneshot; every installed unit file
-byte-identical to the checkout's manifest with no drop-ins; demo order permission still good.
-It compares units, not the installed HEAD, and prints `verify-ok` with commit and profile.
+asserts owners, producers and timers match the profile and resolved toggles; no failed
+oneshot; every installed unit file byte-identical to the checkout's manifest with no
+drop-ins; demo order permission still good. The mainnet half is conditional on the resolved
+toggles: with both mainnet sleeves off, the mainnet owner, both mainnet producers and the
+mainnet liveness timer must all be inactive and disabled; with either on, the funded fleet
+is asserted up exactly like the others. It compares units, not the installed HEAD, and
+prints `verify-ok` with commit, profile and both mainnet toggles.
 
 ## Guarded rollout
 
@@ -79,8 +83,28 @@ pass. [`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) exists b
 Bybit demo realm rejects orders its own `minNotionalValue` accepts — the real per-symbol
 boundary is measured, not readable from the instrument spec.
 
-The GitHub Actions workflow dispatches the same four modes — `rollout`, `install`,
-`activate`, `verify` — and passes `--profile` on rollout. A push runs CI only.
+The GitHub Actions workflow dispatches four of the six modes — `rollout`, `install`,
+`activate`, `verify` — and passes `--profile` on rollout. A push runs CI only. The two
+mainnet modes are deliberately absent from it: arming a funded account is the owner's own
+act at a shell, not a button in CI.
+
+## Mainnet modes
+
+```bash
+scripts/ops.sh deploy --execute activate-mainnet
+scripts/ops.sh deploy --execute stop-mainnet
+```
+
+**activate-mainnet** refuses unless a mainnet sleeve resolves on, creates the mainnet state
+roots, then requires `real-money preflight` to pass before it enables the owner, starts the
+producers their toggles allow, enables the mainnet liveness timer, and verifies. It sets no
+credential and no `REAL_MONEY`; both are the owner's own prior acts.
+
+**stop-mainnet** disables and stops the mainnet timer, watchdog, both producers and the
+owner, and fails if any survives. It stops publication only — exposure is unchanged, so
+flatten through the account owner. It also leaves the sleeves on, so `verify` then fails and
+the next `activate` or `rollout` restarts the fleet; turn the toggles off and install to make
+a stop stick.
 
 ## Profiles and sleeves
 
@@ -100,7 +124,7 @@ The GitHub Actions workflow dispatches the same four modes — `rollout`, `insta
 | `CONTINUOUS_SLEEVE` | off | `bybit-continuous-demo`; forces the hedge timer on |
 | `CONTINUOUS_PAPER_SLEEVE` | off | `bybit-continuous-paper` |
 | `CARRY_PAPER_SLEEVE` | off | `bybit-carry-paper`, retired in favour of the mirror |
-| `CARRY_MAINNET_SLEEVE`, `LONG_MAINNET_SLEEVE` | off | Never started here; verify asserts all three mainnet units off |
+| `CARRY_MAINNET_SLEEVE`, `LONG_MAINNET_SLEEVE` | off | `bybit-carry-mainnet`, `bybit-long-mainnet`; either one on also brings up the mainnet owner and liveness timer |
 
 Turning a sleeve off stops new targets; it does not flatten an existing target or venue
 position, so flatten through the account owner and confirm journal/venue agreement before
@@ -141,11 +165,6 @@ leaves the units stopped and the archive as the only recovery source.
 - Preserve the journal, unit state and logs; diagnose from the exact installed commit. Do
   not hand-start a partial fleet, edit an installed `ExecStart`, or mutate state to get a
   green result. `phase-failed name=<phase> ... status=N` names the failing step.
-- Known break: `verify failed: resolved PAPER_TARGET_MIRROR does not match loaded toggle`.
-  `activate` and `verify` read six sleeve variables out of the resolved env and then
-  compare nine, so `PAPER_TARGET_MIRROR` is treated as `off` and every host with the
-  mirror on fails. Fix the variable list in
-  [`deploy_vps_live.sh`](../scripts/deploy_vps_live.sh); do not turn the mirror off.
 - A failed rollout leaves everything stopped. Finish it with
   `ROLLOUT_REFRESH_STALE_DEMO_RULES=1 ... deploy --execute install` then `activate`.
 - Read logs on the host with `journalctl -u liquidity-migration-<unit> -n 200 --no-pager`;
@@ -159,6 +178,6 @@ leaves the units stopped and the archive as the only recovery source.
 ## Rules
 
 - Local gates, none of which touch the VPS: `scripts/dev.sh doctor`, `scripts/dev.sh check`,
-  `.venv/bin/python -m pytest -q` (2728 pass).
+  `.venv/bin/python -m pytest -q` (2752 pass).
 - Mainnet arming: [`real_money.md`](real_money.md). Agent working rules:
   [`AGENTS.md`](../AGENTS.md).

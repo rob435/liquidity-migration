@@ -101,18 +101,18 @@ def _setup_runner(
     monkeypatch.setattr(
         hedge_runner,
         "_account_continuous_book_state",
-        lambda root, *, equity_usdt: hedge_runner.LiveBookState(0.5, True, "test"),
+        lambda root, *, equity_usdt, **_kwargs: hedge_runner.LiveBookState(0.5, True, "test"),
     )
     quantities = hedge_qty or {}
     monkeypatch.setattr(
         hedge_runner,
         "_current_account_hedge_qty",
-        lambda root, *, strategy_id, symbol="BTCUSDT": quantities.get(symbol, 0.0),
+        lambda root, *, strategy_id, symbol="BTCUSDT", **_kwargs: quantities.get(symbol, 0.0),
     )
     monkeypatch.setattr(
         hedge_runner,
         "_pending_account_hedge_symbols",
-        lambda root, *, strategy_id: set(pending_hedge_symbols or ()),
+        lambda root, *, strategy_id, **_kwargs: set(pending_hedge_symbols or ()),
     )
     args = list(argv or [])
     if "--execution-environment" not in args:

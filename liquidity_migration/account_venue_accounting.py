@@ -263,11 +263,9 @@ def build_venue_accounting_receipt(
 ) -> dict[str, Any]:
     """Build a self-hashed, source-bound accounting reconciliation.
 
-    ``environment`` was hardcoded to ``demo``. Mainnet evidence written under
-    that label is not merely mislabelled: ``three_way_reconciliation`` reads the
-    receipt's environment to decide which fleet the evidence belongs to, so it
-    would have been loaded as demo evidence and compared against the wrong
-    account.
+    ``three_way_reconciliation`` reads ``environment`` off the receipt to decide
+    which fleet the evidence belongs to, so a wrong label routes it to the
+    wrong account.
     """
 
     selected_environment = execution_environment(environment).value

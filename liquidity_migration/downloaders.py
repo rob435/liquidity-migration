@@ -167,10 +167,8 @@ def download_binance_usdm_proxy_data(
                     # Record transport or parsing failures for the completeness gate.
                     failed.append((symbol, ""))
                     print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
-        # Always pass the artifact path (the binance_vision path already does):
-        # writing it only when THIS run failed left a stale failed-jobs file
-        # surviving a later clean re-run, so an operator read yesterday's
-        # failures as today's (2026-07-27 audit L6).
+        # Always pass the artifact path so a clean re-run rewrites it; writing
+        # it only on failure leaves a stale failed-jobs file behind.
         _assert_download_completeness(
             failed, len(symbols), max_failure_ratio=max_failure_ratio,
             artifact_path=_failed_artifact,
@@ -455,11 +453,9 @@ def _download_symbol_dataset(
     """Download a per-symbol dataset slice, with incremental tail-only refresh.
 
     Markers are filename-encoded as `{symbol}_{start_ms}_{end_ms}{suffix}.done`.
-    Each marker records "I have rows for (symbol, dataset) covering exactly
-    [start_ms, end_ms]." On a daily refresh the caller asks for a wider end_ms
-    than any existing marker — the old behavior treated the new range as
-    "uncached" and refetched the full ~5 years. We now scan markers for this
-    (symbol, dataset, suffix) and:
+    Each records "I have rows for (symbol, dataset) covering exactly
+    [start_ms, end_ms]." A daily refresh asks for a wider end_ms than any
+    existing marker, so markers for this (symbol, dataset, suffix) are scanned:
 
       * If any marker covers [<=start_ms, >=end_ms], the requested range is
         a subset of cached coverage — skip the fetch entirely.
@@ -597,11 +593,9 @@ def _marker_coverage_end_ms(
 
 
 def _mark_complete(marker: Path) -> None:
-    # Marker is written AFTER write_dataset on purpose. A crash between the two
-    # makes the next run refetch the same range, but storage.write_dataset holds
-    # an exclusive file lock and dedups by DATASET_KEYS — duplicates can't land,
-    # only wasted work. Don't "fix" the ordering without re-deriving the dedup
-    # guarantee for the affected dataset.
+    # Written AFTER write_dataset: a crash between the two only costs a refetch,
+    # because write_dataset holds an exclusive lock and dedups by DATASET_KEYS.
+    # Re-derive that dedup guarantee before reordering these.
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(datetime.now(tz=UTC).isoformat(), encoding="utf-8")
     _unlink_superseded_markers(marker)
@@ -610,11 +604,9 @@ def _mark_complete(marker: Path) -> None:
 def _unlink_superseded_markers(marker: Path) -> None:
     """Drop markers whose coverage the just-written one strictly contains.
 
-    Each daily refresh wrote a NEW marker per (symbol, dataset, suffix) and never
-    removed the one it supersedes: ~3.6k files a day, forever, every one of them
-    re-scanned by every later coverage lookup (2026-07-27 audit L5). A marker
-    whose [start, end] is inside the new marker's range carries no information
-    the new one does not.
+    Each daily refresh writes a new marker per (symbol, dataset, suffix), and
+    every one is re-scanned by later coverage lookups. A marker whose
+    [start, end] is inside the new marker's range carries no extra information.
     """
 
     parsed = _parse_marker_name(marker.name)
@@ -823,11 +815,9 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
 
 
 def _funding_interval_min(funding_interval_hour: Any) -> int:
-    # The `or 8` idiom only catches None/empty; a literal "0" (string) is truthy so
-    # int("0")==0 would yield a 0-minute interval and make funding_rate_8h_equiv =
-    # funding_rate * (480/0) = inf downstream (ingestion.normalize_funding_history).
-    # A non-positive interval is not a real Bybit funding cadence (real values are
-    # 1/2/4/8h), so treat it as missing and fall back to the 8h default.
+    # A literal "0" is truthy, so `or 8` would let int("0")==0 through and make
+    # funding_rate_8h_equiv = funding_rate * (480/0) = inf downstream. Real Bybit
+    # cadences are 1/2/4/8h, so a non-positive interval means missing.
     try:
         hours = int(funding_interval_hour) if funding_interval_hour not in (None, "") else 8
     except (TypeError, ValueError):

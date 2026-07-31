@@ -35,6 +35,7 @@ def _settlement() -> dict[str, str]:
 
 class FundingClient:
     demo = True
+    realm = "demo"
 
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
@@ -200,12 +201,8 @@ def test_funding_reconciler_chunks_epochs_longer_than_api_window(
 def test_funding_report_freshness_measures_pass_completion_not_query_start(
     tmp_path: Path,
 ) -> None:
-    """A slow venue response must not birth an already-stale funding report.
-
-    The observed VPS failure mode: the pass sampled its timestamp before the
-    paginated REST recovery, so REST latency plus the following position pass
-    aged an otherwise-correct report past the shared 4-second bound and paged
-    false staleness while intents bounced.
+    """Freshness is stamped at pass completion, so REST latency cannot age an
+    otherwise-correct report past the shared 4-second bound.
     """
 
     clock = VirtualClock(current_wall_ns=2_000_000_000)
@@ -308,18 +305,15 @@ def test_funding_index_advances_incrementally_and_rebuilds_on_reset(
     assert set(reconciler._funding_index) == {"settlement-1", "settlement-2"}
 
 
-def test_funding_reconciler_requires_demo_and_owner_startup_event(
+def test_funding_reconciler_requires_a_named_realm_and_owner_startup_event(
     tmp_path: Path,
 ) -> None:
     clock = VirtualClock(current_wall_ns=2_000_000_000)
     empty = AccountExecutionKernel(tmp_path, account_id="empty", clock=clock)
 
-    with pytest.raises(ValueError, match="demo-only"):
-        BybitAccountFundingReconciler(
-            kernel=empty,
-            client=object(),
-            clock=clock,
-        )
+    for client in (object(), _RealmlessClient(), _BadRealmClient()):
+        with pytest.raises(ValueError, match="naming venue realm"):
+            BybitAccountFundingReconciler(kernel=empty, client=client, clock=clock)
 
     reconciler = BybitAccountFundingReconciler(
         kernel=empty,
@@ -328,3 +322,59 @@ def test_funding_reconciler_requires_demo_and_owner_startup_event(
     )
     with pytest.raises(RuntimeError, match="startup venue snapshot first"):
         reconciler.reconcile_once()
+
+
+class _RealmlessClient:
+    demo = True
+
+
+class _BadRealmClient:
+    demo = True
+    realm = "paper"
+
+
+class _MainnetFundingClient(FundingClient):
+    demo = False
+    realm = "mainnet"
+
+
+def test_funding_reconciler_recovers_a_mainnet_settlement(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=1)
+    kernel = _kernel(tmp_path, clock)
+    reconciler = BybitAccountFundingReconciler(
+        kernel=kernel,
+        client=_MainnetFundingClient([_settlement()]),
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert report.healthy
+    assert report.settlement_rows_recorded == 1
+    payload = kernel.state().pnl["venue-funding:settlement-1"]
+    assert payload["funding_usdt"] == 0.02
+    assert payload["net_pnl_usdt"] == 0.02
+
+
+def test_mainnet_funding_refuses_a_settlement_row_carrying_cash(tmp_path: Path) -> None:
+    """``cashFlow`` books into gross P&L, which fill reconstruction already counts."""
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=1)
+    row = {**_settlement(), "cashFlow": "1.5", "change": "1.52"}
+
+    demo_kernel = _kernel(tmp_path / "demo", clock)
+    demo = BybitAccountFundingReconciler(
+        kernel=demo_kernel,
+        client=FundingClient([copy.deepcopy(row)]),
+        clock=clock,
+    )
+    assert demo.reconcile_once().settlement_rows_recorded == 1
+    assert demo_kernel.state().pnl["venue-funding:settlement-1"]["gross_pnl_usdt"] == 1.5
+
+    mainnet = BybitAccountFundingReconciler(
+        kernel=_kernel(tmp_path / "mainnet", clock),
+        client=_MainnetFundingClient([copy.deepcopy(row)]),
+        clock=clock,
+    )
+    with pytest.raises(RuntimeError, match="double-count"):
+        mainnet.reconcile_once()

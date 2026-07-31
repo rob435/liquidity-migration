@@ -1,16 +1,10 @@
-"""Tests for the KlineStreamManager orchestrator.
+"""Tests for the KlineStreamManager orchestrator, driven through injected fakes for
+BybitMarketData (``get_instruments_info`` + ``get_klines``) and BybitKlineStreamPool:
 
-The manager is built so REST + WS dependencies inject through dataclass
-fields: a fake BybitMarketData covers ``get_instruments_info`` +
-``get_klines``, a fake BybitKlineStreamPool covers subscribe + update +
-close. Tests verify the four lifecycle pillars:
-
-  1. bootstrap respects the completion threshold and skips already-covered
-     symbols
+  1. bootstrap respects the completion threshold and skips already-covered symbols
   2. universe-refresh diffs additions + removals and re-bootstraps new ones
-  3. recovery from a flush file populates the store + skips bootstrap for
-     already-covered symbols
-  4. start → stop tears everything down cleanly
+  3. recovery from a flush file populates the store + skips covered symbols
+  4. start -> stop tears everything down cleanly
 """
 
 from __future__ import annotations
@@ -32,10 +26,9 @@ from liquidity_migration.kline_stream_manager import (
 
 
 class _FakeMarketData:
-    """Minimal BybitMarketData stand-in for tests.
-
-    ``instruments`` is a callable so each test can sequence multi-call
-    behaviour (e.g. universe-refresh seeing new listings on call N+1)."""
+    """Minimal ``BybitMarketData`` stand-in. ``instruments`` is a callable so each test
+    can sequence multi-call behaviour (e.g. universe-refresh seeing new listings).
+    """
 
     def __init__(
         self,
@@ -200,10 +193,10 @@ def test_bootstrap_fills_store_with_history(tmp_path: Path) -> None:
 
 
 def test_bootstrap_skips_symbols_with_full_window_coverage_after_recovery(tmp_path: Path) -> None:
-    """If a recovered symbol covers the FULL lookback window, bootstrap
-    skips it. Coverage must span both ends of the window (newest >= end_ms
-    AND oldest <= start_ms) — covering only the latest hour is NOT
-    enough; bootstrap fires for partial-coverage symbols too."""
+    """Bootstrap skips a recovered symbol only when coverage spans BOTH ends of the
+    lookback window (newest >= end_ms AND oldest <= start_ms); partial-coverage
+    symbols still bootstrap.
+    """
     now_ms = int(time.time() * 1000)
     end_ms = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
     # lookback_days=5 in _build_manager defaults. Window = end_ms - 5d to end_ms.
@@ -247,11 +240,10 @@ def test_bootstrap_skips_symbols_with_full_window_coverage_after_recovery(tmp_pa
 
 
 def test_bootstrap_does_not_skip_symbol_with_only_latest_hour(tmp_path: Path) -> None:
-    """Regression: previously, bootstrap-skip used coverage_through(end_ms),
-    so a symbol with just the latest hour was considered "covered" and
-    bootstrap was skipped. Restart-with-flush-file would then leave the
-    store on a tiny snapshot indefinitely. Now coverage_in_window is used,
-    so partial-coverage symbols re-bootstrap on every start."""
+    """The bootstrap skip keys on ``coverage_in_window``, not ``coverage_through``:
+    otherwise a restart with a flush file holding one hour leaves the store on a tiny
+    snapshot indefinitely.
+    """
     now_ms = int(time.time() * 1000)
     end_ms = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
 
@@ -314,12 +306,10 @@ def test_universe_refresh_subscribes_new_listings_and_unsubscribes_delistings(tm
 
 
 def test_universe_refresh_skips_diff_when_fetch_returns_empty(tmp_path: Path) -> None:
-    """A REST blip during universe refresh used to unsubscribe the pool
-    from every symbol because the empty fetch was diffed against the
-    existing universe (every previous symbol counted as "delisted").
-    That silently severed the WS kline feed until the next refresh
-    succeeded. Now an empty fetch is treated as a transient failure:
-    keep existing subscriptions, count an error, retry next tick."""
+    """An empty universe fetch is a transient REST failure, not a mass delisting:
+    diffing it would unsubscribe every symbol and sever the WS kline feed until the
+    next successful refresh. Keep subscriptions, count an error, retry next tick.
+    """
     call_count = {"n": 0}
 
     def _instruments_blip():
@@ -355,9 +345,10 @@ def test_universe_refresh_skips_diff_when_fetch_returns_empty(tmp_path: Path) ->
 
 
 def test_universe_symbols_returns_sorted_current_universe(tmp_path: Path) -> None:
-    """The long daemon scopes its public ticker WS to the same universe
-    the kline manager bootstraps. Manager exposes universe_symbols() as
-    the contract; must return a sorted snapshot consistent with stats."""
+    """The long daemon scopes its public ticker WS to the same universe the kline
+    manager bootstraps, so ``universe_symbols()`` must return a sorted snapshot
+    consistent with stats.
+    """
     manager, _pool, _market = _build_manager(
         tmp_path=tmp_path,
         initial_symbols=["SOLUSDT", "BTCUSDT", "ETHUSDT"],
@@ -402,10 +393,10 @@ def test_on_bar_dispatch_adds_to_store(tmp_path: Path) -> None:
 
 
 def test_on_bar_sets_cycle_wake_event_on_new_confirmed_boundary(tmp_path: Path) -> None:
-    """WS-event-driven trigger: a confirmed bar at a NEW boundary sets the
-    cycle-wake event so the daemon fires its cycle immediately. An unconfirmed
-    bar and a same-boundary bar (the per-symbol hour-close burst) do NOT re-fire
-    it — the boundary-advance gate coalesces the burst into one wake."""
+    """A confirmed bar at a NEW boundary sets the cycle-wake event so the daemon fires
+    immediately. An unconfirmed bar and a same-boundary bar (the per-symbol hour-close
+    burst) do not re-fire it -- the boundary-advance gate coalesces the burst.
+    """
     manager, pool, market = _build_manager(tmp_path=tmp_path, initial_symbols=["BTCUSDT"])
     wake = threading.Event()
     manager.set_cycle_wake_event(wake)
@@ -519,11 +510,10 @@ def test_kline_row_conversion_requires_bybit_array_shape() -> None:
 
 
 def test_refresh_thread_runs_periodically(tmp_path: Path) -> None:
-    """Verifies the refresh thread is wired into the lifecycle. Uses
-    force_refresh_universe() to drive the diff deterministically rather
-    than racing the scheduler — the thread's mere existence + the manual
-    refresh prove the integration; the thread loop itself is exercised
-    by the timer assertion below."""
+    """The refresh thread is wired into the lifecycle; ``force_refresh_universe()``
+    drives the diff deterministically rather than racing the scheduler, and the timer
+    assertion below covers the loop itself.
+    """
 
     refresh_calls = threading.Event()
 
@@ -576,12 +566,10 @@ def test_construction_rejects_invalid_params(tmp_path: Path) -> None:
 
 
 def test_bootstrap_stats_count_every_completion_even_past_threshold(tmp_path: Path) -> None:
-    """Regression: the early-exit-then-break in _bootstrap_universe used to
-    stop iterating the as_completed loop the moment the threshold was
-    reached. The executor's `with` block waited for all futures anyway,
-    but their results never incremented the stats — so symbols_succeeded
-    undercounted the actual bootstrapped symbols. After the fix, every
-    completion is counted."""
+    """Reaching the completion threshold must not stop the ``as_completed`` loop from
+    counting later results: the executor waits for every future anyway, so an early
+    break only undercounts ``symbols_succeeded``.
+    """
 
     # 10 symbols. Threshold = 0.5 means we'd trip at 5 completions. The
     # remaining 5 must still be counted in the stats.
@@ -635,13 +623,10 @@ def test_bootstrap_stats_count_every_completion_even_past_threshold(tmp_path: Pa
 
 
 def test_start_respects_shutdown_event_during_bootstrap(tmp_path: Path) -> None:
-    """Regression: when shutdown_event fires during bootstrap, manager.start
-    must exit promptly instead of blocking until every REST future finishes.
-    The previous behaviour blocked for 90+ seconds → systemd SIGKILL.
-
-    Triggered by setting the shutdown event AFTER the bootstrap loop has
-    picked up at least one future. The remaining futures get cancelled,
-    the for-loop breaks, and start() returns within seconds."""
+    """When ``shutdown_event`` fires during bootstrap, ``manager.start`` must exit
+    promptly rather than block until every REST future finishes (90+ seconds ->
+    systemd SIGKILL). Remaining futures are cancelled and the loop breaks.
+    """
 
     # Slow REST: each fetch takes 0.5s so we can interleave the shutdown.
     def _slow_klines(symbol, interval, start, end):
@@ -690,12 +675,9 @@ def test_start_respects_shutdown_event_during_bootstrap(tmp_path: Path) -> None:
 
 
 def test_start_bootstraps_before_subscribing_pool(tmp_path: Path) -> None:
-    """Regression: the pool must be subscribed AFTER bootstrap, not before.
-
-    Earlier ordering (pool first, then bootstrap) starved REST workers via
-    WS GIL pressure — bootstrap got 100/567 symbols in 383s instead of
-    completing in ~95s. This test pins the order so a refactor can't
-    accidentally re-introduce the regression."""
+    """The pool must be subscribed AFTER bootstrap. Subscribing first starves REST
+    workers via WS GIL pressure -- 100/567 symbols in 383s instead of ~95s.
+    """
 
     call_order: list[str] = []
 
@@ -774,12 +756,10 @@ def test_stats_reflect_ws_freshness_via_lag(tmp_path: Path) -> None:
 
 
 def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, caplog) -> None:
-    """ws-dataplane-6: the bootstrap completion-threshold log must be measured
-    against the symbols actually being bootstrapped (the new listings on a
-    universe-refresh), not the full universe. Before the fix the full-universe
-    denominator made the 'completion threshold reached' log fire immediately
-    and misleadingly on refresh (the rest of the universe is already covered).
-    After the fix the threshold/coverage are scoped to the new targets."""
+    """The bootstrap completion-threshold log must be measured against the symbols
+    actually being bootstrapped (the new listings on a refresh), not the full
+    universe, whose already-covered denominator fires the log immediately.
+    """
     def _instruments(call_n):
         if call_n == 1:
             return _instruments_payload(["BTCUSDT", "ETHUSDT"])
@@ -801,7 +781,7 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
         assert "SOLUSDT" in market.kline_calls
         # Any 'completion threshold reached' log on the refresh path must be
         # scoped to the 1 new target (denominator == 1), never the 3-symbol
-        # universe. (Pre-fix the log read '.../3'.)
+        # universe, not the full one.
         threshold_logs = [
             r.message for r in caplog.records
             if "completion threshold" in r.message
@@ -812,7 +792,7 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
         manager.stop()
 
 
-# --- audit2b unit kline_mgr_count: universe_refresh_errors double-count ---
+# --- universe_refresh_errors must not double-count ---
 #
 # Defect: ``universe_refresh_errors`` was double-counted on the default-fetcher
 # empty path. When ``force_refresh_universe`` calls ``_fetch_universe`` and the
@@ -823,7 +803,7 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
 #
 # These tests pin:
 #   * the default-fetcher REST-exception path counts the error exactly ONCE
-#     (fails on the old code, which counted 2), and
+#     (a double-count reads 2), and
 #   * the normal / other empty paths are unchanged (custom-fetcher empty and a
 #     default fetch that simply filters to empty each count exactly once; a
 #     successful refresh counts zero).
@@ -910,10 +890,9 @@ def _build(tmp_path: Path, instruments_factory) -> tuple[KlineStreamManager, _Po
 
 
 def test_default_fetcher_rest_exception_counts_error_once(tmp_path: Path) -> None:
-    """First fetch succeeds (start), second raises (refresh blip).
-
-    On the old code the exception was counted in _fetch_universe AND again in
-    the empty-set guard => 2. The fix counts it exactly once."""
+    """First fetch succeeds (start), second raises (refresh blip): the exception must be
+    counted exactly once, not in both ``_fetch_universe`` and the empty-set guard.
+    """
 
     def _instruments(call_n: int):
         if call_n >= 2:
@@ -937,10 +916,9 @@ def test_default_fetcher_rest_exception_counts_error_once(tmp_path: Path) -> Non
 
 
 def test_default_fetcher_filtered_to_empty_counts_error_once(tmp_path: Path) -> None:
-    """Default fetch returns rows but they filter to empty (no exception).
-
-    _fetch_universe does NOT count here, so the empty-set guard must still
-    count exactly once. This path is unchanged by the fix."""
+    """The default fetch returns rows that filter to empty with no exception, so
+    ``_fetch_universe`` does not count and the empty-set guard must count exactly once.
+    """
 
     def _instruments(call_n: int):
         if call_n >= 2:
@@ -959,8 +937,7 @@ def test_default_fetcher_filtered_to_empty_counts_error_once(tmp_path: Path) -> 
 
 
 def test_successful_refresh_counts_no_error(tmp_path: Path) -> None:
-    """Normal happy path: a non-empty refresh records zero errors and the
-    diff/return shape is unchanged by the fix."""
+    """Normal happy path: a non-empty refresh records zero errors and the diff/return shape is unchanged by the fix."""
 
     def _instruments(call_n: int):
         return _instruments_payload(["BTCUSDT", "ETHUSDT"])
@@ -975,16 +952,13 @@ def test_successful_refresh_counts_no_error(tmp_path: Path) -> None:
         manager.stop()
 
 
-# ==========================================================================
-# Relocated from test_audit_fix_b14.py (ratelimit-rest-1, ws-pool-1 —
-# 2026-06-14 audit bucket b14).
-# ==========================================================================
 
 
 class _PaginatingMarketData:
-    """Mimics BybitMarketData: get_klines paginates and EACH page acquires the
-    wired rate_limiter once (as the real _get does). rate_limiter starts None
-    exactly like the daemons build it, so the manager must wire its own."""
+    """Mimics ``BybitMarketData``: ``get_klines`` paginates and each page acquires the
+    wired ``rate_limiter`` once. ``rate_limiter`` starts None exactly like the daemons
+    build it, so the manager must wire its own.
+    """
 
     def __init__(self, *, instruments, pages_per_symbol: int) -> None:
         self._instruments = instruments
@@ -1016,18 +990,17 @@ class _CountingLimiter:
 
 
 def test_bootstrap_symbol_no_longer_takes_a_manual_limiter() -> None:
-    """ratelimit-rest-1: the manual once-per-symbol acquire is gone — the
-    _bootstrap_symbol signature must no longer accept ``shared_limiter`` (the
-    limiter now lives on the market client, acquiring once per paginated call)."""
+    """The limiter lives on the market client, acquiring once per paginated call, so
+    ``_bootstrap_symbol`` must no longer accept ``shared_limiter``.
+    """
     params = inspect.signature(KlineStreamManager._bootstrap_symbol).parameters
     assert "shared_limiter" not in params
 
 
 def test_bootstrap_wires_limiter_and_acquires_once_per_page(tmp_path) -> None:
-    """ratelimit-rest-1: bootstrap must rate-limit each PAGINATED get_klines call,
-    not once per symbol. With a market client whose get_klines makes 3 pages, a
-    2-symbol bootstrap must acquire 6 times (the original once-per-symbol code
-    acquired only 2)."""
+    """Bootstrap rate-limits each paginated ``get_klines`` call, not once per symbol:
+    with a 3-page client, a 2-symbol bootstrap must acquire 6 times.
+    """
     symbols = ["AAAUSDT", "BBBUSDT"]
     market = _PaginatingMarketData(
         instruments=_instruments_payload(symbols), pages_per_symbol=3,
@@ -1065,11 +1038,10 @@ def test_bootstrap_wires_limiter_and_acquires_once_per_page(tmp_path) -> None:
 
 
 def test_refresh_bootstrap_honors_shutdown_promptly(tmp_path) -> None:
-    """ws-pool-1: a universe-refresh bootstrap must honor the manager's refresh-
-    stop signal. With a slow REST fetch and only a couple of workers, setting
-    _refresh_stop mid-flight (what stop() does on SIGTERM) must cancel the pool and
-    return promptly instead of running to the 1200s bootstrap deadline. The
-    original code passed NO shutdown_event on this path, so it ignored the signal."""
+    """A universe-refresh bootstrap must honor the manager's refresh-stop signal (what
+    ``stop()`` sets on SIGTERM): setting ``_refresh_stop`` mid-flight cancels the pool
+    and returns promptly instead of running to the 1200s bootstrap deadline.
+    """
     refresh_targets = [f"SYM{i:02d}USDT" for i in range(20)]
 
     def _instruments(call_n):

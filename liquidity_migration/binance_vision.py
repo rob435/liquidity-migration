@@ -1,13 +1,11 @@
 """Point-in-time Binance USD-M data-root maintenance from public archives.
 
-The registered LONG and CONTINUOUS profiles need per-venue full-PIT roots that
-include delisted, renamed, and migrated instruments. Reading live
-``fapi.binance.com/exchangeInfo`` only returns currently listed symbols and is
-survivorship-biased and invalid under the backtest-integrity standard.
-
-The ``data.binance.vision`` monthly archive enumerates every symbol that ever had
-bars. This module discovers that universe, downloads 1h klines, and writes the
-Binance full-PIT root's ``klines_1h`` + ``archive_trade_manifest`` datasets.
+Full-PIT roots need delisted, renamed, and migrated instruments. Live
+``fapi.binance.com/exchangeInfo`` returns only currently listed symbols and is
+survivorship-biased, while the ``data.binance.vision`` monthly archive
+enumerates every symbol that ever had bars. This module discovers that universe,
+downloads 1h klines, and writes the root's ``klines_1h`` +
+``archive_trade_manifest`` datasets.
 
 CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\
@@ -278,12 +276,11 @@ def discover(
 ) -> dict[str, list[str]]:
     """Map every USDT symbol that has 1h klines on/before max_month to its month list.
 
-    A transient per-symbol S3 listing failure must NOT abort the whole (hundreds-
-    of-symbols) OOS build: a single flaky ``list_symbol_months`` exception is caught
-    and accumulated, then routed through the same survivorship gate used for
-    download failures (``_assert_download_completeness``). A few transient failures
-    are tolerated; a failure rate above ``max_listing_failure_ratio`` still aborts so
-    a silently under-enumerated (survivorship-biased) universe is never built.
+    A transient per-symbol S3 listing failure must not abort a hundreds-of-symbols
+    build, so ``list_symbol_months`` exceptions accumulate and go through the same
+    survivorship gate as download failures (``_assert_download_completeness``). A
+    failure rate above ``max_listing_failure_ratio`` aborts, so an under-enumerated
+    survivorship-biased universe is never built.
     """
     symbols = validate_usdm_usdt_symbols(
         list_usdm_usdt_symbols(),
@@ -356,10 +353,8 @@ _SHA256_HEX_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
 def _fetch_expected_sha256(zip_url: str, *, timeout: int = 30) -> str | None:
     """Fetch the ``<zip>.CHECKSUM`` sidecar and return its leading sha256 hex.
 
-    data.binance.vision publishes a ``<file>.zip.CHECKSUM`` object next to every
-    archive whose first token is the file's SHA256. Returns the lowercase hex
-    digest, or None when the sidecar is absent (older months) or unparseable —
-    the caller falls back to a Content-Length check in that case."""
+    Returns the lowercase hex digest, or None when the sidecar is absent (older
+    months) or unparseable; the caller then falls back to Content-Length."""
     try:
         body = urllib.request.urlopen(f"{zip_url}.CHECKSUM", timeout=timeout).read()  # noqa: S310 - public archive
     except Exception:  # noqa: BLE001 - missing/old sidecar or transient network
@@ -393,14 +388,13 @@ def _verify_download(raw: bytes, expected_sha256: str | None, content_length: in
 def fetch_month_klines(symbol: str, ym: str, *, retries: int = 4) -> list[dict] | None:
     """Download, integrity-verify, and parse one monthly 1h kline file.
 
-    Verifies the body against the published ``.CHECKSUM`` SHA256 (or, when that
-    sidecar is missing, the advertised Content-Length) BEFORE parsing, so a
-    corrupt-but-parseable archive is treated as a retryable failure.
+    Verifies against the published ``.CHECKSUM`` SHA256, or Content-Length when
+    the sidecar is missing, BEFORE parsing, so a corrupt-but-parseable archive
+    is a retryable failure.
 
-    Returns the parsed rows on a successful fetch — possibly an EMPTY list for a
-    valid month that genuinely holds no parseable bars (header-only/empty CSV).
-    Returns ``None`` only on a hard download/integrity failure; callers must
-    distinguish it from an empty valid month.
+    Returns parsed rows -- possibly an EMPTY list for a valid month with no
+    parseable bars. ``None`` means a hard download/integrity failure and callers
+    must distinguish the two.
     """
     encoded_symbol = quote_url_symbol(symbol)
     url = (
@@ -478,10 +472,10 @@ def topup_binance_daily_klines(
 ) -> dict:
     """Append current-month daily Vision 1h klines to canonical ``klines_1h``.
 
-    The full monthly builder remains the canonical all-history rebuild path.
-    This function is for the current-month tail before a monthly ZIP exists:
-    it discovers symbols from the daily archive, writes only archive-backed rows,
-    and rewrites PIT membership from actual kline coverage afterwards.
+    For the current-month tail before a monthly ZIP exists; the monthly builder
+    is still the all-history rebuild path. Discovers symbols from the daily
+    archive, writes only archive-backed rows, then rewrites PIT membership from
+    actual kline coverage.
     """
     root = Path(data_root).expanduser()
     requested = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
@@ -588,9 +582,8 @@ def validate_pit_manifest_coverage(
 ) -> dict[str, int | bool]:
     """Validate independent membership against klines without rewriting either.
 
-    The expected-membership manifest is evidence, not output to be conformed to
-    whatever klines happened to download. Missing required rows therefore fail
-    and remain present for diagnosis and retry.
+    The membership manifest is evidence, not output to be conformed to whatever
+    klines downloaded, so missing rows fail and stay present for retry.
     """
 
     root = Path(data_root).expanduser()
@@ -693,17 +686,15 @@ def rewrite_manifest_to_coverage(
     """Rewrite ``archive_trade_manifest`` so it lists only (symbol, date) pairs
     that actually have >= min_hourly_bars hourly klines.
 
-    Returns the surviving row count. This is valid only when the kline archive
-    itself is the membership source, as in the Binance Vision builder.
-    Independently sourced Bybit membership must use
-    :func:`validate_pit_manifest_coverage`; conforming it to observed klines
-    would erase the very gaps it is meant to detect.
+    Returns the surviving row count. Valid only when the kline archive is itself
+    the membership source, as in the Binance Vision builder; independently
+    sourced Bybit membership must use :func:`validate_pit_manifest_coverage`, or
+    conforming it to observed klines erases the gaps it exists to detect.
 
-    ``archive_membership_source`` is required when the caller itself obtained
-    the bars from a known archive and wants to make that observation provenance
-    explicit.  It stamps the covered rows as archive-observed and is deliberately
-    omitted by the generic ``filter-manifest`` CLI path, which cannot infer where
-    an arbitrary root came from.
+    ``archive_membership_source`` stamps covered rows as archive-observed and is
+    required when the caller fetched the bars from a known archive. The generic
+    ``filter-manifest`` CLI path omits it, since it cannot infer the origin of
+    an arbitrary root.
     """
     if archive_membership_source is not None:
         archive_membership_source = archive_membership_source.strip()
@@ -776,11 +767,9 @@ def rewrite_manifest_to_coverage(
         manifest = manifest.drop("__derived_first_archive_observed_date")
     manifest = manifest.sort(["date", "symbol"])
 
-    # One locked, staged replacement. The previous rmtree ran outside the
-    # dataset lock that readers take for a consistent snapshot, so a concurrent
-    # reader could lose part files mid-collect and a kill between the rmtree and
-    # the write left the root's PIT membership dataset gone (audit M5). This
-    # routinely runs under topup_binance_daily_klines.
+    # One locked, staged replacement: an rmtree outside the dataset lock lets a
+    # concurrent reader lose part files mid-collect, and a kill between rmtree
+    # and write leaves the root's PIT membership dataset gone.
     replace_dataset(manifest, root, "archive_trade_manifest", partition_by=("date",))
     return manifest.height
 
@@ -1147,11 +1136,10 @@ ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS = 24 * 60 * 60
 def _sweep_orphaned_publication_trees(root: Path) -> None:
     """Delete aged staging/backup trees that no publication marker references.
 
-    Cleanup is in-process only and the tokens are per-run, so a SIGKILL mid-build
-    orphaned multi-GB hidden trees that nothing ever swept (2026-07-27 audit L7).
-    A tree is removed only when it is older than
-    ``ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS`` (so a concurrent build's fresh
-    tree is never touched) and no incomplete-publication marker names it.
+    Ordinary cleanup is in-process with per-run tokens, so a SIGKILL mid-build
+    leaves multi-GB hidden trees behind. A tree is removed only when it is older
+    than ``ORPHAN_PUBLICATION_TREE_MIN_AGE_SECONDS`` -- so a concurrent build's
+    fresh tree is never touched -- and no marker names it.
     """
 
     referenced: set[str] = set()
@@ -1160,8 +1148,8 @@ def _sweep_orphaned_publication_trees(root: Path) -> None:
         try:
             payload = json.loads(marker_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            # An unreadable marker means "operator recovery pending": refuse to
-            # sweep anything rather than guess which generation is canonical.
+            # Unreadable marker means recovery pending: sweep nothing rather
+            # than guess which generation is canonical.
             return
         for key in ("staging_root", "backup_root"):
             value = payload.get(key)
@@ -1192,9 +1180,8 @@ def _publish_staged_binance_datasets(
 ) -> object:
     """Publish the verified dataset pair and roll back ordinary failures.
 
-    The durable marker remains after a process kill or incomplete rollback so a
-    later build refuses before network or mutation instead of guessing which
-    generation is canonical.
+    The durable marker survives a process kill or incomplete rollback, so a
+    later build refuses before any network or mutation work.
     """
 
     if marker_path.exists() or marker_path.is_symlink():
@@ -1219,8 +1206,8 @@ def _publish_staged_binance_datasets(
             },
         )
     except FileExistsError as exc:
-        # A concurrent publisher won the no-replace marker race. This staging
-        # generation never touched live data and is not referenced by its marker.
+        # A concurrent publisher won the marker race; this staging generation
+        # never touched live data.
         shutil.rmtree(staging_root, ignore_errors=True)
         shutil.rmtree(backup_root, ignore_errors=True)
         raise RuntimeError(
@@ -1302,8 +1289,8 @@ def _assert_download_completeness(
 ) -> None:
     """Refuse to build a survivorship-biased OOS root.
 
-    Persist failed jobs and reject a failure ratio above the declared tolerance.
-    The same gate covers discovery and download phases.
+    Persists failed jobs and rejects a failure ratio above the declared
+    tolerance, for both the discovery and download phases.
     """
     if artifact_path is not None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1382,15 +1369,12 @@ def build_binance_oos(
     the first day of the month containing ``end_date - 1``; monthly history and
     that bounded daily tail are staged and published as one verified pair.
 
-    The klines_1h dataset is REWRITTEN clean (not appended) so a rerun that
-    discovers a narrower universe — e.g. after a transient S3 listing shortfall —
-    can never leave stale ``symbol=...`` partitions from a prior wider build in the
-    PIT root (those would otherwise be silently retained by
-    ``rewrite_manifest_to_coverage``). When the freshly-built universe is strictly
-    narrower than what is already persisted, the build REFUSES unless
-    ``allow_degraded=True`` is set explicitly — mirroring run_archive_manifest's
-    universe-shrink gate, since a silent universe shrink is a survivorship
-    corruption.
+    klines_1h is REWRITTEN clean, not appended, so a rerun that discovers a
+    narrower universe (say after a transient S3 listing shortfall) cannot leave
+    stale ``symbol=...`` partitions from a wider build behind, which
+    ``rewrite_manifest_to_coverage`` would silently retain. A universe strictly
+    narrower than what is persisted REFUSES unless ``allow_degraded=True``,
+    mirroring run_archive_manifest's shrink gate.
     """
     root = Path(data_root).expanduser()
     if root.is_symlink():
@@ -1464,9 +1448,8 @@ def build_binance_oos(
             file=sys.stderr,
         )
 
-    # Universe-shrink gate: a rerun that discovers symbols NOT covering a prior
-    # wider build would leave that build's now-absent symbols stranded on disk.
-    # Refuse rather than silently retain stale symbol-days (survivorship corruption).
+    # Universe-shrink gate: a rerun not covering a prior wider build would
+    # strand its symbols on disk as stale symbol-days.
     persisted, persisted_before_daily = _persisted_kline_symbol_sets(
         root,
         before=daily_start,
@@ -1615,8 +1598,8 @@ def build_binance_oos(
             "daily_failed_files": daily_stats["failed"],
         }
     finally:
-        # Preserve both generations only when a process-level publication marker
-        # says the canonical pair may need operator recovery.
+        # Keep both generations only while the marker says the canonical pair
+        # may need operator recovery.
         if not marker_path.exists():
             shutil.rmtree(staging_root, ignore_errors=True)
             shutil.rmtree(backup_root, ignore_errors=True)

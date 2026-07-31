@@ -95,10 +95,10 @@ def test_funding_interval_normalization() -> None:
 
 
 def test_idless_split_fills_are_not_dedup_collapsed() -> None:
-    """Two distinct idless trades at the same instant/side/price/size must both
-    survive — the synthetic-id index keeps them apart so volume is not
-    undercounted by the trades_to_frame dedup (audit pass2 #18). A feed WITH
-    venue ids still dedups true duplicates normally."""
+    """Two distinct idless trades at the same instant/side/price/size must both survive
+    -- the synthetic-id index keeps them apart so volume is not undercounted. A feed
+    WITH venue ids still dedups true duplicates.
+    """
     same = {"side": "Buy", "price": 100.0, "size": 1.0, "time": 1_700_000_000_000, "symbol": "FOOUSDT"}
     frame = trades_to_frame([dict(same), dict(same)])
     assert frame.height == 2  # both distinct prints survive
@@ -109,7 +109,7 @@ def test_idless_split_fills_are_not_dedup_collapsed() -> None:
     assert trades_to_frame([dict(withid), dict(withid)]).height == 1
 
 
-# audit2b regression: densify multi-symbol recursion must not reuse one symbol's
+# Densify's multi-symbol recursion must not reuse one symbol's
 # prior-close seed for every symbol.
 #
 # Defect: hourly densification split a multi-symbol frame and recursed with the
@@ -172,8 +172,9 @@ def test_hourly_multi_symbol_densify_does_not_leak_seed() -> None:
 
 
 def test_funding_interval_zero_or_negative_is_clamped() -> None:
-    """audit-iter2 ingestion-pit-1: a 0 funding_interval_min must not yield inf and a
-    negative one must not sign-flip the 8h-equivalent; both clamp to the 8h default."""
+    """A 0 ``funding_interval_min`` must not yield inf and a negative one must not
+    sign-flip the 8h equivalent; both clamp to the 8h default.
+    """
     import math
 
     funding = normalize_funding_history(
@@ -192,10 +193,11 @@ def test_funding_interval_zero_or_negative_is_clamped() -> None:
 
 
 def test_densify_forward_fills_in_timestamp_order_not_join_order() -> None:
-    """`forward_fill` is row-positional and polars does not specify left-join row
-    order, so filling on the raw join output and sorting afterwards could carry a
-    LATER hour's close backwards into an earlier gap hour -- look-ahead inside a
-    densified archive bar, hidden by the trailing sort (2026-07-27 audit L8)."""
+    """``forward_fill`` is row-positional and polars does not specify left-join row
+    order, so filling on the raw join output and sorting afterwards can carry a later
+    hour's close backwards into an earlier gap hour -- look-ahead inside a densified
+    archive bar, hidden by the trailing sort.
+    """
 
     day_ms = int(
         datetime(2026, 7, 1, tzinfo=UTC).timestamp() * 1000

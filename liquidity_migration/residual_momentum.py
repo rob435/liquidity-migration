@@ -37,16 +37,12 @@ def residual_momentum_expr() -> pl.Expr:
 def _densify_daily_grid(resid: pl.DataFrame) -> pl.DataFrame:
     """Insert null-residual rows for missing per-symbol calendar days.
 
-    ``residual_momentum_expr`` is ROW-positional: ``rolling_sum(7).shift(3)``
+    ``residual_momentum_expr`` is row-positional: ``rolling_sum(7).shift(3)``
     reaches the 10th *present* row, which spans more than ten calendar days for a
-    gapped symbol (delist/relist, archive hole, dropped factor day). Causality is
-    preserved either way, but the value stops being the registered
-    ``sum(residual_return[D-9..D-3])`` -- the BAC-1/BAC-7 failure class
-    ``_common.calendar_shift`` exists for (2026-07-27 audit M21).
-
-    Padding the grid restores the registered calendar window exactly, and
-    ``RMOM_MIN_SAMPLES`` already tolerates up to three missing observations
-    inside the window, so an ordinary short gap still produces a value.
+    gapped symbol. Causality holds either way, but the value stops being the
+    registered ``sum(residual_return[D-9..D-3])``. Padding restores that window
+    exactly; ``RMOM_MIN_SAMPLES`` still tolerates three missing observations
+    inside it, so an ordinary short gap produces a value.
     """
 
     if resid.is_empty():
@@ -71,10 +67,9 @@ def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
     if resid.is_empty():
         return resid
     end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
-    # A shifted rolling window can still emit causal values after a symbol's
-    # final real residual. Pad only until fewer than RMOM_MIN_SAMPLES real
-    # residuals can remain in the window. This makes stable history independent
-    # of the date on which the table is rebuilt.
+    # A shifted rolling window still emits causal values after a symbol's final
+    # real residual. Pad only until fewer than RMOM_MIN_SAMPLES real residuals
+    # can remain in the window, so history does not depend on the rebuild date.
     trailing_days = RMOM_CAUSAL_SHIFT + RMOM_WINDOW - RMOM_MIN_SAMPLES
     pad = (
         resid.group_by("symbol")

@@ -7,14 +7,10 @@ Each :class:`RunWarning` carries
 * ``message``   — one human sentence
 * ``fix``       — the one-line backfill/command that clears it (``""`` if none)
 
-``tainted`` (any ``tainted``-severity warning) is the machine flag meaning
-"this result is survivorship / look-ahead biased — do NOT cite it as clean."
-That implements the claim-validity policy in ``AGENTS.md``; the
-failure taxonomy lives in ``docs/backtesting_errors_we_never_repeat.md``.
-Here it is surfaced loudly rather than hidden. Data-gap warnings (funding, clipped window)
-are ``warn``/``info``: the run is still produced, the gap is named, and you can
-backfill it yourself.
-
+Any ``tainted``-severity warning means the result is survivorship or look-ahead
+biased and must not be cited as clean. The failure taxonomy lives in
+``docs/backtesting_errors_we_never_repeat.md``. Data-gap warnings (funding,
+clipped window) are ``warn``/``info``: the run is produced and the gap named.
 """
 from __future__ import annotations
 
@@ -51,14 +47,10 @@ def diagnose(
     n_features: int = 0,
     n_trades: int = 0,
 ) -> list[RunWarning]:
-    """Build the warning list for a completed run from its integrity signals.
-
-    Pure and side-effect free so it is trivially unit-testable; callers attach
-    the result to the report payload and render it to stdout.
-    """
+    """Build the warning list for a completed run from its integrity signals."""
     warnings: list[RunWarning] = []
 
-    # --- correctness / tainting (claim-validity gate, never silently dropped) ---
+    # --- correctness / tainting ---
     if archive_manifest_empty:
         warnings.append(
             RunWarning(

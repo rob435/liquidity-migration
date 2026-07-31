@@ -1,43 +1,26 @@
 #!/usr/bin/env python3
 """Phase 5C hypothesis H1 — delta-neutral spot-perp carry vs the perp-only basket.
 
-**External source, not this repository.** Robot Wealth, *"The Art and Science of
-Trading Carry"*, describes the construction and — writing independently — predicts
-the exact failure mode §18.4 measured:
+The existing long/short perpetual carry basket carries a 166-276% max drawdown
+from idiosyncratic dislocation between its legs. The hypothesis here is that
+hedging each name with its own spot removes the dislocation while keeping the
+funding.
 
-    "An obvious one is shorting perpetual futures trading at a premium and longing
-    the spot to hedge the risk, thus collecting the funding."
-
-    "A messier variation is to create a long-short basket of perpetuals trading at
-    a discount or premium, respectively. This trade will see a much higher return
-    variance than the spot-perpetual version because the basket components will
-    dislocate and do all sorts of weird idiosyncratic things."
-
-§18.4's carry book *is* that messier variation, and it carries a 166-276% max
-drawdown from precisely that idiosyncratic dislocation. The hypothesis under test
-is that hedging each name with its own spot removes the dislocation while keeping
-the funding.
-
-**Mechanism and counterparty (why this should exist):** perpetual funding is paid
-by leveraged directional longs to stay long. A short-perp/long-spot pair holds no
-price view; it is paid for supplying the leverage those longs demand. The premium
-is sticky because it is autocorrelated, so funding accrues faster than the basis
+Mechanism: perpetual funding is paid by leveraged directional longs. A
+short-perp/long-spot pair holds no price view and is paid for supplying that
+leverage. The premium is autocorrelated, so funding accrues faster than the basis
 mean-reverts.
 
-**Spot proxy — read this before believing any number here.** This repository holds
-no spot dataset. The panel's ``by_index_close`` / venue index price is the venue's
-own spot index (a basket of major spot exchanges) and is used as the spot leg. That
-is a *mechanism* test, not an executable book: an index is synthetic, cannot be
-bought, and a real spot leg carries its own fees, borrow, and per-exchange
-tracking error. Treat a positive result as a reason to procure spot data, never as
-a tradeable result.
+SPOT PROXY — read before believing any number here. This repository holds no spot
+dataset. The panel's ``by_index_close`` is the venue's own spot index (a basket of
+major spot exchanges) and stands in for the spot leg. That makes this a mechanism
+test, not an executable book: an index cannot be bought, and a real spot leg
+carries its own fees, borrow, and per-exchange tracking error. A positive result
+is a reason to procure spot data, not a tradeable result.
 
-Costs are charged honestly and asymmetrically: the perp side at the measured
-7.78 bp/side, the spot side at 10.0 bp/side (Bybit/Binance spot taker is ~0.10%,
-*worse* than perp). A delta-neutral pair therefore round-trips ~35.6 bp, more than
-double the perp-only book.
-
-Research-only. Lane-1 on seen data; grades nothing (``AGENTS.md``).
+Costs are asymmetric: perp at the measured 7.78 bp/side, spot at 10.0 bp/side
+(spot taker is ~0.10%, worse than perp), so a pair round-trips ~35.6 bp — more
+than double the perp-only book.
 """
 
 from __future__ import annotations
@@ -83,10 +66,9 @@ def attach_pair_return(prepared: pl.DataFrame, *, index_col: str, hold: int = 24
     which is the sticky-premium mechanism stated directly: you keep the funding
     unless the basis moves against you by more.
 
-    This MUST run on the hourly frame, before any disjoint sampling. ``shift`` is
-    positional, so on a 24h-sampled frame ``shift(-24)`` would reach 24 *days*
-    ahead and difference a 24-day spot move against a 24-hour perp move. That bug
-    produced +696 bp/day and Sharpe 4.09 on the first pass.
+    Must run on the hourly frame, before any disjoint sampling: ``shift`` is
+    positional, so on a 24h-sampled frame ``shift(-24)`` reaches 24 *days* ahead
+    and differences a 24-day spot move against a 24-hour perp move.
     """
     d = prepared.sort(["symbol", "bar_ts_ms"]).with_columns(
         pl.when(pl.col(index_col) > 0).then(pl.col(index_col)).otherwise(None).alias("_ix")
@@ -157,7 +139,7 @@ def main() -> int:
         turn = _sp.measure_turnover(u, [("by_funding", +1, 1.0)], args.cut)
         s_ctrl = summary(perp_only["ret_bp"].to_numpy(), periods_per_year=ppy, cost_bp=turn * PERP_FEE_SIDE)
 
-        # Spot leg on the HOURLY frame, then rank/sample -- order matters, see
+        # Spot leg on the hourly frame, then rank/sample -- order matters, see
         # attach_pair_return's docstring.
         paired = attach_pair_return(prep, index_col=index_col)
         u_dn = _sp._disjoint(top_by(paired, "adv24", 100), 24)

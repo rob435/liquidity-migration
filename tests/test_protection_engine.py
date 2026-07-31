@@ -285,9 +285,10 @@ def test_component_take_profit_emits_zero_target_and_never_direct_order(tmp_path
 
 
 def test_terminal_partial_entry_keeps_component_protection(tmp_path: Path) -> None:
-    """A partially-filled-then-cancelled entry holds a live position; it must
-    not lose stop/TP evaluation forever (no working remainder can trade after
-    a terminal status, so the anti-race rationale no longer applies)."""
+    """A partially-filled-then-cancelled entry holds a live position and must not lose
+    stop/TP evaluation: no working remainder can trade after a terminal status, so the
+    anti-race rationale no longer applies.
+    """
 
     route = ensure_account_route(
         account_id="protection",

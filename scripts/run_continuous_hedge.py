@@ -1,21 +1,19 @@
 """Periodic target-hedge runner for a bound continuous account route.
 
 Computes the current two-leg hedge target from a commit-owned immutable model
-prior and canonical account state. Dry-run prints the decision; ``--execute``
-publishes an absolute target batch to the single account owner. This process
-never calls the venue private API and never writes a sleeve-local trade ledger.
+prior and canonical account state. Dry-run (the default) prints the decision;
+``--execute`` publishes an absolute target batch to the account owner. This
+process never calls the venue private API and writes no sleeve-local ledger.
 
-The deployed service is demo-only, although the CLI requires an explicit
-demo/paper route. Dry-run is the default. The historical prior is not extended
-with live returns and its age is not a runtime-freshness signal; missing,
+The CLI requires an explicit demo/paper route. The historical prior is not
+extended with live returns and its age is not a freshness signal; missing,
 malformed, future-dated, or estimator-inadequate prior data fails closed.
 
 An armed run that is blocked or fails publication exits nonzero so the systemd
 oneshot fails and liveness can alert. Dry runs and genuine no-action runs exit 0.
-One deliberate exception: an armed run blocked ONLY by unhealthy account-owner
-health exits 0 with its blocked status recorded — the owner-health watchdog
-already pages that root cause directly, and a duplicate FAILED-unit page for
-the same condition was alert noise, not additional protection.
+Exception: an armed run blocked only by unhealthy account-owner health exits 0
+with its blocked status recorded, because the owner-health watchdog already pages
+that root cause.
 
 Usage:
     .venv/bin/python scripts/run_continuous_hedge.py --execution-environment demo
@@ -52,6 +50,8 @@ from liquidity_migration.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
 from liquidity_migration.account_strategy_state import (  # noqa: E402
+    CanonicalAccountProjection,
+    canonical_account_projection,
     canonical_strategy_trade_rows,
     target_reservation_rows,
 )
@@ -184,6 +184,7 @@ def _current_account_hedge_qty(
     account_root: Path,
     *,
     strategy_id: str,
+    account_projection: CanonicalAccountProjection | None = None,
     symbol: str = HEDGE_SYMBOL,
 ) -> float:
     """Read the accepted hedge target, never a sleeve-local trade ledger."""
@@ -192,6 +193,7 @@ def _current_account_hedge_qty(
         account_root,
         sleeve=SleeveAdapterKind.HEDGE.value,
         strategy_ids=(strategy_id,),
+        account_projection=account_projection,
     )
     reserved = target_reservation_rows(rows)
     if reserved.is_empty():
@@ -206,6 +208,7 @@ def _pending_account_hedge_symbols(
     account_root: Path,
     *,
     strategy_id: str,
+    account_projection: CanonicalAccountProjection | None = None,
 ) -> set[str]:
     """Accepted hedge targets that must not receive an unchanged refresh."""
 
@@ -213,6 +216,7 @@ def _pending_account_hedge_symbols(
         account_root,
         sleeve=SleeveAdapterKind.HEDGE.value,
         strategy_ids=(strategy_id,),
+        account_projection=account_projection,
     )
     if rows.is_empty() or "status" not in rows.columns or "symbol" not in rows.columns:
         return set()
@@ -223,16 +227,13 @@ def _account_continuous_book_state(
     account_root: Path,
     *,
     equity_usdt: float,
+    account_projection: CanonicalAccountProjection | None = None,
 ) -> LiveBookState:
-    """Size hedge exposure from canonical CONTINUOUS targets.
-
-    Realized daily return extension remains a research-data concern, but open
-    gross cannot come from the disabled sleeve ledger during account cutover.
-    """
-
+    """Size hedge exposure from canonical CONTINUOUS targets, not a sleeve ledger."""
     rows = canonical_strategy_trade_rows(
         account_root,
         sleeve=SleeveAdapterKind.CONTINUOUS.value,
+        account_projection=account_projection,
     )
     reserved = target_reservation_rows(rows)
     short_targets = reserved.filter(pl.col("side") == "short") if not reserved.is_empty() else reserved
@@ -402,8 +403,8 @@ def main() -> int:
 
     btc_price = args.btc_price or _latest_close(primary_root, HEDGE_SYMBOL)
     eth_price = args.eth_price or _latest_close(primary_root, HEDGE_SYMBOL_2)
-    # Only the account owner may observe private wallet state. The publisher
-    # consumes that durable observation; it never opens a second private client.
+    # Equity comes from the owner's durable health record; this process never
+    # opens a second private client.
     health_error = ""
     try:
         owner_health = require_recent_account_owner_health(
@@ -421,10 +422,15 @@ def main() -> int:
     equity_source = (
         "override" if args.equity_usdt > 0.0 else "account_owner_health" if account_equity > 0.0 else "unavailable"
     )
-    live_book = _account_continuous_book_state(account_root, equity_usdt=equity)
+    # One verified journal read shared by every read model below.
+    account_projection = canonical_account_projection(account_root)
+    live_book = _account_continuous_book_state(
+        account_root, equity_usdt=equity, account_projection=account_projection
+    )
     pending_hedge_symbols = _pending_account_hedge_symbols(
         account_root,
         strategy_id=cfg.strategy_id,
+        account_projection=account_projection,
     )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
@@ -502,25 +508,21 @@ def main() -> int:
         out["status"] = "execute_blocked_equity_unavailable" if args.execute else "dry_run_equity_unavailable"
         out["error"] = "canonical account equity is unavailable"
     elif btc_price <= 0.0:
-        # No BTC price (kline store missing/unreadable and no --btc-price): the plan
-        # is necessarily None. Without an explicit status this read as a healthy
-        # "dry_run_ok"/"execute_no_action" no-op — silently masking a dead input.
+        # A dead BTC price forces plan=None, which without its own status reads
+        # as a healthy no-op.
         out["status"] = "execute_blocked_btc_price_unavailable" if args.execute else "dry_run_btc_price_unavailable"
     elif args.execute and not live_book.gross_short_frac_known:
-        # The 0.5 gross-short default is a sizing REFERENCE, not an observation —
-        # never submit orders sized off it (it would buy a hedge against a book
-        # whose exposure nobody measured).
+        # The 0.5 gross-short default is a sizing reference, not an observation:
+        # sizing orders off it hedges a book nobody measured.
         out["status"] = "execute_blocked_book_state_unknown"
     elif args.execute and eth_price <= 0.0:
-        # In 2f mode a dead ETH price silently drops the ETH leg; an armed run must
-        # surface it instead of part-hedging.
+        # In 2f mode a dead ETH price would silently drop the ETH leg.
         out["status"] = "execute_blocked_eth_price_unavailable"
     elif args.execute:
-        # Kernel route: publish absolute targets, including no-change targets, so
-        # convergence never depends on a sleeve-local trade ledger. Do
-        # not refresh a target that is already pending when the planner sees no
-        # quantity change: accepting that duplicate would advance the desire
-        # revision and restart the owner's convergence generation/age.
+        # Publish absolute targets, no-change ones included, so convergence never
+        # depends on a sleeve-local ledger. But skip a target already pending with
+        # no quantity change: that duplicate would advance the desire revision and
+        # restart the owner's convergence generation/age.
         pending_unchanged_targets = [
             target
             for target in desired_targets
@@ -560,9 +562,7 @@ def main() -> int:
     print(json.dumps(out))
     # A blocked or failed publish makes the oneshot fail so liveness can page.
     # execute_blocked_account_owner_unhealthy is deliberately absent: the
-    # owner-health watchdog pages that root cause itself, and the redundant
-    # FAILED-unit page arrived out of order (often after the root cause had
-    # already resolved). The blocked status stays in the printed receipt.
+    # owner-health watchdog pages that root cause itself.
     failing_statuses = {
         "execute_blocked_equity_unavailable",
         "execute_blocked_btc_price_unavailable",

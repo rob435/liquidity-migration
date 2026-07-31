@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a read-only command-level trade diagnostic artifact pair."""
+"""Build the trade diagnostic artifact pair: execution_tca.parquet + manifest.json."""
 
 from __future__ import annotations
 

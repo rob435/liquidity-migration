@@ -43,12 +43,11 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
 
 
 def _download_manifest_staleness_lines(data_root: str | Path) -> list[str]:
-    """Coverage table + (when stale) a prominent WARNING that download-data does not
-    refresh the archive manifest, with the exact remediation command.
+    """Coverage table, plus a WARNING when the archive manifest is stale.
 
-    Factored out of the download-data handler so the staleness messaging is unit-
-    testable without performing a real download. Reads only `date=` partition dir
-    names via `coverage_status` (no parquet, no network).
+    download-data does not refresh the manifest, so the warning carries the exact
+    remediation command. Reads only `date=` partition names via `coverage_status`
+    -- no parquet, no network.
     """
     import datetime as _dt
 
@@ -100,11 +99,9 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
     }
 )
 
-# Live daemon entrypoints OWN their ledger root and self-provision it (mkdir -p) so a
-# brand-new sleeve (e.g. a freshly-added paper shadow whose data dir was never created on the
-# box) starts clean on first deploy instead of crash-looping on FileNotFoundError. Research /
-# backtest commands keep the strict ensure_data_root_exists guard below: a missing research
-# root is a misconfiguration to surface loudly, not silently create.
+# Live daemon entrypoints own their ledger root and mkdir -p it, so a brand-new
+# sleeve starts clean on first deploy instead of crash-looping. Research and
+# backtest commands keep the strict ensure_data_root_exists guard below.
 _COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
     {
         "long-native-event-demo-cycle",
@@ -469,9 +466,8 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
     )
     from liquidity_migration.operational_profile import load_operational_profile
 
-    # The carry rule's parameters are an immutable Lane-2 registration; the
-    # shared operational profile's carry block is the ONLY runtime sizing
-    # source, so the profile is required rather than optional here.
+    # Rule parameters come from the registered Lane-2 config; the profile's
+    # carry block is the only runtime sizing source, hence required here.
     operational_profile = load_operational_profile(args.risk_policy_file)
     carry_settings = operational_profile.carry
     carry_demo_config = CarryDemoCycleConfig(
@@ -486,8 +482,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
         # In account_equity mode the ceiling IS the wallet, so the producer's
         # fixed clamp has nothing to clamp to and is disabled (0.0). The owner's
-        # equity-anchored caps are what bind the book, and they are re-proved at
-        # every rebase — which is the half of B4 a fixed reference could not do.
+        # equity-anchored caps bind the book and are re-proved at every rebase.
         capital_reference_usdt=(
             0.0
             if operational_profile.capital_reference.tracks_equity
@@ -552,33 +547,29 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 def _parse_symbols(value: str | None) -> list[str]:
     """Parse a comma-separated --symbols string into upper-cased symbols.
 
-    Single source of truth for the download paths so a missing .strip()/.upper()
-    can't drift between branches (code-quality-9).
+    One implementation for every download path, so .strip()/.upper() cannot
+    drift between branches.
     """
     if not value:
         return []
     return [item.strip().upper() for item in value.split(",") if item.strip()]
 
 
-# Known dataset tokens accepted by each download path. The downloaders dispatch
-# purely via `if "<name>" in datasets`, so an unknown/typo'd name is otherwise a
-# silent no-op (exit 0, zero output) that leaves a coverage/PIT gap. We assert
-# requested-vs-known here so a typo fails loud, mirroring the survivorship gate
-# the repo uses for missing symbols.
+# Known dataset tokens per download path. The downloaders dispatch via
+# `if "<name>" in datasets`, so a typo'd name is otherwise a silent no-op that
+# leaves a coverage/PIT gap.
 _KNOWN_BYBIT_DATASETS = frozenset(REST_DATASETS)
-# Binance proxy accepts either the short alias (map keys, e.g. "funding") or the
-# already-resolved canonical name (map values, e.g. "binance_usdm_funding"); both
-# match a dispatch branch after _resolve_binance_dataset_name.
+# The Binance proxy accepts either the short alias ("funding") or the resolved
+# canonical name ("binance_usdm_funding"); both dispatch after
+# _resolve_binance_dataset_name.
 _KNOWN_BINANCE_PROXY_DATASETS = frozenset(set(BINANCE_PROXY_DATASET_MAP) | set(BINANCE_PROXY_DATASET_MAP.values()))
 
 
 def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str) -> set[str]:
     """Fail loud if any requested dataset name is not a known/served dataset.
 
-    The downloaders silently skip unknown dataset tokens, so without this guard a
-    typo (e.g. ``klines_1hr`` or ``funidng``) downloads nothing for that dataset
-    and returns exit 0 — a silent data-coverage hole. Raises with the offending
-    tokens listed and the known names for the venue.
+    The downloaders silently skip unknown tokens, so a typo would download
+    nothing and still exit 0.
     """
     unknown = sorted(requested - known)
     if unknown:
@@ -589,11 +580,9 @@ def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str
 
 
 def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:
-    # --include-excluded (include_majors) and --exclude-defaults (exclude_majors)
-    # are contradictory: one clears the excluded-symbol list, the other applies
-    # it. The precedence below would silently let include win and drop the
-    # exclude flag with no warning, producing a PIT-relevant universe membership
-    # the operator did not intend. Fail loud on the contradiction instead.
+    # --include-excluded and --exclude-defaults contradict each other: one
+    # clears the excluded-symbol list, the other applies it. The precedence
+    # below would silently let include win, so fail loud instead.
     if args.include_majors and args.exclude_majors:
         raise RuntimeError("--include-excluded and --exclude-defaults are mutually exclusive; pass at most one.")
     if args.exclude_symbols is not None:

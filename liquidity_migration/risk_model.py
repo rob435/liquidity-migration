@@ -20,8 +20,7 @@ from liquidity_migration.daily_feature_panel import (
 from liquidity_migration.storage import read_dataset_columns
 from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership
 
-# Reuse daily feature-panel builders; rank realized volatility below and compute
-# BTC beta separately.
+# From the daily feature panel; realized vol is ranked and BTC beta computed below.
 _REUSED_FACTOR_SPECS = [
     "xs_rank_ret_30d",     # XS 30d momentum
     "realized_vol_7d",     # -> realized_vol_rank (vol regime)
@@ -35,9 +34,7 @@ _FACTOR_COLUMNS = [
     "funding_rate_z", "liquidity_rank", "premium_index_z",
 ]
 
-# Exact price-only factor set consumed by the operational residual-momentum
-# owner. Keep this public so callers cannot drift onto a different regressor
-# set.
+# The price-only factor set the operational residual-momentum owner regresses on.
 COMMON4_FACTOR_COLUMNS = (
     "btc_beta",
     "xs_rank_ret_30d",
@@ -155,19 +152,15 @@ def build_factor_panel(
     ranks. Pads 90d back so the rolling-60 betas warm up; the returned panel
     covers [start, end).
 
-    Attaches 6 factor exposures: the 5 reused daily feature-panel factors (via
-    ``build_feature_panel``) + ``btc_beta``. ``realized_vol_7d`` is converted to
-    its cross-sectional rank (``realized_vol_rank``). The R4 validation
-    (2026-05-29) pruned ``xs_rank_ret_3d`` (sign-inconsistent factor return across
-    venues) and deferred the alt-season factor — 6 stable, sign-consistent factors
-    meet the plan's 5-6 target. See r4-risk-model-verdict.md.
+    Attaches 6 factor exposures: the 5 reused daily feature-panel factors plus
+    ``btc_beta``. ``realized_vol_7d`` is converted to its cross-sectional rank
+    (``realized_vol_rank``).
 
-    ``klines_dataset`` overrides the autodetected kline store name. The autodetect
-    only distinguishes the Bybit/Binance funding-dir conventions and always returns
-    ``klines_1h``; the live demo/paper roots store their WS-driven klines under
-    ``event_demo_klines_1h`` instead, so the offline rmom refresh must pass the real
-    store name or both reads return zero rows (the 2026-06-02 continuous zero-signal
-    blackout). Defaults to None => autodetect (research roots).
+    ``klines_dataset`` overrides the autodetected kline store name. Autodetect
+    only distinguishes the Bybit/Binance funding-dir conventions and always
+    returns ``klines_1h``, but the live demo/paper roots store WS-driven klines
+    under ``event_demo_klines_1h``, so the offline rmom refresh must pass the
+    real store name or both reads return zero rows.
     """
     feat = build_feature_panel(
         data_root, start=start, end=end,
@@ -236,13 +229,10 @@ def fit_factor_returns(
     dropped per day. PIT-clean: factor loadings are as-of decision_ts; the target
     is the strictly-forward return.
 
-    FORWARD-SURVIVORSHIP NOTE: a symbol's terminal trading day before a
-    delist/data-gap has a null ``target_col`` (no strictly-forward return) and is
-    therefore dropped from that day's regression. This is unavoidable — you cannot
-    regress on a return that does not exist — but it means each daily factor-return
-    is estimated only over symbols that survived to the next day. The R4 validation
-    run surfaces the dropped-row count so this exposure is visible rather than
-    silent; treat factor returns near heavy-delisting windows with that caveat.
+    Forward-survivorship: a symbol's terminal trading day before a delist or data
+    gap has a null ``target_col`` and is dropped from that day's regression, so
+    each daily factor return is estimated only over symbols that survived to the
+    next day. Treat factor returns near heavy-delisting windows accordingly.
     """
     cols = list(factor_cols) if factor_cols is not None else list(_FACTOR_COLUMNS)
     f_schema = {"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64}
@@ -266,10 +256,9 @@ def fit_factor_returns(
         sol = np.linalg.lstsq(x, y, rcond=None)
         beta, rank = sol[0], int(sol[2])
         resid = y - x @ beta
-        # On a rank-deficient daily cross-section (collinear/constant factor columns)
-        # lstsq silently returns an arbitrary min-norm solution, so the per-factor
-        # slopes are meaningless; suppress them. Residuals remain identified
-        # because fitted values are unique even when beta is not.
+        # On a rank-deficient cross-section lstsq returns an arbitrary min-norm
+        # solution, so the slopes are suppressed. Residuals stay identified —
+        # fitted values are unique even when beta is not.
         if rank == x.shape[1]:
             for i, fc in enumerate(present):
                 factor_records.append({"ts_ms": ts, "factor": fc, "factor_return": float(beta[i + 1])})

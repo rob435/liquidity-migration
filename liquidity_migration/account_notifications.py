@@ -22,10 +22,9 @@ from .deterministic_runtime import Clock, SystemClock
 
 NOTIFICATION_SCHEMA_VERSION = 3
 HOUR_NS = 3_600_000_000_000
-#: ``settling`` is healthy for lifecycle purposes and honest in the digest: the
-#: venue and the local journal disagree right now, but the disagreement is
-#: younger than the venue's own propagation delay, so it is not yet evidence of
-#: anything. See ``account_service_runner.PositionTruthSettling``.
+#: ``settling`` counts as healthy: venue and journal disagree, but by less than
+#: the venue's own propagation delay. See
+#: ``account_service_runner.PositionTruthSettling``.
 POSITION_TRUTH_STATUSES = frozenset({"healthy", "settling", "mismatch", "stale", "unavailable"})
 #: Statuses under which lifecycle facts may be stated plainly.
 POSITION_TRUTH_LIFECYCLE_OK = frozenset({"healthy", "settling"})
@@ -127,9 +126,9 @@ class AccountNotificationEngine:
         persisted = self._load()
         first_run_with_history = persisted.last_sequence == 0 and bool(events)
         if first_run_with_history:
-            # First run adopts current truth without replaying months of old
-            # lifecycle messages. The immediate hourly summary still tells the
-            # operator what is open now.
+            # First run adopts current truth instead of replaying months of
+            # old lifecycle messages; the hourly summary still reports what is
+            # open now.
             persisted.positions = _position_snapshot(kernel_state)
             persisted.last_sequence = events[-1].sequence
             new_events: list[AccountEvent] = []
@@ -150,10 +149,9 @@ class AccountNotificationEngine:
         )
         bootstrap_messages: list[str] = []
         if first_run_with_history:
-            # Lifecycle alerts are not replayed, but unresolved risk blocks are
-            # current control state rather than historical chatter. Rebuild
-            # them chronologically and discard their old event messages/counts;
-            # the first hourly summary then reports only what remains active.
+            # Unresolved risk blocks are current control state, not history:
+            # rebuild them chronologically and drop their old messages/counts so
+            # the first summary reports only what is still active.
             for event in events:
                 if event.event_type == AccountEventType.RISK_DECISION.value:
                     _entry_risk_decision_messages(
@@ -180,9 +178,8 @@ class AccountNotificationEngine:
                 position_truth_healthy=position_truth_healthy,
             )
         )
-        # A venue/local mismatch makes local unrealized P&L non-authoritative.
-        # Keep lifecycle facts, but never emit a scary loss alert for exposure
-        # the venue says does not exist.
+        # A venue/local mismatch makes local unrealized P&L non-authoritative:
+        # keep lifecycle facts, drop loss alerts for exposure the venue denies.
         loss_messages = (
             self._loss_messages(midpoint_by_symbol, next_state, kernel_state) if position_truth_healthy else []
         )
@@ -217,8 +214,8 @@ class AccountNotificationEngine:
     def _labelled_pages(self, sections: Sequence[str]) -> tuple[str, ...]:
         if not self.channel_label:
             return _paginate_sections(sections)
-        # The label counts toward every page's Telegram budget so labelled
-        # pages can never exceed the transport limit the plain path respects.
+        # The label counts toward each page's Telegram budget so labelled pages
+        # stay inside the transport limit.
         overhead = len(self.channel_label) + 1
         pages = _paginate_sections(sections, max_chars=3900 - overhead)
         return tuple(f"{self.channel_label}\n{page}" for page in pages)
@@ -365,10 +362,9 @@ class AccountNotificationEngine:
             elif event.event_type == AccountEventType.PNL.value:
                 close_key = str(event.payload.get("close_key") or "")
                 if not close_key:
-                    # Funding settlements and other account cash-flow rows are
-                    # reflected in the hourly realized total. They are not a
-                    # position close and must not manufacture one Telegram
-                    # lifecycle message per settlement.
+                    # Cash-flow rows (funding, etc.) already show in the hourly
+                    # realized total and are not position closes, so they must
+                    # not emit one lifecycle message each.
                     continue
                 close = kernel_state.closes.get(close_key, {})
                 reason = _human_reason(str(close.get("reason") or "position closed"))
@@ -413,8 +409,8 @@ class AccountNotificationEngine:
                         event,
                         "✅ Venue reconciliation confirmed prior update · " + confirmed.removeprefix("✅ "),
                     )
-        # Journal fills are authoritative; snap to reconstructed state after
-        # applying messages to eliminate accumulated float noise.
+        # Snap to reconstructed state after applying messages: journal fills
+        # are authoritative and this drops accumulated float noise.
         state.positions = _position_snapshot(kernel_state)
         for symbol, row in list(state.positions.items()):
             if float(row.get("signed_qty") or 0.0) == 0.0:
@@ -500,8 +496,8 @@ def _hourly_summary(
     unpriced_symbols: list[str] = []
     lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
     if position_truth_status == "settling":
-        # Rare in a digest: the window is seconds and this renders hourly. Say
-        # it anyway rather than let a suppressed alarm read as a clean one.
+        # Rare (seconds-wide window, hourly render), but a suppressed alarm
+        # would read as a clean one.
         lines.append("ℹ️ Venue position view is catching up to a just-journaled fill")
     for symbol, position in positions:
         stop = _active_stop(state, symbol)
@@ -941,10 +937,9 @@ def _realized_text(truth: _RealizedPnlTruth) -> str:
 def _component_netting_scope_line(count: int) -> str:
     """Scope the lifetime account-netting count so it cannot read as a backlog.
 
-    The kernel stamps every terminal reduce batch account-netted once and never
-    upgrades the row, so this count grows for the life of the journal epoch;
-    per-component allocation lives in the canonical trade attribution, not
-    here.
+    The kernel stamps each terminal reduce batch once and never upgrades the
+    row, so the count grows for the life of the journal epoch. Per-component
+    allocation lives in the canonical trade attribution.
     """
 
     return (
@@ -954,7 +949,7 @@ def _component_netting_scope_line(count: int) -> str:
 
 
 def _accounting_scope_text(labels: Sequence[str]) -> str:
-    """Render immutable journal limitations without promising a nonexistent finalizer."""
+    """Render the journal's accounting-scope limitations."""
 
     if not labels:
         return ""
@@ -1085,8 +1080,8 @@ def deliver_notification_batch(
 ) -> bool:
     """Send every page, then commit; a partial delivery never advances state.
 
-    A transport retry can duplicate an already-sent page, but committed state
-    can never acknowledge and permanently omit unsent facts.
+    A retry can duplicate an already-sent page, but committed state can never
+    acknowledge and then omit unsent facts.
     """
 
     if not batch.messages:
@@ -1113,8 +1108,8 @@ def deliver_notification_batch(
                 len(batch.messages),
             )
             return False
-        # One-line audit trail of what the operator was actually told; the
-        # full page content lives only in the transport.
+        # One-line record of what was sent; page content lives in the
+        # transport only.
         logger.info(
             "%s Telegram delivered page=%d/%d chars=%d first_line=%s",
             context,

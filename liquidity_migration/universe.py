@@ -18,11 +18,9 @@ from ._common import MS_PER_DAY, safe_name
 _logger = logging.getLogger(__name__)
 
 
-# This repository implements crypto-perp strategies. Bybit now returns TradFi
-# linear perps through the same endpoint/category. Empty is the venue's normal
-# crypto label and ``innovation`` is its crypto innovation-zone label; every
-# other present/future symbolType is outside the strategy domain unless this
-# allow-list is changed prospectively.
+# Bybit returns TradFi linear perps through the same endpoint/category. Empty is
+# its normal crypto label and ``innovation`` its crypto innovation-zone label;
+# every other symbolType is outside the strategy domain.
 CRYPTO_LINEAR_SYMBOL_TYPES: tuple[str, ...] = ("", "innovation")
 
 
@@ -79,13 +77,9 @@ def build_current_universe_table(
     snapshot_ts_ms = snapshot_ts_ms or int(datetime.now(tz=UTC).timestamp() * 1000)
     exclude = {symbol.upper() for symbol in universe_config.exclude_symbols}
     joined = instruments.join(tickers, on="symbol", how="inner", suffix="_ticker")
-    # universe-pit-3: the inner join silently drops any symbol present on only
-    # one side (a freshly-listed perp in instruments-info before it has a ticker
-    # row, or a partial/throttled get_tickers response). That narrows the live
-    # tradable universe with no signal. Surface the dropped-instrument count so
-    # an anomalous partial-ticker fetch is observable per cycle rather than only
-    # when it trips the downstream _universe_shrink_floor. Not PIT leakage (it
-    # only ever REMOVES symbols, never adds future ones).
+    # The inner join drops any symbol present on only one side (a fresh listing
+    # without a ticker row, or a throttled get_tickers), narrowing the tradable
+    # universe. Log the count so a partial fetch is observable per cycle.
     if "symbol" in instruments.columns and "symbol" in tickers.columns:
         dropped = instruments.height - joined.height
         if dropped > 0:
@@ -97,14 +91,10 @@ def build_current_universe_table(
                 tickers.height,
                 joined.height,
             )
-    # universe-pit-1: contract_type is REQUIRED, not optional. Bybit's v5 `linear`
-    # category returns LinearPerpetual AND dated LinearFutures (delivery
-    # contracts), both USDT-settled — so the settle_coin==USDT filter below does
-    # NOT exclude dated futures; the contract_type allow-list is the SOLE barrier
-    # keeping the universe perpetuals-only. Requiring the column (rather than the
-    # old `if "contract_type" in columns` soft guard) makes the perp invariant a
-    # hard schema requirement: a frame missing it fails loudly instead of
-    # silently admitting dated-delivery contracts onto the live tradable path.
+    # ``contract_type`` is required, not optional: Bybit's v5 `linear` category
+    # returns LinearPerpetual and dated LinearFutures, both USDT-settled, so the
+    # settle_coin filter does not exclude dated futures and the contract_type
+    # allow-list below is the only barrier keeping the universe perpetuals-only.
     required = {
         "symbol",
         "status",
@@ -135,14 +125,11 @@ def build_current_universe_table(
     )
     if exclude:
         filtered = filtered.filter(~pl.col("symbol").is_in(sorted(exclude)))
-    # universe-pit-1: perpetuals-only is now an UNCONDITIONAL filter (contract_type
-    # is a required column above). A None contract_type is conservatively dropped
-    # (None not in the allow-list).
+    # Unconditional; a None contract_type is dropped with everything else not in
+    # the allow-list.
     filtered = filtered.filter(pl.col("contract_type").is_in(["LinearPerpetual", "linear", "Linear"]))
-    # Defense-in-depth: Bybit sets a non-null/non-zero delivery_time_ms ONLY on
-    # dated delivery contracts; a true perpetual has it null/0. Exclude any row
-    # that carries a real delivery time even if its contract_type slipped through
-    # the allow-list. Skipped if the column is absent (older instruments frames).
+    # Bybit sets a non-null, non-zero delivery_time_ms only on dated delivery
+    # contracts, so this catches one whose contract_type slipped through.
     if "delivery_time_ms" in filtered.columns:
         filtered = filtered.filter(
             pl.col("delivery_time_ms").is_null() | (pl.col("delivery_time_ms") <= 0)
@@ -155,13 +142,10 @@ def build_current_universe_table(
             ((pl.lit(snapshot_ts_ms) - pl.col("launch_time_ms")) / MS_PER_DAY).alias("listing_age_days"),
         ]
     )
-    # universe-pit-5: a symbol with null launch_time_ms has a null listing_age_days
-    # and is therefore INVISIBLE to the age gates (each requires is_not_null). When
-    # an age floor is active such a symbol is conservatively dropped; but in the
-    # unlimited-universe mode (min_age_days==0 && max_age_days==0) NO age filter
-    # runs and an unknown-age contract passes through silently. Surface the count
-    # of null-launchTime symbols so the operator sees how many unknown-age
-    # contracts entered the candidate pool (no numeric change — observability only).
+    # A null launch_time_ms gives a null listing_age_days, invisible to the age
+    # gates (each requires is_not_null). With an age floor active such a symbol is
+    # dropped, but in unlimited-universe mode no age filter runs at all, so log
+    # how many unknown-age contracts entered the pool.
     if "launch_time_ms" in filtered.columns:
         null_launch = int(filtered.select(pl.col("launch_time_ms").is_null().sum()).item() or 0)
         if null_launch > 0:
@@ -204,15 +188,8 @@ def build_current_universe_table(
         "min_notional_value",
         "tick_size",
         "qty_step",
-        # Lot-size lower + upper bounds. Bybit returns minOrderQty,
-        # maxOrderQty (limit), and maxMktOrderQty (market) per linear
-        # perp. The cycle's entry sizing previously read min_order_qty
-        # off the contract dict and got 0 (no enforcement) because the
-        # universe table didn't propagate it; the max columns were
-        # parsed by _normalize_instruments but also dropped here, so a
-        # large position-sizing × low-price candidate could submit a
-        # qty exceeding Bybit's per-order cap and get rejected
-        # (observed 2026-05-25: SUPERUSDT, 26477 > max 21100).
+        # Lot-size bounds the cycle's entry sizing enforces: Bybit returns
+        # minOrderQty, maxOrderQty (limit), and maxMktOrderQty (market).
         "min_order_qty",
         "max_order_qty",
         "max_market_order_qty",

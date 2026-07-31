@@ -158,11 +158,10 @@ class BybitNativeProtectionManager:
         self.rules = {symbol.upper(): rule for symbol, rule in instrument_rules.items()}
         self.fallback_stop_fraction = fraction
         self.clock = clock or SystemClock()
-        # Private WS callbacks and the owner/reconciliation loop share this
-        # manager. Hold one lock across planning, the Bybit mutation, journal
-        # activation, and every adoption/observation transition so callers can
-        # never install or bind two revisions from the same pre-mutation state.
-        # Public methods call one another, hence a reentrant lock is required.
+        # WS callbacks and the reconciliation loop share this manager. One lock
+        # spans planning, the Bybit mutation, journal activation, and every
+        # adoption transition, so two revisions cannot be installed from the same
+        # pre-mutation state. Reentrant because public methods call one another.
         self._lock = RLock()
         self.last_sync_ns = 0
         self.last_sync_ns_by_symbol: dict[str, int] = {}
@@ -173,23 +172,20 @@ class BybitNativeProtectionManager:
         # the same symbol can expose multiple recent child identities.
         self.observed_entry_stop_order_ids: dict[str, dict[str, str]] = {}
         self._breaches: dict[str, NativeProtectionBreach] = {}
-        # B5: symbols whose entry-attached stop the venue provably did not apply
-        # and which this process could not repair on the spot. Latched here
-        # because the fill may not be journaled yet, so no plan exists to breach
-        # against. Health fails immediately; the next reconciliation pass, which
-        # does have the position, converts the latch into a real breach and the
-        # existing software-flat pipeline closes the position.
+        # Symbols whose entry-attached stop the venue did not apply and this
+        # process could not repair. Latched here because the fill may not be
+        # journaled yet, so there is no plan to breach against; the next
+        # reconciliation pass converts the latch into a real breach.
         self._unarmed_entries: dict[str, dict[str, Any]] = {}
         self._restore_persisted_breaches()
 
     def _restore_persisted_breaches(self) -> None:
         """Rebuild the durable breach latch before any repair can mutate Bybit.
 
-        A process restart is not evidence that a crossed, absent stop became
-        safe.  In particular, the mark may have moved back through the stop
-        while the owner was down.  Restore every latest unresolved breach from
-        the journal so only authenticated proof of the same installed stop or
-        an authenticated flat position can clear it.
+        A restart is not evidence that a crossed, absent stop became safe, so
+        every latest unresolved breach is restored from the journal. Only
+        authenticated proof of the same installed stop, or an authenticated flat
+        position, clears one.
         """
 
         latest_by_symbol: dict[str, tuple[int, NativeProtectionBreach]] = {}
@@ -301,18 +297,15 @@ class BybitNativeProtectionManager:
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(f"{symbol} stop_loss_pct is not numeric: {raw_stop_fraction!r}") from exc
             if not math.isfinite(stop_fraction) or not 0.0 < stop_fraction < 1.0:
-                # Present-but-invalid must fail closed: silently ignoring it
-                # replaced the intended component-anchored stop with the much
-                # wider account fallback fraction and no operator signal.
+                # Ignoring it would silently substitute the much wider account
+                # fallback fraction for the component-anchored stop.
                 raise RuntimeError(f"{symbol} stop_loss_pct must be a fraction in (0, 1), got {raw_stop_fraction!r}")
             fill_price = float(anchor.entry_fill_vwap)
             explicit.append(fill_price * (1.0 - stop_fraction if position.signed_qty > 0.0 else 1.0 + stop_fraction))
         if explicit:
-            # This is a Full-position process-death seatbelt, not a component
-            # exit. It must sit outside every software component stop or the
-            # first ordinary component trigger would flatten all same-symbol
-            # owners at the venue. Component-level stop/TP decisions remain
-            # target replacements in AccountProtectionEngine.
+            # A Full-position process-death seatbelt, not a component exit: it
+            # must sit outside every software component stop, or the first
+            # ordinary trigger would flatten all same-symbol owners at the venue.
             raw_stop = min(explicit) if position.signed_qty > 0.0 else max(explicit)
             source = "fill_anchored_outermost_component_stop"
         else:
@@ -687,10 +680,8 @@ class BybitNativeProtectionManager:
         if plan is None:
             unresolved_breach = self._breaches.get(symbol)
             if unresolved_breach is not None and not authenticated_position_flat:
-                # A reconstructed zero can precede or contradict REST truth.
-                # Keep the safety-flat latch until a complete authenticated
-                # position snapshot independently proves that the venue is
-                # flat; ordinary local sync calls have no authority to clear it.
+                # A reconstructed zero can precede or contradict REST truth, so
+                # only an authenticated position snapshot clears the latch.
                 self.last_error = unresolved_breach.detail
                 raise NativeProtectionBreachError(unresolved_breach)
             active = self.active(symbol)
@@ -740,11 +731,9 @@ class BybitNativeProtectionManager:
             return None
         unresolved_breach = self._breaches.get(symbol)
         if unresolved_breach is not None:
-            # A definite threshold breach is a latch, not a transient price
-            # validation error. A later price recovery or target revision must
-            # never silently widen/re-arm protection instead of flattening.
-            # Only an authenticated snapshot proving the SAME stop was in fact
-            # present, or a flat venue position, may clear it.
+            # A threshold breach is a latch, not a transient validation error, so
+            # a price recovery or target revision cannot re-arm protection. Only
+            # proof of the same stop, or a flat venue position, clears it.
             self.last_error = unresolved_breach.detail
             raise NativeProtectionBreachError(unresolved_breach)
         active = self.active(symbol)
@@ -791,10 +780,8 @@ class BybitNativeProtectionManager:
             if prior_observed_order_id:
                 prior_venue_order_ids.add(prior_observed_order_id)
             # Bybit Full-position TP/SL updates modify an existing system order
-            # and adjust its quantity; they do not promise a new orderId. Clear
-            # the current binding until REST/WS proves the post-update row, but
-            # retain the verified native lineage so an exchange-reused identity
-            # is not misclassified as a foreign conditional order.
+            # and do not promise a new orderId, so clear the binding until
+            # REST/WS proves the post-update row while keeping the lineage.
             self.observed_native_order_ids.pop(symbol, None)
             observed_ns = self.clock.wall_time_ns()
             activation_key, activation_revision = self._next_activation(plan)
@@ -826,9 +813,9 @@ class BybitNativeProtectionManager:
                         "native_exchange": True,
                         "protection_plan_key": plan.protection_key,
                         "activation_revision": activation_revision,
-                        # Retain the historical key for replay compatibility.
-                        # These IDs are prior revisions, not an authentication
-                        # blacklist: Bybit may reuse one for the active Full stop.
+                        # Prior revisions, not an authentication blacklist: Bybit
+                        # may reuse one for the active Full stop. The historical
+                        # key is retained for replay compatibility.
                         "superseded_venue_order_ids": sorted(prior_venue_order_ids),
                         "native_venue_order_id_lineage": sorted(prior_venue_order_ids),
                         "symbol": symbol,
@@ -874,16 +861,12 @@ class BybitNativeProtectionManager:
         command_id: str,
         attempts: int = 3,
     ) -> str:
-        """Prove the venue actually applied an entry-attached stop (B5).
+        """Prove the venue actually applied an entry-attached stop.
 
-        Bybit's documented behaviour is that a Market order carrying ``stopLoss``
-        arms the position atomically, so the happy path has no naked window. That
-        is a *venue* promise, and it has never been exercised against a mainnet
-        key. If mainnet accepts the order and drops the attached stop, the
-        position opens unprotected and — before this check — nothing noticed
-        until the next reconciliation tick.
-
-        This reads position truth back immediately and returns one of:
+        Bybit documents that a Market order carrying ``stopLoss`` arms the
+        position atomically, but that is a venue promise: if it is dropped, the
+        position opens unprotected. This reads position truth back immediately
+        and returns one of:
 
         ``armed``
             The venue reports the exact stop we sent. Nothing to do.
@@ -900,9 +883,8 @@ class BybitNativeProtectionManager:
         ``unreadable``
             Position truth could not be read at all. Fails closed the same way.
 
-        This never resends the entry and never invents a fill. The stop price is
-        the one the command already carried and the kernel already validated
-        before any exposure existed.
+        The stop price is the one the command already carried and the kernel
+        already validated; the entry is never resent.
         """
 
         symbol = symbol.upper()
@@ -1051,15 +1033,14 @@ class BybitNativeProtectionManager:
             else _optional_float(venue_row.get("stopLoss") or venue_row.get("stop_loss"))
         )
         if venue_stop is not None and abs(venue_stop - stop_price) <= tolerance:
-            # The stop did land, late. Nothing was ever unprotected in a way this
-            # pass can still act on, so clear rather than flatten a live book.
+            # The stop landed late; clear rather than flatten a live book.
             self._unarmed_entries.pop(symbol, None)
             self.last_error = ""
             return
         plan = self.plan(symbol)
         if plan is None:
-            # Still no journal position. Keep failing closed rather than
-            # discarding evidence that the venue dropped a declared stop.
+            # Still no journal position; keep the latch rather than discard
+            # evidence that the venue dropped a declared stop.
             self.last_error = str(latch["detail"])[:1000]
             return
         observed_mark = latch.get("observed_mark")
@@ -1091,14 +1072,12 @@ class BybitNativeProtectionManager:
         stop. The position snapshot carries Bybit's current ``stopLoss``; a
         missing or different value is repaired before health is refreshed.
 
-        ``skip_symbols`` names symbols whose journal position cannot currently
-        be read against the venue — an unresolved quantity mismatch, a dual-side
-        row, an ambiguous in-flight submission. Their stop plan would be derived
-        from a quantity this pass knows to be wrong, so they are left untouched
-        rather than "repaired" toward a fiction. They are *not* marked fresh, so
-        ``require_recent_healthy`` still fails them on age. Every other symbol
-        is verified normally: one illegible symbol must not suspend protection
-        proof for the whole account.
+        ``skip_symbols`` names symbols whose journal position cannot be read
+        against the venue (quantity mismatch, dual-side row, ambiguous in-flight
+        submission). Their stop plan would derive from a quantity known to be
+        wrong, so they are left untouched and not marked fresh —
+        ``require_recent_healthy`` still fails them on age. Every other symbol is
+        verified normally.
         """
 
         skipped = {str(symbol).upper() for symbol in skip_symbols}
@@ -1113,8 +1092,7 @@ class BybitNativeProtectionManager:
         state = self.kernel._state_ref()
         failures: list[tuple[str, BaseException]] = []
         # A latched unarmed entry can name a symbol the journal has no position
-        # for yet, so it is resolved before (and independently of) the position
-        # walk below.
+        # for yet, so resolve it independently of the position walk below.
         for symbol in sorted(set(self._unarmed_entries) - skipped):
             try:
                 self._resolve_unarmed_entry(symbol, venue_row=venue_rows.get(symbol))
@@ -1738,17 +1716,14 @@ class BybitNativeProtectionManager:
             return True
         # A consumed Full-position stop can stay visible in Bybit's open-order
         # queries for minutes after its protection record leaves the
-        # {active, triggering} statuses (2026-07-20 BLUAIUSDT triggered-stop
-        # false unowned_venue_order page). Within a bounded grace window,
-        # verify such rows against the latest native protection record. The
-        # manager only creates Full-position stops, so partial-stop provenance
-        # can never be the lingering consumed row. When any identity evidence
-        # exists — a recorded venue id, recorded lineage, or the still-held
-        # in-memory observed id — the row must match it; the trigger-price
-        # fallback remains only for a stop consumed before its venue id was
-        # ever observable. The record's exchange time is bounded by the same
-        # window so an owner-downtime recovery cannot reopen a long-dead
-        # window. Rows lingering past the window page as unowned again.
+        # {active, triggering} statuses, so within a bounded grace window such
+        # rows are verified against the latest native protection record. This
+        # manager only creates Full-position stops, so partial-stop provenance is
+        # never the lingering row. Where any identity evidence exists (recorded
+        # venue id, lineage, or the in-memory observed id) the row must match it;
+        # the trigger-price fallback covers a stop consumed before its venue id
+        # was observable. The record's exchange time is bounded by the same
+        # window, so an owner-downtime recovery cannot reopen a dead one.
         if not _has_full_native_stop_provenance(row):
             return False
         latest = self._latest_native_protection_from_state(self.kernel._state_ref(), symbol)
@@ -1918,7 +1893,14 @@ def _crossed_stop_rejection_mark(
     *,
     requested_stop: float,
 ) -> float | None:
-    """Parse only Bybit's definite crossed-StopLoss rejection shape."""
+    """Parse only Bybit's definite crossed-StopLoss rejection shape.
+
+    Narrow on purpose. The mark it returns latches `breached_unprotected` and
+    flattens, so anything short of ErrCode 10001 carrying both `StopLoss` and
+    `base_price` must fall through to the ordinary repair path instead. Bybit
+    reports the pair as integer prices (`StopLoss:1291300000 ...
+    base_price:1309440000`), which is why the caller normalises them.
+    """
 
     message = str(error)
     lowered = message.lower()
@@ -1953,9 +1935,8 @@ def _crossed_stop_rejection_mark(
     if base is None:
         return None
     # Pybit's InvalidRequestError string can expose Bybit's internal integer
-    # price units (for DEXE: 1291300000 / 1309440000) instead of decimals.
-    # Normalize with the requested stop echoed in the same error; the ratio is
-    # scale-independent and avoids guessing instrument precision.
+    # price units instead of decimals. Normalize with the requested stop echoed
+    # in the same error: the ratio is scale-independent.
     if encoded_stop is not None:
         return base * float(requested_stop) / encoded_stop
     scale = base / float(requested_stop)

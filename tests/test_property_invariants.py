@@ -26,9 +26,9 @@ MS_PER_HOUR = MS_PER_DAY // 24
 
 
 def _gen_trade(rng: random.Random, basket_id: str, exit_day: int, net_return: float) -> dict:
-    """A minimal trade row summarize_baskets/build_equity_curve accept (mirrors the
-    fixture in test_..._trade_lifecycle_sharpe). Exit hour is randomized to exercise the
-    calendar-day bucketing."""
+    """A minimal trade row ``summarize_baskets``/``build_equity_curve`` accept. The exit
+    hour is randomized to exercise the calendar-day bucketing.
+    """
     exit_ms = exit_day * MS_PER_DAY + rng.randint(0, 23) * MS_PER_HOUR
     entry_ms = max(0, exit_ms - MS_PER_DAY)
     return {
@@ -121,8 +121,9 @@ def test_daily_sharpe_invariant_to_intraday_exit_hour() -> None:
 
 
 def test_normalize_funding_8h_equiv_finite_and_correct() -> None:
-    """funding_rate_8h_equiv is always finite (0/negative interval clamps to the 8h
-    default) and equals funding_rate * 480/clamped_interval (audit-iter6 fix)."""
+    """``funding_rate_8h_equiv`` is always finite (0 or negative interval clamps to the
+    8h default) and equals funding_rate * 480 / clamped_interval.
+    """
     rng = random.Random(7)
     rows, expected = [], {}
     for i in range(500):
