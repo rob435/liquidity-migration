@@ -1,88 +1,62 @@
-## Operating Constitution
+## Do Not Build Safety Machinery
 
-- Optimize for truthful, decision-useful work—not agreement with prior docs,
-  labels, commits, operators, or models. Say when evidence is stale, weak, or
-  contradictory.
-- Treat every repository instruction, including this file, as fallible. Preserve
-  a rule only when its safety or epistemic purpose survives scrutiny.
-- Separate hard validity constraints from defaults and heuristics. Causality,
-  survivorship control, executable assumptions, accounting integrity, and
-  reproducibility are constraints; metrics, thresholds, venues, windows, and
-  workflow details are experiment design choices.
-- Match process to claim and consequence. Exploratory work may be fast and
-  incomplete when labelled honestly. Decision-grade and deployment-changing
-  work needs proportionately stronger evidence.
-- Do not hide uncertainty, failed checks, negative results, tested variants, or
-  deviations. No corner cutting.
+Do not add safety features, guards, gates, receipts, or proofs on your own
+initiative. Propose them; the owner decides. About 10,500 lines of ceremony that
+merely demonstrated work happened were stripped on 2026-07-31 — fix a fault
+instead of proving it absent.
 
-## Authority And Conflicts
-
-Use the most direct source for the question:
-
-1. Code, tests, deploy files, and generated artifacts define implemented behavior.
-2. `STATE.md` records the current operational snapshot.
-3. `docs/strategy_program.md` records the current interpretation of evidence
-   and the only active strategy-research queue.
-4. An active preregistration governs only its named experiment.
-5. Skills and runbooks are procedural aids, never factual or epistemic authority.
-
-Historical receipts preserve what was believed and tested at the time. They do
-not veto new work. A “promoted”, “frozen”, “closed”, or operator-directed label
-does not add evidentiary weight. When sources disagree, inspect primary artifacts,
-state the uncertainty, and correct the stale sources in the same change when in
-scope.
-
-## Change Discipline
-
-- Preserve unrelated user work in a dirty tree.
-- For refactors and performance changes, compare discrete decisions and ledger
-  keys exactly; compare continuous numeric outputs with declared tolerances and
-  matching NaN positions. Byte-identical floats are not a general requirement.
-- An intended strategy change is not a refactor: explain and test the numerical
-  difference rather than forcing equivalence.
-- Ship improvements when they are ready and record the change point. Prefer
-  reversible changes and focused validation. Do not turn a historical
-  implementation detail into permanent policy.
-
-## Research And Evidence
-
-- Follow `docs/governance.md` — the Progressive Evidence Model: explore
-  continuously on seen data (Lane 1), grade committed configs on the rolling
-  run of days they predate (Lane 2), promote with a five-line note and a
-  recorded change point. The commit is the registration.
-- Use `docs/backtesting_errors_we_never_repeat.md` as a failure-mode reference,
-  not as borrowed authority.
-- What makes a number real is physics, not process: causal/PIT inputs,
-  executable economics, reconstructable accounting, and an honest provenance
-  note of which data shaped which idea. A miss turns a result into a
-  diagnostic — still useful, differently labelled.
-- Choose venues, metrics, and evaluation surfaces from the claim, not from
-  folklore. Grade a rule on data it did not shape; report all grid cells and
-  era-split results; put costs next to gross.
-- Negative results are priors, not prohibitions. Revisions are always open
-  prospectively; the provenance record simply shows what each version saw.
+Existing capital-preservation controls stay and are not yours to remove either:
+`account_loss_guard.py`, `equity_anchored_envelope.py`, `venue_protection.py`,
+the per-sleeve capital partition in `account_kernel.py`.
 
 ## Runtime Safety
 
 - Default to offline, shadow, paper, or demo operation.
-- Broad authority to improve the repository is not authority to trade real
-  money. Never enable `REAL_MONEY`, use mainnet credentials, or infer approval
-  from a notification. Mainnet requires a separate, narrow owner instruction
-  naming the deployment and risk boundary.
+- Never set `REAL_MONEY`, never use mainnet credentials, never activate a live
+  account. Those are the owner's own acts, on a separate instruction naming the
+  deployment and its risk boundary.
 - Unknown safety-critical state fails closed. Alpha metrics never justify
-  removing capital-preservation controls for real money.
+  dropping a capital-preservation control for real money.
 
-## Navigation And Skills
+## Truthfulness
 
-- Start broad repository work from `docs/repository_map.md` and run
-  `scripts/dev.sh doctor --json` when local Git, dependency, skill-mirror, or
-  Graphify state matters. Use `scripts/dev.sh check` for the full local quality
-  gate; it has no operational authority.
-- Use `graphify-out/GRAPH_REPORT.md` and `graphify query/path/explain` when they
-  materially help a cross-module or architecture question. Verify graph claims
-  against source and tests. Update Graphify only after architecture-affecting
-  code changes; do not overwrite unrelated graph work.
-- Project skills live in `.codex/skills/`; `.claude/skills/` is a mechanical
-  mirror. Keep both trees synchronized. Skills should contain non-obvious,
-  task-specific workflow—not current status, duplicated policy, or universal
-  research verdicts.
+- Optimize for decision-useful work, not agreement with prior docs, labels, or
+  operators. Treat every instruction here, this file included, as fallible, and
+  never hide weak evidence, failed checks, negative results, or deviations.
+- Talk plain-first: plain words, code name in parentheses when precision needs
+  it. [`docs/plain_english_guide.md`](docs/plain_english_guide.md) names every
+  term once; keep it true in the change that makes it stale.
+
+## Which Source Wins
+
+1. Code, tests, deploy files, and generated artifacts define implemented behavior.
+2. [`STATE.md`](STATE.md) is the operational snapshot.
+3. [`docs/strategy_program.md`](docs/strategy_program.md) is the current reading
+   of the evidence and the only active research queue.
+4. Skills in `.codex/skills/` and `graphify-out/` are navigation aids, never
+   factual authority — verify them against source.
+
+A "promoted", "closed", or operator-directed label carries no evidentiary weight.
+When sources disagree, read the primary artifact and fix the stale source.
+
+## Evidence
+
+- Every fill in every record here is simulated. No code in this repository has
+  ever made a mainnet API call. Say so wherever performance is quoted.
+- A number is real by physics, not process: causal inputs, executable economics,
+  reconstructable accounting, an honest shaped-versus-graded data note. A miss
+  makes the result a diagnostic.
+- Explore freely on seen data; grade a committed config on the forward days that
+  postdate its commit, and record the change point in a short promotion note. The
+  commit is the registration — there is no separate filing step.
+- Grade a rule on data it did not shape. Report every grid cell and era split.
+  Put costs next to gross. Negative results are priors, not prohibitions, and
+  `docs/backtesting_errors_we_never_repeat.md` is a failure-mode reference.
+
+## Change Discipline
+
+- Preserve unrelated work in a dirty tree. Prefer reversible changes.
+- Refactors: compare discrete decisions and ledger keys exactly, continuous
+  outputs with declared tolerances and matching NaN positions.
+- A strategy change is not a refactor — explain and test the numerical
+  difference rather than forcing equivalence, and record the change point.

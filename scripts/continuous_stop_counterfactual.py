@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stop-level counterfactual on the CONTINUOUS reconstruction's own trades.
 
-Method (docs/anomaly_research_2026-07-24.md §16.3): take every modelled trade,
+Method (docs/research_findings.md): take every modelled trade,
 and for each candidate stop fraction, any trade whose recorded ``mae`` breaches
 the stop is closed at exactly the stop instead of its modelled exit. Costs and
 funding are held at their recorded values, and the trade stays attributed to its
@@ -15,7 +15,7 @@ at tight stops are therefore ceilings.
 Purpose: choose the declared ``stop_loss_pct`` for the CONTINUOUS sleeve so the
 deployed exit rule and the backtest model the same book (§16.5 item 4: wide
 native backstop + the strategy's own TP/max-hold exits). Lane-1 on seen data;
-grades nothing (docs/governance.md §1).
+grades nothing (AGENTS.md).
 
 Usage:
   python scripts/continuous_stop_counterfactual.py \

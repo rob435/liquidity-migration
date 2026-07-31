@@ -1,11 +1,11 @@
 ---
 name: backtest-integrity
-description: Assess whether a backtest, research run, strategy or feature change, or result interpretation produces evidence that is real, under the Progressive Evidence Model. Use before designing decision-influencing research, when judging a report, or before an alpha, robustness, candidate, or deployment claim. Apply docs/governance.md and the failure taxonomy in docs/backtesting_errors_we_never_repeat.md; keep the physics, skip the ceremony.
+description: Assess whether a backtest, research run, strategy or feature change, or result interpretation produces evidence that is real, under the Progressive Evidence Model. Use before designing decision-influencing research, when judging a report, or before an alpha, robustness, candidate, or deployment claim. Apply AGENTS.md and the failure taxonomy in docs/backtesting_errors_we_never_repeat.md; keep the physics, skip the ceremony.
 ---
 
 # Assess evidence integrity
 
-Read `docs/governance.md` (Progressive Evidence Model) and the relevant
+Read `AGENTS.md` (Progressive Evidence Model) and the relevant
 failure modes in `docs/backtesting_errors_we_never_repeat.md`. Treat raw
 artifacts, code, and data provenance as evidence; labels and old verdicts
 are not authority.
@@ -50,4 +50,4 @@ explicit non-conclusions.
 
 Research quality never grants mainnet authority. Real money requires a
 separate owner instruction naming the deployment, capital/risk limits,
-controls, and expiry under `docs/governance.md`.
+controls, and expiry under `AGENTS.md`.

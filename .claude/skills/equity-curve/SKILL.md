@@ -65,7 +65,7 @@ State:
 - modeled costs/funding and coverage;
 - reconstruction gaps versus runtime;
 - modeled versus presentation leverage;
-- validity, study mode, and justified conclusion under `docs/governance.md`.
+- validity, study mode, and justified conclusion under `AGENTS.md`.
 
 Ad hoc plots are allowed for diagnostics only when they are visually DISTINCT
 from the standard layout, clearly labelled non-standard, and never compared as

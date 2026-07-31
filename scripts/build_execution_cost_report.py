@@ -5,7 +5,7 @@ Read-only observer over the verified journal + capture root: per-fill
 effective spread, price impact, and realized spread anchored to the
 decision-time midpoint, plus a notional-weighted summary. See
 liquidity_migration/execution_cost_model.py for the decomposition and
-docs/preregistration/passive_execution_experiment_2026-07-20.md for how the
+docs/research_findings.md for how the
 realized-spread numbers feed the passive-execution experiment.
 """
 

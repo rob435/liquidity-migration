@@ -434,7 +434,7 @@ def overwrite_blocked(venue: str, report: dict, *, max_drift: float, force: bool
         return (f"max|delta_beta| {report['beta_drift']:.3f} exceeds the "
                 f"coefficient-drift bound {MAX_PRIOR_BETA_DRIFT:.2f}; a vintage shift "
                 f"that resizes the live hedge this much needs --force and a review "
-                f"per docs/hedge_refresh_policy.md")
+                f"per docs/trading_logic.md")
     return None
 
 

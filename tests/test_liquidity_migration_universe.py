@@ -84,7 +84,7 @@ def test_universe_report_contains_symbol_csv() -> None:
 
 def test_current_universe_table_excludes_non_perp_and_non_usdt_contracts() -> None:
     """universe-pit-2: the 'perpetuals-only, USDT-settled by construction' invariant
-    (docs/data_roots.md; backtesting_errors_we_never_repeat.md rule 12, instrument
+    (docs/data.md; backtesting_errors_we_never_repeat.md rule 12, instrument
     lifecycle) must hold at the universe.py boundary. The positive test only ever fed
     LinearPerpetual/USDT rows, so a refactor could silently let a dated-delivery future,
     an inverse/USDC contract, or a row with a missing contractType through. Inject one of

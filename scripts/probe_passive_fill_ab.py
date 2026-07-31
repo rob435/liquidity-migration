@@ -6,7 +6,7 @@ mechanically reachable, or is the measured 15.56 bp taker basis the true
 cost?** The protocol, metric, sample size and kill criteria are pre-declared in
 ``liquidity_migration/passive_fill_probe.py`` — read that docstring first,
 including its relationship to the registered in-flow experiment
-(``docs/preregistration/passive_execution_experiment_2026-07-20.md``): this
+(``docs/research_findings.md``): this
 probe bounds the mechanism quickly; only the in-flow A/B grades the flow at
 signal times.
 

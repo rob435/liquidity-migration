@@ -1,39 +1,34 @@
 # liquidity-migration
 
-Research and demo/paper execution for crypto-perpetual strategies.
+Research and demo/paper execution for crypto-perpetual strategies, mostly on
+Bybit. Every fill in every record is simulated: no code here has ever made a
+mainnet API call.
 
 @AGENTS.md
 
-## Read By Purpose
+## Read by purpose
 
-- Plain-English translation of the whole system, for owner conversations:
-  `docs/plain_english_guide.md` (talk plain-first; keep it fixed in the same
-  change that makes it stale).
-- Governance and evidence: `docs/governance.md`.
-- Active research evidence, direction, and next actions:
-  `docs/strategy_program.md`.
-- Transferable research launcher: `docs/next_agent_prompt.md` (prompt only;
-  never a second status source).
-- Current operations: `STATE.md`, then `deploy/sleeves.env` and systemd units.
-- Research interpretation: `docs/strategy_program.md` and the relevant raw
-  artifacts.
-- Research model and provenance: `docs/governance.md` (Progressive Evidence
-  Model) and `docs/preregistration/INDEX.md` (receipts, not waiting rooms).
-- Data provenance: `docs/data_roots.md` and `docs/pit_gate.md`.
+| Question | File |
+| --- | --- |
+| What is running right now | [STATE.md](STATE.md) |
+| The system without jargon | [docs/plain_english_guide.md](docs/plain_english_guide.md) |
+| Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |
+| What each sleeve trades and where its evidence stops | [docs/trading_logic.md](docs/trading_logic.md) |
+| Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
+| Active research queue | [docs/strategy_program.md](docs/strategy_program.md) |
+| Everything else | [README.md](README.md) |
 
-Do not copy sleeve status or decision thresholds into this file. Derive live
-state from current sources. Skills are task runbooks, not general memory.
+Derive live state from those files; never copy sleeve status or thresholds here.
 
 ## Commands
 
-- Repository diagnostics: `scripts/dev.sh doctor` (add `--json` for tools).
-- Full local quality gate: `scripts/dev.sh check`.
-- Routine operations: `scripts/ops.sh --help`.
-- Package CLI: `python -m liquidity_migration --help` and the selected
-  subcommand's `--help`.
-- Tests: `.venv/bin/python -m pytest -q`.
-- Lint: `.venv/bin/python -m ruff check liquidity_migration tests scripts`.
+| Command | Does |
+| --- | --- |
+| `scripts/dev.sh doctor` | read-only Git, Python, dependency, and skill diagnostic (`--json` for tools) |
+| `scripts/dev.sh check` | doctor, then Ruff, mypy, pytest |
+| `.venv/bin/python -m pytest -q` | tests |
+| `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
+| `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
+| `python -m liquidity_migration --help` | research and data CLI |
 
-Before a push, run the relevant focused tests and then the repository lint/test
-gates in proportion to the change. Never enable `REAL_MONEY` without a separate,
-explicit owner instruction for that exact action.
+Before a push, run the focused tests, then `scripts/dev.sh check`.

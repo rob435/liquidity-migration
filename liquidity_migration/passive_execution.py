@@ -1,6 +1,6 @@
 """Paper-only passive-execution A/B adapter (registered experiment arm B).
 
-Implements `docs/preregistration/passive_execution_experiment_2026-07-20.md`
+Implements `docs/research_findings.md`
 on the paper owner: eligible CONTINUOUS entry commands are deterministically
 assigned by component (trade) id hash parity to arm A (the unchanged
 market-IOC twin) or arm B (post-only limit at the touch, re-pegged on touch

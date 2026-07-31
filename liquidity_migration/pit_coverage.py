@@ -12,7 +12,7 @@ partition directory names, so no parquet is parsed.
 
 Membership is keyed on the signal's TRADING DAY (the day whose close produced the
 signal); the gate lives in ``volume_events_pit.py`` (consumed by the active
-long/continuous engines) and ``docs/pit_gate.md``. The most recent fully-closed daily bar as of ``now`` has
+long/continuous engines) and ``docs/data.md``. The most recent fully-closed daily bar as of ``now`` has
 trading day ``today_utc - 1``; that is the latest trading day a daily-close signal
 can reference, so the manifest must cover at least that day for a strict reconcile.
 """

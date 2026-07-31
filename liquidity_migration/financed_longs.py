@@ -5,7 +5,7 @@ and produces daily score rows. No venue access, no order path, no runtime
 surface; nothing here can open the real-money door.
 
 Two mechanisms, selected in the 2026-07-26 Lane-1 program
-(``docs/research_2026-07-26_financed_longs.md``), both long-only expressions of
+(``docs/research_findings.md``), both long-only expressions of
 one macro-premium: the market pays longs while the short side is paying funding.
 
 * **Carry-hold** — a per-name hysteresis state machine on the settled funding
@@ -25,7 +25,7 @@ Accounting conventions shared with the rest of the research surface:
   convention; both books strengthen, not weaken, under +1h/+4h entry delays).
 * Funding accrues settlement-exact (``lane2_blend.settlement_exact_funding``).
 * Costs are charged as measured one-way turnover x the measured per-side fee,
-  not a flat round trip per period (docs/anomaly_research_2026-07-24.md §17.1).
+  not a flat round trip per period (docs/research_findings.md).
 * Per-name weight cap plus a total gross cap: the uncapped book trebles gross
   exactly during cascades, which is the opposite of the design intent.
 """

@@ -1,6 +1,6 @@
 ---
 name: research-phase-runner
-description: Route, execute, and record research work under the Progressive Evidence Model in this quant repository. Use before running, monitoring, or interpreting decision-influencing research. Lane-1 exploration is unlimited on seen data; Lane-2 configs are graded on the rolling run of forward days after their git commit; promotion is a five-line note under docs/governance.md.
+description: Route, execute, and record research work under the Progressive Evidence Model in this quant repository. Use before running, monitoring, or interpreting decision-influencing research. Lane-1 exploration is unlimited on seen data; Lane-2 configs are graded on the rolling run of forward days after their git commit; promotion is a five-line note under AGENTS.md.
 ---
 
 # Run research work

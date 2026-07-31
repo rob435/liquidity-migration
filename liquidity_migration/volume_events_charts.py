@@ -14,7 +14,7 @@ import polars as pl
 # Splits live exclusively on VolumeEventResearchConfig.splits (default ()).
 # The default therefore has no internal validation split. OOS status depends on
 # exposure history, not on whether data is historical or forward
-# (docs/governance.md).
+# (AGENTS.md).
 
 from ._common import _float_or_nan, _parse_day
 from .trade_lifecycle import _has_columns

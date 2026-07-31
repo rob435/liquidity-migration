@@ -1,55 +1,62 @@
 # liquidity-migration
 
-Research plus demo/paper execution for two crypto-perpetual profiles:
+Research and demo/paper execution for crypto-perpetual strategies, primarily on
+Bybit. Every fill in every record in this repository is simulated: no code here
+has ever placed an order against a mainnet account.
 
-- `continuous_ensemble_v2`
-- `LongV11aDivWeekendVol`
+## Sleeves
 
-The executable runtime is demo/paper only. Mainnet and `REAL_MONEY` remain
-unauthorized unless the owner gives a separate, narrow instruction naming the
-deployment and risk boundary.
+| Sleeve | Profile | `deploy/sleeves.env` |
+| --- | --- | --- |
+| LONG | `LongV11aDivWeekendVol` | `LONG_SLEEVE=on` |
+| CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE=on` |
+| CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE=off` — retired 2026-07-29 by owner override, no kill criterion tripped |
+| paper target mirror | republishes the demo fleet's targets onto the paper route | `PAPER_TARGET_MIRROR=on` |
 
-## Read first
-
-- [STATE.md](STATE.md) — last recorded operating state and next action.
-- [docs/account_execution.md](docs/account_execution.md) — execution ownership
-  and operational authorization.
-- [docs/account_journal.md](docs/account_journal.md) — authoritative account
-  transaction/event storage.
-- [docs/operations.md](docs/operations.md) — supported operator commands.
-- [docs/active_trading_logic.md](docs/active_trading_logic.md) — active
-  strategy profiles and reconstruction limits.
-- [docs/governance.md](docs/governance.md) — evidence and authorization policy.
-- [docs/strategy_program.md](docs/strategy_program.md) — consolidated evidence,
-  current direction, and the only active strategy-research queue.
-- [docs/next_agent_prompt.md](docs/next_agent_prompt.md) — transferable task
-  launcher for owner handoffs; never a second status source.
-- [docs/data_roots.md](docs/data_roots.md) and
-  [docs/pit_gate.md](docs/pit_gate.md) — research-data boundaries.
-- [docs/research_refresh.md](docs/research_refresh.md) — append-first data,
-  benchmark, resume, and demo/paper/backtest reconciliation workflow.
-- [docs/repository_map.md](docs/repository_map.md) — subsystem ownership,
-  entry points, and validation paths.
+Paper sleeves for CONTINUOUS and CARRY, and both mainnet sleeves, are off.
+`deploy/sleeves.env` is a ceiling: a host override can turn an enabled sleeve
+off, never on.
 
 ## Layout
 
-- `liquidity_migration/` — package, strategies, account kernel, journals, and CLI.
-- `scripts/` — supported operations, deploy, data, and reporting entry points.
-- `deploy/` — systemd topology and strict environment handling.
-- `tests/` — executable contracts.
-- `.codex/skills/` — canonical project workflows; `.claude/skills/` mirrors them.
+| Path | Contents |
+| --- | --- |
+| [`liquidity_migration/`](liquidity_migration) | package — strategy engines, account kernel, journals, venue adapters, CLI |
+| [`scripts/`](scripts) | `dev.sh`, `ops.sh`, deploy, data builders, research screens |
+| [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
+| [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
+| [`data/`](data) | per-sleeve event stores and reconciliation captures |
+| [`reports/`](reports) | research-run outputs |
+| [`tests/`](tests) | executable contracts |
+| `.codex/skills/` | task runbooks; `.claude/skills/` is a mechanical mirror |
 
-## Developer workflow
+## Local gate
 
-Use `scripts/dev.sh doctor` for a read-only environment/worktree diagnostic and
-`scripts/dev.sh check` for the full local Ruff, mypy, and pytest gate. These
-commands never contact a venue or grant operational authority. Operator and
-research commands remain under `scripts/ops.sh` and the task-specific skills.
-Coordination locks and reset receipts do not by themselves grant operational or
-mainnet authority; their exact limits are in `docs/operations.md`.
+```
+scripts/dev.sh doctor        # read-only Git/Python/dependency/skill diagnostic
+scripts/dev.sh check         # doctor, then ruff, mypy, pytest
+.venv/bin/python -m pytest -q
+```
 
-Plan the current research refresh with
-`scripts/ops.sh research-refresh plan --end YYYY-MM-DD`; replace `plan` with
-`run` only after checking the printed end-exclusive boundary and data mode.
+`scripts/dev.sh` never contacts a venue. Operator commands are
+`scripts/ops.sh help`; the research and data CLI is
+`python -m liquidity_migration --help`. Python 3.11+.
 
-Python 3.11+.
+## Documentation
+
+| Doc | Covers |
+| --- | --- |
+| [STATE.md](STATE.md) | last recorded operating state and next action |
+| [docs/plain_english_guide.md](docs/plain_english_guide.md) | the whole system without jargon — start here |
+| [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
+| [docs/architecture.md](docs/architecture.md) | producers, account owner, journals, how a target becomes an order |
+| [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
+| [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |
+| [docs/research_findings.md](docs/research_findings.md) | what the evidence supports, including the negative results |
+| [docs/strategy_program.md](docs/strategy_program.md) | active research queue |
+| [docs/real_money.md](docs/real_money.md) | what real capital would require, and what is unbuilt |
+
+## Standing rules
+
+Working rules for agents live in [AGENTS.md](AGENTS.md) — read it before
+changing anything.

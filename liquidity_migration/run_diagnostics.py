@@ -9,7 +9,7 @@ Each :class:`RunWarning` carries
 
 ``tainted`` (any ``tainted``-severity warning) is the machine flag meaning
 "this result is survivorship / look-ahead biased — do NOT cite it as clean."
-That implements the claim-validity policy in ``docs/governance.md``; the
+That implements the claim-validity policy in ``AGENTS.md``; the
 failure taxonomy lives in ``docs/backtesting_errors_we_never_repeat.md``.
 Here it is surfaced loudly rather than hidden. Data-gap warnings (funding, clipped window)
 are ``warn``/``info``: the run is still produced, the gap is named, and you can

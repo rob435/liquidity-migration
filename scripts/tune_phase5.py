@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 5A — tune gates and filters for *t*, not for mean.
 
-`docs/roadmap_2026-07-25.md` §8. Every filter in this program was chosen to raise
+`docs/research_findings.md` §8. Every filter in this program was chosen to raise
 the mean, but ``t = effect x sqrt(n)``, so a filter that raises the mean while
 cutting the sample can *lower* the evidence it produces:
 
@@ -22,7 +22,7 @@ Costs are charged at each cell's own *measured* turnover (§17.1), because
 strictness changes turnover and a fixed charge would bias the curve toward
 whichever end churns less.
 
-Research-only. Lane-1 on seen data; grades nothing (``docs/governance.md`` §1).
+Research-only. Lane-1 on seen data; grades nothing (``AGENTS.md``).
 """
 
 from __future__ import annotations
@@ -218,7 +218,7 @@ def main() -> int:
           "carrying the result.\nA SPIKE means the cell is the result, which is overfitting. "
           "No cell here is\nselected as a candidate; selection requires clearing "
           f"t >= {BONFERRONI_T} and replicating in 2A.")
-    print("\nLane-1 on seen data. Grades nothing; see docs/governance.md.")
+    print("\nLane-1 on seen data. Grades nothing; see AGENTS.md.")
     return 0
 
 

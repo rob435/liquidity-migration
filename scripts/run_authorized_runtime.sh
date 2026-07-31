@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Verify the exact inherited environment, then replace this wrapper with the
-# registered workload for UNIT/ENTRYPOINT. Callers cannot append argv; the
-# authorized commit owns each complete command line.
+# Replace this wrapper with the registered workload for UNIT/ENTRYPOINT.
+# Callers cannot append argv; the committed script owns each complete
+# command line.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -59,6 +59,23 @@ case "$UNIT:$ENTRYPOINT" in
             --expected-invocation-id "${INVOCATION_ID:?INVOCATION_ID is required}"
             --timeout-seconds 180
             --max-age-seconds 30
+        )
+        ;;
+    liquidity-migration-paper-target-mirror.service:main)
+        # Reads the demo fleet's published targets and republishes them onto
+        # the paper route. Deliberately verbatim: the mirror exists so that a
+        # difference between the two books is execution and nothing else.
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            -m liquidity_migration.paper_target_mirror_runner
+            --demo-capture-tape "${DEMO_ACCOUNT_CAPTURE_ROOT:?DEMO_ACCOUNT_CAPTURE_ROOT is required}/strategy-targets.jsonl"
+            --demo-account-root "${DEMO_ACCOUNT_EXECUTION_ROOT:?DEMO_ACCOUNT_EXECUTION_ROOT is required}"
+            --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
+            --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
+            --cursor-path "${ACCOUNT_PAPER_CAPTURE_ROOT:?ACCOUNT_PAPER_CAPTURE_ROOT is required}/paper-target-mirror-cursor.json"
+            --sleeve "${PAPER_MIRROR_SLEEVE:-carry}"
+            --scale-mode "${PAPER_MIRROR_SCALE_MODE:-verbatim}"
+            --poll-seconds "${PAPER_MIRROR_POLL_SECONDS:-5}"
         )
         ;;
     liquidity-migration-bybit-long-demo.service:main | \

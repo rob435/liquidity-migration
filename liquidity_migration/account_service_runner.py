@@ -434,7 +434,7 @@ def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
     """Gross notional of the reconstructed book at the freshest observed marks.
 
     Deliberately computed from *positions*, not from target quantities: the
-    hardening note in docs/real_money_envelope.md flags that account_gross is
+    hardening note in docs/real_money.md flags that account_gross is
     derived from targets, which cannot see exposure the book acquired outside
     the kernel's own commands.
     """

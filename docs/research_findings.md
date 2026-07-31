@@ -1,0 +1,363 @@
+# Research findings
+
+The durable record of what this repository's strategy research established, replacing six dated documents.
+Current interpretation: [docs/strategy_program.md](strategy_program.md). Evidence rules:
+[docs/governance.md](../AGENTS.md). Failure taxonomy: [docs/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
+Data tiers and roots: [docs/data_roots.md](data.md). PIT membership: [docs/pit_gate.md](data.md).
+
+**Reading these numbers.** Every fill in every record here is simulated; no code in this repository has ever
+made a mainnet API call. All screening figures are Lane-1 selection on seen data and grade nothing. Any
+pre-2026-07-28 figure whose funding leg came through the cross-venue panel is non-citable unless re-derived
+on the corrected scorer (§3).
+
+## 1. What currently looks real
+
+**The one durable premium: funding-financed long-side liquidity provision** — long the names whose shorts are
+paying. The only mechanism of ~45 screened that clears an honest cost bar, and positive in every era.
+
+| construction | bp/day | t | Sharpe | worst 1% | max DD | neg eras |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bybit top-100 decile carry | +34.09 | 3.05 | 1.34 | −18.61% | 77.9% | 0/6 |
+| Bybit top-300 decile carry | +24.59 | **3.96** | 1.75 | −10.03% | 58.8% | 0/6 |
+
+Top-300 clears the 144-cell Bonferroni line (t ≈ 3.58) on a plateau, 30/30 era-size cells positive. It is
+uninvestable on drawdown, not significance: 58.8–275.7% max DD with −10% to −35% worst-1% days on a 2× gross
+book is a liquidation sequence. Magnitudes stale post-fix; shape is not. **You are paid for holding the risk
+nobody wants and not paid for the hedged version anybody can run** — the premium compensates idiosyncratic
+liquidation risk with a named counterparty, which is why the easy construction was arbitraged out by 2022.
+
+| registered config | bp/day | t | Sharpe full / bench | max DD | turnover |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [carry_hold_v1](../configs/lane2_carry_hold_v1.json) | 18.0 | 2.31 | 1.02 / **1.21** | −60.0% | 0.271 |
+| [carry_hold_v2](../configs/lane2_carry_hold_v2.json) | 16.7 | 2.47 | 1.09 / 1.35 | −48.6% | 0.198 |
+| [carry_hold_v3](../configs/lane2_carry_hold_v3.json) | 19.83 | 3.13 | 1.38 / 1.71 | −28.7% | 0.156 |
+| [funding_spread_v1](../configs/lane2_funding_spread_v1.json) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
+
+- v1's bench **1.21 (t 2.31)** is the citable figure and does **not** beat the CONTINUOUS benchmark (1.84, §3).
+  Two CONTINUOUS Sharpes appear in this document and they are different renders: **1.84** is the retired
+  sl35 research render used as the comparison benchmark; **1.45** is the shipped book's forward figure.
+  Compare 1.21 against 1.84, not against 1.45.
+- v2 is risk reallocation, not mean improvement — same P&L from a third less average capital (mean gross 0.24
+  vs 0.37); paired differential vs v1 −1.0 bp, t −0.4. v3 adds three filters, each grounded in a measured loss
+  cohort: moderate grind-down (trailing 3d return in [−30%, −5%) earns −114 bp/name-day at Sharpe −2.1), dead
+  names (30d vol < 5%/day, −77 bp/nd), post-recovery holds (−54 bp/nd). Its registered forward experiment is
+  the paired differential vs v2: +3.09 bp/day, t 1.64.
+- funding_spread takes the same premium market-neutrally (long the perp on the more-negative-funding venue,
+  short the same symbol on the other): correlation with v3 **+0.09**, and decision-clock stable unlike the
+  directional family. Basis risk concentrates where it trades — the cross-venue price difference runs 40 bp/day
+  sd normally and 677 bp/day when |spread| > 50, which is why its standalone Sharpe is 1.3 and not 3.
+- **Two-book portfolio** (Lane-1 selection on seen data — this grades nothing), PIT 60d vol-parity: bench Sharpe **2.34** (max DD −11.2%, MAR 5.07), 1.93–2.34 across
+  clocks; full 2021-inclusive window 1.55–1.87. The Sharpe ≥ 2 target is met on the standard quote basis and
+  not on the strictest basis. Both numbers are the claim.
+- **Unconditional Sharpe 2 is not honestly reachable for the directional book.** ~95 cells plateau at 1.4–1.55.
+  On the PIT deep-funding half of days it runs at conditional 2.15–2.35; on the shallow half it is EV-noise
+  (1.4–5.0 bp/day). A conditional-2.25 stream active half the time pools to ~1.6 and no per-day scaling changes
+  that — which is why the answer was a second P&L identity, not a threshold.
+
+**Momentum.** `momentum_1w` is **continuation** (long recent winners), not reversal — the sign was backwards in
+earlier drafts: continuation +39.55 bp/day (Sharpe 1.20) vs reversal −40.73 (−1.23). Best-behaved real signal
+found, never cleared: +30.48 bp/day t 2.10 Bybit vs +13.64 t 0.99 Binance (ratio 0.45, outside the [0.5, 2.0]
+kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
+[lane2_premium_momentum_blend_v1](../configs/lane2_premium_momentum_blend_v1.json), whose premium leg is dead.
+
+**CONTINUOUS** was retired from demo and paper by owner override 2026-07-29 (`CONTINUOUS_SLEEVE=off`,
+`CONTINUOUS_PAPER_SLEEVE=off`); no kill criterion tripped, so the frozen journal is a retirement artifact, not
+a dead run. Citable baseline for the shipped shape: **+11.06% / max DD −1.84% / Sharpe 1.45 / MAR 1.80**, 655
+trades, 2023-03-13 → 2026-07-16. Five load-bearing parameters, all in
+[continuous_profile.py](../liquidity_migration/continuous_profile.py) and
+[continuous_events.py](../liquidity_migration/continuous_events.py): trigger `turn3_pop3`, age 240d,
+settled-funding floor 0.0, crowd-2, hold 24h, plus the BTC uptrend gate and BTC+ETH hedge.
+
+- **The gate is half the strategy and the funding floor is an economic boundary, not a searched threshold.**
+  Gate off → 0.93 with the funding bill tripled and drawdown doubled; gated 2.18. No funding filter 1.88 →
+  ≥ 0 **2.18** → ≥ +1 bp 1.65, keeping 98% of return on 17% fewer trades at half the max DD. Pump-fading pays
+  in uptrends only, and a pump with negative funding is a crowded short.
+- **The retired 3-cell ensemble was amplitude weighting, not scale-in or TWAP** — 92.5% of base pumps also
+  triggered the second rung in the same hour, median rung lag 0.0h, median entry-price difference 0.00%. Its
+  Sharpe 1.84 decomposes into four non-signal channels: the funding bill it kept paying, gated beta from the
+  hedge, an impact-slicing artifact (impact scales by weight^0.5 per slice, so splitting one pump across three
+  books under-prices it), and calendar density (646 vs 554 active days). Do not rebuild it.
+- **Only surviving lead — venue-scoped admission**: apply the funding floor only to both-venue symbols, admit
+  Bybit-only contracts regardless of sign. Hedged +12.76% / −1.75% / MAR 2.09 against the shipped
+  +11.39% / −1.84% / 1.78 in the same render, the only variant better on every axis — but the delta is 43
+  trades over 28 symbols, carried entirely by 2025 (+1.31 pp) while losing 2024 (−0.22) and 2026 (−0.28).
+
+**Short-leg construction.** A basket short halves the tail for 2.4% of the return: decile short 39.55 bp/day,
+Sharpe 1.20, worst day −35.37%, max DD 83.6% vs basket 38.62 / 1.55 / −17.50% / 64.4%; half-and-half is the
+dial, and the worst name in the decile leg averages −7.65%/day and reaches −90.13%. Standalone the basket short
+is dead (§2), so this is a construction principle, not a strategy.
+
+**Execution.** Fills price as taker: 7.78 bp/side notional-weighted, **15.56 bp round trip**, 3.89× the 4 bp
+maker assumption the anomaly and blend work used (`cross_section.MEASURED_ROUND_TRIP_BP`, also `summary`'s
+default `cost_bp`). `is_maker` is false on all 87 journal fills — a venue label, not an inference — and 88.3%
+of exit notional left through native stop triggers (24 of 30 exit fills `CreateByStopLoss`), taker by
+construction and unreachable by chase logic. Markouts show no adverse selection: effective spread 3.76 bp
+against a 4.91 bp quoted spread, realized spread to the passive counterparty +25.7 bp at 1 m, leaving ~25–30
+bp/side of maker-first headroom (23 fills, 1,120 USDT: small). Chase-then-cross is the right shape and the
+passive fill rate is the binding constraint — arm B chases at 4.80 bp/side against a 5.50 taker control but
+fills 2 of 8, implying 2.70 bp/side; raising the fill rate 25% → 80% moves a book 14.43 → 23.47 bp/day. The
+passive floor is 5.40 bp round trip, so 4 bp was never reachable, and arm B's strict-crossing model grants no
+queue credit, so measured rates are lower bounds
+([passive_execution.py](../liquidity_migration/passive_execution.py)). Capacity is small: v3's held names have
+median $33M trailing-24h turnover ($3.2M at p05), and p95 entry participation crosses 1% at a ~$1.1M book and
+5% at ~$5.5M post-2025.
+
+## 2. Do-not-retest ledger
+
+Rows marked *(stale)* have a superseded magnitude but a surviving direction (§3).
+
+### Cross-sectional and cross-venue screens
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| premium_diff cross-venue divergence | −7.31 bp/day t −0.69 Bybit, −17.87 t −1.76 Binance at its own 3.23-unit turnover; eras −57.9, +6.9, +0.0, −14.3, +7.4, −2.8 | dead across its whole parameter space — a 24-setting sweep returns no positive cell and worsens monotonically as the cut loosens (t −3.02 at cut 0.45) |
+| 50/50 premium+momentum blend | +16.00 t 1.80 Bybit, +2.33 t 0.28 Binance | sub-bar |
+| premium momentum (the change, not the level) | 3.70 bp/day t 0.35 | the effect is a convergence force, not a trend |
+| mark/index dislocation | looked like 29.96 bp/day t 2.61; flips sign incoherently under lag (+29.96 → −17.91 at +1h → +23.80 at +4h), decays 76.2 → 0.4 by era | arbitraged out |
+| `funding_chg24` | 2.59 (t 1.6) → 0.59 → −2.18 at lag 0/+1h/+4h | stale-price artifact |
+| venue volume-share shift | −10.83 bp/day t −1.31 | dead — the most direct test of flow migrating between venues |
+| cross-venue convergence pair on premium_diff | 534k flips, −417 bp/day | the per-name signal flaps at hourly scale |
+| cross-venue funding-differential pair, 07-26 build | 47k flips, churn −35 bp/day *(stale)* | dead. **Not** `lane2_funding_spread_v1`, which uses a different band and a trailing settled-spread basis |
+| cross-venue discount accumulation | bench vt 1.21, corr 0.45 to carry-hold *(stale)* | sub-bar; kept only as the best-independence lead |
+| amihud illiquidity, cross-venue funding dispersion, jump frequency, funding-vs-premium dislocation, vol term structure, basis instability, close location in range, stale-quote ratio | all \|t\| < 2 | dead |
+| OI/turnover ratio; OI/price divergence | 4.27 t 0.35; 3.80 t 0.34 | dead, and on a contaminated panel (§4) |
+| OI-flow crowding (7d/1d growth, 4 shapes) | shorting crowded longs costs −28.8 bp/day | dead and inverted |
+
+### Short-side constructions
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| equal-notional basket short, standalone | −5.07 bp/day t −0.70 Bybit, −15.85 t −2.19 Binance | dead on both venues |
+| carry SHORT leg | −7.5 bp/day *(stale)* | dead, and a tail carrier |
+| MAX / lottery weekly short | −109 bp/week | inverted — a squeeze furnace |
+| bear-regime mirror (crowded leaders, gate off) | −4.6 bp/day | dead |
+| crowding screen on the short leg | worst day −43.63% vs −35.37% unscreened, worst 1% −23.91%, loss concentration 12.0% | makes the tail **worse** — funding percentile is not a squeeze predictor; it removes diversification without removing hazard |
+| BTC-gated conditional short book | −9.73 → +24.88 bp/day Bybit, −10.95 → +20.4 Binance (sign replicates), but t 1.08 / 0.90; flat across seven drop thresholds, peak t 1.30 | do not restore the erased daily SHORT sleeve; extract the gate as a momentum-book component |
+
+**Structural:** every short-side construction in this market fails — the marginal desperate flow is short-side
+and the payment is always on the long side of it. A sign result, unaffected by the funding correction.
+
+### Time-series, horizon and clock
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| delta-neutral carry (short perp / long spot index proxy) | 168h hold +47.83 bp/period, t 4.33, Sharpe 1.85; the 24h pair's worst 1% is −0.78% and max DD 4.5% vs −18.61%/77.9% unhedged. Eras +245, −18, +10, +58, −27, −13 | the whole result is 2021, the panel's thinnest era (84 both-venue symbols vs 552 in 2025). Killed on era stability, not significance. No Binance index column, so no replication arm existed |
+| weekly hold / t rising with horizon | disjoint resampling t = −5.69 (1h), 2.82 (6h), **3.48 (24h)**, 1.91 (72h), 1.18 (168h) | overlap artifact; 24h is the correct hold and the 73.1%/yr weekly figure does not survive |
+| delisting decay | published 220.8 bp/day t 9.94; the PIT turnover-collapse trigger identifies dying contracts at 12.7% vs a 13.3% base rate (0.96× lift); on contracts that never died the same trigger pays **more**, +38.0 bp/day t 4.26 | look-ahead, withdrawn. Residual is generic "short low-turnover falling coins" |
+| listing debut short | first 24h return at age 0–3 days: mean +21.2 bp, median −72.3 bp | mean/median trap; explains why listing-short work kept flipping sign by era |
+| 24h-display rollover | isolated spike at exactly lag 23 (+0.90 bp/hr t 2.45) scaling with the rolled-off candle, but all alpha is in hour 1, the sharpest 1% cut yields 3.82 bp/hr, dead in 2023 (t 0.39) and 2024 (t 0.12) | a confirmed mechanism that does not pay |
+| 7 salience/attention features | all fail at 15.56 bp; the two apparent survivors collapse to t −0.26 / −0.13 when restricted to contracts with a full 168h of history | the effect lived in young contracts — the listing trap again |
+| funding-stamp clock | conditioned on the concurrent rate; the PIT version is negative and all intraday windows sit below costs | look-ahead, caught and killed |
+| hourly print clock for carry-hold | −94 bp/day in the 2026 era | knife-catching; the daily clock's staleness doubles as a survived-to-the-bar filter |
+| BTC→alt lead-lag (24h, 72h) | −25.4 bp/day | dead and inverted — alts mean-revert against BTC's prior move |
+| beta catch-up gap | −18.3 bp/day | dead in both directions |
+| per-coin time-series momentum ensemble | −0.3 bp/day | dead |
+| majors 3d dip-buy | −4 to +5 bp/day | dead |
+| weekend basket long | t 0.18 | dead |
+| volume-impact fade/follow | Sharpe 0.15 / 0.18; fade-all control −23 bp/day | flat |
+
+**Structural:** nothing intraday survives the 15.56 bp round trip on this panel.
+
+### Carry-hold levers — ~95 cells, all reported in `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_quant_review_2026-07-28/`
+
+| lever | measured | verdict |
+| --- | --- | --- |
+| daily-equivalent funding-rate entry | the "missed" cohort earns 0.6 bp/nd t 0.02 vs 72.2 (t 3.21) held, −45 bp/nd in 2026; grid cell 11.6 bp/d Sharpe 0.62 | **inverted.** Distributed carry marks chronic decliners; a single deep print marks acute crowding. The per-print gate is load-bearing |
+| intraday MAE stops −10/−15/−20/−25/−30% | every cell worse on mean, Sharpe, max DD and MAR; DD goes −31.1% → −47.9…−63.6%; at −15% the stop wins the median stopped trade and loses the mean (−23.3 bp; p10 −153, p90 +132) | **the stop family is closed.** Excising recoveries converts a drawdown into a realized hole. Stop-and-re-enter is bounded between the grid and baseline-minus-fees |
+| tighter trailing-rate exits | 17.9/17.6/17.5 bp/d, turnover unchanged | binary exits lose re-entry participation and save no turnover |
+| time-based / spell-age exits | funding per held-day flat across spell days (135/128/135/117/135 bp) | no decay, so no justification |
+| breadth tilt (≤2/≤3/≤5 names) | 15.3/14.1/11.6 bp/d vs baseline 18.0 | the drawdown window is itself high-breadth; the tilt shrinks recoveries without protecting the crash |
+| risk-off / BTC trend gate | PIT 30d-trend<0 days earn **more** (38.2 bp, Sharpe 1.69) than trend≥0 (6.4 bp, 0.38), in every era pair | would destroy the edge — the book is a fear-premium collector |
+| beta hedge | relieves ~5% of the tail | the residual risk is the price of the premium |
+| print-depth sizing | Sharpe 1.04/1.02/0.98 vs the trailing-rate ladder's 1.06 → 1.16 | one print is a noisier premium estimate than the 24h sum |
+| vol-target overlay | v1 0.64 vs raw 1.02; v2 0.52 vs 1.11; worst vt day −24.6% | harmful on corrected accounting — raw is primary; vt kept for recipe comparability only |
+| regime-scaling overlays | deep-regime variance dominates the pool at any scaling | pooled-variance arithmetic defeats them |
+| per-name vol normalization | Sharpe falls | the premium scales *with* vol |
+| shallower −5 bp entries, band-only-when-shallow, spell-loss floors, X1/band boundary grids | flat plateaus or worse | no cell beat the baseline |
+| per-name cap 0.15/0.20 | Sharpe pinned ~1.5, MAR rises to ~4 | scales mean and vol together — a sizing decision for an owner, not a Sharpe fix |
+| depth-sizing the spread book | Sharpe falls | a deeper spread carries more basis volatility |
+
+**Why entry screening cannot separate them:** the worst decile at entry has a deeper print (−34 vs −22 bp),
+deeper trail, higher vol and is *more* pumped (ret3d +27% vs +14%) — identical to the biggest winners, and the
+ret3d ≥ +50% bucket has median −6.4% but mean +8.2% and the largest book contribution of any bucket. Blocking
+the fingerprint deletes the strategy. Losses are single events, not processes: 98% of losers take ≥50% of the
+loss in one daily candle, 88% hit maximum adverse excursion within 2 days, and conditional on being ≥10%
+underwater after day 1 the remainder averages **+1.26%**.
+
+### Financed-longs mechanism ledger
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| cross-sectional carry long/short | +29.1 bp/d t 2.43 *(stale)* | reproduces the house cell; not new alpha |
+| crash reversion conditioned on an OI purge | mid/no-purge cells revert equally (t 4.2 vs 2.8); purge cells unstable 2022/2026 | the purge does not discriminate; the external prior did not transfer |
+| crash-reversal portfolio, all variants | best bench Sharpe 0.98 | sub-bar |
+| crash + negative-funding absorption | best bench 1.58, cross-venue ratio 0.28–0.53, carry-exit variant −40 bp/d in 2026 *(stale)* | sub-bar and Bybit-local |
+| gated momentum long *without* the financing condition | bench 1.57 and −61 bp/d in 2022 unfiltered; funding ≤ +1 bp → 1.79; ≤ 0 → 2.87 *(stale)* | the financing condition **is** the alpha — monotone along the economic axis, not a fitted spike |
+| post-squeeze drift | Sharpe 0.41 *(stale)*; reconfirmed twice — shallowest trailing-rate decile −67 bp/nd, v3 recovery exit −54 bp/nd | the payment stops when the crowding stops |
+| aggregate-funding regime basket | states pay (+24–31 bp/d) but are rare; Sharpe 0.44 *(stale)* | sub-bar standalone |
+| long-side composites of sub-bar parts | best honest composite 1.80 | composing sub-bar parts stays sub-bar |
+
+### CONTINUOUS shape
+
+| cell | measured | verdict |
+| --- | --- | --- |
+| amplitude ladder under the funding admission | ungated cells are monotone in rung strictness (1.88 < 2.00 < 2.45) but funding-gated the order **inverts** (2.18 > 2.13 > 2.00); every reweighting loses hedged | the strict rungs' premium lived on funding<0 trades — the population the admission removes |
+| crowd-3 / crowd-off | fc 1.17 / 1.16 vs crowd-2 | monotone worse, deeper drawdowns |
+| hold-12 / hold-48 | +2.38% total at fc 0.41; hold-48 buys 610 active days at max DD −3.18%, MAR 1.15 | both strictly worse |
+| TWAP 3-tranche (delay 1/2/3h) | −0.84 pp for a fair DD improvement at 3× the parameter surface | rejected; delay-2 and delay-3 single cells worse than delay-1 |
+| looser trigger `turn2_pop2`, alone or combined | 1.27 / 0.97 / 1.68 | dead |
+| funding floor at +1 bp | 1.65 vs 2.18 at 0.0 | past the economic boundary |
+| gate off / loosened to >−0.05 | 0.93 / 1.35, and 1.31 even with the funding filter | not loosenable |
+| reject-unknown admission | 641 trades, +11.39%, −1.84%, fc 1.49 — identical to the shipped book on every line | exact null; on root funding there are no historical unknowns |
+| cooldown as an independent parameter | `cooldown_ms = hold_ms` in the engine, so the hold-12 test conflated the two | deprioritized: separating them needs an identity-shifting engine field and the prior on more same-symbol re-entries is too weak |
+| force every entry passive | −90.57 bp/day, t −7.20, Sharpe −3.19; discards 49% of intended entries | the most damaging change tested — in a momentum book the entries that come back to you are the ones about to go wrong. Immediate taker +28.42 t 1.96; hybrid chase-then-cross +31.30 t 2.16 |
+
+## 3. Corrections that changed a conclusion
+
+**Funding double-count (fixed 2026-07-28, commit 3540f9a).** `by_funding_age_h` carries float epsilon — one
+hour after a settlement it reads 0.9999999999999999, not 1.0 — so the old `age < 1.0` predicate matched two
+bars per 8h/4h/2h settlement and charged every such print **twice**; 1h-interval symbols escaped because the
+next print overwrote the epsilon bar. Now an age-reset test, `(age < 0.5) | (age < age.shift(1).over("symbol"))`,
+in [financed_longs.py](../liquidity_migration/financed_longs.py) and mirrored in `lane2_blend.py`, with
+regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
+decisions read funding *levels*. Only funding P&L inflated, ~×1.5–2 blended and worst where funding was deepest.
+
+| withdrawn | replacement |
+| --- | --- |
+| carry_hold_v1 and financed_leaders_v1 beat the CONTINUOUS benchmark on return **and** Sharpe (2.57 t 4.87 / 2.21 t 4.01) | bench Sharpe 1.21 / 1.44 / 1.01 against a 1.84 benchmark — **return only.** None of the three meets the program goal |
+| carry-hold attribution funding +13.06 vs price −3.86 (3.4:1) | funding +7.19, price −3.40, fees −0.40 (2.1:1). The sign survives; the size does not clear the bar |
+| eras +25.4 / +19.1 / +54.3 / +32.9 / +77.6 / +71.5 bp/day, "positive through the 2022 bear" | +3.8 / +3.0 / +26.0 / +13.8 / +30.3 / +32.5 — the doubled prints concentrated in deep-funding capitulations; financed-leaders' 2022 is now −4.0 |
+| both books clear the ~t 3.4 multiple-testing bar | t 2.31 and 2.58 — both below |
+| carry-hold replicates on Binance (+25.0 bp/day t 2.73 Sharpe 1.38) | +2.7 bp/day, t 0.4, Sharpe 0.18, max DD −85%. **The doubled funding leg *was* the replication.** Carry-hold is single-venue Bybit evidence |
+
+**CONTINUOUS's Sharpe 2.73 described a strategy that was not running.** The backtest modelled no stop
+(`stop_price` empty on all 2,344 trades) while the deployment always had the account's 2.006% disaster
+fallback. Applying that stop via recorded MAE: −2.54%, Sharpe −0.75, t −1.36, against +18.24% / Sharpe 2.50
+with no stop. 77.5% of trades breach a 2% stop; 64.3% of the model's 649 take-profit winners first dipped 2%
+against the position; the sign flips between a 5% and an 8% stop. LONG had no such gap — it declares
+`stop_loss_pct` and models the identical stop — which is the control that makes this a located defect rather
+than a harness bug. Repair: a declared 35% component stop modelled on both sides, honest reconstruction Sharpe
+**1.87**, exit mix `stop_loss` 114/2,344 = 4.9% exactly as predicted. 35% is the widest trigger whose worst
+modelled fill still sits inside the ~48% 2× liquidation distance.
+
+**Two cost claims withdrawn.** The deployed sleeves were never priced at 4 bp: LONG models a 45.00 bp round
+trip (2.9× conservative) and CONTINUOUS was actually charged **24.12 bp** in the ledger (1.55× conservative;
+`−Σ cost_return / Σ|notional_weight| × 1e4` over 2,344 trades). So CONTINUOUS net does not fall +21.13% →
++14.80%, and its cost was not "implausibly cheap" — the price is 24 bp, and the anomaly was turnover (10.44
+units over 3.3 years). The 3.89× ratio belongs only to the 4 bp research surfaces. Relatedly, **a flat
+per-book charge is a reranking, not a rescaling**: measured turnover is 1.52 units for momentum_1w (11.9 bp
+charged), 2.16 for funding carry (16.8) and 3.23 for premium_diff (25.2), so the uniform 15.56 bp overcharged
+momentum and undercharged premium by a third — which flipped premium_diff negative and left the designated
+dead control as the strongest cell in the screen.
+
+**The dispersion gate was an artifact** of the pro-rated funding approximation. Published as Sharpe 1.27 →
+1.74 with halved drawdown; re-measured, gated 1.30 vs ungated 1.29 vs *inverse*-gated 1.29 — indistinguishable
+— with a worse compounded drawdown (51.6% vs 46.1%) while sitting out 64% of the time. Not in the committed
+config; the rejection rests on three identical Sharpes, not on an exact number.
+
+**The 95%-idiosyncratic un-hedgeable tail described hypothetical shorts across the research universe, not the
+deployed book.** On full PIT, LONG is long-only with max drawdown −4.11% and CONTINUOUS −1.29%. The premise
+that this research was replacing a broken deployed book was wrong.
+
+## 4. Data contamination and measurement facts
+
+- **Bybit open interest is survivorship-contaminated** — backfilled only for contracts still listed at
+  backfill time: 95.9% of with-OI symbols were still listed on 2026-07-16 against **0.0%** of without-OI
+  symbols. Specific to OI (delisted-cohort coverage: price 0.999, funding 0.999, premium 0.998, OI 0.100).
+  Delisted alts are exactly where short exposure pays, so an OI-conditioned short study is biased against its
+  own thesis and a long study for it. Never use OI availability as a filter in a return study. The panel's
+  rising OI coverage (0.857 → 0.980, 2021→2026) is a bias gradient, not improving quality.
+- **`open_interest_value` is not a value** — byte-for-byte identical to `open_interest` across the dataset,
+  i.e. contract units. Dropped in [cross_venue_panel.py](../liquidity_migration/cross_venue_panel.py) with
+  the reason inline; still latent in `daily_feature_panel.py`, which prefers it for `oi_delta_7d` and
+  `oi_to_adv` (neither has a consumer outside that module). Derive notional as `open_interest × mark_close`.
+- **`funding_event_kind` exists on only 2 of 2,024 Bybit funding partitions** (added 2026-07-16). Filtering on
+  it naively drops 99.9% of history; ignoring it admits unsettled *predicted* rates into recent decision rows
+  — direct look-ahead. Scan the two schema generations separately.
+- **Bybit funding intervals really did shorten**, so a per-print threshold means a different *daily* carry per
+  symbol: 2025 settlements are 52% 4h, 21% 1h, 7% 2h, ~20% 8h against 100% 8h in 2021, and 73–80% of
+  carry-hold's 2025-26 held name-days are on sub-8h names.
+- **Bybit funding inverted in 2025-26** — the median still pays a short (~+5.5%/yr) but the mean now costs one
+  (~−4.5%/yr), a ~10 pp gap that is entirely a negative-funding tail firing on the same events as the price
+  squeeze. A short book pays twice on one event (269,642 settlements over 203 sampled days).
+- **Short payoff geometry is structural.** A short book takes 22.4% of its total loss in the worst 1% of
+  trades and 49.1% in the worst 5%, against 8.6% for a long. Liquidity screening makes it worse — worst-1%
+  short loss by ADV quartile runs −11,422 bp (thinnest) to −19,719 bp (deepest), because the most liquid names
+  attract the most crowded shorts. Removing market beta relieves ~5%, and that is the optimistic in-sample
+  bound, so the tail has to be avoided at the name level.
+- **Cross-venue replication cannot multiply the sample here.** Universe overlap is 79.9% Jaccard (152,715
+  shared name-periods), so agreement is a robustness check on funding data, not independent evidence:
+  empirically 5 of 6 mechanisms with a positive Bybit effect failed replication and the only replicator was
+  dead on both venues. Real sample multiplication needs a different name population or asset class.
+- **Decision-clock fragility.** The identical carry-hold construction over 12 daily-grid offsets spans Sharpe
+  0.30–1.52, and midnight — the clock every registered financed-longs number uses — is the best cell;
+  settlement-aligned offsets score 0.73/1.04, refuting a freshness explanation. The honest level is the
+  8-offset ensemble, ~1.2 full / ~1.5 bench. The *filters'* improvement is clock-robust, which is why the
+  registered experiment is a paired differential. Separately, entry staleness beyond the daily cadence is
+  expensive: +1h and +4h delays were free at v1 registration (t 4.19 / 4.82), +24h costs ~40% of mean.
+- **Terminal-day dodge.** `prepare()`'s forward-return requirement exits every name 24h before its final panel
+  bar — an implicit look-ahead worth roughly +0.13 Sharpe that flips 2022's sign. Every financed-longs number
+  shares it, so cross-config comparisons stay fair and absolute levels are optimistic by that amount.
+- **Registered numbers are module-path.** The review scripts compute the trailing rate after `prepare()`'s row
+  filter, the module before: 50 of 1,883 gap-adjacent days differ, Sharpe 1.13 vs 1.11 on the chosen cell,
+  orderings unaffected.
+- **Two Sharpe bases in the CONTINUOUS work, not comparable**: "active" = active ledger days only (what
+  component reports print); "fc" = full calendar with flat days as zeros. Convert with × sqrt(active_days/1222).
+- **CONTINUOUS's small drawdown reflected a small book**: mean realized gross 0.0075 against a nominal target
+  of 0.500 (1.5%), max ever 0.0800, in market 325/849 days. The cap never bound; the constraint was candidate
+  supply. Any restatement at larger size must scale drawdown by the same factor it scales return. Relatedly the
+  BTC hedge produces zero fills by design at this size — binding constraint `min_qty` 0.001 BTC (~65 USDT), not
+  a notional minimum; it first becomes executable at short gross ≈ 2.5–4.9k USDT, and the sub-step intent is
+  preserved so the kernel emits an explicit `qty_step_mismatch` rejection rather than silently rounding.
+- **Harness errors that produced impossible numbers before publication** (they belong on the failure list, but
+  are recorded here so they are not lost): an uncentred pooled-leg percentile — `rank/len` runs 1/n..1 rather
+  than symmetric about 0.5 — handed the two tails different name counts and made a supposedly neutral book
+  directional, and on re-run pair correlation is +0.009 not −0.285 (the legs are independent, not hedging),
+  magnitudes roughly doubled, and 2021 is negative, so the earlier "positive in all six years" claim was wrong;
+  `shift(-24)` on a disjoint-sampled frame differenced a 24-*day* spot move against a 24-*hour* perp move
+  (+696 bp/day with a 3,049% drawdown simultaneously); booking a passive entry at the *next* close produced
+  Sharpe 5.60 from a price no resting order could obtain; and a first venue comparison charged funding to Bybit
+  only, comparing a net leg against a gross one.
+
+## 5. Still open
+
+- **Re-derive the stale magnitudes.** Every *(stale)* row above needs the corrected scorer before any
+  magnitude is trusted. Directions are already safe to use.
+- **Forward records.** `scripts/score_financed_longs_forward.py` appends one row per config-day (plus the
+  `carry_hold_v2_minus_v1` differential) to `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`; the record still
+  needs the data refresh past 2026-07-17. Live-runtime parity — order lifecycle, venue stops, partial fills —
+  is modelled nowhere.
+- **Score the venue-scoped CONTINUOUS admission variant** against `fund0_base` re-run identically
+  (`scripts/render_continuous_admission_variants.py admission --end-date <later>`, variant
+  `fund0_venue_scoped`). It re-renders on history, so it works with the sleeve off. Promotion would need a
+  deliberate admission-scope field on `ContinuousEventConfig` (identity-shifting: it moves `config_hash()` and
+  `kernel_strategy_id` for every CONTINUOUS config), a committed both-venue registry with a refresh policy so
+  the panel union cannot silently drift, and an explicit re-size — the retired profile block was shrunk to
+  `max_active` 1.
+- **Untested loser-identification doors**, in mechanism order: same-symbol cross-venue funding confirmation at
+  entry (consensus short vs venue-local liquidation), suspend → hard exit, toxic-band high boundary extended
+  to 0, turnover-rank-decay dropout warning. Two cohorts are already known structurally lossy and remain
+  candidate exclusions: suspension-touched trades (−6.5%, n=168) and positions open at series end (−4.0%,
+  n=70, −16% of book over 5.5y). **Permanently closed:** OI (contaminated) and spot basis (data the roots lack).
+- **Missing datasets, ranked.** (1) A liquidation feed — its purpose changed: it is the input that would let
+  the one durable premium be *sized and survived*, not a squeeze predictor, and external cascade work records
+  a hazard no backtest here models, that venues activate auto-deleveraging and can force-close a winning short.
+  (2) Multi-venue funding beyond two venues: two venues give a difference, not a distribution, and the
+  two-venue version is dead. (3) Sub-hourly bars — the rolloff mechanism decays inside an hour. Spot klines
+  were downgraded to a completeness item because the index proxy already answered the delta-neutral question.
+- **If Bybit's interval mix shifts materially again** (e.g. majority-1h), rerun the acuteness-vs-chronic
+  tables — that split is microstructure-shaped and could invert.
+- **The coarse funding-coverage label.** `trade_lifecycle.py` exposes `funding_modeled_fraction` and
+  `long_native.py` consumes it, but `continuous_events.py` still collapses the whole book to "partial" from
+  per-trade modes — a flag that fires on 2 of 843 trades at 99.82% notional-weighted coverage.
+- **Structural target never built.** One shared causal feature library, few signals each with a stated
+  mechanism, one portfolio construction layer, one execution layer, parameters set by economics. Sizing and
+  the BTC hedge remain per-sleeve.
+- **The screen's own budget**, for whoever sets the next threshold: ~45 mechanisms in the anomaly program plus
+  ~18 families (~45 constructions) in the financed-longs program; Bonferroni over the 144-cell tuning grid
+  needs t ≈ 3.58; phase 1 returned 0 of 12 cells at t ≥ 3.25 and the strongest cell was the designated dead
+  control. Gates here were tuned on Sharpe and are therefore mis-set for producing evidence, because loosening
+  a filter buys sample: the momentum BTC gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives
+  n 1,247, **t 2.78**, Sharpe 1.50.
+- Registered experiment definitions live in code, not prose — passive A/B arm parameters in
+  [passive_execution.py](../liquidity_migration/passive_execution.py).

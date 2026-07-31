@@ -736,7 +736,7 @@ def _funding_admission_filter(
     The rate is the last settlement at-or-before each entry's decision
     timestamp (signal-bar close, ``ts_ms + 1h``) — the same backward as-of
     semantics as the cross-venue panel join that produced the V3 evidence
-    (docs/continuous_redesign_2026-07-26.md). Entries with no settled print
+    (docs/research_findings.md). Entries with no settled print
     admit and are counted. The filter runs BEFORE ``_run_trades`` so crowding,
     cooldown, and capacity see only admitted candidates, exactly like the
     research render that produced the adopted numbers.

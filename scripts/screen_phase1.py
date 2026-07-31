@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 1 re-screen: the mechanisms that survived something, priced honestly.
 
-One pass, not a sweep (`docs/roadmap_2026-07-25.md` §3). Every cell is reported;
+One pass, not a sweep (`docs/research_findings.md` §3). Every cell is reported;
 a survivor must clear the Bonferroni threshold **t = 3.25** for the ~44
 mechanisms this program has tested, not t = 2.
 
@@ -24,7 +24,7 @@ one that means something.
 
 Research-only: reads a panel built by ``scripts/build_cross_venue_panel.py``,
 has no venue access, no account journal, and no operational authority. Lane-1 on
-seen data — this grades nothing (``docs/governance.md`` §1).
+seen data — this grades nothing (``AGENTS.md``).
 """
 
 from __future__ import annotations
@@ -446,7 +446,7 @@ def main() -> int:
         cells_txt = "  ".join(f"{y}: {mn:+7.1f}bp t{t:+5.2f} (n={n})" for y, (n, mn, t) in eras.items())
         print(f"  eras  {cells_txt}")
 
-    print("\nLane-1 on seen data. Grades nothing; see docs/governance.md.")
+    print("\nLane-1 on seen data. Grades nothing; see AGENTS.md.")
     return 0
 
 

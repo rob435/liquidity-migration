@@ -1,7 +1,7 @@
 """Minimal causal cross-venue panel — the P0 research substrate.
 
 One reusable hourly panel over symbols listed on both Bybit and Binance, built
-from the Tier-A/Tier-B datasets that `docs/data_roots.md` certifies as real:
+from the Tier-A/Tier-B datasets that `docs/data.md` certifies as real:
 price, mark, index, premium, settled funding, turnover, and Bybit open
 interest. It exists so anomaly research stops rebuilding bespoke readers.
 

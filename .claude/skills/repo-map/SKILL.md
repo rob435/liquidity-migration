@@ -14,7 +14,7 @@ Start from the source that owns the question:
 
 - Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
   environment/config.
-- Evidence policy: `docs/governance.md`.
+- Evidence policy: `AGENTS.md`.
 - Research decisions and queue: `docs/strategy_program.md` and raw run
   artifacts.
 - Active profile contract: `docs/active_trading_logic.md`, then the strategy

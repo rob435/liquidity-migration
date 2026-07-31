@@ -14,14 +14,14 @@ Conventions, fixed here so every read means the same thing:
   direction rather than silently flipping a sign to flatter a result.
 * Returns passed in should already include every economic leg the trade has —
   for a funding-sorted signal, price alone has the wrong sign (see
-  ``docs/anomaly_research_2026-07-24.md`` §4.1).
+  ``docs/research_findings.md``).
 * ``summary`` reports the tail statistics this repository cares about, not just
   a Sharpe: loss concentration in the worst 1% and max drawdown, because the
   book being replaced failed on tail shape rather than on mean.
 
 Nothing here grades anything. Lane-1 reads on seen data cannot grade the
 configurations they selected; that requires a committed config scored on
-post-commit days per ``docs/governance.md``.
+post-commit days per ``AGENTS.md``.
 """
 
 from __future__ import annotations
@@ -48,15 +48,15 @@ DEFAULT_CUT = 0.10
 #: This replaces the 4.00 bp maker assumption used by the cross-venue anomaly
 #: reads and by ``configs/lane2_premium_momentum_blend_v1.json``. A result that
 #: only survives at 4 bp is not a result
-#: (``docs/roadmap_2026-07-25.md`` §2, task 0.1).
+#: (``docs/research_findings.md``, task 0.1).
 #:
 #: Note this is NOT a repo-wide correction: the LONG and CONTINUOUS engine
-#: surfaces were never priced at 4 bp. See ``docs/anomaly_research_2026-07-24.md``
+#: surfaces were never priced at 4 bp. See ``docs/research_findings.md``
 #: §16.1 for the per-surface audit.
 MEASURED_ROUND_TRIP_BP = 15.56
 
 #: Round trip a perfect passive book would pay, from the paper passive-execution
-#: A/B (``docs/anomaly_research_2026-07-24.md`` §13): 2.70 bp/side implied at a
+#: A/B (``docs/research_findings.md``): 2.70 bp/side implied at a
 #: 100% passive fill rate. The floor, never an achieved cost.
 PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40
 
@@ -161,7 +161,7 @@ def summary(
 
     The default is :data:`MEASURED_ROUND_TRIP_BP`, not zero. A caller that omits
     the argument gets the honest cost basis rather than a gross number, because
-    a gross number is a diagnostic and not a result (``docs/governance.md`` §2).
+    a gross number is a diagnostic and not a result (``AGENTS.md``).
     Pass ``cost_bp=0.0`` explicitly when a gross read is genuinely what is
     wanted, and label it as such.
     """

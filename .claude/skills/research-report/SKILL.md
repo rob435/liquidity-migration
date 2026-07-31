@@ -1,11 +1,11 @@
 ---
 name: research-report
-description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the Progressive Evidence Model in docs/governance.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
+description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence rules in AGENTS.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
 ---
 
 # Interpret research reports
 
-Read `docs/governance.md`, then inspect the report and its referenced raw
+Read `AGENTS.md`, then inspect the report and its referenced raw
 artifacts directly. A helper summary or attractive chart is not a substitute for
 the ledger, event rows, config, or data identity behind the claim.
 
@@ -40,7 +40,7 @@ metrics merely because an older template listed them.
 
 ## Write the conclusion
 
-Produce the evidence card from `docs/governance.md`:
+Produce the evidence card from `AGENTS.md`:
 
 - claim;
 - validity: valid, limited, or invalid;

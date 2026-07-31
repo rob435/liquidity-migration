@@ -358,7 +358,7 @@ def parse_trade_archive_entries(
     start_date = _parse_date(start) if start else None
     # `end` is end-exclusive (the day named by `end` is NOT included), matching
     # the `volume-events` convention and the end-exclusive contract documented
-    # in docs/data_roots.md. This prevents ingesting a partial trailing day.
+    # in docs/data.md. This prevents ingesting a partial trailing day.
     end_date = _parse_date(end) if end else None
     pattern = re.compile(rf"^{re.escape(symbol.upper())}(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.csv(?:\.gz|\.zip)?$")
     rows: list[dict[str, Any]] = []
@@ -1290,7 +1290,7 @@ def _select_manifest_rows(
         frame = frame.filter(pl.col("date") >= config.start[:10])
     if config.end:
         # End-exclusive: the day named by `--end` is not downloaded, matching
-        # the `volume-events` convention (see docs/data_roots.md). An inclusive
+        # the `volume-events` convention (see docs/data.md). An inclusive
         # bound here would fabricate flat bars for a partial trailing day via
         # kline densification.
         frame = frame.filter(pl.col("date") < config.end[:10])

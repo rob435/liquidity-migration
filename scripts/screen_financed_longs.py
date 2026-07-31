@@ -9,7 +9,7 @@ render they were compared against.
 
 Research-only: no venue access, no account journal, no operational authority.
 Lane-1 on seen data before each config's registration commit; forward rows
-after the commit are the evidence (``docs/governance.md``).
+after the commit are the evidence (``AGENTS.md``).
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ def main() -> int:
         print("  eras:", era_line(scores))
 
     print("\nLane-1 on seen data before each registration commit; grades nothing "
-          "(docs/governance.md). Forward rows after the commit are the evidence.")
+          "(AGENTS.md). Forward rows after the commit are the evidence.")
     return 0
 
 

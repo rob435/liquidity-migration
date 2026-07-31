@@ -24,10 +24,9 @@ This topology is demo/paper only. It never authorizes mainnet.
 The three mainnet units are inert on a demo host: they are installed by the unit
 manifest but never enabled or started by this entrypoint, their environment
 files do not exist, and `verify` asserts each one is inactive rather than
-leaving a running real-money owner invisible to a green demo verification. They
-come up only under a `real-money` authority receipt. See
-`docs/real_money_envelope.md` §6; nothing in this repository sets `REAL_MONEY`,
-writes a credential, or starts one of them.
+leaving a running real-money owner invisible to a green demo verification. They are
+started by hand, by the owner. See `docs/real_money.md`; nothing in this
+repository sets `REAL_MONEY`, writes a credential, or starts one of them.
 
 The hedge, RMOM, and liveness services are invoked by their matching timers.
 Target producers and auxiliary services have private API, mainnet,

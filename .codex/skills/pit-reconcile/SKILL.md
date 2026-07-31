@@ -61,6 +61,6 @@ current-listing-derived tail rows are inference, not archive observations. A
 partial/current-universe run may support only its declared narrower scope.
 
 PIT coverage cannot prove execution, and a reconciled demo journal cannot repair
-a survivorship-invalid historical claim. Apply `docs/governance.md`,
+a survivorship-invalid historical claim. Apply `AGENTS.md`,
 `docs/pit_gate.md`, and `docs/account_execution.md` to keep those conclusions
 separate.

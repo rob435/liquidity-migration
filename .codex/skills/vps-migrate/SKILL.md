@@ -121,4 +121,4 @@ focused runtime/deploy tests and lint before proposing a push.
   successful local command without exposing secrets.
 
 Never enable real-money trading as part of VPS recovery. Mainnet requires a
-separate control plane and exact owner authorization under `docs/governance.md`.
+separate control plane and exact owner authorization under `AGENTS.md`.

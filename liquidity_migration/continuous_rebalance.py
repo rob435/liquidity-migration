@@ -58,7 +58,7 @@ class ContinuousHedgeRule:
     # reproduces plain OLS exactly. Shrinkage applies only to coefficients the
     # window can estimate; insufficient-sample and degenerate paths still
     # return zero (no hedge) rather than falling back to the prior blind.
-    # Policy and guardrails: docs/hedge_refresh_policy.md.
+    # Policy and guardrails: docs/trading_logic.md.
     shrinkage_weight: float = 0.0
     prior_beta_1: float = 0.0
     prior_beta_2: float = 0.0

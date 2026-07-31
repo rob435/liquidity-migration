@@ -99,7 +99,7 @@ def test_parse_trade_archive_entries_matches_dated_csv_and_sorts() -> None:
 
 
 def test_parse_trade_archive_entries_applies_start_inclusive_end_exclusive_window() -> None:
-    # `--end` is end-exclusive (matches volume-events and docs/data_roots.md):
+    # `--end` is end-exclusive (matches volume-events and docs/data.md):
     # the day named by `end` is NOT included, so passing the same `--end` to the
     # archive and volume-events commands no longer ingests a partial trailing day.
     html = """
@@ -521,7 +521,7 @@ def _manifest_frame() -> pl.DataFrame:
 
 
 def test_select_manifest_rows_filters_date_window_and_sorts(tmp_path) -> None:
-    # `--end` is end-exclusive (matches volume-events and docs/data_roots.md), so
+    # `--end` is end-exclusive (matches volume-events and docs/data.md), so
     # end="2025-01-04" selects 01-02 and 01-03 but not 01-04.
     config = ArchiveHourlyKlineDownloadConfig(start="2025-01-02", end="2025-01-04", missing_only=False)
 

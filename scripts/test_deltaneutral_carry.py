@@ -37,7 +37,7 @@ Costs are charged honestly and asymmetrically: the perp side at the measured
 *worse* than perp). A delta-neutral pair therefore round-trips ~35.6 bp, more than
 double the perp-only book.
 
-Research-only. Lane-1 on seen data; grades nothing (``docs/governance.md`` §1).
+Research-only. Lane-1 on seen data; grades nothing (``AGENTS.md``).
 """
 
 from __future__ import annotations
@@ -187,7 +187,7 @@ def main() -> int:
     print("basket has 'much higher return variance' from idiosyncratic dislocation.")
     print("\nSPOT PROXY CAVEAT: the index is a synthetic basket and cannot be bought.")
     print("A positive result here justifies procuring spot data; it is not a tradeable book.")
-    print("\nLane-1 on seen data. Grades nothing; see docs/governance.md.")
+    print("\nLane-1 on seen data. Grades nothing; see AGENTS.md.")
     return 0
 
 

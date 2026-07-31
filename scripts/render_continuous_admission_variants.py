@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CONTINUOUS admission-variant research renders (Lane-1; grades nothing).
 
-Reproduction and forward scorer for `docs/continuous_ladder_mechanism_2026-07-27.md`.
+Reproduction and forward scorer for `docs/research_findings.md`.
 Runs component variants of the deployed single funding-gated cell through the
 real engine (`run_continuous_equity_component`, existing config fields only)
 and renders hedged books through the exact deployed overlay stack imported

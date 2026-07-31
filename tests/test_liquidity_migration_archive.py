@@ -135,7 +135,7 @@ def test_archive_manifest_parses_symbols_and_files() -> None:
     """
 
     assert parse_symbol_directories(root_html) == ["BTCUSDT", "ETHUSDT"]
-    # `--end` is end-exclusive (matches volume-events / docs/data_roots.md), so
+    # `--end` is end-exclusive (matches volume-events / docs/data.md), so
     # end must be the day after the last date we want included.
     rows = parse_trade_archive_entries(
         symbol_html,

@@ -13,8 +13,8 @@ CONTINUOUS_PROFILE_ID = "continuous_ensemble_v2"
 # single_fund0: operator override 2026-07-26 replaced the three nested-trigger
 # components with the single turn3_pop3 cell plus a settled-funding >= 0
 # admission ("only fade pumps whose longs are paying") — the V3 shape in
-# docs/continuous_redesign_2026-07-26.md. sl35 semantics unchanged (declared
-# 35% component stop, docs/anomaly_research_2026-07-24.md §16.3/§20). Change
+# docs/research_findings.md. sl35 semantics unchanged (declared
+# 35% component stop, docs/research_findings.md). Change
 # point recorded by this revision bump; the forward evidence run restarts here.
 CONTINUOUS_PROFILE_REVISION = "active_single_fund0_tp12_sl35_v1"
 CONTINUOUS_HISTORY_START_DATE = "2023-04-01"
@@ -43,7 +43,7 @@ class ContinuousComponentProfile:
     # decision timestamp; None disables. 0.0 is the economic boundary where
     # "longs pay" flips, not a searched threshold — a pump with negative
     # funding is a crowded short and the toxic population
-    # (docs/continuous_redesign_2026-07-26.md V1/V3/V8). Unknown funding
+    # (docs/research_findings.md V1/V3/V8). Unknown funding
     # admits and is counted, matching the research basis.
     funding_min_at_entry: float | None = None
 

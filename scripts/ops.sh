@@ -29,13 +29,12 @@ Safe operator commands:
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
-  kill-criteria [ARGS...]      weekly read-only sleeve K1/K2/K3 trip report (exit 3 on trip)
   wedged-command [ARGS...]     report/probe wedged order commands (read-only)
   wedged-command --execute resolve [ARGS...]
                                terminalize one wedged command on venue evidence
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
-                               render+prove the operational profile from the
+                               render the operational profile from the
                                RM_* dials in the owner's env file
   test [PYTEST_ARGS...]        run pytest
   deploy --execute MODE        run install, activation, or guarded rollout
@@ -100,27 +99,6 @@ REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
 
-remote_python_script() {
-  local script_path="$1"
-  shift
-  local -a script_args=("$@")
-  local arg
-  {
-    printf 'REPO_DIR=%q\n' "$REPO_DIR"
-    printf 'SCRIPT_PATH=%q\n' "$script_path"
-    printf 'SCRIPT_ARGS=('
-    for arg in ${script_args[@]+"${script_args[@]}"}; do
-      printf ' %q' "$arg"
-    done
-    printf ' )\n'
-    cat <<'REMOTE_SCRIPT'
-set -euo pipefail
-cd "$REPO_DIR"
-exec .venv/bin/python "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}"
-REMOTE_SCRIPT
-  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
-}
-
 remote_python_module() {
   local module="$1"
   shift
@@ -166,20 +144,12 @@ case "$command" in
   venue-accounting)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"
     ;;
-  kill-criteria)
-    # Weekly read-only K1/K2/K3 evaluation on the VPS demo journal per
-    # docs/preregistration/sleeve_kill_criteria_2026-07-20.md. Exit 3 on trip.
-    if [[ "$#" -eq 0 ]]; then
-      set -- --account-root "$REPO_DIR/data/bybit-account-execution"
-    fi
-    remote_python_script scripts/check_kill_criteria.py "$@"
-    ;;
   real-money)
     # The owner-facing arming surface. `preflight` reads only and never prints
     # a secret. `render-profile` without --execute prints the profile to
     # stdout; with --execute it writes exactly one non-secret artifact and
     # refuses any dial set that does not pass the load-time envelope proof.
-    # Neither sets REAL_MONEY, writes a credential, issues authority, or starts
+    # Neither sets REAL_MONEY, writes a credential, or starts
     # a unit -- every one of those is the owner's own act.
     # No argument means preflight, and it has to be *passed*: leaving argv
     # empty ran the module with no subcommand and got an argparse usage error
