@@ -38,12 +38,16 @@ done
 
 # The paper owner is unprivileged and owns its own route manifests and inbox.
 # Flatten runs as that owner rather than as root, so every file it writes is
-# already claimable and no ownership exception is needed anywhere.
+# already claimable and no ownership exception is needed anywhere. Its
+# environment file is 0640 root:liquidity-migration-paper rather than 0600, so
+# the loader is told the group that is allowed to read it.
 RUN_AS=""
+ENVIRONMENT_GROUP=""
 case "$ENVIRONMENT" in
     demo) ENVIRONMENT_FILE=/etc/liquidity-migration/account-execution.env ;;
     paper)
         ENVIRONMENT_FILE=/etc/liquidity-migration/account-paper-execution.env
+        ENVIRONMENT_GROUP=liquidity-migration-paper
         RUN_AS=liquidity-migration-paper
         ;;
     mainnet) ENVIRONMENT_FILE=/etc/liquidity-migration/account-execution-mainnet.env ;;
@@ -61,8 +65,13 @@ esac
 # shellcheck source=../../deploy/lib_systemd_environment.sh
 . deploy/lib_systemd_environment.sh
 unset ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
-lm_load_private_systemd_environment "$PYTHON" "$ENVIRONMENT_FILE" \
-    ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
+if [ -n "$ENVIRONMENT_GROUP" ]; then
+    lm_load_group_systemd_environment "$PYTHON" "$ENVIRONMENT_FILE" "$ENVIRONMENT_GROUP" \
+        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
+else
+    lm_load_private_systemd_environment "$PYTHON" "$ENVIRONMENT_FILE" \
+        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
+fi
 [ -n "${ACCOUNT_EXECUTION_ROOT:-}" ] || { echo "account root is unavailable" >&2; exit 1; }
 [ -n "${ACCOUNT_INTENT_INBOX_ROOT:-}" ] || { echo "inbox root is unavailable" >&2; exit 1; }
 
