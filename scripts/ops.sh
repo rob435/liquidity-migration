@@ -28,6 +28,14 @@ Safe operator commands:
   equity [ARGS...]             standard descriptive equity curves
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
+  flatten --environment ENV --reason TEXT [ARGS...]
+                               report how one account owner would be taken to
+                               zero exposure; reads only
+  flatten --execute --environment ENV --reason TEXT [ARGS...]
+                               publish the zero targets and wait for the owner
+                               to converge. ENV is demo|paper|mainnet and has no
+                               default. Stop the producing sleeve first, or it
+                               can republish while this converges.
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
   wedged-command [ARGS...]     report/probe wedged order commands (read-only)
   wedged-command --execute resolve [ARGS...]
@@ -107,6 +115,24 @@ REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
 
+remote_flatten() {
+  local -a flatten_args=("$@")
+  local arg
+  {
+    printf 'REPO_DIR=%q\n' "$REPO_DIR"
+    printf 'FLATTEN_ARGS=('
+    for arg in ${flatten_args[@]+"${flatten_args[@]}"}; do
+      printf ' %q' "$arg"
+    done
+    printf ' )\n'
+    cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+cd "$REPO_DIR"
+exec bash scripts/vps/flatten_account.sh "${FLATTEN_ARGS[@]}"
+REMOTE_SCRIPT
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
+}
+
 remote_python_module() {
   local module="$1"
   shift
@@ -177,6 +203,16 @@ case "$command" in
       exec "$PYTHON_BIN" -m liquidity_migration.policy.real_money_arming "$@"
     fi
     remote_python_module liquidity_migration.policy.real_money_arming "$@"
+    ;;
+  flatten)
+    # Publishes zero targets through the account owner and watches the journal
+    # until it converges. Reads only until --execute. It stops no unit: a
+    # producer left running can republish, and the report says so.
+    if [[ "${1:-}" == "--execute" ]]; then
+      shift
+      set -- --execute "$@"
+    fi
+    remote_flatten "$@"
     ;;
   wedged-command)
     # B15b. `report` and `probe` read only. `resolve` writes one journal

@@ -256,6 +256,8 @@ file, a record, or a log line.
 | one pass of a strategy's decision loop, and its record of why each coin was skipped | cycle, cycle receipt |
 | refuse to act when something safety-critical is unknown | fail closed |
 | holding nothing: no positions, orders, or pending wishes | flat |
+| the one command that sells everything down to nothing, by telling the account manager we now want zero of each coin | flatten |
+| a leftover so small the exchange will not accept an order for it, so it cannot be sold | dust, below-minimum |
 | lock preventing two account managers running at once | lease |
 | the alert-only health watcher that cannot trade | watchdog, demo-liveness, mainnet-liveness |
 | the supervised deploy you trigger on GitHub | rollout |

@@ -20,6 +20,7 @@ from liquidity_migration.core.venue_realm import (
     REALM_CREDENTIAL_VARIABLES,
     REALM_REST_ENDPOINTS,
     VenueRealm,
+    client_venue_realm,
     venue_realm,
 )
 
@@ -159,3 +160,67 @@ def test_execution_environment_and_venue_realm_stay_distinct_types() -> None:
 
     assert EXECUTION_ENVIRONMENT_VALUES > {realm.value for realm in VenueRealm}
     assert "paper" not in {realm.value for realm in VenueRealm}
+
+
+class TestClientVenueRealm:
+    """What the demo-only constructor fences were replaced with.
+
+    They used to refuse any non-demo client outright, which blocked a mainnet
+    account owner from starting at all. What they were actually worth is the
+    coherence check: a client whose declared realm and transport disagree would
+    act on a different account than the one the caller believes it is holding.
+    """
+
+    def test_a_coherent_client_of_either_realm_is_accepted(self) -> None:
+        class _Demo:
+            demo = True
+            realm = "demo"
+
+        class _Mainnet:
+            demo = False
+            realm = "mainnet"
+
+        assert client_venue_realm(_Demo(), what="t") is VenueRealm.DEMO
+        assert client_venue_realm(_Mainnet(), what="t") is VenueRealm.MAINNET
+
+    def test_an_object_with_no_realm_reads_as_demo(self) -> None:
+        """Hand-rolled test doubles carry no realm and must stay usable."""
+
+        class _Double:
+            demo = True
+
+        assert client_venue_realm(_Double(), what="t") is VenueRealm.DEMO
+
+    @pytest.mark.parametrize(
+        ("demo", "realm", "expected"),
+        (
+            (False, None, "demo"),
+            (False, "demo", "demo"),
+            (True, "mainnet", "mainnet"),
+        ),
+    )
+    def test_a_transport_contradicting_its_realm_is_refused(
+        self, demo: bool, realm: str | None, expected: str
+    ) -> None:
+        client = type("_C", (), {"demo": demo} | ({} if realm is None else {"realm": realm}))()
+        with pytest.raises(ValueError, match=f"contradicts its {expected} realm"):
+            client_venue_realm(client, what="t")
+
+    def test_a_testnet_client_is_refused_in_either_realm(self) -> None:
+        """Testnet is a third venue with its own book; neither realm is it."""
+
+        class _Testnet:
+            demo = True
+            realm = "demo"
+            testnet = True
+
+        with pytest.raises(ValueError, match="refuses a testnet client"):
+            client_venue_realm(_Testnet(), what="t")
+
+    def test_an_unparseable_realm_refuses_rather_than_defaulting(self) -> None:
+        class _Bogus:
+            demo = True
+            realm = "prod"
+
+        with pytest.raises(ValueError, match="explicitly set"):
+            client_venue_realm(_Bogus(), what="t")

@@ -10,11 +10,11 @@ grouped script never edits a unit file.
 | Path | Who runs it | Contents |
 | --- | --- | --- |
 | `dev.sh` | you, before a push | `doctor`, `check` (ruff, mypy, pytest) |
-| `ops.sh` | you, against the host | operator router: status, equity, reset, deploy, real-money preflight |
+| `ops.sh` | you, against the host | operator router: status, equity, reset, flatten, deploy, real-money preflight |
 | `run_authorized_runtime.sh` | systemd | the wrapper every unit's `ExecStart` names; dispatches into `runtime/` |
 | `deploy_vps_live.sh` | systemd / GitHub Actions | install, activate, verify, rollout, mainnet arming |
 | `runtime/` | systemd, via the wrapper | one script per sleeve or service: the event engines, the account owners, the hedge and rmom jobs, the fleet liveness check |
-| `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness |
+| `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
 | `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, demo-rule probes, venue-accounting reconcile, hedge warm-start |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute |
 | `research/` | you, offline | screens, scorers, equity curves, cost and diagnostic reports, the research-refresh workflow |

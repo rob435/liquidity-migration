@@ -17,6 +17,7 @@ __all__ = [
     "REALM_CREDENTIAL_VARIABLES",
     "REALM_REST_ENDPOINTS",
     "VenueRealm",
+    "client_venue_realm",
     "venue_realm",
 ]
 
@@ -54,3 +55,28 @@ def venue_realm(value: object) -> VenueRealm:
         raise ValueError(
             "venue realm must be explicitly set to 'demo' or 'mainnet'"
         ) from exc
+
+
+def client_venue_realm(client: object, *, what: str) -> VenueRealm:
+    """The realm a private client addresses, refusing a self-contradictory one.
+
+    Read from the client rather than passed in, so a caller cannot assert a
+    realm the transport does not actually address. ``demo`` is the pybit
+    transport kwarg and ``realm`` is the authority; an object carrying no realm
+    is read as demo, which keeps hand-rolled test doubles usable and keeps a
+    ``demo=False`` object with nothing to justify it refused exactly as before.
+
+    This is the whole check. Whether trading that realm is permitted is decided
+    by credential resolution, which requires ``REAL_MONEY`` for mainnet.
+    """
+
+    declared = getattr(client, "realm", None)
+    selected = VenueRealm.DEMO if declared is None else venue_realm(declared)
+    if bool(getattr(client, "demo", False)) is not (selected is VenueRealm.DEMO):
+        raise ValueError(
+            f"{what} received a client whose transport contradicts its "
+            f"{selected.value} realm"
+        )
+    if bool(getattr(client, "testnet", False)):
+        raise ValueError(f"{what} refuses a testnet client")
+    return selected

@@ -75,6 +75,9 @@ case "$UNIT:$ENTRYPOINT" in
             --sleeve "${PAPER_MIRROR_SLEEVE:-carry}"
             --scale-mode "${PAPER_MIRROR_SCALE_MODE:-verbatim}"
             --poll-seconds "${PAPER_MIRROR_POLL_SECONDS:-5}"
+            # Runs as root to read the 0600 demo tape, so the paper route
+            # manifests belong to the paper owner, not to this process.
+            --owner-user "${PAPER_RUNTIME_USER:-liquidity-migration-paper}"
         )
         ;;
     liquidity-migration-bybit-long-demo.service:main | \

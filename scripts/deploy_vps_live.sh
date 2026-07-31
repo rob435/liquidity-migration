@@ -1332,8 +1332,16 @@ verify_topology() {
     done
     check_demo_order_permissions verify \
         || fail "demo order permission verification failed"
-    printf 'verify-ok commit=%s profile=%s mainnet_carry=%s mainnet_long=%s\n' \
-        "$EXPECTED_COMMIT" "$AUTH_PROFILE" "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE"
+    # Report the commit the host is actually on, not the one the caller asked
+    # about. Echoing EXPECTED_COMMIT made a stale host indistinguishable from a
+    # current one in the only line an operator reads.
+    local installed_head
+    installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
+    printf 'verify-ok commit=%s requested=%s profile=%s mainnet_carry=%s mainnet_long=%s\n' \
+        "$installed_head" "$EXPECTED_COMMIT" "$AUTH_PROFILE" \
+        "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE"
+    [ "$installed_head" = "$EXPECTED_COMMIT" ] \
+        || fail "installed checkout is $installed_head, not the requested $EXPECTED_COMMIT"
 }
 
 start_if() {
@@ -1714,6 +1722,8 @@ case "$MODE" in
     stop-mainnet) stop_mainnet_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;
+    # Without this an unknown mode silently succeeded having done nothing.
+    *) fail "unknown deploy mode: $MODE" ;;
 esac
 REMOTE_SCRIPT
 } | ssh "${SSH_ARGS[@]}" -- "$SSH_TARGET" bash -s

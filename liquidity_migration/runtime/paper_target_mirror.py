@@ -200,13 +200,20 @@ class PaperTargetMirror:
         if not self.sleeves:
             raise ValueError("paper target mirror requires at least one sleeve")
         self.cursor_path = Path(cursor_path).expanduser()
-        self._cursor = self._load_cursor()
+        if self.cursor_path.exists():
+            self._cursor = self._load_cursor()
+        else:
+            # Persist the adoption immediately. A restart before the leader
+            # publishes again would otherwise adopt a newer head and silently
+            # skip whatever landed in between.
+            self._cursor = _MirrorCursor(offset=0, capture_hash="")
+            self._store_cursor(self._adopt_tape_head())
 
     def _load_cursor(self) -> _MirrorCursor:
         try:
             raw = self.cursor_path.read_bytes()
         except FileNotFoundError:
-            return _MirrorCursor(offset=0, capture_hash="")
+            return self._adopt_tape_head()
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -219,6 +226,34 @@ class PaperTargetMirror:
         ):
             raise PaperTargetMirrorError("paper mirror cursor has invalid fields")
         return _MirrorCursor(offset=int(payload["offset"]), capture_hash=str(payload["capture_hash"]))
+
+    def _adopt_tape_head(self) -> _MirrorCursor:
+        """Start a first run at the tape's current end, not at its beginning.
+
+        Offset zero would republish the leader's entire history onto a live
+        book -- the same replay :meth:`poll` refuses when a tape shrinks. A
+        mirror that has never run has no claim on decisions taken before it
+        existed, so it verifies the chain from genesis to establish the hash,
+        publishes none of it, and follows from there.
+        """
+
+        try:
+            data = self.tape_path.read_bytes()
+        except OSError:
+            # No tape yet: the leader has not published, so genesis is the head.
+            return _MirrorCursor(offset=0, capture_hash="")
+        if not data:
+            return _MirrorCursor(offset=0, capture_hash="")
+        _events, chain_hash = load_target_scheduling_capture_bytes(
+            data,
+            prior_capture_hash=None,
+        )
+        _logger.warning(
+            "paper mirror has no cursor; adopting the demo tape head at %d byte(s) "
+            "and mirroring only what the leader publishes from now on",
+            len(data),
+        )
+        return _MirrorCursor(offset=len(data), capture_hash=chain_hash)
 
     def _store_cursor(self, cursor: _MirrorCursor) -> None:
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)

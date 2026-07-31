@@ -147,30 +147,31 @@ exits 1 while anything is outstanding.
 
 ## What is still unproven
 
-The owner's four Bybit REST components — wallet snapshot, start-up
-order-ownership check, position reconciler, funding reconciler — each refused a
-non-demo client outright until 2026-07-31 and now construct and run under either
-named realm. Every step above exists and is tested, none of it has run against a
-funded account, and the first bullet is a blocker rather than a caveat: two
-demo-only client fences remain, the first of them ahead of all four, so a
-mainnet owner still does not start.
+Every owner-side component now constructs and runs under either named realm. No
+code fence blocks a mainnet owner from starting any more. Every step above
+exists and is tested; none of it has run against a funded account, and what
+remains between the repo and live trading is the owner's own acts —
+`REAL_MONEY`, the mainnet credentials, and a mainnet sleeve toggled on.
 
-- **Two demo-only client fences still block mainnet startup.**
-  `BybitNativeProtectionManager` refuses a non-demo client
-  ([`venue_protection.py:151`](../liquidity_migration/venue/venue_protection.py)) and is built at
-  [`account_service_runner.py:716`](../liquidity_migration/runtime/account_service_runner.py), before
-  every other start-up read; `BybitDemoExecutionAdapter` refuses one too
-  ([`bybit_execution_adapter.py:91`](../liquidity_migration/venue/bybit_execution_adapter.py)) and is
-  built after them. Both are the same arbitrary realm fence the wallet snapshot, order-ownership
-  and reconciler gates carried until they were made realm-aware, but the protection manager also
-  supplies the ownership check's native verifier, so un-fencing it changes what a mainnet owner
-  treats as its own stop. Owner decision.
+- **The demo-only client fences are gone, and what replaced them is narrower.**
+  `BybitNativeProtectionManager`
+  ([`venue_protection.py`](../liquidity_migration/venue/venue_protection.py)),
+  `BybitDemoExecutionAdapter`
+  ([`bybit_execution_adapter.py`](../liquidity_migration/venue/bybit_execution_adapter.py)) and the
+  rollout readiness proof each refused any non-demo client until 2026-07-31. All three now call
+  `client_venue_realm`, which refuses a client whose declared realm and transport disagree, and
+  refuses testnet — the coherence the old fences were actually worth — while accepting either
+  realm. `BybitDemoExecutionAdapter` keeps its name: `bybit_demo` is journaled as `adapter_name`
+  and `AccountExecutionService` keys the position-truth and native-protection requirements off
+  that exact string, so it is an identity, not a description. Whether mainnet may trade is
+  decided by credential resolution, which requires `REAL_MONEY`.
 - **The ownership and position reads are realm-aware but narrow, and fail open.** Both run in
   both realms now, and both ask Bybit for `category=linear, settleCoin=USDT` only. A USDC-settled,
   inverse, spot or options order *or position* on the same UID is therefore invisible: startup
   passes, the reconciler reports `healthy` with that exposure omitted, and nothing detects it —
   while `totalEquity` (below) does count it, so the caps and the daily loss halt size against
-  exposure the owner cannot see or close. Flatten and keep the UID to USDT-linear by hand.
+  exposure the owner cannot see or close. `scripts/ops.sh flatten` only sees what the owner
+  sees, so keep the UID to USDT-linear by hand.
   Bybit's own liquidation and ADL orders carry no kernel
   `orderLinkId` and no stop provenance, so they classify unowned — that makes the account
   unhealthy and, through `require_recent_symbols_consistent`, blocks the owner's own reduce-only
@@ -221,8 +222,9 @@ mainnet owner still does not start.
   rather than relying on it.
 - **`stop-mainnet` stops publication, not exposure.** It leaves positions and the
   sleeve toggles alone, so `verify` fails afterwards and the next `activate` or
-  `rollout` restarts the fleet. Flatten through the account owner and turn the
-  toggles off to make a stop stick.
+  `rollout` restarts the fleet. Turn the toggles off to make a stop stick, then
+  `scripts/ops.sh flatten --execute --environment mainnet --reason ...` to close
+  the book.
 - **Untried against a real venue.** The post-create stop assertion, the
   reconciler, and the wedged-command path have never run against a mainnet key.
   The code is tested; the venue behaviour it asserts is not.

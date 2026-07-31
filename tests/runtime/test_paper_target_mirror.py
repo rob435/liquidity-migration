@@ -19,6 +19,10 @@ from liquidity_migration.runtime.paper_target_mirror import (
     mirror_request,
     mirrored_request_id,
 )
+from liquidity_migration.runtime.paper_target_mirror_runner import (
+    main as mirror_runner_main,
+    resolve_owner_uid,
+)
 from liquidity_migration.account.strategy_event_clock import StrategyEvent
 from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 from liquidity_migration.strategy.strategy_target_replay import (
@@ -223,8 +227,9 @@ class TestScaling:
 class TestPolling:
     def test_published_demo_targets_land_in_the_paper_inbox(self, tmp_path: Path) -> None:
         demo = _demo_route(tmp_path)
+        mirror = _mirror(tmp_path)
         _tape(tmp_path / "strategy-targets.jsonl", [_request(demo, suffix="1")])
-        report = _mirror(tmp_path).poll()
+        report = mirror.poll()
         assert report.requests_mirrored == 1
         queued = _pending(tmp_path)
         assert len(queued) == 1
@@ -232,16 +237,17 @@ class TestPolling:
 
     def test_a_second_poll_over_unchanged_bytes_publishes_nothing(self, tmp_path: Path) -> None:
         demo = _demo_route(tmp_path)
-        _tape(tmp_path / "strategy-targets.jsonl", [_request(demo, suffix="1")])
         mirror = _mirror(tmp_path)
+        _tape(tmp_path / "strategy-targets.jsonl", [_request(demo, suffix="1")])
         mirror.poll()
         assert mirror.poll().requests_mirrored == 0
         assert len(_pending(tmp_path)) == 1
 
     def test_a_restart_resumes_from_the_cursor_instead_of_replaying(self, tmp_path: Path) -> None:
         demo = _demo_route(tmp_path)
+        mirror = _mirror(tmp_path)
         _tape(tmp_path / "strategy-targets.jsonl", [_request(demo, suffix="1")])
-        _mirror(tmp_path).poll()
+        mirror.poll()
         # A brand-new mirror object, as after a service restart.
         assert _mirror(tmp_path).poll().requests_mirrored == 0
         assert len(_pending(tmp_path)) == 1
@@ -249,14 +255,57 @@ class TestPolling:
     def test_only_appended_bytes_are_reverified_after_the_cursor(self, tmp_path: Path) -> None:
         demo = _demo_route(tmp_path)
         tape = tmp_path / "strategy-targets.jsonl"
-        _tape(tape, [_request(demo, suffix="1")])
         mirror = _mirror(tmp_path)
+        _tape(tape, [_request(demo, suffix="1")])
         mirror.poll()
         _tape(tape, [_request(demo, suffix="1"), _request(demo, symbol="ESPUSDT", suffix="2")])
         report = mirror.poll()
         assert report.capture_events_read == 1, "the whole tape was re-read"
         assert report.requests_mirrored == 1
         assert len(_pending(tmp_path)) == 2
+
+    def test_a_first_run_adopts_the_tape_head_instead_of_replaying_history(
+        self, tmp_path: Path
+    ) -> None:
+        """A mirror that has never run has no claim on earlier decisions.
+
+        Starting at offset zero would republish the leader's whole history onto
+        a live paper book, which is the replay ``poll`` already refuses when a
+        tape shrinks.
+        """
+
+        demo = _demo_route(tmp_path)
+        tape = tmp_path / "strategy-targets.jsonl"
+        _tape(tape, [_request(demo, suffix="1"), _request(demo, symbol="ESPUSDT", suffix="2")])
+
+        mirror = _mirror(tmp_path)
+        assert mirror.poll().requests_mirrored == 0
+        assert _pending(tmp_path) == []
+
+        # Only what the leader publishes after the adoption is mirrored.
+        _tape(
+            tape,
+            [
+                _request(demo, suffix="1"),
+                _request(demo, symbol="ESPUSDT", suffix="2"),
+                _request(demo, symbol="TLMUSDT", suffix="3"),
+            ],
+        )
+        assert mirror.poll().requests_mirrored == 1
+        assert len(_pending(tmp_path)) == 1
+
+    def test_the_adopted_head_is_durable_across_a_restart(self, tmp_path: Path) -> None:
+        """Adoption is persisted, so a restart cannot skip the gap it leaves."""
+
+        demo = _demo_route(tmp_path)
+        tape = tmp_path / "strategy-targets.jsonl"
+        _tape(tape, [_request(demo, suffix="1")])
+        _mirror(tmp_path)  # adopts and persists, without polling
+
+        _tape(tape, [_request(demo, suffix="1"), _request(demo, symbol="ESPUSDT", suffix="2")])
+        # A restart must resume from the adopted offset, not re-adopt the newer
+        # head, or the second request would be silently skipped.
+        assert _mirror(tmp_path).poll().requests_mirrored == 1
 
     def test_other_sleeves_are_left_alone(self, tmp_path: Path) -> None:
         demo = _demo_route(tmp_path)
@@ -296,3 +345,63 @@ class TestPolling:
         (tmp_path / "cursor.json").write_text("{not json")
         with pytest.raises(PaperTargetMirrorError):
             _mirror(tmp_path)
+
+
+class TestPrivilegedOwnerBinding:
+    """The mirror is not an owner: it binds to the owner's uid, never creates.
+
+    Running privileged is deliberate -- the demo capture tape is 0600 root:root.
+    That means the paper route manifests belong to the paper owner rather than
+    to this process, which is exactly the read ``require_account_route``
+    documents for a privileged observer.
+    """
+
+    def test_a_named_owner_resolves_to_that_uid(self) -> None:
+        import getpass
+        import os
+
+        assert resolve_owner_uid(None) is None
+        assert resolve_owner_uid(getpass.getuser()) == os.geteuid()
+
+    def test_an_unknown_owner_fails_rather_than_falling_back(self) -> None:
+        """Falling back to None would silently mean "whoever is running" --
+        root, for this unit."""
+
+        with pytest.raises(RuntimeError, match="does not exist"):
+            resolve_owner_uid("liquidity-migration-no-such-user")
+        with pytest.raises(RuntimeError, match="cannot be blank"):
+            resolve_owner_uid("   ")
+
+    def test_the_inbox_accepts_the_owner_uid_it_is_given(self, tmp_path: Path) -> None:
+        import os
+
+        route = _paper_route(tmp_path)
+        inbox = AccountIntentInbox(route, expected_owner_uid=os.geteuid())
+        assert inbox.route == route
+
+    def test_the_inbox_refuses_a_manifest_owned_by_someone_else(self, tmp_path: Path) -> None:
+        import os
+
+        route = _paper_route(tmp_path)
+        with pytest.raises(Exception, match="owner UID"):
+            AccountIntentInbox(route, expected_owner_uid=os.geteuid() + 1)
+
+    def test_the_runner_refuses_an_uninitialized_route_instead_of_creating_one(
+        self, tmp_path: Path
+    ) -> None:
+        """An absent manifest means the paper owner has not started. Creating
+        one here would bind the route to root and leave the real owner locked
+        out of its own account."""
+
+        from liquidity_migration.account.account_route import AccountRouteMissingError
+
+        with pytest.raises(AccountRouteMissingError):
+            mirror_runner_main(
+                [
+                    "--demo-capture-tape", str(tmp_path / "tape.jsonl"),
+                    "--demo-account-root", str(tmp_path / "demo"),
+                    "--account-root", str(tmp_path / "never-initialized"),
+                    "--inbox-root", str(tmp_path / "never-initialized-inbox"),
+                    "--cursor-path", str(tmp_path / "cursor.json"),
+                ]
+            )

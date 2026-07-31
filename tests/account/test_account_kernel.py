@@ -1983,11 +1983,14 @@ def test_reduce_batch_finalization_is_atomic_under_concurrent_redelivery(
     assert len(final.pnl) == 1
 
 
-def test_bybit_demo_adapter_refuses_mainnet_and_never_synthesizes_a_fill() -> None:
+def test_bybit_adapter_refuses_an_unrealmed_client_and_never_synthesizes_a_fill() -> None:
     class FakeClient:
+        # No ``realm``, so it reads as demo, and ``demo=False`` contradicts it.
+        # The adapter accepts either realm now, but never a client whose
+        # declared realm and transport disagree.
         demo = False
 
-    with pytest.raises(ValueError, match="mainnet is forbidden"):
+    with pytest.raises(ValueError, match="contradicts its demo realm"):
         BybitDemoExecutionAdapter(FakeClient())
 
     class DemoClient:

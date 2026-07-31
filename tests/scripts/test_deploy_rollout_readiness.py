@@ -249,13 +249,30 @@ def test_readiness_rejects_stale_evidence_and_non_demo_client(
     )
     assert stopped.journal_sequence == 1
 
-    non_demo = _Client()
-    non_demo.demo = False
-    with pytest.raises(ValueError, match="non-demo"):
+    # The readiness proof is realm-agnostic -- a funded account has to be
+    # provable flat too -- but still refuses a client whose declared realm and
+    # transport disagree, because it would then be proving the wrong book flat.
+    contradictory = _Client()
+    contradictory.demo = False
+    with pytest.raises(ValueError, match="contradicts its demo realm"):
         readiness.require_rollout_readiness(
             account_root=tmp_path,
             head_binding="none",
-            client=non_demo,
+            client=contradictory,
+            now_ns=now_ns,
+        )
+
+    # A coherent mainnet client gets past the realm check entirely: it now fails
+    # on the evidence, exactly as the demo client above does, rather than on its
+    # realm. A funded account has to be provable flat too.
+    mainnet = _Client()
+    mainnet.demo = False
+    mainnet.realm = "mainnet"
+    with pytest.raises(RuntimeError, match="not fresh"):
+        readiness.require_rollout_readiness(
+            account_root=tmp_path,
+            head_binding="none",
+            client=mainnet,
             now_ns=now_ns,
         )
 

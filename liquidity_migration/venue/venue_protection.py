@@ -25,6 +25,7 @@ from liquidity_migration.strategy.account_strategy_state import component_execut
 from liquidity_migration.venue.bybit_execution_adapter import bybit_private_execution_metadata
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
+from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.native_protection_math import round_native_stop
 
 
@@ -148,8 +149,11 @@ class BybitNativeProtectionManager:
         fallback_stop_fraction: float,
         clock: Clock | None = None,
     ) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("native protection manager refuses a non-demo client")
+        # The manager is realm-agnostic: it installs a full-position stop for
+        # whatever account the client addresses. What it must not accept is a
+        # client whose realm and transport disagree, because the stop would then
+        # be installed somewhere other than where the exposure is.
+        self.realm = client_venue_realm(client, what="native protection manager")
         fraction = float(fallback_stop_fraction)
         if not math.isfinite(fraction) or not 0.0 < fraction < 1.0:
             raise ValueError("fallback_stop_fraction must be explicitly set in (0, 1)")
@@ -253,7 +257,7 @@ class BybitNativeProtectionManager:
             return None
         rule = self.rules.get(symbol)
         if rule is None or rule.tick_size <= 0.0:
-            raise RuntimeError(f"{symbol} lacks a verified positive demo tick_size")
+            raise RuntimeError(f"{symbol} lacks a verified positive venue tick_size")
         targets = [
             (key, target)
             for key, target in state.component_targets.items()

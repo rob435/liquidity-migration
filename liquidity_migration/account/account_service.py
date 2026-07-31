@@ -136,7 +136,10 @@ class AccountTargetRequest:
         if type(self.account_id) is not str or not self.account_id:
             raise ValueError("target request account_id is required")
         if type(self.environment) is not str or self.environment not in EXECUTION_ENVIRONMENT_VALUES:
-            raise ValueError("target request environment must be exactly 'demo' or 'paper'")
+            raise ValueError(
+                "target request environment must be one of "
+                + ", ".join(repr(value) for value in sorted(EXECUTION_ENVIRONMENT_VALUES))
+            )
         if self.batch_id.startswith("account-convergence/"):
             raise ValueError("target request batch_id uses the reserved convergence namespace")
         if type(self.intents) is not tuple:
@@ -403,7 +406,11 @@ def _atomic_replace(path: Path, data: bytes) -> None:
         os.close(directory_fd)
 
 
-def _require_verified_account_route(route: AccountRoute) -> AccountRoute:
+def _require_verified_account_route(
+    route: AccountRoute,
+    *,
+    expected_owner_uid: int | None = None,
+) -> AccountRoute:
     if not isinstance(route, AccountRoute):
         raise TypeError("a verified AccountRoute is required")
     verified = require_account_route(
@@ -411,6 +418,7 @@ def _require_verified_account_route(route: AccountRoute) -> AccountRoute:
         environment=route.environment,
         account_root=route.account_root,
         inbox_root=route.inbox_root,
+        expected_owner_uid=expected_owner_uid,
     )
     if verified != route:
         raise ValueError("account route object does not match its durable manifests")
@@ -420,8 +428,16 @@ def _require_verified_account_route(route: AccountRoute) -> AccountRoute:
 class AccountIntentInbox:
     """Filesystem queue with atomic claim and explicit crash recovery."""
 
-    def __init__(self, route: AccountRoute) -> None:
-        self.route = _require_verified_account_route(route)
+    def __init__(self, route: AccountRoute, *, expected_owner_uid: int | None = None) -> None:
+        # ``expected_owner_uid`` is for a privileged writer that is not the
+        # owner -- it names the uid the manifests must belong to instead of
+        # requiring them to belong to this process. Left unset, the manifests
+        # must be this process's own, which is what every owner-side caller
+        # wants.
+        self.route = _require_verified_account_route(
+            route,
+            expected_owner_uid=expected_owner_uid,
+        )
         self.root = self.route.inbox_path
         for name in ("pending", "processing", "completed", "failed", "arrival", ".locks"):
             (self.root / name).mkdir(parents=True, exist_ok=True)

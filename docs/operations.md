@@ -102,9 +102,47 @@ credential and no `REAL_MONEY`; both are the owner's own prior acts.
 
 **stop-mainnet** disables and stops the mainnet timer, watchdog, both producers and the
 owner, and fails if any survives. It stops publication only — exposure is unchanged, so
-flatten through the account owner. It also leaves the sleeves on, so `verify` then fails and
+flatten. It also leaves the sleeves on, so `verify` then fails and
 the next `activate` or `rollout` restarts the fleet; turn the toggles off and install to make
 a stop stick.
+
+## Flatten
+
+```bash
+scripts/ops.sh flatten --environment demo --reason "why"            # reads only
+scripts/ops.sh flatten --execute --environment demo --reason "why"  # publishes
+```
+
+Flatten takes one account to zero exposure through its own owner. It publishes a zero
+replacement target for every component that still holds exposure, then watches the journal
+until the owner has converged. It places no order itself: every close is an ordinary
+owner-side reduce-only command, so risk accounting, protection cleanup and the journal read
+exactly as they do for a strategy exit.
+
+Zero targets are strictly risk-reducing, which is why this works when nothing else does —
+the kernel exempts a reducing batch from the capital, leverage, freshness and partition
+checks that would otherwise refuse an order on a degraded account, and retries a reduction
+without limit. A tripped loss guard does not block an exit.
+
+`--environment` is named explicitly and has no default; it accepts `demo`, `paper` or
+`mainnet`. `--symbol` and `--sleeve` narrow the plan, but a narrowed flatten will not
+satisfy a rollout, which wants the whole account flat.
+
+**Stop the producing sleeve first.** Flatten manages no units, so a producer left running
+can publish a new nonzero target while it is converging. It detects that and says so rather
+than fighting it.
+
+Terminal states, which are also the exit codes:
+
+| Status | Exit | Means |
+| --- | --- | --- |
+| `already_flat`, `flat`, `planned` | 0 | Nothing to do, converged, or a dry run |
+| `dust_limited` | 4 | Residual is below the venue's minimum order size, so no admissible order can express it. As flat as the venue allows; read from the kernel's own `below_min_qty` rejection |
+| `timed_out` | 5 | Did not converge in `--wait-seconds`. The detail names what is still standing, including any target a producer republished |
+| `publication_failed` | 6 | One or more zero targets did not reach the inbox |
+
+Exposure with no component owner needs no target: owner convergence drives an orphan to
+flat on its own. Flatten reports them and waits.
 
 ## Profiles and sleeves
 
@@ -118,17 +156,18 @@ a stop stick.
 
 | Toggle | Now | Units it gates |
 | --- | --- | --- |
-| `LONG_SLEEVE` | on | `bybit-long-demo`, `bybit-long-paper` |
-| `CARRY_SLEEVE` | on | `bybit-carry-demo` |
-| `PAPER_TARGET_MIRROR` | on | `paper-target-mirror` |
+| `LONG_SLEEVE` | off | `bybit-long-demo`, `bybit-long-paper` |
+| `CARRY_SLEEVE` | off | `bybit-carry-demo` |
+| `PAPER_TARGET_MIRROR` | off | `paper-target-mirror` |
 | `CONTINUOUS_SLEEVE` | off | `bybit-continuous-demo`; forces the hedge timer on |
 | `CONTINUOUS_PAPER_SLEEVE` | off | `bybit-continuous-paper` |
 | `CARRY_PAPER_SLEEVE` | off | `bybit-carry-paper`, retired in favour of the mirror |
 | `CARRY_MAINNET_SLEEVE`, `LONG_MAINNET_SLEEVE` | off | `bybit-carry-mainnet`, `bybit-long-mainnet`; either one on also brings up the mainnet owner and liveness timer |
 
 Turning a sleeve off stops new targets; it does not flatten an existing target or venue
-position, so flatten through the account owner and confirm journal/venue agreement before
-retiring one. Each unit names only `UNIT:ENTRYPOINT`, and
+position — the last targets stay standing in the journal, which is why a sleeve-off fleet
+still fails `rollout`'s flat proof. Turn the sleeve off, then flatten. Each unit names only
+`UNIT:ENTRYPOINT`, and
 [`run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh) maps that pair to one
 complete command line and execs it; callers cannot append argv.
 
@@ -169,9 +208,9 @@ leaves the units stopped and the archive as the only recovery source.
   `ROLLOUT_REFRESH_STALE_DEMO_RULES=1 ... deploy --execute install` then `activate`.
 - Read logs on the host with `journalctl -u liquidity-migration-<unit> -n 200 --no-pager`;
   `systemctl list-units 'liquidity-migration-*'` shows the fleet.
-- To flatten, publish through the account owner — reductions bypass every cap by design.
-  Do not cancel or close by hand on the venue while an owner is running: the journal
-  becomes the thing that disagrees with the account.
+- To flatten, use `scripts/ops.sh flatten` (below). Do not cancel or close by hand on the
+  venue while an owner is running: the journal becomes the thing that disagrees with the
+  account.
 - Host replacement, SSH or deploy-key recovery, and expected-commit drift: the
   `vps-migrate` skill.
 

@@ -80,21 +80,20 @@ def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path
 
 
 def test_loaded_toggles_match_committed_sleeve_state(tmp_path: Path) -> None:
-    # Loaded toggles must equal the committed deploy/sleeves.env: LONG on,
-    # CONTINUOUS is retired from demo AND paper,
-    # CARRY on for demo. The paper CARRY producer is off because two producers
-    # deciding independently off a raced read of one data store cannot be made
-    # to agree. PAPER_TARGET_MIRROR was to replace it but is off too: it cannot
-    # read the demo capture tape as the paper user (see deploy/sleeves.env), so
-    # paper CARRY is idle rather than raced. One `test` per toggle -- a failing
-    # inner member of one `&&` chain is ignored by `set -e`, since only the LAST
-    # member's status escapes.
+    # Loaded toggles must equal the committed deploy/sleeves.env. Every producer
+    # is off for the 2026-07-31 flatten window: the book cannot be taken to zero
+    # while a producer is republishing into it. CONTINUOUS is retired from demo
+    # AND paper permanently. The paper CARRY producer stays off regardless,
+    # because two producers deciding independently off a raced read of one data
+    # store cannot be made to agree; PAPER_TARGET_MIRROR replaces it. One `test`
+    # per toggle -- a failing inner member of one `&&` chain is ignored by
+    # `set -e`, since only the LAST member's status escapes.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$LONG_SLEEVE" = on
+        test "$LONG_SLEEVE" = off
         test "$CONTINUOUS_SLEEVE" = off
         test "$CONTINUOUS_PAPER_SLEEVE" = off
-        test "$CARRY_SLEEVE" = on
+        test "$CARRY_SLEEVE" = off
         test "$CARRY_PAPER_SLEEVE" = off
         test "$PAPER_TARGET_MIRROR" = off
         echo "TOGGLES_OK"
@@ -240,17 +239,17 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
 
 def test_committed_sleeves_env_continuous_retired() -> None:
     # The committed file is the source of truth. CONTINUOUS is retired from demo
-    # and paper; LONG stays on; CARRY replaces CONTINUOUS on demo; paper CARRY is
-    # idle -- PAPER_TARGET_MIRROR was to serve it but cannot run under the
-    # deployed demo/paper boundary, and the raced producer is not the fallback.
+    # and paper permanently; paper CARRY is served by PAPER_TARGET_MIRROR, never
+    # by its own raced producer. LONG, CARRY and the mirror are all off for the
+    # 2026-07-31 flatten window and the follow-up commit turns them back on.
     # Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
     # comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
-        "LONG_SLEEVE": "on",
+        "LONG_SLEEVE": "off",
         "CONTINUOUS_SLEEVE": "off",
         "CONTINUOUS_PAPER_SLEEVE": "off",
-        "CARRY_SLEEVE": "on",
+        "CARRY_SLEEVE": "off",
         "CARRY_PAPER_SLEEVE": "off",
         "PAPER_TARGET_MIRROR": "off",
         # Real-money producers. Repo-off is a hard ceiling a host override

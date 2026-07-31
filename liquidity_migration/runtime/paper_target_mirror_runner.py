@@ -6,6 +6,12 @@ not touch the demo account journal or inbox.
 
 It runs privileged because the demo capture tape is ``0600 root:root`` and the
 paper owner is unprivileged; queued files are handed to the inbox's own uid/gid.
+
+Running privileged means the paper route manifests belong to the paper owner
+rather than to this process, so ``--owner-user`` names the uid they must belong
+to. That is the read ``require_account_route`` documents for a privileged
+observer: still fail-closed, and narrower than the default, because it pins one
+named uid instead of accepting whoever happens to be running.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ import time
 from pathlib import Path
 
 from liquidity_migration.account.account_owner_health import read_account_owner_health
-from liquidity_migration.account.account_route import derive_account_route, ensure_account_route
+from liquidity_migration.account.account_route import require_account_route
 from liquidity_migration.account.account_service import AccountIntentInbox
 from liquidity_migration.core.env_flags import explicitly_false_or_unset
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
@@ -45,6 +51,27 @@ def require_mirror_runtime_isolation(environment=None) -> None:
         )
     if not explicitly_false_or_unset(env.get("REAL_MONEY")):
         raise RuntimeError("paper target mirror requires REAL_MONEY=false or unset")
+
+
+def resolve_owner_uid(owner_user: str | None) -> int | None:
+    """Resolve the named route owner, or None to require this process's own.
+
+    A name that does not resolve is an error rather than a fallback: silently
+    dropping back to ``None`` would turn a typo into "whoever is running", which
+    for a privileged mirror is root.
+    """
+
+    if owner_user is None:
+        return None
+    import pwd  # noqa: PLC0415 - only the privileged path needs it
+
+    name = str(owner_user).strip()
+    if not name:
+        raise RuntimeError("--owner-user cannot be blank")
+    try:
+        return int(pwd.getpwnam(name).pw_uid)
+    except KeyError as exc:
+        raise RuntimeError(f"paper route owner user does not exist: {name}") from exc
 
 
 def resolve_scale(
@@ -91,29 +118,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--scale-mode", choices=SCALE_MODES, default="verbatim")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--owner-user",
+        default=None,
+        help=(
+            "User the paper route manifests must belong to. Required when this "
+            "runs privileged rather than as the owner itself."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.poll_seconds <= 0.0:
         parser.error("--poll-seconds must be positive")
     require_mirror_runtime_isolation()
 
-    requested = derive_account_route(
+    owner_uid = resolve_owner_uid(args.owner_user)
+
+    # Read-only and fail-closed: the mirror is not an owner and must never
+    # initialize or repair a route. An absent manifest means the paper owner has
+    # not started, which is a reason to fail rather than to create one here.
+    #
+    # No owner lease either: the mirror only writes to the inbox, so it must not
+    # contend with the owner for the journal lease.
+    route = require_account_route(
         account_id=args.account_id,
         environment="paper",
         account_root=args.account_root,
         inbox_root=args.inbox_root,
-    )
-    # No owner lease: the mirror only writes to the inbox, so it must not contend
-    # with the owner for the journal lease.
-    route = ensure_account_route(
-        account_id=requested.account_id,
-        environment=requested.environment,
-        account_root=requested.account_root,
-        inbox_root=requested.inbox_root,
+        expected_owner_uid=owner_uid,
     )
     mirror = PaperTargetMirror(
         tape_path=args.demo_capture_tape,
         route=route,
-        inbox=AccountIntentInbox(route),
+        inbox=AccountIntentInbox(route, expected_owner_uid=owner_uid),
         sleeves=args.sleeve or ("carry",),
         cursor_path=args.cursor_path,
     )

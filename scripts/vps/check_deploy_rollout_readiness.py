@@ -22,6 +22,7 @@ from liquidity_migration.account.account_kernel import (  # noqa: E402
 from liquidity_migration.account.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
+from liquidity_migration.core.venue_realm import client_venue_realm  # noqa: E402
 from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_demo_credentials,
@@ -78,8 +79,7 @@ def require_rollout_readiness(
         raise ValueError(
             "head binding must be exact, allow_behind, none, or stopped-maintenance"
         )
-    if not bool(getattr(client, "demo", False)):
-        raise ValueError("rollout readiness refuses a non-demo venue client")
+    client_venue_realm(client, what="rollout readiness")
     root = Path(account_root).expanduser()
     reset_boundary_verified = False
     observed_now_ns = time.time_ns() if now_ns is None else int(now_ns)

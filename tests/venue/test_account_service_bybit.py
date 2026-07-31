@@ -42,6 +42,7 @@ from liquidity_migration.runtime.account_paper_runner import (
 )
 from liquidity_migration.core.deterministic_runtime import VirtualClock
 from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.core.venue_realm import VenueRealm
 from liquidity_migration.venue.demo_rule_probe import (
     DEMO_RULE_PROBE_EVIDENCE_KIND,
     DEMO_RULE_PROBE_EVIDENCE_SCHEMA_VERSION,
@@ -1032,22 +1033,73 @@ def test_mainnet_owner_start_up_reads_get_past_construction(tmp_path: Path) -> N
     ]
 
 
-def test_mainnet_owner_still_blocked_by_two_realm_fences_outside_this_change() -> None:
-    """Named so the residual blocker is discoverable, not implicit.
+def test_both_owner_constructors_accept_a_coherent_mainnet_client(tmp_path: Path) -> None:
+    """The two constructors are realm-agnostic; arming is decided elsewhere.
 
-    ``BybitNativeProtectionManager`` is built at ``account_service_runner.py:716``,
-    before every gate above, and supplies the ownership check's native verifier.
-    ``BybitDemoExecutionAdapter`` is built after them. Both still refuse mainnet.
+    ``BybitNativeProtectionManager`` is built at ``account_service_runner.py:716``
+    and ``BybitDemoExecutionAdapter`` after it. Both used to refuse any non-demo
+    client outright, which blocked a mainnet owner from starting at all. Neither
+    refuses a realm now: whether mainnet may trade is decided by credential
+    resolution, which requires ``REAL_MONEY``.
     """
 
     client = _MainnetOwnerClient()
+    kernel = AccountExecutionKernel(tmp_path, account_id="mainnet-owner")
 
-    with pytest.raises(ValueError, match="non-demo client"):
+    manager = BybitNativeProtectionManager(
+        kernel=kernel,
+        client=client,
+        instrument_rules={},
+        fallback_stop_fraction=0.35,
+    )
+    assert manager.realm is VenueRealm.MAINNET
+    assert BybitDemoExecutionAdapter(client).realm is VenueRealm.MAINNET
+
+
+def test_both_owner_constructors_refuse_a_self_contradictory_client(tmp_path: Path) -> None:
+    """A declared realm that the transport does not address is still refused.
+
+    This is what the demo-only fences were actually worth: a client claiming
+    mainnet while its transport addresses demo (or the reverse) would install
+    stops and send orders somewhere other than where the exposure is.
+    """
+
+    class _Contradictory:
+        demo = True
+        realm = "mainnet"
+
+    kernel = AccountExecutionKernel(tmp_path, account_id="contradictory-owner")
+
+    with pytest.raises(ValueError, match="contradicts its mainnet realm"):
         BybitNativeProtectionManager(
-            kernel=None,  # type: ignore[arg-type]
-            client=client,
+            kernel=kernel,
+            client=_Contradictory(),
             instrument_rules={},
             fallback_stop_fraction=0.35,
         )
-    with pytest.raises(ValueError, match="requires a demo client"):
-        BybitDemoExecutionAdapter(client)
+    with pytest.raises(ValueError, match="contradicts its mainnet realm"):
+        BybitDemoExecutionAdapter(_Contradictory())
+
+
+def test_owner_constructors_refuse_an_unrealmed_non_demo_client(tmp_path: Path) -> None:
+    """An object with no realm reads as demo, so ``demo=False`` stays refused.
+
+    Hand-rolled doubles carry no ``realm``; treating them as demo keeps them
+    usable while preserving the old refusal for anything that turned demo off
+    without saying what it turned it on to.
+    """
+
+    class _Unrealmed:
+        demo = False
+
+    kernel = AccountExecutionKernel(tmp_path, account_id="unrealmed-owner")
+
+    with pytest.raises(ValueError, match="contradicts its demo realm"):
+        BybitNativeProtectionManager(
+            kernel=kernel,
+            client=_Unrealmed(),
+            instrument_rules={},
+            fallback_stop_fraction=0.35,
+        )
+    with pytest.raises(ValueError, match="contradicts its demo realm"):
+        BybitDemoExecutionAdapter(_Unrealmed())

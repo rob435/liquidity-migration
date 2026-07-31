@@ -1,4 +1,4 @@
-"""Account-owner-only adapter from kernel commands to Bybit demo mutations."""
+"""Account-owner-only adapter from kernel commands to Bybit mutations."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from liquidity_migration.account.account_contracts import (
 )
 from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
+from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.execution_adapters import ExecutionObservation, ExecutionObservationType
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a protection import cycle
@@ -70,13 +71,17 @@ def bybit_private_execution_metadata(
 
 
 class BybitDemoExecutionAdapter:
-    """Thin, demo-only Bybit command adapter.
+    """Thin Bybit command adapter for whichever realm its client addresses.
 
     Submission yields the create acknowledgement only; executions arrive through
     the private execution stream and go to the kernel driver. No fill is ever
     inferred from a successful create response.
     """
 
+    # Frozen: journaled as ``adapter_name`` in every submission attempt, and
+    # ``AccountExecutionService`` keys the position-truth and native-protection
+    # requirements off this exact string. It is an identity, not a description,
+    # so it keeps its demo-era spelling in both realms.
     name = "bybit_demo"
     submission_outcome_can_be_ambiguous = True
 
@@ -88,8 +93,11 @@ class BybitDemoExecutionAdapter:
         max_unsubmitted_exposure_age_ns: int = 5_000_000_000,
         entry_stop_verifier: EntryStopVerifier | None = None,
     ) -> None:
-        if not bool(getattr(client, "demo", False)):
-            raise ValueError("BybitDemoExecutionAdapter requires a demo client; mainnet is forbidden")
+        # Realm-agnostic: the order path is identical in both realms, and the
+        # arming decision belongs to credential resolution, which requires
+        # REAL_MONEY for mainnet. What is refused here is a client whose
+        # declared realm and transport disagree.
+        self.realm = client_venue_realm(client, what="Bybit execution adapter")
         if (
             type(max_unsubmitted_exposure_age_ns) is not int
             or max_unsubmitted_exposure_age_ns <= 0
