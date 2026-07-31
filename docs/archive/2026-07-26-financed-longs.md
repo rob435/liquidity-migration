@@ -41,7 +41,7 @@ daily-equivalent rate~~ — **tested and refuted 2026-07-28**: the
 daily-rate-entry variant collapses (Sharpe 0.62; the deep-daily-carry names
 its threshold admits are chronic decliners whose shorts are right), while
 the per-print gate's acuteness selection is load-bearing. See
-`docs/research_2026-07-28_carry_hold_quant_review.md`.
+`docs/archive/2026-07-28-carry-hold-quant-review.md`.
 
 **Corrected verdicts** (`scripts/screen_financed_longs.py` on the
 2026-07-28 panel; output `reports/financed_longs_corrected_2026-07-28/`):
@@ -82,7 +82,7 @@ replication. "First positive mechanism to survive cross-venue replication"
 is withdrawn; carry-hold is single-venue (Bybit) evidence until shown
 otherwise. The same review registered `lane2_carry_hold_v2` (depth-scaled
 sizing, same state machine; v1 keeps scoring) — full tables in
-`docs/research_2026-07-28_carry_hold_quant_review.md`.
+`docs/archive/2026-07-28-carry-hold-quant-review.md`.
 
 ---
 

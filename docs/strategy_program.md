@@ -25,7 +25,7 @@ one-off runners are retired.
   deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
   (Deployment) is the authority for what is installed.
 - **The instrument-repair phase is complete (2026-07-25); see
-  `docs/anomaly_research_2026-07-24.md` §16.** Three results change the position:
+  `docs/archive/2026-07-24-anomaly-research.md` §16.** Three results change the position:
   - **CONTINUOUS's Sharpe 2.73 is withdrawn as evidence about the deployed
     sleeve.** Its backtest models no stop-loss; the deployed account attaches a
     ~2% native seatbelt that is CONTINUOUS's de facto exit rule because the
@@ -141,7 +141,7 @@ Consequences:
   vs price −3.4 (2.1:1): the premium is real, roughly half the registered
   size, and its 2021-22 bear-robustness (now +3.8/+3.0 bp/day) is
   withdrawn. Corrected table and scope:
-  `docs/research_2026-07-26_financed_longs.md` §0; reproduction output
+  `docs/archive/2026-07-26-financed-longs.md` §0; reproduction output
   `reports/financed_longs_corrected_2026-07-28/`.
 - **`lane2_premium_momentum_blend_v1` and the anomaly-research
   settlement-exact numbers** (the leg-attribution reversal, the
@@ -176,7 +176,7 @@ otherwise.
     as always documented (2023-10 alone is +11.4%).
 - **Registered-config truth table**:
   `reports/financed_longs_corrected_2026-07-28/` plus §0 of
-  `docs/research_2026-07-26_financed_longs.md` — the only citable
+  `docs/archive/2026-07-26-financed-longs.md` — the only citable
   financed-longs numbers. Corrected carry_hold artifacts:
   `reports/carry_hold_equity_2026-07-28/`,
   `reports/carry_hold_trade_diagnostics_2026-07-28/`.
@@ -195,7 +195,7 @@ otherwise.
 
 ### 2026-07-28 — carry-hold quant review; `lane2_carry_hold_v2` registered
 
-Full review: `docs/research_2026-07-28_carry_hold_quant_review.md`
+Full review: `docs/archive/2026-07-28-carry-hold-quant-review.md`
 (mechanism, six declared theses, all grid cells, robustness). Change point:
 this commit. Five-line summary:
 
@@ -223,7 +223,7 @@ this commit. Five-line summary:
 
 ### 2026-07-28 — wave 2 (owner Sharpe-2 goal): `lane2_carry_hold_v3`; two integrity findings; data refreshed
 
-Full tables: `docs/research_2026-07-28_carry_hold_quant_review.md` §9.
+Full tables: `docs/archive/2026-07-28-carry-hold-quant-review.md` §9.
 Change point: this commit. Summary:
 
 1. **Registered `lane2_carry_hold_v3`** — v2 plus three filters with
@@ -428,7 +428,7 @@ carries the rollout evidence.
   commit. The forward CONTINUOUS record is continuous across it; entry counts in
   crowded hours are not comparable to days before it.
 - **Lane-2 financed-longs scoring — flat-day turnover (audit M19).** The
-  full-calendar correction recorded in `docs/research_2026-07-26_financed_longs.md`
+  full-calendar correction recorded in `docs/archive/2026-07-26-financed-longs.md`
   on 2026-07-26 lived only in that note: `daily_scores` still iterated the bars
   present in `weights`, so the documented reproduction command printed the
   active-days-only view and contradicted the registered table, and a flat
@@ -466,7 +466,7 @@ An owner-directed one-day program (goal: three alphas that beat the deployed
 CONTINUOUS system on return and Sharpe at full measured costs) ran ~18 new
 mechanism families through the honest harness and registered three configs.
 Full evidence note, including the 22-row negative-results ledger:
-`docs/research_2026-07-26_financed_longs.md`.
+`docs/archive/2026-07-26-financed-longs.md`.
 
 - **Benchmark regenerated from primary artifacts**: CONTINUOUS sl35 render,
   2023-03-13→2026-07-16: Sharpe 1.84, +15.85%, max DD −2.85%
@@ -578,7 +578,7 @@ owner-dispatched; this commit deploys nothing.
 Owner-directed follow-up on the replacement ("why did the 3-cell ensemble
 work — was it a gradual scale-in/TWAP — and what is barebones single_fund0
 missing?"). Full evidence, all cells and negatives:
-`docs/continuous_ladder_mechanism_2026-07-27.md`; reproduction/scorer:
+`docs/archive/2026-07-27-continuous-ladder-mechanism.md`; reproduction/scorer:
 `scripts/render_continuous_admission_variants.py`. Lane-1 on seen data.
 
 - **The TWAP/scale-in story is refuted twice.** The nested triggers fired in
@@ -863,7 +863,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       replace the count-based threshold with something auditable. This is a
       defect in the evidence standard itself, not in any one result.
 - [x] **Idio charts — closed as a Sharpe upgrade for this book (2026-07-30).**
-      `docs/research_2026-07-30_idio_charts.md`. Pre-declared 48-cell grid over
+      `docs/archive/2026-07-30-idio-charts.md`. Pre-declared 48-cell grid over
       the Bybit full-PIT panel (2023-06-01..2026-06-30, 1,126 days, 880
       symbols): **0 cells profitable in their best direction and clearing
       t > 3.46** on measured turnover; max t anywhere is 1.90. Idio beats the
@@ -917,7 +917,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       is contract units, `funding_event_kind` on 2 of 2,024 partitions) are in
       `docs/research_findings.md` §4.
 - [x] Produce the P1 anomaly search with the full log, and consolidate it.
-      `docs/anomaly_research_2026-07-24.md` — 37 mechanisms tested identically.
+      `docs/archive/2026-07-24-anomaly-research.md` — 37 mechanisms tested identically.
       Survivors are cross-venue premium divergence and 1-week cross-sectional
       momentum, both concentrated in the *most* liquid names and effectively
       uncorrelated (+0.009). Funding carry broke in 2025-26 exactly when funding
@@ -969,7 +969,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       correction. Module `liquidity_migration/financed_longs.py`, reproduction
       `scripts/screen_financed_longs.py` (reproduces the registered table
       directly since the 2026-07-27 M19 turnover fix), evidence
-      `docs/research_2026-07-26_financed_longs.md` with the 22-row
+      `docs/archive/2026-07-26-financed-longs.md` with the 22-row
       negative-results ledger.
 - [ ] Score the six registered financed-longs configs on each new completed UTC day
       (`lane2_carry_hold_v1/v2/v3`, `lane2_funding_spread_v1`,
@@ -994,7 +994,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       shape on post-2026-07-27 days
       (`scripts/render_continuous_admission_variants.py admission --end-date …`;
       registered 2026-07-27, evidence
-      `docs/continuous_ladder_mechanism_2026-07-27.md` §5 — the 2025-carried
+      `docs/archive/2026-07-27-continuous-ladder-mechanism.md` §5 — the 2025-carried
       era profile is the thing the forward record must test).
 - [ ] Read the paper passive-execution A/B for realised maker-fill probability
       (target was 100 fills per arm). This is the last unmeasured cost input and

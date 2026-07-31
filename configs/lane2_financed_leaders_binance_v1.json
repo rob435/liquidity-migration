@@ -75,11 +75,11 @@
       "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85},
       "verdict": "beats the benchmark on RETURN only; does NOT beat on full-calendar Sharpe (1.66 vs 1.84). Registered as the replication arm, not as a benchmark-beating book."
     },
-    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 selected the parent rule on Bybit; this arm applies it unchanged to Binance data. Full evidence note: docs/research_2026-07-26_financed_longs.md."
+    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 selected the parent rule on Bybit; this arm applies it unchanged to Binance data. Full evidence note: docs/archive/2026-07-26-financed-longs.md."
   },
   "known_weaknesses": [
     "does NOT beat the benchmark on full-calendar Sharpe (1.66 vs 1.84); the initial 2.12 quote was active-days-only and was corrected the same day",
-    "corr +0.82 with the Bybit arm: this is the same mechanism on largely the same names (79.9% universe Jaccard, docs/anomaly_research_2026-07-24.md section 18.4); it multiplies venue evidence, not portfolio breadth",
+    "corr +0.82 with the Bybit arm: this is the same mechanism on largely the same names (79.9% universe Jaccard, docs/archive/2026-07-24-anomaly-research.md section 18.4); it multiplies venue evidence, not portfolio breadth",
     "t 3.04 is below the program-wide ~3.4 Bonferroni threshold as a standalone discovery; its evidentiary role is as the replication arm of the Bybit registration",
     "no Binance execution, fills, or fee measurement exists in this repository; every number here inherits the Bybit fee assumption",
     "2022 is -10.5 bp/day (the Bybit arm is -3.9): the financing condition protects less on Binance",

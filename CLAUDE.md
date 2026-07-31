@@ -24,13 +24,9 @@ Bybit.
 | Active research queue | [docs/strategy_program.md](docs/strategy_program.md) |
 | Everything else | [README.md](README.md) |
 
-Dated research notes (`docs/anomaly_research_2026-07-24.md`,
-`docs/continuous_ladder_mechanism_2026-07-27.md`,
-`docs/research_2026-07-26_financed_longs.md`,
-`docs/research_2026-07-28_carry_hold_quant_review.md`,
-`docs/research_2026-07-30_idio_charts.md`) are the underlying runs;
-`docs/research_findings.md` is the durable summary. In-flight plans live in
-`docs/demo_paper_convergence_plan.md`.
+Dated research runs live in [`docs/archive/`](docs/archive/README.md) — the
+underlying tables behind a number. `docs/research_findings.md` is the durable
+summary; in-flight work is recorded in `STATE.md`.
 
 Derive live state from those files; never copy sleeve status or thresholds here.
 

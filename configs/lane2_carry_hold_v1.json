@@ -88,7 +88,7 @@
       "parameter_plateau": "enter/exit thresholds {5/2, 10/3, 15/4, 20/5} all Sharpe 1.92-2.64; knife-filter variants {none, -30%, -40%, -50%} all 2.26-2.44; top-N {50, 100, 300} all 2.26-2.61. Broad plateau, no spike.",
       "multiple_testing": "the 2026-07-26 program tested ~18 new mechanism families (~45 constructions) on top of the repository's ~45; Bonferroni threshold ~ t 3.4. This config's t 4.88 clears it."
     },
-    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 (both-venue cross_venue_panel_v1, commit a9ac75d) selected this configuration on 2026-07-26. These numbers CANNOT grade it; the forward record after the registration commit does. Full evidence note: docs/research_2026-07-26_financed_longs.md."
+    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 (both-venue cross_venue_panel_v1, commit a9ac75d) selected this configuration on 2026-07-26. These numbers CANNOT grade it; the forward record after the registration commit does. Full evidence note: docs/archive/2026-07-26-financed-longs.md."
   },
   "known_weaknesses": [
     "concentrated: mean ~3.8 names when active, active on ~72% of days; single-name idiosyncratic risk is bounded only by the 0.10 cap",

@@ -24,7 +24,7 @@ The hedge is rebalanced daily and charged on the change in its own notional,
 charged on its measured turnover exactly as in the unhedged screen, so the two
 are compared on one cost basis.
 
-DECLARED KILL CONDITION (``docs/research_2026-07-30_idio_charts.md``): if the
+DECLARED KILL CONDITION (``docs/archive/2026-07-30-idio-charts.md``): if the
 hedged book's net Sharpe does not exceed the unhedged book's at the same cost
 basis, the idio-chart programme is closed for this repository.
 

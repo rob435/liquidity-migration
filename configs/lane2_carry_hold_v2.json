@@ -83,7 +83,7 @@
     },
     "binance_replication": "FAILS on the corrected scorer: same construction on Binance = +2.7 bp/day, t 0.4, Sharpe 0.18, MAR negative; depth sizing does not rescue it (0.16). v1's registered replication claim (Sharpe 1.38, effect ratio 0.50) was an artifact of the funding double-count. The mechanism is currently SINGLE-VENUE (Bybit) evidence.",
     "multiple_testing": "this review ran ~19 seen-data cells on top of the program's prior ~90 constructions; t 2.6 does NOT clear the program's historical Bonferroni-style bar (~3.4). v2 is a sizing refinement of an already-registered mechanism, not a new discovery; its evidence is the forward run and the paired differential vs v1.",
-    "provenance": "Selected 2026-07-28 by the carry_hold quant review (docs/research_2026-07-28_carry_hold_quant_review.md) on the corrected scorer over cross_venue_panel_v1 2021-01-01..2026-07-17 (seen data). Thesis tests T1-T6 preceded the grid; the grid was declared before any cell ran; the ref extension past 80 and the print-depth family are labelled post-hoc in the review."
+    "provenance": "Selected 2026-07-28 by the carry_hold quant review (docs/archive/2026-07-28-carry-hold-quant-review.md) on the corrected scorer over cross_venue_panel_v1 2021-01-01..2026-07-17 (seen data). Thesis tests T1-T6 preceded the grid; the grid was declared before any cell ran; the ref extension past 80 and the print-depth family are labelled post-hoc in the review."
   },
   "known_weaknesses": [
     "inherits every v1 weakness: ~3.8 concentrated names when active, +0.75 correlation with financed_leaders, long-only market beta (contemporaneous BTC beta 0.44 on active days), capitulation entries can catch death spirals, capacity limited to the deep-negative-funding subset",

@@ -20,7 +20,7 @@
     "gate": {
       "btc_lookback_days": 30,
       "btc_threshold": -0.05,
-      "note": "the house 2B regime conditioner at the Phase-5A t-chosen threshold (docs/anomaly_research_2026-07-24.md section 18.6); prior-day window, PIT"
+      "note": "the house 2B regime conditioner at the Phase-5A t-chosen threshold (docs/archive/2026-07-24-anomaly-research.md section 18.6); prior-day window, PIT"
     },
     "sizing": {
       "per_name_cap": 0.1,
@@ -87,7 +87,7 @@
       "funding_cap_curve": "bench Sharpe: no cap 1.57, <=+1bp 1.79, <=0 2.87 - monotone along the crowding axis",
       "multiple_testing": "t 4.04 against the ~3.4 Bonferroni threshold for the program's ~63 mechanisms"
     },
-    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 selected this configuration on 2026-07-26. These numbers CANNOT grade it. Full evidence note: docs/research_2026-07-26_financed_longs.md."
+    "provenance": "Lane-1 exploration on 2021-01-01..2026-07-18 selected this configuration on 2026-07-26. These numbers CANNOT grade it. Full evidence note: docs/archive/2026-07-26-financed-longs.md."
   },
   "known_weaknesses": [
     "correlated +0.75 with lane2_carry_hold_v1 and 41% of its name-days are also carry-hold names: both books harvest the funding-financed long-side premium in different phases (capitulation vs squeeze); they are two recipes, not two independent premia",

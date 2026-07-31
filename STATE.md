@@ -485,7 +485,7 @@ journal instead of the constant 250,000 it reported for its whole life
 demo's 366, which was arithmetic and not a threshold), paper accrues modelled
 funding from public rates (it previously accrued **none**, on a sleeve whose
 entire return is funding), and a demo↔paper agreement check runs in the
-liveness watchdog. Plan and evidence: `docs/demo_paper_convergence_plan.md`.
+liveness watchdog.
 
 ## Evidence boundary
 
@@ -504,7 +504,7 @@ Research-only: Strategy Overhaul V2 closed with no qualifying thesis and did not
 touch its reserved holdout; its diagnostic portfolios are model-based and
 negative after costs/funding. The consolidated research conclusion and successor
 direction are in `docs/strategy_program.md`; current anomaly evidence is in
-`docs/anomaly_research_2026-07-24.md`. Retired receipts remain in Git history.
+`docs/archive/2026-07-24-anomaly-research.md`. Retired receipts remain in Git history.
 
 ## Known benign alert shapes
 

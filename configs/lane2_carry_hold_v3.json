@@ -78,7 +78,7 @@
     "v2_same_basis": {"mean_net_bp_per_day": 16.74, "t_stat": 2.47, "sharpe_raw": 1.09, "max_drawdown_raw_pct": -48.6, "mar_raw": 1.21, "mean_oneway_turnover": 0.198},
     "benchmark_window_2023_03_13_to_2026_07_16": {"sharpe_raw": 1.71, "mar_raw": 4.84, "max_drawdown_raw_pct": -28.7, "v2_same_basis": {"sharpe_raw": 1.35, "mar_raw": 1.95}},
     "paired_differential_vs_v2": {"mean_bp_per_day": 3.09, "t_stat": 1.64, "note": "the registered forward experiment"},
-    "multiple_testing": "wave-2 ran ~95 seen-data cells (all reported in docs/research_2026-07-28_carry_hold_quant_review.md §9); t 3.13 sits at the program's ~3.4 historical bar, and the filters are refinements of a registered mechanism with declared-before-tested diagnostics and era-consistent direction — the forward differential grades them",
+    "multiple_testing": "wave-2 ran ~95 seen-data cells (all reported in docs/archive/2026-07-28-carry-hold-quant-review.md §9); t 3.13 sits at the program's ~3.4 historical bar, and the filters are refinements of a registered mechanism with declared-before-tested diagnostics and era-consistent direction — the forward differential grades them",
     "provenance": "Selected 2026-07-28 by wave-2 of the carry-hold quant review on seen data. Diagnostics (U-shape, dead-name, recovery-velocity) were declared with mechanisms before their conditional tables ran; the offset sweep and hourly engine were robustness probes whose adverse findings are recorded above rather than hidden."
   },
   "known_weaknesses": [

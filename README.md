@@ -56,15 +56,10 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [docs/governance.md](docs/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
 | [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
 | [docs/strategy_program.md](docs/strategy_program.md) | active research queue |
-| [docs/demo_paper_convergence_plan.md](docs/demo_paper_convergence_plan.md) | in-flight demo/paper convergence work |
 | [docs/real_money.md](docs/real_money.md) | the funded-account envelope, the owner's arming runbook, and what is still unproven |
+| [docs/archive/](docs/archive/README.md) | dated research runs — the underlying tables behind a number |
 
-Dated research notes ([anomaly_research_2026-07-24](docs/anomaly_research_2026-07-24.md),
-[continuous_ladder_mechanism_2026-07-27](docs/continuous_ladder_mechanism_2026-07-27.md),
-[research_2026-07-26_financed_longs](docs/research_2026-07-26_financed_longs.md),
-[research_2026-07-28_carry_hold_quant_review](docs/research_2026-07-28_carry_hold_quant_review.md),
-[research_2026-07-30_idio_charts](docs/research_2026-07-30_idio_charts.md)) hold
-the underlying runs. Registered configs cite them by section;
+Registered configs cite the archived runs by section;
 `docs/research_findings.md` is the durable summary.
 
 ## Standing rules

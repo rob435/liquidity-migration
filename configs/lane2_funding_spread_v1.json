@@ -59,7 +59,7 @@
     "offset_sweep": "decision clocks {0,6,12,18}h (review-script frame): full 1.28/1.10/1.15/1.23, bench 1.61/1.36/1.38/1.51 - offset-stable, unlike the directional family",
     "conditional_diagnostic": "per-name-day Sharpe by |spread| bucket: 80-150 bp/day -> 2.08, >150 -> 1.91; the premium is real and deep spreads carry it",
     "basis_risk_measured": "the cross-venue price difference has 40 bp/day sd normally but 677 bp/day when |spread| > 50 - the 'neutral' book is NOT riskless exactly when it is active; this is the honest reason its standalone Sharpe is 1.3 and not 3",
-    "multiple_testing": "wave 3 ran ~15 cells (6 declared grid + 3 sizing + 4 offsets + combos), all reported in docs/research_2026-07-28_carry_hold_quant_review.md s10; new mechanism, t 2.9, graded by its forward run",
+    "multiple_testing": "wave 3 ran ~15 cells (6 declared grid + 3 sizing + 4 offsets + combos), all reported in docs/archive/2026-07-28-carry-hold-quant-review.md s10; new mechanism, t 2.9, graded by its forward run",
     "provenance": "Selected 2026-07-28 by wave 3 of the carry-hold quant review on seen data; the mechanism was checked against both negative ledgers first (prior cross-venue items were price-premium signals and the directional Binance replication - neither is this trade)."
   },
   "known_weaknesses": [
