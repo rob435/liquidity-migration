@@ -11,6 +11,8 @@ Bybit.
 | --- | --- |
 | What is running right now | [STATE.md](STATE.md) |
 | The system without jargon | [docs/plain_english_guide.md](docs/plain_english_guide.md) |
+| Which subpackage owns a module, and what may import what | [liquidity_migration/README.md](liquidity_migration/README.md) |
+| Which script to run, and who runs it | [scripts/README.md](scripts/README.md) |
 | Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |
 | What each sleeve trades and where its evidence stops | [docs/trading_logic.md](docs/trading_logic.md) |
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |

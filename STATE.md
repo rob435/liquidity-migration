@@ -19,6 +19,20 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** The change is
 > committed but not deployed.
 
+- **2026-07-31 — repository restructure, committed on `repo-restructure` and
+  not deployed.** The 125-module package moved into eleven subpackages
+  (`liquidity_migration/README.md`), `scripts/` grouped by who runs it
+  (`scripts/README.md`), `tests/` mirrored onto the package, and the dated
+  research runs archived under `docs/archive/`. **No systemd unit file
+  changed** — no `.service` names a Python module; all 19 Exec lines invoke
+  `scripts/run_authorized_runtime.sh`. What did change is committed shell that
+  ships with the checkout: the ten `-m liquidity_migration.<pkg>.<module>`
+  invocations in `scripts/` and `deploy/`, and the six test paths
+  `deploy_vps_live.sh` runs as its focused-runtime-tests preflight. **This is a
+  code deploy, and the whole restructure must land in one release** — a
+  checkout carrying the old shell against the new tree, or the reverse, fails
+  at unit start. Behaviour is unchanged: no strategy, threshold, journal key,
+  or ledger key was touched, and the suite is the same 2768 tests.
 - **2026-07-31 — four of six demo-only client fences off the mainnet owner's
   critical path, in the working tree and not deployed.** The wallet snapshot
   provider, the start-up order-ownership check, the position reconciler and the
