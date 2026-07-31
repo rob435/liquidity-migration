@@ -134,7 +134,7 @@ complete command line and execs it; callers cannot append argv.
 
 Sizing lives in [`configs/operational.demo.json`](../configs/operational.demo.json): edit the
 repository copy, never the installed `/etc` copy, then reinstall. `pytest -q
-tests/test_operational_profile.py` runs the loader, which rejects unknown keys, non-finite
+tests/policy/test_operational_profile.py` runs the loader, which rejects unknown keys, non-finite
 values, producer leverage above the account maximum and envelopes that cannot fit the owner
 caps at `capital_reference_usdt`.
 

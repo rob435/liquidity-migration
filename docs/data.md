@@ -118,7 +118,7 @@ target event (`account_kernel.py:2053`), so a row violating the second is a genu
 
 *Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision
 reference price (`protection_engine.py:123-151`);
-[`tests/test_account_strategy_state.py`](../tests/test_account_strategy_state.py) pins this. The
+[`tests/strategy/test_account_strategy_state.py`](../tests/strategy/test_account_strategy_state.py) pins this. The
 account owner's venue-native entry stop is the other plane and is anchored to the decision
 reference price, because it is armed in the same `place_order` call as the entry and no fill exists
 yet ([`architecture.md`](architecture.md), *Venue-native protection*). Four
@@ -158,7 +158,7 @@ their own bar-stamp date, unadjusted.
 **What kline coverage is required.** Not every manifest row. Coverage is required only for manifest
 `(date, symbol)` pairs inside each symbol's traded span `[first_kline_date, last_kline_date]`
 (`_required_pit_date_symbols`, `volume_events_pit.py:292`; pinned by
-`tests/test_volume_events_pit.py`). Rows before the first kline (listing or
+`tests/data/test_volume_events_pit.py`). Rows before the first kline (listing or
 announcement precedes the first trade bar) and after the last kline (an isolated 0-trade
 settlement/marker archive object landing weeks-to-months later) are excluded: genuinely empty archive
 objects, untradable, and re-downloading them returns Empty every time. A gap *inside* the span is still

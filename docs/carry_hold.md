@@ -183,7 +183,7 @@ grind-downs where shorts are not paying.
    superseded active-days-only basis) against the ≈3.4 Bonferroni threshold for
    the ~63 mechanisms this program has tested.
 8. **Funding-sign accounting** is covered by unit tests
-   (`tests/test_financed_longs.py`): a long receives negative funding
+   (`tests/research/backtest/test_financed_longs.py`): a long receives negative funding
    settlement-exactly; hysteresis state uses only past prints; the gross cap
    dilutes.
 

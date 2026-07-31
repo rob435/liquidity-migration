@@ -174,7 +174,7 @@ turnover down 27%).
    root) with one row per config-day for all four registered configs plus
    the derived `carry_hold_v2_minus_v1` paired differential;
    `forward_eligible` marks days strictly after each registration.
-   Append-first and idempotent (`tests/test_score_financed_longs_forward.py`).
+   Append-first and idempotent (`tests/scripts/test_score_financed_longs_forward.py`).
 2. The financed-longs forward record still needs the data refresh past
    2026-07-17 (pre-existing queue item; now covers both configs).
 3. Re-derive the stale negative-ledger rows (1, 2, 13–17, 20) on the

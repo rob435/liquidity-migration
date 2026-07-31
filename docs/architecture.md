@@ -343,7 +343,7 @@ reconstructed, never venue-final. The CONTINUOUS BTC gate and entry-funnel line 
 a separate receipt-bound projection shown only when `CONTINUOUS_CYCLE_ROOT` is configured;
 it is deliberately unset on both owner units
 (`deploy/systemd/liquidity-migration-account-execution.service:17`,
-`...-paper-execution.service:17`, pinned by `tests/test_runtime_scripts.py:319,821,982`) so
+`...-paper-execution.service:17`, pinned by `tests/scripts/test_runtime_scripts.py:319,821,982`) so
 a retired sleeve leaves no permanently `STALE` line. Re-promotion must set the root
 explicitly.
 

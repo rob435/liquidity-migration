@@ -1010,12 +1010,12 @@ install_mode() {
     run_phase ruff "$PYTHON" -m ruff check liquidity_migration scripts tests
     run_phase mypy "$PYTHON" -m mypy liquidity_migration
     run_phase focused-runtime-tests "$PYTHON" -m pytest -q \
-        tests/test_candidate_rule_coverage.py \
-        tests/test_demo_rule_probe.py \
-        tests/test_deploy_rollout_readiness.py \
-        tests/test_operational_profile.py \
-        tests/test_strategy_planning.py \
-        tests/test_runtime_scripts.py
+        tests/ops/test_candidate_rule_coverage.py \
+        tests/venue/test_demo_rule_probe.py \
+        tests/scripts/test_deploy_rollout_readiness.py \
+        tests/policy/test_operational_profile.py \
+        tests/strategy/test_strategy_planning.py \
+        tests/scripts/test_runtime_scripts.py
 
     # Bound journald so logs cannot crowd the data roots, and keep at most the
     # newest timestamped backup of the demo credential file.

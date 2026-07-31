@@ -28,8 +28,8 @@ decisions read funding *levels* — but every funding P&L leg below is
 inflated (~×1.5–2 blended, largest where funding was deepest). Fixed
 2026-07-28 in `financed_longs.settlement_exact_funding` and
 `lane2_blend.settlement_exact_funding` (age-reset detector; regression tests
-on the real age shapes in `tests/test_financed_longs.py` and
-`tests/test_lane2_blend.py`). The registrations and their commit dates are
+on the real age shapes in `tests/research/backtest/test_financed_longs.py` and
+`tests/research/panels/test_lane2_blend.py`). The registrations and their commit dates are
 untouched — the scorer is corrected, the receipts stand (M19 precedent).
 Discovered from the owner's question about Bybit's shortened funding
 intervals; those are real (2025 settlements: 52% 4h, 21% 1h, 7% 2h, ~20%
@@ -343,7 +343,7 @@ Structural findings worth more than the individual results:
   `configs/lane2_financed_leaders_binance_v1.json` (the commit is the
   registration).
 - Executable: `liquidity_migration/research/backtest/financed_longs.py`; reproduction:
-  `scripts/research/screen_financed_longs.py`; tests: `tests/test_financed_longs.py`.
+  `scripts/research/screen_financed_longs.py`; tests: `tests/research/backtest/test_financed_longs.py`.
 - Benchmark render: `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26/`
   *(2026-07-28: superseded as a baseline — retained in place only as a
   frozen input of the registered admission-variant scorer)*.

@@ -584,7 +584,7 @@ def canonical_account_projection(
 #: Event types the canonical read models inspect directly; everything else
 #: reaches them through ``AccountState``, which the cursor folds over every
 #: event regardless. Keep in step with the ``AccountEventType`` filters below;
-#: ``tests/test_account_journal_cursor.py`` pins the equivalence.
+#: ``tests/strategy/test_account_journal_cursor.py`` pins the equivalence.
 PROJECTION_EVENT_TYPES: frozenset[str] = frozenset(
     {
         AccountEventType.TARGET.value,
