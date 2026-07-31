@@ -15,7 +15,7 @@ Come here for the full tables and the reasoning behind a specific number.
 | [2026-07-27 continuous ladder mechanism](2026-07-27-continuous-ladder-mechanism.md) | Why did the retired 3-cell ensemble work, and can `single_fund0` replicate it? |
 | [2026-07-28 carry-hold quant review](2026-07-28-carry-hold-quant-review.md) | Six falsifiable theses against `lane2_carry_hold_v1` on the corrected settlement-exact scorer; registered v2 |
 | [2026-07-30 idio charts](2026-07-30-idio-charts.md) | Do chart signals work better on idiosyncratic price paths than raw ones? |
-| [2026-07-31 trend filters](2026-07-31-trend-filters.md) | Does excluding coins in a downtrend improve the books, family-wide rather than only carry? Long-side only and not a momentum tilt, but worthless on both registered books — a screen pays only where entry is unselective |
+| [2026-07-31 trend filters and persistence](2026-07-31-trend-filters-and-persistence.md) | Does excluding downtrending coins pay? No — a screen pays only where entry is unselective. Closed two of the four untested doors, and found crowding persistence, which works as a **size** and not a screen. Registered v4 |
 
 ## What is not here
 

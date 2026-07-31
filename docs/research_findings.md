@@ -27,11 +27,19 @@ liquidation risk with a named counterparty, which is why the easy construction w
 
 | registered config | bp/day | t | Sharpe full / bench | max DD | turnover |
 | --- | ---: | ---: | ---: | ---: | ---: |
+| [carry_hold_v4](../configs/lane2_carry_hold_v4.json) | 22.19 | 3.61 | 1.64 / **1.88** | −24.5% | 0.119 |
 | [carry_hold_v1](../configs/lane2_carry_hold_v1.json) | 18.0 | 2.31 | 1.02 / **1.21** | −60.0% | 0.271 |
 | [carry_hold_v2](../configs/lane2_carry_hold_v2.json) | 16.7 | 2.47 | 1.09 / 1.35 | −48.6% | 0.198 |
 | [carry_hold_v3](../configs/lane2_carry_hold_v3.json) | 19.83 | 3.13 | 1.38 / 1.71 | −28.7% | 0.156 |
 | [funding_spread_v1](../configs/lane2_funding_spread_v1.json) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
 
+- **v4 is scored over 1,756 days, not 1,894** — it does not trade early-2021, so its row above is not
+  directly comparable with v1–v3's. On the shared spine v3 reads 21.12 bp/day and Sharpe 1.41. v4's own-capital
+  differential vs v3 is **+1.07 bp/day at t 0.47, not significant**; its registered claim is capital efficiency
+  (mean gross 0.0948 vs 0.1362) and the capital-normalised differential **+10.76, t 3.23**. At v3's capital
+  v4's worst dip is 33.5%, *worse* than v3's; at its own capital it is 24.5%, better. Sharpe and MAR are
+  scale-free and improve either way. v4's bench 1.88 is the first carry-hold render above the 1.84 benchmark —
+  seen-data selection, so it grades nothing.
 - v1's bench **1.21 (t 2.31)** is the citable figure and does **not** beat the CONTINUOUS benchmark (1.84, §3).
   Two CONTINUOUS Sharpes appear in this document and they are different renders: **1.84** is the retired
   sl35 research render used as the comparison benchmark; **1.45** is the shipped book's forward figure.
@@ -318,6 +326,17 @@ that this research was replacing a broken deployed book was wrong.
 - **Registered numbers are module-path.** The review scripts compute the trailing rate after `prepare()`'s row
   filter, the module before: 50 of 1,883 gap-adjacent days differ, Sharpe 1.13 vs 1.11 on the chosen cell,
   orderings unaffected.
+- **`lane2_carry_hold_v1` does not reproduce its own registered figures, and v2/v3 do.** `score_carry_hold`
+  gives v1 **17.38 bp/day / Sharpe 0.977 / turnover 0.273** against the registered 18.0 / 1.02 / 0.271, a ~3.5%
+  gap. v2 (16.736 / 1.085 / 0.198) and v3 (19.826 / 1.376 / 0.156) reproduce to three decimals. Confirmed
+  **pre-existing** on 2026-07-31 by scoring both sides of the v4 change — the numbers are byte-identical before
+  and after — and consistent with the module-path item above. Not repaired; recorded so it is not rediscovered
+  as a new defect, and so v1's row in §1 is read as approximate.
+- **Vol-targeted drawdown is not a comparable statistic across sizing variants.** During the v4 review it
+  ranked the persistence arms in the *opposite* order to the raw basis (the arm with the best vt drawdown,
+  31.9%, had the worst raw one, 39.3%). The repo already treats raw as primary and vt as recipe-comparability
+  only; this is the concrete instance of why. Any drawdown compared across arms holding different average
+  capital must also state the capital, since drawdown scales with it.
 - **Two Sharpe bases in the CONTINUOUS work, not comparable**: "active" = active ledger days only (what
   component reports print); "fc" = full calendar with flat days as zeros. Convert with × sqrt(active_days/1222).
 - **CONTINUOUS's small drawdown reflected a small book**: mean realized gross 0.0075 against a nominal target
@@ -351,11 +370,32 @@ that this research was replacing a broken deployed book was wrong.
   `kernel_strategy_id` for every CONTINUOUS config), a committed both-venue registry with a refresh policy so
   the panel union cannot silently drift, and an explicit re-size — the retired profile block was shrunk to
   `max_active` 1.
-- **Untested loser-identification doors**, in mechanism order: same-symbol cross-venue funding confirmation at
-  entry (consensus short vs venue-local liquidation), suspend → hard exit, toxic-band high boundary extended
-  to 0, turnover-rank-decay dropout warning. Two cohorts are already known structurally lossy and remain
-  candidate exclusions: suspension-touched trades (−6.5%, n=168) and positions open at series end (−4.0%,
-  n=70, −16% of book over 5.5y). **Permanently closed:** OI (contaminated) and spot basis (data the roots lack).
+- **Loser-identification doors — two closed, one taken, one still open (2026-07-31).**
+  - **Closed: same-symbol cross-venue funding confirmation at entry.** The diagnostic pointed the right way
+    (name-days where Binance funding is also deep earn +59.6 bp/nd vs +16.0 where it is ≥ 0) but the
+    venue-local cohort is 6.4% of the book and blocking it is worth −0.10 bp/day (t −0.09). Requiring
+    *sustained* Binance crowding is actively harmful, −5.70 and −6.18 bp/day (t −2.9, −3.0): it strips the
+    acute Bybit-local liquidation events the premium is paid for.
+  - **Closed: turnover-rank-decay dropout.** The first measurement was broken — raw rank *number* drifts up
+    for every symbol as the panel grows from 84 to 552 listings, so a 7-day change in it counts new listings.
+    Repaired with a percentile rank, names slipping 5–15pp in a week do earn −53.1 bp/nd, but that is 8% of
+    the book and as a filter it is worse than the band v3 already has.
+  - **Taken: toxic-band high boundary extended to 0** — in `lane2_carry_hold_v4`, at t 1.12, i.e. below the
+    bar, at the owner's direction and flagged as such in the config.
+  - **Still open: suspend → hard exit.** Untestable without an identity-shifting engine change; v3/v4 suspend
+    a hold to zero weight inside the band rather than ending the state.
+  - Two cohorts remain known structurally lossy and candidate exclusions: suspension-touched trades (−6.5%,
+    n=168) and positions open at series end (−4.0%, n=70, −16% of book over 5.5y).
+    **Permanently closed:** OI (contaminated) and spot basis (data the roots lack).
+- **Crowding persistence is the surviving new feature, and it only works as a size.** Share of a symbol's last
+  20 settlements printing deeper than the 10 bp entry threshold, counted in settlement sequence and not on a
+  clock. As an entry *filter* it is a wash against v3's band (paired differential −0.69, t −0.39) — on a
+  3-name book removing candidates costs more than the losers save. As a *size multiplier* composed with v2's
+  depth ladder it is the strongest carry result the program has: 16 of 16 shape cells positive at t 1.87–2.77,
+  and the combined v4 differential is +10.76 bp/day (t 3.23) at v3's capital. Replacing the depth ladder rather
+  than multiplying it gives +0.16 to +1.89, all t < 1 — the composition is the result. Registered as
+  [lane2_carry_hold_v4](../configs/lane2_carry_hold_v4.json); full run note in
+  [docs/archive/2026-07-31-trend-filters-and-persistence.md](archive/2026-07-31-trend-filters-and-persistence.md).
 - **Missing datasets, ranked.** (1) A liquidation feed — its purpose changed: it is the input that would let
   the one durable premium be *sized and survived*, not a squeeze predictor, and external cascade work records
   a hazard no backtest here models, that venues activate auto-deleveraging and can force-close a winning short.
@@ -370,12 +410,18 @@ that this research was replacing a broken deployed book was wrong.
 - **Structural target never built.** One shared causal feature library, few signals each with a stated
   mechanism, one portfolio construction layer, one execution layer, parameters set by economics. Sizing and
   the BTC hedge remain per-sleeve.
-- **The screen's own budget**, for whoever sets the next threshold: ~45 mechanisms in the anomaly program plus
-  ~18 families (~45 constructions) in the financed-longs program; Bonferroni over the 144-cell tuning grid
-  needs t ≈ 3.58; phase 1 returned 0 of 12 cells at t ≥ 3.25 and the strongest cell was the designated dead
-  control. Gates here were tuned on Sharpe and are therefore mis-set for producing evidence, because loosening
-  a filter buys sample: the momentum BTC gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives
-  n 1,247, **t 2.78**, Sharpe 1.50.
+- **The bar is t ≥ 2.5 as of 2026-07-31**, owner decision, authority
+  [docs/governance.md](governance.md) §2. It replaces the family-wise ≈3.25/3.58 and is prospective — pre-2026-07-31
+  verdicts stand as recorded and are not restated. It also closes a defect the program had open against itself:
+  the ~44-mechanism denominator behind the old threshold was never enumerable in the tree or in git history, so
+  every number derived from it rested on an unverifiable count. A fixed bar does not. What it costs: t 2.5 is
+  p ≈ 0.012, so across ~45 screened mechanisms roughly **one false positive is expected** against roughly one in
+  twenty at 3.25. A plateau and a failed placebo now carry the weight the threshold used to.
+- **The screen's own budget**, for whoever revisits the threshold: ~45 mechanisms in the anomaly program plus
+  ~18 families (~45 constructions) in the financed-longs program; phase 1 returned 0 of 12 cells at the
+  then-current t ≥ 3.25 and the strongest cell was the designated dead control. Gates here were tuned on Sharpe
+  and are therefore mis-set for producing evidence, because loosening a filter buys sample: the momentum BTC
+  gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives n 1,247, **t 2.78**, Sharpe 1.50.
 - Registered experiment definitions live in code, not prose — passive A/B arm parameters in
   [passive_execution.py](../liquidity_migration/runtime/passive_execution.py). Its read thresholds, sample target and
   kill rule are not in code and are recorded in §1, with the reason the arm currently accrues nothing.

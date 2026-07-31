@@ -3,6 +3,7 @@
 
 The Lane-2 recipe for the registered financed-longs configs (``DEFAULT_CONFIGS``
 below: ``lane2_carry_hold_v1``, ``lane2_carry_hold_v2``, ``lane2_carry_hold_v3``,
+``lane2_carry_hold_v4``,
 ``lane2_funding_spread_v1``, ``lane2_financed_leaders_v1``,
 ``lane2_financed_leaders_binance_v1``) is one
 score row per completed UTC day; only days strictly after each config's
@@ -13,8 +14,13 @@ that ledger append-first from a cross-venue panel:
 * every scored panel day is written (seen-data rows carry
   ``forward_eligible=false``) so the ledger is self-describing;
 * the carry-hold sizing experiments get derived rows (``DIFF_PAIRS``):
-  ``carry_hold_v2_minus_v1`` and ``carry_hold_v3_minus_v2``, paired daily
-  differentials, the primary comparison each registration declares.
+  ``carry_hold_v2_minus_v1``, ``carry_hold_v3_minus_v2`` and
+  ``carry_hold_v4_minus_v3``, paired daily differentials, the primary
+  comparison each registration declares. v4's registration declares the
+  CAPITAL-NORMALISED differential as its experiment, not this raw one — at its
+  own capital v4 is not a return improvement (+1.07 bp/day, t 0.47) and this
+  row will show that. Read it beside ``mean_gross``: v4's claim is the same
+  money on ~30% less capital.
 
 Extending the input panel in time belongs to ``scripts/ops.sh research-refresh``
 and ``scripts/data/build_cross_venue_panel.py``, not here.
@@ -44,6 +50,7 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v1.json",
     "lane2_carry_hold_v2.json",
     "lane2_carry_hold_v3.json",
+    "lane2_carry_hold_v4.json",
     "lane2_funding_spread_v1.json",
     "lane2_financed_leaders_v1.json",
     "lane2_financed_leaders_binance_v1.json",
@@ -52,6 +59,7 @@ DIFF_ID = "carry_hold_v2_minus_v1"
 DIFF_PAIRS = (
     ("carry_hold_v2_minus_v1", "lane2_carry_hold_v2", "lane2_carry_hold_v1"),
     ("carry_hold_v3_minus_v2", "lane2_carry_hold_v3", "lane2_carry_hold_v2"),
+    ("carry_hold_v4_minus_v3", "lane2_carry_hold_v4", "lane2_carry_hold_v3"),
 )
 PANEL_COLS = [
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
@@ -103,7 +111,7 @@ def config_rows(
 
 
 def diff_rows(rows: pl.DataFrame) -> pl.DataFrame:
-    """Paired daily differentials (v2-v1, v3-v2) on shared dates."""
+    """Paired daily differentials (v2-v1, v3-v2, v4-v3) on shared dates."""
     out: list[pl.DataFrame] = []
     for diff_id, a_id, b_id in DIFF_PAIRS:
         a = rows.filter(pl.col("config_id") == a_id)

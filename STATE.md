@@ -64,7 +64,26 @@ how it got there. That history is in Git.
   separately and fails on a mismatch. An unknown deploy mode also succeeded
   silently having done nothing; it now fails.
 
-
+- **2026-07-31 — `lane2_carry_hold_v4` registered. NOT DEPLOYED, and the CARRY
+  sleeve still runs v3.** A Lane-2 research registration, not a change to what
+  publishes: `deploy/sleeves.env` and the CARRY producer are untouched, and a
+  regression test pins that v1/v2/v3 score bit-identically before and after.
+  v4 = v3 plus (a) the toxic band's high edge moved −5% → 0% and (b) a
+  crowding-persistence size multiplier composed with v2's depth ladder. Switching
+  the sleeve to it is a separate owner act through the normal deploy flow with a
+  recorded change point. **The headline is capital efficiency, not return**: at
+  its own capital v4 vs v3 is +1.07 bp/day at t 0.47 (not significant); at v3's
+  average capital it is +10.76 at t 3.23, and at that leverage its worst dip is
+  *worse* (33.5% vs 28.7%). Sharpe 1.41 → 1.64 (scale-free); MAR 3.08 → 4.14 at v4's own capital, 4.67 at v3's (MAR is not scale-free). 76.2% of the curve's log growth is 2025-26.
+  Detail: [`docs/carry_hold.md`](docs/carry_hold.md) §0.1.
+- **2026-07-31 — the program significance bar is now t ≥ 2.5**, owner decision,
+  replacing the family-wise ≈3.25/3.58. Authority is
+  [`docs/governance.md`](docs/governance.md) §2; `screen_phase1.py` and
+  `screen_idio_charts.py` follow it and still print the retired threshold beside
+  it. Prospective: verdicts recorded before this date stand as written. It
+  admits roughly one false positive across the program's ~45 screened mechanisms
+  against roughly one in twenty before, so a plateau and a failed placebo now
+  carry the weight the threshold used to.
 - **2026-07-31 — everything below deployed to the VPS at `cdb6e61`.** The host
   had been pinned at `b13cbfa` (2026-07-30) while 38 commits accumulated on
   `main`, so `scripts/ops.sh` from a current checkout could not reach it at all

@@ -57,6 +57,20 @@ for absorbing the panic. Once a day, just after midnight UTC:
 | Hold | keep it while the fee stays deep; leave when it normalises, or the moment it snaps back more than 30 bp over two days |
 | Seatbelt | 35% disaster stop at the exchange — deliberately far away; every tighter stop tested on 1,670 historical trades made it worse |
 
+**A newer version exists on paper and is not running.** `lane2_carry_hold_v4`
+(registered 2026-07-31) changes two things. It refuses the grind over a wider
+range — anything down at all over three days, not just down 5–30% — and it adds
+a second sizing question. The old question was *how much is the crowd paying
+right now*. The new one is *does this coin get crowded habitually, or is this a
+one-off*: it counts what share of the coin's last 20 fee settlements were deep,
+and holds nothing when that is 10% or less. The one-off panic turns out to be
+the only losing group in the whole book. On paper it earns about the same money
+using roughly a third less of the account, with a better smoothness score
+(1.41 → 1.64) and a better pain-adjusted score (3.08 → 4.14). Both versions earn
+almost everything in 2025-26 — three-quarters of the growth — so this is a bet on
+the crowd-fee regime staying the way it has been since 2025. Switching the live
+sleeve to it is a separate decision nobody has made.
+
 It takes no profit target. A few big squeezes pay for many small losers;
 roughly 6 trades in 10 lose.
 
@@ -217,6 +231,8 @@ file, a record, or a log line.
 | contract that never expires, tracking a coin's price | perpetual, perp |
 | the crowd fee: every 8h the crowded side pays the other | funding |
 | the last crowd fee actually charged, never a forecast | settled funding |
+| how habitually a coin gets crowded: share of its last 20 fee settlements that were deep | crowd persistence |
+| average slice of the account actually at risk, counting flat days as zero | mean gross |
 | rising price forcing short-sellers to buy back at once, pushing it higher | short squeeze |
 | profit from being paid to hold, not from price moves | carry |
 | money traded in a period | turnover |

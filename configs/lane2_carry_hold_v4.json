@@ -1,0 +1,152 @@
+{
+  "config_id": "lane2_carry_hold_v4",
+  "registered": "2026-07-31",
+  "lane": 2,
+  "surface": "research-only",
+  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
+  "descends_from": "lane2_carry_hold_v3 (which keeps scoring; v3's forward record is NOT superseded and must keep accruing)",
+  "claim": "v3's book plus two changes. (1) The toxic band's high edge moves -5% -> 0%: the trailing-3d-return cohort in [-5%, 0) earns -34.4 bp/name-day on 10% of v3's held name-days and v3 keeps it. (2) A CROWDING-PERSISTENCE size multiplier: a held name whose last 20 settlements were deep (< -10 bp) at most 10% of the time is cut to zero weight. Persistence is not depth. Depth (v2's ladder, kept) asks how much the crowd is paying now; persistence asks whether this name pays habitually. The isolated deep print is the only losing cohort in the book at -16.7 bp/name-day over a third of held name-days, while every bucket above the cut earns +99 to +135. The two multiply.",
+  "read_this_before_citing_a_number": {
+    "the_two_books_do_not_span_the_same_record": "v3's record is 1,894 decision days and v4's is 1,756: daily_scores spans first-weighted to last-weighted bar, and v4 does not take a position until later because early-2021 names have not yet printed deep often enough. EVERY comparison below is on the 1,756-day SHARED spine, where v3 reads mean +21.12 bp/day and Sharpe 1.41 rather than the +19.83 / 1.38 its own config records over its own longer window. Both are true; they are different windows.",
+    "at_its_own_capital_v4_is_not_a_return_improvement": "The paired differential is +1.07 bp/day at t 0.47. NOT significant. Do not quote v4's +22.19 against v3's +19.83 as an improvement - those are different windows and different capital.",
+    "the_claim_is_capital_efficiency": "On the shared spine v4's mean gross is 0.0948 against v3's 0.1362 - it is flat on 46.2% of days against v3's 31.4% and turns over 24% less. Run at v3's average capital (x1.437) the paired differential is +10.76 bp/day at t 3.23, which is the registered evidence claim.",
+    "and_that_leverage_costs_drawdown": "At v3's capital v4's worst dip is 33.5%, WORSE than v3's 28.7%. At its own capital it is 24.5%, better. The return improvement and the drawdown improvement are not available at the same time; which one you get is a leverage choice.",
+    "the_scale_free_statements_are_the_clean_ones": "Sharpe 1.41 -> 1.64 is scale-free and holds however capital is normalised; cite it first. MAR is NOT scale-free - it improves 3.08 -> 4.14 at v4's own capital and 3.08 -> 4.67 at v3's, because drawdown and return do not scale identically. State which capital any MAR is on.",
+    "decision_clock_fragility": "INHERITED FROM v3 AND RE-MEASURED, omitted from this config at registration and added 2026-07-31. Every headline number here (+22.19 bp/day, Sharpe 1.64, MAR 4.14, the +2783% curve) is on the midnight-UTC daily grid, which is the grid origin every registered financed-longs number uses. Sweeping the identical construction over all 24 hourly grid phases: v4 spans +9.84 to +22.19 bp/day and Sharpe 0.75 to 1.64, mean +14.46 / 1.13. MIDNIGHT IS THE BEST OF THE 24. The settlement-aligned phases 8h and 16h score 1.17 and 1.38, so settlement alignment does not explain it, matching v3's 12-offset finding; treat the midnight level as decision-hour luck and ~14.5 bp/day at Sharpe ~1.13 as the honest level for this construction. The 24 phases are heavily overlapping and are not 24 independent draws, so 'best of 24' overstates the selection - but the spread is the point, not the rank.",
+    "but_the_v4_over_v3_EXPERIMENT_is_clock_robust": "The declared experiment survives the sweep and is strengthened by it. Across all 24 phases the capital-normalised paired differential v4-v3 is POSITIVE IN 24/24, mean +61.38 bp/day at mean t +2.37; the raw own-capital differential is positive in 19/24, mean +1.78 (better than the +1.07 at midnight). v3's config could only report 3 stale offsets. Cite the differential, not the level."
+  },
+  "rule": {
+    "universe": {
+      "venue": "bybit",
+      "rank_by": "trailing_24h_quote_turnover",
+      "top_n": 100,
+      "note": "identical to v1/v2/v3"
+    },
+    "state": {
+      "type": "per_name_hysteresis_long",
+      "enter_below_funding_bp": 10.0,
+      "exit_above_funding_bp": 3.0,
+      "exit_on_trail_recovery_bp_2d": 30.0,
+      "signal": "last settled funding rate at the decision bar (by_funding); trailing daily rate for the recovery exit",
+      "note": "identical to v3"
+    },
+    "filters": {
+      "toxic_band_ret_3d": {
+        "lo": -0.30,
+        "hi": 0.0,
+        "note": "v3 used hi -0.05. The change is the ONLY difference and it blocks 10% more name-days. Plateau: hi in {-0.10, -0.05, -0.02, 0.00} all score within 0.8 bp/day of each other and it degrades at +2% and +5%; lo in {-0.40, -0.30, -0.25} likewise, degrading at -0.50 and -0.20. Zero is also the less-fitted edge - down at all versus not down - so it is a weaker prior than -5%. Capitulation below -30% is still KEPT: the relationship is U-shaped and that cohort earns +336.9 bp/name-day. A null ret_3d fails open."
+      },
+      "min_vol_30d_daily": 0.05,
+      "min_vol_note": "identical to v3; trailing 30d std of 24h returns; entry-only; null fails open"
+    },
+    "sizing": {
+      "per_name_cap": 0.1,
+      "gross_cap": 1.0,
+      "depth_scaling": {"basis": "trail_fund_24h", "ref_bp_per_day": 120.0, "floor": 0.25, "note": "identical to v2/v3"},
+      "persistence_scaling": {
+        "basis": "deep_settlement_share",
+        "window_settlements": 20,
+        "cut": 0.10,
+        "low_multiplier": 0.0,
+        "note": "NEW in v4. Share of the symbol's last 20 SETTLEMENTS printing deeper than the 10 bp entry threshold, measured in the symbol's own settlement sequence and shifted one settlement so a name's first deep print never counts itself. At or below the cut the weight is multiplied by 0.0, i.e. the name is not held that day. Counted in settlements and not on a clock on purpose: Bybit's interval mix went 100% 8h in 2021 -> 52% 4h / 21% 1h in 2025, so an hours-based version reports the symbol's cadence and the confound has an era gradient. A null persistence (fewer than 20 settlements of history) FAILS OPEN at full size so this cannot act as a listing-age screen; measured on the registered book the branch never fires, 0 of 3,314 v3 held name-days have a null."
+      },
+      "owner_choice_note": "low_multiplier 0.0 was the owner's selection over 0.25 on 2026-07-31. 0.25 is the more conservative shape - it never zeroes a name - and scores mean +24.34 bp/day, Sharpe 1.51, maxDD 28.7%, MAR 3.10 at v3's capital against 0.0's +26.34 / 1.54 / 31.3% / 3.07. 0.0 buys mean and Sharpe and pays for it in drawdown and concentration.",
+      "rejected_in_review": "persistence as an ENTRY FILTER rather than a size (paired differential vs v3 -0.69, t -0.39: a wash, because on a 3-name book removing candidates costs more than the losers save); persistence REPLACING the depth ladder rather than multiplying it (+0.16 to +1.89 bp/day, all t < 1). The gain is specifically in composing the two."
+    },
+    "risk": {
+      "vol_target_annual": 0.15,
+      "vol_lookback_days": 30,
+      "max_leverage": 3.0,
+      "note": "recipe comparability only; the vol-target overlay is harmful on corrected accounting for all versions. RAW is primary. Vol-targeted drawdown is NOT comparable across these arms - it ranked the persistence variants in the opposite order to the raw basis during the review."
+    }
+  },
+  "cost_model": {
+    "measured_fee_side_bp": 7.78,
+    "charging": "measured one-way turnover x fee per side, per day, identical to v1/v2/v3",
+    "funding": "settlement_exact (2026-07-28 corrected detector)",
+    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"]
+  },
+  "scoring_recipe": {
+    "metric": "mean net bp per day and annualised Sharpe on the raw daily series",
+    "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "mean gross", "paired daily differentials vs lane2_carry_hold_v3 on shared days, BOTH at own capital and capital-normalised"],
+    "comparator": "lane2_carry_hold_v3's forward rows are the primary comparator; also v2, the retired CONTINUOUS research render (Sharpe 1.84), and zero",
+    "grid": "none; single committed configuration",
+    "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
+    "eligibility": "only days strictly after the registration commit date count as forward evidence",
+    "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
+  },
+  "measured_at_registration": {
+    "basis": "corrected settlement-exact scorer, module path (score_carry_hold), panel 2021-01-01..2026-07-27 (seen data; Lane-1 selection, not evidence)",
+    "own_record": {
+      "days": 1756,
+      "mean_net_bp_per_day": 22.19,
+      "t_stat": 3.61,
+      "sharpe_raw": 1.64,
+      "total_return_raw_pct": 2783,
+      "max_drawdown_raw_pct": -24.5,
+      "mar_raw": 4.14,
+      "mar_convention": "compounded annualised return / max drawdown, the convention v3 registered and scripts/research/equity_curves.sh renders. Simple annualisation of the daily mean gives 3.31 for the same series; the two are not interchangeable and v3's registered 2.84 is the compounded one.",
+      "mean_oneway_turnover": 0.119,
+      "held_name_days": 2050,
+      "active_days": 944,
+      "mean_names_per_active_day": 2.17,
+      "note": "t 3.61 is v4's own mean against ZERO - is this book profitable - not a comparison with v3. See paired_differential_vs_v3 for that."
+    },
+    "shared_spine_1756_days": {
+      "note": "the only fair v3/v4 comparison; mean gross counts flat days as zero capital",
+      "v4": {"mean_gross": 0.0948, "flat_days_pct": 46.2, "mean_net_bp_per_day": 22.19, "sharpe_raw": 1.64, "max_drawdown_raw_pct": -24.46, "mar_raw": 4.14, "annualised_pct": 101.29, "total_return_raw_pct": 2783},
+      "v3": {"mean_gross": 0.1362, "flat_days_pct": 31.4, "mean_net_bp_per_day": 21.12, "sharpe_raw": 1.41, "max_drawdown_raw_pct": -28.69, "mar_raw": 3.08, "annualised_pct": 88.45, "total_return_raw_pct": 2000},
+      "v4_restated_at_v3_capital": {"leverage_factor": 1.437, "mean_net_bp_per_day": 31.88, "sharpe_raw": 1.64, "max_drawdown_raw_pct": -33.52, "mar_raw": 4.67, "annualised_pct": 156.65}
+    },
+    "era_net_bp_per_day": {
+      "v3_own": {"2021": -1.7, "2022": 4.5, "2023": 10.8, "2024": 8.4, "2025": 41.7, "2026": 64.7},
+      "v4_own": {"2021": -1.2, "2022": 6.7, "2023": 11.6, "2024": 5.8, "2025": 40.9, "2026": 74.1},
+      "v4_at_v3_capital": {"2021": -1.8, "2022": 9.7, "2023": 16.7, "2024": 8.4, "2025": 58.7, "2026": 106.5},
+      "note": "all on the shared spine. At equal capital v4 wins 2022/2023/2025/2026, ties 2024, and loses 2021 by 0.1 bp. At its OWN capital it wins only 2022/2023/2026 - the era claim depends on the normalisation and both are shown."
+    },
+    "benchmark_window_2023_03_13_to_2026_07_16": {
+      "v4": {"sharpe_raw": 1.88, "max_drawdown_raw_pct": -24.46, "mar_raw": 6.11, "annualised_pct": 149.38},
+      "v3": {"sharpe_raw": 1.71, "max_drawdown_raw_pct": -28.69, "mar_raw": 4.85, "annualised_pct": 139.01},
+      "note": "1.88 is the first carry-hold render to exceed the retired CONTINUOUS research benchmark of 1.84. Seen-data selection; it grades nothing, and the benchmark itself is a retired research render, not the shipped book (which was 1.45)."
+    },
+    "paired_differential_vs_v3": {
+      "own_capital_bp_per_day": 1.07,
+      "own_capital_t": 0.47,
+      "capital_normalised_bp_per_day": 10.76,
+      "capital_normalised_t": 3.23,
+      "note": "THE REGISTERED FORWARD EXPERIMENT is the capital-normalised differential on the shared spine. The own-capital differential is recorded because it is what a reader would otherwise assume, and it is not significant."
+    },
+    "decomposition_at_v3_capital": {
+      "band_move_alone_bp_per_day": 0.76,
+      "band_move_alone_t": 1.12,
+      "sizing_alone_bp_per_day": 6.51,
+      "sizing_alone_t": 2.54,
+      "note": "measured during the review on the pre-implementation harness with a slightly different capital denominator; the direction and ordering hold, the magnitudes are indicative. The combined figure above is the implementation-path number and is the citable one."
+    },
+    "multiple_testing": "16 persistence shape cells (4 ramp refs x 2 floors, 4 step cuts x 2 low multipliers) were run and ALL 16 were positive, t +1.87 to +2.77 - a plateau, and they are one feature in different clothes rather than 16 independent trials. The band-edge sweep added 10 cells and the three closed doors 15 more. Against the program bar, lowered to t 2.5 on 2026-07-31, the combined differential clears at 3.23 and the band-edge move alone does NOT clear at 1.12.",
+    "provenance": "Selected 2026-07-31 on seen data, after a downtrend-screen program that failed (docs/archive/2026-07-31-trend-filters.md) and a pass over the four untested loser-identification doors, two of which are now closed. The persistence feature was first tried as a filter, failed, and was moved to sizing at the owner's direction."
+  },
+  "rendered_equity_curve": {
+    "path": "~/SHARED_DATA/bybit_full_pit/reports/equity_curves/research/lane2_carry_hold_v4/",
+    "command": "bash scripts/research/equity_curves.sh --sleeves \"\" --research-config configs/lane2_carry_hold_v4.json --start 2021-01-01",
+    "run_label": "lane2_carry_hold_v4_research_seen_data_corrected_scorer",
+    "window": "2021-10-05 .. 2026-07-26 (1,756 days, 4.80 years) - the record starts when the book first takes a position, NOT at the panel start",
+    "shape": "76.2% of the log growth is 2025-26. The book is at 2.21x on 2025-01-01 after three years and ends at 28.83x. Per year: 2021 -0.6%, 2022 +23.5%, 2023 +48.7%, 2024 +24.1%, 2025 +260.5%, 2026 +266.1% (207 days). v3 has the same shape - 76.7% post-2025, 2.13x on 2025-01-01 - so this is the mechanism's regime dependence, not something v4 introduced.",
+    "leverage": "native raw-book size; no presentation leverage applied"
+  },
+  "placebos_run": {
+    "inverse_persistence": "size UP the isolated prints instead of down: -14.44 bp/day at v3's capital, t -2.73",
+    "shuffled_multipliers": "the identical distribution of position sizes handed to the wrong names: -15.26 bp/day, t -2.71. This is the load-bearing control - it holds size distribution and gross constant, so the gain is about WHICH names get the money, not about holding less.",
+    "null_fails_open_variant": "identical to the closed variant (+6.51, t 2.54), and 0 of 3,314 held name-days have a null persistence, so this is not a listing-age screen"
+  },
+  "known_weaknesses": [
+    "inherits every v1/v2/v3 weakness: concentrated, long-only crash beta, single-venue (Bybit) evidence, capacity ~$1M at 1% participation, and the terminal-day frame caveat (~+0.13 Sharpe, shared by every financed-longs number)",
+    "MORE CONCENTRATED THAN v3, which is the direct cost of low_multiplier 0.0: 2,050 held name-days over 944 active days at 2.17 names per active day, against v3's 3,314 / 1,211 / 2.74. It is in the market on 22% fewer days and holds fewer names when it is. The measured drawdown is lower anyway, but the concentration risk is real and is not captured by a drawdown taken on the same history that selected the rule",
+    "REGIME BET deepened again: 2024 falls to 5.8 bp/day (v3 8.4) while 2026 rises to 74.1 (v3 64.7). At its own capital v4 beats v3 in only 3 of 6 eras (2022, 2023, 2026); the capital-normalised comparison is better but the 2021 and 2024 eras remain worse",
+    "the band-edge move does not clear the program bar even at 2.5 (t 1.12) and is included at the owner's direction; it is separable and its contribution is reported on its own line so a later reader can withdraw it without touching the sizing result",
+    "the persistence cut at 10% and window at 20 settlements were chosen from the same seen-data conditional table that motivated them; the plateau is reported but the forward record is what grades them",
+    "v4 is registered three days after v3. v3's own forward record has almost no post-commit days yet, so the v4-vs-v3 comparison is currently entirely seen-data",
+    "the single-clock LEVEL is decision-hour-lucky: midnight is the best of 24 hourly grid phases (0.75-1.64 Sharpe, mean 1.13). This config was registered quoting only the midnight level; see read_this_before_citing_a_number.decision_clock_fragility. The v4-over-v3 differential is clock-robust (24/24), the level is not",
+    "the price leg is uncompensated risk that cannot be hedged away. Decomposed, v4 is +45.70 bp/day of funding and -2.70 bp/day of price, and the price leg carries ~95% of the book's daily variance (sd 245 of 258 bp/day) while standing alone at Sharpe -0.11. A perfect price hedge would score Sharpe 8.24. Three routes were measured 2026-07-31 and all three fail: short BTC removes 2.5% of the variance; a short EW top-100 basket removes 15.9% but once the basket leg pays its own fees and funding the Sharpe gain vanishes (1.13 -> 1.11 at fixed beta 1.0, better in only 6/24 phases); and a per-name short of the same symbol on Binance removes 94% of the price variance but eats 74% of the funding (+221.16 received, -163.67 paid, +57.48 kept per name-day), leaving a neutral book at Sharpe 0.62 against the directional 1.24. Holding the coin is the price of admission to the crowd fee"
+  ]
+}

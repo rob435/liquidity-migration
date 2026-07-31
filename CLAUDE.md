@@ -24,6 +24,7 @@ Bybit.
 | Backtest failure modes we do not repeat | [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) |
 | The lead strategy in full | [docs/carry_hold.md](docs/carry_hold.md) |
 | Active research queue | [docs/strategy_program.md](docs/strategy_program.md) |
+| The price pattern around funding payments, and why the carry book cannot be hedged | [docs/settlement_sawtooth_program.md](docs/settlement_sawtooth_program.md) |
 | Everything else | [README.md](README.md) |
 
 Dated research runs live in [`docs/archive/`](docs/archive/README.md) — the

@@ -86,6 +86,14 @@ taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
 
 ## CARRY — `lane2_carry_hold_v3`
 
+> **`lane2_carry_hold_v4` is registered (2026-07-31) and is NOT what runs.** This
+> section describes the deployed sleeve, which is still v3. v4 moves the toxic
+> band's high edge to 0% and adds a crowding-persistence size multiplier; it is a
+> Lane-2 research registration accruing a forward record, and switching the
+> sleeve to it is a separate owner act through the normal deploy flow with a
+> recorded change point. Nothing in v4 changed v3 — a regression test pins that.
+> See [`carry_hold.md`](carry_hold.md) §0.1.
+
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
 and the forward scorer cannot drift apart. Universe: top 100 by 24h quote turnover.

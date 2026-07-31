@@ -13,6 +13,9 @@ commit.**
 family — the reference for any §7 implementation work. Research-only status
 unchanged; v1/v2 keep scoring. Trade diagnostics:
 `reports/carry_hold_v3_trade_diagnostics_2026-07-28/`.)*
+*(2026-07-31: **`lane2_carry_hold_v4` is registered and is the lead config**
+— see §0.1. v1/v2/v3 all keep scoring and are unchanged; a regression test
+pins that v4 moved nothing in them.)*
 
 ## 0. 2026-07-28 correction — read this before any number below
 
@@ -69,6 +72,82 @@ per-print acuteness is load-bearing).
   bench-window Sharpe 2.34 (1.93–2.34 across clocks) / full-window
   1.55–1.87 — the Sharpe-2 target met on the program's standard quote
   basis, not on the strictest one. Review §10.
+
+## 0.1 2026-07-31 — v4 registered, and the program bar moved to 2.5
+
+Two changes, one config (`configs/lane2_carry_hold_v4.json`), both on seen data
+and therefore grading nothing yet.
+
+**The new feature is crowding persistence, used as a size and not a screen.**
+The share of a symbol's last 20 **settlements** that printed deeper than the
+10 bp entry threshold. It is a different question from v2's depth ladder —
+depth is how much the crowd is paying now, persistence is whether this name
+pays habitually — and the two multiply. Counted in the symbol's own settlement
+sequence, never on a clock: Bybit's interval mix went 100% 8h in 2021 to 52%
+4h / 21% 1h in 2025, so an hours-based version reports cadence, and the
+confound has an era gradient. The isolated deep print is the only losing cohort
+in v3's book (−16.7 bp/name-day over a third of held name-days); every bucket
+above the 10% cut earns +99 to +135.
+
+**The second change is the toxic band's high edge, −5% → 0%.** The [−5%, 0)
+cohort earns −34.4 bp/name-day and v3 keeps it. On its own this change measures
+**t 1.12 — it does not clear the bar even at 2.5**, and it is in v4 at the
+owner's direction. Its contribution is on its own line in the config so a later
+reader can withdraw it without touching the sizing result.
+
+**Read the numbers in this order.** v4 and v3 do not span the same record
+(1,756 days vs 1,894 — v4 does not trade early-2021). On the shared spine:
+
+| | mean gross | bp/day | Sharpe | max DD | MAR | turnover |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| v3 | 0.1362 | +21.12 | 1.41 | −28.69% | 3.08 | 0.156 |
+| v4 | 0.0948 | +22.19 | **1.64** | **−24.46%** | **4.14** | **0.119** |
+| v4 at v3's capital | 0.1362 | +31.88 | 1.64 | −33.52% | 4.67 | — |
+
+MAR is compounded annualised return ÷ max drawdown — the convention v3 registered
+and `scripts/research/equity_curves.sh` renders. Simple annualisation of the daily
+mean gives 2.69 / 3.31 / 3.47 for the same three rows; do not mix them.
+
+- **At its own capital v4 is not a return improvement**: +1.07 bp/day, t 0.47.
+  Do not cite it as one.
+- **The claim is capital efficiency.** Run at v3's average capital the paired
+  differential is **+10.76 bp/day, t 3.23** — that is the registered forward
+  experiment.
+- **And that leverage costs drawdown**: at v3's capital v4's worst dip is 33.5%,
+  *worse* than v3's 28.7%. At its own capital it is better, 24.5%. You get one
+  or the other, and which one is a leverage choice.
+- **Sharpe 1.41 → 1.64 is scale-free** and holds either way — cite it first. MAR
+  is *not* scale-free: 3.08 → 4.14 at v4's own capital, 3.08 → 4.67 at v3's.
+  Always say which capital a MAR is on.
+- Benchmark window: v4 Sharpe **1.88**, the first carry-hold render above the
+  retired CONTINUOUS research benchmark of 1.84 — on seen data, so it grades
+  nothing, and that benchmark is a retired research render, not the shipped
+  book (1.45). On that window v4 is MAR 6.11 against v3's 4.85.
+- **The curve is a 2025-26 story.** Rendered through the standard chart
+  (`reports/equity_curves/research/lane2_carry_hold_v4/`), **76.2% of the log
+  growth is 2025-26**: the book is at 2.21x on 2025-01-01 after three years and
+  finishes at 28.83x. By year: 2021 −0.6%, 2022 +23.5%, 2023 +48.7%, 2024
+  +24.1%, 2025 +260.5%, 2026 +266.1% (207 days). v3 has the same shape (76.7%,
+  2.13x) — this is the mechanism's regime dependence, not something v4 added.
+
+**What it costs.** v4 is more concentrated than v3: 2,050 held name-days over
+944 active days at 2.17 names per active day, against 3,314 / 1,211 / 2.74. It
+is out of the market 46% of days against v3's 31%. The measured drawdown is
+lower anyway, but concentration risk taken on the same history that selected
+the rule is not evidence about the next drawdown.
+
+**Placebos, which are why this was registered at all.** Sizing *up* the isolated
+prints: −14.44 bp/day (t −2.73). Handing the identical distribution of position
+sizes to the wrong names: −15.26 (t −2.71) — the load-bearing control, because
+it holds size distribution and gross constant. Null persistence fails open and
+never fires on this book (0 of 3,314 held name-days), so it is not a listing-age
+screen.
+
+**The program bar is now t ≥ 2.5** (`docs/governance.md` §2, owner decision
+2026-07-31), replacing the family-wise ≈3.25/3.58. It is prospective: verdicts
+recorded before that date stand as written. The bar no longer controls
+family-wise error, so a plateau and a failed placebo now carry the weight the
+threshold used to — v4 has both (16 of 16 shape cells positive, t 1.87–2.77).
 
 ## 1. The trade in one paragraph
 
@@ -179,9 +258,13 @@ grind-downs where shorts are not paying.
    2.26–2.61; knife-filter variants change little. No spike-fitting.
 6. **Slippage sensitivity**: +2 bp/side beyond the measured fee → bench Sharpe
    2.57 → 2.53.
-7. **Multiple testing**: t 4.87 (full sample, full-calendar basis; 4.88 on the
-   superseded active-days-only basis) against the ≈3.4 Bonferroni threshold for
-   the ~63 mechanisms this program has tested.
+7. **Multiple testing**: registration-era t 4.87 (full sample, full-calendar
+   basis; 4.88 on the superseded active-days-only basis) against the ≈3.4
+   Bonferroni threshold then in force. **Both halves of that sentence are
+   superseded.** The t is withdrawn by the §0 funding correction — v1's citable
+   figure is t 2.31 — and the threshold was replaced on 2026-07-31 by a fixed
+   t ≥ 2.5 (`docs/governance.md` §2). v1 clears the current bar on the corrected
+   number; it did not clear the one in force when it was registered.
 8. **Funding-sign accounting** is covered by unit tests
    (`tests/research/backtest/test_financed_longs.py`): a long receives negative funding
    settlement-exactly; hysteresis state uses only past prints; the gross cap

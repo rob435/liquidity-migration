@@ -617,3 +617,149 @@ class TestAccounting:
         out = score_carry_hold(panel, carry_cfg)
         assert out["config_id"] == "lane2_carry_hold_v1"
         assert out["days"] > 0
+
+
+class TestCrowdPersistence:
+    """v4's sizing feature: how habitual a name's crowding is.
+
+    The feature is counted in the symbol's own settlement sequence rather than on
+    a clock, so the tests pin that too — a clock version silently reports the
+    symbol's funding interval, and Bybit's interval mix moved hard in 2025.
+    """
+
+    def test_column_is_the_share_of_the_prior_twenty_settlements(self) -> None:
+        # Settlements 0-29 deep, 30-59 benign. At settlement k the value covers
+        # k-20 .. k-1, so k=35 spans 15 deep and 5 benign.
+        panel = _panel(hours=480, funding_bp={"S01USDT": [-15.0] * 30 + [1.0] * 30})
+        prepared = prepare(panel).filter(pl.col("symbol") == "S01USDT").sort("bar_ts_ms")
+
+        def at(settlement: int) -> float:
+            row = prepared.filter(pl.col("bar_ts_ms") == settlement * 8 * HOUR_MS)
+            assert row.height == 1, f"settlement {settlement} not in the prepared frame"
+            return float(row["crowd_persistence"].item())
+
+        assert at(25) == pytest.approx(1.0)
+        assert at(35) == pytest.approx(0.75)
+        assert at(50) == pytest.approx(0.0)
+
+    def test_value_is_carried_forward_between_settlements(self) -> None:
+        # Bars between settlements must read the last completed settlement's
+        # value, not null and not the next one's.
+        panel = _panel(hours=480, funding_bp={"S01USDT": [-15.0] * 30 + [1.0] * 30})
+        prepared = prepare(panel).filter(pl.col("symbol") == "S01USDT").sort("bar_ts_ms")
+        base = prepared.filter(pl.col("bar_ts_ms") == 35 * 8 * HOUR_MS)["crowd_persistence"].item()
+        for offset in (1, 4, 7):
+            ts = 35 * 8 * HOUR_MS + offset * HOUR_MS
+            row = prepared.filter(pl.col("bar_ts_ms") == ts)
+            assert row["crowd_persistence"].item() == pytest.approx(base)
+
+    def test_first_deep_print_never_counts_itself(self) -> None:
+        # A name whose ONLY deep print is its most recent settlement must read 0.0
+        # persistence at that bar: the feature describes history before the print,
+        # so a single liquidation can never look habitual.
+        deep_at = 25
+        rates = [1.0] * deep_at + [-15.0] * 5
+        panel = _panel(hours=480, funding_bp={"S01USDT": rates})
+        prepared = prepare(panel).filter(pl.col("symbol") == "S01USDT").sort("bar_ts_ms")
+        at_first_deep = prepared.filter(pl.col("bar_ts_ms") == deep_at * 8 * HOUR_MS)
+        assert at_first_deep.height == 1
+        assert at_first_deep["crowd_persistence"].item() == pytest.approx(0.0)
+
+    def test_research_and_live_frames_agree(self) -> None:
+        panel = _panel(hours=480, funding_bp={"S01USDT": [-15.0, 1.0]})
+        view = venue_view(panel, "bybit")
+        res = prepare(view).select("symbol", "bar_ts_ms", "crowd_persistence")
+        live = prepare_decision(view).select("symbol", "bar_ts_ms", "crowd_persistence")
+        joined = res.join(live, on=["symbol", "bar_ts_ms"], how="inner", suffix="_live")
+        assert joined.height == res.height
+        same = joined.select(
+            (pl.col("crowd_persistence").eq_missing(pl.col("crowd_persistence_live"))).all()
+        ).item()
+        assert same, "the live frame must carry the identical feature"
+
+    def test_low_persistence_drops_the_name(self) -> None:
+        # One isolated deep print: persistence 0.0 <= the 0.10 cut, so v4 holds
+        # nothing while v3 holds the name.
+        panel = _panel(hours=480, funding_bp={"S01USDT": [1.0] * 25 + [-15.0] * 10})
+        u = _universe(panel)
+        v3 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v3.json")
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        held3 = carry_hold_weights(u, v3).filter(pl.col("symbol") == "S01USDT")
+        held4 = carry_hold_weights(u, v4).filter(pl.col("symbol") == "S01USDT")
+        assert held3.height > 0
+        assert held4.height < held3.height
+
+    def test_null_persistence_fails_open_at_full_size(self) -> None:
+        # Fewer than PERSISTENCE_WINDOW settlements of history must NOT downsize:
+        # that would make v4 a covert listing-age screen, and listing age has
+        # produced two false positives in this program.
+        #
+        # An 8h-cadence symbol reaches 21 settlements inside prepare()'s own
+        # 168h warmup, so the null branch is unreachable there. A 24h-cadence
+        # symbol is the case that exercises it — which is also why the branch
+        # never fires on the registered book.
+        panel = _panel(hours=400, funding_bp={"S01USDT": [-15.0]}).with_columns(
+            pl.when(pl.col("symbol") == "S01USDT")
+            .then((pl.col("bar_ts_ms") // HOUR_MS % 24).cast(pl.Float64))
+            .otherwise(pl.col("by_funding_age_h"))
+            .alias("by_funding_age_h")
+        )
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        prepared = prepare(panel).filter(pl.col("symbol") == "S01USDT")
+        assert prepared["crowd_persistence"].null_count() == prepared.height, (
+            "the 24h-cadence symbol must never reach a full 20-settlement window here"
+        )
+        u = _universe(panel)
+        held = carry_hold_weights(u, v4).filter(pl.col("symbol") == "S01USDT")
+        assert held.height > 0, "a null persistence must not block the name"
+        # "Fails open" means the weight is whatever the rest of the rule says —
+        # here the depth ladder's floor — not that persistence forces full size.
+        off = carry_hold_weights(u, dataclasses.replace(v4, persistence_window=None)).filter(
+            pl.col("symbol") == "S01USDT"
+        )
+        assert held.equals(off)
+
+    def test_window_mismatch_is_rejected_not_silently_rescored(self) -> None:
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        bad = dataclasses.replace(v4, persistence_window=5)
+        with pytest.raises(FinancedLongsError, match="persistence window"):
+            carry_hold_weights(_universe(_panel()), bad)
+
+    def test_entry_threshold_mismatch_is_rejected(self) -> None:
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        bad = dataclasses.replace(v4, enter_bp=25.0)
+        with pytest.raises(FinancedLongsError, match="deeper than"):
+            carry_hold_weights(_universe(_panel()), bad)
+
+
+class TestRegisteredConfigsAreImmutable:
+    """v4 must not move v1/v2/v3. The forward records depend on it."""
+
+    @pytest.mark.parametrize("name", ["v1", "v2", "v3"])
+    def test_persistence_defaults_off(self, name: str) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
+        assert cfg.persistence_window is None
+
+    @pytest.mark.parametrize("name", ["v1", "v2", "v3"])
+    def test_weights_ignore_the_new_column(self, name: str) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
+        u = _universe(_panel(funding_bp={"S01USDT": [-15.0, 1.0], "S02USDT": [-12.0]}))
+        with_col = carry_hold_weights(u, cfg)
+        without = carry_hold_weights(u.drop("crowd_persistence"), cfg)
+        assert with_col.equals(without)
+
+    def test_v4_declares_the_two_changes_and_nothing_else(self) -> None:
+        v3 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v3.json")
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        changed = {
+            f.name
+            for f in dataclasses.fields(CarryHoldConfig)
+            if getattr(v3, f.name) != getattr(v4, f.name)
+        }
+        assert changed == {
+            "config_id",
+            "toxic_band_ret3d",
+            "persistence_window",
+        }, f"v4 changed more than the two declared levers: {changed}"
+        assert v3.toxic_band_ret3d == (-0.30, -0.05)
+        assert v4.toxic_band_ret3d == (-0.30, 0.0)

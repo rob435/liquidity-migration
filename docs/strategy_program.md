@@ -8,6 +8,28 @@ one-off runners are retired.
 
 ## Current truth
 
+- **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
+  authority `docs/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
+  prospective — earlier verdicts stand as recorded. Because it no longer controls
+  family-wise error, a survivor needs a reported plateau and a failed placebo
+  beside the number.
+- **`lane2_carry_hold_v4` is registered (2026-07-31) and is NOT deployed.** The
+  CARRY sleeve still publishes v3. v4 adds a crowding-persistence size multiplier
+  and moves the toxic band's high edge to 0%; its claim is capital efficiency
+  (same money, ~30% less capital) and not return — at its own capital the paired
+  differential against v3 is t 0.47. Detail: `docs/carry_hold.md` §0.1.
+- **The settlement sawtooth is an open program with nothing registered:
+  `docs/settlement_sawtooth_program.md`.** Around a deep funding print, price
+  runs +252 bp over the 5 hours ending at the print and −121 bp over the
+  following 6; shallow prints are flat to ±5 bp. It replicates on Binance
+  (ratios 0.58 / 0.69, inside the [0.5, 2.0] kill band) and is *growing*, not
+  decaying. Two results from that dossier bound the carry family and should be
+  quoted before anyone re-proposes either: **the price leg cannot be hedged**
+  (a per-name Binance short removes 94% of the price variance but eats 74% of
+  the funding — neutral Sharpe 0.62 against directional 1.24), and **the
+  settlement-window trade needs a zero-latency exit** (Sharpe 2.96 at zero lag,
+  −2.14 at one hour). The deciding experiment is blocked on minute bars the repo
+  does not have and has no downloader for.
 - The publishing profiles are `lane2_carry_hold_v3` (CARRY) and
   `LongV11aDivWeekendVol` (LONG). `continuous_ensemble_v2` at revision
   `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
@@ -846,14 +868,38 @@ authorized.
 
 ## Live task queue
 
-The measured position this list starts from: ~44 mechanisms tested means the corrected significance threshold is t = 3.25, and our best
-signals are t 1.30-2.06 at the measured 15.56 bp round trip. There is no
-validated edge yet, and execution work cannot create one (its ceiling is
-Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
+The measured position this list starts from: the significance bar is **t >= 2.5**
+since 2026-07-31 (`docs/governance.md` 2, owner decision), replacing the
+family-wise t = 3.25 derived from a ~44-mechanism count that was never
+enumerable. At the measured 15.56 bp round trip the anomaly-program signals are
+t 1.30-2.06 and still do not clear it. The one thing that does is the
+`lane2_carry_hold_v4` crowding-persistence size, whose capital-normalised
+differential against v3 is t 3.23 on seen data — registered 2026-07-31 and
+accruing forward days, not validated. Execution work cannot create an edge (its
+ceiling is Sharpe 0.69 -> ~1.17). Completed items below are retained as the
+evidence trail.
 
 
-- [ ] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
-      them.** Found 2026-07-30 while setting the bar for the idio screen: no
+- [ ] **Settlement sawtooth program — OPEN 2026-07-31, dossier at
+      `docs/settlement_sawtooth_program.md`.** Seven ranked hypotheses; that file
+      carries the tables, the falsification tests (cross-venue replication
+      passes, the deep-positive mirror does *not*), the already-closed dead ends,
+      and the kill criteria. Order of work: **H5** (which mechanism — harvest
+      flow vs squeeze-and-fade; produces no trade but decides which other items
+      are worth running), then **H7** (fill scheduling for the live CARRY sleeve
+      — cheapest, operational, no alpha claim), then **H2/H3** (entry and exit
+      timing for the deployed book — unblocked, and read the degenerate-cycle-
+      phase trap in H2 before building). **P0 is a data task:** `tick_ohlc_1m/`
+      is empty and no script in `scripts/data/` fetches sub-hourly bars, so H1 —
+      the highest-value item — is *blocked*, not refuted. Report every result as
+      a sweep over the 24 grid phases, never a single clock.
+- [x] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
+      them — CLOSED 2026-07-31 by taking the second option.** The bar is now a
+      fixed t >= 2.5 owned by `docs/governance.md` 2, so no threshold in this
+      program rests on the unverifiable count any more. `bonferroni_t` and
+      `PRIOR_MECHANISMS` survive as reference numbers printed beside the bar, not
+      as the pass/fail rule. The original defect statement follows.
+      ORIGINAL: Found 2026-07-30 while setting the bar for the idio screen: no
       artifact in the tree or in git history lists them. `scripts/research/screen_phase1.py`
       and four configs all *assert* the count, none enumerates it. Every Bonferroni threshold this programme quotes — the
       standing t = 3.25, and the 3.46 / 3.57 the idio screens derived from it —

@@ -98,6 +98,18 @@ class CarryHoldConfig:
     toxic_band_ret3d: tuple[float, float] | None = None
     min_vol30_daily: float | None = None
     trail_recovery_exit_bp_2d: float | None = None
+    #: v4 sizing, default OFF so v1/v2/v3 stay bit-identical. Crowding
+    #: persistence is the share of the symbol's last ``persistence_window``
+    #: SETTLEMENTS whose rate was deeper than ``enter_bp``. It answers a
+    #: different question from ``depth_ref_bp_per_day``: depth is how much the
+    #: crowd is paying now, persistence is whether that is a pattern or a blip.
+    #: The two multiply. Measured in the symbol's own settlement sequence rather
+    #: than on a clock, because Bybit's interval mix went from 100% 8h in 2021 to
+    #: 52% 4h / 21% 1h in 2025 and any hours-based version reports the cadence.
+    persistence_window: int | None = None
+    persistence_cut: float = 0.10
+    #: Weight multiplier at or below the cut. 0.0 drops the name entirely.
+    persistence_lo: float = 0.0
 
     @classmethod
     def from_json(cls, path: str | Path) -> "CarryHoldConfig":
@@ -112,6 +124,12 @@ class CarryHoldConfig:
         filters = rule.get("filters") or {}
         band = filters.get("toxic_band_ret_3d")
         exit_vel = rule["state"].get("exit_on_trail_recovery_bp_2d")
+        pers = rule["sizing"].get("persistence_scaling")
+        if pers is not None and pers.get("basis") != "deep_settlement_share":
+            raise FinancedLongsError(
+                f"unsupported persistence_scaling basis {pers.get('basis')!r}; "
+                "only 'deep_settlement_share' is implemented"
+            )
         return cls(
             config_id=payload["config_id"],
             venue=rule["universe"]["venue"],
@@ -139,6 +157,9 @@ class CarryHoldConfig:
             trail_recovery_exit_bp_2d=(
                 float(exit_vel) if exit_vel is not None else None
             ),
+            persistence_window=(int(pers["window_settlements"]) if pers is not None else None),
+            persistence_cut=(float(pers["cut"]) if pers is not None else 0.10),
+            persistence_lo=(float(pers["low_multiplier"]) if pers is not None else 0.0),
         )
 
 
@@ -215,6 +236,54 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
 
 
+#: Crowding persistence is measured over this many of the symbol's own
+#: settlements. Fixed here rather than per-config because ``prepare`` and
+#: ``prepare_decision`` must attach the identical column for the research and
+#: live frames; a config asking for a different window is rejected in
+#: :func:`carry_hold_weights` rather than silently scored against the wrong
+#: feature.
+PERSISTENCE_WINDOW = 20
+
+#: Depth that makes a settlement "deep" for the persistence count. Every
+#: registered carry-hold config enters below 10 bp, so persistence asks "how
+#: often has this name printed at entry depth", not a second free parameter.
+#: A config whose ``enter_bp`` differs is rejected in :func:`carry_hold_weights`.
+DEFAULT_ENTER_BP = 10.0
+
+
+def _persistence_frame(frame: pl.DataFrame, deep_bp: float) -> pl.DataFrame:
+    """Attach ``crowd_persistence``: how habitual this name's crowding is.
+
+    The share of the symbol's last :data:`PERSISTENCE_WINDOW` **settlements**
+    that printed deeper than ``deep_bp``, carried forward onto the bars between
+    settlements.
+
+    Counted in the symbol's own settlement sequence rather than on a clock. The
+    clock version is not the same measurement: Bybit's interval mix went from
+    100% 8h in 2021 to 52% 4h / 21% 1h in 2025, so "deep prints in the last 30
+    days" mostly reports a symbol's cadence, and the confound has an era
+    gradient on top.
+
+    The rolling mean is shifted one settlement, so the value a bar carries
+    describes the history *before* the settlement on that bar — a name's first
+    deep print never counts itself as evidence that it prints deep habitually.
+    """
+    events = (
+        frame.filter(_settlement_flag())
+        .select(
+            "symbol",
+            "bar_ts_ms",
+            (pl.col("by_funding") < -deep_bp / 1e4).cast(pl.Float64).alias("_deep"),
+        )
+        .with_columns(pl.col("_deep").rolling_mean(PERSISTENCE_WINDOW).over("symbol").alias("_p"))
+        .with_columns(pl.col("_p").shift(1).over("symbol").alias("crowd_persistence"))
+        .select("symbol", "bar_ts_ms", "crowd_persistence")
+    )
+    return frame.join(events, on=["symbol", "bar_ts_ms"], how="left").with_columns(
+        pl.col("crowd_persistence").forward_fill().over("symbol")
+    )
+
+
 def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataFrame:
     """Shared signal construction for the research and live frames.
 
@@ -248,12 +317,15 @@ def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataF
             ).alias("contiguous"),
         ]
     )
-    return frame.with_columns(
+    frame = frame.with_columns(
         pl.col("_r24").rolling_std(720).shift(1).over("symbol").alias("vol_30d_daily"),
         (pl.col("trail_fund_24h") - pl.col("trail_fund_24h").shift(48).over("symbol")).alias(
             "dtrail_2d"
         ),
     ).drop("_r24")
+    # Attached unconditionally so the research and live frames cannot diverge on
+    # whether the column exists; configs that leave persistence off ignore it.
+    return _persistence_frame(frame, DEFAULT_ENTER_BP)
 
 
 def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataFrame:
@@ -350,13 +422,37 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
     ``depth_ref_bp_per_day`` set (v2), a held name's weight is scaled by
     ``clip(|trail_fund_24h| / ref, depth_floor, 1.0)`` — size follows the
     premium being paid; a missing trailing value fails to the floor, never up.
+
+    With ``persistence_window`` set (v4) that weight is multiplied again by a
+    crowding-persistence step: names whose recent settlements have rarely been
+    deep are cut to ``persistence_lo``. Depth and persistence answer different
+    questions — how much is being paid now, versus whether this name pays
+    habitually — which is why they compose rather than replace each other.
     """
     enter, exit_ = cfg.enter_bp / 1e4, cfg.exit_bp / 1e4
     sized = cfg.depth_ref_bp_per_day is not None
     banded = cfg.toxic_band_ret3d is not None
     volfloored = cfg.min_vol30_daily is not None
     veled = cfg.trail_recovery_exit_bp_2d is not None
-    need = ["trail_fund_24h"] * sized + ["ret_3d"] * banded + ["vol_30d_daily"] * volfloored + ["dtrail_2d"] * veled
+    persisted = cfg.persistence_window is not None
+    if persisted:
+        if cfg.persistence_window != PERSISTENCE_WINDOW:
+            raise FinancedLongsError(
+                f"{cfg.config_id}: persistence window {cfg.persistence_window} but the "
+                f"prepared column is built over {PERSISTENCE_WINDOW} settlements"
+            )
+        if cfg.enter_bp != DEFAULT_ENTER_BP:
+            raise FinancedLongsError(
+                f"{cfg.config_id}: persistence counts settlements deeper than "
+                f"{DEFAULT_ENTER_BP} bp but this config enters at {cfg.enter_bp} bp"
+            )
+    need = (
+        ["trail_fund_24h"] * sized
+        + ["ret_3d"] * banded
+        + ["vol_30d_daily"] * volfloored
+        + ["dtrail_2d"] * veled
+        + ["crowd_persistence"] * persisted
+    )
     missing = [c for c in dict.fromkeys(need) if c not in universe.columns]
     if missing:
         raise FinancedLongsError(
@@ -378,6 +474,7 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
         bd = g["ret_3d"].to_numpy() if banded else None
         vf = g["vol_30d_daily"].to_numpy() if volfloored else None
         vl = g["dtrail_2d"].to_numpy() if veled else None
+        pr = g["crowd_persistence"].to_numpy() if persisted else None
         ts = g["bar_ts_ms"].to_numpy()
         state = False
         for i in range(len(ts)):
@@ -400,6 +497,17 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
                 if sized and tr is not None:
                     depth = abs(tr[i]) if math.isfinite(tr[i]) else 0.0
                     w *= min(1.0, max(cfg.depth_floor, depth / ref))
+                if persisted and pr is not None:
+                    # A null persistence — fewer than PERSISTENCE_WINDOW
+                    # settlements of history — fails OPEN at full size.
+                    # Downsizing it would make this a covert listing-age screen,
+                    # and listing age has produced two false positives in this
+                    # program. Measured on the registered book the branch never
+                    # fires: every held name-day has a full window.
+                    if math.isfinite(pr[i]) and pr[i] <= cfg.persistence_cut:
+                        w *= cfg.persistence_lo
+                if w <= 0.0:
+                    continue  # persistence cut this name to nothing today
                 rows["bar_ts_ms"].append(int(ts[i]))
                 rows["symbol"].append(str(sym))
                 rows["w"].append(w)
