@@ -51,20 +51,20 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     scripts = [
         DEPLOY,
         WRAPPER,
-        ROOT / "scripts" / "run_account_execution_service.sh",
-        ROOT / "scripts" / "run_account_paper_execution_service.sh",
-        ROOT / "scripts" / "run_bybit_long_demo_event_engine.sh",
-        ROOT / "scripts" / "run_bybit_continuous_demo_event_engine.sh",
-        ROOT / "scripts" / "run_bybit_carry_demo_event_engine.sh",
-        ROOT / "scripts" / "run_continuous_hedge.sh",
-        ROOT / "scripts" / "run_continuous_rmom_refresh.sh",
-        ROOT / "scripts" / "reset_demo_paper_ledgers.sh",
+        ROOT / "scripts" / "runtime" / "run_account_execution_service.sh",
+        ROOT / "scripts" / "runtime" / "run_account_paper_execution_service.sh",
+        ROOT / "scripts" / "runtime" / "run_bybit_long_demo_event_engine.sh",
+        ROOT / "scripts" / "runtime" / "run_bybit_continuous_demo_event_engine.sh",
+        ROOT / "scripts" / "runtime" / "run_bybit_carry_demo_event_engine.sh",
+        ROOT / "scripts" / "runtime" / "run_continuous_hedge.sh",
+        ROOT / "scripts" / "runtime" / "run_continuous_rmom_refresh.sh",
+        ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh",
     ]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
     for path in scripts[:7] + scripts[9:]:
         assert path.stat().st_mode & stat.S_IXUSR
-    assert (ROOT / "scripts" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
-    paper_runner = _read("scripts/run_account_paper_execution_service.sh")
+    assert (ROOT / "scripts" / "vps" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
+    paper_runner = _read("scripts/runtime/run_account_paper_execution_service.sh")
     assert "CALIBRATION" not in paper_runner
     assert "--latency-quantile" not in paper_runner
     assert "--slippage-quantile" not in paper_runner
@@ -185,9 +185,9 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
         ):
             assert stripped in unset, (producer, stripped)
     for runner in (
-        "scripts/run_bybit_long_demo_event_engine.sh",
-        "scripts/run_bybit_continuous_demo_event_engine.sh",
-        "scripts/run_continuous_hedge.sh",
+        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
+        "scripts/runtime/run_continuous_hedge.sh",
     ):
         text = _read(runner)
         assert "place_order" not in text
@@ -250,7 +250,7 @@ def test_mainnet_liveness_observer_pages_without_holding_trading_authority() -> 
     assert "scripts/check_demo_liveness.py" not in wrapper
     start = wrapper.index("liquidity-migration-mainnet-liveness.service:main)")
     case = wrapper[start : wrapper.index("\n        ;;", start)]
-    assert "scripts/check_fleet_liveness.py" in case
+    assert "scripts/runtime/check_fleet_liveness.py" in case
     assert '--account-scope "${ACCOUNT_LIVENESS_SCOPE:?' in case
     assert "--carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event" in case
     assert "--long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event" in case
@@ -297,9 +297,9 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
         assert carry_demo[key] == carry_paper[key]
     # Carry has no WS kline plane in either environment.
     assert carry_demo["WS_KLINES_ENABLED"] == "0"
-    long_runner = _read("scripts/run_bybit_long_demo_event_engine.sh")
-    continuous_runner = _read("scripts/run_bybit_continuous_demo_event_engine.sh")
-    hedge_runner = _read("scripts/run_continuous_hedge.sh")
+    long_runner = _read("scripts/runtime/run_bybit_long_demo_event_engine.sh")
+    continuous_runner = _read("scripts/runtime/run_bybit_continuous_demo_event_engine.sh")
+    hedge_runner = _read("scripts/runtime/run_continuous_hedge.sh")
     for runner in (long_runner, continuous_runner, hedge_runner):
         assert 'ACCOUNT_RISK_POLICY_FILE' in runner
         assert '--operational-profile-file' in runner
@@ -340,7 +340,7 @@ def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots()
     assert carry_paper["CARRY_MARKET_FOLLOW_ROOT"] == carry_demo["DATA_ROOT"]
     assert "KLINES_FOLLOW_ROOT" not in carry_paper
 
-    rmom = _read("scripts/run_continuous_rmom_refresh.sh")
+    rmom = _read("scripts/runtime/run_continuous_rmom_refresh.sh")
     assert "CONTINUOUS_PAPER_DATA_ROOT" not in rmom
     assert rmom.count("precompute_residual_momentum.py") == 1
 
@@ -481,7 +481,7 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
     assert "rollout-recovery-boundary rollback=unavailable" in rollout
 
-    readiness = _read("scripts/check_deploy_rollout_readiness.py")
+    readiness = _read("scripts/vps/check_deploy_rollout_readiness.py")
     assert "read_account_journal(root, verify=True)" in readiness
     assert "canonical aggregate targets are non-flat" in readiness
     assert "canonical working orders remain" in readiness
@@ -497,7 +497,7 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert '|| status=$?' in rollout_check
     assert 'return "$status"' in rollout_check
     assert 'ROLLOUT_READINESS_HELPER_B64' in text
-    assert '"$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py"' in text
+    assert '"$EXPECTED_COMMIT:scripts/vps/check_deploy_rollout_readiness.py"' in text
     refresh = text[
         text.index("refresh_stale_demo_rules_if_requested()") :
         text.index("install_mode()")
@@ -543,7 +543,7 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
         assert phase in text
 
     seed = text[text.index("seed_rmom()") : text.index("activate_mode()")]
-    gate_check = 'scripts/check_residual_momentum_gate.py --path "$gate_path"'
+    gate_check = 'scripts/research/check_residual_momentum_gate.py --path "$gate_path"'
     assert seed.index(gate_check) < seed.index("while true")
     assert seed.index("systemctl is-failed --quiet") < seed.index(gate_check)
     assert 'rmom-bootstrap path=reuse reason=current-valid-gate' in seed
@@ -692,7 +692,7 @@ def test_resolved_sleeves_are_atomically_generated_then_group_bound() -> None:
     deploy = _read(DEPLOY)
     assert 'chown root:"$PAPER_RUNTIME_GROUP" /etc/liquidity-migration/sleeves.resolved.env' in deploy
     assert "chmod 0640 /etc/liquidity-migration/sleeves.resolved.env" in deploy
-    rmom = _read("scripts/run_continuous_rmom_refresh.sh")
+    rmom = _read("scripts/runtime/run_continuous_rmom_refresh.sh")
     assert "lm_load_sleeve_toggles" not in rmom
     assert "CONTINUOUS_SLEEVE is required" in rmom
     rmom_unit = _unit("liquidity-migration-continuous-rmom-refresh.service")
@@ -798,7 +798,7 @@ def test_dependency_contract_has_one_source_and_exact_runtime_pins() -> None:
 
 
 def test_recovery_generator_is_exact_commit_and_non_destructive() -> None:
-    text = _read("scripts/print_vps_recovery_command.sh")
+    text = _read("scripts/vps/print_vps_recovery_command.sh")
     assert 'git show "$commit:$1"' in text
     assert "vps_restore_ssh_access.sh" in text
     assert "vps_rescue_restore_ssh_access.sh" in text
@@ -829,7 +829,7 @@ def test_paper_owner_owns_paper_telegram_notifications() -> None:
         )
         assert "TELEGRAM_BOT_TOKEN" in unset
         assert "TELEGRAM_CHAT_ID" in unset
-    script = _read("scripts/run_account_paper_execution_service.sh")
+    script = _read("scripts/runtime/run_account_paper_execution_service.sh")
     assert '"${TELEGRAM_ENABLED:-0}" == "1"' in script
     assert "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing" in script
     assert "--telegram" in script
@@ -918,7 +918,7 @@ def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> Non
 
 
 def test_rollout_and_reset_survive_a_dying_ssh_transport() -> None:
-    for script in (DEPLOY, ROOT / "scripts" / "reset_demo_paper_ledgers.sh"):
+    for script in (DEPLOY, ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"):
         text = _read(script)
         assert "trap 'exit 129' HUP" in text
         assert "trap 'exit 141' PIPE" in text
@@ -960,7 +960,7 @@ def test_paper_runner_has_no_hidden_equity_fallback() -> None:
     required input in this script: a hidden 10,000 default runs the twin 25x
     under-scaled against the deployed 250,000 capital reference.
     """
-    script = _read("scripts/run_account_paper_execution_service.sh")
+    script = _read("scripts/runtime/run_account_paper_execution_service.sh")
     assert 'PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"' in script
     assert "PAPER_EQUITY_USDT:-10000" not in script
     assert 'if [[ -z "$PAPER_EQUITY_USDT" ]]; then' in script
@@ -983,7 +983,7 @@ def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
 
 
 def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
-    runner = (ROOT / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
+    runner = (ROOT / "scripts" / "runtime" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in runner
     assert "data/bybit-continuous-demo-event" not in runner
     assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner

@@ -60,7 +60,7 @@
     "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "paired daily differentials vs lane2_carry_hold_v2 AND lane2_carry_hold_v1 on shared days"],
     "comparator": "lane2_carry_hold_v2's forward rows (the paired differential isolates the filters, which is the clock-robust claim), plus v1, the deployed CONTINUOUS render, and zero",
     "grid": "none; single committed configuration",
-    "cadence": "one row per completed UTC day after the registration commit (scripts/score_financed_longs_forward.py)",
+    "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
     "eligibility": "only days strictly after the registration commit date count as forward evidence",
     "reproduce_with": "liquidity_migration.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },

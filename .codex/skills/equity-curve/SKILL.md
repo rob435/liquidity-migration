@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: Produce and interpret the repository-standard equity curves for the LONG and CONTINUOUS profiles, and for a registered Lane-2 carry config through the same chart. Use scripts/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
+description: Produce and interpret the repository-standard equity curves for the LONG and CONTINUOUS profiles, and for a registered Lane-2 carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
 # Produce equity curves
@@ -8,19 +8,19 @@ description: Produce and interpret the repository-standard equity curves for the
 Read current options before constructing a command:
 
 ```bash
-bash scripts/equity_curves.sh --help
+bash scripts/research/equity_curves.sh --help
 scripts/ops.sh equity --help
 ```
 
 Use the standard wrapper for outputs intended to be compared or cited:
 
 ```bash
-bash scripts/equity_curves.sh --sleeves long
-bash scripts/equity_curves.sh --sleeves continuous
-bash scripts/equity_curves.sh --sleeves carry
-bash scripts/equity_curves.sh --sleeves long,continuous,carry
-bash scripts/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit --venue bybit
-bash scripts/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
+bash scripts/research/equity_curves.sh --sleeves long
+bash scripts/research/equity_curves.sh --sleeves continuous
+bash scripts/research/equity_curves.sh --sleeves carry
+bash scripts/research/equity_curves.sh --sleeves long,continuous,carry
+bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit --venue bybit
+bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
 ```
 
 Derive the time boundary and venues from the user's question or experiment
@@ -31,7 +31,7 @@ contract. Do not assume a default window is OOS or that both venues are required
 - `long` loads the active LONG profile and runs the long-native research
   engine.
 - `continuous` reconstructs the continuous component book and hedge through
-  `scripts/continuous_deployed_equity_refresh.py`. The sleeve was retired from
+  `scripts/research/continuous_deployed_equity_refresh.py`. The sleeve was retired from
   demo and paper on 2026-07-29, so that curve is a research reconstruction of a
   dormant profile, never a live record.
 - `carry` renders the registered research config

@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from scripts.score_financed_longs_forward import DIFF_ID, main  # noqa: E402
+from scripts.research.score_financed_longs_forward import DIFF_ID, main  # noqa: E402
 
 HOUR_MS = 3_600_000
 

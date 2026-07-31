@@ -40,7 +40,7 @@ never arrived — which is what the watchdog reads.
 
 ## The liveness watchdog
 
-[`scripts/check_fleet_liveness.py`](../scripts/check_fleet_liveness.py), one oneshot per timer fire,
+[`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per timer fire,
 every 3 minutes after a 10-minute cold-start grace. `--account-scope` selects `demo`, `demo-paper`,
 or `mainnet`; the mainnet scope runs only the mainnet owner and producers against roots disjoint
 from demo and paper.

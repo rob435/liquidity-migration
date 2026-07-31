@@ -1,6 +1,6 @@
 """Executable form of the three ``lane2_*financed*`` / ``lane2_carry_hold`` configs.
 
-Reads a cross-venue panel (``scripts/build_cross_venue_panel.py``) and produces
+Reads a cross-venue panel (``scripts/data/build_cross_venue_panel.py``) and produces
 daily score rows. Two mechanisms, both long-only expressions of one premium: the
 market pays longs while the short side is paying funding.
 

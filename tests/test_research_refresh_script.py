@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-import scripts.research_refresh as refresh
+import scripts.research.research_refresh as refresh
 
 
 def _date_partitions(root: Path, venue: str, day: str) -> None:

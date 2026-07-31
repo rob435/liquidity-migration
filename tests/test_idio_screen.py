@@ -18,8 +18,8 @@ from liquidity_migration.residual_price import RESIDUAL_AVAILABILITY_SHIFT_DAYS
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / f"{name}.py")
+def _load(group: str, name: str):
+    spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / group / f"{name}.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -27,8 +27,8 @@ def _load(name: str):
     return module
 
 
-build_idio_panel = _load("build_idio_panel")
-screen_idio_charts = _load("screen_idio_charts")
+build_idio_panel = _load("data", "build_idio_panel")
+screen_idio_charts = _load("research", "screen_idio_charts")
 
 BASE_DAY = 20_000
 

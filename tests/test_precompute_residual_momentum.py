@@ -1,4 +1,4 @@
-"""Causality tests for the residual-momentum precompute (scripts/precompute_residual_momentum.py).
+"""Causality tests for the residual-momentum precompute (scripts/data/precompute_residual_momentum.py).
 
 The residual is fit against a forward return that only completes ~2 days late, so
 residual_momentum[D] must be a rolling sum shifted far enough that its newest term is
@@ -20,7 +20,7 @@ DAY_MS = 86_400_000
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "precompute_residual_momentum", REPO / "scripts" / "precompute_residual_momentum.py"
+        "precompute_residual_momentum", REPO / "scripts" / "data" / "precompute_residual_momentum.py"
     )
     assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec)
@@ -502,5 +502,5 @@ def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
 def test_deployed_rmom_refresh_uses_full_rewrite() -> None:
     """Pins the reason M21 cannot break the operational path."""
 
-    script = (REPO / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
+    script = (REPO / "scripts" / "runtime" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
     assert "--full-rewrite" in script

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-import scripts.reconcile_bybit_demo_accounting as accounting_script
+import scripts.maintain.reconcile_bybit_demo_accounting as accounting_script
 
 
 class Lease:

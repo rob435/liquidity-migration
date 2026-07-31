@@ -9,7 +9,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from scripts.build_cross_venue_panel import main, year_windows
+from scripts.data.build_cross_venue_panel import main, year_windows
 
 
 class TestYearWindows:

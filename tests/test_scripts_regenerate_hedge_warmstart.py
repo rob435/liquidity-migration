@@ -10,7 +10,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_SRC = Path(__file__).resolve().parent.parent / "scripts" / "regenerate_hedge_warmstart.py"
+_SRC = Path(__file__).resolve().parent.parent / "scripts" / "maintain" / "regenerate_hedge_warmstart.py"
 _spec = importlib.util.spec_from_file_location("_audit2_regen_warmstart", _SRC)
 mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)

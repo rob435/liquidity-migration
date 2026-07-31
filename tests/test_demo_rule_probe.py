@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _probe_script_module() -> Any:
-    path = REPO_ROOT / "scripts" / "probe_bybit_demo_rules.py"
+    path = REPO_ROOT / "scripts" / "maintain" / "probe_bybit_demo_rules.py"
     spec = importlib.util.spec_from_file_location("probe_bybit_demo_rules_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -537,7 +537,7 @@ def test_probe_distance_must_be_positive_and_below_full_price(distance: float) -
 
 
 def test_probe_cli_checks_explicit_conditional_order_view() -> None:
-    text = (REPO_ROOT / "scripts" / "probe_bybit_demo_rules.py").read_text()
+    text = (REPO_ROOT / "scripts" / "maintain" / "probe_bybit_demo_rules.py").read_text()
 
     assert 'client.get_open_orders(settle_coin="USDT")' in text
     assert 'order_filter="StopOrder"' in text

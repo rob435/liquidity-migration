@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 _spec = importlib.util.spec_from_file_location(
-    "screen_phase1", REPO_ROOT / "scripts" / "screen_phase1.py"
+    "screen_phase1", REPO_ROOT / "scripts" / "research" / "screen_phase1.py"
 )
 assert _spec and _spec.loader
 screen_phase1 = importlib.util.module_from_spec(_spec)

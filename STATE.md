@@ -38,11 +38,11 @@ how it got there. That history is in Git.
   and none of this has run against a funded account. Limitations:
   `docs/real_money.md`.
 - **2026-07-31 — mainnet arming tooling, in the working tree and not deployed.**
-  Four gaps closed: `scripts/freeze_account_candidate_universe.py` now takes a
+  Four gaps closed: `scripts/maintain/freeze_account_candidate_universe.py` now takes a
   required `--realm`, so the universe can be frozen from `api.bybit.com`;
   `scripts/ops.sh real-money create-state-roots [--execute]` creates the mainnet
   journal roots; `scripts/check_demo_liveness.py` became
-  `scripts/check_fleet_liveness.py --account-scope {demo,demo-paper,mainnet}`
+  `scripts/runtime/check_fleet_liveness.py --account-scope {demo,demo-paper,mainnet}`
   behind the new `liquidity-migration-mainnet-liveness.{service,timer}`; and
   `deploy_vps_live.sh` gained `activate-mainnet` / `stop-mainnet`, with its
   mainnet `verify` half now conditional on the resolved mainnet sleeve toggles.

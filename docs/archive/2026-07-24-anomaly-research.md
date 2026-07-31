@@ -92,7 +92,7 @@ neutral, daily, top-100 only, both legs liquid, 12.4% loss concentration.
 > **Correction, 2026-07-24.** An earlier version of this paragraph described that
 > statistic as a property of *the deployed book*. It is not. It is the payoff
 > geometry of hypothetical short positions across the research universe. Measured
-> directly (`scripts/equity_curves.sh`, full PIT), the deployed sleeves carry no
+> directly (`scripts/research/equity_curves.sh`, full PIT), the deployed sleeves carry no
 > such tail: LONG is **long-only** with max drawdown −4.11% and worst month
 > −3.06%; CONTINUOUS has max drawdown −1.29% and **zero days worse than −1%**.
 > Neither is decaying — both are stronger in the second half of their samples.
@@ -475,7 +475,7 @@ grades itself on days it never saw.
 
 Prompted by a direct challenge — *is the current signal fully spent?* — the two
 deployed profiles were measured with the repository-standard tooling
-(`scripts/equity_curves.sh`, `~/SHARED_DATA/bybit_full_pit`, full PIT) rather
+(`scripts/research/equity_curves.sh`, `~/SHARED_DATA/bybit_full_pit`, full PIT) rather
 than assumed dead. They are not spent. Both are **improving**.
 
 ### LONG (`LongV11aDivWeekendVol`), long-only, 3× cost multiplier
@@ -894,7 +894,7 @@ Three of the four tasks close; one is blocked on access. Two published claims
 are withdrawn, and **Gate 0.3 is explained** — the CONTINUOUS backtest and the forward record were never
 measuring the same strategy.
 
-Run identity: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
+Run identity: `scripts/research/equity_curves.py --sleeves continuous --start 2023-03-13
 --end 2026-07-17`, root `~/SHARED_DATA/bybit_full_pit`, config
 `configs/volume_alpha.default.yaml`, profile `continuous_ensemble_v2` revision
 `active_tp12_code_v1`. Reproduces §10 exactly: **Sharpe 2.73, max DD −1.29%,
@@ -1115,10 +1115,10 @@ basis, threshold **t ≥ 3.25**.
 **Gate 1 result: 0 of 12 cells clear t ≥ 3.25.** That is the roadmap's expected
 outcome, so no further sweeps were run.
 
-Substrate: `scripts/build_cross_venue_panel.py --start 2021-01-01 --end
+Substrate: `scripts/data/build_cross_venue_panel.py --start 2021-01-01 --end
 2026-07-18`, **11,430,624 rows / 636 both-venue symbols** across six yearly
 shards, panel commit `ec29aa9`, zero exclusions, `execution_delay_ms=0` on top of
-the mandatory 1h bar-completion lag. Harness: `scripts/screen_phase1.py`
+the mandatory 1h bar-completion lag. Harness: `scripts/research/screen_phase1.py`
 (19 tests). Top-100 by trailing-24h turnover on the venue being traded, 24h
 disjoint holds, settlement-exact funding. Lane-1 on seen data.
 
@@ -1291,7 +1291,7 @@ grades nothing (`docs/governance.md` §1).
 ## 18. Phase 5A — tuned for *t*. One mechanism clears, and it is uninvestable (2026-07-25)
 
 One-dimensional strictness sweeps on the already-selected books, selecting on
-**t** rather than mean, at each cell's own measured turnover. Harness `scripts/tune_phase5.py`. 8 cells × 3 parameters ×
+**t** rather than mean, at each cell's own measured turnover. Harness `scripts/research/tune_phase5.py`. 8 cells × 3 parameters ×
 3 signals × 2 venues = **144 cells swept, all reported**. Lane-1 on seen data.
 
 ### 18.1 The roadmap's arithmetic is confirmed empirically
@@ -1634,7 +1634,7 @@ agree — a declared stop the account places at the venue, and the identical
 stop modeled in the reconstruction.
 
 **Choosing the level.** The §16.3 counterfactual was extended upward
-(`scripts/continuous_stop_counterfactual.py`, same MAE method, same caveats,
+(`scripts/research/continuous_stop_counterfactual.py`, same MAE method, same caveats,
 deployed component weights — the published "none" row reproduces exactly):
 
 | stop | breached | TP→stop | total | Sharpe | t | maxDD | worst day |
@@ -1726,7 +1726,7 @@ That instrument is the right grader — hash-assigned arms on *real* entries at
 finding (~1 position on 38% of days) makes 100 fills/arm months of accrual.
 
 What was missing is a fast bound on the mechanism. Built this session:
-`scripts/probe_passive_fill_ab.py` + `liquidity_migration/passive_fill_probe.py`
+`scripts/research/probe_passive_fill_ab.py` + `liquidity_migration/passive_fill_probe.py`
 (protocol pre-declared in the module docstring; 22 unit tests):
 
 - standalone, operator-run, demo-only, min-notional, sequential, mutation-lease
@@ -1750,12 +1750,12 @@ so fill-rate-at-20s is derivable and the instruments stay comparable.
 
 **Blocked here:** this box holds no demo credentials. The first run needs a
 box with `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET`, the fleet stopped and
-flat: `python scripts/probe_passive_fill_ab.py --symbols <liquid set>
+flat: `python scripts/research/probe_passive_fill_ab.py --symbols <liquid set>
 --demo-rules-file <verified rules> --output <receipt> --confirm-demo-probe`.
 
 ### 20.3 Bookkeeping
 
-`scripts/run_with_stub.py` gained three research-only Windows patches
+`scripts/devtools/run_with_stub.py` gained three research-only Windows patches
 (btc-risk fsync, account-route directory fsync, `rename_noreplace` via
 Windows-native no-replace rename) so the contract tests were runnable here;
 the account-route **mode-0600 enforcement is deliberately not stubbed**, so

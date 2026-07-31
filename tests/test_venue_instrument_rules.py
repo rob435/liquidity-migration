@@ -159,6 +159,6 @@ def test_the_rules_provider_refuses_a_rule_from_the_other_realm() -> None:
 def test_the_deploy_rule_probe_is_gated_by_realm() -> None:
     source = (REPO / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
     assert 'the order-placing rule probe is demo-only' in source
-    probe_index = source.index("scripts/probe_bybit_demo_rules.py")
+    probe_index = source.index("scripts/maintain/probe_bybit_demo_rules.py")
     gate_index = source.index('[ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ]')
     assert gate_index < probe_index

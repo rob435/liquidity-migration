@@ -141,9 +141,9 @@ Three read paths, and they are not interchangeable.
    `verify_account_journal(...)`. Sanctioned callers: `account_strategy_state.py`,
    `three_way_reconciliation.py`, `account_candidate_universe.py`, owner startup
    (`AccountJournal._events_ref`, which is what makes the head read valid below), and the
-   audit/report tools `scripts/check_fleet_liveness.py`,
-   `scripts/check_deploy_rollout_readiness.py`, `scripts/build_trade_diagnostics.py`,
-   `scripts/build_execution_cost_report.py`. `account_venue_accounting.py` verifies the
+   audit/report tools `scripts/runtime/check_fleet_liveness.py`,
+   `scripts/vps/check_deploy_rollout_readiness.py`, `scripts/research/build_trade_diagnostics.py`,
+   `scripts/research/build_execution_cost_report.py`. `account_venue_accounting.py` verifies the
    same way over a captured byte snapshot via `read_account_journal_bytes`.
 2. **Resumable cursor** — `AccountJournalCursor` for per-cycle producers: re-reads only
    segments added since the last call, cold-reads on any prefix mismatch. Never put a bare
@@ -165,7 +165,7 @@ predate a fill; `head_binding="allow_behind"` is for liveness consumers, because
 execution consumer appends fills independently of the owner loop and on-disk health
 normally lags the head by one transaction until the next republish. Health *ahead* of the
 journal, or equal-sequence state-hash disagreement, still fails closed, and staleness stays
-bounded by `max_age_ns`. `scripts/check_deploy_rollout_readiness.py` adds two script-level
+bounded by `max_age_ns`. `scripts/vps/check_deploy_rollout_readiness.py` adds two script-level
 modes that skip the binding entirely: `none` and `stopped-maintenance`.
 
 ## Pre-trade gate
@@ -224,7 +224,7 @@ component declaring a stop it falls back to the explicit account fraction under
 `decision_reference_account_fallback_fraction` (`:1534`). The stop is rounded outward to
 the verified tick (`round_native_stop`). The account fraction is `DISASTER_STOP_FRACTION` →
 `--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0,1) with no default:
-`scripts/run_account_execution_service.sh:79-80` refuses to start the owner without it.
+`scripts/runtime/run_account_execution_service.sh:79-80` refuses to start the owner without it.
 Reduce-only commands carry no entry TP/SL fields. Confirmed fills then re-anchor the
 Full-position stop to exact component fill evidence — a separate later stage, labelled
 `fill_anchored_outermost_component_stop` (`venue_protection.py:310`); the two labels must
@@ -274,7 +274,7 @@ immediately.
 
 **Private stream.** Readiness is probed every owner-loop iteration and again at
 exposure-increasing admission. After `ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` (default 180;
-`.env.example:87`, `scripts/run_account_execution_service.sh:19` →
+`.env.example:87`, `scripts/runtime/run_account_execution_service.sh:19` →
 `--private-ws-reconnect-seconds`) continuously not-ready, the owner builds and subscribes
 one replacement in a background thread, reusing that same value as an attempt cooldown
 against authentication storms. Every authentication generation must obtain fresh
@@ -382,7 +382,7 @@ digest — not a reopened predictable path.
 
 Paper reset retires its own deterministic epoch explicitly and never borrows the demo
 flatness claim; the demo venue-flat proof gates only the demo half
-(`scripts/reset_demo_paper_ledgers.sh:67-74`). The post-reset paper heartbeat records
+(`scripts/maintain/reset_demo_paper_ledgers.sh:67-74`). The post-reset paper heartbeat records
 `paper_boundary=archived_deterministic_epoch_not_carried_forward`, and the fresh paper
 epoch's flatness basis is `fresh_empty_deterministic_epoch`.
 
@@ -438,7 +438,7 @@ never below the entry limit (`passive_execution.py:118-120`). The modeled ACK re
 effective age, the limit, and the policy source `paper_owner_market_freshness` (`:147-150`),
 so this safety-liveness allowance cannot be mistaken for entry-model calibration.
 
-[`scripts/measure_execution_twin_error.py`](../scripts/measure_execution_twin_error.py)
+[`scripts/research/measure_execution_twin_error.py`](../scripts/research/measure_execution_twin_error.py)
 `--demo-account-root R --paper-account-root R2 [--demo-account-id ID] [--paper-account-id
 ID] [--json]` is the measurement that would let the twin leave `integration_only_uncalibrated`
 scope. It reports `optimism_bps = sign(qty) * (demo_vwap − paper_vwap) / demo_vwap *
@@ -535,8 +535,8 @@ Operator routes ([`scripts/ops.sh`](../scripts/ops.sh)): `status`, `equity`,
 readiness, exact decision books, journals, reconciliation and protection, they simply do
 not append every public frame. The runner refuses to start unless the variable is
 explicitly `0` or `1` — "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1"
-(`scripts/run_account_execution_service.sh:90-94`,
-`scripts/run_account_paper_execution_service.sh:44-48`); `.env.example:85` deliberately
+(`scripts/runtime/run_account_execution_service.sh:90-94`,
+`scripts/runtime/run_account_paper_execution_service.sh:44-48`); `.env.example:85` deliberately
 ships it empty and `deploy_vps_live.sh:525` sets `"0"`.
 
 Deployment derives one authorization-bound scheduling-capture tape per environment:
@@ -574,7 +574,7 @@ read-only via `CARRY_MARKET_FOLLOW_ROOT`. Missing bars retain the public REST fa
 no second bulk collector or WS bootstrap. Paper runtime verification reopens only the
 paper/non-secret files. The demo credential file is read by `check_demo_order_permissions`
 (`deploy_vps_live.sh:1169-1178`), which loads it into the process environment, runs
-`scripts/check_bybit_order_permissions.py` and unsets the keys again; `activate` runs it in
+`scripts/maintain/check_bybit_order_permissions.py` and unsets the keys again; `activate` runs it in
 `deploy` context and `verify` re-runs it in `verify` context (`:1333`), so order permission is
 re-checked live rather than being bound once.
 
@@ -597,11 +597,11 @@ launcher), `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 | [`account_intent_client.py`](../liquidity_migration/account_intent_client.py), [`strategy_targets.py`](../liquidity_migration/strategy_targets.py), [`paper_target_mirror.py`](../liquidity_migration/paper_target_mirror.py) | Write-only producer boundary; demo-to-paper republication | `test_account_intent_client.py`, `test_strategy_targets.py`, `test_paper_target_mirror.py` |
 | [`strategy_planning.py`](../liquidity_migration/strategy_planning.py) | Shared cross-sleeve suppression invariant: read owner health for equity, snapshot planning state, suppress intents duplicating unresolved durable work, retry terminally rejected attempts, avoid same-cycle exit collisions — shared so it cannot drift between sleeves | `test_strategy_planning.py` |
 | [`strategy_runtime.py`](../liquidity_migration/strategy_runtime.py) | The rule that sleeve code may compute signals and desired notionals but never call a venue client, mutate a ledger, or reserve margin; converts all sleeve intents together into one atomic kernel batch | no dedicated file — covered by `test_account_kernel.py`, `test_account_service.py`, `test_account_risk_reduction.py`, `test_protection_engine.py`, `test_account_service_runner_readiness.py` |
-| [`strategy_funnel.py`](../liquidity_migration/strategy_funnel.py) | **Observer-only** diagnostic serialization of LONG/CONTINUOUS source gates and separated future-path labels; callers compute gates from causal state and pass immutable row snapshots, and writer failure is reported without becoming an admission gate (`:138`). Entry point `scripts/build_candidate_tape.py` | `test_strategy_funnel.py`, `test_candidate_tape.py` |
+| [`strategy_funnel.py`](../liquidity_migration/strategy_funnel.py) | **Observer-only** diagnostic serialization of LONG/CONTINUOUS source gates and separated future-path labels; callers compute gates from causal state and pass immutable row snapshots, and writer failure is reported without becoming an admission gate (`:138`). Entry point `scripts/data/build_candidate_tape.py` | `test_strategy_funnel.py`, `test_candidate_tape.py` |
 | [`historical_account_replay.py`](../liquidity_migration/historical_account_replay.py) | Historical-replay accounting path | `test_historical_account_replay.py` |
 | [`bybit_market_data.py`](../liquidity_migration/bybit_market_data.py) | Venue market-data boundary | `test_bybit_market_data_boundary.py` |
 | [`cli.py`](../liquidity_migration/cli.py), [`cli_parsers.py`](../liquidity_migration/cli_parsers.py), [`config.py`](../liquidity_migration/config.py), [`storage.py`](../liquidity_migration/storage.py), [`ingestion.py`](../liquidity_migration/ingestion.py), [`downloaders.py`](../liquidity_migration/downloaders.py), [`archive.py`](../liquidity_migration/archive.py) / [`archive_manifest.py`](../liquidity_migration/archive_manifest.py), venue download modules | `python -m liquidity_migration` CLI and the research-data domain | `test_liquidity_migration_cli.py`, `test_liquidity_migration_config.py`, `test_liquidity_migration_ingestion.py`, `test_liquidity_migration_storage.py`, `test_storage_since_date.py`, `test_liquidity_migration_downloaders.py`, `test_liquidity_migration_archive.py`, `test_liquidity_migration_archive_manifest.py` |
-| [`three_way_reconciliation.py`](../liquidity_migration/three_way_reconciliation.py) (behind `research-refresh reconcile`), `scripts/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_three_way_reconciliation.py`, `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
+| [`three_way_reconciliation.py`](../liquidity_migration/three_way_reconciliation.py) (behind `research-refresh reconcile`), `scripts/research/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_three_way_reconciliation.py`, `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
 | [`account_route.py`](../liquidity_migration/account_route.py), [`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py) | Root identity; one owner per account | `test_account_route.py`, `test_account_owner_lease.py` |
 | [`account_reconcile.py`](../liquidity_migration/account_reconcile.py), [`account_venue_accounting.py`](../liquidity_migration/account_venue_accounting.py), [`account_strategy_state.py`](../liquidity_migration/account_strategy_state.py) | REST recovery, venue truth, accounting rows, sleeve planning read model | `test_account_reconcile.py`, `test_account_funding_reconcile.py`, `test_account_venue_accounting.py`, `test_account_strategy_state.py` |
 | [`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py), [`operational_profile.py`](../liquidity_migration/operational_profile.py) | Capital reference and derived caps | `test_equity_anchored_envelope.py`, `test_operational_profile.py` |
@@ -610,7 +610,7 @@ launcher), `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 | [`venue_realm.py`](../liquidity_migration/venue_realm.py), [`execution_environment.py`](../liquidity_migration/execution_environment.py), [`venue_instrument_rules.py`](../liquidity_migration/venue_instrument_rules.py), [`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) | Realm/owner separation, credential selection, rules per realm | `test_venue_realm.py`, `test_venue_instrument_rules.py`, `test_demo_rule_probe.py` |
 | [`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py), [`account_epoch_reset.py`](../liquidity_migration/account_epoch_reset.py), [`account_reset_archive.py`](../liquidity_migration/account_reset_archive.py) | Descriptor-rooted checks before an `rm -rf`, epoch transition, archive | `test_reset_path_safety.py`, `test_account_epoch_reset.py`, `test_account_reset_archive.py` |
 | [`trade_diagnostics.py`](../liquidity_migration/trade_diagnostics.py), [`post_fill_markouts.py`](../liquidity_migration/post_fill_markouts.py) | Command-grain TCA projection, markout scheduling | `test_trade_diagnostics.py`, `test_post_fill_markouts.py` |
-| [`market_capture.py`](../liquidity_migration/market_capture.py), [`ws_state_cache.py`](../liquidity_migration/ws_state_cache.py), [`account_owner_health.py`](../liquidity_migration/account_owner_health.py), [`account_owner_readiness.py`](../liquidity_migration/account_owner_readiness.py), [`strategy_cycle_health.py`](../liquidity_migration/strategy_cycle_health.py), [`run_diagnostics.py`](../liquidity_migration/run_diagnostics.py) | Book capture, stream state, health projection, whether the owner accepts work at all, cycle health read by the liveness units | `test_market_capture.py`, `test_account_owner_health.py`, `test_account_owner_readiness.py`, `test_strategy_cycle_health.py`, `test_run_diagnostics.py`, plus the `scripts/check_fleet_liveness.py` tests |
+| [`market_capture.py`](../liquidity_migration/market_capture.py), [`ws_state_cache.py`](../liquidity_migration/ws_state_cache.py), [`account_owner_health.py`](../liquidity_migration/account_owner_health.py), [`account_owner_readiness.py`](../liquidity_migration/account_owner_readiness.py), [`strategy_cycle_health.py`](../liquidity_migration/strategy_cycle_health.py), [`run_diagnostics.py`](../liquidity_migration/run_diagnostics.py) | Book capture, stream state, health projection, whether the owner accepts work at all, cycle health read by the liveness units | `test_market_capture.py`, `test_account_owner_health.py`, `test_account_owner_readiness.py`, `test_strategy_cycle_health.py`, `test_run_diagnostics.py`, plus the `scripts/runtime/check_fleet_liveness.py` tests |
 
 Producer-side strategy modules (`long_native*`, `continuous_*`, `carry_demo*`,
 `financed_longs.py`, `lane2_blend.py`) are documented with the research they implement:
@@ -638,7 +638,7 @@ sequence-aware book contexts for arrival liquidity and timing; (3) strategy
 feature/candidate rows for the pre-gate selection funnel; (4) PIT historical bars or
 bounded forward marks for future path labels — never live projections.
 
-[`scripts/build_trade_diagnostics.py`](../scripts/build_trade_diagnostics.py)
+[`scripts/research/build_trade_diagnostics.py`](../scripts/research/build_trade_diagnostics.py)
 `--account-root R --capture-root C --out DIR` builds one deterministic row per canonical
 order command from sources 1 and 2. It refuses a dirty tree unless `--allow-dirty`, refuses
 an existing output, and writes exactly `execution_tca.parquet` and `manifest.json`. `s=+1`
@@ -748,13 +748,13 @@ gates separately named.
 `manifest.json` (identities, schema, counts, nulls, hashes, deviations),
 `execution_tca.parquet` (one row per canonical command), `decision_funnel.parquet` (one row
 per pre-gate decision unit) and `path_labels.parquet` (future labels only) — the last two
-written by `scripts/build_candidate_tape.py:909-910`. Separating future labels into their
+written by `scripts/data/build_candidate_tape.py:909-910`. Separating future labels into their
 own file is the mechanism that keeps lookahead out of the funnel. The verified journal and
 capture root stay sources and are not copied into the run; intermediate partitions are
 resumable working state; charts and Markdown are regenerated from the tables, and only the
 compact evidence card and decision are committed to the research summary. Adding an
 artifact requires a named claim, a consumer, and a retention rule.
-`scripts/build_candidate_tape.py` reads only the preregistered PIT root and writes exactly
+`scripts/data/build_candidate_tape.py` reads only the preregistered PIT root and writes exactly
 one run-scoped diagnostic partition; construct commands from `--help`.
 
 Claim-bearing exports require a quiescent, frozen, read-only capture snapshot. The projector
@@ -768,7 +768,7 @@ run the builder against a live root and the table can span a moving root.
 threshold crossing; exit reason and holding time; realized/funding/fee decomposition with a
 counterfactual fixed-horizon return; signal-to-order delay and opportunity cost for
 rejected, expired, cancelled or partially unfilled intent. The only implementation anywhere
-is `mae_72h`/`mfe_72h` in the candidate tape (`scripts/build_candidate_tape.py:625-671`).
+is `mae_72h`/`mfe_72h` in the candidate tape (`scripts/data/build_candidate_tape.py:625-671`).
 The TCA table is not the definition of complete.
 
 **Analysis standard.** Every diagnostic read reports median, robust spread, tails,

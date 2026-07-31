@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts/build_full_pit_bybit.sh"
+SCRIPT = REPO / "scripts/data/build_full_pit_bybit.sh"
 
 
 def test_builder_validates_independent_manifest_without_filtering_it() -> None:

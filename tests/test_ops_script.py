@@ -32,7 +32,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
-        Path("scripts/check_deploy_rollout_readiness.py"),
+        Path("scripts/vps/check_deploy_rollout_readiness.py"),
         Path("liquidity_migration/maintenance_lock.py"),
     ):
         target = checkout / relative

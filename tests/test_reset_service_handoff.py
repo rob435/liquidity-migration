@@ -9,7 +9,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RESET_SCRIPT = ROOT / "scripts" / "reset_demo_paper_ledgers.sh"
+RESET_SCRIPT = ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"
 
 
 def _function_source(name: str) -> str:

@@ -197,7 +197,7 @@ def test_run_script_refuses_circular_self_follow() -> None:
         "run_bybit_continuous_demo_event_engine.sh",
         "run_bybit_long_demo_event_engine.sh",
     ):
-        script = (repo / "scripts" / name).read_text(encoding="utf-8")
+        script = (repo / "scripts" / "runtime" / name).read_text(encoding="utf-8")
         assert 'if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]' in script
         assert "circular self-follow" in script
 

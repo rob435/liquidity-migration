@@ -21,17 +21,19 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(f"scripts.{name}", REPO / "scripts" / f"{name}.py")
+def _load(group: str, name: str):
+    spec = importlib.util.spec_from_file_location(
+        f"scripts.{group}.{name}", REPO / "scripts" / group / f"{name}.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules[f"scripts.{name}"] = module
+    sys.modules[f"scripts.{group}.{name}"] = module
     spec.loader.exec_module(module)
     return module
 
 
-hedged = _load("screen_idio_hedged")
-directional = _load("screen_idio_directional")
+hedged = _load("research", "screen_idio_hedged")
+directional = _load("research", "screen_idio_directional")
 
 BASE_DAY = 20_000
 BTC = "BTCUSDT"

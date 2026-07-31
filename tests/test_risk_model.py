@@ -155,7 +155,7 @@ def _load_precompute_module():
     import importlib.util
     import sys
 
-    path = Path(__file__).resolve().parents[1] / "scripts" / "precompute_residual_momentum.py"
+    path = Path(__file__).resolve().parents[1] / "scripts" / "data" / "precompute_residual_momentum.py"
     scripts = str(path.parent)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)

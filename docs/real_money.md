@@ -66,7 +66,7 @@ there, naming the dial to move, instead of at start-up over a funded account.
 | Daily loss halt → `run_safety_flat_once` | [`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py) |
 | Venue-native stop armed in the same `place_order` call, read back after create | [`venue_protection.py`](../liquidity_migration/venue_protection.py), [`bybit_execution_adapter.py`](../liquidity_migration/bybit_execution_adapter.py) |
 | One owner per account; journal ↔ venue reconciliation | [`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py), [`account_reconcile.py`](../liquidity_migration/account_reconcile.py) |
-| Independent watchdog: owner, producers, strategy inputs and venue snapshot every 3 min, paging Telegram; no credential, no ordering edge to the owner it watches | `liquidity-migration-mainnet-liveness.timer` → [`check_fleet_liveness.py --account-scope mainnet`](../scripts/check_fleet_liveness.py) |
+| Independent watchdog: owner, producers, strategy inputs and venue snapshot every 3 min, paging Telegram; no credential, no ordering edge to the owner it watches | `liquidity-migration-mainnet-liveness.timer` → [`check_fleet_liveness.py --account-scope mainnet`](../scripts/runtime/check_fleet_liveness.py) |
 | Mainnet client refuses to construct while `REAL_MONEY` is unset | [`bybit.py:204-209`](../liquidity_migration/bybit.py) (private WebSocket: `:875-878`) |
 | Producers get no credentials and no arming switch in any realm; order authority is the account owner's alone | the mainnet units `UnsetEnvironment` both |
 
@@ -106,9 +106,9 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
    ```
 7. **Freeze the inputs.** Universe first, then rules against it:
    ```bash
-   scripts/freeze_account_candidate_universe.py --realm mainnet \
+   scripts/maintain/freeze_account_candidate_universe.py --realm mainnet \
      --output $D/candidate-universe.json
-   scripts/freeze_venue_instrument_rules.py --realm mainnet \
+   scripts/maintain/freeze_venue_instrument_rules.py --realm mainnet \
      --symbols-file $D/candidate-universe.json --output $D/venue-rules.json
    ```
    Rules come from the read-only `get_instruments_info` endpoint. Do not run the

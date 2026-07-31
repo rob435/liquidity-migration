@@ -43,7 +43,7 @@ its threshold admits are chronic decliners whose shorts are right), while
 the per-print gate's acuteness selection is load-bearing. See
 `docs/archive/2026-07-28-carry-hold-quant-review.md`.
 
-**Corrected verdicts** (`scripts/screen_financed_longs.py` on the
+**Corrected verdicts** (`scripts/research/screen_financed_longs.py` on the
 2026-07-28 panel; output `reports/financed_longs_corrected_2026-07-28/`):
 
 | bench window 2023-03-13..2026-07-16, full calendar | Sharpe raw | Sharpe vt | mean bp/d | beats bench? |
@@ -89,12 +89,12 @@ sizing, same state machine; v1 keeps scoring) — full tables in
 ## 1. The benchmark, pinned from primary artifacts
 
 The deployed CONTINUOUS sleeve's honest render was regenerated rather than
-quoted: `scripts/equity_curves.py --sleeves continuous --start 2023-03-13
+quoted: `scripts/research/equity_curves.py --sleeves continuous --start 2023-03-13
 --end 2026-07-17`, profile revision `active_tp12_sl35_v1`, output
 `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26`
 *(2026-07-28: renders the RETIRED 3-cell shape — no longer a citable
 baseline; the dir stays in place only as a frozen input of
-`scripts/render_continuous_admission_variants.py`. Current baselines:
+`scripts/research/render_continuous_admission_variants.py`. Current baselines:
 `reports/equity_curves_2026-07-28/`.)*
 
 > **Benchmark: Sharpe 1.84, total +15.85% (+4.49%/yr), max DD −2.85%, worst
@@ -156,7 +156,7 @@ panel that has been refreshed since 2026-07-26. Every verdict in this note is
 unchanged; the total turnover actually charged rose 1–3%, which is small here
 because gate flips are infrequent.
 
-Reproduce with `scripts/screen_financed_longs.py`. The raw compounded totals
+Reproduce with `scripts/research/screen_financed_longs.py`. The raw compounded totals
 assume full reinvestment at book scale and are shown for the accounting, not
 as a capacity claim; the vol-targeted (15% ann, 3× cap, leverage-change
 turnover charged) rows are the deployable presentation. Equity curves and the
@@ -343,7 +343,7 @@ Structural findings worth more than the individual results:
   `configs/lane2_financed_leaders_binance_v1.json` (the commit is the
   registration).
 - Executable: `liquidity_migration/financed_longs.py`; reproduction:
-  `scripts/screen_financed_longs.py`; tests: `tests/test_financed_longs.py`.
+  `scripts/research/screen_financed_longs.py`; tests: `tests/test_financed_longs.py`.
 - Benchmark render: `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26/`
   *(2026-07-28: superseded as a baseline — retained in place only as a
   frozen input of the registered admission-variant scorer)*.

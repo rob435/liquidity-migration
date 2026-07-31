@@ -8,14 +8,14 @@ order-writing runtime at a research root, and never use a demo ledger as a resea
 
 | Root | Venue | Builder |
 | --- | --- | --- |
-| `~/SHARED_DATA/bybit_full_pit` | Bybit USDT linear perps | [`scripts/build_full_pit_bybit.sh`](../scripts/build_full_pit_bybit.sh) |
-| `~/SHARED_DATA/binance_full_pit` | Binance USD-M perps | [`scripts/build_full_pit_binance.sh`](../scripts/build_full_pit_binance.sh) |
+| `~/SHARED_DATA/bybit_full_pit` | Bybit USDT linear perps | [`scripts/data/build_full_pit_bybit.sh`](../scripts/data/build_full_pit_bybit.sh) |
+| `~/SHARED_DATA/binance_full_pit` | Binance USD-M perps | [`scripts/data/build_full_pit_binance.sh`](../scripts/data/build_full_pit_binance.sh) |
 
 Mutable local datasets. Not committed, not holdouts by virtue of their name.
 
 ```bash
-BYBIT_START=2021-01-01 BYBIT_END=YYYY-MM-DD  bash scripts/build_full_pit_bybit.sh
-BINANCE_START=2019-09-01 BINANCE_END=YYYY-MM-DD bash scripts/build_full_pit_binance.sh
+BYBIT_START=2021-01-01 BYBIT_END=YYYY-MM-DD  bash scripts/data/build_full_pit_bybit.sh
+BINANCE_START=2019-09-01 BINANCE_END=YYYY-MM-DD bash scripts/data/build_full_pit_binance.sh
 ```
 
 **Every `--end` and `*_END` in this repository is exclusive.** The named day is not in the output.
@@ -30,14 +30,14 @@ ancillaries. Binance: `binance_vision build-binance-oos` (monthly plus daily tai
 published as one atomic pair) → `download-binance-proxy`. Monthly history and the bounded current-month
 daily tail are assembled in **one** staging generation specifically so daily-only new contracts cannot
 be dropped before a later top-up, and membership is then derived from their *combined* ≥20-bar coverage
-(`scripts/build_full_pit_binance.sh:56-59`). Splitting that into a cheaper two-pass reintroduces the
+(`scripts/data/build_full_pit_binance.sh:56-59`). Splitting that into a cheaper two-pass reintroduces the
 survivorship hole it closes.
 
 - `symbol=` components are percent-encoded by [`symbol_codec.py`](../liquidity_migration/symbol_codec.py). Decode with that module; never read the directory name as an exchange symbol. ASCII symbols are unchanged.
 - Unsupported, ambiguous, or path-like identifiers fail with `SymbolIdentityError` *before* any root mutation. `normalize_exchange_symbol` (`symbol_codec.py:14-36`) NFC-normalizes, then rejects: anything that is not one non-blank untrimmed `str`; any value whose NFKC form differs from its NFC form (compatibility/confusable); identifiers over 192 UTF-8 bytes; any character outside Unicode categories L/N; any character where `c != c.upper()`. Two upstream identifiers that normalize to the same key are also rejected (`:73, :91-96`). A build aborting on one odd venue symbol is that guard, not a bug.
 - An *ordinary* Binance publication failure rolls back — the new trees are quarantined, the backups restored, a `prior_presence` invariant checked per dataset — and then `marker_path.unlink(missing_ok=True)`: the root is intact and **no** marker is left. Retry. `.binance_vision_publish_incomplete.json` survives only a hard process kill or an *incomplete* rollback, where `RuntimeError("Binance publication failed and rollback was incomplete: ...")` is raised before the unlink (`binance_vision.py:1241-1276`, docstring `:1181-1185`). A marker that is present therefore means one of those two things; the second needs the backup root inspected, not just a retry. The next build refuses before any network access — read the marker's staging and backup paths and recover deliberately.
 - Publication runs inside the per-dataset `exclusive_file_lock`s, acquired in sorted dataset order with `stale_seconds=21_600` (`:1219-1227`, via `storage.dataset_lock_path`), so a build can legitimately appear to hang while blocked on a dataset lock. A concurrent publisher that already owns the marker is refused outright — "Binance build REFUSED: another publication owns {marker_path}" (`:1210-1215`) — and that loser deletes its own staging/backup without touching live data.
-- **Universe-shrink gate**, three distinct refusals. Two fire before any download, off the discovery inventory: `historical_dropped_symbols` → "binance OOS build REFUSED: current daily inventory cannot replace missing monthly history for N persisted symbols" (`:1464-1470`, only when a daily tail is staged) and `dropped_symbols` → "binance OOS build REFUSED: combined archive universe (N symbols) shrank vs the persisted klines_1h (M symbols) — K symbols would be stranded" (`:1471-1478`). The third fires after staging: `missing_persisted` → "binance OOS build REFUSED: verified monthly-plus-daily staging lost N persisted symbols" (`:1553-1558`). `--allow-degraded` / `allow_degraded=True` is the only override (`:1359, :1632`) and `scripts/build_full_pit_binance.sh` never passes it — overriding means invoking `binance_vision build-binance-oos` by hand, and overwriting a wide root with a narrow one after a transient S3 listing shortfall is exactly what the gate exists to stop. Separately, the staged `klines_1h` + `archive_trade_manifest` pair is verified from persisted Parquet, not in-memory inputs (`_verify_staged_binance_datasets`, `:1047-1052`), and re-verified against the live root after the rename (`after_publish`, `:1608-1614`).
+- **Universe-shrink gate**, three distinct refusals. Two fire before any download, off the discovery inventory: `historical_dropped_symbols` → "binance OOS build REFUSED: current daily inventory cannot replace missing monthly history for N persisted symbols" (`:1464-1470`, only when a daily tail is staged) and `dropped_symbols` → "binance OOS build REFUSED: combined archive universe (N symbols) shrank vs the persisted klines_1h (M symbols) — K symbols would be stranded" (`:1471-1478`). The third fires after staging: `missing_persisted` → "binance OOS build REFUSED: verified monthly-plus-daily staging lost N persisted symbols" (`:1553-1558`). `--allow-degraded` / `allow_degraded=True` is the only override (`:1359, :1632`) and `scripts/data/build_full_pit_binance.sh` never passes it — overriding means invoking `binance_vision build-binance-oos` by hand, and overwriting a wide root with a narrow one after a transient S3 listing shortfall is exactly what the gate exists to stop. Separately, the staged `klines_1h` + `archive_trade_manifest` pair is verified from persisted Parquet, not in-memory inputs (`_verify_staged_binance_datasets`, `:1047-1052`), and re-verified against the live root after the rename (`after_publish`, `:1608-1614`).
 - The `bybit_render_1m` and `binance_vision_alt` plans and their fetchers were removed 2026-07-21. Do not recreate them from old documents.
 
 ## Coverage census, 2026-07-31
@@ -228,7 +228,7 @@ treatment after seeing a result does not rescue the original claim.
 ## Refresh
 
 [`scripts/ops.sh research-refresh`](../scripts/ops.sh) →
-[`scripts/research_refresh.sh`](../scripts/research_refresh.sh) → `scripts/research_refresh.py`.
+[`scripts/research/research_refresh.sh`](../scripts/research/research_refresh.sh) → `scripts/research/research_refresh.py`.
 Offline: no orders, no private venue APIs, no VPS checkout, no promotion.
 
 ```bash
@@ -244,7 +244,7 @@ scripts/ops.sh research-refresh run  --end YYYY-MM-DD --start YYYY-MM-DD \
 | Bybit klines | Recheck the trailing `--overlap-days` (default 7), fetch missing or sub-20-bar partitions, validate the whole root against the manifest. Failure triggers a full missing-only scan. |
 | Binance klines/membership | Append strict current-month daily archives; crossing an unmaterialized month falls back to the atomic monthly builder. `topup-daily-klines` discovers symbols from the daily archive, writes only archive-backed rows, then **rewrites** `archive_trade_manifest` from actual kline coverage — `rewrite_manifest_to_coverage(root, archive_membership_source="binance_vision_archive")`, keeping only `(symbol, date)` pairs with ≥20 hourly bars and stamping them `membership_inferred=False` (`binance_vision.py:464-478, :554-557, :680-760`, `MIN_HOURLY_BARS = 20` at `:73`). A routine `run --end` therefore can change Binance membership. |
 | Ancillary, **both venues** | Its own tail phase per venue: `data.bybit.ancillary_tail` (`download-data`: funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, `research_refresh.py:507-537`) and `data.binance.ancillary_tail` (`download-binance-proxy`: the same five plus taker_flow_1h, `:587-617`). Each starts from the stalest of its own venue's ancillary datasets minus `--overlap-days`, clamped to `[base_start, end-1d]` (`:170-185`), over that venue's whole validated manifest. Bybit ancillaries are **not** skipped by a tail run. |
-| Residual momentum | Recompute a fixed **14-day** checked overlap (`DEFAULT_APPEND_OVERLAP_DAYS = 14`, `scripts/precompute_residual_momentum.py:67` — `research_refresh.py` never passes `--append-overlap-days`, so `--overlap-days` does not move it), require stable rows unchanged, atomically append the provisional tail. Rows older than the overlap window are preserved verbatim, so final causal rows survive for symbols that have since aged out. A table lacking `is_provisional`, or unreadable, is automatically promoted to one atomic full rewrite (reason `legacy_schema` / `unreadable_existing_table`); every *other* stable-overlap mismatch — key count, NaN positions, changed values, or a stable row demoted to provisional — fails closed for inspection (`:183-204`). `--force-rmom-full-rewrite` is the explicit recovery path, not a waiver. |
+| Residual momentum | Recompute a fixed **14-day** checked overlap (`DEFAULT_APPEND_OVERLAP_DAYS = 14`, `scripts/data/precompute_residual_momentum.py:67` — `research_refresh.py` never passes `--append-overlap-days`, so `--overlap-days` does not move it), require stable rows unchanged, atomically append the provisional tail. Rows older than the overlap window are preserved verbatim, so final causal rows survive for symbols that have since aged out. A table lacking `is_provisional`, or unreadable, is automatically promoted to one atomic full rewrite (reason `legacy_schema` / `unreadable_existing_table`); every *other* stable-overlap mismatch — key count, NaN positions, changed values, or a stable row demoted to provisional — fails closed for inspection (`:183-204`). `--force-rmom-full-rewrite` is the explicit recovery path, not a waiver. |
 | Backtests | Reuse an identical completed run-scoped report, else recompute the fixed window from a clean sleeve directory. No incremental replay is appended to an old account journal. |
 
 The download stages reuse valid existing data rather than re-fetching it: per-symbol ancillary writers
@@ -267,8 +267,8 @@ path strictly, hashes the file, and freezes `{"path": ..., "sha256": ...}` into 
 configuration — which is also the block a resumed `--run-id` must match exactly. It is the mechanism
 binding a canonical rebuild to a named contract.
 
-A partial sleeve makes `scripts/equity_curves.sh` return nonzero: the runner keeps going across sleeves
-but exits 1 if any sleeve errored (`scripts/equity_curves.py:512-514`), so a driver cannot accept an
+A partial sleeve makes `scripts/research/equity_curves.sh` return nonzero: the runner keeps going across sleeves
+but exits 1 if any sleeve errored (`scripts/research/equity_curves.py:512-514`), so a driver cannot accept an
 incomplete benchmark as complete. A failed step leaves its record in `events.jsonl` and its output in
 `logs/`; a retry clears only that run's partial derived sleeve directory under
 `reports/research-refresh/<run-id>/backtests/<venue>/equity_curves/<sleeve>` (`equity_curves.sh` runs
@@ -392,7 +392,7 @@ as inherited file descriptors plus (device, inode) metadata rather than paths, a
 acquisition — account-lease metadata is written only after the inherited descriptor still matches the
 prepared path **and** holds the kernel flock (`account_owner_lease.py:535-645`,
 `revalidate_inherited_account_owner_lease` at `:647-727`; canonical demo lease directory
-`/run/lock/liquidity-migration` at `:26`; `scripts/reset_demo_paper_ledgers.sh:145-172`, where the host
+`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_paper_ledgers.sh:145-172`, where the host
 maintenance lock dir is the different path `/run/liquidity-migration`). Simplifying that handoff to a
 plain path breaks the revalidation.
 

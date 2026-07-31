@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "check_fleet_liveness.py"
+SCRIPT_PATH = REPO_ROOT / "scripts" / "runtime" / "check_fleet_liveness.py"
 
 
 def _load():

@@ -102,7 +102,7 @@ remote_reset() {
     cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd "$REPO_DIR"
-exec bash scripts/reset_demo_paper_ledgers.sh "${RESET_ARGS[@]}"
+exec bash scripts/maintain/reset_demo_paper_ledgers.sh "${RESET_ARGS[@]}"
 REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
@@ -141,16 +141,16 @@ case "$command" in
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" verify "$@"
     ;;
   equity)
-    exec bash "$ROOT_DIR/scripts/equity_curves.sh" "$@"
+    exec bash "$ROOT_DIR/scripts/research/equity_curves.sh" "$@"
     ;;
   research-refresh)
-    exec bash "$ROOT_DIR/scripts/research_refresh.sh" "$@"
+    exec bash "$ROOT_DIR/scripts/research/research_refresh.sh" "$@"
     ;;
   reset)
     remote_reset "$@"
     ;;
   venue-accounting)
-    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/reconcile_bybit_demo_accounting.py" "$@"
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/maintain/reconcile_bybit_demo_accounting.py" "$@"
     ;;
   real-money)
     # The owner-facing arming surface. `preflight` reads only and never prints

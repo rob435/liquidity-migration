@@ -261,7 +261,7 @@ def _assert_rmom_covers_window(
             f"{_iso_day(rmom_max_day)} lags the klines window's last day {_iso_day(klines_max_day)} "
             f"by {lag_days}d (> {RMOM_COVERAGE_TOLERANCE_DAYS}d). The decile join would silently "
             f"drop the newest dates from the panel. Rebuild it: "
-            f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
+            f"POLARS_MAX_THREADS=8 python scripts/data/precompute_residual_momentum.py --root {root}"
         )
 
 
@@ -321,7 +321,7 @@ def build_continuous_panel(
     if not rmom_path.exists():
         raise FileNotFoundError(
             f"{rmom_path} missing -- build it first: "
-            f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
+            f"POLARS_MAX_THREADS=8 python scripts/data/precompute_residual_momentum.py --root {root}"
         )
     rmom = pl.read_parquet(rmom_path)
     # Provisional rows can change when delayed residuals arrive.

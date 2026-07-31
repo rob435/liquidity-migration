@@ -8,7 +8,7 @@ import polars as pl
 import pytest
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "continuous_deployed_equity_refresh.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "research" / "continuous_deployed_equity_refresh.py"
 SPEC = importlib.util.spec_from_file_location("continuous_deployed_equity_refresh", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 refresh = importlib.util.module_from_spec(SPEC)

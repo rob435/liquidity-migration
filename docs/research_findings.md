@@ -340,12 +340,12 @@ that this research was replacing a broken deployed book was wrong.
 
 - **Re-derive the stale magnitudes.** Every *(stale)* row above needs the corrected scorer before any
   magnitude is trusted. Directions are already safe to use.
-- **Forward records.** `scripts/score_financed_longs_forward.py` appends one row per config-day (plus the
+- **Forward records.** `scripts/research/score_financed_longs_forward.py` appends one row per config-day (plus the
   `carry_hold_v2_minus_v1` differential) to `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`; the record still
   needs the data refresh past 2026-07-17. Live-runtime parity — order lifecycle, venue stops, partial fills —
   is modelled nowhere.
 - **Score the venue-scoped CONTINUOUS admission variant** against `fund0_base` re-run identically
-  (`scripts/render_continuous_admission_variants.py admission --end-date <later>`, variant
+  (`scripts/research/render_continuous_admission_variants.py admission --end-date <later>`, variant
   `fund0_venue_scoped`). It re-renders on history, so it works with the sleeve off. Promotion would need a
   deliberate admission-scope field on `ContinuousEventConfig` (identity-shifting: it moves `config_hash()` and
   `kernel_strategy_id` for every CONTINUOUS config), a committed both-venue registry with a refresh policy so

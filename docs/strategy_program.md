@@ -107,7 +107,7 @@ one-off runners are retired.
     `stop_loss` exits are the deployment check.
   - **Passive execution has a fast instrument beside the registered slow one.**
     The 2026-07-20 in-flow paper A/B remains the grader; §16.3's scale finding
-    explains why it accrues slowly. `scripts/probe_passive_fill_ab.py` (protocol
+    explains why it accrues slowly. `scripts/research/probe_passive_fill_ab.py` (protocol
     in `liquidity_migration/passive_fill_probe.py`, ITT accounting, written kill
     criteria) bounds the mechanism in hours — it answers whether the 5.40 bp
     passive floor is mechanically reachable, and only that. Blocked on demo
@@ -579,7 +579,7 @@ Owner-directed follow-up on the replacement ("why did the 3-cell ensemble
 work — was it a gradual scale-in/TWAP — and what is barebones single_fund0
 missing?"). Full evidence, all cells and negatives:
 `docs/archive/2026-07-27-continuous-ladder-mechanism.md`; reproduction/scorer:
-`scripts/render_continuous_admission_variants.py`. Lane-1 on seen data.
+`scripts/research/render_continuous_admission_variants.py`. Lane-1 on seen data.
 
 - **The TWAP/scale-in story is refuted twice.** The nested triggers fired in
   the same hour (median rung lag 0.0h; 81% of base pumps were already
@@ -854,7 +854,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
 
 - [ ] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
       them.** Found 2026-07-30 while setting the bar for the idio screen: no
-      artifact in the tree or in git history lists them. `scripts/screen_phase1.py`
+      artifact in the tree or in git history lists them. `scripts/research/screen_phase1.py`
       and four configs all *assert* the count, none enumerates it. Every Bonferroni threshold this programme quotes — the
       standing t = 3.25, and the 3.46 / 3.57 the idio screens derived from it —
       therefore rests on an unverifiable denominator, and whether a new grid
@@ -903,15 +903,15 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       it to one book. Across all three screens: **0 of 96 pre-declared cells are
       profitable and significant.**
       New: `liquidity_migration/residual_price.py`,
-      `liquidity_migration/idio_features.py`, `scripts/build_idio_panel.py`,
-      `scripts/screen_idio_charts.py`, `scripts/screen_idio_hedged.py`,
-      `scripts/diagnose_idio_panel.py`.
+      `liquidity_migration/idio_features.py`, `scripts/data/build_idio_panel.py`,
+      `scripts/research/screen_idio_charts.py`, `scripts/research/screen_idio_hedged.py`,
+      `scripts/data/diagnose_idio_panel.py`.
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
 - [x] Build the minimal P0 causal substrate and publish its coverage map.
       `liquidity_migration/cross_venue_panel.py` +
-      `scripts/build_cross_venue_panel.py`, built 2026-07-24 over the
+      `scripts/data/build_cross_venue_panel.py`, built 2026-07-24 over the
       both-venue population from `2021-01-01`. Coverage lives in each shard's
       `manifest.json`; the two source defects it exposed (`open_interest_value`
       is contract units, `funding_event_kind` on 2 of 2,024 partitions) are in
@@ -967,7 +967,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       Binance replication arm beats on return only (Sharpe 1.66 vs 1.84) — see
       the registration block above, which has said so since the same-day
       correction. Module `liquidity_migration/financed_longs.py`, reproduction
-      `scripts/screen_financed_longs.py` (reproduces the registered table
+      `scripts/research/screen_financed_longs.py` (reproduces the registered table
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/archive/2026-07-26-financed-longs.md` with the 22-row
       negative-results ledger.
@@ -979,11 +979,11 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       since 2026-07-28 the scorer charges each settlement exactly once;
       `lane2_carry_hold_v2`/`v3` score beside v1 with the paired daily
       differentials v2−v1 and v3−v2 as the primary comparisons). Tooling:
-      `scripts/score_financed_longs_forward.py` appends
+      `scripts/research/score_financed_longs_forward.py` appends
       `reports/financed_longs_forward/ledger.csv` (append-first, idempotent,
       `forward_eligible` flagged). Panel refreshed through 2026-07-27 on
       2026-07-28; the daily sequence is research-refresh → panel 2026
-      rebuild (`scripts/build_cross_venue_panel.py --start 2021-01-01`,
+      rebuild (`scripts/data/build_cross_venue_panel.py --start 2021-01-01`,
       full rebuild — the index is whole-file) → ledger append.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
@@ -992,7 +992,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       (2026-07-28 double-count correction).
 - [ ] Score the venue-scoped CONTINUOUS admission variant beside the shipped
       shape on post-2026-07-27 days
-      (`scripts/render_continuous_admission_variants.py admission --end-date …`;
+      (`scripts/research/render_continuous_admission_variants.py admission --end-date …`;
       registered 2026-07-27, evidence
       `docs/archive/2026-07-27-continuous-ladder-mechanism.md` §5 — the 2025-carried
       era profile is the thing the forward record must test).

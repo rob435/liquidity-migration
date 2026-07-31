@@ -671,7 +671,7 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     assert "private_stream_status is True" in loop
     assert "private_stream_supervisor.health_detail" in loop
 
-    wrapper = (repo / "scripts" / "run_account_execution_service.sh").read_text(encoding="utf-8")
+    wrapper = (repo / "scripts" / "runtime" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
     # CONTINUOUS is retired: the cycle root is unset by default and the flag is

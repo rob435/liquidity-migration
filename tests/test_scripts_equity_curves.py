@@ -1,4 +1,4 @@
-"""Tests for scripts/equity_curves.py and scripts/continuous_deployed_equity_refresh.py:
+"""Tests for scripts/research/equity_curves.py and scripts/research/continuous_deployed_equity_refresh.py:
 a start-date year shift clamps to Feb 28 on Feb 29; ``stats()`` returns mar=None on a
 no-drawdown curve instead of dividing by zero; and the continuous sleeve inherits the
 frozen deployed start (start_date=None) unless --start/--years asks for a window.
@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def _load(name: str):
-    path = REPO / "scripts" / f"{name}.py"
+    path = REPO / "scripts" / "research" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -264,7 +264,7 @@ and `model_prior_evidence_scope` =
 `sizing_only_not_current_calibration_or_performance_evidence` — the field that forbids
 citing the prior as calibration or performance evidence. A refresh changes
 `model_prior_artifact_sha256`. The stamp is spliced into each target's intent metadata
-(`scripts/run_continuous_hedge.py:114-117`) and the runner status JSON (`:451`). Missing,
+(`scripts/runtime/run_continuous_hedge.py:114-117`) and the runner status JSON (`:451`). Missing,
 malformed, future-dated or estimator-inadequate prior data fails closed. Prior age is
 informational, not a freshness gate; coefficient drift remains a stated limitation. The
 demo hedge sizes current BTC/ETH targets from live canonical CONTINUOUS gross exposure,
@@ -275,7 +275,7 @@ Betas are rolling OLS over the trailing 90 ledger days of
 [`bybit_warmstart.csv`](../deploy/hedge_warmstart/bybit_warmstart.csv) (200 rows, data
 through 2026-07-09). The runtime never extends that prior with live returns: the live
 account path cannot reconstruct the regression's per-unit book return. Regeneration runs
-via [`regenerate_hedge_warmstart.py`](../scripts/regenerate_hedge_warmstart.py) after each
+via [`regenerate_hedge_warmstart.py`](../scripts/maintain/regenerate_hedge_warmstart.py) after each
 research refresh of the continuous equity pipeline, at least quarterly, from the
 code-defined TP12 component ledgers. `ContinuousHedgeRule` supports `shrinkage_weight` /
 `prior_beta_1` / `prior_beta_2` (`beta = (1−w)·OLS + w·prior`), previous vintage as prior,
@@ -283,7 +283,7 @@ code-defined TP12 component ledgers. `ContinuousHedgeRule` supports `shrinkage_w
 committed change. No refresh has run yet — the deployed vintage is still 2026-07-09.
 
 *Regeneration gates.* The script has exactly four refusal conditions (`overwrite_blocked`,
-`scripts/regenerate_hedge_warmstart.py:413-435`, in this order): no date overlap with the
+`scripts/maintain/regenerate_hedge_warmstart.py:413-435`, in this order): no date overlap with the
 existing CSV; `max|delta_unit_ret|` over the overlap above `--max-unit-drift` (default
 1e-3); regenerated row count below the existing row count; and beta drift above
 `MAX_PRIOR_BETA_DRIFT`. A 60-observation minimum is **not** one of them — regenerating from

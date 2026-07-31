@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts import repo_doctor
+from scripts.devtools import repo_doctor
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEV = ROOT / "scripts" / "dev.sh"
-DOCTOR = ROOT / "scripts" / "repo_doctor.py"
+DOCTOR = ROOT / "scripts" / "devtools" / "repo_doctor.py"
 PRE_PUSH = ROOT / "scripts" / "git-hooks" / "pre-push"
 
 

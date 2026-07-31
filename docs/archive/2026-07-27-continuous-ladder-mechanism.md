@@ -13,10 +13,10 @@ config fields, plus two admission variants via an in-process patch of
 `_funding_admission_filter` recorded in their `variant_meta.json`. Hedged
 books use the exact deployed overlay stack (combine → winner rule → BTC+ETH
 hedge → btcvol intensity) imported from
-`scripts/continuous_deployed_equity_refresh.py`. Parity: the driver
+`scripts/research/continuous_deployed_equity_refresh.py`. Parity: the driver
 reproduces the recorded deployed render exactly (+15.85% / −2.85% / fc 1.84
 / 2,372 trades) and research-V3 to rounding. Reproduction:
-`scripts/render_continuous_admission_variants.py` (artifact dirs key on
+`scripts/research/render_continuous_admission_variants.py` (artifact dirs key on
 `--end-date`). Artifacts:
 `~/SHARED_DATA/bybit_full_pit/reports/continuous_ladder_mech_2026-07-17/`.
 
@@ -204,7 +204,7 @@ instrument for that.
 
 **Registration (Lane-2, commit = registration).** This commit registers the
 venue-scoped formulation for forward grading: exact executable spec in
-`scripts/render_continuous_admission_variants.py` (`fund0_venue_scoped`),
+`scripts/research/render_continuous_admission_variants.py` (`fund0_venue_scoped`),
 universe = the cross-venue panel symbol union, scorer = the same script
 re-run with a later `--end-date` on days after this commit, compared against
 `fund0_base` re-run identically. No runtime change: the deployed profile is

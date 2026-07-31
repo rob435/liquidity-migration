@@ -371,7 +371,7 @@ cumulating a path; they are wrong as a P&L target. This is worth adding to
 
 ### 6.4a Mode (b) — the hedged book. RUN, and the kill condition fires.
 
-`scripts/screen_idio_hedged.py`, same panel, same universe, same cost basis.
+`scripts/research/screen_idio_hedged.py`, same panel, same universe, same cost basis.
 
 **What is actually hedgeable.** Three of COMMON4's four exposures are
 cross-sectional ranks with no tradable instrument — nothing pays "liquidity
@@ -495,7 +495,7 @@ construction *least* favourable to the claim: the long and short legs share the
 common factor, so it cancels in the spread whether or not you residualise. A
 null there is weak evidence about the claim and strong evidence only about that
 book. §6.4 listed the directional single-name construction as untested. It is
-now tested — `scripts/screen_idio_directional.py`.
+now tested — `scripts/research/screen_idio_directional.py`.
 
 Rule, fixed in advance and uniform across all six features and all four sources:
 `pos[i,t] = sign(z[i,t])` where `z` is the 60-day trailing, strictly-prior
@@ -561,7 +561,7 @@ hiding a real effect; it was not.
 ### 6.8a A repeat of taxonomy item 34, committed by this author, in this session
 
 Renaming `resid_fwd` to the simple-return residual (§4.3) left
-`scripts/diagnose_idio_panel.py` comparing a *simple* residual against a *log*
+`scripts/data/diagnose_idio_panel.py` comparing a *simple* residual against a *log*
 total. The first `nomom3` diagnostic therefore reported a **negative R²**
 (mean −0.053). That is not a finding, it is the same units mismatch this
 document had just added to the failure taxonomy an hour earlier, reintroduced by
@@ -580,7 +580,7 @@ only an arithmetic one.
 ## 6.7 Unresolved
 
 - **The "~44 prior mechanisms" count is not auditable.** No artifact in the tree
-  or in git history enumerates it; every reference (`scripts/screen_phase1.py`,
+  or in git history enumerates it; every reference (`scripts/research/screen_phase1.py`,
   four configs) asserts a number. The `|t| > 3.46` threshold this
   document quotes therefore inherits an unverifiable denominator, and whether
   any of these 48 cells overlaps something already inside that 44 is unknown.
@@ -612,9 +612,9 @@ only an arithmetic one.
 ## 8. Reproduction
 
 ```bash
-POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/build_idio_panel.py \
+POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/data/build_idio_panel.py \
     --root ~/SHARED_DATA/bybit_full_pit --start 2023-06-01 --end 2026-07-01 \
     --out data/idio_panel/bybit
-.venv/bin/python -u scripts/diagnose_idio_panel.py --panel data/idio_panel/bybit/panel_common4.parquet
-.venv/bin/python -u scripts/screen_idio_charts.py --panel data/idio_panel/bybit/panel_common4.parquet --era-split
+.venv/bin/python -u scripts/data/diagnose_idio_panel.py --panel data/idio_panel/bybit/panel_common4.parquet
+.venv/bin/python -u scripts/research/screen_idio_charts.py --panel data/idio_panel/bybit/panel_common4.parquet --era-split
 ```

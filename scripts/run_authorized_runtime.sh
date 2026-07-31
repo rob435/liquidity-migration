@@ -14,7 +14,7 @@ ENTRYPOINT="$2"
 
 case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-account-execution.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/run_account_execution_service.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_account_execution_service.sh)
         ;;
     liquidity-migration-account-execution.service:readiness)
         COMMAND=(
@@ -30,7 +30,7 @@ case "$UNIT:$ENTRYPOINT" in
         )
         ;;
     liquidity-migration-account-execution-mainnet.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/run_account_execution_service.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_account_execution_service.sh)
         ;;
     liquidity-migration-account-execution-mainnet.service:readiness)
         COMMAND=(
@@ -46,7 +46,7 @@ case "$UNIT:$ENTRYPOINT" in
         )
         ;;
     liquidity-migration-account-paper-execution.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/run_account_paper_execution_service.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_account_paper_execution_service.sh)
         ;;
     liquidity-migration-account-paper-execution.service:readiness)
         COMMAND=(
@@ -80,11 +80,11 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-bybit-long-demo.service:main | \
     liquidity-migration-bybit-long-paper.service:main | \
     liquidity-migration-bybit-long-mainnet.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_long_demo_event_engine.sh)
         ;;
     liquidity-migration-bybit-continuous-demo.service:main | \
     liquidity-migration-bybit-continuous-paper.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/run_bybit_continuous_demo_event_engine.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_continuous_demo_event_engine.sh)
         ;;
     liquidity-migration-bybit-carry-demo.service:main | \
     liquidity-migration-bybit-carry-paper.service:main | \
@@ -96,18 +96,18 @@ case "$UNIT:$ENTRYPOINT" in
             MARKET_FOLLOW_ROOT="$CARRY_MARKET_FOLLOW_ROOT"
             export MARKET_FOLLOW_ROOT
         fi
-        COMMAND=(/opt/liquidity-migration/scripts/run_bybit_carry_demo_event_engine.sh)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_carry_demo_event_engine.sh)
         ;;
     liquidity-migration-continuous-hedge.service:main)
-        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/run_continuous_hedge.sh)
+        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/runtime/run_continuous_hedge.sh)
         ;;
     liquidity-migration-continuous-rmom-refresh.service:main)
-        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/run_continuous_rmom_refresh.sh)
+        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/runtime/run_continuous_rmom_refresh.sh)
         ;;
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            scripts/check_fleet_liveness.py
+            scripts/runtime/check_fleet_liveness.py
             --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
             --account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env
             --max-cycle-age-min 10
@@ -118,7 +118,7 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-mainnet-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            scripts/check_fleet_liveness.py
+            scripts/runtime/check_fleet_liveness.py
             --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
             --carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event
             --long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event

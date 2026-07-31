@@ -169,7 +169,7 @@ turnover down 27%).
 ## 6. Open follow-ups
 
 1. ~~Wire `lane2_carry_hold_v2` into the same forward-scoring cadence as
-   v1~~ — done same day: `scripts/score_financed_longs_forward.py` appends
+   v1~~ — done same day: `scripts/research/score_financed_longs_forward.py` appends
    the ledger (`reports/financed_longs_forward/ledger.csv` on the bybit
    root) with one row per config-day for all four registered configs plus
    the derived `carry_hold_v2_minus_v1` paired differential;

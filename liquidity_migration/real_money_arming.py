@@ -303,11 +303,11 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
     artifacts = {
         "candidate universe": (
             values.get("ACCOUNT_SYMBOLS_FILE", ""),
-            "scripts/freeze_account_candidate_universe.py --realm mainnet",
+            "scripts/maintain/freeze_account_candidate_universe.py --realm mainnet",
         ),
         "instrument rules": (
             values.get("ACCOUNT_DEMO_RULES_FILE", ""),
-            "scripts/freeze_venue_instrument_rules.py --realm mainnet",
+            "scripts/maintain/freeze_venue_instrument_rules.py --realm mainnet",
         ),
         "operational profile": (
             values.get("ACCOUNT_RISK_POLICY_FILE", ""),

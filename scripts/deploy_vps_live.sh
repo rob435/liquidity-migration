@@ -90,7 +90,7 @@ ROLLOUT_READINESS_HELPER_B64=""
 if [ "$MODE" = rollout ]; then
     if ! ROLLOUT_READINESS_HELPER_B64="$(
         "${LOCAL_GIT[@]}" show \
-            "$EXPECTED_COMMIT:scripts/check_deploy_rollout_readiness.py" \
+            "$EXPECTED_COMMIT:scripts/vps/check_deploy_rollout_readiness.py" \
         | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
     )"; then
         echo "expected commit does not contain the rollout readiness helper: $EXPECTED_COMMIT" >&2
@@ -284,7 +284,7 @@ encoded = sys.argv[1]
 arguments = sys.argv[2:]
 source = base64.b64decode(encoded, validate=True)
 sys.argv = ["check_deploy_rollout_readiness.py", *arguments]
-namespace = {"__file__": "scripts/check_deploy_rollout_readiness.py", "__name__": "__main__"}
+namespace = {"__file__": "scripts/vps/check_deploy_rollout_readiness.py", "__name__": "__main__"}
 exec(compile(source, namespace["__file__"], "exec"), namespace)
 ' "$ROLLOUT_READINESS_HELPER_B64" "$@"
 }
@@ -864,7 +864,7 @@ PY
     receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
     install -d -o root -g root -m 0700 "$candidate_dir" "$receipt_dir"
     refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-    "$PYTHON" scripts/freeze_account_candidate_universe.py \
+    "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
         --realm demo --output "$refreshed_candidate"
     printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
 
@@ -873,7 +873,7 @@ PY
         # still-fresh venue evidence and timestamp; a candidate addition exits 3
         # and falls through to a complete fresh probe.
         projected_rules="$receipt_dir/demo-rules-projected-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-        if "$PYTHON" scripts/project_demo_rules_to_candidate.py \
+        if "$PYTHON" scripts/maintain/project_demo_rules_to_candidate.py \
             --candidate-file "$refreshed_candidate" \
             --prior-rules-file "$demo_rules" \
             --output "$projected_rules"; then
@@ -916,9 +916,9 @@ PY
         # the candidate universe, and the branch above reaches it automatically
         # once the bound receipt passes half its lifetime, so keep it demo-only.
         [ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ] \
-            || fail "the order-placing rule probe is demo-only; freeze rules with scripts/freeze_venue_instrument_rules.py --realm ${DEPLOY_VENUE_REALM}"
+            || fail "the order-placing rule probe is demo-only; freeze rules with scripts/maintain/freeze_venue_instrument_rules.py --realm ${DEPLOY_VENUE_REALM}"
         refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-        DEMO=true "$PYTHON" scripts/probe_bybit_demo_rules.py \
+        DEMO=true "$PYTHON" scripts/maintain/probe_bybit_demo_rules.py \
             --symbols-file "$refreshed_candidate" \
             --prior-rules-file "$demo_rules" \
             --output "$refreshed_rules" \
@@ -1161,7 +1161,7 @@ expected_downstream_on() {
 }
 
 validate_hedge_model_prior() {
-    "$PYTHON" scripts/run_continuous_hedge.py \
+    "$PYTHON" scripts/runtime/run_continuous_hedge.py \
         --execution-environment demo \
         --validate-model-prior-only
 }
@@ -1172,7 +1172,7 @@ check_demo_order_permissions() {
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/bybit-demo.env \
         BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
-    "$PYTHON" scripts/check_bybit_order_permissions.py --context "$context" || status=$?
+    "$PYTHON" scripts/maintain/check_bybit_order_permissions.py --context "$context" || status=$?
     unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
     return "$status"
 }
@@ -1354,7 +1354,7 @@ seed_rmom() {
     # a valid gate is reused rather than rebuilt (~1 min) on every deployment.
     # A failed prior refresh still forces the repair path.
     if ! systemctl is-failed --quiet liquidity-migration-continuous-rmom-refresh.service \
-        && "$PYTHON" scripts/check_residual_momentum_gate.py --path "$gate_path"; then
+        && "$PYTHON" scripts/research/check_residual_momentum_gate.py --path "$gate_path"; then
         echo "rmom-bootstrap path=reuse reason=current-valid-gate"
         return 0
     fi
@@ -1366,7 +1366,7 @@ seed_rmom() {
         systemctl start liquidity-migration-continuous-rmom-refresh.service || ok=0
         if sleeve_on "$CONTINUOUS_SLEEVE" \
             || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
-            "$PYTHON" scripts/check_residual_momentum_gate.py \
+            "$PYTHON" scripts/research/check_residual_momentum_gate.py \
                 --path "$gate_path" || ok=0
         fi
         [ "$ok" -eq 0 ] || return 0

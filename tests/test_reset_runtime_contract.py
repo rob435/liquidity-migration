@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reset_demo_paper_ledgers.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"
 
 
 def _text() -> str:
@@ -71,7 +71,7 @@ def test_reset_holds_process_and_account_leases_across_archive() -> None:
     text = _text()
     archive = text.index("liquidity_migration.account_reset_archive")
     lease_helper = (
-        SCRIPT.parents[1] / "liquidity_migration" / "account_owner_lease.py"
+        SCRIPT.parents[2] / "liquidity_migration" / "account_owner_lease.py"
     ).read_text(encoding="utf-8")
     assert "LOCK_EX | fcntl.LOCK_NB" in lease_helper
     assert "canonical_demo_account_lease_path" in text
@@ -85,7 +85,7 @@ def test_reset_holds_process_and_account_leases_across_archive() -> None:
 
 def test_paper_runner_and_reset_share_historical_owner_lease_path() -> None:
     runner = (
-        SCRIPT.parents[1] / "liquidity_migration" / "account_paper_runner.py"
+        SCRIPT.parents[2] / "liquidity_migration" / "account_paper_runner.py"
     ).read_text(encoding="utf-8")
 
     assert (
@@ -118,7 +118,7 @@ def test_reset_prepares_and_opens_account_leases_without_path_truncation() -> No
 def test_reset_and_deploy_share_host_maintenance_lock_with_legacy_bridge() -> None:
     reset = _text()
     deploy = (
-        SCRIPT.parent.joinpath("deploy_vps_live.sh")
+        SCRIPT.parents[1].joinpath("deploy_vps_live.sh")
         .read_text(encoding="utf-8")
     )
     legacy_reset = "/run/lock/liquidity-migration-ledger-reset.lock"

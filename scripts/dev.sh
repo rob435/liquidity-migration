@@ -41,12 +41,12 @@ cd "$ROOT_DIR"
 # One list, used by both `types` and `check`.
 MYPY_TARGETS=(
   liquidity_migration
-  scripts/repo_doctor.py
-  scripts/build_trade_diagnostics.py
-  scripts/build_candidate_tape.py
-  scripts/check_fleet_liveness.py
-  scripts/check_demo_paper_agreement.py
-  scripts/measure_execution_twin_error.py
+  scripts/devtools/repo_doctor.py
+  scripts/research/build_trade_diagnostics.py
+  scripts/data/build_candidate_tape.py
+  scripts/runtime/check_fleet_liveness.py
+  scripts/maintain/check_demo_paper_agreement.py
+  scripts/research/measure_execution_twin_error.py
 )
 
 command="${1:-help}"
@@ -59,7 +59,7 @@ case "$command" in
     usage
     ;;
   doctor)
-    exec "$PYTHON_BIN" scripts/repo_doctor.py --repo "$ROOT_DIR" "$@"
+    exec "$PYTHON_BIN" scripts/devtools/repo_doctor.py --repo "$ROOT_DIR" "$@"
     ;;
   lint)
     exec "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests "$@"
@@ -72,7 +72,7 @@ case "$command" in
     ;;
   check)
     echo "[dev] repository doctor"
-    "$PYTHON_BIN" scripts/repo_doctor.py --repo "$ROOT_DIR"
+    "$PYTHON_BIN" scripts/devtools/repo_doctor.py --repo "$ROOT_DIR"
     echo "[dev] ruff"
     "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests
     echo "[dev] mypy"

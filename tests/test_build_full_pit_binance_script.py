@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "build_full_pit_binance.sh"
+SCRIPT = REPO / "scripts" / "data" / "build_full_pit_binance.sh"
 
 
 def test_script_is_valid_bash_and_stages_daily_tail_with_monthly_rebuild() -> None:

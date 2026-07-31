@@ -11,7 +11,7 @@ services. Derive current values from:
 - `.github/workflows/vps-deploy.yml`;
 - `scripts/deploy_vps_live.sh` with
   `install|activate|verify|rollout|activate-mainnet|stop-mainnet`;
-- `scripts/print_vps_recovery_command.sh` and the current SSH restore scripts;
+- `scripts/vps/print_vps_recovery_command.sh` and the current SSH restore scripts;
 - `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.
 
@@ -49,8 +49,8 @@ archive/patch.
 Generate recovery material from a trusted checkout at the exact intended commit:
 
 ```bash
-scripts/print_vps_recovery_command.sh COMMIT
-scripts/print_vps_recovery_command.sh --rescue-only COMMIT
+scripts/vps/print_vps_recovery_command.sh COMMIT
+scripts/vps/print_vps_recovery_command.sh --rescue-only COMMIT
 ```
 
 Inspect the generated command before using the provider console. It embeds the

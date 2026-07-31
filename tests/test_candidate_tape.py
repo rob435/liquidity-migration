@@ -9,7 +9,7 @@ from liquidity_migration.strategy_funnel import (
     validate_decision_funnel,
     validate_path_labels,
 )
-from scripts.build_candidate_tape import (
+from scripts.data.build_candidate_tape import (
     CONTINUOUS_REQUIRED_GATES,
     _bars_by_symbol,
     _build_continuous_funnel,

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-import scripts.run_continuous_hedge as hedge_runner
+import scripts.runtime.run_continuous_hedge as hedge_runner
 from liquidity_migration.account_route import ensure_account_route
 from liquidity_migration.continuous_hedge_manager import HedgeDecision2F, HedgeModelPrior
 from liquidity_migration.continuous_rebalance import ContinuousRebalanceResizePlan

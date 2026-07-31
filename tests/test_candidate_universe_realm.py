@@ -28,8 +28,8 @@ PRODUCER_MODULES = (
     "liquidity_migration/continuous_demo.py",
     "liquidity_migration/event_demo_data.py",
     "liquidity_migration/long_native_event_demo.py",
-    "scripts/freeze_venue_instrument_rules.py",
-    "scripts/probe_bybit_demo_rules.py",
+    "scripts/maintain/freeze_venue_instrument_rules.py",
+    "scripts/maintain/probe_bybit_demo_rules.py",
 )
 
 
@@ -96,7 +96,7 @@ class _RecordingMarket:
 
 
 def _freeze_module() -> Any:
-    path = REPO_ROOT / "scripts" / "freeze_account_candidate_universe.py"
+    path = REPO_ROOT / "scripts" / "maintain" / "freeze_account_candidate_universe.py"
     spec = importlib.util.spec_from_file_location(
         "freeze_account_candidate_universe_test", path
     )

@@ -13,7 +13,7 @@ import polars as pl
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "render_continuous_admission_variants.py"
+SCRIPT_PATH = REPO_ROOT / "scripts" / "research" / "render_continuous_admission_variants.py"
 
 from liquidity_migration.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
@@ -22,7 +22,7 @@ from liquidity_migration.continuous_events import (  # noqa: E402
 
 
 def _load():
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "research"))
     sys.path.insert(0, str(REPO_ROOT))
     spec = importlib.util.spec_from_file_location(
         "render_continuous_admission_variants", SCRIPT_PATH

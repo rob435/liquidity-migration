@@ -7,7 +7,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-import scripts.build_trade_diagnostics as diagnostic_script
+import scripts.research.build_trade_diagnostics as diagnostic_script
 
 from liquidity_migration.account_kernel import (
     AccountEvent,
