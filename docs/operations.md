@@ -156,9 +156,9 @@ flat on its own. Flatten reports them and waits.
 
 | Toggle | Now | Units it gates |
 | --- | --- | --- |
-| `LONG_SLEEVE` | off | `bybit-long-demo`, `bybit-long-paper` |
-| `CARRY_SLEEVE` | off | `bybit-carry-demo` |
-| `PAPER_TARGET_MIRROR` | off | `paper-target-mirror` |
+| `LONG_SLEEVE` | on | `bybit-long-demo`, `bybit-long-paper` |
+| `CARRY_SLEEVE` | on | `bybit-carry-demo` |
+| `PAPER_TARGET_MIRROR` | on | `paper-target-mirror` |
 | `CONTINUOUS_SLEEVE` | off | `bybit-continuous-demo`; forces the hedge timer on |
 | `CONTINUOUS_PAPER_SLEEVE` | off | `bybit-continuous-paper` |
 | `CARRY_PAPER_SLEEVE` | off | `bybit-carry-paper`, retired in favour of the mirror |
