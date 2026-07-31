@@ -2,8 +2,10 @@
 """Phase 1 re-screen: the mechanisms that survived something, priced honestly.
 
 One pass, not a sweep (`docs/research_findings.md` §3). Every cell is reported;
-a survivor must clear the Bonferroni threshold **t = 3.25** for the ~44
-mechanisms this program has tested, not t = 2.
+a survivor must clear the program bar, **t = 2.5** since 2026-07-31
+(`docs/governance.md` §2). Both thresholds are printed: the retired family-wise
+3.25 is kept alongside so this screen's historical verdicts stay readable rather
+than being silently restated at the looser bar.
 
 Two cost corrections are applied together, because both were wrong in the same
 direction:
@@ -49,8 +51,16 @@ from liquidity_migration.research.panels.cross_section import (  # noqa: E402
 )
 from liquidity_migration.research.panels.lane2_blend import HOUR_MS, BlendConfig, prepare  # noqa: E402
 
-#: Bonferroni threshold at alpha=0.05 for the ~44 mechanisms tested to date.
-BONFERRONI_T = 3.25
+#: The program significance bar. Owned by ``docs/governance.md`` §2, which is the
+#: authority; this constant follows it. Lowered from a family-wise Bonferroni
+#: 3.25 to a fixed 2.5 on 2026-07-31 by owner decision — the bar no longer
+#: controls family-wise error, so a survivor needs a plateau and a failed placebo
+#: beside it, not just a number.
+PROGRAM_T = 2.5
+
+#: The family-wise threshold this screen used before 2026-07-31, kept so the
+#: run's historical verdicts stay reconstructable rather than silently restated.
+LEGACY_BONFERRONI_T = 3.25
 DAY_MS = 86_400_000
 
 
@@ -354,7 +364,7 @@ def main() -> int:
     print(f"panel {panel.height:,} rows | {panel['symbol'].n_unique()} symbols | "
           f"{years[0]}..{years[-1]} | top-{args.top_n} | {args.hold_hours}h disjoint holds")
     print(f"round trip {args.round_trip_bp:.2f} bp ({args.round_trip_bp / 2:.2f} bp/side)"
-          f"   threshold t >= {BONFERRONI_T}")
+          f"   bar t >= {PROGRAM_T} (was {LEGACY_BONFERRONI_T} before 2026-07-31)")
 
     cells: list[Cell] = []
     universes: dict[str, set[tuple[int, str]]] = {}
@@ -370,13 +380,17 @@ def main() -> int:
     print(hdr)
     print("-" * len(hdr))
     for c in [x for x in cells if not x.gated]:
-        ok = "YES" if c.honest.t_stat >= BONFERRONI_T else "no"
+        ok = "YES" if c.honest.t_stat >= PROGRAM_T else "no"
         print(f"{c.venue:9s} {c.name:30s} {c.honest.n:5d} "
               f"{c.repo_1x.mean_bp:8.2f}bp t{c.repo_1x.t_stat:5.2f} "
               f"{c.honest.mean_bp:8.2f}bp t{c.honest.t_stat:5.2f} {c.charged_bp:5.1f} {ok:>9s}")
 
-    survivors = [c for c in cells if not c.gated and c.honest.t_stat >= BONFERRONI_T]
-    print(f"\nGATE 1: {len(survivors)} of {len([c for c in cells if not c.gated])} cells clear t >= {BONFERRONI_T}.")
+    survivors = [c for c in cells if not c.gated and c.honest.t_stat >= PROGRAM_T]
+    legacy = [c for c in cells if not c.gated and c.honest.t_stat >= LEGACY_BONFERRONI_T]
+    ungated = len([c for c in cells if not c.gated])
+    print(f"\nGATE 1: {len(survivors)} of {ungated} cells clear the t >= {PROGRAM_T} bar "
+          f"({len(legacy)} would have cleared the retired {LEGACY_BONFERRONI_T}). A survivor at "
+          f"this bar still needs a plateau and a failed placebo; see docs/governance.md 2.")
 
     print("\n\n2A - CROSS-VENUE REPLICATION (sign agreement and effect ratio)")
     print("=" * 100)

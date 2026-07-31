@@ -57,11 +57,22 @@ ALL_SOURCES = ("raw", "rawlag", "idio", "iz")
 TARGETS = ("fwd_ret_1d", "resid_fwd")
 
 
+#: The program bar, owned by ``docs/governance.md`` §2. Since 2026-07-31 the
+#: screens are judged against a fixed 2.5 rather than a family-wise threshold
+#: derived from ``PRIOR_MECHANISMS`` — that denominator was never enumerable, a
+#: defect the strategy program had open against itself. :func:`bonferroni_t` is
+#: kept and still printed so the retired threshold stays visible beside the bar.
+PROGRAM_T = 2.5
+
+
 def bonferroni_t(n_tests: int, *, alpha: float = 0.05) -> float:
     """Two-sided Bonferroni critical t, normal approximation.
 
     The daily panels here have hundreds of periods, so the normal tail is an
     adequate stand-in for the t tail and is stated rather than hidden.
+
+    Retired as the pass/fail threshold on 2026-07-31; retained as a reference
+    number so a historical verdict can still be read at the bar that produced it.
     """
     from statistics import NormalDist
 
@@ -275,11 +286,12 @@ def main(argv: list[str] | None = None) -> int:
 
     n_cells = len(CHART_FEATURES) * len(ALL_SOURCES) * len(TARGETS)
     family = PRIOR_MECHANISMS + n_cells
-    t_crit = bonferroni_t(family)
+    t_crit = PROGRAM_T
+    legacy = bonferroni_t(family)
     print(f"pre-declared grid: {len(CHART_FEATURES)} features x {len(ALL_SOURCES)} sources "
           f"x {len(TARGETS)} targets = {n_cells} cells")
-    print(f"Bonferroni family {PRIOR_MECHANISMS} prior + {n_cells} new = {family}; "
-          f"|t| > {t_crit:.2f} required\n")
+    print(f"bar |t| > {t_crit:.2f} (docs/governance.md 2). Retired family-wise threshold "
+          f"for {PRIOR_MECHANISMS} prior + {n_cells} new = {family} was {legacy:.2f}\n")
 
     results = run(
         panel,

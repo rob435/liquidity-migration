@@ -89,6 +89,7 @@ def test_bonferroni_family_counts_the_whole_predeclared_grid() -> None:
     # The same approximation reproduces the program's standing threshold for
     # its 44 prior mechanisms, so this screen is scored on the repo's own
     # convention rather than a private one.
+    assert screen_idio_charts.PROGRAM_T == pytest.approx(2.5), "docs/governance.md 2 owns the bar"
     assert screen_idio_charts.bonferroni_t(screen_idio_charts.PRIOR_MECHANISMS) == pytest.approx(3.25, abs=0.01)
     t_crit = screen_idio_charts.bonferroni_t(family)
     # Adding tests must raise the bar, never lower it.

@@ -69,6 +69,7 @@ from scripts.research.screen_idio_charts import (  # noqa: E402
     ALL_SOURCES,
     DAYS_PER_YEAR,
     PRIOR_MECHANISMS,
+    PROGRAM_T,
     bonferroni_t,
 )
 
@@ -173,9 +174,10 @@ def main(argv: list[str] | None = None) -> int:
         panel = top_by(panel, "turnover_quote", args.universe, period="ts_ms")
 
     family = PRIOR_MECHANISMS + CROSS_SECTIONAL_CELLS + NEW_CELLS
-    t_crit = bonferroni_t(family)
-    print(f"family {PRIOR_MECHANISMS} prior + {CROSS_SECTIONAL_CELLS} cross-sectional "
-          f"+ {NEW_CELLS} directional = {family}; |t| > {t_crit:.2f}\n")
+    t_crit = PROGRAM_T
+    print(f"bar |t| > {t_crit:.2f} (docs/governance.md 2). Retired family-wise threshold for "
+          f"{PRIOR_MECHANISMS} prior + {CROSS_SECTIONAL_CELLS} cross-sectional "
+          f"+ {NEW_CELLS} directional = {family} was {bonferroni_t(family):.2f}\n")
     print("DIRECTIONAL single-name book: pos = sign(60d z-score of the feature),")
     print("equal weight, no cross-sectional information. Common-factor motion does")
     print("NOT cancel here -- this is where residualising should pay if it ever does.\n")

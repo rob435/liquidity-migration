@@ -44,6 +44,39 @@ A miss on one of these makes the affected number a diagnostic instead of a
 result. Diagnostics generate the next idea; they do not get graded as
 evidence.
 
+### The significance bar is **t ≥ 2.5**, set 2026-07-31
+
+This is the single number a screen or a registration is measured against, and
+this document is its authority. Code constants
+(`scripts/research/screen_phase1.py`, `screen_idio_charts.py`) derive from here,
+not the other way round.
+
+**What changed.** The program previously used a family-wise Bonferroni threshold
+derived from its own search history — t ≈ 3.25 over ~44 mechanisms, rising to
+≈ 3.58 over a 144-cell tuning grid. That is now replaced by a fixed **t ≥ 2.5**,
+by owner decision on 2026-07-31.
+
+**What it costs, stated plainly.** t 2.5 two-sided is p ≈ 0.012. Across the
+~45 mechanisms this program has screened that is roughly **one false positive
+expected**, against roughly one in twenty at 3.25. The bar no longer controls
+family-wise error; it is a fixed evidence threshold and it will admit results
+that would previously have been rejected. Two things carry the weight the
+threshold used to:
+
+- **A plateau, not a cell.** Report the neighbouring parameter values. One cell
+  at 2.5 with worse neighbours is a spike and should be treated as noise
+  regardless of the bar.
+- **A placebo that fails.** An inverted or size-matched-random arm that
+  *also* looks good means the result is an artifact of the construction. This
+  catches what a higher threshold used to catch, and catches it for the right
+  reason.
+
+**It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
+`docs/archive/` entries quoting 3.25 or 3.58 are accurate history and are not
+restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
+promoted — it is eligible to be re-examined, and the re-examination is a new
+registration.
+
 ## 3. Promotion is a note, not a treatise — and demotion is too
 
 When a config's rolling record earns a change to the live system, the

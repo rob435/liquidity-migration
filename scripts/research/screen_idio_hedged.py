@@ -55,7 +55,7 @@ from liquidity_migration.research.panels.idio_features import CHART_FEATURES  # 
 from scripts.research.screen_idio_charts import (  # noqa: E402
     ALL_SOURCES,
     DAYS_PER_YEAR,
-    bonferroni_t,
+    PROGRAM_T,
     realized_turnover,
 )
 
@@ -193,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     res = pl.DataFrame(rows)
     wins = int(res.filter(pl.col("delta_sharpe") > 0).height)
-    t_crit = bonferroni_t(92)
+    t_crit = PROGRAM_T  # docs/governance.md 2; retired family-wise was bonferroni_t(92)
     print("\n" + "=" * 92)
     print(f"hedging improves net Sharpe in {wins}/{res.height} cells")
     print(f"  median delta = {res['delta_sharpe'].median():+.3f}   "
