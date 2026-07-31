@@ -893,3 +893,25 @@ def test_invalid_requested_identity_fails_before_initialization(
 
     assert not account_root.exists()
     assert not inbox_root.exists()
+
+
+def test_route_id_domain_is_frozen_against_module_moves() -> None:
+    """The domain tag is hashed into stored manifests, so it must never move.
+
+    It reads like a module path but predates the subpackage split. Rewriting it
+    to follow the module invalidates the route_id of every manifest on disk and
+    the account owner refuses to start.
+    """
+    assert account_route_module._ROUTE_ID_DOMAIN == "liquidity_migration.account_route.v1"
+
+
+def test_derived_route_id_matches_frozen_vector() -> None:
+    assert (
+        account_route_module._derive_route_id(
+            account_id="acct",
+            environment="demo",
+            account_root="/srv/a",
+            inbox_root="/srv/b",
+        )
+        == "account-route-v1-3f7e41e57e08af501c23dd9b32ddfa53a3c2c1e5993bc46fabcdc1b2735e4187"
+    )

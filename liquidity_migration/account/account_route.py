@@ -34,7 +34,10 @@ ACCOUNT_ROUTE_FILENAME = "account_route.json"
 ACCOUNT_ROUTE_LOCK_DIRECTORY = ".locks"
 ACCOUNT_ROUTE_LOCK_FILENAME = "account_route.lock"
 _ROUTE_ID_PREFIX = "account-route-v1-"
-_ROUTE_ID_DOMAIN = "liquidity_migration.account.account_route.v1"
+# Hashed into every stored route_id, so this is a frozen domain tag, not a
+# module reference. It keeps its pre-subpackage spelling: moving the module
+# must not rewrite it, or every manifest on disk fails its integrity check.
+_ROUTE_ID_DOMAIN = "liquidity_migration.account_route.v1"
 _ROUTE_FIELDS = frozenset(
     {
         "schema_version",
