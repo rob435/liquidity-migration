@@ -158,7 +158,7 @@ their own bar-stamp date, unadjusted.
 **What kline coverage is required.** Not every manifest row. Coverage is required only for manifest
 `(date, symbol)` pairs inside each symbol's traded span `[first_kline_date, last_kline_date]`
 (`_required_pit_date_symbols`, `volume_events_pit.py:292`; pinned by
-`tests/test_liquidity_migration_volume_events_pit.py`). Rows before the first kline (listing or
+`tests/test_volume_events_pit.py`). Rows before the first kline (listing or
 announcement precedes the first trade bar) and after the last kline (an isolated 0-trade
 settlement/marker archive object landing weeks-to-months later) are excluded: genuinely empty archive
 objects, untradable, and re-downloading them returns Empty every time. A gap *inside* the span is still

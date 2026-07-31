@@ -543,7 +543,7 @@ class LivePanelCache:
     gives for the appended synthetic bar, so `state(...)` is `np.allclose` on
     `composite` and exact on `decile`/membership against
     `build_live_continuous_state(...)`.
-    `tests/test_liquidity_migration_continuous_demo.py` pins it. The full
+    `tests/test_continuous_demo.py` pins it. The full
     recompute stays available as the cycle's fallback.
     """
 
