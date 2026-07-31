@@ -14,7 +14,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY
+from liquidity_migration.core._common import MS_PER_DAY
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:

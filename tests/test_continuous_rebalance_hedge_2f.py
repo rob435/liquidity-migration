@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from liquidity_migration.continuous_rebalance import (
+from liquidity_migration.research.backtest.continuous_rebalance import (
     ContinuousHedge2FState,
     ContinuousHedgeRule,
     ContinuousRebalanceComponents,

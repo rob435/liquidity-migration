@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from liquidity_migration.wedged_command_watch import (
+from liquidity_migration.account.wedged_command_watch import (
     DEFAULT_WEDGE_AFTER_NS,
     WEDGE_AMBIGUOUS_SUBMISSION,
     WEDGE_NEVER_SUBMITTED,

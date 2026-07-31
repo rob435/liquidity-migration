@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_kernel import AccountEvent, AccountEventType
-from liquidity_migration.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS
-from liquidity_migration.three_way_reconciliation import (
+from liquidity_migration.account.account_kernel import AccountEvent, AccountEventType
+from liquidity_migration.research.backtest.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS
+from liquidity_migration.research.execution.three_way_reconciliation import (
     AccountEntryRecord,
     AccountEvidence,
     BacktestEntryRecord,

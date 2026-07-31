@@ -40,13 +40,13 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from liquidity_migration.cross_section import (  # noqa: E402
+from liquidity_migration.research.panels.cross_section import (  # noqa: E402
     MEASURED_ROUND_TRIP_BP,
     long_short,
     summary,
     top_by,
 )
-from liquidity_migration.idio_features import CHART_FEATURES  # noqa: E402
+from liquidity_migration.research.panels.idio_features import CHART_FEATURES  # noqa: E402
 
 DAYS_PER_YEAR = 365
 #: Mechanisms tested before this screen (``scripts/research/screen_phase1.py``). The idio

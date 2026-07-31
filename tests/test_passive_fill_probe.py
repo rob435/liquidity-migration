@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from liquidity_migration.passive_fill_probe import (
+from liquidity_migration.research.execution.passive_fill_probe import (
     ARM_POST_ONLY,
     ARM_TAKER,
     KILL_MIN_FILL_RATE,

@@ -33,7 +33,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
         Path("scripts/vps/check_deploy_rollout_readiness.py"),
-        Path("liquidity_migration/maintenance_lock.py"),
+        Path("liquidity_migration/ops/maintenance_lock.py"),
     ):
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +148,7 @@ def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Pa
     dry = _run("real-money", "create-state-roots", env=environment)
     assert dry.returncode == 0, dry.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "MODULE=liquidity_migration.real_money_arming" in payload
+    assert "MODULE=liquidity_migration.policy.real_money_arming" in payload
     assert "create-state-roots" in payload
     assert "--execute" not in payload
 
@@ -284,7 +284,7 @@ def test_remote_clean_check_ignores_current_index_flags(
     index_flag: str,
 ) -> None:
     checkout, commit = _isolated_deploy_checkout(tmp_path)
-    helper = checkout / "liquidity_migration/maintenance_lock.py"
+    helper = checkout / "liquidity_migration/ops/maintenance_lock.py"
     subprocess.run(
         [
             "git",
@@ -293,7 +293,7 @@ def test_remote_clean_check_ignores_current_index_flags(
             "update-index",
             index_flag,
             "--",
-            "liquidity_migration/maintenance_lock.py",
+            "liquidity_migration/ops/maintenance_lock.py",
         ],
         check=True,
     )

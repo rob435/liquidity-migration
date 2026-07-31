@@ -41,35 +41,35 @@ import polars as pl
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from liquidity_migration._common import exact_duration_ms  # noqa: E402
-from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.account_kernel import AccountEventType, read_account_journal  # noqa: E402
-from liquidity_migration.account_execution_config import (  # noqa: E402
+from liquidity_migration.core._common import exact_duration_ms  # noqa: E402
+from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
+from liquidity_migration.account.account_kernel import AccountEventType, read_account_journal  # noqa: E402
+from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
     load_demo_rules,
 )
-from liquidity_migration.demo_paper_agreement import (  # noqa: E402
+from liquidity_migration.ops.demo_paper_agreement import (  # noqa: E402
     DEFAULT_RELATIVE_TOLERANCE,
     evaluate_demo_paper_agreement,
 )
-from liquidity_migration.account_owner_health import (  # noqa: E402
+from liquidity_migration.account.account_owner_health import (  # noqa: E402
     AccountOwnerMarketWarmupPending,
     require_recent_account_owner_health,
     validate_systemd_invocation_id,
 )
-from liquidity_migration.account_owner_readiness import latest_market_readiness  # noqa: E402
-from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
+from liquidity_migration.runtime.account_owner_readiness import latest_market_readiness  # noqa: E402
+from liquidity_migration.strategy.continuous_hedge_manager import (  # noqa: E402
     HEDGE_MODEL_PRIOR_KIND,
     load_hedge_model_prior,
     require_usable_hedge_model_prior,
 )
-from liquidity_migration.storage import read_dataset  # noqa: E402
-from liquidity_migration.strategy_cycle_health import (  # noqa: E402
+from liquidity_migration.data.storage import read_dataset  # noqa: E402
+from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
     read_strategy_cycle_health,
 )
-from liquidity_migration.systemd_environment import parse_systemd_environment_bytes  # noqa: E402
-from liquidity_migration.telegram import send_telegram_message  # noqa: E402
+from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes  # noqa: E402
+from liquidity_migration.ops.telegram import send_telegram_message  # noqa: E402
 
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"

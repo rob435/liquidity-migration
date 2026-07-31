@@ -6,8 +6,8 @@ import urllib.parse
 
 import pytest
 
-from liquidity_migration import telegram
-from liquidity_migration.telegram import (
+from liquidity_migration.ops import telegram
+from liquidity_migration.ops.telegram import (
     TelegramConfig,
     send_telegram_message,
     _rate_limit_retry_seconds,

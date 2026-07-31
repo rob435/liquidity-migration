@@ -132,7 +132,7 @@ balance; leverage only changes how much cash each bet locks up.
 What stands between the account and a bad day:
 
 - **The daily loss halt**
-  ([`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py))
+  ([`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py))
   measures the day's loss against the day's *opening* equity, not a high-water
   mark, so a profitable morning cannot ratchet the trigger up. It has three
   answers: trade normally; take no new risk when the equity reading is too stale
@@ -141,15 +141,15 @@ What stands between the account and a bad day:
   by itself. The anchor survives a restart, so a crash-loop cannot hand the day
   a fresh loss budget.
 - **The wallet-anchored envelope**
-  ([`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py))
+  ([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py))
   makes every cap above a ratio of observed wallet equity, not a number someone
   remembered to update. Equity down shrinks the caps immediately; equity up
   waits for a move past a 5% dead band; equity unknown moves nothing.
 - **The per-sleeve partition** (in
-  [`account_kernel.py`](../liquidity_migration/account_kernel.py)) holds each
+  [`account_kernel.py`](../liquidity_migration/account/account_kernel.py)) holds each
   sleeve to its own share, so one strategy cannot eat the book, and **the
   exchange-side stop**
-  ([`venue_protection.py`](../liquidity_migration/venue_protection.py)) goes on
+  ([`venue_protection.py`](../liquidity_migration/venue/venue_protection.py)) goes on
   in the same request that opens the position.
 
 ## 8. Deploying, and the correctness pieces
@@ -164,11 +164,11 @@ it. Which shape is installed is a one-line marker at
 
 Beside the money limits in §7 sit three correctness pieces: one owner per
 account
-([`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py)), the
+([`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py)), the
 constant cross-check against the exchange
-([`account_reconcile.py`](../liquidity_migration/account_reconcile.py)), and the
+([`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py)), and the
 checks that run before anything deletes a directory
-([`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py)).
+([`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py)).
 
 **Standing rule:** no new safety features, guards, or gates on an agent's own
 initiative. Propose them; you decide.

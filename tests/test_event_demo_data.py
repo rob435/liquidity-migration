@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from liquidity_migration import event_demo_data
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.event_demo_data import (
+from liquidity_migration.strategy import event_demo_data
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.strategy.event_demo_data import (
     _build_demo_universe,
     _demo_instruments,
     _demo_kline_fetch_ranges,
@@ -20,9 +20,9 @@ from liquidity_migration.event_demo_data import (
     _download_recent_1h_klines,
     _resolve_ticker_snapshot,
 )
-from liquidity_migration.event_demo_data import _prune_event_demo_kline_cache
-from liquidity_migration.storage import read_dataset, write_dataset
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.strategy.event_demo_data import _prune_event_demo_kline_cache
+from liquidity_migration.data.storage import read_dataset, write_dataset
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
 
 from _event_demo_fixtures import (
     FailingKlineMarket,
@@ -244,7 +244,7 @@ def test_demo_kline_compact_cache_opt_out_preserves_existing_window(tmp_path: Pa
 
 def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
     """With a fully-covering kline_store, REST is never called and the output is sourced entirely from the store."""
-    from liquidity_migration.kline_store import KlineStore
+    from liquidity_migration.marketdata.kline_store import KlineStore
 
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     for hour in range(3):
@@ -282,8 +282,8 @@ def test_download_recent_1h_klines_store_full_coverage_skips_disk_cache(tmp_path
     on-disk parquet cache read entirely (5-10s versus <50ms). A SENTINEL row written
     to the disk cache would corrupt the output if read.
     """
-    from liquidity_migration.kline_store import KlineStore
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.marketdata.kline_store import KlineStore
+    from liquidity_migration.data.storage import write_dataset
 
     # Disk cache holds a sentinel row that would surface if read.
     sentinel = pl.DataFrame([{
@@ -326,7 +326,7 @@ def test_download_recent_1h_klines_store_full_coverage_skips_disk_cache(tmp_path
 
 def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_path: Path) -> None:
     """Hybrid path: store covers one symbol, REST fills the other."""
-    from liquidity_migration.kline_store import KlineStore
+    from liquidity_migration.marketdata.kline_store import KlineStore
 
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     for hour in range(3):
@@ -366,7 +366,7 @@ def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_
 def test_download_recent_1h_klines_backfills_store_midwindow_hole(tmp_path: Path) -> None:
     """A store symbol that reaches end_ms but has a MID-WINDOW hole must be forced
     off the fast path and REST-backfilled, not trusted as covered (BUG-2)."""
-    from liquidity_migration.kline_store import KlineStore
+    from liquidity_migration.marketdata.kline_store import KlineStore
 
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     # AAAUSDT: bars at 0 and 2h (HOLE at 1h). max==2h==end_ms so the latest-bar
@@ -443,7 +443,7 @@ def test_download_recent_1h_klines_without_store_uses_rest(tmp_path: Path) -> No
 def test_resolve_ticker_snapshot_prefers_fresh_cache() -> None:
     """When the ticker cache is seeded + fresh, _resolve_ticker_snapshot
     returns the cache snapshot and never touches REST."""
-    from liquidity_migration.ws_state_cache import TickerCache
+    from liquidity_migration.marketdata.ws_state_cache import TickerCache
 
     cache = TickerCache()
     cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
@@ -460,7 +460,7 @@ def test_resolve_ticker_snapshot_prefers_fresh_cache() -> None:
 
 
 def test_resolve_ticker_snapshot_falls_back_to_rest_when_unseeded() -> None:
-    from liquidity_migration.ws_state_cache import TickerCache
+    from liquidity_migration.marketdata.ws_state_cache import TickerCache
 
     cache = TickerCache()  # never seeded
 
@@ -480,7 +480,7 @@ def test_resolve_ticker_snapshot_falls_back_when_cache_stale() -> None:
     a stale price snapshot is worse than waiting one REST roundtrip.
     """
     import time as _time
-    from liquidity_migration.ws_state_cache import TickerCache
+    from liquidity_migration.marketdata.ws_state_cache import TickerCache
 
     cache = TickerCache()
     cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
@@ -697,7 +697,7 @@ def test_prune_kline_cache_skipped_until_utc_date_changes(tmp_path: Path) -> Non
 
 
 def test_prune_kline_cache_tolerates_failures(tmp_path: Path, monkeypatch) -> None:
-    import liquidity_migration.event_demo_data as event_demo_data_module
+    import liquidity_migration.strategy.event_demo_data as event_demo_data_module
 
     # (a) one partition's rmtree fails with OSError: the failure is swallowed,
     # the OTHER stale partition is still pruned.

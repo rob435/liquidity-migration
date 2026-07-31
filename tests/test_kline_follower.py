@@ -13,18 +13,18 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_HOUR
-from liquidity_migration.cli import build_parser
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, _signal_source_root
-from liquidity_migration.continuous_demo_daemon import (
+from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.cli.commands import build_parser
+from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig, _signal_source_root
+from liquidity_migration.strategy.continuous_demo_daemon import (
     _default_continuous_kline_stream_manager_factory,
     _follower_continuous_kline_stream_manager_factory,
     _select_kline_stream_manager_factory,
 )
-from liquidity_migration.kline_follower import FollowerKlineStreamManager
-from liquidity_migration.kline_store import KlineStore
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-from liquidity_migration.long_native_event_demo_daemon import (
+from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager
+from liquidity_migration.marketdata.kline_store import KlineStore
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.strategy.long_native_event_demo_daemon import (
     _default_long_kline_stream_manager_factory,
     _follower_long_kline_stream_manager_factory,
     _select_long_kline_stream_manager_factory,
@@ -172,7 +172,7 @@ def test_follower_warns_once_when_leader_snapshot_goes_stale(tmp_path: Path, cap
         old = time.time() - 3600.0
         os.utime(snapshot, (old, old))
         follower._last_sig = None  # re-stat picks up the aged mtime
-        with caplog.at_level(logging.WARNING, logger="liquidity_migration.kline_follower"):
+        with caplog.at_level(logging.WARNING, logger="liquidity_migration.marketdata.kline_follower"):
             follower._refresh()
             follower._refresh()  # second pass must NOT re-warn (once per episode)
         stale_warnings = [r for r in caplog.records if "has not changed" in r.message]
@@ -300,7 +300,7 @@ def test_cli_klines_follow_root_parses_into_config(tmp_path: Path) -> None:
 def test_rmom_parquet_is_read_from_the_followed_root(tmp_path: Path) -> None:
     """End-to-end pin of the one signal-input redirect: with klines_follow_root set,
     _load_rmom_table(_signal_source_root(...)) resolves the LEADER's gate parquet."""
-    from liquidity_migration.continuous_demo import _load_rmom_table
+    from liquidity_migration.strategy.continuous_demo import _load_rmom_table
 
     leader = tmp_path / "leader"
     own = tmp_path / "own"

@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_execution_stream import (
+from liquidity_migration.venue.account_execution_stream import (
     BybitAccountExecutionConsumer,
     PrivateExecutionStreamSupervisor,
 )
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -18,7 +18,7 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_runtime import VirtualClock
 
 
 class _PrivateStream:

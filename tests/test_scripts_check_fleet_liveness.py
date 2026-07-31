@@ -282,7 +282,7 @@ def test_gather_long_alerts_covers_cycle_and_input_freshness(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
@@ -314,7 +314,7 @@ def test_gather_long_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
@@ -360,7 +360,7 @@ def test_gather_carry_alerts_covers_cycle_freshness_and_decision_staleness(tmp_p
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
@@ -398,7 +398,7 @@ def test_gather_carry_alerts_fresh_healthy_cycle_is_clean(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
@@ -427,7 +427,7 @@ def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
@@ -471,7 +471,7 @@ def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
 
 
 def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
-    from liquidity_migration.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
+    from liquidity_migration.account.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
 
     capture = tmp_path / "capture"
     missing = M.gather_account_capture_alerts(capture_root=capture, now_ms=1_000 * HOUR, max_age_minutes=3)
@@ -538,7 +538,7 @@ def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     root = tmp_path / "bybit-continuous-demo-event"
@@ -572,7 +572,7 @@ def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
 
 
 def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:
-    from liquidity_migration.account_kernel import AccountExecutionKernel
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
     now_ms = 1_000 * HOUR
     missing = M.gather_account_health_alerts(
@@ -626,7 +626,7 @@ def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> N
 
 
 def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
-    from liquidity_migration.account_kernel import AccountExecutionKernel
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
     outer_now_ms = 1_000 * HOUR
     published_ms = outer_now_ms + 84
@@ -658,7 +658,7 @@ def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) 
 
 
 def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_path) -> None:
-    from liquidity_migration.account_owner_health import (
+    from liquidity_migration.account.account_owner_health import (
         TEST_ACCOUNT_OWNER_INVOCATION_ID,
         AccountOwnerHealth,
         write_account_owner_health,
@@ -709,8 +709,8 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
 
 
 def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
-    from liquidity_migration import account_owner_health as owner_health_module
-    from liquidity_migration.account_owner_health import (
+    from liquidity_migration.account import account_owner_health as owner_health_module
+    from liquidity_migration.account.account_owner_health import (
         TEST_ACCOUNT_OWNER_INVOCATION_ID,
         AccountOwnerHealth,
         write_account_owner_health,
@@ -856,7 +856,7 @@ def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:
 
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6, max_rmom_stale_days=2.0)
@@ -894,7 +894,7 @@ def test_gather_continuous_healthy_inputs_are_clean(tmp_path) -> None:
     root = tmp_path / "bybit-continuous-demo-event"
     root.mkdir()
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     write_dataset(
         pl.DataFrame(
@@ -924,7 +924,7 @@ def test_gather_continuous_paper_alerts_uses_paper_cycle_dataset(tmp_path) -> No
     root = tmp_path / "bybit-continuous-paper-event"
     root.mkdir()
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     write_dataset(
         pl.DataFrame(
@@ -965,8 +965,8 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
 ) -> None:
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
-    from liquidity_migration.strategy_cycle_health import (
+    from liquidity_migration.data.storage import write_dataset
+    from liquidity_migration.strategy.strategy_cycle_health import (
         StrategyCycleHealth,
         write_strategy_cycle_health,
     )
@@ -1037,8 +1037,8 @@ def test_current_generation_completion_time_is_sampled_after_receipt_read(
 ) -> None:
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
-    from liquidity_migration.strategy_cycle_health import (
+    from liquidity_migration.data.storage import write_dataset
+    from liquidity_migration.strategy.strategy_cycle_health import (
         StrategyCycleHealth,
         write_strategy_cycle_health,
     )
@@ -1108,8 +1108,8 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
 ) -> None:
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
-    from liquidity_migration.strategy_cycle_health import (
+    from liquidity_migration.data.storage import write_dataset
+    from liquidity_migration.strategy.strategy_cycle_health import (
         StrategyCycleHealth,
         write_strategy_cycle_health,
     )
@@ -1188,7 +1188,7 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
 def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> None:
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
     root = tmp_path / "bybit-continuous-demo-event"
@@ -1242,8 +1242,8 @@ def test_prior_generation_or_stale_completion_cannot_mask_hung_daemon(
 ) -> None:
     import polars as pl
 
-    from liquidity_migration.storage import write_dataset
-    from liquidity_migration.strategy_cycle_health import (
+    from liquidity_migration.data.storage import write_dataset
+    from liquidity_migration.strategy.strategy_cycle_health import (
         StrategyCycleHealth,
         write_strategy_cycle_health,
     )
@@ -2070,7 +2070,7 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
 
 def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
     """A 1.4-minute-old journaled snapshot must not page."""
-    from liquidity_migration.account_kernel import AccountExecutionKernel
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
     now_ms = 1_000 * HOUR
     root = tmp_path / "busy"

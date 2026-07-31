@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_kernel as account_kernel_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.account.account_kernel as account_kernel_module
+from liquidity_migration.account.account_kernel import (
     AccountEvent,
     AccountEventType,
     AccountExecutionKernel,
@@ -29,10 +29,10 @@ from liquidity_migration.account_kernel import (
     read_account_journal_head,
     verify_account_journal,
 )
-from liquidity_migration.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
-from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
+from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import (
     AmbiguousExposureSubmission,
     BookLevel,
     ExecutionObservation,
@@ -43,7 +43,7 @@ from liquidity_migration.execution_adapters import (
     MarketOrderExecutionTwin,
     StaleUnsubmittedExposureCommand,
 )
-from liquidity_migration.strategy_runtime import (
+from liquidity_migration.account.strategy_runtime import (
     AccountKernelRuntime,
     AdaptedIntent,
     ContinuousTargetAdapter,

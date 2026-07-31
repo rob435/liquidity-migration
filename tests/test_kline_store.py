@@ -13,8 +13,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.kline_store import (
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.marketdata.kline_store import (
     WS_STORE_SOURCE,
     KlineStore,
     _empty_klines_frame,
@@ -135,7 +135,7 @@ def test_far_future_bar_is_rejected_and_does_not_mass_evict() -> None:
     """A corrupt far-future ts must not advance the eviction reference and evict every
     legitimate bar (total store loss, then silent REST fallback).
     """
-    from liquidity_migration.kline_store import _utc_now_ms
+    from liquidity_migration.marketdata.kline_store import _utc_now_ms
 
     store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
     now = _utc_now_ms()
@@ -155,7 +155,7 @@ def test_bootstrap_skips_far_future_bars() -> None:
     """Bulk bootstrap must drop corrupt far-future bars, not let them poison the
     eviction reference for the good bars in the same batch.
     """
-    from liquidity_migration.kline_store import _utc_now_ms
+    from liquidity_migration.marketdata.kline_store import _utc_now_ms
 
     store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
     now = _utc_now_ms()
@@ -174,7 +174,7 @@ def test_recover_from_disk_skips_far_future_bars(tmp_path) -> None:
     """
     import polars as pl
 
-    from liquidity_migration.kline_store import _utc_now_ms
+    from liquidity_migration.marketdata.kline_store import _utc_now_ms
 
     now = _utc_now_ms()
     store1 = KlineStore(cache_root=tmp_path, retain_days=2, flush_interval_seconds=0.0)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from liquidity_migration.continuous_identity import continuous_trade_id
+from liquidity_migration.strategy.continuous_identity import continuous_trade_id
 
 
 def test_continuous_trade_id_is_deterministic() -> None:

@@ -3,7 +3,7 @@
 
 Component triggers, weights, age gates, take profits, stops, and the
 settled-funding admission floor all come from
-``liquidity_migration.continuous_profile``; the generated reports are outputs,
+``liquidity_migration.research.backtest.continuous_profile``; the generated reports are outputs,
 never configuration inputs.
 
     PYTHONIOENCODING=utf-8 POLARS_MAX_THREADS=6 .venv/bin/python \
@@ -32,11 +32,11 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from liquidity_migration.continuous_component_sources import (  # noqa: E402
+from liquidity_migration.strategy.continuous_component_sources import (  # noqa: E402
     ContinuousComponentSource,
     load_continuous_component_source,
 )
-from liquidity_migration.continuous_profile import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_profile import (  # noqa: E402
     ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
     CONTINUOUS_EQUITY_EVIDENCE_LABEL,
     CONTINUOUS_HISTORICAL_RUN_LABEL,
@@ -46,19 +46,19 @@ from liquidity_migration.continuous_profile import (  # noqa: E402
     active_hedge_regime,
     active_rebalance_rule,
 )
-from liquidity_migration.continuous_events import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     run_continuous_equity_component,
 )
-from liquidity_migration.continuous_rebalance import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     apply_rebalance_rule,
     combine_continuous_components,
 )
-from liquidity_migration.continuous_regime import btcvol_intensity_series  # noqa: E402
-from liquidity_migration.storage import resolve_dataset_name  # noqa: E402
-from liquidity_migration.symbol_codec import encode_symbol_partition  # noqa: E402
-from liquidity_migration.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
+from liquidity_migration.research.backtest.continuous_regime import btcvol_intensity_series  # noqa: E402
+from liquidity_migration.data.storage import resolve_dataset_name  # noqa: E402
+from liquidity_migration.core.symbol_codec import encode_symbol_partition  # noqa: E402
+from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart  # noqa: E402
 
 SHARED = Path(os.environ.get("SHARED_DATA", str(Path.home() / "SHARED_DATA"))).expanduser()
 PANEL_COLUMNS = ["symbol", "ts_ms", "date", "close", "turnover_quote"]
@@ -528,7 +528,7 @@ def write_continuous_equity_report(
         "strategy_run_label": CONTINUOUS_HISTORICAL_RUN_LABEL,
         "strategy_profile": CONTINUOUS_PROFILE_ID,
         "profile_revision": CONTINUOUS_PROFILE_REVISION,
-        "config_authority": "liquidity_migration.continuous_profile.ACTIVE_CONTINUOUS_COMPONENTS",
+        "config_authority": "liquidity_migration.research.backtest.continuous_profile.ACTIVE_CONTINUOUS_COMPONENTS",
         "venue": venue,
         "data_root": str(data_root),
         "output_dir": str(out_dir),
@@ -594,7 +594,7 @@ def write_continuous_equity_report(
             f"Run label: {CONTINUOUS_EQUITY_EVIDENCE_LABEL}",
             f"Strategy run label: {CONTINUOUS_HISTORICAL_RUN_LABEL}",
             f"Active profile: {CONTINUOUS_PROFILE_ID} ({CONTINUOUS_PROFILE_REVISION})",
-            "Config authority: liquidity_migration.continuous_profile",
+            "Config authority: liquidity_migration.research.backtest.continuous_profile",
             f"Venue: {venue}",
             f"Data root: {data_root}",
             f"Window: {stats_1x.get('window')}",

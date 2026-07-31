@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from liquidity_migration import downloaders
+from liquidity_migration.data import downloaders
 
 import pytest
 
-from liquidity_migration.downloaders import (
+from liquidity_migration.data.downloaders import (
     _download_symbol_dataset,
     _float_or_none,
     _funding_interval_min,
@@ -28,7 +28,7 @@ from liquidity_migration.downloaders import (
     _resolve_binance_dataset_name,
     parse_date_ms,
 )
-from liquidity_migration.storage import read_dataset
+from liquidity_migration.data.storage import read_dataset
 
 
 # --- _normalize_klines (Bybit kline arrays) ---------------------------------
@@ -676,8 +676,8 @@ def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp
     must key on the CLAMPED range, not the full requested one, or the uncovered
     pre-30d prefix is claimed complete and skipped forever.
     """
-    from liquidity_migration import binance
-    from liquidity_migration.downloaders import _download_symbol_dataset, _marker_path
+    from liquidity_migration.marketdata import binance
+    from liquidity_migration.data.downloaders import _download_symbol_dataset, _marker_path
 
     day_ms = 24 * 60 * 60_000
     now_ms = 1_700_000_000_000

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_intent_client import (
+from liquidity_migration.account.account_intent_client import (
     AccountTargetPublisher,
     ExitFirstPublication,
     TargetPublicationError,
@@ -14,26 +14,26 @@ from liquidity_migration.account_intent_client import (
     publish_exit_first_target_requests,
     requested_target,
 )
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.account_service import AccountIntentInbox, SleeveAdapterKind
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
-from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-from liquidity_migration.long_native_event_demo_daemon import (
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.account.account_service import AccountIntentInbox, SleeveAdapterKind
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
+from liquidity_migration.strategy.continuous_demo_daemon import ContinuousDemoDaemon
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.strategy.long_native_event_demo_daemon import (
     LongNativeDemoDaemon,
 )
-from liquidity_migration.strategy_event_clock import JsonlStrategyEventTape, StrategyEvent
-from liquidity_migration.strategy_event_outcome import (
+from liquidity_migration.account.strategy_event_clock import JsonlStrategyEventTape, StrategyEvent
+from liquidity_migration.strategy.strategy_event_outcome import (
     JsonlStrategyEventDecisionTape,
     load_strategy_event_decision_tape,
 )
-from liquidity_migration.strategy_cycle_health import (
+from liquidity_migration.strategy.strategy_cycle_health import (
     read_strategy_cycle_health,
     strategy_cycle_health_path,
 )
-from liquidity_migration.strategy_target_replay import (
+from liquidity_migration.strategy.strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
     capture_event_from_cycle,

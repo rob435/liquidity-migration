@@ -13,15 +13,15 @@ from urllib.error import HTTPError
 import polars as pl
 import pytest
 
-import liquidity_migration.binance_vision as bv
-from liquidity_migration.binance_vision import (
+import liquidity_migration.data.binance_vision as bv
+from liquidity_migration.data.binance_vision import (
     _assert_download_completeness,
     parse_month_csv,
     rewrite_manifest_to_coverage,
     validate_pit_manifest_coverage,
 )
-from liquidity_migration.storage import read_dataset, write_dataset
-from liquidity_migration.symbol_codec import (
+from liquidity_migration.data.storage import read_dataset, write_dataset
+from liquidity_migration.core.symbol_codec import (
     SymbolIdentityError,
     encode_symbol_partition,
     normalize_binance_usdm_symbols,

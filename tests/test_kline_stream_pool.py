@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from liquidity_migration.bybit_market_data import (
+from liquidity_migration.marketdata.bybit_market_data import (
     BybitKlineStreamPool,
     _symbol_from_kline_topic,
 )

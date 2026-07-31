@@ -8,26 +8,26 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_candidate_universe import (
+from liquidity_migration.strategy.account_candidate_universe import (
     build_candidate_universe_artifact,
     load_candidate_universe,
     write_candidate_universe,
 )
-from liquidity_migration.carry_demo import _candidate_filtered_universe
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
-from liquidity_migration.execution_environment import candidate_universe_realm
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-from liquidity_migration.venue_realm import VenueRealm
+from liquidity_migration.strategy.carry_demo import _candidate_filtered_universe
+from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
+from liquidity_migration.account.execution_environment import candidate_universe_realm
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.core.venue_realm import VenueRealm
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT_NS = 1_800_000_000_000_000_000
 PRODUCER_MODULES = (
-    "liquidity_migration/candidate_rule_coverage.py",
-    "liquidity_migration/carry_demo.py",
-    "liquidity_migration/continuous_demo.py",
-    "liquidity_migration/event_demo_data.py",
-    "liquidity_migration/long_native_event_demo.py",
+    "liquidity_migration/ops/candidate_rule_coverage.py",
+    "liquidity_migration/strategy/carry_demo.py",
+    "liquidity_migration/strategy/continuous_demo.py",
+    "liquidity_migration/strategy/event_demo_data.py",
+    "liquidity_migration/strategy/long_native_event_demo.py",
     "scripts/maintain/freeze_venue_instrument_rules.py",
     "scripts/maintain/probe_bybit_demo_rules.py",
 )

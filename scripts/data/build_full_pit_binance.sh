@@ -77,7 +77,7 @@ echo "=============================================================="
 
 echo
 echo "[1/2] Binance — atomic full PIT root from USD-M monthly + current daily archives"
-"$PYTHON_BIN" -m liquidity_migration.binance_vision \
+"$PYTHON_BIN" -m liquidity_migration.data.binance_vision \
   build-binance-oos --data-root "$ROOT" --end "$END" --workers "$VISION_WORKERS" \
   --job-batch-size "$JOB_BATCH_SIZE" --max-failure-ratio "$MAX_FAILURE_RATIO" \
   --daily-start "$DAILY_START"
@@ -87,7 +87,7 @@ echo "[1/2] Binance — atomic full PIT root from USD-M monthly + current daily 
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os, pathlib, sys
 import polars as pl
-from liquidity_migration.binance_vision import validate_usdm_usdt_symbols
+from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols
 
 root = pathlib.Path(os.environ["ROOT"]).expanduser()
 df = pl.read_parquet(str(root / "archive_trade_manifest" / "**" / "*.parquet"))

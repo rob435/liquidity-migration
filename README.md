@@ -20,8 +20,8 @@ off, never on.
 
 | Path | Contents |
 | --- | --- |
-| [`liquidity_migration/`](liquidity_migration) | package — strategy engines, account kernel, journals, venue adapters, CLI |
-| [`scripts/`](scripts) | `dev.sh`, `ops.sh`, deploy, data builders, research screens |
+| [`liquidity_migration/`](liquidity_migration/README.md) | the package, in eleven subpackages — `core`, `marketdata`, `data`, `account`, `venue`, `strategy`, `research`, `policy`, `ops`, `cli`, `runtime` |
+| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
 | [`data/`](data) | per-sleeve event stores and reconciliation captures |

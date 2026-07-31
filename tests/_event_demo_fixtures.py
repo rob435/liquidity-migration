@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_HOUR
+from liquidity_migration.core._common import MS_PER_HOUR
 
 
 class FakeKlineMarket:

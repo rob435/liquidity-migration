@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -15,15 +15,15 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     read_account_journal,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import ExecutionObservation, KernelExecutionDriver
-from liquidity_migration.wedged_command_resolution import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import ExecutionObservation, KernelExecutionDriver
+from liquidity_migration.venue.wedged_command_resolution import (
     RESOLUTION_REJECTION_KEY,
     WedgedCommandResolutionRefused,
     probe_wedged_command,
     resolve_wedged_command,
 )
-from liquidity_migration.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
+from liquidity_migration.account.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
 
 RULES = {"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1)}
 POLICY = AccountRiskPolicy(100_000.0, 100_000.0, 100_000.0, 100_000.0, 10.0)

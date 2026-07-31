@@ -36,13 +36,13 @@ except (AttributeError, ValueError):
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
-from liquidity_migration.risk_model import (  # noqa: E402
+from liquidity_migration.research.panels.risk_model import (  # noqa: E402
     COMMON4_FACTOR_COLUMNS,
     build_factor_panel,
     fit_factor_returns,
 )
-from liquidity_migration.daily_feature_panel import MS_PER_DAY, _date_str_to_ms  # noqa: E402
-from liquidity_migration.residual_momentum import (  # noqa: E402
+from liquidity_migration.research.panels.daily_feature_panel import MS_PER_DAY, _date_str_to_ms  # noqa: E402
+from liquidity_migration.research.panels.residual_momentum import (  # noqa: E402
     RMOM_CAUSAL_SHIFT,
     RMOM_MIN_SAMPLES,
     RMOM_WINDOW,
@@ -205,7 +205,7 @@ def _assert_append_overlap_matches(
             f"max_abs_diff={float(diffs.max()):.12g}. Two causes, and they need "
             "opposite responses: (a) a DELIBERATE change to the signal definition "
             "(RMOM_WINDOW / RMOM_MIN_SAMPLES / RMOM_CAUSAL_SHIFT, or the per-symbol "
-            "calendar grid in liquidity_migration/residual_momentum.py) makes exactly "
+            "calendar grid in liquidity_migration/research/panels/residual_momentum.py) makes exactly "
             "this raise fire once per root — confirm the recorded change point, then "
             "rerun with --full-rewrite; (b) no definition change means the SOURCE "
             "residuals moved under a stable row, which is drift to investigate before "

@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_owner_health as owner_health_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.account.account_owner_health as owner_health_module
+from liquidity_migration.account.account_kernel import (
     AccountEvent,
     AccountExecutionKernel,
     AccountRiskSnapshot,
     GENESIS_HASH,
 )
-from liquidity_migration.account_owner_health import (
+from liquidity_migration.account.account_owner_health import (
     ACCOUNT_OWNER_HEALTH_FILENAME,
     ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION,
     TEST_ACCOUNT_OWNER_INVOCATION_ID,
@@ -32,21 +32,21 @@ from liquidity_migration.account_owner_health import (
     validate_systemd_invocation_id,
     write_account_owner_health,
 )
-from liquidity_migration.account_reconcile import (
+from liquidity_migration.venue.account_reconcile import (
     AccountPositionTruthMismatchError,
     AccountReconciliationReport,
     AccountReconciliationStaleError,
 )
-from liquidity_migration.account_service import AccountConvergenceItem, AccountConvergenceReport
-from liquidity_migration.account_paper_runner import publish_paper_owner_health
-from liquidity_migration.account_service_runner import (
+from liquidity_migration.account.account_service import AccountConvergenceItem, AccountConvergenceReport
+from liquidity_migration.runtime.account_paper_runner import publish_paper_owner_health
+from liquidity_migration.runtime.account_service_runner import (
     PositionTruthSettling,
     append_unique_notification_health_error,
     notification_position_truth,
     owner_health_publish_decision,
     publish_demo_owner_health,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_runtime import VirtualClock
 
 
 def _health(*, loop_sequence: int = 1) -> AccountOwnerHealth:
@@ -778,7 +778,7 @@ def test_failed_atomic_publish_preserves_last_good_health(
     def fail_replace(_source: Path, _destination: Path) -> None:
         raise OSError("simulated replace failure")
 
-    monkeypatch.setattr("liquidity_migration.account_owner_health.os.replace", fail_replace)
+    monkeypatch.setattr("liquidity_migration.account.account_owner_health.os.replace", fail_replace)
     with pytest.raises(OSError, match="simulated replace failure"):
         write_account_owner_health(tmp_path, _health(loop_sequence=2))
 
@@ -792,8 +792,8 @@ def test_atomic_publish_refuses_a_precreated_temporary_alias(
 ) -> None:
     target = tmp_path / "unrelated"
     target.write_text("preserve me", encoding="utf-8")
-    monkeypatch.setattr("liquidity_migration.account_owner_health.time.time_ns", lambda: 123)
-    monkeypatch.setattr("liquidity_migration.account_owner_health.threading.get_ident", lambda: 456)
+    monkeypatch.setattr("liquidity_migration.account.account_owner_health.time.time_ns", lambda: 123)
+    monkeypatch.setattr("liquidity_migration.account.account_owner_health.threading.get_ident", lambda: 456)
     temporary = tmp_path / (
         f".{ACCOUNT_OWNER_HEALTH_FILENAME}.{os.getpid()}.456.123.tmp"
     )
@@ -1014,7 +1014,7 @@ def test_allow_behind_still_enforces_freshness(tmp_path: Path) -> None:
 def test_allow_behind_rejects_health_ahead_of_the_journal(tmp_path: Path) -> None:
     from dataclasses import replace as dc_replace
 
-    from liquidity_migration.account_owner_health import write_account_owner_health
+    from liquidity_migration.account.account_owner_health import write_account_owner_health
 
     _kernel, health = _behind_by_one_root(tmp_path)
     write_account_owner_health(tmp_path, dc_replace(health, journal_sequence=99))
@@ -1032,7 +1032,7 @@ def test_allow_behind_rejects_health_ahead_of_the_journal(tmp_path: Path) -> Non
 def test_allow_behind_rejects_equal_sequence_hash_disagreement(tmp_path: Path) -> None:
     from dataclasses import replace as dc_replace
 
-    from liquidity_migration.account_owner_health import write_account_owner_health
+    from liquidity_migration.account.account_owner_health import write_account_owner_health
 
     kernel, health = _behind_by_one_root(tmp_path)
     doctored = dc_replace(

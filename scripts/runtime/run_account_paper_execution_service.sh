@@ -67,7 +67,7 @@ if [[ -n "${CONTINUOUS_CYCLE_ROOT:-}" ]]; then
     )
 fi
 
-exec "$PYTHON_BIN" -m liquidity_migration.account_paper_runner \
+exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_paper_runner \
     --account-root "$ACCOUNT_ROOT" \
     --inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
     --capture-root "$ACCOUNT_CAPTURE_ROOT" \

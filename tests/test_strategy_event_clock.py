@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.strategy_event_clock import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
     MemoryStrategyEventTape,

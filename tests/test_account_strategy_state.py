@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -16,7 +16,7 @@ from liquidity_migration.account_kernel import (
     TargetBatchResult,
     read_account_journal,
 )
-from liquidity_migration.account_strategy_state import (
+from liquidity_migration.strategy.account_strategy_state import (
     canonical_account_projection,
     canonical_adverse_reduction_events,
     canonical_component_execution_anchors,
@@ -27,9 +27,9 @@ from liquidity_migration.account_strategy_state import (
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
-from liquidity_migration.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
+from liquidity_migration.research.backtest.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
 
 
 def test_component_execution_anchor_snapshot_requires_one_coherent_head(
@@ -854,8 +854,8 @@ def test_filled_component_remains_exit_visible_while_same_symbol_peer_is_pending
     tmp_path: Path,
     second_order_status: str,
 ) -> None:
-    from liquidity_migration.continuous_demo import _open_continuous_trades
-    from liquidity_migration.long_native_event_demo import _open_long_trades
+    from liquidity_migration.strategy.continuous_demo import _open_continuous_trades
+    from liquidity_migration.strategy.long_native_event_demo import _open_long_trades
 
     kernel = AccountExecutionKernel(tmp_path / second_order_status, account_id="a")
     component_a = _submit(
@@ -1207,7 +1207,7 @@ def test_terminal_group_reduction_projects_one_account_pnl_event(
         root,
         sleeve="long",
     )
-    import liquidity_migration.account_strategy_state as strategy_state_module
+    import liquidity_migration.strategy.account_strategy_state as strategy_state_module
 
     with monkeypatch.context() as reference:
         reference.setattr(

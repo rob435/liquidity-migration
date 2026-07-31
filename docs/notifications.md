@@ -5,7 +5,7 @@ watchdog reports that the fleet is still running. They watch each other — the 
 the owner's digest stops arriving, and the owner is the only thing that reports a fill.
 
 Both read `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-([`telegram.py`](../liquidity_migration/telegram.py)). Missing either is not an error: the send
+([`telegram.py`](../liquidity_migration/ops/telegram.py)). Missing either is not an error: the send
 returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`.
 
 | Unit | Telegram | Sends |
@@ -22,7 +22,7 @@ not its own.
 
 ## The owner's digest
 
-[`account_notifications.py`](../liquidity_migration/account_notifications.py), rendered from the
+[`account_notifications.py`](../liquidity_migration/ops/account_notifications.py), rendered from the
 canonical account journal — never from a projection or a venue read.
 
 - **Hourly summary** on the UTC hour boundary: open positions with side, quantity, entry, mark and

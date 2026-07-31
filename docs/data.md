@@ -33,7 +33,7 @@ be dropped before a later top-up, and membership is then derived from their *com
 (`scripts/data/build_full_pit_binance.sh:56-59`). Splitting that into a cheaper two-pass reintroduces the
 survivorship hole it closes.
 
-- `symbol=` components are percent-encoded by [`symbol_codec.py`](../liquidity_migration/symbol_codec.py). Decode with that module; never read the directory name as an exchange symbol. ASCII symbols are unchanged.
+- `symbol=` components are percent-encoded by [`symbol_codec.py`](../liquidity_migration/core/symbol_codec.py). Decode with that module; never read the directory name as an exchange symbol. ASCII symbols are unchanged.
 - Unsupported, ambiguous, or path-like identifiers fail with `SymbolIdentityError` *before* any root mutation. `normalize_exchange_symbol` (`symbol_codec.py:14-36`) NFC-normalizes, then rejects: anything that is not one non-blank untrimmed `str`; any value whose NFKC form differs from its NFC form (compatibility/confusable); identifiers over 192 UTF-8 bytes; any character outside Unicode categories L/N; any character where `c != c.upper()`. Two upstream identifiers that normalize to the same key are also rejected (`:73, :91-96`). A build aborting on one odd venue symbol is that guard, not a bug.
 - An *ordinary* Binance publication failure rolls back — the new trees are quarantined, the backups restored, a `prior_presence` invariant checked per dataset — and then `marker_path.unlink(missing_ok=True)`: the root is intact and **no** marker is left. Retry. `.binance_vision_publish_incomplete.json` survives only a hard process kill or an *incomplete* rollback, where `RuntimeError("Binance publication failed and rollback was incomplete: ...")` is raised before the unlink (`binance_vision.py:1241-1276`, docstring `:1181-1185`). A marker that is present therefore means one of those two things; the second needs the backup root inspected, not just a retry. The next build refuses before any network access — read the marker's staging and backup paths and recover deliberately.
 - Publication runs inside the per-dataset `exclusive_file_lock`s, acquired in sorted dataset order with `stale_seconds=21_600` (`:1219-1227`, via `storage.dataset_lock_path`), so a build can legitimately appear to hang while blocked on a dataset lock. A concurrent publisher that already owns the marker is refused outright — "Binance build REFUSED: another publication owns {marker_path}" (`:1210-1215`) — and that loser deletes its own staging/backup without touching live data.
@@ -146,13 +146,13 @@ incarnations without upgrading an inferred row to an observation.
 
 **The rule.** A symbol may enter the universe on day D only if the manifest lists it as a member on D,
 and that filter runs *before* any rolling feature or cross-sectional rank —
-`filter_klines_to_pit_membership` in [`volume_events_pit.py`](../liquidity_migration/volume_events_pit.py).
+`filter_klines_to_pit_membership` in [`volume_events_pit.py`](../liquidity_migration/data/volume_events_pit.py).
 A later filter can stop an ineligible symbol trading but cannot undo its influence on ranks, cut-offs,
 and rolling state.
 
 **Trading-day key.** A daily-close signal for trading day D is stamped 00:00 UTC on D+1, so the
 membership day is `date(signal_ts_ms - 1ms)`, not the stamp date. `latest_signal_trading_day()` in
-[`pit_coverage.py`](../liquidity_migration/pit_coverage.py) is `today_utc - 1`. Hourly bars key on
+[`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py) is `today_utc - 1`. Hourly bars key on
 their own bar-stamp date, unadjusted.
 
 **What kline coverage is required.** Not every manifest row. Coverage is required only for manifest
@@ -194,7 +194,7 @@ freshly downloaded root can carry stale membership and hard-reject recent signal
 `pit_membership_fail`. `download-data` emits the PIT coverage table itself and, when the manifest is
 stale, prints a WARNING block carrying the exact remediation command and the `--refresh-manifest`
 alternative (`_download_manifest_staleness_lines`, `cli.py:44` → `coverage_status`/`format_coverage` in
-[`pit_coverage.py`](../liquidity_migration/pit_coverage.py); reads `date=` partition names only, no
+[`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py); reads `date=` partition names only, no
 parquet, no network). That output also reports manifest end, kline end, latest signal day, margin in
 days, manifest-vs-kline lag, and up to five per-symbol lag examples — the fastest way to tell whole-root
 staleness from a handful of newly listed symbols. There is no standalone coverage subcommand; scroll
@@ -202,7 +202,7 @@ back for it. The remediation:
 
 ```bash
 python -m liquidity_migration --data-root ROOT archive-manifest --start YYYY-MM-DD --end YYYY-MM-DD
-python -m liquidity_migration.binance_vision validate-manifest --data-root ROOT
+python -m liquidity_migration.data.binance_vision validate-manifest --data-root ROOT
 ```
 
 `validate-manifest` fails on missing kline coverage (≥20 hourly bars per symbol-day) without deleting
@@ -215,7 +215,7 @@ The LONG research runner always measures manifest/kline agreement and records
 `full_pit_universe_pass`, with no switch to disable it — the `require_full_pit_universe` strategy
 switch no longer exists and must not be recreated; a non-passing run can be a current-universe or
 data diagnostic, not a historical-universe performance claim. It also stamps, per run, a warning list
-([`run_diagnostics.py`](../liquidity_migration/run_diagnostics.py) `RunWarning`: stable greppable
+([`run_diagnostics.py`](../liquidity_migration/research/backtest/run_diagnostics.py) `RunWarning`: stable greppable
 `code`, `severity` in `info` < `warn` < `tainted`, one-sentence `message`, one-line `fix`; the PIT codes
 are `PIT_MANIFEST_EMPTY` and `PIT_SURVIVORSHIP`, both `tainted`), a data-integrity `run_label`, and a
 `methodology_run_label` (`exploratory` | `biased_benchmark` | `invalid`). Any `tainted` warning means
@@ -373,7 +373,7 @@ by two `_validate_lock_fd_path` calls); multiply-linked leaves are reconciled by
 hand-clean them.
 
 Paper `.locks` directories and leaves are owned by `liquidity-migration-paper`, mode `0700`. Deployment
-pre-creates them via `liquidity_migration.reset_path_safety normalize-paper` / `normalize-demo`
+pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-paper` / `normalize-demo`
 (`scripts/deploy_vps_live.sh:584-607`; `reset_path_safety.py:908-955` does `os.mkdir(".locks", 0o700,
 dir_fd=root_fd)` and rebinds/validates owner), and `deploy_vps_live.sh:642-643` then verifies the paper
 user can write `$root/.locks`. Reset restores the same boundary before restarting paper services. At

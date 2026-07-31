@@ -62,27 +62,27 @@ if str(REPO) not in sys.path:
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration._common import MS_PER_DAY  # noqa: E402
-from liquidity_migration.daily_feature_panel import (  # noqa: E402
+from liquidity_migration.core._common import MS_PER_DAY  # noqa: E402
+from liquidity_migration.research.panels.daily_feature_panel import (  # noqa: E402
     _aggregate_daily_klines,
     _autodetect_dataset_names,
     _date_str_to_ms,
     _read_window,
 )
-from liquidity_migration.idio_features import CHART_FEATURES, chart_features  # noqa: E402
-from liquidity_migration.residual_price import (  # noqa: E402
+from liquidity_migration.research.panels.idio_features import CHART_FEATURES, chart_features  # noqa: E402
+from liquidity_migration.research.panels.residual_price import (  # noqa: E402
     RESIDUAL_AVAILABILITY_SHIFT_DAYS,
     add_log_forward_return,
     build_idio_price,
 )
-from liquidity_migration.risk_model import (  # noqa: E402
+from liquidity_migration.research.panels.risk_model import (  # noqa: E402
     COMMON4_FACTOR_COLUMNS,
     build_factor_panel,
     build_factor_panel_from_daily,
     fit_factor_returns,
 )
-from liquidity_migration.storage import read_dataset_columns  # noqa: E402
-from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
+from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
+from liquidity_migration.data.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
 
 #: The six-factor set, for the factor-set-sensitivity arm. Residualising on
 #: ``premium_index_z`` and ``funding_rate_z`` removes the premium/funding

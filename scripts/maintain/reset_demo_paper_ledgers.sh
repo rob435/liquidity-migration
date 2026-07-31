@@ -35,7 +35,7 @@ export PATH
 
 RESET_SCRIPT_DIRECTORY="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RESET_REPOSITORY_DIRECTORY="$(cd -P -- "$RESET_SCRIPT_DIRECTORY/../.." && pwd)"
-MAINTENANCE_LOCK_HELPER="$RESET_REPOSITORY_DIRECTORY/liquidity_migration/maintenance_lock.py"
+MAINTENANCE_LOCK_HELPER="$RESET_REPOSITORY_DIRECTORY/liquidity_migration/ops/maintenance_lock.py"
 
 usage() {
   cat <<'EOF'
@@ -809,11 +809,11 @@ if ! DEMO_ACCOUNT_LEASE_PATH="$(
   "$PYTHON" - --resolve-demo-account-lease <<'PY'
 import sys
 
-from liquidity_migration.account_owner_lease import (
+from liquidity_migration.account.account_owner_lease import (
     DemoAccountIdentity,
     canonical_demo_account_lease_path,
 )
-from liquidity_migration.bybit import BybitPrivateClient, resolve_demo_credentials
+from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_demo_credentials
 
 
 api_key, api_secret = resolve_demo_credentials()
@@ -1016,7 +1016,7 @@ acquire_demo_account_lease() {
   local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
 
   helper_output="$(
-    "$PYTHON" -m liquidity_migration.account_owner_lease \
+    "$PYTHON" -m liquidity_migration.account.account_owner_lease \
       prepare "$DEMO_ACCOUNT_LEASE_PATH"
   )" || die "cannot prepare canonical demo-account lease safely"
   [[ "$helper_output" != *$'\n'* ]] \
@@ -1038,7 +1038,7 @@ acquire_demo_account_lease() {
     die "cannot open canonical demo-account lease without truncation: $DEMO_ACCOUNT_LEASE_PATH"
   fi
 
-  if "$PYTHON" -m liquidity_migration.account_owner_lease acquire-inherited \
+  if "$PYTHON" -m liquidity_migration.account.account_owner_lease acquire-inherited \
     8 "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
     demo ledger_reset; then
     DEMO_ACCOUNT_LEASE_HELD=1
@@ -1069,7 +1069,7 @@ acquire_paper_account_lease() {
   local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
 
   helper_output="$(
-    "$PYTHON" -m liquidity_migration.account_owner_lease \
+    "$PYTHON" -m liquidity_migration.account.account_owner_lease \
       prepare "$PAPER_ACCOUNT_LEASE_PATH"
   )" || die "cannot prepare canonical paper-account lease safely"
   [[ "$helper_output" != *$'\n'* ]] \
@@ -1091,7 +1091,7 @@ acquire_paper_account_lease() {
     die "cannot open canonical paper-account lease without truncation: $PAPER_ACCOUNT_LEASE_PATH"
   fi
 
-  if "$PYTHON" -m liquidity_migration.account_owner_lease acquire-inherited \
+  if "$PYTHON" -m liquidity_migration.account.account_owner_lease acquire-inherited \
     7 "$PAPER_ACCOUNT_LEASE_PATH" "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}" \
     paper ledger_reset; then
     PAPER_ACCOUNT_LEASE_HELD=1
@@ -1291,7 +1291,7 @@ account_preflight_args=(preflight --anchor "$PWD/data" --reject-symlinks)
 for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
   account_preflight_args+=(--target "$PWD/$target")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${account_preflight_args[@]}" \
   || die "account root descriptor/mount preflight failed before owner leases"
 
@@ -1302,11 +1302,11 @@ for root in \
   data/bybit-carry-paper-event; do
   paper_preflight_args+=(--root "$PWD/$root")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${paper_preflight_args[@]}" \
   || die "paper runtime descriptor/mount preflight failed before owner leases"
 
-"$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
   --anchor "$PWD/data" \
   --root "$PWD/data/bybit-long-demo-event" \
   --root "$PWD/data/bybit-continuous-demo-event" \
@@ -1318,7 +1318,7 @@ reset_tree_preflight_args=(preflight --anchor "$PWD/data")
 for target in "${SELECTED_ROOTS[@]}" "${EXISTING_TARGETS[@]}"; do
   reset_tree_preflight_args+=(--target "$PWD/$target")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${reset_tree_preflight_args[@]}" \
   || die "reset target descriptor/mount preflight failed before owner leases"
 
@@ -1339,7 +1339,7 @@ echo "Checking demo/mainnet boundary and flat-account precondition ..."
   "$PYTHON" - <<'PY'
 import sys
 
-from liquidity_migration.bybit import BybitPrivateClient, resolve_demo_credentials
+from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_demo_credentials
 
 
 def amount(row: dict) -> float:
@@ -1453,7 +1453,7 @@ archive_inode=""
 if ! IFS=$'\t' read -r \
   ARCHIVE_PATH SHA_PATH archive_sha archive_size archive_device archive_inode \
   < <(
-    "$PYTHON" -m liquidity_migration.account_reset_archive \
+    "$PYTHON" -m liquidity_migration.ops.account_reset_archive \
       "${archive_create_args[@]}"
   ); then
   die "descriptor-bound reset archive publication failed"
@@ -1471,7 +1471,7 @@ echo "  sha256: $archive_sha"
 echo "  digest sidecar: $SHA_PATH"
 
 verify_clean_candidate_checkout
-"$PYTHON" -m liquidity_migration.account_reset_archive verify \
+"$PYTHON" -m liquidity_migration.ops.account_reset_archive verify \
   --repository "$PWD" \
   --archive "$ARCHIVE_PATH" \
   --sidecar "$SHA_PATH" \
@@ -1494,10 +1494,10 @@ echo "Removing only archived generated projections and epoch telemetry ..."
 from pathlib import Path
 import sys
 
-from liquidity_migration.account_epoch_reset import (
+from liquidity_migration.ops.account_epoch_reset import (
     clear_account_epoch_roots_preserving_locks,
 )
-from liquidity_migration.account_owner_lease import (
+from liquidity_migration.account.account_owner_lease import (
     PreparedAccountOwnerLease,
     revalidate_inherited_account_owner_lease,
 )
@@ -1555,7 +1555,7 @@ for target in "${EXISTING_TARGETS[@]}"; do
   fi
   generic_remove_args+=(--target "$PWD/$target")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${generic_remove_args[@]}" \
   || die "descriptor-rooted generated-target removal failed"
 
@@ -1571,7 +1571,7 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.storage import write_dataset
+from liquidity_migration.data.storage import write_dataset
 
 
 stamp = sys.argv[2]
@@ -1631,7 +1631,7 @@ demo_account_normalize_args=(
 for root in "$DEMO_ACCOUNT_ROOT" "$DEMO_ACCOUNT_INBOX_ROOT" "$DEMO_ACCOUNT_CAPTURE_ROOT"; do
   demo_account_normalize_args+=(--root "$PWD/$root")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${demo_account_normalize_args[@]}" \
   || die "descriptor-rooted demo account permission normalization failed"
 
@@ -1645,11 +1645,11 @@ for root in \
   data/bybit-carry-paper-event; do
   paper_normalize_args+=(--root "$PWD/$root")
 done
-"$PYTHON" -m liquidity_migration.reset_path_safety \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${paper_normalize_args[@]}" \
   || die "descriptor-rooted paper runtime permission normalization failed"
 
-"$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
+"$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
   --anchor "$PWD/data" \
   --root "$PWD/data/bybit-long-demo-event" \
   --root "$PWD/data/bybit-continuous-demo-event" \

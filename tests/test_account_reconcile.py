@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_execution_stream import BybitAccountExecutionConsumer
-from liquidity_migration.account_kernel import (
+from liquidity_migration.venue.account_execution_stream import BybitAccountExecutionConsumer
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -14,14 +14,14 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_reconcile import (
+from liquidity_migration.venue.account_reconcile import (
     POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
     AccountReconciliationStaleError,
     BybitAccountReconciler,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.venue_protection import BybitNativeProtectionManager
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.venue.venue_protection import BybitNativeProtectionManager
 
 
 def _kernel(tmp_path: Path, clock: VirtualClock) -> tuple[AccountExecutionKernel, str]:

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.artifact_snapshot as snapshot_module
-from liquidity_migration.artifact_snapshot import read_stable_file, rename_noreplace
+import liquidity_migration.core.artifact_snapshot as snapshot_module
+from liquidity_migration.core.artifact_snapshot import read_stable_file, rename_noreplace
 
 
 def test_read_stable_file_returns_descriptor_bound_bytes(tmp_path: Path) -> None:

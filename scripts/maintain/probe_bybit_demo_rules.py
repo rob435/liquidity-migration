@@ -17,27 +17,27 @@ from typing import Any, Iterable, Mapping
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.account_owner_lease import (  # noqa: E402
+from liquidity_migration.account.account_owner_lease import (  # noqa: E402
     DemoAccountIdentity,
     DemoAccountMutationLease,
 )
-from liquidity_migration.account_execution_config import (  # noqa: E402
+from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     load_demo_rules_bytes,
 )
-from liquidity_migration.account_candidate_universe import (  # noqa: E402
+from liquidity_migration.strategy.account_candidate_universe import (  # noqa: E402
     CANDIDATE_UNIVERSE_KIND,
     load_candidate_universe,
 )
-from liquidity_migration.venue_realm import VenueRealm  # noqa: E402
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.core.venue_realm import VenueRealm  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
     resolve_demo_credentials,
     validate_demo_order_permission,
 )
-from liquidity_migration.bybit_market_data import BybitRestRateLimiter  # noqa: E402
-from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.demo_rule_probe import (  # noqa: E402
+from liquidity_migration.marketdata.bybit_market_data import BybitRestRateLimiter  # noqa: E402
+from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
+from liquidity_migration.venue.demo_rule_probe import (  # noqa: E402
     DEMO_RULE_PROBE_FAILURE_KIND,
     DEMO_RULE_PROBE_FAILURE_SCHEMA_VERSION,
     DEMO_RULES_KIND,
@@ -49,7 +49,7 @@ from liquidity_migration.demo_rule_probe import (  # noqa: E402
     probe_demo_instrument_rule,
     require_registered_demo_rule_probe_parameters,
 )
-from liquidity_migration.deterministic_serialization import canonical_json  # noqa: E402
+from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
 
 
 def _active_positions(client: Any) -> list[dict[str, Any]]:

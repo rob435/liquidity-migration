@@ -48,7 +48,7 @@
   },
   "cost_model": {
     "cost_basis_default": "MEASURED_round_trip_bp",
-    "cost_basis_default_note": "Corrected 2026-07-25 (roadmap task 0.1). liquidity_migration.lane2_blend now charges MEASURED_round_trip_bp by default; maker_round_trip_bp is reachable only by passing it explicitly. The rule itself (universe, signals, weights, volatility target) is unchanged, so this is a re-pricing of the same book and not a new rule.",
+    "cost_basis_default_note": "Corrected 2026-07-25 (roadmap task 0.1). liquidity_migration.research.panels.lane2_blend now charges MEASURED_round_trip_bp by default; maker_round_trip_bp is reachable only by passing it explicitly. The rule itself (universe, signals, weights, volatility target) is unchanged, so this is a re-pricing of the same book and not a new rule.",
     "maker_round_trip_bp": 4.0,
     "maker_round_trip_bp_status": "RETIRED as a scoring basis. Retained for reproducing the as-registered figures only. It was never reachable: the paper passive-execution A/B implies 5.40 bp round trip even at a 100% passive fill rate.",
     "funding": "settlement_exact",
@@ -79,7 +79,7 @@
   },
   "measured_at_registration": {
     "window": "2021-01-01 to 2026-07-18",
-    "reproduce_with": "liquidity_migration.lane2_blend.score(panel, BlendConfig.from_json(this_file))",
+    "reproduce_with": "liquidity_migration.research.panels.lane2_blend.score(panel, BlendConfig.from_json(this_file))",
     "days": 1882,
     "mean_net_bp_per_day": 25.99,
     "sharpe_raw": 1.24,

@@ -96,12 +96,12 @@ def test_stats_sharpe_uses_sample_std() -> None:
 
 
 def test_deployed_equity_literals_match_active_config() -> None:
-    from liquidity_migration.continuous_profile import (
+    from liquidity_migration.research.backtest.continuous_profile import (
         ACTIVE_CONTINUOUS_CONFIG,
         active_hedge_rule,
         active_rebalance_rule,
     )
-    from liquidity_migration.continuous_rebalance import ContinuousHedgeRule
+    from liquidity_migration.research.backtest.continuous_rebalance import ContinuousHedgeRule
 
     assert refresh.WINNER_WEIGHTS == ACTIVE_CONTINUOUS_CONFIG["weights"]
     assert refresh.winner_rule() == active_rebalance_rule()
@@ -109,7 +109,7 @@ def test_deployed_equity_literals_match_active_config() -> None:
 
 
 def test_active_component_config_is_code_defined_tp12() -> None:
-    from liquidity_migration.continuous_profile import (
+    from liquidity_migration.research.backtest.continuous_profile import (
         ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
         CONTINUOUS_PROFILE_ID,
         CONTINUOUS_PROFILE_REVISION,
@@ -156,7 +156,7 @@ def test_component_report_match_checks_hash_and_gross_exposure() -> None:
 
 
 def test_non_active_component_receipt_is_rejected() -> None:
-    from liquidity_migration.continuous_profile import ACTIVE_CONTINUOUS_COMPONENT_BY_KEY
+    from liquidity_migration.research.backtest.continuous_profile import ACTIVE_CONTINUOUS_COMPONENT_BY_KEY
 
     payloads = []
     for component in ACTIVE_CONTINUOUS_COMPONENT_BY_KEY.values():
@@ -205,7 +205,7 @@ def test_strict_hedge_inputs_refuse_missing_returns_and_funding(
 
 
 def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path) -> None:
-    from liquidity_migration.continuous_profile import (
+    from liquidity_migration.research.backtest.continuous_profile import (
         ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
         CONTINUOUS_HISTORICAL_RUN_LABEL,
         CONTINUOUS_PROFILE_ID,
@@ -270,7 +270,7 @@ def test_write_continuous_equity_report_emits_auditable_artifacts(tmp_path: Path
     summary = json.loads((out_dir / "continuous_equity_summary.json").read_text(encoding="utf-8"))
     assert "Run label: exploratory_historical_equity" in report
     assert f"Strategy run label: {CONTINUOUS_HISTORICAL_RUN_LABEL}" in report
-    assert "Config authority: liquidity_migration.continuous_profile" in report
+    assert "Config authority: liquidity_migration.research.backtest.continuous_profile" in report
     assert "Data root:" in report
     assert "BTC trend gate: uptrend" in report
     assert "## Cost Model" in report

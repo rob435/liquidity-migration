@@ -22,7 +22,7 @@ def _run(body: str, *, env_extra: dict[str, str] | None = None) -> str:
     program = textwrap.dedent(
         """
         import logging
-        from liquidity_migration.logging_setup import ensure_default_log_handler
+        from liquidity_migration.core.logging_setup import ensure_default_log_handler
         """
     ) + textwrap.dedent(body)
     completed = subprocess.run(
@@ -54,10 +54,10 @@ def test_package_logger_records_keep_their_formatting() -> None:
     stderr = _run(
         """
         ensure_default_log_handler()
-        logging.getLogger("liquidity_migration.market_capture").info("stream connected")
+        logging.getLogger("liquidity_migration.account.market_capture").info("stream connected")
         """
     )
-    assert "[INFO] liquidity_migration.market_capture: stream connected" in stderr
+    assert "[INFO] liquidity_migration.account.market_capture: stream connected" in stderr
 
 
 def test_existing_logging_setup_is_never_overridden() -> None:

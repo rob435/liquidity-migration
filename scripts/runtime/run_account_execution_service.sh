@@ -52,7 +52,7 @@ case "$ACCOUNT_VENUE_REALM" in
             echo "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." >&2
             exit 2
         fi
-        # Vocabulary matches liquidity_migration/env_flags.py, which lower-cases
+        # Vocabulary matches liquidity_migration/core/env_flags.py, which lower-cases
         # before comparing; keep the two in step or this gate crash-loops.
         case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
             1|true|yes|on) ;;
@@ -115,7 +115,7 @@ if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then
     )
 fi
 
-exec "$PYTHON_BIN" -m liquidity_migration.account_service_runner \
+exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     --realm "$ACCOUNT_VENUE_REALM" \
     --account-id "$ACCOUNT_ID" \
     --account-root "$ACCOUNT_ROOT" \

@@ -342,7 +342,7 @@ Structural findings worth more than the individual results:
   `configs/lane2_financed_leaders_v1.json`,
   `configs/lane2_financed_leaders_binance_v1.json` (the commit is the
   registration).
-- Executable: `liquidity_migration/financed_longs.py`; reproduction:
+- Executable: `liquidity_migration/research/backtest/financed_longs.py`; reproduction:
   `scripts/research/screen_financed_longs.py`; tests: `tests/test_financed_longs.py`.
 - Benchmark render: `~/SHARED_DATA/bybit_full_pit/reports/equity_curves_sl35_2026-07-26/`
   *(2026-07-28: superseded as a baseline — retained in place only as a

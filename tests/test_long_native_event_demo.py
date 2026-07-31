@@ -22,18 +22,18 @@ from typing import Any
 import polars as pl
 import pytest
 
-import liquidity_migration.long_native_event_demo as lnd
-import liquidity_migration.strategy_planning as planning_module
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
-from liquidity_migration.account_route import (
+import liquidity_migration.strategy.long_native_event_demo as lnd
+import liquidity_migration.strategy.strategy_planning as planning_module
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
+from liquidity_migration.account.account_route import (
     AccountRoute,
     AccountRouteMismatchError,
     ensure_account_route,
 )
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-from liquidity_migration.long_native import long_v11a_profile
-from liquidity_migration.long_native_event_demo import (
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
+from liquidity_migration.research.backtest.long_native import long_v11a_profile
+from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _count_long_target_reservations,
     _open_long_trades,
@@ -46,7 +46,7 @@ from liquidity_migration.long_native_event_demo import (
     run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
 )
-from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def test_v11a_config_matches_research_run() -> None:
@@ -157,7 +157,7 @@ def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
 
 def test_vol_target_scale_volup125() -> None:
     """volup125: the cap is 1.25 -- mild scale-up in calm regimes, de-risk unchanged."""
-    from liquidity_migration.long_native import _vol_target_scale
+    from liquidity_migration.research.backtest.long_native import _vol_target_scale
 
     cfg = long_v11a_profile()
     assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.25)  # calm -> mild lever-up, capped at 1.25
@@ -590,8 +590,8 @@ def test_long_entry_excludes_incomplete_today_bar() -> None:
     eligible: firing on a not-yet-closed bar is look-ahead against the backtest's
     closed-bar signal.
     """
-    from liquidity_migration.long_native import LongNativeConfig
-    from liquidity_migration.long_native_event_demo import _select_long_entry_candidates
+    from liquidity_migration.research.backtest.long_native import LongNativeConfig
+    from liquidity_migration.strategy.long_native_event_demo import _select_long_entry_candidates
 
     now = 1_700_000_000_000
     # ONLY a future-ts (today, still forming) bar -> its day-END ts is in the future -> not eligible.
@@ -649,7 +649,7 @@ def test_long_kline_universe_fetcher_scopes_to_top_n_by_turnover() -> None:
     sleeve trades the top-10 by 24h turnover, so scoping to the top-50 keeps memory
     under the systemd cap with 5x rank-shift headroom. Beyond that, per-cycle REST.
     """
-    from liquidity_migration.long_native_event_demo_daemon import (
+    from liquidity_migration.strategy.long_native_event_demo_daemon import (
         _LONG_KLINE_UNIVERSE_SIZE,
         _build_long_kline_universe,
     )
@@ -679,7 +679,7 @@ def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
     """A universe fetch error must not crash the manager: an empty list bootstraps
     nothing and the cycle's REST fallback supplies everything that day.
     """
-    from liquidity_migration.long_native_event_demo_daemon import (
+    from liquidity_migration.strategy.long_native_event_demo_daemon import (
         _build_long_kline_universe,
     )
 
@@ -695,8 +695,8 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     base per-position notional * the de-risk-only vol-target scalar keyed on the
     latest non-null ``btc_rv_30`` after sorting by ts_ms.
     """
-    from liquidity_migration.long_native import _vol_target_scale
-    from liquidity_migration.long_native_event_demo import (
+    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,
     )
@@ -718,8 +718,8 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
 
 
 def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> None:
-    from liquidity_migration.long_native import _vol_target_scale
-    from liquidity_migration.long_native_event_demo import (
+    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,
     )
@@ -751,8 +751,8 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
 
 
 def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists() -> None:
-    from liquidity_migration.long_native import _vol_target_scale
-    from liquidity_migration.long_native_event_demo import (
+    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,
     )
@@ -858,7 +858,7 @@ def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
     so it is a no-op byte match (fallback_count == 0) -- the consistency guarantee
     with the backtest's own universe selection.
     """
-    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+    from liquidity_migration.strategy.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
     prev = now - 86_400_000
@@ -892,7 +892,7 @@ def test_median_universe_selection_cold_start_backfills_by_24h() -> None:
     remainder is backfilled by 24h turnover so the book is never zeroed, and the
     backfill count is surfaced (universe_fallback_24h > 0).
     """
-    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+    from liquidity_migration.strategy.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
     rows = [
@@ -915,7 +915,7 @@ def test_median_universe_selection_noop_without_median_column() -> None:
     """A features frame lacking ``turnover_median_90d`` is returned unchanged with
     fallback 0, never crashing the cycle.
     """
-    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+    from liquidity_migration.strategy.long_native_event_demo import _apply_median_universe_selection
 
     feat = pl.DataFrame([{"ts_ms": 1, "symbol": "x", "turnover_quote": 1.0, "in_universe": True}])
     out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=1)
@@ -1095,8 +1095,8 @@ def _write_owner_health(
     equity_usdt: float = 10_000.0,
     now_ms: int | None = None,
 ) -> None:
-    from liquidity_migration.account_kernel import read_account_journal
-    from liquidity_migration.account_owner_health import (
+    from liquidity_migration.account.account_kernel import read_account_journal
+    from liquidity_migration.account.account_owner_health import (
         TEST_ACCOUNT_OWNER_INVOCATION_ID,
         AccountOwnerHealth,
         write_account_owner_health,
@@ -1286,7 +1286,7 @@ def test_account_route_new_signal_key_remains_eligible_while_prior_is_pending(
 def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from liquidity_migration.account_kernel import (
+    from liquidity_migration.account.account_kernel import (
         AccountExecutionKernel,
         AccountRiskPolicy,
         AccountRiskSnapshot,
@@ -1294,7 +1294,7 @@ def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
         InstrumentRules,
         MarketInputRef,
     )
-    from liquidity_migration.deterministic_runtime import VirtualClock
+    from liquidity_migration.core.deterministic_runtime import VirtualClock
 
     candidate = _candidate("AAAUSDT")
     candidates = [candidate]
@@ -1362,8 +1362,8 @@ def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
 def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from liquidity_migration.account_intent_client import AccountTargetPublisher
-    from liquidity_migration.account_service import AccountServiceReceipt
+    from liquidity_migration.account.account_intent_client import AccountTargetPublisher
+    from liquidity_migration.account.account_service import AccountServiceReceipt
 
     candidate = _candidate(
         "AAAUSDT",
@@ -1523,7 +1523,7 @@ def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() ->
     a bar stamped after ``snapshot_ts_ms``. Entries fire from the latest CLOSED bar,
     so the re-selection and its telemetry must target that bar, not the partial one.
     """
-    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+    from liquidity_migration.strategy.long_native_event_demo import _apply_median_universe_selection
 
     now = 1_700_000_000_000
     closed = now - 3_600_000  # latest closed bar (<= now)

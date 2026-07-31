@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration import maintenance_lock as locks
-from liquidity_migration.maintenance_lock import (
+from liquidity_migration.ops import maintenance_lock as locks
+from liquidity_migration.ops.maintenance_lock import (
     acquire_inherited_locks,
     prepare_host_maintenance_locks,
 )

@@ -8,24 +8,24 @@ from typing import Any, Mapping
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_HOUR
-from liquidity_migration.continuous_events import (
+from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.research.backtest.continuous_events import (
     ContinuousEventConfig,
     _fresh_entries,
     _run_trades,
     cross_sectional_decile,
 )
-from liquidity_migration.long_native import long_v11a_profile
-from liquidity_migration.long_native_event_demo import (
+from liquidity_migration.research.backtest.long_native import long_v11a_profile
+from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _long_entry_target_intents,
     _select_long_entry_candidates,
 )
-from liquidity_migration.strategy_funnel import (
+from liquidity_migration.account.strategy_funnel import (
     FunnelJsonlWriter,
     finalize_funnel_row,
 )
-from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol
+from liquidity_migration.data.trade_lifecycle import _indexed_price_bars_by_symbol
 
 
 class _Collector:

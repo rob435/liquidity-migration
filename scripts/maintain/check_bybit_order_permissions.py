@@ -9,7 +9,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
     resolve_demo_credentials,

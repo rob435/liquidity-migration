@@ -29,9 +29,9 @@ sys.path.insert(0, str(REPO))
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
-from liquidity_migration.deterministic_serialization import canonical_json  # noqa: E402
-from liquidity_migration.three_way_reconciliation import (  # noqa: E402
+from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
+from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
+from liquidity_migration.research.execution.three_way_reconciliation import (  # noqa: E402
     reconcile_account_roots_to_backtest,
     write_three_way_artifacts,
 )
@@ -470,7 +470,7 @@ def _bybit_tail_steps(
         command=(
             str(PYTHON),
             "-m",
-            "liquidity_migration.binance_vision",
+            "liquidity_migration.data.binance_vision",
             "validate-manifest",
             "--data-root",
             str(root),
@@ -555,7 +555,7 @@ def _binance_tail_steps(
         command=(
             str(PYTHON),
             "-m",
-            "liquidity_migration.binance_vision",
+            "liquidity_migration.data.binance_vision",
             "topup-daily-klines",
             "--data-root",
             str(root),
@@ -575,7 +575,7 @@ def _binance_tail_steps(
         command=(
             str(PYTHON),
             "-m",
-            "liquidity_migration.binance_vision",
+            "liquidity_migration.data.binance_vision",
             "validate-manifest",
             "--data-root",
             str(root),

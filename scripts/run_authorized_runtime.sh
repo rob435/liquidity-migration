@@ -19,7 +19,7 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-account-execution.service:readiness)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.account_owner_readiness
+            -m liquidity_migration.runtime.account_owner_readiness
             --environment demo
             --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
             --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
@@ -35,7 +35,7 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-account-execution-mainnet.service:readiness)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.account_owner_readiness
+            -m liquidity_migration.runtime.account_owner_readiness
             --environment mainnet
             --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
             --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
@@ -51,7 +51,7 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-account-paper-execution.service:readiness)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.account_owner_readiness
+            -m liquidity_migration.runtime.account_owner_readiness
             --environment paper
             --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
             --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
@@ -66,7 +66,7 @@ case "$UNIT:$ENTRYPOINT" in
         # verbatim, so execution is the only difference between the two books.
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.paper_target_mirror_runner
+            -m liquidity_migration.runtime.paper_target_mirror_runner
             --demo-capture-tape "${DEMO_ACCOUNT_CAPTURE_ROOT:?DEMO_ACCOUNT_CAPTURE_ROOT is required}/strategy-targets.jsonl"
             --demo-account-root "${DEMO_ACCOUNT_EXECUTION_ROOT:?DEMO_ACCOUNT_EXECUTION_ROOT is required}"
             --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"

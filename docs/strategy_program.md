@@ -108,7 +108,7 @@ one-off runners are retired.
   - **Passive execution has a fast instrument beside the registered slow one.**
     The 2026-07-20 in-flow paper A/B remains the grader; §16.3's scale finding
     explains why it accrues slowly. `scripts/research/probe_passive_fill_ab.py` (protocol
-    in `liquidity_migration/passive_fill_probe.py`, ITT accounting, written kill
+    in `liquidity_migration/research/execution/passive_fill_probe.py`, ITT accounting, written kill
     criteria) bounds the mechanism in hours — it answers whether the 5.40 bp
     passive floor is mechanically reachable, and only that. Blocked on demo
     credentials this box does not hold; run with the fleet stopped and flat.
@@ -902,15 +902,15 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       favours it. That is what closes the programme rather than merely bounding
       it to one book. Across all three screens: **0 of 96 pre-declared cells are
       profitable and significant.**
-      New: `liquidity_migration/residual_price.py`,
-      `liquidity_migration/idio_features.py`, `scripts/data/build_idio_panel.py`,
+      New: `liquidity_migration/research/panels/residual_price.py`,
+      `liquidity_migration/research/panels/idio_features.py`, `scripts/data/build_idio_panel.py`,
       `scripts/research/screen_idio_charts.py`, `scripts/research/screen_idio_hedged.py`,
       `scripts/data/diagnose_idio_panel.py`.
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
 - [x] Build the minimal P0 causal substrate and publish its coverage map.
-      `liquidity_migration/cross_venue_panel.py` +
+      `liquidity_migration/research/panels/cross_venue_panel.py` +
       `scripts/data/build_cross_venue_panel.py`, built 2026-07-24 over the
       both-venue population from `2021-01-01`. Coverage lives in each shard's
       `manifest.json`; the two source defects it exposed (`open_interest_value`
@@ -926,7 +926,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       volume-share migration — the most direct test of the Crowding Transfer
       starting hypothesis below — is dead; the price dislocation pays, the flow
       migration does not. Scoring primitives are
-      `liquidity_migration/cross_section.py`.
+      `liquidity_migration/research/panels/cross_section.py`.
 - [x] Withdraw the delisting-decay lead. The 220.8 bp/day figure used a
       look-ahead label (contract stops appearing). No point-in-time trigger
       reaches it: turnover collapse identifies dying contracts at **0.96× lift**,
@@ -954,7 +954,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       for this signal**. Caveat: the premium leg is marginal and clears t = 2 only
       at 24h.
 - [x] **Lane-2 registration**: `configs/lane2_premium_momentum_blend_v1.json`,
-      executable as `liquidity_migration/lane2_blend.py`. Daily, top-100 Bybit,
+      executable as `liquidity_migration/research/panels/lane2_blend.py`. Daily, top-100 Bybit,
       50/50 premium + 1-week momentum continuation, settlement-exact funding, 15% vol
       target; no dispersion gate, no Binance leg, no maturity filter. Per
       `docs/governance.md` the commit is the registration; it grades forward from
@@ -966,7 +966,7 @@ Sharpe 0.69 -> ~1.17). Completed items below are retained as the evidence trail.
       full-calendar basis the two Bybit books beat it on return AND Sharpe; the
       Binance replication arm beats on return only (Sharpe 1.66 vs 1.84) — see
       the registration block above, which has said so since the same-day
-      correction. Module `liquidity_migration/financed_longs.py`, reproduction
+      correction. Module `liquidity_migration/research/backtest/financed_longs.py`, reproduction
       `scripts/research/screen_financed_longs.py` (reproduces the registered table
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/archive/2026-07-26-financed-longs.md` with the 22-row

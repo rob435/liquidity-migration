@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -12,34 +12,34 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_service import (
+from liquidity_migration.account.account_service import (
     AccountIntentInbox,
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
     prepare_account_request_intents,
 )
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.account_strategy_state import (
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.strategy.account_strategy_state import (
     canonical_component_execution_anchors,
     canonical_strategy_trade_rows,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import (
     BookLevel,
     ExecutionTwinConfig,
     L2BookSnapshot,
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
-from liquidity_migration.protection_engine import AccountProtectionEngine, _protection_trigger_reason
-from liquidity_migration.strategy_runtime import (
+from liquidity_migration.venue.protection_engine import AccountProtectionEngine, _protection_trigger_reason
+from liquidity_migration.account.strategy_runtime import (
     AccountKernelRuntime,
     AdaptedIntent,
     LongTargetAdapter,
     SleeveTargetIntent,
 )
-from liquidity_migration.venue_protection import (
+from liquidity_migration.venue.venue_protection import (
     NativeProtectionBreach,
     NativeProtectionPlan,
 )
@@ -360,7 +360,7 @@ def test_terminal_partial_entry_keeps_component_protection(tmp_path: Path) -> No
 
 
 def test_present_but_invalid_protection_fraction_fails_closed() -> None:
-    from liquidity_migration.protection_engine import _optional_fraction
+    from liquidity_migration.venue.protection_engine import _optional_fraction
 
     assert _optional_fraction(None) is None
     assert _optional_fraction("") is None

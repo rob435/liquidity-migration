@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.config import (
+from liquidity_migration.core.config import (
     CostConfig,
     DEFAULT_EXCLUDED_SYMBOLS,
     DEFAULT_RESEARCH_DATA_ROOT,

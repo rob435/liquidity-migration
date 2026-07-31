@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.execution_twin_calibration import (  # noqa: E402
+from liquidity_migration.research.execution.execution_twin_calibration import (  # noqa: E402
     calibration_report,
     load_states,
 )

@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration.volume_events_charts import (
+from liquidity_migration.research.backtest.volume_events_charts import (
     _monthly_return_color,
     _write_equity_benchmark_chart,
 )
@@ -15,7 +15,7 @@ def test_monthly_table_rows_fills_gap_months() -> None:
     """A month where the book sat flat must appear as a +0.00% row, not vanish -- a
     missing month is indistinguishable from a rendering bug.
     """
-    from liquidity_migration.volume_events_charts import _monthly_table_rows
+    from liquidity_migration.research.backtest.volume_events_charts import _monthly_table_rows
 
     equity = pl.DataFrame({
         "date": ["2025-01-10", "2025-01-20", "2025-03-05"],
@@ -30,7 +30,7 @@ def test_monthly_table_rows_fills_gap_months() -> None:
 
 
 def test_monthly_table_rows_real_monthly_counts_trades_and_fills_gaps() -> None:
-    from liquidity_migration.volume_events_charts import _monthly_table_rows
+    from liquidity_migration.research.backtest.volume_events_charts import _monthly_table_rows
 
     monthly = pl.DataFrame({
         "month": ["2025-01", "2025-03"],

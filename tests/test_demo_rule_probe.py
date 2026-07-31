@@ -11,16 +11,16 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_execution_config import load_demo_rules
-from liquidity_migration.demo_rule_probe import (
+from liquidity_migration.policy.account_execution_config import load_demo_rules
+from liquidity_migration.venue.demo_rule_probe import (
     DEMO_RULE_PROBE_FAILURE_KIND,
     ORDER_HISTORY_SOURCE,
     ORDER_REALTIME_SOURCE,
     DemoRuleProbeAttempt,
     probe_demo_instrument_rule,
 )
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.venue_realm import VenueRealm
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.core.venue_realm import VenueRealm
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

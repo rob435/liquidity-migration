@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_execution_config import load_risk_policy_bytes
-from liquidity_migration.operational_profile import load_operational_profile_bytes
+from liquidity_migration.policy.account_execution_config import load_risk_policy_bytes
+from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[1] / "configs" / "operational.demo.json"

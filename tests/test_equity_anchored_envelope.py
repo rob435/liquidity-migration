@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.equity_anchored_envelope import EquityAnchoredEnvelope
-from liquidity_migration.operational_profile import (
+from liquidity_migration.policy.equity_anchored_envelope import EquityAnchoredEnvelope
+from liquidity_migration.policy.operational_profile import (
     load_operational_profile_bytes,
     profile_at_capital_reference,
 )
@@ -129,7 +129,7 @@ def test_the_profile_refuses_an_unbounded_or_oversized_anchor() -> None:
 def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
     """The committed mainnet envelope holds no hard money amount."""
 
-    from liquidity_migration.operational_profile import load_operational_profile
+    from liquidity_migration.policy.operational_profile import load_operational_profile
 
     profile = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
     reference = profile.capital_reference_usdt
@@ -159,7 +159,7 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
 def test_the_mainnet_partition_is_a_real_partition() -> None:
     """B3: no sleeve can spend another's share, and the shares fit the account."""
 
-    from liquidity_migration.operational_profile import load_operational_profile
+    from liquidity_migration.policy.operational_profile import load_operational_profile
 
     profile = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
     risk = profile.account_risk
@@ -190,5 +190,5 @@ def test_the_mainnet_partition_is_a_real_partition() -> None:
 
 
 def test_the_producer_clamp_is_disabled_when_the_ceiling_tracks_equity() -> None:
-    source = (REPO / "liquidity_migration" / "cli.py").read_text(encoding="utf-8")
+    source = (REPO / "liquidity_migration" / "cli" / "commands.py").read_text(encoding="utf-8")
     assert "if operational_profile.capital_reference.tracks_equity" in source

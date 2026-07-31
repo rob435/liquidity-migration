@@ -49,15 +49,15 @@ from continuous_deployed_equity_refresh import (  # noqa: E402
     pad_flat_tail,
     winner_rule,
 )
-from liquidity_migration.continuous_component_sources import (  # noqa: E402
+from liquidity_migration.strategy.continuous_component_sources import (  # noqa: E402
     ContinuousComponentSource,
     load_continuous_component_source,
 )
-from liquidity_migration.continuous_events import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     run_continuous_equity_component,
 )
-from liquidity_migration.continuous_rebalance import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     apply_rebalance_rule,
     combine_continuous_components,
@@ -116,7 +116,7 @@ class Runner:
 
     def run_cell_admission_variant(self, cell: str, mode: str) -> Path:
         """Run fund0 with a patched admission filter (research inputs transform)."""
-        import liquidity_migration.continuous_events as ce
+        import liquidity_migration.research.backtest.continuous_events as ce
 
         out_dir = self.out / "components" / "bybit" / cell
         if (out_dir / "continuous_report.json").exists():

@@ -31,11 +31,11 @@ market data -> strategy target -> durable inbox -> account kernel
 keyed on that type finds a path that never emits one, not missing data.
 
 One owner per account, held by a persistent lease
-([`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py)): demo's is the
+([`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py)): demo's is the
 authenticated Bybit user-wide capability under `/run/lock/liquidity-migration`, paper's is
 local to its account root. An owner derives its route without touching the filesystem,
 takes the lease, then creates the paired account/inbox manifests
-([`account_route.py`](../liquidity_migration/account_route.py)), so a losing owner cannot
+([`account_route.py`](../liquidity_migration/account/account_route.py)), so a losing owner cannot
 initialize routes before discovering the active one. Both owners pin and revalidate the
 same single-link inode plus parent and leaf mount identities for the lease lifetime
 (`account_owner_lease.py:315,426,464,518,748-753`); the paper owner alone passes
@@ -44,7 +44,7 @@ intentional private-parent mount boundary created by systemd `ReadWritePaths` �
 everywhere else, so adding a `ReadWritePaths` entry to a demo unit breaks lease
 acquisition. Route mismatch still fails closed after acquisition.
 The inbox (`AccountIntentInbox` in
-[`account_service.py`](../liquidity_migration/account_service.py)) is a filesystem queue —
+[`account_service.py`](../liquidity_migration/account/account_service.py)) is a filesystem queue —
 `pending/processing/completed/failed/arrival`, atomic claim, durable arrival sequence — that
 coalesces later replacements and carries component revisions, so an older entry cannot
 reopen a component after a newer zero target.
@@ -69,7 +69,7 @@ destination directory (`paper_target_mirror.py:239-255`). The demo tape's mode i
 ## The account journal
 
 Event-sourced, and the accounting authority for demo, paper, mainnet, and historical
-replay. Implementation: [`account_kernel.py`](../liquidity_migration/account_kernel.py).
+replay. Implementation: [`account_kernel.py`](../liquidity_migration/account/account_kernel.py).
 
 ```text
 <account_root>/account_journal/
@@ -192,14 +192,14 @@ quantity change. A sleeve the partition does not name gets nothing
 share cannot veto another's de-risking.
 
 **Equity-anchored envelope**
-([`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py)). The
+([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py)). The
 profile is a set of ratios; the capital reference is the scale. Caps are a fraction of
 observed wallet equity, not a pinned number. Equity down rescales immediately; equity up
 waits for a move past a dead band. A missing, non-finite, non-positive, or stale reading
 holds the current reference — unknown is not evidence of small.
 
 **Daily loss halt**
-([`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py)). Account-level,
+([`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py)). Account-level,
 because the failure that matters is the whole book moving together. `OK`; `BLOCKED` when
 equity is too stale to judge (no new risk, positions stay under their venue stops);
 `TRIPPED` when the daily ceiling breaks against a fresh reading (flatten and stop, never
@@ -207,8 +207,8 @@ self-clears). The anchor is the day's opening equity, not a high-water mark, and
 snapshotted so a restart cannot refresh the budget.
 
 **Venue-native protection**
-([`venue_protection.py`](../liquidity_migration/venue_protection.py),
-[`protection_engine.py`](../liquidity_migration/protection_engine.py)). Every
+([`venue_protection.py`](../liquidity_migration/venue/venue_protection.py),
+[`protection_engine.py`](../liquidity_migration/venue/protection_engine.py)). Every
 exposure-increasing demo command durably carries a Full-position MarkPrice stop before any
 provider call — `stopLoss`, `slTriggerBy=MarkPrice`, `tpslMode=Full`, `slOrderType=Market`
 in the create request. A position without a durable active stop cannot be scaled up and an
@@ -350,8 +350,8 @@ explicitly.
 ## Epoch reset
 
 The descriptor-rooted preflight
-([`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py),
-[`account_epoch_reset.py`](../liquidity_migration/account_epoch_reset.py)) rejects
+([`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py),
+[`account_epoch_reset.py`](../liquidity_migration/ops/account_epoch_reset.py)) rejects
 symlinked parent components, multiply-linked regular files (`st_nlink != 1`), special files
 (anything not directory, regular, or symlink), and mount-boundary crossings — including
 same-device bind mounts, detected by Linux mount id rather than `st_dev`. Leaf symlinks are
@@ -419,7 +419,7 @@ the public/route values they need and explicitly unset private API, mainnet, `RE
 and Telegram variables. Paper units pin `REAL_MONEY=false` and reject inherited exchange
 credentials. Env files are strict `KEY=VALUE` data, parsed and never sourced as shell.
 
-[`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) submits and cancels real
+[`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) submits and cancels real
 PostOnly orders on demo to find the empirically accepted minimum notional: the demo realm
 rejects some orders its own `minNotionalValue` says it should accept. It refuses any realm
 but demo; mainnet takes the declared `minNotionalValue` at face value and labels the source
@@ -454,7 +454,7 @@ matched pairs** — the two fleets have never executed the same decision, which 
 twin has never been calibrated. A sample becomes possible only once the target mirror runs.
 
 **Paper equity** is marked from the paper journal
-([`paper_account_equity.py`](../liquidity_migration/paper_account_equity.py):5-8):
+([`paper_account_equity.py`](../liquidity_migration/runtime/paper_account_equity.py):5-8):
 
 ```text
 equity = starting_capital
@@ -589,28 +589,28 @@ launcher), `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 
 | Module | Owns | Tests |
 | --- | --- | --- |
-| [`account_kernel.py`](../liquidity_migration/account_kernel.py), [`account_contracts.py`](../liquidity_migration/account_contracts.py) | Journal storage, reducer, event/risk contracts, pre-trade gate, command emission | `test_account_kernel.py`, `test_account_journal_cursor.py`, `test_account_risk_reduction.py`, `test_sleeve_capital_partition.py` |
-| [`account_service.py`](../liquidity_migration/account_service.py) | Inbox queue, owner loop, crash-safe request replay | `test_account_service.py` |
-| [`account_service_runner.py`](../liquidity_migration/account_service_runner.py), [`account_paper_runner.py`](../liquidity_migration/account_paper_runner.py) | Owner processes, realm wiring, paper twin config | `test_account_service_runner_readiness.py`, `test_account_owner_health.py`, `test_paper_account_equity.py` |
-| [`account_service_bybit.py`](../liquidity_migration/account_service_bybit.py), [`bybit_execution_adapter.py`](../liquidity_migration/bybit_execution_adapter.py), [`account_execution_stream.py`](../liquidity_migration/account_execution_stream.py) | Bybit providers, order submission, private WS | `test_account_service_bybit.py`, `test_account_execution_stream.py` |
-| [`execution_adapters.py`](../liquidity_migration/execution_adapters.py) | Deterministic modeled execution twin | `test_passive_execution.py` |
-| [`account_intent_client.py`](../liquidity_migration/account_intent_client.py), [`strategy_targets.py`](../liquidity_migration/strategy_targets.py), [`paper_target_mirror.py`](../liquidity_migration/paper_target_mirror.py) | Write-only producer boundary; demo-to-paper republication | `test_account_intent_client.py`, `test_strategy_targets.py`, `test_paper_target_mirror.py` |
-| [`strategy_planning.py`](../liquidity_migration/strategy_planning.py) | Shared cross-sleeve suppression invariant: read owner health for equity, snapshot planning state, suppress intents duplicating unresolved durable work, retry terminally rejected attempts, avoid same-cycle exit collisions — shared so it cannot drift between sleeves | `test_strategy_planning.py` |
-| [`strategy_runtime.py`](../liquidity_migration/strategy_runtime.py) | The rule that sleeve code may compute signals and desired notionals but never call a venue client, mutate a ledger, or reserve margin; converts all sleeve intents together into one atomic kernel batch | no dedicated file — covered by `test_account_kernel.py`, `test_account_service.py`, `test_account_risk_reduction.py`, `test_protection_engine.py`, `test_account_service_runner_readiness.py` |
-| [`strategy_funnel.py`](../liquidity_migration/strategy_funnel.py) | **Observer-only** diagnostic serialization of LONG/CONTINUOUS source gates and separated future-path labels; callers compute gates from causal state and pass immutable row snapshots, and writer failure is reported without becoming an admission gate (`:138`). Entry point `scripts/data/build_candidate_tape.py` | `test_strategy_funnel.py`, `test_candidate_tape.py` |
-| [`historical_account_replay.py`](../liquidity_migration/historical_account_replay.py) | Historical-replay accounting path | `test_historical_account_replay.py` |
-| [`bybit_market_data.py`](../liquidity_migration/bybit_market_data.py) | Venue market-data boundary | `test_bybit_market_data_boundary.py` |
-| [`cli.py`](../liquidity_migration/cli.py), [`cli_parsers.py`](../liquidity_migration/cli_parsers.py), [`config.py`](../liquidity_migration/config.py), [`storage.py`](../liquidity_migration/storage.py), [`ingestion.py`](../liquidity_migration/ingestion.py), [`downloaders.py`](../liquidity_migration/downloaders.py), [`archive.py`](../liquidity_migration/archive.py) / [`archive_manifest.py`](../liquidity_migration/archive_manifest.py), venue download modules | `python -m liquidity_migration` CLI and the research-data domain | `test_cli.py`, `test_config.py`, `test_ingestion.py`, `test_storage.py`, `test_storage_since_date.py`, `test_downloaders.py`, `test_archive.py`, `test_archive_manifest.py` |
-| [`three_way_reconciliation.py`](../liquidity_migration/three_way_reconciliation.py) (behind `research-refresh reconcile`), `scripts/research/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_three_way_reconciliation.py`, `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
-| [`account_route.py`](../liquidity_migration/account_route.py), [`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py) | Root identity; one owner per account | `test_account_route.py`, `test_account_owner_lease.py` |
-| [`account_reconcile.py`](../liquidity_migration/account_reconcile.py), [`account_venue_accounting.py`](../liquidity_migration/account_venue_accounting.py), [`account_strategy_state.py`](../liquidity_migration/account_strategy_state.py) | REST recovery, venue truth, accounting rows, sleeve planning read model | `test_account_reconcile.py`, `test_account_funding_reconcile.py`, `test_account_venue_accounting.py`, `test_account_strategy_state.py` |
-| [`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py), [`operational_profile.py`](../liquidity_migration/operational_profile.py) | Capital reference and derived caps | `test_equity_anchored_envelope.py`, `test_operational_profile.py` |
-| [`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py) | Daily loss halt | `test_account_loss_guard.py` |
-| [`venue_protection.py`](../liquidity_migration/venue_protection.py), [`protection_engine.py`](../liquidity_migration/protection_engine.py) | Stop placement, repair, external-fill adoption | `test_venue_protection.py`, `test_protection_engine.py` |
-| [`venue_realm.py`](../liquidity_migration/venue_realm.py), [`execution_environment.py`](../liquidity_migration/execution_environment.py), [`venue_instrument_rules.py`](../liquidity_migration/venue_instrument_rules.py), [`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) | Realm/owner separation, credential selection, rules per realm | `test_venue_realm.py`, `test_venue_instrument_rules.py`, `test_demo_rule_probe.py` |
-| [`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py), [`account_epoch_reset.py`](../liquidity_migration/account_epoch_reset.py), [`account_reset_archive.py`](../liquidity_migration/account_reset_archive.py) | Descriptor-rooted checks before an `rm -rf`, epoch transition, archive | `test_reset_path_safety.py`, `test_account_epoch_reset.py`, `test_account_reset_archive.py` |
-| [`trade_diagnostics.py`](../liquidity_migration/trade_diagnostics.py), [`post_fill_markouts.py`](../liquidity_migration/post_fill_markouts.py) | Command-grain TCA projection, markout scheduling | `test_trade_diagnostics.py`, `test_post_fill_markouts.py` |
-| [`market_capture.py`](../liquidity_migration/market_capture.py), [`ws_state_cache.py`](../liquidity_migration/ws_state_cache.py), [`account_owner_health.py`](../liquidity_migration/account_owner_health.py), [`account_owner_readiness.py`](../liquidity_migration/account_owner_readiness.py), [`strategy_cycle_health.py`](../liquidity_migration/strategy_cycle_health.py), [`run_diagnostics.py`](../liquidity_migration/run_diagnostics.py) | Book capture, stream state, health projection, whether the owner accepts work at all, cycle health read by the liveness units | `test_market_capture.py`, `test_account_owner_health.py`, `test_account_owner_readiness.py`, `test_strategy_cycle_health.py`, `test_run_diagnostics.py`, plus the `scripts/runtime/check_fleet_liveness.py` tests |
+| [`account_kernel.py`](../liquidity_migration/account/account_kernel.py), [`account_contracts.py`](../liquidity_migration/account/account_contracts.py) | Journal storage, reducer, event/risk contracts, pre-trade gate, command emission | `test_account_kernel.py`, `test_account_journal_cursor.py`, `test_account_risk_reduction.py`, `test_sleeve_capital_partition.py` |
+| [`account_service.py`](../liquidity_migration/account/account_service.py) | Inbox queue, owner loop, crash-safe request replay | `test_account_service.py` |
+| [`account_service_runner.py`](../liquidity_migration/runtime/account_service_runner.py), [`account_paper_runner.py`](../liquidity_migration/runtime/account_paper_runner.py) | Owner processes, realm wiring, paper twin config | `test_account_service_runner_readiness.py`, `test_account_owner_health.py`, `test_paper_account_equity.py` |
+| [`account_service_bybit.py`](../liquidity_migration/venue/account_service_bybit.py), [`bybit_execution_adapter.py`](../liquidity_migration/venue/bybit_execution_adapter.py), [`account_execution_stream.py`](../liquidity_migration/venue/account_execution_stream.py) | Bybit providers, order submission, private WS | `test_account_service_bybit.py`, `test_account_execution_stream.py` |
+| [`execution_adapters.py`](../liquidity_migration/account/execution_adapters.py) | Deterministic modeled execution twin | `test_passive_execution.py` |
+| [`account_intent_client.py`](../liquidity_migration/account/account_intent_client.py), [`strategy_targets.py`](../liquidity_migration/account/strategy_targets.py), [`paper_target_mirror.py`](../liquidity_migration/runtime/paper_target_mirror.py) | Write-only producer boundary; demo-to-paper republication | `test_account_intent_client.py`, `test_strategy_targets.py`, `test_paper_target_mirror.py` |
+| [`strategy_planning.py`](../liquidity_migration/strategy/strategy_planning.py) | Shared cross-sleeve suppression invariant: read owner health for equity, snapshot planning state, suppress intents duplicating unresolved durable work, retry terminally rejected attempts, avoid same-cycle exit collisions — shared so it cannot drift between sleeves | `test_strategy_planning.py` |
+| [`strategy_runtime.py`](../liquidity_migration/account/strategy_runtime.py) | The rule that sleeve code may compute signals and desired notionals but never call a venue client, mutate a ledger, or reserve margin; converts all sleeve intents together into one atomic kernel batch | no dedicated file — covered by `test_account_kernel.py`, `test_account_service.py`, `test_account_risk_reduction.py`, `test_protection_engine.py`, `test_account_service_runner_readiness.py` |
+| [`strategy_funnel.py`](../liquidity_migration/account/strategy_funnel.py) | **Observer-only** diagnostic serialization of LONG/CONTINUOUS source gates and separated future-path labels; callers compute gates from causal state and pass immutable row snapshots, and writer failure is reported without becoming an admission gate (`:138`). Entry point `scripts/data/build_candidate_tape.py` | `test_strategy_funnel.py`, `test_candidate_tape.py` |
+| [`historical_account_replay.py`](../liquidity_migration/research/backtest/historical_account_replay.py) | Historical-replay accounting path | `test_historical_account_replay.py` |
+| [`bybit_market_data.py`](../liquidity_migration/marketdata/bybit_market_data.py) | Venue market-data boundary | `test_bybit_market_data_boundary.py` |
+| [`cli.py`](../liquidity_migration/cli/commands.py), [`cli_parsers.py`](../liquidity_migration/cli/parsers.py), [`config.py`](../liquidity_migration/core/config.py), [`storage.py`](../liquidity_migration/data/storage.py), [`ingestion.py`](../liquidity_migration/data/ingestion.py), [`downloaders.py`](../liquidity_migration/data/downloaders.py), [`archive.py`](../liquidity_migration/data/archive.py) / [`archive_manifest.py`](../liquidity_migration/data/archive_manifest.py), venue download modules | `python -m liquidity_migration` CLI and the research-data domain | `test_cli.py`, `test_config.py`, `test_ingestion.py`, `test_storage.py`, `test_storage_since_date.py`, `test_downloaders.py`, `test_archive.py`, `test_archive_manifest.py` |
+| [`three_way_reconciliation.py`](../liquidity_migration/research/execution/three_way_reconciliation.py) (behind `research-refresh reconcile`), `scripts/research/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_three_way_reconciliation.py`, `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
+| [`account_route.py`](../liquidity_migration/account/account_route.py), [`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py) | Root identity; one owner per account | `test_account_route.py`, `test_account_owner_lease.py` |
+| [`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py), [`account_venue_accounting.py`](../liquidity_migration/research/execution/account_venue_accounting.py), [`account_strategy_state.py`](../liquidity_migration/strategy/account_strategy_state.py) | REST recovery, venue truth, accounting rows, sleeve planning read model | `test_account_reconcile.py`, `test_account_funding_reconcile.py`, `test_account_venue_accounting.py`, `test_account_strategy_state.py` |
+| [`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py), [`operational_profile.py`](../liquidity_migration/policy/operational_profile.py) | Capital reference and derived caps | `test_equity_anchored_envelope.py`, `test_operational_profile.py` |
+| [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) | Daily loss halt | `test_account_loss_guard.py` |
+| [`venue_protection.py`](../liquidity_migration/venue/venue_protection.py), [`protection_engine.py`](../liquidity_migration/venue/protection_engine.py) | Stop placement, repair, external-fill adoption | `test_venue_protection.py`, `test_protection_engine.py` |
+| [`venue_realm.py`](../liquidity_migration/core/venue_realm.py), [`execution_environment.py`](../liquidity_migration/account/execution_environment.py), [`venue_instrument_rules.py`](../liquidity_migration/venue/venue_instrument_rules.py), [`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) | Realm/owner separation, credential selection, rules per realm | `test_venue_realm.py`, `test_venue_instrument_rules.py`, `test_demo_rule_probe.py` |
+| [`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py), [`account_epoch_reset.py`](../liquidity_migration/ops/account_epoch_reset.py), [`account_reset_archive.py`](../liquidity_migration/ops/account_reset_archive.py) | Descriptor-rooted checks before an `rm -rf`, epoch transition, archive | `test_reset_path_safety.py`, `test_account_epoch_reset.py`, `test_account_reset_archive.py` |
+| [`trade_diagnostics.py`](../liquidity_migration/research/execution/trade_diagnostics.py), [`post_fill_markouts.py`](../liquidity_migration/account/post_fill_markouts.py) | Command-grain TCA projection, markout scheduling | `test_trade_diagnostics.py`, `test_post_fill_markouts.py` |
+| [`market_capture.py`](../liquidity_migration/account/market_capture.py), [`ws_state_cache.py`](../liquidity_migration/marketdata/ws_state_cache.py), [`account_owner_health.py`](../liquidity_migration/account/account_owner_health.py), [`account_owner_readiness.py`](../liquidity_migration/runtime/account_owner_readiness.py), [`strategy_cycle_health.py`](../liquidity_migration/strategy/strategy_cycle_health.py), [`run_diagnostics.py`](../liquidity_migration/research/backtest/run_diagnostics.py) | Book capture, stream state, health projection, whether the owner accepts work at all, cycle health read by the liveness units | `test_market_capture.py`, `test_account_owner_health.py`, `test_account_owner_readiness.py`, `test_strategy_cycle_health.py`, `test_run_diagnostics.py`, plus the `scripts/runtime/check_fleet_liveness.py` tests |
 
 Producer-side strategy modules (`long_native*`, `continuous_*`, `carry_demo*`,
 `financed_longs.py`, `lane2_blend.py`) are documented with the research they implement:

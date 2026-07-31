@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from liquidity_migration.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL
+from liquidity_migration.research.backtest.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "research" / "equity_curves.py"
 SPEC = importlib.util.spec_from_file_location("equity_curves", MODULE_PATH)

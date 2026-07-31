@@ -36,13 +36,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.cross_section import (  # noqa: E402
+from liquidity_migration.research.panels.cross_section import (  # noqa: E402
     MEASURED_ROUND_TRIP_BP,
     long_short,
     summary,
     top_by,
 )
-from liquidity_migration.lane2_blend import BlendConfig, prepare  # noqa: E402
+from liquidity_migration.research.panels.lane2_blend import BlendConfig, prepare  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("screen_phase1", REPO_ROOT / "scripts" / "research" / "screen_phase1.py")
 assert _spec and _spec.loader

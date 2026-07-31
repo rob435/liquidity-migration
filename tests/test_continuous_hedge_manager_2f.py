@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.continuous_hedge_manager import (
+from liquidity_migration.strategy.continuous_hedge_manager import (
     ACTIVE_HEDGE_RULE,
     HEDGE_SYMBOL,
     HEDGE_SYMBOL_2,
@@ -17,11 +17,11 @@ from liquidity_migration.continuous_hedge_manager import (
     load_hedge_model_prior,
     require_usable_hedge_model_prior,
 )
-from liquidity_migration.continuous_rebalance import (
+from liquidity_migration.research.backtest.continuous_rebalance import (
     ContinuousHedge2FState,
     compute_continuous_hedge_ratios_2f,
 )
-from liquidity_migration.continuous_regime import latest_btcvol_intensity
+from liquidity_migration.research.backtest.continuous_regime import latest_btcvol_intensity
 
 
 def _two_factor_series(n: int = 120):
@@ -164,7 +164,7 @@ def test_model_prior_parser_rejects_malformed_rows_instead_of_skipping(tmp_path)
 
 
 def test_active_hedge_rule_derives_from_profile() -> None:
-    from liquidity_migration.continuous_profile import active_hedge_rule
+    from liquidity_migration.research.backtest.continuous_profile import active_hedge_rule
 
     assert ACTIVE_HEDGE_RULE == active_hedge_rule()
 

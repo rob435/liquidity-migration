@@ -467,7 +467,7 @@ def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
     one artifact. The daily refresh is unaffected: it runs --full-rewrite.
     """
 
-    import liquidity_migration.residual_momentum as rm
+    import liquidity_migration.research.panels.residual_momentum as rm
 
     gapped = [(index, 1.0) for index in range(30) if index not in (5, 6, 7)]
     resid = pl.DataFrame(

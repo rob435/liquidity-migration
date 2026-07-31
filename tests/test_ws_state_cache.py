@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from liquidity_migration.ws_state_cache import TickerCache, _message_rows
+from liquidity_migration.marketdata.ws_state_cache import TickerCache, _message_rows
 
 
 def _ws_message(*rows: dict) -> dict:
@@ -78,7 +78,7 @@ def test_ticker_replace_with_rest_snapshot_overwrites_state() -> None:
 
 
 def test_ticker_empty_rest_snapshot_does_not_wipe_existing_or_stamp(monkeypatch) -> None:
-    import liquidity_migration.ws_state_cache as wsc
+    import liquidity_migration.marketdata.ws_state_cache as wsc
 
     clock = {"t": 100.0}
     monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
@@ -172,7 +172,7 @@ def test_ticker_event_does_not_bump_last_event_when_every_row_drops() -> None:
 # -- WS-silence watchdog clock --------------------------------------------------
 
 def test_ticker_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
-    import liquidity_migration.ws_state_cache as wsc
+    import liquidity_migration.marketdata.ws_state_cache as wsc
 
     clock = {"t": 500.0}
     monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
@@ -197,7 +197,7 @@ def test_ticker_snapshot_list_drops_per_symbol_stale_rows(monkeypatch) -> None:
     excluded from ``snapshot_list(max_age_seconds=...)`` and cannot feed the cycle's
     stop/exit math.
     """
-    import liquidity_migration.ws_state_cache as wsc
+    import liquidity_migration.marketdata.ws_state_cache as wsc
 
     clock = {"t": 1000.0}
     monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])

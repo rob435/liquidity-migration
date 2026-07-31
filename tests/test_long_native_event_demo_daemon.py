@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.long_native_event_demo_daemon as daemon_module
-from liquidity_migration.account_intent_client import ExitFirstPublication
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_environment import account_id_for_environment
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
-from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon
-from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+import liquidity_migration.strategy.long_native_event_demo_daemon as daemon_module
+from liquidity_migration.account.account_intent_client import ExitFirstPublication
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_environment import account_id_for_environment
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
+from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def _published_payload(data_root: Path, kwargs: dict, payload: dict) -> PublishedTargetCyclePayload:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from liquidity_migration.env_flags import (
+from liquidity_migration.core.env_flags import (
     FALSE_ENV_VALUES,
     TRUE_ENV_VALUES,
     env_flag,

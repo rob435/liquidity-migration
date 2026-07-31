@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import polars as pl
 
-from liquidity_migration import archive_manifest as am
-from liquidity_migration import archive_manifest as manifest_module
-from liquidity_migration.archive_manifest import (
+from liquidity_migration.data import archive_manifest as am
+from liquidity_migration.data import archive_manifest as manifest_module
+from liquidity_migration.data.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
     ArchiveHourlyKlineDownloadConfig,
     ARCHIVE_KLINE_SKIP_ROWS_ENV,
@@ -37,7 +37,7 @@ from liquidity_migration.archive_manifest import (
     run_archive_hourly_klines_api_download,
     synthesize_v5_listing_manifest_rows,
 )
-from liquidity_migration.storage import dataset_path, read_dataset, write_dataset
+from liquidity_migration.data.storage import dataset_path, read_dataset, write_dataset
 
 
 # --- parse_directory_hrefs / parse_symbol_directories ---------------------

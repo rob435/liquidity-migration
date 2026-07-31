@@ -5,8 +5,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.residual_momentum import inspect_gate
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.research.panels.residual_momentum import inspect_gate
 
 
 def test_gate_requires_provenance_and_current_stable_rows(tmp_path: Path) -> None:

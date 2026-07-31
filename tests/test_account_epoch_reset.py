@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration import account_epoch_reset as epoch_reset
-from liquidity_migration.account_epoch_reset import clear_account_epoch_roots_preserving_locks
-from liquidity_migration.account_route import ensure_account_route, require_account_route
+from liquidity_migration.ops import account_epoch_reset as epoch_reset
+from liquidity_migration.ops.account_epoch_reset import clear_account_epoch_roots_preserving_locks
+from liquidity_migration.account.account_route import ensure_account_route, require_account_route
 
 
 def _private_file(path: Path, payload: str = "lock\n") -> Path:

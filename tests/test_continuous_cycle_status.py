@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.continuous_cycle_status import (
+from liquidity_migration.strategy.continuous_cycle_status import (
     ContinuousCycleStatus,
     ContinuousCycleStatusReader,
     continuous_cycle_status_path,
@@ -13,7 +13,7 @@ from liquidity_migration.continuous_cycle_status import (
     render_continuous_cycle_status,
     write_continuous_cycle_status,
 )
-from liquidity_migration.strategy_cycle_health import (
+from liquidity_migration.strategy.strategy_cycle_health import (
     StrategyCycleHealth,
     write_strategy_cycle_health,
 )

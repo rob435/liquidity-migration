@@ -8,13 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from liquidity_migration import bybit, bybit_errors, bybit_market_data
-import liquidity_migration.account_owner_lease as owner_lease_module
-from liquidity_migration.account_owner_lease import (
+from liquidity_migration.venue import bybit
+from liquidity_migration.marketdata import bybit_errors
+from liquidity_migration.marketdata import bybit_market_data
+import liquidity_migration.account.account_owner_lease as owner_lease_module
+from liquidity_migration.account.account_owner_lease import (
     DemoAccountIdentity,
     DemoAccountMutationLease,
 )
-from liquidity_migration.bybit_market_data import BybitKlineStreamPool
+from liquidity_migration.marketdata.bybit_market_data import BybitKlineStreamPool
 
 
 @pytest.fixture
@@ -47,7 +49,7 @@ def held_demo_mutation_lease(tmp_path, monkeypatch):
 def test_pybit_rate_limit_log_filter_drops_10006_messages(caplog) -> None:
     # pybit logs the rate-limit retries at ERROR level on its _http_manager
     # logger; that produces tens of thousands of identical lines per minute on
-    # the demo VPS at top-of-hour. liquidity_migration.bybit installs a filter
+    # the demo VPS at top-of-hour. liquidity_migration.venue.bybit installs a filter
     # on pybit._http_manager that drops only the 10006 lines.
     logger = logging.getLogger("pybit._http_manager")
     with caplog.at_level(logging.ERROR, logger="pybit._http_manager"):
@@ -1975,7 +1977,7 @@ def test_resolve_credentials_logs_resolved_account(monkeypatch, caplog) -> None:
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
     monkeypatch.delenv("DEMO", raising=False)
     monkeypatch.delenv("REAL_MONEY", raising=False)
-    with caplog.at_level("INFO", logger="liquidity_migration.bybit.account"):
+    with caplog.at_level("INFO", logger="liquidity_migration.venue.bybit.account"):
         bybit.resolve_demo_credentials()
     assert any("resolved account realm: demo" in r.getMessage() for r in caplog.records)
 
@@ -2584,7 +2586,7 @@ def test_pybit_still_exposes_the_demo_endpoint() -> None:
 
     from pybit.unified_trading import HTTP
 
-    from liquidity_migration.bybit import DEMO_REST_ENDPOINT
+    from liquidity_migration.venue.bybit import DEMO_REST_ENDPOINT
 
     demo = HTTP(testnet=False, demo=True, api_key="k", api_secret="s")
     assert str(getattr(demo, "endpoint")).rstrip("/") == DEMO_REST_ENDPOINT
@@ -2598,7 +2600,7 @@ def test_private_client_refuses_a_transport_that_resolved_to_mainnet() -> None:
 
     import pytest
 
-    from liquidity_migration import bybit
+    from liquidity_migration.venue import bybit
 
     class _MainnetHTTP:
         __module__ = "pybit.unified_trading"

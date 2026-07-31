@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from liquidity_migration.account_service import SleeveAdapterKind
-from liquidity_migration.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY
-from liquidity_migration.strategy_targets import component_target_intent
+from liquidity_migration.account.account_service import SleeveAdapterKind
+from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY
+from liquidity_migration.account.strategy_targets import component_target_intent
 
 
 def test_component_target_identity_is_environment_free_and_canonical() -> None:

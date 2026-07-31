@@ -13,9 +13,9 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.residual_momentum import RMOM_CAUSAL_SHIFT
-from liquidity_migration.residual_price import (
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.research.panels.residual_momentum import RMOM_CAUSAL_SHIFT
+from liquidity_migration.research.panels.residual_price import (
     RESIDUAL_AVAILABILITY_SHIFT_DAYS,
     add_log_forward_return,
     build_idio_price,

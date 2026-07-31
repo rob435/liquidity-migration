@@ -3,7 +3,7 @@
 
 Per-fill effective spread, price impact, and realized spread anchored to the
 decision-time midpoint, plus a notional-weighted summary. The decomposition
-lives in liquidity_migration/execution_cost_model.py.
+lives in liquidity_migration/research/execution/execution_cost_model.py.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.account_kernel import read_account_journal  # noqa: E402
-from liquidity_migration.account_contracts import AccountEventType  # noqa: E402
-from liquidity_migration.execution_cost_model import (  # noqa: E402
+from liquidity_migration.account.account_kernel import read_account_journal  # noqa: E402
+from liquidity_migration.account.account_contracts import AccountEventType  # noqa: E402
+from liquidity_migration.research.execution.execution_cost_model import (  # noqa: E402
     build_fill_cost_rows,
     cost_model_summary,
 )
-from liquidity_migration.trade_diagnostics import (  # noqa: E402
+from liquidity_migration.research.execution.trade_diagnostics import (  # noqa: E402
     load_post_fill_markouts,
     load_required_book_contexts,
 )

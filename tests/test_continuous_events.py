@@ -7,9 +7,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.account_kernel import AccountRiskPolicy
-from liquidity_migration.continuous_events import (
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.account.account_kernel import AccountRiskPolicy
+from liquidity_migration.research.backtest.continuous_events import (
     ContinuousEventConfig,
     _btc_trend_returns,
     _fresh_entries,
@@ -21,13 +21,13 @@ from liquidity_migration.continuous_events import (
     cross_sectional_decile,
     run_continuous_equity_component,
 )
-from liquidity_migration.execution_adapters import ExecutionTwinConfig, LatencyProfile
-from liquidity_migration.historical_account_replay import (
+from liquidity_migration.account.execution_adapters import ExecutionTwinConfig, LatencyProfile
+from liquidity_migration.research.backtest.historical_account_replay import (
     HistoricalAccountSession,
     synthetic_historical_rules_for_symbols,
 )
-from liquidity_migration.storage import write_dataset
-from liquidity_migration.trade_lifecycle import _indexed_price_bars_by_symbol
+from liquidity_migration.data.storage import write_dataset
+from liquidity_migration.data.trade_lifecycle import _indexed_price_bars_by_symbol
 
 
 def _iso(ts_ms: int) -> str:

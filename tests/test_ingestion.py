@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_HOUR
-from liquidity_migration.ingestion import (
+from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.data.ingestion import (
     aggregate_trade_klines_1h,
     densify_trade_klines_1h,
     normalize_funding_history,

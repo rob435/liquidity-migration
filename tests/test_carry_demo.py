@@ -17,15 +17,15 @@ from typing import Any
 import polars as pl
 import pytest
 
-import liquidity_migration.carry_demo as module
-import liquidity_migration.strategy_planning as planning_module
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.account_intent_client import (
+import liquidity_migration.strategy.carry_demo as module
+import liquidity_migration.strategy.strategy_planning as planning_module
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.account.account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     entry_attempt_key,
 )
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.carry_demo import (
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.strategy.carry_demo import (
     CARRY_COMPONENT_ID,
     CARRY_CYCLES_DATASET,
     CARRY_FUNDING_DATASET,
@@ -43,9 +43,9 @@ from liquidity_migration.carry_demo import (
     load_carry_config,
     run_carry_demo_cycle,
 )
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.storage import read_dataset, write_dataset
-from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.data.storage import read_dataset, write_dataset
+from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 # A day boundary far from any real calendar edge; divisible by 8h so the synth
 # funding grid lands exactly on 00:00/08:00/16:00.

@@ -8,24 +8,24 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.continuous_demo_daemon as daemon_module
-import liquidity_migration.long_native_event_demo_daemon as base_daemon_module
-from liquidity_migration.account_intent_client import ExitFirstPublication
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.continuous_demo import (
+import liquidity_migration.strategy.continuous_demo_daemon as daemon_module
+import liquidity_migration.strategy.long_native_event_demo_daemon as base_daemon_module
+from liquidity_migration.account.account_intent_client import ExitFirstPublication
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.strategy.continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
     run_continuous_demo_cycle,
 )
-from liquidity_migration.continuous_demo_daemon import (
+from liquidity_migration.strategy.continuous_demo_daemon import (
     ContinuousDemoDaemon,
     _follower_continuous_kline_stream_manager_factory,
     _select_kline_stream_manager_factory,
 )
-from liquidity_migration.kline_follower import FollowerKlineStreamManager
-from liquidity_migration.execution_environment import account_id_for_environment
-from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager
+from liquidity_migration.account.execution_environment import account_id_for_environment
+from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 
 def _target_config(tmp_path: Path, **overrides: Any) -> ContinuousDemoCycleConfig:

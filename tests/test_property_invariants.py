@@ -6,15 +6,15 @@ import random
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.continuous_rebalance import (
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.research.backtest.continuous_rebalance import (
     ContinuousHedgeRule,
     ContinuousHedgeState,
     compute_continuous_hedge_ratio,
 )
-from liquidity_migration.config import TradeLifecycleConfig
-from liquidity_migration.ingestion import normalize_funding_history
-from liquidity_migration.trade_lifecycle import (
+from liquidity_migration.core.config import TradeLifecycleConfig
+from liquidity_migration.data.ingestion import normalize_funding_history
+from liquidity_migration.data.trade_lifecycle import (
     _daily_sharpe,
     annualized_sharpe,
     build_equity_curve,

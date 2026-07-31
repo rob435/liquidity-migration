@@ -16,12 +16,13 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Every active sibling produced by the public-data + chart/PIT + CLI splits.
+# Every active sibling produced by the public-data + chart/PIT + CLI splits,
+# at its subpackage path.
 _SPLIT_SIBLINGS = [
-    "event_demo_data",
-    "volume_events_charts",
-    "volume_events_pit",
-    "cli_parsers",
+    "strategy.event_demo_data",
+    "research.backtest.volume_events_charts",
+    "data.volume_events_pit",
+    "cli.parsers",
 ]
 
 

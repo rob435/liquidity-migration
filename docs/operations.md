@@ -79,7 +79,7 @@ stopped.
 Demo instrument rules carry a 7-day age limit and a rollout past half of it re-probes, so
 freshness is a side effect of ordinary deployment rather than an operator deadline. The
 probe places and cancels bounded PostOnly demo orders, only after the stopped flat checks
-pass. [`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) exists because the
+pass. [`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) exists because the
 Bybit demo realm rejects orders its own `minNotionalValue` accepts — the real per-symbol
 boundary is measured, not readable from the instrument spec.
 
@@ -153,7 +153,7 @@ Also `--sleeves long|continuous|carry|all`, `--archive-dir DIR` (default `data/_
 maintenance lock is free, mainnet configuration is absent, every managed unit reports
 `inactive`, and every submit-armed unit loads the same credential file. It never cancels an
 order or closes a position.
-[`reset_path_safety.py`](../liquidity_migration/reset_path_safety.py) validates every target
+[`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py) validates every target
 path before anything is deleted, and both account-owner leases are held across the
 destructive boundary. Journals, inboxes and captures are archived with a SHA-256 sidecar
 re-checked immediately before deletion; configs, lock inodes, `residual_momentum.parquet`

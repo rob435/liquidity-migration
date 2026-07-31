@@ -11,9 +11,9 @@ import math
 import polars as pl
 import pytest
 
-import liquidity_migration.trade_lifecycle as tl
-from liquidity_migration.config import TradeLifecycleConfig
-from liquidity_migration.trade_lifecycle import (
+import liquidity_migration.data.trade_lifecycle as tl
+from liquidity_migration.core.config import TradeLifecycleConfig
+from liquidity_migration.data.trade_lifecycle import (
     _bar_excursion,
     _bar_exit_hits,
     _funding_lookup,

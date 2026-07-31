@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.systemd_environment import (
+from liquidity_migration.policy.systemd_environment import (
     load_group_systemd_environment,
     load_private_systemd_environment,
     parse_systemd_environment_bytes,
@@ -92,7 +92,7 @@ def test_cli_emits_no_payload_when_private_file_validation_fails(tmp_path: Path)
         [
             sys.executable,
             "-m",
-            "liquidity_migration.systemd_environment",
+            "liquidity_migration.policy.systemd_environment",
             "--path",
             str(path),
             "--name",

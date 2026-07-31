@@ -8,8 +8,8 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.idio_features import CHART_FEATURES, chart_features
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.research.panels.idio_features import CHART_FEATURES, chart_features
 
 BASE_DAY = 20_000
 

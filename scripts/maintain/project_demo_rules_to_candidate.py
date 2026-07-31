@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.candidate_rule_coverage import (  # noqa: E402
+from liquidity_migration.ops.candidate_rule_coverage import (  # noqa: E402
     CandidateRuleRefreshRequired,
     REGISTERED_MAX_RULE_AGE_SECONDS,
     project_demo_rules_to_candidate_subset,

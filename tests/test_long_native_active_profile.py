@@ -8,16 +8,16 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_HOUR
-from liquidity_migration.account_kernel import AccountRiskPolicy
-from liquidity_migration.config import CostConfig
-from liquidity_migration.execution_adapters import ExecutionTwinConfig, LatencyProfile
-from liquidity_migration.historical_account_replay import (
+from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.account.account_kernel import AccountRiskPolicy
+from liquidity_migration.core.config import CostConfig
+from liquidity_migration.account.execution_adapters import ExecutionTwinConfig, LatencyProfile
+from liquidity_migration.research.backtest.historical_account_replay import (
     HistoricalAccountSession,
     synthetic_historical_rules_for_symbols,
 )
-from liquidity_migration.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-from liquidity_migration.long_native import (
+from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
+from liquidity_migration.research.backtest.long_native import (
     LongNativeConfig,
     _diagnostic_data_end,
     _finalize_trade,
@@ -26,7 +26,7 @@ from liquidity_migration.long_native import (
     format_long_native_report,
     long_v11a_profile,
 )
-from liquidity_migration.run_diagnostics import diagnose
+from liquidity_migration.research.backtest.run_diagnostics import diagnose
 
 
 def _feature(symbol: str, ts_ms: int, *, day_return: float = 0.20) -> dict[str, object]:

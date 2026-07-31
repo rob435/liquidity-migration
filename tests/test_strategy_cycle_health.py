@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.strategy_cycle_health import (
+from liquidity_migration.strategy.strategy_cycle_health import (
     StrategyCycleHealth,
     read_strategy_cycle_health,
     strategy_cycle_health_path,

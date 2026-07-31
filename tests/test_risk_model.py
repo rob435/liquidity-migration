@@ -7,8 +7,8 @@ from pathlib import Path
 import polars as pl
 from polars.testing import assert_frame_equal
 
-from liquidity_migration.daily_feature_panel import _aggregate_daily_klines
-from liquidity_migration.risk_model import (
+from liquidity_migration.research.panels.daily_feature_panel import _aggregate_daily_klines
+from liquidity_migration.research.panels.risk_model import (
     _FACTOR_COLUMNS,
     build_factor_panel,
     build_factor_panel_from_daily,

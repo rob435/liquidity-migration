@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration.financed_longs import (
+from liquidity_migration.research.backtest.financed_longs import (
     HOUR_MS,
     CarryHoldConfig,
     FinancedLeadersConfig,
@@ -357,7 +357,7 @@ class TestFundingSpread:
     """
 
     def test_config_round_trip_and_dispatch(self) -> None:
-        from liquidity_migration.financed_longs import FundingSpreadConfig, config_scores
+        from liquidity_migration.research.backtest.financed_longs import FundingSpreadConfig, config_scores
 
         cfg = FundingSpreadConfig.from_json(CONFIG_DIR / "lane2_funding_spread_v1.json")
         assert (cfg.enter_bp_per_day, cfg.exit_bp_per_day) == (80.0, 20.0)
@@ -367,7 +367,7 @@ class TestFundingSpread:
         assert venue == "bybit+binance"
 
     def test_neutral_return_is_the_funding_differential_when_prices_track(self) -> None:
-        from liquidity_migration.financed_longs import prepare_spread, daily_grid
+        from liquidity_migration.research.backtest.financed_longs import prepare_spread, daily_grid
 
         # Flat prices on both venues: the neutral fwd-24h return must equal
         # -(paid_by) + paid_bn = 3 x (60 - 30) bp = +90 bp for the deep name.
@@ -378,7 +378,7 @@ class TestFundingSpread:
         assert row["net_return"][0] == pytest.approx(90.0 / 1e4, rel=1e-6)
 
     def test_hysteresis_enters_deep_and_exits_converged(self) -> None:
-        from liquidity_migration.financed_longs import (
+        from liquidity_migration.research.backtest.financed_longs import (
             FundingSpreadConfig,
             funding_spread_weights,
             prepare_spread,
@@ -401,7 +401,7 @@ class TestFundingSpread:
         assert all(abs(s) >= cfg.exit_bp_per_day for s in held_spreads)
 
     def test_fees_charged_on_both_legs(self) -> None:
-        from liquidity_migration.financed_longs import FundingSpreadConfig, score_funding_spread
+        from liquidity_migration.research.backtest.financed_longs import FundingSpreadConfig, score_funding_spread
 
         cfg = FundingSpreadConfig.from_json(CONFIG_DIR / "lane2_funding_spread_v1.json")
         panel = _panel(hours=1100, funding_bp={"S01USDT": [-60.0]})
@@ -409,7 +409,7 @@ class TestFundingSpread:
         assert out["config_id"] == "lane2_funding_spread_v1"
         assert out["days"] > 0
         # entry day cost = 0.10 notional x BOTH legs x per-side fee
-        from liquidity_migration.financed_longs import (
+        from liquidity_migration.research.backtest.financed_longs import (
             daily_scores, funding_spread_weights, prepare_spread, daily_grid, top_n_universe,
         )
         u = top_n_universe(daily_grid(prepare_spread(panel)), cfg.universe_top_n)
@@ -514,7 +514,7 @@ class TestResearchEquityChart:
     """
 
     def test_renders_standard_chart_with_research_label(self, tmp_path: Path) -> None:
-        from liquidity_migration.financed_longs import research_equity_chart
+        from liquidity_migration.research.backtest.financed_longs import research_equity_chart
 
         panel = _panel(funding_bp={"S01USDT": [-15.0]})
         payload = research_equity_chart(
@@ -537,7 +537,7 @@ class TestResearchEquityChart:
         )
 
     def test_config_scores_dispatches_both_rule_shapes(self) -> None:
-        from liquidity_migration.financed_longs import config_scores
+        from liquidity_migration.research.backtest.financed_longs import config_scores
 
         panel = _panel(funding_bp={"S01USDT": [-15.0]})
         _, _, carry_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v1.json")

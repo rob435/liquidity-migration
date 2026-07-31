@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_contracts import AccountState, OrderState, PositionState
-from liquidity_migration.account_kernel import AccountExecutionKernel
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.paper_funding_accrual import (
+from liquidity_migration.account.account_contracts import AccountState, OrderState, PositionState
+from liquidity_migration.account.account_kernel import AccountExecutionKernel
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.runtime.paper_funding_accrual import (
     PAPER_MODELED_FUNDING_SOURCE,
     PaperFundingAccrual,
     position_signed_qty_at,

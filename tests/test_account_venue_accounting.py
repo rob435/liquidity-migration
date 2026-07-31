@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.account_venue_accounting as accounting_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.research.execution.account_venue_accounting as accounting_module
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -18,14 +18,14 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     account_transactions_path,
 )
-from liquidity_migration.account_venue_accounting import (
+from liquidity_migration.research.execution.account_venue_accounting import (
     VenueAccountingRequirements,
     build_venue_accounting_receipt,
     load_venue_accounting_receipt,
     verify_venue_accounting_receipt,
     write_venue_accounting_receipt,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_runtime import VirtualClock
 
 
 ACCOUNT_ID = "bybit-demo-accounting-test"

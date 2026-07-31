@@ -40,8 +40,8 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from liquidity_migration.cross_section import top_by  # noqa: E402
-from liquidity_migration.idio_features import CHART_FEATURES  # noqa: E402
+from liquidity_migration.research.panels.cross_section import top_by  # noqa: E402
+from liquidity_migration.research.panels.idio_features import CHART_FEATURES  # noqa: E402
 
 DECILE_CUT = 0.10
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 
-from liquidity_migration.event_demo_data import _resolve_ticker_snapshot
-from liquidity_migration.ws_state_cache import TickerCache
+from liquidity_migration.strategy.event_demo_data import _resolve_ticker_snapshot
+from liquidity_migration.marketdata.ws_state_cache import TickerCache
 
 
 class _CountingPublic:

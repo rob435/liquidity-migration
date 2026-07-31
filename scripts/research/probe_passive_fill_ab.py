@@ -4,7 +4,7 @@
 Answers one question with real orders: is the 5.40 bp passive floor mechanically
 reachable, or is the measured 15.56 bp taker basis the true cost? Protocol,
 metric and sample size are pre-declared in
-``liquidity_migration/passive_fill_probe.py``; read that first. This probe bounds
+``liquidity_migration/research/execution/passive_fill_probe.py``; read that first. This probe bounds
 the mechanism quickly — only the in-flow A/B grades the flow at signal times.
 
 Operating constraints:
@@ -38,22 +38,22 @@ from typing import Any, Mapping
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.account_execution_config import (  # noqa: E402
+from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     load_demo_rules,
 )
-from liquidity_migration.account_owner_lease import (  # noqa: E402
+from liquidity_migration.account.account_owner_lease import (  # noqa: E402
     DemoAccountIdentity,
     DemoAccountMutationLease,
 )
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
     resolve_demo_credentials,
     validate_demo_order_permission,
 )
-from liquidity_migration.bybit_market_data import BybitRestRateLimiter  # noqa: E402
-from liquidity_migration.deterministic_serialization import canonical_json  # noqa: E402
-from liquidity_migration.passive_fill_probe import (  # noqa: E402
+from liquidity_migration.marketdata.bybit_market_data import BybitRestRateLimiter  # noqa: E402
+from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
+from liquidity_migration.research.execution.passive_fill_probe import (  # noqa: E402
     ARM_POST_ONLY,
     ARM_TAKER,
     REGISTERED_ADVERSE_SELECTION_DELAY_SECONDS,

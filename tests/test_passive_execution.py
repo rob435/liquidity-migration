@@ -4,10 +4,10 @@ from dataclasses import replace
 
 import pytest
 
-from liquidity_migration.account_contracts import InstrumentRules, MarketInputRef, OrderCommand
-from liquidity_migration.account_contracts import AccountState, OrderState
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.account.account_contracts import InstrumentRules, MarketInputRef, OrderCommand
+from liquidity_migration.account.account_contracts import AccountState, OrderState
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import (
     BookLevel,
     ExecutionObservationType,
     ExecutionTwinConfig,
@@ -15,7 +15,7 @@ from liquidity_migration.execution_adapters import (
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
-from liquidity_migration.passive_execution import (
+from liquidity_migration.runtime.passive_execution import (
     EXECUTION_ARM_METADATA_KEY,
     PASSIVE_MAKER_FEE_BPS,
     PASSIVE_TIMEOUT_NS,

@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration import cli
-from liquidity_migration.archive_manifest import _safe_name as _archive_safe_name
-from liquidity_migration.cli import (
+from liquidity_migration.cli import commands as cli
+from liquidity_migration.data.archive_manifest import _safe_name as _archive_safe_name
+from liquidity_migration.cli.commands import (
     _KNOWN_BINANCE_PROXY_DATASETS,
     _KNOWN_BYBIT_DATASETS,
     _parse_symbols,
@@ -16,8 +16,8 @@ from liquidity_migration.cli import (
     _validate_datasets,
     build_parser,
 )
-from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
-from liquidity_migration.universe import _safe_name as _universe_safe_name
+from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
+from liquidity_migration.data.universe import _safe_name as _universe_safe_name
 
 
 def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     """
     from dataclasses import replace
 
-    from liquidity_migration.config import CostConfig
+    from liquidity_migration.core.config import CostConfig
 
     taker = replace(CostConfig(), maker_fill_probability=0.0)
     assert taker.base_entry_exit_cost_bps == pytest.approx(15.0)

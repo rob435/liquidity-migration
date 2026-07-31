@@ -35,27 +35,27 @@ sys.path.insert(0, str(REPO))
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration.account_intent_client import (  # noqa: E402
+from liquidity_migration.account.account_intent_client import (  # noqa: E402
     AccountTargetPublisher,
     component_target_key,
     publish_exit_first_target_requests,
     requested_target,
 )
-from liquidity_migration.account_service import SleeveAdapterKind  # noqa: E402
-from liquidity_migration.account_route import AccountRoute, require_account_route  # noqa: E402
-from liquidity_migration.execution_environment import (  # noqa: E402
+from liquidity_migration.account.account_service import SleeveAdapterKind  # noqa: E402
+from liquidity_migration.account.account_route import AccountRoute, require_account_route  # noqa: E402
+from liquidity_migration.account.execution_environment import (  # noqa: E402
     account_id_for_environment,
 )
-from liquidity_migration.account_owner_health import (  # noqa: E402
+from liquidity_migration.account.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
-from liquidity_migration.account_strategy_state import (  # noqa: E402
+from liquidity_migration.strategy.account_strategy_state import (  # noqa: E402
     CanonicalAccountProjection,
     canonical_account_projection,
     canonical_strategy_trade_rows,
     target_reservation_rows,
 )
-from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
+from liquidity_migration.strategy.continuous_hedge_manager import (  # noqa: E402
     HEDGE_MODEL_PRIOR_KIND,
     HEDGE_MODEL_PRIOR_LIMITATIONS,
     HEDGE_SYMBOL,
@@ -67,7 +67,7 @@ from liquidity_migration.continuous_hedge_manager import (  # noqa: E402
     load_hedge_model_prior,
     require_usable_hedge_model_prior,
 )
-from liquidity_migration.operational_profile import load_operational_profile  # noqa: E402
+from liquidity_migration.policy.operational_profile import load_operational_profile  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)

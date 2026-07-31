@@ -11,14 +11,14 @@ from typing import Any
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.account_service import SleeveAdapterKind
-from liquidity_migration.continuous_btc_risk import (
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.account.account_service import SleeveAdapterKind
+from liquidity_migration.research.backtest.continuous_btc_risk import (
     BTC_RISK_COMPONENTS,
     BTC_RISK_EVIDENCE_METADATA_KEY,
     BtcRiskLiveSizer,
 )
-from liquidity_migration.continuous_demo import (
+from liquidity_migration.strategy.continuous_demo import (
     PRIOR_BAR_COLUMN_PREFIX,
     CONTINUOUS_DEMO_PROFILES,
     CONTINUOUS_V2_PROFILE,
@@ -32,7 +32,7 @@ from liquidity_migration.continuous_demo import (
     build_confirmed_entry_state,
     plan_continuous_exits,
 )
-from liquidity_migration.continuous_events import compute_continuous_decile_panel
+from liquidity_migration.research.backtest.continuous_events import compute_continuous_decile_panel
 
 
 ACTIVE_COMPONENTS = (

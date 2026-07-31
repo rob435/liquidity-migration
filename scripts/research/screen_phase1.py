@@ -9,7 +9,7 @@ Two cost corrections are applied together, because both were wrong in the same
 direction:
 
 1. **Fee level.** The measured round trip is
-   :data:`liquidity_migration.cross_section.MEASURED_ROUND_TRIP_BP` (15.56 bp),
+   :data:`liquidity_migration.research.panels.cross_section.MEASURED_ROUND_TRIP_BP` (15.56 bp),
    not the 4 bp maker assumption the earlier reads used.
 2. **Gross multiple.** ``cross_section.long_short`` returns a book that is
    *1 unit long + 1 unit short on one unit of capital* — 2x gross, as
@@ -40,14 +40,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.cross_section import (  # noqa: E402
+from liquidity_migration.research.panels.cross_section import (  # noqa: E402
     MEASURED_ROUND_TRIP_BP,
     Summary,
     long_short,
     summary,
     top_by,
 )
-from liquidity_migration.lane2_blend import HOUR_MS, BlendConfig, prepare  # noqa: E402
+from liquidity_migration.research.panels.lane2_blend import HOUR_MS, BlendConfig, prepare  # noqa: E402
 
 #: Bonferroni threshold at alpha=0.05 for the ~44 mechanisms tested to date.
 BONFERRONI_T = 3.25

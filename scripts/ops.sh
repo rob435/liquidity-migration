@@ -174,9 +174,9 @@ case "$command" in
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.
     if [[ "${LOCAL:-0}" == "1" ]]; then
-      exec "$PYTHON_BIN" -m liquidity_migration.real_money_arming "$@"
+      exec "$PYTHON_BIN" -m liquidity_migration.policy.real_money_arming "$@"
     fi
-    remote_python_module liquidity_migration.real_money_arming "$@"
+    remote_python_module liquidity_migration.policy.real_money_arming "$@"
     ;;
   wedged-command)
     # B15b. `report` and `probe` read only. `resolve` writes one journal
@@ -189,7 +189,7 @@ case "$command" in
     elif [[ "${1:-}" == "resolve" ]]; then
       die_usage "wedged-command resolve writes a journal transition; prefix it with --execute"
     fi
-    remote_python_module liquidity_migration.wedged_command_resolution "$@"
+    remote_python_module liquidity_migration.venue.wedged_command_resolution "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"

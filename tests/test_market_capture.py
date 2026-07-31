@@ -9,8 +9,8 @@ from typing import Any, Mapping
 
 import pytest
 
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.market_capture import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.market_capture import (
     OWNER_CAPTURE_READINESS_FILENAME,
     OWNER_MARKET_READINESS_FILENAME,
     BybitRawPublicMarketStream,
@@ -273,7 +273,7 @@ def test_post_fill_markout_capacity_rejection_is_durable_and_non_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "liquidity_migration.market_capture.MAX_PENDING_POST_FILL_MARKOUTS",
+        "liquidity_migration.account.market_capture.MAX_PENDING_POST_FILL_MARKOUTS",
         1,
     )
     recorder = SequenceAwareMarketRecorder(
@@ -310,7 +310,7 @@ def test_post_fill_marks_are_capped_per_book_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "liquidity_migration.market_capture.MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE",
+        "liquidity_migration.account.market_capture.MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE",
         1,
     )
     fill_local_ns = 10_000_000_000
@@ -385,7 +385,7 @@ def test_current_book_observation_orders_wall_time_after_locked_snapshot(
 def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_changes(
     tmp_path: Path,
 ) -> None:
-    from liquidity_migration.account_owner_readiness import (
+    from liquidity_migration.runtime.account_owner_readiness import (
         latest_market_readiness,
         latest_market_receive_ts_ns,
     )
@@ -1183,7 +1183,7 @@ def test_raw_stream_registers_transport_callbacks_and_logs_failures(
         assert callable(captured_kwargs.get("on_message"))
         assert callable(captured_kwargs.get("on_error"))
         assert callable(captured_kwargs.get("on_close"))
-        with caplog.at_level("WARNING", logger="liquidity_migration.market_capture"):
+        with caplog.at_level("WARNING", logger="liquidity_migration.account.market_capture"):
             captured_kwargs["on_error"](None, RuntimeError("ping/pong timed out"))
             captured_kwargs["on_close"](None, 1006, "abnormal closure")
         rendered = "\n".join(record.getMessage() for record in caplog.records)
@@ -1216,7 +1216,7 @@ def test_cumulative_outage_bound_fires_between_reconnect_attempts(
     now[0] = 219.9
     assert stream.check_stale_subscriptions() == ()
 
-    with caplog.at_level("WARNING", logger="liquidity_migration.market_capture"):
+    with caplog.at_level("WARNING", logger="liquidity_migration.account.market_capture"):
         now[0] = 220.0
         assert stream.check_stale_subscriptions() == ("BTCUSDT",)
     rendered = "\n".join(record.getMessage() for record in caplog.records)
@@ -1282,7 +1282,7 @@ def test_cumulative_outage_counts_from_last_accepted_frame_and_clears_on_recover
     stream._active_connection_generation = 2
     stream._on_open(recovered, generation=2)
     now[0] = 280.0
-    with caplog.at_level("INFO", logger="liquidity_migration.market_capture"):
+    with caplog.at_level("INFO", logger="liquidity_migration.account.market_capture"):
         stream._on_message(recovered, frame, generation=2)
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert "raw Bybit public stream recovered" in rendered

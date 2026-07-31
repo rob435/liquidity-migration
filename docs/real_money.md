@@ -13,7 +13,7 @@ No money amount binds anything. `capital_reference_usdt` in
 [`configs/operational.mainnet.json`](../configs/operational.mainnet.json) is
 `2500.0`, and it is only a scale: `capital_reference.mode = "account_equity"`
 makes the runtime reference track observed wallet equity, and every cap in the
-profile is a ratio of it ([`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py)).
+profile is a ratio of it ([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py)).
 
 Equity down rescales the caps on the next observation. Equity up waits for a
 move larger than `expand_dead_band_fraction` (5%), so ordinary wander cannot
@@ -24,7 +24,7 @@ mode the producer's own equity clamp is disabled — the owner's caps bind.
 `account_risk.sleeve_limits` partitions the account gross and margin caps into
 per-sleeve shares that must sum inside those caps. The kernel holds each sleeve
 to its share on every exposure-increasing batch and refuses a sleeve the
-partition does not name ([`account_kernel.py:2367`](../liquidity_migration/account_kernel.py)).
+partition does not name ([`account_kernel.py:2367`](../liquidity_migration/account/account_kernel.py)).
 Risk-reducing batches bypass every cap, so exits are always possible.
 
 A dedicated subaccount would put the ceiling at the venue instead of in
@@ -60,14 +60,14 @@ there, naming the dial to move, instead of at start-up over a funded account.
 
 | Control | Where |
 | --- | --- |
-| Absolute pre-trade caps — component gross, account gross, initial margin, available margin, leverage — rejected atomically inside the journal transaction | [`account_kernel.py`](../liquidity_migration/account_kernel.py) |
-| Per-sleeve partition | [`account_kernel.py`](../liquidity_migration/account_kernel.py), [`operational_profile.py`](../liquidity_migration/operational_profile.py) |
-| Caps rescale with observed equity | [`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py) |
-| Daily loss halt → `run_safety_flat_once` | [`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py) |
-| Venue-native stop armed in the same `place_order` call, read back after create | [`venue_protection.py`](../liquidity_migration/venue_protection.py), [`bybit_execution_adapter.py`](../liquidity_migration/bybit_execution_adapter.py) |
-| One owner per account; journal ↔ venue reconciliation | [`account_owner_lease.py`](../liquidity_migration/account_owner_lease.py), [`account_reconcile.py`](../liquidity_migration/account_reconcile.py) |
+| Absolute pre-trade caps — component gross, account gross, initial margin, available margin, leverage — rejected atomically inside the journal transaction | [`account_kernel.py`](../liquidity_migration/account/account_kernel.py) |
+| Per-sleeve partition | [`account_kernel.py`](../liquidity_migration/account/account_kernel.py), [`operational_profile.py`](../liquidity_migration/policy/operational_profile.py) |
+| Caps rescale with observed equity | [`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py) |
+| Daily loss halt → `run_safety_flat_once` | [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) |
+| Venue-native stop armed in the same `place_order` call, read back after create | [`venue_protection.py`](../liquidity_migration/venue/venue_protection.py), [`bybit_execution_adapter.py`](../liquidity_migration/venue/bybit_execution_adapter.py) |
+| One owner per account; journal ↔ venue reconciliation | [`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py), [`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py) |
 | Independent watchdog: owner, producers, strategy inputs and venue snapshot every 3 min, paging Telegram; no credential, no ordering edge to the owner it watches | `liquidity-migration-mainnet-liveness.timer` → [`check_fleet_liveness.py --account-scope mainnet`](../scripts/runtime/check_fleet_liveness.py) |
-| Mainnet client refuses to construct while `REAL_MONEY` is unset | [`bybit.py:204-209`](../liquidity_migration/bybit.py) (private WebSocket: `:875-878`) |
+| Mainnet client refuses to construct while `REAL_MONEY` is unset | [`bybit.py:204-209`](../liquidity_migration/venue/bybit.py) (private WebSocket: `:875-878`) |
 | Producers get no credentials and no arming switch in any realm; order authority is the account owner's alone | the mainnet units `UnsetEnvironment` both |
 
 ## Arming (owner-executed)
@@ -77,7 +77,7 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
 
 1. **Confirm the account is flat by hand.** No manual position, no open order. The owner's
    startup check for this (`require_bybit_order_ownership`,
-   [`account_service_bybit.py`](../liquidity_migration/account_service_bybit.py)) now runs in
+   [`account_service_bybit.py`](../liquidity_migration/venue/account_service_bybit.py)) now runs in
    both realms, but it and the reconciler see USDT-settled linear only, so anything else on the
    UID stays invisible to both — see *What is still unproven*.
 2. **Create the API key** on the funded account: contract trading only,
@@ -113,7 +113,7 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
    ```
    Rules come from the read-only `get_instruments_info` endpoint. Do not run the
    demo order probe: it places live PostOnly orders and refuses any realm but
-   demo by name ([`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py)).
+   demo by name ([`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py)).
 8. **Enable the producers.** Set `CARRY_MAINNET_SLEEVE` and/or
    `LONG_MAINNET_SLEEVE` to `on` in [`deploy/sleeves.env`](../deploy/sleeves.env)
    and commit — repo-off is a ceiling a host override cannot lift. Then
@@ -130,7 +130,7 @@ Changing any dial afterwards means re-rendering the profile and reinstalling.
 
 ## What preflight checks
 
-[`liquidity_migration/real_money_arming.py`](../liquidity_migration/real_money_arming.py)
+[`liquidity_migration/policy/real_money_arming.py`](../liquidity_migration/policy/real_money_arming.py)
 reads only, reports a credential by name and never by value, takes `--json`, and
 exits 1 while anything is outstanding.
 
@@ -157,10 +157,10 @@ mainnet owner still does not start.
 
 - **Two demo-only client fences still block mainnet startup.**
   `BybitNativeProtectionManager` refuses a non-demo client
-  ([`venue_protection.py:151`](../liquidity_migration/venue_protection.py)) and is built at
-  [`account_service_runner.py:716`](../liquidity_migration/account_service_runner.py), before
+  ([`venue_protection.py:151`](../liquidity_migration/venue/venue_protection.py)) and is built at
+  [`account_service_runner.py:716`](../liquidity_migration/runtime/account_service_runner.py), before
   every other start-up read; `BybitDemoExecutionAdapter` refuses one too
-  ([`bybit_execution_adapter.py:91`](../liquidity_migration/bybit_execution_adapter.py)) and is
+  ([`bybit_execution_adapter.py:91`](../liquidity_migration/venue/bybit_execution_adapter.py)) and is
   built after them. Both are the same arbitrary realm fence the wallet snapshot, order-ownership
   and reconciler gates carried until they were made realm-aware, but the protection manager also
   supplies the ownership check's native verifier, so un-fencing it changes what a mainnet owner
@@ -192,13 +192,13 @@ mainnet owner still does not start.
   is the dial for it; 1.0 is only right on a USDT-only account.
 - **Three funding shapes stop the owner permanently, outside the degrade path.** A
   `category=linear` settlement row in any currency but USDT raises
-  ([`account_reconcile.py:728`](../liquidity_migration/account_reconcile.py)); the epoch replay
+  ([`account_reconcile.py:728`](../liquidity_migration/venue/account_reconcile.py)); the epoch replay
   paginates at 2,500 rows per 7-day chunk — about 357 settlements/day — above which every
   restart fails; and off demo a settlement row carrying nonzero `cashFlow`, which would be
   double-counted against reconstructed fill P&L, is refused rather than booked (`:773`). The
   first two apply in both realms; only the third is realm-gated. All three raise out of
   `reconcile_once`, and the runner calls that at
-  [`account_service_runner.py:794`](../liquidity_migration/account_service_runner.py) and
+  [`account_service_runner.py:794`](../liquidity_migration/runtime/account_service_runner.py) and
   `:810` outside `degrade_or_raise` — so each is a `Restart=always` crash loop with the
   book unmanaged, not the exit-only degradation the wrapped start-up checks fall back to. Venue
   rows are immutable and every restart replays the epoch from the first journal event, so one

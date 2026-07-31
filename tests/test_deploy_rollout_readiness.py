@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_contracts import AccountEventType, AccountState
+from liquidity_migration.account.account_contracts import AccountEventType, AccountState
 from scripts.vps import check_deploy_rollout_readiness as readiness
 
 

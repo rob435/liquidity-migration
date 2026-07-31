@@ -1,5 +1,5 @@
 """Tests for the PIT membership / full-PIT universe gate in
-liquidity_migration/volume_events_pit.py.
+liquidity_migration/data/volume_events_pit.py.
 
 Survivorship semantics: pre-listing and post-delisting empty manifest claims are NOT
 required (they would be false tripwires), but a genuine mid-history gap within a
@@ -10,7 +10,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration.volume_events_pit import (
+from liquidity_migration.data.volume_events_pit import (
     _covered_kline_date_symbol_set,
     _full_pit_universe_pass,
     _pit_manifest_metadata,

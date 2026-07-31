@@ -6,8 +6,8 @@ import datetime as dt
 
 import polars as pl
 
-from liquidity_migration import pit_coverage as pc
-from liquidity_migration.symbol_codec import encode_symbol_partition
+from liquidity_migration.data import pit_coverage as pc
+from liquidity_migration.core.symbol_codec import encode_symbol_partition
 
 
 def _mk(root, dataset, dates, *, symbol="FOOUSDT"):

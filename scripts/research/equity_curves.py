@@ -29,9 +29,9 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.config import load_config  # noqa: E402
-from liquidity_migration.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL  # noqa: E402
-from liquidity_migration.symbol_codec import (  # noqa: E402
+from liquidity_migration.core.config import load_config  # noqa: E402
+from liquidity_migration.research.backtest.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL  # noqa: E402
+from liquidity_migration.core.symbol_codec import (  # noqa: E402
     SymbolIdentityError,
     decode_symbol_partition,
 )
@@ -71,7 +71,7 @@ def _run_long(
 ) -> dict[str, Any]:
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
-    from liquidity_migration.long_native import long_v11a_profile, run_long_native_research
+    from liquidity_migration.research.backtest.long_native import long_v11a_profile, run_long_native_research
 
     cfg = replace(long_v11a_profile(), start_date=start, end_date=end)
     if long_notional is not None:
@@ -178,8 +178,8 @@ def _run_carry(
     standard curve is that same config through the --research-config path. It
     reads the cross-venue panel, not the demo/paper cycle record.
     """
-    from liquidity_migration.carry_demo import CARRY_CONFIG_PATH
-    from liquidity_migration.financed_longs import research_equity_chart
+    from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH
+    from liquidity_migration.research.backtest.financed_longs import research_equity_chart
 
     panel = _load_research_panel(panel_root)
     return research_equity_chart(panel, CARRY_CONFIG_PATH, out, start=start, end=end)
@@ -489,7 +489,7 @@ def main() -> int:
         _prepare_sleeve_output(out, fresh=args.fresh_output)
         print(f"=== RESEARCH ({name}) ===", flush=True)
         try:
-            from liquidity_migration.financed_longs import research_equity_chart
+            from liquidity_migration.research.backtest.financed_longs import research_equity_chart
 
             payload = research_equity_chart(panel, cfg_path, out, start=start, end=end)
         except Exception as exc:  # noqa: BLE001 - report per-config, keep going

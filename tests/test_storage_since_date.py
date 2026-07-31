@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.storage import _partition_date_ge, read_dataset_columns, write_dataset
+from liquidity_migration.data.storage import _partition_date_ge, read_dataset_columns, write_dataset
 
 
 def _seed(root: Path) -> None:

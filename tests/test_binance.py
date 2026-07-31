@@ -5,8 +5,8 @@ from urllib.error import HTTPError
 
 import pytest
 
-from liquidity_migration import binance
-from liquidity_migration._common import exact_duration_ms
+from liquidity_migration.marketdata import binance
+from liquidity_migration.core._common import exact_duration_ms
 
 
 def test_recent_history_start_clamps_to_latest_30_days(monkeypatch) -> None:

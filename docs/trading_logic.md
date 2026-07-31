@@ -1,13 +1,13 @@
 # Trading logic
 
 What each sleeve trades, how it sizes, how it exits, and where its evidence stops. Code is
-the authority: [`long_native_event_demo.py`](../liquidity_migration/long_native_event_demo.py)
-and [`long_native.py`](../liquidity_migration/long_native.py),
-[`carry_demo.py`](../liquidity_migration/carry_demo.py) and
-[`financed_longs.py`](../liquidity_migration/financed_longs.py),
-[`continuous_demo.py`](../liquidity_migration/continuous_demo.py) and
-[`continuous_profile.py`](../liquidity_migration/continuous_profile.py),
-[`continuous_hedge_manager.py`](../liquidity_migration/continuous_hedge_manager.py). Plain
+the authority: [`long_native_event_demo.py`](../liquidity_migration/strategy/long_native_event_demo.py)
+and [`long_native.py`](../liquidity_migration/research/backtest/long_native.py),
+[`carry_demo.py`](../liquidity_migration/strategy/carry_demo.py) and
+[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py),
+[`continuous_demo.py`](../liquidity_migration/strategy/continuous_demo.py) and
+[`continuous_profile.py`](../liquidity_migration/research/backtest/continuous_profile.py),
+[`continuous_hedge_manager.py`](../liquidity_migration/strategy/continuous_hedge_manager.py). Plain
 English: [`plain_english_guide.md`](plain_english_guide.md).
 
 ## On today
@@ -312,17 +312,17 @@ estimator deliberately collapsing to one factor, not missing ETH data.
 
 [`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable sizing
 surface. Caps are a fraction of observed wallet equity
-([`equity_anchored_envelope.py`](../liquidity_migration/equity_anchored_envelope.py):
+([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py):
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
-[`account_kernel.py`](../liquidity_migration/account_kernel.py) holds each sleeve to its own
-partition of it; [`account_loss_guard.py`](../liquidity_migration/account_loss_guard.py) halts
+[`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to its own
+partition of it; [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) halts
 the day at a loss ceiling. The paper twin's fixed capital base comes from the same file:
 `scripts/deploy_vps_live.sh:503` sets `PAPER_EQUITY_USDT =
 load_operational_profile(...).capital_reference_usdt` (currently 250,000), with no per-host
 tuning — every percentage return or drawdown read off the paper book is against that number.
 
 **Profile load refusals** (all in
-[`operational_profile.py`](../liquidity_migration/operational_profile.py)): unknown or
+[`operational_profile.py`](../liquidity_migration/policy/operational_profile.py)): unknown or
 missing fields in any block (`_object`, `:44-50`); any producer `entry_leverage` above
 `account_risk.max_leverage` (`:447-453`); an account gross cap above `capital_reference_usdt
 × max_leverage` (`:455-458`); an initial-margin cap above `capital_reference_usdt`
@@ -366,7 +366,7 @@ disappearance.
 
 Bybit's demo realm rejects orders its own published
 `minNotionalValue` accepts, so
-[`demo_rule_probe.py`](../liquidity_migration/demo_rule_probe.py) measures the executable
+[`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) measures the executable
 minimum with bounded probe orders (≤200 USDT, 100 bps away) and caches it per symbol; entry
 dust skips key off that. A component below 4× that minimum is quantization-distorted, so a
 day where such components carry >20% of gross exposure measures plumbing rather than

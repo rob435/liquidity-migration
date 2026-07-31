@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_candidate_universe import (
+from liquidity_migration.strategy.account_candidate_universe import (
     build_candidate_universe_artifact,
     enforce_frozen_candidate_frames,
     enforce_frozen_candidate_population,
@@ -16,16 +16,16 @@ from liquidity_migration.account_candidate_universe import (
     require_scheduled_retirements_flat,
     write_candidate_universe,
 )
-from liquidity_migration.account_intent_client import (
+from liquidity_migration.account.account_intent_client import (
     AccountTargetPublisher,
     requested_target,
 )
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.account_service import SleeveAdapterKind
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.downloaders import _normalize_instruments, _normalize_tickers
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.account.account_service import SleeveAdapterKind
+from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_tickers
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
 
 SNAPSHOT_NS = 1_800_000_000_000_000_000

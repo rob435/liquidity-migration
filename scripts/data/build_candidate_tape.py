@@ -51,23 +51,23 @@ def _install_import_only_windows_fcntl_guard() -> None:
 
 _install_import_only_windows_fcntl_guard()
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms  # noqa: E402
-from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS  # noqa: E402
-from liquidity_migration.continuous_events import (  # noqa: E402
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms  # noqa: E402
+from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS  # noqa: E402
+from liquidity_migration.research.backtest.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     _btc_trend_returns,
     continuous_source_decile_panel,
     per_symbol_timeseries_features,
 )
-from liquidity_migration.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS  # noqa: E402
-from liquidity_migration.long_native import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS  # noqa: E402
+from liquidity_migration.research.backtest.long_native import (  # noqa: E402
     _classify_entry,
     build_long_features,
     long_pump_family,
     long_v11a_profile,
 )
-from liquidity_migration.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
-from liquidity_migration.strategy_funnel import (  # noqa: E402
+from liquidity_migration.data.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
+from liquidity_migration.account.strategy_funnel import (  # noqa: E402
     canonical_payload,
     finalize_funnel_row,
     gate_state,

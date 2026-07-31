@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountEventType,
     AccountJournalIntegrityError,
     AccountRiskPolicy,
@@ -12,13 +12,13 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     read_account_journal,
 )
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.account_service import (
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.account.account_service import (
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
 )
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.account.execution_adapters import (
     BookLevel,
     ExecutionObservation,
     ExecutionObservationType,
@@ -26,13 +26,13 @@ from liquidity_migration.execution_adapters import (
     L2BookSnapshot,
     LatencyProfile,
 )
-from liquidity_migration.historical_account_replay import (
+from liquidity_migration.research.backtest.historical_account_replay import (
     HistoricalAccountSession,
     HistoricalReplayCycle,
     HistoricalTargetDecision,
     synthetic_historical_rules_for_symbols,
 )
-from liquidity_migration.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 
 
 def _book(*, sequence: int, local_ns: int, bid: float, ask: float) -> L2BookSnapshot:

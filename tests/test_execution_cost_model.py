@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from liquidity_migration.account_contracts import AccountEvent
-from liquidity_migration.execution_cost_model import (
+from liquidity_migration.account.account_contracts import AccountEvent
+from liquidity_migration.research.execution.execution_cost_model import (
     build_fill_cost_rows,
     cost_model_summary,
 )

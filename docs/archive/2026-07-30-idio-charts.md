@@ -54,9 +54,9 @@ That tension is what §3 tries to settle.
 
 ## 2. Construction, and what forced each choice
 
-`liquidity_migration/residual_price.py` cumulates
+`liquidity_migration/research/panels/residual_price.py` cumulates
 `risk_model.fit_factor_returns` residuals into per-symbol paths.
-`liquidity_migration/idio_features.py` computes chart features from any single
+`liquidity_migration/research/panels/idio_features.py` computes chart features from any single
 price column. Four decisions were forced rather than chosen:
 
 **Log space.** `daily_feature_panel` produces *simple* returns, and `cumsum` on
@@ -473,7 +473,7 @@ constant.
 ## 6.6 A design flaw in this screen's momentum arms
 
 `COMMON4_FACTOR_COLUMNS` includes **`xs_rank_ret_30d`**
-(`liquidity_migration/risk_model.py:41-46`). The residual is therefore
+(`liquidity_migration/research/panels/risk_model.py:41-46`). The residual is therefore
 orthogonal to 30-day cross-sectional momentum *by construction*, on every day,
 before any chart feature is computed.
 

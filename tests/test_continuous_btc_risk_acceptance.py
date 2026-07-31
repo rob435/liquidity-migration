@@ -5,9 +5,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-import liquidity_migration.continuous_btc_risk as btc_risk_module
-from liquidity_migration.account_intent_client import AccountTargetPublisher, unresolved_target_snapshot
-from liquidity_migration.account_kernel import (
+import liquidity_migration.research.backtest.continuous_btc_risk as btc_risk_module
+from liquidity_migration.account.account_intent_client import AccountTargetPublisher, unresolved_target_snapshot
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -15,15 +15,15 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_service import AccountIntentInbox, SleeveAdapterKind
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.account_strategy_state import canonical_strategy_trade_rows
-from liquidity_migration.continuous_btc_risk import (
+from liquidity_migration.account.account_service import AccountIntentInbox, SleeveAdapterKind
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.strategy.account_strategy_state import canonical_strategy_trade_rows
+from liquidity_migration.research.backtest.continuous_btc_risk import (
     BTC_RISK_COMPONENTS,
     BTC_RISK_EVIDENCE_METADATA_KEY,
     BtcRiskLiveSizer,
 )
-from liquidity_migration.continuous_demo import (
+from liquidity_migration.strategy.continuous_demo import (
     ContinuousDemoCycleConfig,
     _apply_btc_risk_sizing,
     _continuous_entry_target_intents,

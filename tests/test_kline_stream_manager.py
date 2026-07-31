@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration._common import MS_PER_HOUR
-from liquidity_migration.kline_store import KlineStore
-from liquidity_migration.kline_stream_manager import (
+from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.marketdata.kline_store import KlineStore
+from liquidity_migration.marketdata.kline_stream_manager import (
     KlineStreamManager,
     _default_universe_filter,
     _kline_row_to_bar_dict,
@@ -774,7 +774,7 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
     manager.start()
     try:
         with caplog.at_level(
-            "INFO", logger="liquidity_migration.kline_stream_manager"
+            "INFO", logger="liquidity_migration.marketdata.kline_stream_manager"
         ):
             manager.force_refresh_universe()
         # The new listing was bootstrapped.
@@ -857,7 +857,7 @@ def _build(tmp_path: Path, instruments_factory) -> tuple[KlineStreamManager, _Po
 
     def _klines(symbol, interval, start, end):
         # A single page of bars is plenty for bootstrap to mark covered.
-        from liquidity_migration._common import MS_PER_HOUR
+        from liquidity_migration.core._common import MS_PER_HOUR
 
         return [
             {

@@ -9,22 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_candidate_universe import (
+from liquidity_migration.strategy.account_candidate_universe import (
     build_candidate_universe_artifact,
     load_candidate_universe,
     write_candidate_universe,
 )
-from liquidity_migration.candidate_rule_coverage import (
+from liquidity_migration.ops.candidate_rule_coverage import (
     CandidateRuleRefreshRequired,
     REGISTERED_MAX_RULE_AGE_SECONDS,
     build_candidate_rule_coverage,
     classify_demo_rule_receipt_freshness,
     project_demo_rules_to_candidate_subset,
 )
-from liquidity_migration.artifact_snapshot import read_stable_file
-from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.demo_rule_probe import (
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.venue.demo_rule_probe import (
     DEMO_RULE_PROBE_EVIDENCE_KIND,
     DEMO_RULE_PROBE_EVIDENCE_SCHEMA_VERSION,
     DEMO_RULES_KIND,
@@ -34,7 +34,7 @@ from liquidity_migration.demo_rule_probe import (
     ORDER_HISTORY_SOURCE,
     TRADE_HISTORY_SOURCE,
 )
-from liquidity_migration.long_native_event_demo import LongNativeDemoCycleConfig
+from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
 
 NOW_NS = 1_800_000_000_000_000_000
@@ -537,7 +537,7 @@ def test_coverage_rejects_legacy_boolean_only_acceptance_evidence(tmp_path: Path
 def test_rollout_refresh_threshold_is_half_the_hard_bound_and_tightens_only(
     tmp_path: Path,
 ) -> None:
-    from liquidity_migration.candidate_rule_coverage import (
+    from liquidity_migration.ops.candidate_rule_coverage import (
         REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
         require_registered_rule_age,
     )

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -15,19 +15,19 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.account_service import (
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.account.account_service import (
     AccountExecutionService,
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import (
     ExecutionObservation,
     ExecutionObservationType,
 )
-from liquidity_migration.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 
 
 NOW_NS = 1_100_000_000

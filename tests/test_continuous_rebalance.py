@@ -3,8 +3,8 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration import continuous_rebalance
-from liquidity_migration.continuous_rebalance import (
+from liquidity_migration.research.backtest import continuous_rebalance
+from liquidity_migration.research.backtest.continuous_rebalance import (
     MS_PER_DAY,
     ContinuousRebalanceComponents,
     ContinuousRebalanceRule,

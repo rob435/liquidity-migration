@@ -90,7 +90,7 @@ echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-g
 
 echo
 echo "[3/4] Bybit — validate independent manifest against ≥20-bar kline coverage"
-"$PYTHON_BIN" -m liquidity_migration.binance_vision \
+"$PYTHON_BIN" -m liquidity_migration.data.binance_vision \
   validate-manifest --data-root "$ROOT"
 
 # Symbol list for download-data, from the validated manifest. Perps-only guard:
@@ -98,7 +98,7 @@ echo "[3/4] Bybit — validate independent manifest against ≥20-bar kline cove
 SYMBOLS=$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os, pathlib, sys
 import polars as pl
-from liquidity_migration.archive_manifest import validate_bybit_manifest_provenance
+from liquidity_migration.data.archive_manifest import validate_bybit_manifest_provenance
 
 root = pathlib.Path(os.environ["ROOT"]).expanduser()
 df = pl.read_parquet(str(root / "archive_trade_manifest" / "**" / "*.parquet"))

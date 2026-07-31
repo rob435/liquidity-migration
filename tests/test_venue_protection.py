@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_execution_stream import BybitAccountExecutionConsumer
-from liquidity_migration.account_kernel import (
+from liquidity_migration.venue.account_execution_stream import BybitAccountExecutionConsumer
+from liquidity_migration.account.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -18,11 +18,11 @@ from liquidity_migration.account_kernel import (
     TargetBatchResult,
     read_account_journal,
 )
-from liquidity_migration.account_service_bybit import inspect_bybit_order_ownership
-from liquidity_migration.bybit_errors import BybitRequestRejected
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import ExecutionObservation, KernelExecutionDriver
-from liquidity_migration.venue_protection import (
+from liquidity_migration.venue.account_service_bybit import inspect_bybit_order_ownership
+from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import ExecutionObservation, KernelExecutionDriver
+from liquidity_migration.venue.venue_protection import (
     BybitNativeProtectionManager,
     NativeProtectionBreachError,
 )
@@ -2023,7 +2023,7 @@ def test_triggered_native_stop_row_stays_owned_within_visibility_grace(
     closed again.
     """
 
-    from liquidity_migration.venue_protection import (
+    from liquidity_migration.venue.venue_protection import (
         NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,
     )
 
@@ -2265,7 +2265,7 @@ def test_visibility_grace_bounds_record_exchange_time(tmp_path: Path) -> None:
     window.
     """
 
-    from liquidity_migration.venue_protection import (
+    from liquidity_migration.venue.venue_protection import (
         NATIVE_TERMINAL_ORDER_VISIBILITY_GRACE_NS,
     )
 

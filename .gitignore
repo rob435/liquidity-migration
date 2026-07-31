@@ -17,7 +17,9 @@ venv/
 *.sqlite3.gz
 .cache/
 .tmp/
-data/
+# Anchored: this is the top-level per-sleeve event-store root. Unanchored it
+# also swallowed liquidity_migration/data/ and scripts/data/.
+/data/
 reports/*
 !reports/autonomous-improvement/
 !reports/autonomous-improvement/**

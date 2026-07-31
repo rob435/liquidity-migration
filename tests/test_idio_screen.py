@@ -11,9 +11,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.idio_features import CHART_FEATURES, chart_features
-from liquidity_migration.residual_price import RESIDUAL_AVAILABILITY_SHIFT_DAYS
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.research.panels.idio_features import CHART_FEATURES, chart_features
+from liquidity_migration.research.panels.residual_price import RESIDUAL_AVAILABILITY_SHIFT_DAYS
 
 REPO = Path(__file__).resolve().parent.parent
 

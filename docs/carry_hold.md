@@ -5,7 +5,7 @@ The owner-selected lead strategy from the 2026-07-26 financed-longs program
 reference for what carry-hold is, why it works, what it has been tested
 against, how it should be run, and what would kill it. Registered config:
 `configs/lane2_carry_hold_v1.json` (commit `6584b00` + correction `7f2e0a7`);
-executable: `liquidity_migration/financed_longs.py`.
+executable: `liquidity_migration/research/backtest/financed_longs.py`.
 
 Status: **Lane-2 registered, accruing a forward record since the registration
 commit.**
@@ -228,7 +228,7 @@ grind-downs where shorts are not paying.
 The owner ordered on 2026-07-28/29: retire CONTINUOUS from demo and paper
 and deploy this strategy in its place. The runtime now exists:
 
-1. **Sleeve**: `carry` — target producer `liquidity_migration/carry_demo.py`
+1. **Sleeve**: `carry` — target producer `liquidity_migration/strategy/carry_demo.py`
    (+ `carry_demo_daemon.py`), demo + paper units, publishing absolute
    component targets through the normal account-kernel inbox. The deployed
    decision logic is NOT a reimplementation: the producer calls the exact

@@ -15,7 +15,7 @@ _lm_load_systemd_environment() {
     shift 3
     local -a _lse_names=("$@")
     local -a _lse_command=(
-        "$_lse_python" -m liquidity_migration.systemd_environment
+        "$_lse_python" -m liquidity_migration.policy.systemd_environment
         --path "$_lse_file"
     )
     if [ -n "$_lse_group" ]; then

@@ -6,8 +6,8 @@ import math
 
 import pytest
 
-from liquidity_migration.account_contracts import AccountState, PositionState
-from liquidity_migration.paper_account_equity import (
+from liquidity_migration.account.account_contracts import AccountState, PositionState
+from liquidity_migration.runtime.paper_account_equity import (
     MarkedPaperSnapshotProvider,
     PaperEquityUnavailableError,
     paper_equity_breakdown,

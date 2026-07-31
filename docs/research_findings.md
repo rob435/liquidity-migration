@@ -63,8 +63,8 @@ kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
 `CONTINUOUS_PAPER_SLEEVE=off`); no kill criterion tripped, so the frozen journal is a retirement artifact, not
 a dead run. Citable baseline for the shipped shape: **+11.06% / max DD −1.84% / Sharpe 1.45 / MAR 1.80**, 655
 trades, 2023-03-13 → 2026-07-16. Five load-bearing parameters, all in
-[continuous_profile.py](../liquidity_migration/continuous_profile.py) and
-[continuous_events.py](../liquidity_migration/continuous_events.py): trigger `turn3_pop3`, age 240d,
+[continuous_profile.py](../liquidity_migration/research/backtest/continuous_profile.py) and
+[continuous_events.py](../liquidity_migration/research/backtest/continuous_events.py): trigger `turn3_pop3`, age 240d,
 settled-funding floor 0.0, crowd-2, hold 24h, plus the BTC uptrend gate and BTC+ETH hedge.
 
 - **The gate is half the strategy and the funding floor is an economic boundary, not a searched threshold.**
@@ -97,7 +97,7 @@ passive fill rate is the binding constraint — arm B chases at 4.80 bp/side aga
 fills 2 of 8, implying 2.70 bp/side; raising the fill rate 25% → 80% moves a book 14.43 → 23.47 bp/day. The
 passive floor is 5.40 bp round trip, so 4 bp was never reachable, and arm B's strict-crossing model grants no
 queue credit, so measured rates are lower bounds
-([passive_execution.py](../liquidity_migration/passive_execution.py)). Capacity is small: v3's held names have
+([passive_execution.py](../liquidity_migration/runtime/passive_execution.py)). Capacity is small: v3's held names have
 median $33M trailing-24h turnover ($3.2M at p05), and p95 entry participation crosses 1% at a ~$1.1M book and
 5% at ~$5.5M post-2025.
 
@@ -106,7 +106,7 @@ limit at the touch with a bounded chase-and-timeout fallback reaches ≥ 60% pas
 all-in cost by ≥ 10 bp/side against market-IOC, without degrading signal capture (fills inside the same
 decision hour). Any read beyond mechanics needs ≥ 100 **fills** per arm — not the standalone demo probe's
 ≥ 100 **attempts** per arm (`REGISTERED_MIN_ATTEMPTS_PER_ARM` in
-[passive_fill_probe.py](../liquidity_migration/passive_fill_probe.py), a separate instrument with its own
+[passive_fill_probe.py](../liquidity_migration/research/execution/passive_fill_probe.py), a separate instrument with its own
 40% fill-rate kill); the two are easily confused. Kill rule: stop early if arm B's missed-fill opportunity
 cost exceeds its measured cost saving over any 50-entry window, where **missed-fill opportunity cost** is the
 signal P&L of entries whose passive order never filled, measured at the decision-hour close.
@@ -116,7 +116,7 @@ signal P&L of entries whose passive order never filled, measured at the decision
 `CONTINUOUS_PAPER_SLEEVE=off`, retired 2026-07-29); paper's carry book now arrives through
 `PAPER_TARGET_MIRROR=on`, which republishes the demo fleet's targets. No fills accrue to either arm until a
 CONTINUOUS sleeve runs again. `execution_arm` appears only in `passive_execution.py` and its test —
-[execution_cost_model.py](../liquidity_migration/execution_cost_model.py) has no arm grouping, so the cost
+[execution_cost_model.py](../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
 report does not split by arm.
 
 ## 2. Do-not-retest ledger
@@ -235,7 +235,7 @@ underwater after day 1 the remainder averages **+1.26%**.
 hour after a settlement it reads 0.9999999999999999, not 1.0 — so the old `age < 1.0` predicate matched two
 bars per 8h/4h/2h settlement and charged every such print **twice**; 1h-interval symbols escaped because the
 next print overwrote the epsilon bar. Now an age-reset test, `(age < 0.5) | (age < age.shift(1).over("symbol"))`,
-in [financed_longs.py](../liquidity_migration/financed_longs.py) and mirrored in `lane2_blend.py`, with
+in [financed_longs.py](../liquidity_migration/research/backtest/financed_longs.py) and mirrored in `lane2_blend.py`, with
 regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
 decisions read funding *levels*. Only funding P&L inflated, ~×1.5–2 blended and worst where funding was deepest.
 
@@ -285,7 +285,7 @@ that this research was replacing a broken deployed book was wrong.
   own thesis and a long study for it. Never use OI availability as a filter in a return study. The panel's
   rising OI coverage (0.857 → 0.980, 2021→2026) is a bias gradient, not improving quality.
 - **`open_interest_value` is not a value** — byte-for-byte identical to `open_interest` across the dataset,
-  i.e. contract units. Dropped in [cross_venue_panel.py](../liquidity_migration/cross_venue_panel.py) with
+  i.e. contract units. Dropped in [cross_venue_panel.py](../liquidity_migration/research/panels/cross_venue_panel.py) with
   the reason inline; still latent in `daily_feature_panel.py`, which prefers it for `oi_delta_7d` and
   `oi_to_adv` (neither has a consumer outside that module). Derive notional as `open_interest × mark_close`.
 - **`funding_event_kind` exists on only 2 of 2,024 Bybit funding partitions** (added 2026-07-16). Filtering on
@@ -377,5 +377,5 @@ that this research was replacing a broken deployed book was wrong.
   a filter buys sample: the momentum BTC gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives
   n 1,247, **t 2.78**, Sharpe 1.50.
 - Registered experiment definitions live in code, not prose — passive A/B arm parameters in
-  [passive_execution.py](../liquidity_migration/passive_execution.py). Its read thresholds, sample target and
+  [passive_execution.py](../liquidity_migration/runtime/passive_execution.py). Its read thresholds, sample target and
   kill rule are not in code and are recorded in §1, with the reason the arm currently accrues nothing.

@@ -48,9 +48,9 @@ no_implicit_optional = true
 # Polars aggregate scalar stubs overapproximate the values used in these paths.
 [[tool.mypy.overrides]]
 module = [
-    "liquidity_migration.trade_lifecycle",
-    "liquidity_migration.kline_store",
-    "liquidity_migration.continuous_events",
+    "liquidity_migration.data.trade_lifecycle",
+    "liquidity_migration.marketdata.kline_store",
+    "liquidity_migration.research.backtest.continuous_events",
 ]
 disable_error_code = ["arg-type"]
 

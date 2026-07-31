@@ -3,9 +3,9 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration.config import UniverseConfig
-from liquidity_migration.universe import build_current_universe_table, format_universe_report
-from liquidity_migration._common import MS_PER_DAY
+from liquidity_migration.core.config import UniverseConfig
+from liquidity_migration.data.universe import build_current_universe_table, format_universe_report
+from liquidity_migration.core._common import MS_PER_DAY
 
 
 def test_current_universe_table_filters_and_ranks() -> None:
@@ -340,7 +340,7 @@ def test_universepit3_join_drop_is_logged(caplog) -> None:
         _univ_instrument("BBBUSDT", old),  # no ticker row -> dropped by the join
     ])
     tickers = pl.DataFrame([_univ_ticker("AAAUSDT", 50_000_000.0)])
-    with caplog.at_level("INFO", logger="liquidity_migration.universe"):
+    with caplog.at_level("INFO", logger="liquidity_migration.data.universe"):
         table = build_current_universe_table(
             instruments, tickers,
             universe_config=UniverseConfig(
@@ -367,7 +367,7 @@ def test_universepit5_null_launch_time_surfaced_in_unlimited_mode(caplog) -> Non
         _univ_ticker("AAAUSDT", 50_000_000.0),
         _univ_ticker("NULLAGEUSDT", 40_000_000.0),
     ])
-    with caplog.at_level("INFO", logger="liquidity_migration.universe"):
+    with caplog.at_level("INFO", logger="liquidity_migration.data.universe"):
         table = build_current_universe_table(
             instruments, tickers,
             # unlimited mode: no age gate active.

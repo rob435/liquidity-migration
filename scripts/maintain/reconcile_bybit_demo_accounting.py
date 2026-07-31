@@ -14,17 +14,17 @@ from typing import Any, Mapping, Sequence
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.account_owner_lease import (  # noqa: E402
+from liquidity_migration.account.account_owner_lease import (  # noqa: E402
     DemoAccountIdentity,
     DemoAccountMutationLease,
 )
-from liquidity_migration.account_venue_accounting import (  # noqa: E402
+from liquidity_migration.research.execution.account_venue_accounting import (  # noqa: E402
     VenueAccountingRequirements,
     build_venue_accounting_receipt,
     require_registered_venue_accounting_requirements,
     write_venue_accounting_receipt,
 )
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_demo_credentials,
 )

@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_service_bybit import VerifiedBybitDemoRulesProvider
-from liquidity_migration.demo_rule_probe import require_demo_probe_realm
-from liquidity_migration.venue_instrument_rules import (
+from liquidity_migration.venue.account_service_bybit import VerifiedBybitDemoRulesProvider
+from liquidity_migration.venue.demo_rule_probe import require_demo_probe_realm
+from liquidity_migration.venue.venue_instrument_rules import (
     build_venue_instrument_rules,
     load_venue_rules_bytes,
     render_venue_rules_artifact,
 )
-from liquidity_migration.venue_realm import VenueRealm
+from liquidity_migration.core.venue_realm import VenueRealm
 
 REPO = Path(__file__).resolve().parents[1]
 

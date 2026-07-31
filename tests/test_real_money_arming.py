@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.operational_profile import load_operational_profile_bytes
-from liquidity_migration.real_money_arming import preflight
-from liquidity_migration.real_money_profile import (
+from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
+from liquidity_migration.policy.real_money_arming import preflight
+from liquidity_migration.policy.real_money_profile import (
     RealMoneyDials,
     dial_environment_keys,
     parse_real_money_dials,
@@ -76,7 +76,7 @@ def test_the_template_names_every_dial_the_renderer_reads() -> None:
 
 
 def test_the_template_parses_as_a_strict_systemd_environment_file() -> None:
-    from liquidity_migration.systemd_environment import parse_systemd_environment_bytes
+    from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
 
     for template in (TEMPLATE, OWNER_TEMPLATE):
         values = parse_systemd_environment_bytes(template.read_bytes(), label=str(template))
@@ -336,7 +336,7 @@ def test_the_arming_module_never_sets_real_money_or_starts_a_unit() -> None:
 
     import ast
 
-    path = REPO / "liquidity_migration" / "real_money_arming.py"
+    path = REPO / "liquidity_migration" / "policy" / "real_money_arming.py"
     source = path.read_text(encoding="utf-8")
     assert "systemctl" not in source
     assert "subprocess" not in source
@@ -349,7 +349,7 @@ def test_the_arming_module_never_sets_real_money_or_starts_a_unit() -> None:
 
 
 def test_render_profile_writes_one_private_artifact(tmp_path: Path) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     credential = _filled_credential_env(tmp_path)
     output = tmp_path / "risk-policy.json"
@@ -372,7 +372,7 @@ def test_render_profile_writes_one_private_artifact(tmp_path: Path) -> None:
 
 
 def test_render_profile_refuses_to_clobber_without_being_told(tmp_path: Path) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     credential = _filled_credential_env(tmp_path)
     output = tmp_path / "risk-policy.json"
@@ -385,7 +385,7 @@ def test_render_profile_refuses_to_clobber_without_being_told(tmp_path: Path) ->
 
 
 def test_render_profile_is_a_dry_run_without_execute(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     credential = _filled_credential_env(tmp_path)
     assert main(["render-profile", "--from-env", str(credential)]) == 0
@@ -395,7 +395,7 @@ def test_render_profile_is_a_dry_run_without_execute(tmp_path: Path, capsys) -> 
 
 
 def test_the_owner_template_declares_disjoint_mainnet_roots() -> None:
-    from liquidity_migration.systemd_environment import parse_systemd_environment_bytes
+    from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
 
     values = parse_systemd_environment_bytes(OWNER_TEMPLATE.read_bytes(), label="owner")
     roots = [
@@ -451,7 +451,7 @@ def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
     profile exists produces a green report describing an envelope nothing enforces.
     """
 
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     installed = tmp_path / "risk-policy.json"
     stale = _filled_credential_env(
@@ -521,7 +521,7 @@ def test_preflight_checks_the_state_roots_exist(tmp_path: Path) -> None:
 def _no_installed_realm_envs(tmp_path: Path, monkeypatch) -> None:
     """Point the other-realm env files at absent paths so a VPS run stays hermetic."""
 
-    from liquidity_migration import real_money_arming
+    from liquidity_migration.policy import real_money_arming
 
     monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", tmp_path / "absent-demo.env")
     monkeypatch.setattr(real_money_arming, "PAPER_OWNER_ENV", tmp_path / "absent-paper.env")
@@ -543,7 +543,7 @@ def _owner_env_with_roots(tmp_path: Path, roots: Path, **overrides: str) -> Path
 
 
 def test_create_state_roots_dry_run_creates_nothing(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     owner = _owner_env_with_roots(tmp_path, roots)
@@ -557,7 +557,7 @@ def test_create_state_roots_dry_run_creates_nothing(tmp_path: Path, capsys) -> N
 
 
 def test_create_state_roots_creates_all_three_private(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     owner = _owner_env_with_roots(tmp_path, roots)
@@ -581,7 +581,7 @@ def test_create_state_roots_creates_the_capture_paths_own_parent(
 ) -> None:
     """The shipped template nests it in the capture root; a moved one still works."""
 
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     targets = roots / "targets"
@@ -603,7 +603,7 @@ def test_create_state_roots_handles_one_root_nested_in_another(
 ) -> None:
     """Creating the child materialises the parent; both are still declared roots."""
 
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     owner = _owner_env_with_roots(
@@ -622,7 +622,7 @@ def test_create_state_roots_handles_one_root_nested_in_another(
 
 
 def test_create_state_roots_is_idempotent(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     owner = _owner_env_with_roots(tmp_path, roots)
@@ -636,7 +636,7 @@ def test_create_state_roots_is_idempotent(tmp_path: Path, capsys) -> None:
 
 
 def test_create_state_roots_refuses_a_relative_root(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     owner = _owner_env_with_roots(
         tmp_path, tmp_path / "state", ACCOUNT_INTENT_INBOX_ROOT="var/inbox-mainnet"
@@ -650,7 +650,7 @@ def test_create_state_roots_refuses_a_relative_root(tmp_path: Path, capsys) -> N
 def test_create_state_roots_refuses_a_root_that_is_a_file(tmp_path: Path, capsys) -> None:
     """Never unlink: the owner is told, and the file stays exactly as it is."""
 
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     roots.mkdir()
@@ -668,8 +668,8 @@ def test_create_state_roots_refuses_a_root_under_the_demo_root(
 ) -> None:
     """A mainnet journal inside the demo tree would mix two realms' state."""
 
-    from liquidity_migration import real_money_arming
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy import real_money_arming
+    from liquidity_migration.policy.real_money_arming import main
 
     demo_root = tmp_path / "demo"
     demo_env = _env_file(
@@ -700,8 +700,8 @@ def test_create_state_roots_refuses_a_root_under_the_paper_root(
 ) -> None:
     """Paper roots live in their own env file; checking only the demo one misses them."""
 
-    from liquidity_migration import real_money_arming
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy import real_money_arming
+    from liquidity_migration.policy.real_money_arming import main
 
     paper_root = tmp_path / "paper"
     paper_env = _env_file(
@@ -727,8 +727,8 @@ def test_create_state_roots_resolves_before_comparing_realms(
 ) -> None:
     """A lexical compare misses a symlink or ``..`` that lands in the demo tree."""
 
-    from liquidity_migration import real_money_arming
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy import real_money_arming
+    from liquidity_migration.policy.real_money_arming import main
 
     demo_root = tmp_path / "demo"
     demo_root.mkdir()
@@ -761,7 +761,7 @@ def test_create_state_roots_accepts_a_root_that_is_a_symlinked_directory(
 ) -> None:
     """The preflight passes a symlinked root; refusing it here would deadlock arming."""
 
-    from liquidity_migration.real_money_arming import main, preflight
+    from liquidity_migration.policy.real_money_arming import main, preflight
 
     volume = tmp_path / "volume"
     volume.mkdir()
@@ -783,7 +783,7 @@ def test_create_state_roots_accepts_a_root_that_is_a_symlinked_directory(
 def test_create_state_roots_refuses_a_broken_symlinked_root(tmp_path: Path, capsys) -> None:
     """mkdir would raise FileExistsError on it; say what is actually wrong."""
 
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     roots = tmp_path / "state"
     roots.mkdir()
@@ -800,8 +800,8 @@ def test_create_state_roots_refuses_an_installed_but_unreadable_realm_env(
 ) -> None:
     """Silently skipping the realm check is how a mainnet root lands in the demo tree."""
 
-    from liquidity_migration import real_money_arming
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy import real_money_arming
+    from liquidity_migration.policy.real_money_arming import main
 
     demo_env = _env_file(tmp_path, "account-execution.env", "ACCOUNT_EXECUTION_ROOT=/demo\n")
     demo_env.chmod(0o000)
@@ -816,7 +816,7 @@ def test_create_state_roots_refuses_an_installed_but_unreadable_realm_env(
 
 
 def test_create_state_roots_reports_an_unreadable_owner_env(tmp_path: Path, capsys) -> None:
-    from liquidity_migration.real_money_arming import main
+    from liquidity_migration.policy.real_money_arming import main
 
     assert main(["create-state-roots", "--owner-env", str(tmp_path / "absent.env")]) == 2
     assert "does not exist" in capsys.readouterr().err

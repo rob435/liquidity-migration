@@ -21,7 +21,7 @@ import polars as pl
 from polars.testing import assert_frame_equal
 import pytest
 
-from liquidity_migration.daily_feature_panel import (
+from liquidity_migration.research.panels.daily_feature_panel import (
     FEATURE_REGISTRY,
     FeatureContext,
     _aggregate_daily_funding,
@@ -509,7 +509,7 @@ def test_autodetect_dataset_names_picks_binance_when_prefixed_subdirs_exist(tmp_
     funding/oi/premium-derived features and an all-NaN IC, so the autodetector picks
     the convention by sniffing which subdirs exist.
     """
-    from liquidity_migration.daily_feature_panel import _autodetect_dataset_names
+    from liquidity_migration.research.panels.daily_feature_panel import _autodetect_dataset_names
 
     # Bybit-shaped root: plain dataset dirs
     (tmp_path / "bybit_like" / "funding").mkdir(parents=True)

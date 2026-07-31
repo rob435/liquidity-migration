@@ -15,7 +15,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "research" / "render_continuous_admission_variants.py"
 
-from liquidity_migration.continuous_events import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_events import (  # noqa: E402
     ContinuousEventConfig,
     _funding_admission_filter,
 )

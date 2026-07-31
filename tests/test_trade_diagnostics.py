@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 import scripts.research.build_trade_diagnostics as diagnostic_script
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountEvent,
     AccountEventType,
     AccountExecutionKernel,
@@ -20,14 +20,14 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     read_account_journal,
 )
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.market_capture import (
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.market_capture import (
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
     capture_record_id,
 )
-from liquidity_migration.trade_diagnostics import (
+from liquidity_migration.research.execution.trade_diagnostics import (
     EXECUTION_DIAGNOSTIC_SCHEMA,
     TradeDiagnosticError,
     build_execution_diagnostics,

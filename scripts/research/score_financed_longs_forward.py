@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.financed_longs import config_scores  # noqa: E402
+from liquidity_migration.research.backtest.financed_longs import config_scores  # noqa: E402
 
 DEFAULT_PANEL_ROOT = Path.home() / "SHARED_DATA" / "cross_venue_panel_v1"
 DEFAULT_LEDGER = (

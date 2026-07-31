@@ -37,7 +37,7 @@ One harness, applied without variation:
 - Return is **price plus funding**, not price alone (§4.1 — this reversed a
   conclusion).
 - Reported per era, with the round-trip cost that would break the trade.
-- Scored through `liquidity_migration.cross_section`.
+- Scored through `liquidity_migration.research.panels.cross_section`.
 
 Costs use Bybit reference fees: **taker ~5.5 bp/side (11 bp round trip), maker
 ~2 bp/side (4 bp round trip)**. Convention is `1u long + 1u short`, i.e. one
@@ -463,7 +463,7 @@ clears t = 2.
 
 The committed configuration is
 `configs/lane2_premium_momentum_blend_v1.json`, executable as
-`liquidity_migration/lane2_blend.py`: daily, top-100 Bybit, 50/50
+`liquidity_migration/research/panels/lane2_blend.py`: daily, top-100 Bybit, 50/50
 premium + momentum-continuation, settlement-exact funding, 15% volatility target,
 **no dispersion gate**, **no Binance leg**, **no maturity filter**. Under
 `docs/governance.md` the commit is the registration; from that commit forward it
@@ -640,7 +640,7 @@ The operator's report — realised fees materially above model — is now measur
 rather than assumed. Source: the archived pre-reset demo journal
 (`ledger-reset-20260722T213413Z-owner-authorized-full-reset-20260722.tar.gz`),
 33,666 events, **85 fills**, 4,406.62 USDT notional, read through
-`liquidity_migration.account_kernel` on the VPS and analysed read-only.
+`liquidity_migration.account.account_kernel` on the VPS and analysed read-only.
 
 | | |
 | --- | ---: |
@@ -836,7 +836,7 @@ come back to you are precisely the ones that were about to go wrong. You save
 **Chase-then-cross is the right answer and it already exists.** The hybrid beats
 both immediate execution (31.30 vs 28.42) and today's cost basis (vs 23.86). The
 lever is the passive **fill rate**, not removing the fallback — which is exactly
-what arm B of the registered A/B (`liquidity_migration/passive_execution.py`)
+what arm B of the registered A/B (`liquidity_migration/runtime/passive_execution.py`)
 already implements at a 25% fill rate. Raise the rate; keep the cross.
 
 ### 15.2 Entries are only half the bill
@@ -933,7 +933,7 @@ The 24.12 bp is measured, not inferred: `−Σ cost_return / Σ|notional_weight|
    round-tripped over 3.3 years. Cheapness was read off a ratio when the
    denominator was the anomaly.
 
-**Change made.** `liquidity_migration.cross_section` now owns a single
+**Change made.** `liquidity_migration.research.panels.cross_section` now owns a single
 `MEASURED_ROUND_TRIP_BP = 15.56` with its provenance, plus
 `PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40`. `cross_section.summary` defaults `cost_bp`
 to the measured basis instead of `0.0`, so omitting the argument yields an honest
@@ -1719,14 +1719,14 @@ model.
 
 Discovery first: the roadmap's "measure passive execution" already has a
 registered in-flow A/B (arm B shipped in
-`liquidity_migration/passive_execution.py` on the paper owner; read thresholds
+`liquidity_migration/runtime/passive_execution.py` on the paper owner; read thresholds
 in `docs/research_findings.md` §1).
 That instrument is the right grader — hash-assigned arms on *real* entries at
 *signal* times — and it is slow for a measured reason: §16.3's realized-scale
 finding (~1 position on 38% of days) makes 100 fills/arm months of accrual.
 
 What was missing is a fast bound on the mechanism. Built this session:
-`scripts/research/probe_passive_fill_ab.py` + `liquidity_migration/passive_fill_probe.py`
+`scripts/research/probe_passive_fill_ab.py` + `liquidity_migration/research/execution/passive_fill_probe.py`
 (protocol pre-declared in the module docstring; 22 unit tests):
 
 - standalone, operator-run, demo-only, min-notional, sequential, mutation-lease

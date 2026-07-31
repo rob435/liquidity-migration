@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.account_reset_archive as reset_archive
-from liquidity_migration.account_reset_archive import (
+import liquidity_migration.ops.account_reset_archive as reset_archive
+from liquidity_migration.ops.account_reset_archive import (
     create_reset_archive,
     verify_reset_archive,
 )

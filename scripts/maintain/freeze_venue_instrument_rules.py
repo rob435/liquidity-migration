@@ -18,21 +18,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_private_credentials,
 )
-from liquidity_migration.logging_setup import ensure_default_log_handler  # noqa: E402
-from liquidity_migration.account_candidate_universe import (  # noqa: E402
+from liquidity_migration.core.logging_setup import ensure_default_log_handler  # noqa: E402
+from liquidity_migration.strategy.account_candidate_universe import (  # noqa: E402
     load_candidate_universe,
 )
-from liquidity_migration.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.venue_instrument_rules import (  # noqa: E402
+from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
+from liquidity_migration.venue.venue_instrument_rules import (  # noqa: E402
     build_venue_instrument_rules,
     candidate_symbol_source,
     render_venue_rules_artifact,
 )
-from liquidity_migration.venue_realm import (  # noqa: E402
+from liquidity_migration.core.venue_realm import (  # noqa: E402
     REALM_CREDENTIAL_VARIABLES,
     VenueRealm,
     venue_realm,

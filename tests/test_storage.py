@@ -13,9 +13,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration import storage
-from liquidity_migration.symbol_codec import encode_symbol_partition
-from liquidity_migration.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
+from liquidity_migration.data import storage
+from liquidity_migration.core.symbol_codec import encode_symbol_partition
+from liquidity_migration.data.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
 
 
 def _hold_exclusive_file_lock(path: str, acquired, release) -> None:
@@ -102,11 +102,11 @@ def test_unicode_symbol_partition_is_canonical_and_round_trips(tmp_path: Path) -
 
 
 def test_continuous_cycle_datasets_registered_and_roundtrip(tmp_path: Path) -> None:
-    from liquidity_migration.continuous_demo import (
+    from liquidity_migration.strategy.continuous_demo import (
         ContinuousDemoCycleConfig,
         continuous_cycles_dataset,
     )
-    from liquidity_migration.storage import DATASET_KEYS, DATASETS
+    from liquidity_migration.data.storage import DATASET_KEYS, DATASETS
 
     datasets = {
         continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="demo")),
@@ -203,7 +203,7 @@ def test_thread_lock_for_returns_same_lock_per_path() -> None:
     """The per-process thread-lock layer must return a stable Lock object per lock-path,
     or two threads on the same dataset grab different Locks and do not serialise.
     """
-    from liquidity_migration.storage import _thread_lock_for
+    from liquidity_migration.data.storage import _thread_lock_for
 
     path_a = Path("/tmp/sweep_test_thread_lock_a.lock")
     path_b = Path("/tmp/sweep_test_thread_lock_b.lock")
@@ -574,7 +574,7 @@ import os
 import select
 import threading
 
-from liquidity_migration.storage import exclusive_file_lock
+from liquidity_migration.data.storage import exclusive_file_lock
 
 lock_path = {str(lock_path)!r}
 read_fd, write_fd = os.pipe()
@@ -651,7 +651,7 @@ def test_concurrent_cycle_writers_do_not_lose_or_tear_rows(tmp_path: Path) -> No
     assert stored.height == writer_count * rows_per_writer
 
 
-from liquidity_migration.storage import _LEDGER_MONTH_COL  # noqa: E402
+from liquidity_migration.data.storage import _LEDGER_MONTH_COL  # noqa: E402
 
 _MS_PER_DAY = 86_400_000
 
@@ -729,7 +729,7 @@ def test_exclusive_file_lock_release_keeps_its_persistent_inode(tmp_path: Path) 
 def test_funding_resolves_to_binance_usdm_funding_without_symlink(tmp_path: Path) -> None:
     """A raw per-venue root that stores funding as binance_usdm_funding is read as
     canonical `funding` with no symlink/rename — read_dataset auto-resolves it."""
-    from liquidity_migration.storage import resolve_dataset_name
+    from liquidity_migration.data.storage import resolve_dataset_name
 
     rows = pl.DataFrame(
         {"ts_ms": [1, 2], "symbol": ["BTCUSDT", "ETHUSDT"], "funding_rate": [0.0001, -0.0002]}
@@ -746,7 +746,7 @@ def test_funding_resolves_to_binance_usdm_funding_without_symlink(tmp_path: Path
 def test_funding_canonical_takes_precedence_over_fallback(tmp_path: Path) -> None:
     """When a root has the canonical `funding` dir, it is used as-is (the fallback
     only fires when canonical is absent), so existing roots are unaffected."""
-    from liquidity_migration.storage import resolve_dataset_name
+    from liquidity_migration.data.storage import resolve_dataset_name
 
     canonical = pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.001]})
     write_dataset(canonical, tmp_path, "funding", partition_by=())
@@ -757,7 +757,7 @@ def test_funding_canonical_takes_precedence_over_fallback(tmp_path: Path) -> Non
 
 def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
     """No canonical and no venue-variant funding -> empty frame, name unchanged."""
-    from liquidity_migration.storage import resolve_dataset_name
+    from liquidity_migration.data.storage import resolve_dataset_name
 
     assert resolve_dataset_name(tmp_path, "funding") == "funding"
     assert read_dataset(tmp_path, "funding").is_empty()
@@ -765,7 +765,7 @@ def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
 
 # --- Funding-fallback gating, reused-pid stale singleton-lock eviction, orphaned
 # `.*.tmp` sweeping, and the parent-dir fsync after the atomic rename ---------
-from liquidity_migration.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
+from liquidity_migration.data.storage import resolve_dataset_name as _b10_resolve_dataset_name  # noqa: E402
 
 
 def test_canonical_klines_root_with_binance_variant_resolves_to_binance_funding(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from liquidity_migration.run_diagnostics import (
+from liquidity_migration.research.backtest.run_diagnostics import (
     diagnose,
     is_tainted,
     render,

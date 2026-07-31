@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
-from liquidity_migration._common import (
+from liquidity_migration.core._common import (
     MS_PER_DAY,
     calendar_roll,
     calendar_shift,

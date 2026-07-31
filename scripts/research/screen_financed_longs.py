@@ -3,7 +3,7 @@
 
 Runs the three committed configs (``lane2_carry_hold_v1``,
 ``lane2_financed_leaders_v1``, ``lane2_financed_leaders_binance_v1``) through
-``liquidity_migration.financed_longs`` on a cross-venue panel and prints the
+``liquidity_migration.research.backtest.financed_longs`` on a cross-venue panel and prints the
 full-sample and benchmark-window rows next to the deployed CONTINUOUS sl35
 render they were compared against.
 
@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.financed_longs import (  # noqa: E402
+from liquidity_migration.research.backtest.financed_longs import (  # noqa: E402
     CarryHoldConfig,
     FinancedLeadersConfig,
     btc_gate,

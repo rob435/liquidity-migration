@@ -12,9 +12,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-from liquidity_migration.account_kernel import read_account_journal
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.trade_diagnostics import (
+from liquidity_migration.account.account_kernel import read_account_journal
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.research.execution.trade_diagnostics import (
     build_execution_diagnostics,
     build_trade_diagnostic_manifest,
     load_post_fill_markouts,

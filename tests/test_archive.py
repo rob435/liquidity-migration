@@ -8,9 +8,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration import archive as archive_module
-from liquidity_migration import archive_manifest as manifest_module
-from liquidity_migration.archive import (
+from liquidity_migration.data import archive as archive_module
+from liquidity_migration.data import archive_manifest as manifest_module
+from liquidity_migration.data.archive import (
     ArchiveDownloadIncompleteError,
     ArchiveFileNotFoundError,
     download_archive_bytes,
@@ -18,7 +18,7 @@ from liquidity_migration.archive import (
     read_public_trade_archive,
     read_public_trade_archive_klines_1h,
 )
-from liquidity_migration.archive_manifest import (
+from liquidity_migration.data.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
     ArchiveHourlyKlineDownloadConfig,
     ArchiveManifestConfig,
@@ -28,10 +28,10 @@ from liquidity_migration.archive_manifest import (
     run_archive_hourly_klines_download,
     run_archive_manifest,
 )
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration import downloaders
-from liquidity_migration.downloaders import download_market_data
-from liquidity_migration.storage import read_dataset, write_dataset
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.data import downloaders
+from liquidity_migration.data.downloaders import download_market_data
+from liquidity_migration.data.storage import read_dataset, write_dataset
 
 
 def test_archive_hourly_kline_default_resumes_written_partitions() -> None:
@@ -812,14 +812,14 @@ def test_scalar_1h_fastpath_failure_is_logged_before_fallback(
     archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
 
     # Force the scalar fast path to blow up so the fallback fires.
-    import liquidity_migration.archive as am
+    import liquidity_migration.data.archive as am
 
     def boom(*_a, **_k):  # noqa: ANN002, ANN003
         raise RuntimeError("simulated scalar fast-path fault")
 
     monkeypatch.setattr(am, "_public_trade_text_handle", boom)
 
-    with caplog.at_level(logging.WARNING, logger="liquidity_migration.archive"):
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.data.archive"):
         result = read_public_trade_archive_klines_1h(archive)
 
     # correctness preserved: the slow aggregate path still produced the bar
@@ -842,7 +842,7 @@ def test_vectorized_1h_fastpath_failure_is_logged_before_fallback(
     )
     archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
 
-    import liquidity_migration.archive as am
+    import liquidity_migration.data.archive as am
 
     monkeypatch.setenv(am.ARCHIVE_VECTORIZE_1H_ENV, "1")
 
@@ -851,7 +851,7 @@ def test_vectorized_1h_fastpath_failure_is_logged_before_fallback(
 
     monkeypatch.setattr(am, "_read_public_trade_archive_klines_1h_vectorized", boom)
 
-    with caplog.at_level(logging.WARNING, logger="liquidity_migration.archive"):
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.data.archive"):
         result = read_public_trade_archive_klines_1h(archive)
 
     assert not result.is_empty()

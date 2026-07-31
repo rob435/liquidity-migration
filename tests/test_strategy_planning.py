@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from liquidity_migration import strategy_planning as planning
-from liquidity_migration.account_owner_health import AccountOwnerHealthHeadPending
+from liquidity_migration.strategy import strategy_planning as planning
+from liquidity_migration.account.account_owner_health import AccountOwnerHealthHeadPending
 
 
 def _route(tmp_path: Path) -> SimpleNamespace:

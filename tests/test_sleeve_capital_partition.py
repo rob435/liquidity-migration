@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_contracts import SleeveCapitalLimit
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_contracts import SleeveCapitalLimit
+from liquidity_migration.account.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountRiskPolicy,
@@ -26,8 +26,8 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     read_account_journal,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.operational_profile import load_operational_profile_bytes
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
 
 REPO = Path(__file__).resolve().parents[1]
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a repository script with a POSIX-only stdlib stub on Windows (research only).
 
-``liquidity_migration.storage`` and a few lock helpers import ``fcntl`` at module
+``liquidity_migration.data.storage`` and a few lock helpers import ``fcntl`` at module
 top, which Windows lacks. This wrapper installs no-op stubs into ``sys.modules``
 before running the target script in-process.
 
@@ -53,7 +53,7 @@ def ensure_posix_stubs() -> None:
 
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
-    from liquidity_migration import storage as storage_module
+    from liquidity_migration.data import storage as storage_module
 
     process_lock = threading.RLock()
 
@@ -66,7 +66,7 @@ def ensure_posix_stubs() -> None:
 
     # account_kernel fsyncs directory fds and fchmods its JSONL projection, both
     # POSIX-only. Swap in atomic-but-not-crash-durable writes; drop the projection.
-    from liquidity_migration import account_kernel as account_kernel_module
+    from liquidity_migration.account import account_kernel as account_kernel_module
 
     def _research_atomic_replace(path: Path, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +80,7 @@ def ensure_posix_stubs() -> None:
 
     # continuous_btc_risk fsyncs through O_RDONLY descriptors; Windows rejects
     # that with Errno 9.
-    from liquidity_migration import continuous_btc_risk as continuous_btc_risk_module
+    from liquidity_migration.research.backtest import continuous_btc_risk as continuous_btc_risk_module
 
     continuous_btc_risk_module._fsync_file = lambda path: None
     continuous_btc_risk_module._fsync_directory = lambda path: None
@@ -88,8 +88,8 @@ def ensure_posix_stubs() -> None:
     # artifact_snapshot.rename_noreplace fails closed off Linux/Darwin
     # (renameat2/renamex_np). Windows os.rename is natively no-replace, so the
     # substitute keeps the no-clobber semantics and drops only POSIX atomicity.
-    from liquidity_migration import account_route as account_route_module
-    from liquidity_migration import artifact_snapshot as artifact_snapshot_module
+    from liquidity_migration.account import account_route as account_route_module
+    from liquidity_migration.core import artifact_snapshot as artifact_snapshot_module
 
     def _research_rename_noreplace(
         source: "Path | str", destination: "Path | str", *, label: str

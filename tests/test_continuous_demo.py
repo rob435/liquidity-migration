@@ -15,21 +15,21 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.account_intent_client import (
+from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.account.account_intent_client import (
     AccountTargetPublisher,
     ExitFirstPublication,
     publish_exit_first_target_requests,
 )
-from liquidity_migration.account_route import (
+from liquidity_migration.account.account_route import (
     AccountRoute,
     AccountRouteMismatchError,
     ensure_account_route,
 )
-from liquidity_migration.account_service import SleeveAdapterKind
-from liquidity_migration.account_strategy_state import CanonicalReductionEvent
-from liquidity_migration.config import ResearchConfig
-from liquidity_migration.continuous_demo import (
+from liquidity_migration.account.account_service import SleeveAdapterKind
+from liquidity_migration.strategy.account_strategy_state import CanonicalReductionEvent
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.strategy.continuous_demo import (
     CONTINUOUS_DEMO_PROFILES,
     ContinuousDemoCycleConfig,
     LivePanelCache,
@@ -71,10 +71,10 @@ from liquidity_migration.continuous_demo import (
     run_continuous_demo_cycle,
     select_continuous_entries,
 )
-from liquidity_migration.continuous_cycle_status import read_continuous_cycle_status
-from liquidity_migration.continuous_events import compute_continuous_decile_panel
-from liquidity_migration.strategy_target_replay import PublishedTargetCyclePayload
-from liquidity_migration.venue_realm import VenueRealm
+from liquidity_migration.strategy.continuous_cycle_status import read_continuous_cycle_status
+from liquidity_migration.research.backtest.continuous_events import compute_continuous_decile_panel
+from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.core.venue_realm import VenueRealm
 
 
 def _synth(
@@ -1131,7 +1131,7 @@ def test_same_signal_entry_is_suppressed() -> None:
     )
     picks = [{"symbol": "WIFUSDT", "decile": 9, "composite": 1.0}]
 
-    from liquidity_migration.continuous_demo import _prior_continuous_signal_entries, _symbols_blocking_component
+    from liquidity_migration.strategy.continuous_demo import _prior_continuous_signal_entries, _symbols_blocking_component
 
     prior_entries = _prior_continuous_signal_entries(
         prior,
@@ -1389,8 +1389,8 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import liquidity_migration.continuous_demo as module
-    import liquidity_migration.strategy_planning as planning_module
+    import liquidity_migration.strategy.continuous_demo as module
+    import liquidity_migration.strategy.strategy_planning as planning_module
 
     route = _route(tmp_path / "route")
     candidate_path = (tmp_path / "candidate-universe.json").absolute()

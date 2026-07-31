@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_kernel as account_kernel_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.account.account_kernel as account_kernel_module
+from liquidity_migration.account.account_kernel import (
     AccountEventType,
     AccountExecutionKernel,
     AccountJournalCursor,
@@ -21,14 +21,14 @@ from liquidity_migration.account_kernel import (
     account_transactions_path,
     read_account_journal,
 )
-from liquidity_migration.account_strategy_state import (
+from liquidity_migration.strategy.account_strategy_state import (
     PROJECTION_EVENT_TYPES,
     canonical_account_projection,
     canonical_account_projection_from_digest,
     canonical_entry_attempts,
     canonical_strategy_trade_rows,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_runtime import VirtualClock
 
 from tests.test_account_kernel import (
     _market,
@@ -291,10 +291,10 @@ def test_every_cycle_runner_receives_a_resumable_cursor() -> None:
 
     import inspect
 
-    from liquidity_migration.carry_demo import CarryCycleState, run_carry_demo_cycle
-    from liquidity_migration.continuous_demo import run_continuous_demo_cycle
-    from liquidity_migration.long_native_event_demo import run_long_native_demo_cycle
-    from liquidity_migration.strategy_planning import new_planning_journal_cursor
+    from liquidity_migration.strategy.carry_demo import CarryCycleState, run_carry_demo_cycle
+    from liquidity_migration.strategy.continuous_demo import run_continuous_demo_cycle
+    from liquidity_migration.strategy.long_native_event_demo import run_long_native_demo_cycle
+    from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
 
     for runner in (run_long_native_demo_cycle, run_continuous_demo_cycle):
         assert "journal_cursor" in inspect.signature(runner).parameters, runner.__name__
@@ -308,7 +308,7 @@ def test_every_cycle_runner_receives_a_resumable_cursor() -> None:
 
 
 def test_subclass_cycle_kwargs_keep_the_base_cursor() -> None:
-    from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
+    from liquidity_migration.strategy.continuous_demo_daemon import ContinuousDemoDaemon
 
     # Bypass __init__: this pins the kwargs contract, not daemon construction.
     daemon = object.__new__(ContinuousDemoDaemon)

@@ -10,33 +10,33 @@ import pytest
 
 
 REPO = Path(__file__).resolve().parents[1]
-PUBLIC_MODULE = REPO / "liquidity_migration" / "bybit_market_data.py"
-PRIVATE_MODULE = REPO / "liquidity_migration" / "bybit.py"
-OWNER_ADAPTER_MODULE = REPO / "liquidity_migration" / "bybit_execution_adapter.py"
-OWNER_RUNNER_MODULE = REPO / "liquidity_migration" / "account_service_runner.py"
+PUBLIC_MODULE = REPO / "liquidity_migration" / "marketdata" / "bybit_market_data.py"
+PRIVATE_MODULE = REPO / "liquidity_migration" / "venue" / "bybit.py"
+OWNER_ADAPTER_MODULE = REPO / "liquidity_migration" / "venue" / "bybit_execution_adapter.py"
+OWNER_RUNNER_MODULE = REPO / "liquidity_migration" / "runtime" / "account_service_runner.py"
 ACTIVE_MARKET_DATA_PRODUCERS = (
-    "continuous_demo.py",
-    "continuous_demo_daemon.py",
-    "downloaders.py",
-    "event_demo_data.py",
-    "kline_stream_manager.py",
-    "long_native_event_demo.py",
-    "long_native_event_demo_daemon.py",
-    "universe.py",
+    "strategy/continuous_demo.py",
+    "strategy/continuous_demo_daemon.py",
+    "data/downloaders.py",
+    "strategy/event_demo_data.py",
+    "marketdata/kline_stream_manager.py",
+    "strategy/long_native_event_demo.py",
+    "strategy/long_native_event_demo_daemon.py",
+    "data/universe.py",
 )
 PUBLIC_PROCESS_MODULES = (
-    "liquidity_migration.bybit_market_data",
-    "liquidity_migration.execution_adapters",
-    "liquidity_migration.continuous_events",
-    "liquidity_migration.long_native",
-    "liquidity_migration.continuous_demo",
-    "liquidity_migration.continuous_demo_daemon",
-    "liquidity_migration.long_native_event_demo",
-    "liquidity_migration.long_native_event_demo_daemon",
+    "liquidity_migration.marketdata.bybit_market_data",
+    "liquidity_migration.account.execution_adapters",
+    "liquidity_migration.research.backtest.continuous_events",
+    "liquidity_migration.research.backtest.long_native",
+    "liquidity_migration.strategy.continuous_demo",
+    "liquidity_migration.strategy.continuous_demo_daemon",
+    "liquidity_migration.strategy.long_native_event_demo",
+    "liquidity_migration.strategy.long_native_event_demo_daemon",
 )
 NEUTRAL_ACCOUNT_MODULES = (
-    "liquidity_migration.account_execution_config",
-    "liquidity_migration.account_paper_runner",
+    "liquidity_migration.policy.account_execution_config",
+    "liquidity_migration.runtime.account_paper_runner",
 )
 
 
@@ -55,8 +55,8 @@ def test_public_market_data_module_has_no_private_account_surface() -> None:
     }
     referenced_names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
-    assert "account_owner_lease" not in imported_modules
-    assert "bybit" not in imported_modules
+    assert "liquidity_migration.account.account_owner_lease" not in imported_modules
+    assert "liquidity_migration.venue.bybit" not in imported_modules
     assert "BybitPrivateClient" not in class_names
     assert "BybitPrivateWebSocketStream" not in class_names
     assert not {
@@ -85,16 +85,16 @@ def test_active_market_data_producers_import_the_public_plane_directly() -> None
             for node in ast.walk(_tree(path))
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
-        assert "bybit_market_data" in imports, filename
-        assert "bybit" not in imports, filename
+        assert "liquidity_migration.marketdata.bybit_market_data" in imports, filename
+        assert "liquidity_migration.venue.bybit" not in imports, filename
 
 
 @pytest.mark.parametrize("module", PUBLIC_PROCESS_MODULES)
 def test_public_and_target_modules_do_not_transitively_load_private_execution(module: str) -> None:
     forbidden = (
-        "liquidity_migration.bybit",
-        "liquidity_migration.account_owner_lease",
-        "liquidity_migration.bybit_execution_adapter",
+        "liquidity_migration.venue.bybit",
+        "liquidity_migration.account.account_owner_lease",
+        "liquidity_migration.venue.bybit_execution_adapter",
     )
     code = (
         "import importlib, sys; "
@@ -116,9 +116,9 @@ def test_public_and_target_modules_do_not_transitively_load_private_execution(mo
 @pytest.mark.parametrize("module", NEUTRAL_ACCOUNT_MODULES)
 def test_paper_and_shared_config_do_not_load_demo_owner(module: str) -> None:
     forbidden = (
-        "liquidity_migration.bybit",
-        "liquidity_migration.bybit_execution_adapter",
-        "liquidity_migration.account_service_runner",
+        "liquidity_migration.venue.bybit",
+        "liquidity_migration.venue.bybit_execution_adapter",
+        "liquidity_migration.runtime.account_service_runner",
     )
     code = (
         "import importlib, sys; "
@@ -138,7 +138,7 @@ def test_paper_and_shared_config_do_not_load_demo_owner(module: str) -> None:
 
 
 def test_private_bybit_module_does_not_export_public_market_data() -> None:
-    private = importlib.import_module("liquidity_migration.bybit")
+    private = importlib.import_module("liquidity_migration.venue.bybit")
     public_names = {
         "INTERVAL_MS",
         "BybitKlineStreamPool",
@@ -155,10 +155,10 @@ def test_demo_owner_reaches_only_the_owner_adapter_with_a_leased_private_client(
     runner_imports = {
         node.module for node in ast.walk(runner_tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     }
-    assert "bybit_execution_adapter" in runner_imports
+    assert "liquidity_migration.venue.bybit_execution_adapter" in runner_imports
     assert not any(
         isinstance(node, ast.ImportFrom)
-        and node.module == "execution_adapters"
+        and node.module == "liquidity_migration.account.execution_adapters"
         and any(alias.name == "BybitDemoExecutionAdapter" for alias in node.names)
         for node in ast.walk(runner_tree)
     )
@@ -196,14 +196,14 @@ def test_demo_owner_reaches_only_the_owner_adapter_with_a_leased_private_client(
         for node in ast.walk(adapter_tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert "bybit_errors" in adapter_imports
-    assert "bybit" not in adapter_imports
+    assert "liquidity_migration.marketdata.bybit_errors" in adapter_imports
+    assert "liquidity_migration.venue.bybit" not in adapter_imports
     assert {"place_order", "set_leverage"}.issubset(adapter_calls)
 
     private_tree = _tree(PRIVATE_MODULE)
     assert any(
         isinstance(node, ast.ImportFrom)
-        and node.module == "account_owner_lease"
+        and node.module == "liquidity_migration.account.account_owner_lease"
         and any(alias.name == "DemoAccountMutationLease" for alias in node.names)
         for node in ast.walk(private_tree)
     )

@@ -756,13 +756,13 @@ def test_remote_deploy_entrypoint_serializes_every_mode() -> None:
         deploy.index("acquire_maintenance_locks()"),
     ) < deploy.rindex('case "$MODE" in')
     transmission = deploy[: deploy.index("read -r -a SSH_ARGS")]
-    assert '"$EXPECTED_COMMIT:liquidity_migration/maintenance_lock.py"' in transmission
+    assert '"$EXPECTED_COMMIT:liquidity_migration/ops/maintenance_lock.py"' in transmission
     assert '/usr/bin/git --no-pager --git-dir="$LOCAL_REPOSITORY/.git"' in transmission
     assert 'cat-file -t "$EXPECTED_COMMIT"' in transmission
     assert "GIT_NO_REPLACE_OBJECTS=1" in transmission
     assert "EXPECTED_COMMIT is not a local commit object" in transmission
     assert "MAINTENANCE_LOCK_HELPER_B64" in transmission
-    assert "../liquidity_migration/maintenance_lock.py" not in transmission
+    assert "../liquidity_migration/ops/maintenance_lock.py" not in transmission
     remote = deploy[deploy.index("set -Eeuo pipefail", deploy.index("cat <<'REMOTE_SCRIPT'")) :]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH" in remote[:200]
     assert "GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1" in remote
@@ -1046,7 +1046,7 @@ def test_mainnet_activation_creates_roots_then_gates_on_preflight() -> None:
     )
     combined = started.stdout + started.stderr
     assert started.returncode == 0, combined
-    assert "python:-m liquidity_migration.real_money_arming create-state-roots --execute" in combined
+    assert "python:-m liquidity_migration.policy.real_money_arming create-state-roots --execute" in combined
     assert combined.index("create-state-roots") < combined.index("preflight")
     assert (
         "systemctl:enable liquidity-migration-account-execution-mainnet.service" in combined

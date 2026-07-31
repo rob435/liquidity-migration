@@ -39,11 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import polars as pl  # noqa: E402
 
-from liquidity_migration.continuous_component_sources import (  # noqa: E402
+from liquidity_migration.strategy.continuous_component_sources import (  # noqa: E402
     ContinuousComponentSource,
     load_continuous_component_source,
 )
-from liquidity_migration.continuous_profile import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_profile import (  # noqa: E402
     ACTIVE_CONTINUOUS_COMPONENT_BY_KEY,
     CONTINUOUS_EQUITY_EVIDENCE_LABEL,
     CONTINUOUS_HISTORICAL_RUN_LABEL,
@@ -52,7 +52,7 @@ from liquidity_migration.continuous_profile import (  # noqa: E402
     CONTINUOUS_PROFILE_REVISION,
     ACTIVE_CONTINUOUS_CONFIG,
 )
-from liquidity_migration.continuous_rebalance import (  # noqa: E402
+from liquidity_migration.research.backtest.continuous_rebalance import (  # noqa: E402
     ContinuousHedgeRule,
     combine_continuous_components,
     compute_hedge_betas_2f,

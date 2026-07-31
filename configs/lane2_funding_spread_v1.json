@@ -44,7 +44,7 @@
     "grid": "none; single committed configuration",
     "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
     "eligibility": "only days strictly after the registration commit date count as forward evidence",
-    "reproduce_with": "liquidity_migration.financed_longs.score_funding_spread(panel, FundingSpreadConfig.from_json(this_file))"
+    "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_funding_spread(panel, FundingSpreadConfig.from_json(this_file))"
   },
   "measured_at_registration": {
     "basis": "CORRECTED settlement-exact scorer, module path, panel 2021-01-01..2026-07-28 (seen data; Lane-1 selection, not evidence)",

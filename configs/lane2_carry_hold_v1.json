@@ -36,7 +36,7 @@
     "charging": "measured one-way turnover x fee per side, per day (mean one-way turnover 0.35 units/day, i.e. ~2.7 bp/day), NOT a flat round trip per period",
     "funding": "settlement_exact",
     "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"],
-    "provenance": "7.78 bp/side measured 2026-07-25 from 85 forward demo fills (all taker); see liquidity_migration.cross_section.MEASURED_ROUND_TRIP_BP"
+    "provenance": "7.78 bp/side measured 2026-07-25 from 85 forward demo fills (all taker); see liquidity_migration.research.panels.cross_section.MEASURED_ROUND_TRIP_BP"
   },
   "scoring_recipe": {
     "metric": "mean net bp per day, and annualised Sharpe on raw and vol-targeted daily series",
@@ -45,7 +45,7 @@
     "grid": "none; single committed configuration",
     "cadence": "one row per completed UTC day after the registration commit",
     "eligibility": "only days strictly after the registration commit date count as forward evidence",
-    "reproduce_with": "liquidity_migration.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
+    "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },
   "measured_at_registration": {
     "window": "2021-01-01 to 2026-07-18",

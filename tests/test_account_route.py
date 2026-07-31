@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_route as account_route_module
-from liquidity_migration.account_route import (
+import liquidity_migration.account.account_route as account_route_module
+from liquidity_migration.account.account_route import (
     ACCOUNT_ROUTE_FILENAME,
     AccountRouteConfigurationError,
     AccountRouteCutoverRequiredError,
@@ -23,7 +23,7 @@ from liquidity_migration.account_route import (
     read_account_route_manifest,
     require_account_route,
 )
-from liquidity_migration.deterministic_serialization import canonical_json
+from liquidity_migration.core.deterministic_serialization import canonical_json
 
 
 def _route_paths(account_root: Path, inbox_root: Path) -> tuple[Path, Path]:
@@ -57,7 +57,7 @@ def test_owner_acquires_lease_before_route_initialization(
     calls: list[str] = []
 
     if runner_name == "demo":
-        import liquidity_migration.account_service_runner as runner
+        import liquidity_migration.runtime.account_service_runner as runner
 
         argv = [
             "--account-root",
@@ -108,7 +108,7 @@ def test_owner_acquires_lease_before_route_initialization(
             "AccountIntentInbox",
         )
     else:
-        import liquidity_migration.account_paper_runner as runner
+        import liquidity_migration.runtime.account_paper_runner as runner
 
         argv = [
             "--account-root",
@@ -196,7 +196,7 @@ def test_paper_owner_rejects_private_credentials_before_route_or_resources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import liquidity_migration.account_paper_runner as runner
+    import liquidity_migration.runtime.account_paper_runner as runner
 
     monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
     monkeypatch.setenv("REAL_MONEY", "false")

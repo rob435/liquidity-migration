@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -16,25 +16,25 @@ from liquidity_migration.account_kernel import (
     MarketInputRef,
     NativeDisasterProtectionPolicy,
 )
-from liquidity_migration.account_reconcile import BybitAccountReconciler
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.account_service import (
+from liquidity_migration.venue.account_reconcile import BybitAccountReconciler
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.account.account_service import (
     AccountExecutionService,
     AccountIntentInbox,
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
 )
-from liquidity_migration.account_intent_client import completed_expired_entry_attempt_keys
-from liquidity_migration.account_strategy_state import (
+from liquidity_migration.account.account_intent_client import completed_expired_entry_attempt_keys
+from liquidity_migration.strategy.account_strategy_state import (
     canonical_strategy_trade_rows,
     target_reservation_rows,
 )
-from liquidity_migration.bybit_errors import BybitSubmissionUncertain
-from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.marketdata.bybit_errors import BybitSubmissionUncertain
+from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.account.execution_adapters import (
     AmbiguousExposureSubmission,
     BookLevel,
     ExecutionObservation,
@@ -44,11 +44,11 @@ from liquidity_migration.execution_adapters import (
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
-from liquidity_migration.market_capture import MarketCaptureError
-from liquidity_migration.protection_engine import AccountProtectionEngine
-from liquidity_migration.strategy_runtime import SleeveTargetIntent
-from liquidity_migration.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
-from liquidity_migration.venue_protection import (
+from liquidity_migration.account.market_capture import MarketCaptureError
+from liquidity_migration.venue.protection_engine import AccountProtectionEngine
+from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.account.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
+from liquidity_migration.venue.venue_protection import (
     NativeProtectionBreach,
     NativeProtectionPlan,
 )

@@ -4,16 +4,16 @@ import json
 
 import pytest
 
-from liquidity_migration.account_intent_client import (
+from liquidity_migration.account.account_intent_client import (
     AccountTargetPublisher,
     component_target_key,
     publish_exit_first_target_requests,
     requested_target,
     unresolved_target_snapshot,
 )
-from liquidity_migration.account_service import AccountIntentInbox, SleeveAdapterKind
-from liquidity_migration.account_route import AccountRoute, ensure_account_route
-from liquidity_migration.strategy_targets import component_target_intent
+from liquidity_migration.account.account_service import AccountIntentInbox, SleeveAdapterKind
+from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
+from liquidity_migration.account.strategy_targets import component_target_intent
 
 
 def _route(tmp_path) -> AccountRoute:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from liquidity_migration.deterministic_serialization import canonical_json, json_safe
+from liquidity_migration.core.deterministic_serialization import canonical_json, json_safe
 
 
 class _Scalar:

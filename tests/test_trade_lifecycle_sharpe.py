@@ -8,9 +8,9 @@ import math
 
 import polars as pl
 
-from liquidity_migration._common import MS_PER_DAY
-from liquidity_migration.config import TradeLifecycleConfig
-from liquidity_migration.trade_lifecycle import (
+from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.core.config import TradeLifecycleConfig
+from liquidity_migration.data.trade_lifecycle import (
     _daily_sharpe,
     annualized_sharpe,
     build_equity_curve,

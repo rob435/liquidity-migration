@@ -11,7 +11,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.residual_momentum import inspect_gate  # noqa: E402
+from liquidity_migration.research.panels.residual_momentum import inspect_gate  # noqa: E402
 
 
 def main() -> int:

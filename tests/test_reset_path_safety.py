@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration import reset_path_safety as safety
-from liquidity_migration.reset_path_safety import (
+from liquidity_migration.ops import reset_path_safety as safety
+from liquidity_migration.ops.reset_path_safety import (
     normalize_demo_runtime_roots,
     normalize_paper_runtime_roots,
     preflight_demo_runtime_roots,

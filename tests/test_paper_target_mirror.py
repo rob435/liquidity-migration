@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.account_service import (
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.account.account_service import (
     AccountIntentInbox,
     AccountTargetRequest,
     RequestedIntent,
 )
-from liquidity_migration.paper_target_mirror import (
+from liquidity_migration.runtime.paper_target_mirror import (
     PaperTargetMirror,
     PaperTargetMirrorError,
     mirror_request,
     mirrored_request_id,
 )
-from liquidity_migration.strategy_event_clock import StrategyEvent
-from liquidity_migration.strategy_runtime import SleeveTargetIntent
-from liquidity_migration.strategy_target_replay import (
+from liquidity_migration.account.strategy_event_clock import StrategyEvent
+from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.strategy.strategy_target_replay import (
     CAPTURE_KIND,
     CAPTURE_SCHEMA_VERSION,
     CapturedTargetRequest,
@@ -30,7 +30,7 @@ from liquidity_migration.strategy_target_replay import (
     _CAPTURE_GENESIS_HASH,
     _decision_keys_from_requests,
 )
-from liquidity_migration.deterministic_serialization import canonical_json
+from liquidity_migration.core.deterministic_serialization import canonical_json
 
 TS = 1_785_400_000_000_000_000
 

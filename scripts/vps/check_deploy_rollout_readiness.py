@@ -14,15 +14,15 @@ from typing import Any, Mapping
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from liquidity_migration.account_contracts import AccountEventType  # noqa: E402
-from liquidity_migration.account_kernel import (  # noqa: E402
+from liquidity_migration.account.account_contracts import AccountEventType  # noqa: E402
+from liquidity_migration.account.account_kernel import (  # noqa: E402
     read_account_journal,
     reduce_account_events,
 )
-from liquidity_migration.account_owner_health import (  # noqa: E402
+from liquidity_migration.account.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
-from liquidity_migration.bybit import (  # noqa: E402
+from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_demo_credentials,
 )

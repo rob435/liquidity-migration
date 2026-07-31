@@ -10,9 +10,9 @@ import polars as pl
 import pytest
 
 import scripts.runtime.run_continuous_hedge as hedge_runner
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.continuous_hedge_manager import HedgeDecision2F, HedgeModelPrior
-from liquidity_migration.continuous_rebalance import ContinuousRebalanceResizePlan
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.strategy.continuous_hedge_manager import HedgeDecision2F, HedgeModelPrior
+from liquidity_migration.research.backtest.continuous_rebalance import ContinuousRebalanceResizePlan
 
 
 OPERATIONAL_PROFILE = Path(__file__).resolve().parents[1] / "configs" / "operational.demo.json"

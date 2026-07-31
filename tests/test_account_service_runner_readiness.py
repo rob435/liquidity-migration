@@ -6,27 +6,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from liquidity_migration.account_reconcile import AccountReconciliationReport
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.account_service import (
+from liquidity_migration.venue.account_reconcile import AccountReconciliationReport
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.account.account_service import (
     AccountIntentInbox,
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
 )
-from liquidity_migration.account_market_readiness import (
+from liquidity_migration.account.account_market_readiness import (
     RequestedMarketReadiness,
     RequestedMarketWarmupGate,
     run_ready_request_or_converge,
 )
-from liquidity_migration.account_service_runner import (
+from liquidity_migration.runtime.account_service_runner import (
     account_has_open_exposure,
     degrade_or_raise,
     require_startup_reconciliation_safe,
 )
-from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
-from liquidity_migration.market_capture import operational_market_symbols
-from liquidity_migration.strategy_runtime import SleeveTargetIntent
+from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
+from liquidity_migration.account.market_capture import operational_market_symbols
+from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 
 
 class _Recorder:
@@ -583,8 +583,7 @@ def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
 
     source = (
         Path(__file__).resolve().parents[1]
-        / "liquidity_migration"
-        / "account_service_runner.py"
+        / "liquidity_migration" / "runtime" / "account_service_runner.py"
     ).read_text(encoding="utf-8")
     for stage in (
         '"venue order ownership"',
@@ -613,7 +612,7 @@ def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
 
 def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
     repo = Path(__file__).resolve().parents[1]
-    for filename in ("account_service_runner.py", "account_paper_runner.py"):
+    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
         source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
         assert "RequestedMarketWarmupGate" in source
         assert "run_ready_request_or_converge(" in source
@@ -624,7 +623,7 @@ def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
 
 def test_demo_and_paper_validate_registered_startup_bounds_before_owner_identity() -> None:
     repo = Path(__file__).resolve().parents[1]
-    for filename in ("account_service_runner.py", "account_paper_runner.py"):
+    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
         source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
         main = source[source.index("def main(") :]
         assert main.index("require_registered_demo_rule_max_age_hours(") < main.index("require_systemd_invocation_id()")
@@ -635,7 +634,7 @@ def test_demo_and_paper_validate_registered_startup_bounds_before_owner_identity
 
 def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> None:
     repo = Path(__file__).resolve().parents[1]
-    for filename in ("account_service_runner.py", "account_paper_runner.py"):
+    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
         source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
         tree = ast.parse(source)
         recorder_calls = [
@@ -657,7 +656,7 @@ def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> N
 
 def test_demo_owner_supervises_private_execution_stream_before_admission() -> None:
     repo = Path(__file__).resolve().parents[1]
-    source = (repo / "liquidity_migration" / "account_service_runner.py").read_text(encoding="utf-8")
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
     loop = source[source.index("        while True:") :]
     health_chain = source[
         source.index("health_chain = AccountHealthChain(") : source.index(
@@ -687,8 +686,8 @@ def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
     other handler between it and process exit.
     """
 
-    from liquidity_migration.account_service_runner import protection_market_refs
-    from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
+    from liquidity_migration.runtime.account_service_runner import protection_market_refs
+    from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
 
     healthy = L2BookSnapshot(
         symbol="BTCUSDT",
@@ -726,7 +725,7 @@ def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
 
 
 def _protection_book(symbol: str, local_receive_ts_ns: int):
-    from liquidity_migration.execution_adapters import BookLevel, L2BookSnapshot
+    from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
 
     return L2BookSnapshot(
         symbol=symbol,
@@ -747,7 +746,7 @@ def test_protection_market_refs_rejects_a_frozen_book() -> None:
     passes every structural check, so it must be rejected on staleness.
     """
 
-    from liquidity_migration.account_service_runner import (
+    from liquidity_migration.runtime.account_service_runner import (
         PROTECTION_MAX_BOOK_AGE_NS,
         protection_market_refs,
     )
@@ -769,7 +768,7 @@ def test_protection_market_refs_rejects_a_frozen_book() -> None:
 
 
 def test_protection_market_refs_accepts_a_book_inside_the_bound() -> None:
-    from liquidity_migration.account_service_runner import (
+    from liquidity_migration.runtime.account_service_runner import (
         PROTECTION_MAX_BOOK_AGE_NS,
         protection_market_refs,
     )
@@ -790,7 +789,7 @@ def test_protection_market_refs_treats_a_backwards_clock_as_unusable() -> None:
     wall-clock regression rather than a read/update race, and fails closed.
     """
 
-    from liquidity_migration.account_service_runner import protection_market_refs
+    from liquidity_migration.runtime.account_service_runner import protection_market_refs
 
     book = _protection_book("BTCUSDT", 5_000_000_000_000)
 
@@ -806,7 +805,7 @@ def test_protection_market_refs_treats_a_backwards_clock_as_unusable() -> None:
 def test_periodic_reconciliation_survives_transient_venue_read_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from liquidity_migration.account_service_runner import run_periodic_reconciliation
+    from liquidity_migration.runtime.account_service_runner import run_periodic_reconciliation
 
     class TimeoutReconciler:
         def reconcile_once(self):
@@ -818,7 +817,7 @@ def test_periodic_reconciliation_survives_transient_venue_read_failure(
         def reconcile_once(self):
             return object()
 
-    with caplog.at_level("ERROR", logger="liquidity_migration.account_service_runner"):
+    with caplog.at_level("ERROR", logger="liquidity_migration.runtime.account_service_runner"):
         report, funding_report = run_periodic_reconciliation(
             reconciler=TimeoutReconciler(),  # type: ignore[arg-type]
             funding_reconciler=HealthyFundingReconciler(),  # type: ignore[arg-type]

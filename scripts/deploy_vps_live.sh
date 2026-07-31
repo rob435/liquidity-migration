@@ -76,7 +76,7 @@ if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" !
 fi
 if ! MAINTENANCE_LOCK_HELPER_B64="$(
     "${LOCAL_GIT[@]}" show \
-        "$EXPECTED_COMMIT:liquidity_migration/maintenance_lock.py" \
+        "$EXPECTED_COMMIT:liquidity_migration/ops/maintenance_lock.py" \
     | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
 )"; then
     echo "expected commit does not contain the maintenance lock helper: $EXPECTED_COMMIT" >&2
@@ -364,7 +364,7 @@ prepare_paper_runtime_boundary() {
         || fail "missing tracked operational profile: $operational_profile_source"
     "$PYTHON" - "$operational_profile_source" <<'PY'
 import sys
-from liquidity_migration.operational_profile import load_operational_profile
+from liquidity_migration.policy.operational_profile import load_operational_profile
 
 load_operational_profile(sys.argv[1])
 PY
@@ -373,7 +373,7 @@ PY
     install -o root -g root -m 0600 "$operational_profile_source" "$demo_risk"
     "$PYTHON" - "$demo_risk" <<'PY'
 import sys
-from liquidity_migration.operational_profile import load_operational_profile
+from liquidity_migration.policy.operational_profile import load_operational_profile
 
 load_operational_profile(sys.argv[1])
 PY
@@ -385,8 +385,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from liquidity_migration.account_candidate_universe import load_candidate_universe
-from liquidity_migration.systemd_environment import load_private_systemd_environment
+from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
 
 path = Path(sys.argv[1])
 symbols = str(Path(sys.argv[2]))
@@ -419,7 +419,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from liquidity_migration.systemd_environment import load_private_systemd_environment
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
 
 path = Path(sys.argv[1])
 target_capture = Path(sys.argv[2])
@@ -476,8 +476,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from liquidity_migration.operational_profile import load_operational_profile
-from liquidity_migration.systemd_environment import (
+from liquidity_migration.policy.operational_profile import load_operational_profile
+from liquidity_migration.policy.systemd_environment import (
     load_private_systemd_environment,
 )
 
@@ -571,23 +571,23 @@ PY
         paper_path_args+=(--root "$root")
     done
     paper_tree_preflight_phase() {
-        "$PYTHON" -m liquidity_migration.reset_path_safety preflight-paper \
+        "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-paper \
             --anchor "$REPO_DIR/data" "${paper_path_args[@]}"
     }
     demo_tree_preflight_phase() {
-        "$PYTHON" -m liquidity_migration.reset_path_safety preflight-demo \
+        "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
             --root "$CARRY_DEMO_ROOT" \
             --continuous-root "$CONTINUOUS_DEMO_ROOT"
     }
     paper_tree_normalize_phase() {
-        "$PYTHON" -m liquidity_migration.reset_path_safety normalize-paper \
+        "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-paper \
             --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
             --uid "$paper_uid" --gid "$paper_gid" --create-missing
     }
     demo_tree_normalize_phase() {
-        "$PYTHON" -m liquidity_migration.reset_path_safety normalize-demo \
+        "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
             --root "$CARRY_DEMO_ROOT" \
@@ -810,7 +810,7 @@ refresh_stale_demo_rules_if_requested() {
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     if "$PYTHON" - "$demo_rules" <<'PY'
 import sys
-from liquidity_migration.candidate_rule_coverage import (
+from liquidity_migration.ops.candidate_rule_coverage import (
     REGISTERED_MAX_RULE_AGE_SECONDS,
     REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
     classify_demo_rule_receipt_freshness,
@@ -846,7 +846,7 @@ PY
     "$PYTHON" - "$ACCOUNT_SYMBOLS_FILE" <<'PY' || candidate_readable=0
 import sys
 
-from liquidity_migration.account_candidate_universe import load_candidate_universe
+from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
 
 load_candidate_universe(sys.argv[1])
 PY
@@ -936,11 +936,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from liquidity_migration.account_execution_config import load_demo_rules
-from liquidity_migration.account_candidate_universe import load_candidate_universe
-from liquidity_migration.candidate_rule_coverage import build_candidate_rule_coverage
-from liquidity_migration.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
-from liquidity_migration.systemd_environment import load_private_systemd_environment
+from liquidity_migration.policy.account_execution_config import load_demo_rules
+from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
+from liquidity_migration.ops.candidate_rule_coverage import build_candidate_rule_coverage
+from liquidity_migration.ops.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
 
 path = Path(sys.argv[1])
 rules = Path(sys.argv[2]).resolve(strict=True)
@@ -1048,8 +1048,8 @@ install_mode() {
         hedge_open="$(ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT" "$PYTHON" - <<'PY' 2>/dev/null || echo unknown
 import os
 from pathlib import Path
-from liquidity_migration.account_service import SleeveAdapterKind
-from liquidity_migration.account_strategy_state import canonical_strategy_trade_rows
+from liquidity_migration.account.account_service import SleeveAdapterKind
+from liquidity_migration.strategy.account_strategy_state import canonical_strategy_trade_rows
 
 try:
     rows = canonical_strategy_trade_rows(
@@ -1428,7 +1428,7 @@ MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
 MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
 
 ensure_mainnet_state_roots() {
-    "$PYTHON" -m liquidity_migration.real_money_arming create-state-roots --execute \
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming create-state-roots --execute \
         || fail "mainnet state root creation failed"
 }
 
@@ -1436,7 +1436,7 @@ ensure_mainnet_state_roots() {
 # precondition is reported, and any one of them outstanding stops the deploy.
 require_mainnet_preflight() {
     local report status=0
-    report="$("$PYTHON" -m liquidity_migration.real_money_arming preflight 2>&1)" || status=$?
+    report="$("$PYTHON" -m liquidity_migration.policy.real_money_arming preflight 2>&1)" || status=$?
     printf '%s\n' "$report"
     [ "$status" -eq 0 ] || fail "mainnet preflight has outstanding steps (status $status)"
 }

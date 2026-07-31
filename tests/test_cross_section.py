@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration.cross_section import (
+from liquidity_migration.research.panels.cross_section import (
     MEASURED_ROUND_TRIP_BP,
     PASSIVE_FLOOR_ROUND_TRIP_BP,
     CrossSectionError,

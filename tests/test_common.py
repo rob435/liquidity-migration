@@ -1,11 +1,11 @@
-"""Unit tests for liquidity_migration._common shared coercion helpers."""
+"""Unit tests for liquidity_migration.core._common shared coercion helpers."""
 
 from __future__ import annotations
 
 
 def test_coerce_int_matches_legacy_int_helper_behaviour() -> None:
     """The shared helper accepts integer-like values and falls back safely."""
-    from liquidity_migration._common import coerce_int
+    from liquidity_migration.core._common import coerce_int
 
     cases = ["5", 5, 5.9, "  7  ", None, "", "abc", [], {}]
     for value in cases:

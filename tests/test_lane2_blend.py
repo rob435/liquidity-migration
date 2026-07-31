@@ -11,8 +11,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration.cross_section import MEASURED_ROUND_TRIP_BP
-from liquidity_migration.lane2_blend import (
+from liquidity_migration.research.panels.cross_section import MEASURED_ROUND_TRIP_BP
+from liquidity_migration.research.panels.lane2_blend import (
     HOUR_MS,
     BlendConfig,
     daily_book,
@@ -113,7 +113,7 @@ class TestFundingCausality:
         0.9999999999999999, not 1.0, so an ``age < 1.0`` predicate counts that bar as a
         second settlement and charges every 8h/4h/2h print twice.
         """
-        from liquidity_migration.lane2_blend import settlement_exact_funding
+        from liquidity_migration.research.panels.lane2_blend import settlement_exact_funding
 
         cycle = [
             0.0, 0.9999999999999999, 1.9999999999999998, 3.0,

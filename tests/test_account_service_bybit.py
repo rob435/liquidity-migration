@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.account_service_runner as account_service_runner_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.runtime.account_service_runner as account_service_runner_module
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountState,
     InstrumentRules,
@@ -16,8 +16,8 @@ from liquidity_migration.account_kernel import (
     OrderCommand,
     OrderState,
 )
-from liquidity_migration.account_execution_config import load_demo_rules, load_risk_policy
-from liquidity_migration.account_service_bybit import (
+from liquidity_migration.policy.account_execution_config import load_demo_rules, load_risk_policy
+from liquidity_migration.venue.account_service_bybit import (
     BybitAccountSnapshotProvider,
     CapturedBybitMarketProvider,
     CapturedPaperExecutionAdapter,
@@ -26,23 +26,23 @@ from liquidity_migration.account_service_bybit import (
     instrument_rules_from_bybit_row,
     require_bybit_order_ownership,
 )
-from liquidity_migration.account_reconcile import (
+from liquidity_migration.venue.account_reconcile import (
     BybitAccountFundingReconciler,
     BybitAccountReconciler,
 )
-from liquidity_migration.account_service_runner import (
+from liquidity_migration.runtime.account_service_runner import (
     require_order_submit_permission,
     require_startup_reconciliation_safe,
 )
-from liquidity_migration.bybit_execution_adapter import BybitDemoExecutionAdapter
-from liquidity_migration.venue_protection import BybitNativeProtectionManager
-from liquidity_migration.account_paper_runner import (
+from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
+from liquidity_migration.venue.venue_protection import BybitNativeProtectionManager
+from liquidity_migration.runtime.account_paper_runner import (
     PAPER_EXECUTION_BOOK_DEPTH,
     PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.deterministic_serialization import canonical_json
-from liquidity_migration.demo_rule_probe import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.venue.demo_rule_probe import (
     DEMO_RULE_PROBE_EVIDENCE_KIND,
     DEMO_RULE_PROBE_EVIDENCE_SCHEMA_VERSION,
     DEMO_RULES_KIND,
@@ -52,7 +52,7 @@ from liquidity_migration.demo_rule_probe import (
     ORDER_HISTORY_SOURCE,
     TRADE_HISTORY_SOURCE,
 )
-from liquidity_migration.execution_adapters import (
+from liquidity_migration.account.execution_adapters import (
     INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
     BookLevel,
     ExecutionObservationType,
@@ -61,7 +61,7 @@ from liquidity_migration.execution_adapters import (
     LatencyProfile,
     MarketOrderExecutionTwin,
 )
-from liquidity_migration.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
+from liquidity_migration.account.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
 
 
 def test_owner_reconciliation_cycle_refreshes_position_truth_after_funding() -> None:

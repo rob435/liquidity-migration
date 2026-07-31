@@ -86,7 +86,7 @@ format, the wrapper is the only path:
 - Registered Lane-2 financed-longs configs render through the SAME standard
   chart via `--research-config configs/lane2_*.json` (repeatable; output under
   `<out>/research/<config_id>/`, labelled RESEARCH / simulation-on-seen-data;
-  added 2026-07-28 with `liquidity_migration.financed_longs.research_equity_chart`).
+  added 2026-07-28 with `liquidity_migration.research.backtest.financed_longs.research_equity_chart`).
 
 If the wrapper still lacks an option for a recurring citable need, add a tested
 option to the wrapper rather than creating a second format.

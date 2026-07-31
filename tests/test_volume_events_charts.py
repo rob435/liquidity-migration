@@ -8,7 +8,7 @@ import math
 
 import polars as pl
 
-from liquidity_migration.volume_events_charts import _strategy_equity_series
+from liquidity_migration.research.backtest.volume_events_charts import _strategy_equity_series
 
 
 def test_date_only_frame_does_not_crash():
@@ -86,7 +86,7 @@ def test_nice_axis_floor_follows_negative_data() -> None:
     0, which draws the wipeout below the plot floor; when min < 0 the floor follows
     the data.
     """
-    from liquidity_migration.volume_events_charts import _nice_axis
+    from liquidity_migration.research.backtest.volume_events_charts import _nice_axis
 
     low, _high, ticks = _nice_axis(-0.27, 2.0, target_ticks=12)
     assert low < 0.0  # the floor descended below zero to show the blow-through
@@ -98,7 +98,7 @@ def test_nice_axis_still_clamps_floor_at_zero_for_nonnegative_data() -> None:
     """A non-negative series whose padded floor would dip below 0 is still pinned at 0 --
     the axis never invents negative territory the curve never visited.
     """
-    from liquidity_migration.volume_events_charts import _nice_axis
+    from liquidity_migration.research.backtest.volume_events_charts import _nice_axis
 
     # min near zero: the 5% pad would push floor_candidate below 0; the clamp holds it at 0.
     low, _high, ticks = _nice_axis(0.02, 1.5, target_ticks=12)
@@ -119,7 +119,7 @@ def test_monthly_table_labels_days_when_no_trades_column() -> None:
     rows must not claim "Trades: 0": the count is derived from per-month equity DAYS
     and labelled "Days".
     """
-    from liquidity_migration.volume_events_charts import _has_columns, _monthly_table_rows
+    from liquidity_migration.research.backtest.volume_events_charts import _has_columns, _monthly_table_rows
 
     monthly = pl.DataFrame(
         {"month": ["2025-01", "2025-02"], "strategy_return": [0.05, -0.02]}
@@ -142,7 +142,7 @@ def test_monthly_table_labels_days_when_no_trades_column() -> None:
 
 def test_monthly_table_labels_trades_when_trades_column_present() -> None:
     """Companion: a frame WITH a trades column keeps the honest "Trades" path."""
-    from liquidity_migration.volume_events_charts import _has_columns, _monthly_table_rows
+    from liquidity_migration.research.backtest.volume_events_charts import _has_columns, _monthly_table_rows
 
     monthly = pl.DataFrame(
         {"month": ["2025-01"], "strategy_return": [0.05], "trades": [7]}
@@ -162,7 +162,7 @@ def test_chart_final_values_uses_common_end_window() -> None:
     EACH series is read at the last date common to all series, not each series' own
     last point, which compared spans of different length.
     """
-    from liquidity_migration.volume_events_charts import _chart_final_values
+    from liquidity_migration.research.backtest.volume_events_charts import _chart_final_values
 
     series = [
         {"name": "Strategy", "points": [

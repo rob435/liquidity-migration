@@ -8,7 +8,7 @@ import datetime as dt
 
 import pytest
 
-from liquidity_migration.account_loss_guard import (
+from liquidity_migration.policy.account_loss_guard import (
     LOSS_GUARD_BLOCKED,
     LOSS_GUARD_OK,
     LOSS_GUARD_TRIPPED,

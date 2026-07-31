@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import liquidity_migration.account_owner_lease as lease_module
-from liquidity_migration.account_owner_lease import (
+import liquidity_migration.account.account_owner_lease as lease_module
+from liquidity_migration.account.account_owner_lease import (
     AccountOwnerLease,
     AccountOwnerLeaseAlreadyHeldError,
     DemoAccountIdentity,
@@ -61,7 +61,7 @@ def _run_inherited_cli(
         [
             sys.executable,
             "-m",
-            "liquidity_migration.account_owner_lease",
+            "liquidity_migration.account.account_owner_lease",
             "acquire-inherited",
             str(descriptor),
             str(prepared.path),
@@ -100,7 +100,7 @@ def test_fork_child_close_does_not_unlock_parent_lease(tmp_path: Path) -> None:
         import os
         import sys
 
-        from liquidity_migration.account_owner_lease import AccountOwnerLease
+        from liquidity_migration.account.account_owner_lease import AccountOwnerLease
 
         path = sys.argv[1]
         lease = AccountOwnerLease(path)

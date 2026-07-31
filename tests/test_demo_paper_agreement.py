@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_contracts import AccountState
-from liquidity_migration.demo_paper_agreement import (
+from liquidity_migration.account.account_contracts import AccountState
+from liquidity_migration.ops.demo_paper_agreement import (
     AgreementReport,
     TargetRow,
     accepted_quantities,

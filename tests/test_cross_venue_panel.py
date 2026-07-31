@@ -12,7 +12,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from liquidity_migration.cross_venue_panel import (
+from liquidity_migration.research.panels.cross_venue_panel import (
     HOUR_MS,
     PanelBuildError,
     PanelSpec,

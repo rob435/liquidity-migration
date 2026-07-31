@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from liquidity_migration.account_kernel import (
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -11,12 +11,12 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.market_capture import (
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.market_capture import (
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
 )
-from liquidity_migration.post_fill_markouts import PostFillMarkoutObserver
+from liquidity_migration.account.post_fill_markouts import PostFillMarkoutObserver
 
 
 def _kernel_with_fill(root: Path) -> tuple[AccountExecutionKernel, str]:

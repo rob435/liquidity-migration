@@ -5,7 +5,7 @@ Sharding is a memory decision, not a semantic one: a full-history build is tens
 of millions of rows and does not need to exist in one frame. Each shard carries
 its own manifest, and a top-level manifest records the set.
 
-`liquidity_migration/cross_venue_panel.py` holds the causality contract this
+`liquidity_migration/research/panels/cross_venue_panel.py` holds the causality contract this
 inherits.
 
 Example:
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liquidity_migration.cross_venue_panel import (  # noqa: E402
+from liquidity_migration.research.panels.cross_venue_panel import (  # noqa: E402
     PanelBuildError,
     PanelSpec,
     build_panel,

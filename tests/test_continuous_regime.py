@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import math
 
-from liquidity_migration.continuous_profile import (
+from liquidity_migration.research.backtest.continuous_profile import (
     ACTIVE_CONTINUOUS_CONFIG,
     active_hedge_regime,
 )
-from liquidity_migration.continuous_rebalance import (
+from liquidity_migration.research.backtest.continuous_rebalance import (
     ContinuousHedge2FState,
     ContinuousHedgeRule,
     ContinuousRebalanceComponents,
@@ -16,7 +16,7 @@ from liquidity_migration.continuous_rebalance import (
     apply_rebalance_rule,
     compute_continuous_hedge_ratios_2f,
 )
-from liquidity_migration.continuous_regime import (
+from liquidity_migration.research.backtest.continuous_regime import (
     ACTIVE_BTCVOL_REGIME,
     PCT_WARMUP,
     btcvol_intensity_series,

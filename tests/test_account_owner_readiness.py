@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_owner_readiness as readiness
-from liquidity_migration.account_kernel import GENESIS_HASH
-from liquidity_migration.account_owner_health import (
+import liquidity_migration.runtime.account_owner_readiness as readiness
+from liquidity_migration.account.account_kernel import GENESIS_HASH
+from liquidity_migration.account.account_owner_health import (
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
     write_account_owner_health,
 )
-from liquidity_migration.account_route import ensure_account_route
-from liquidity_migration.market_capture import (
+from liquidity_migration.account.account_route import ensure_account_route
+from liquidity_migration.account.market_capture import (
     OWNER_CAPTURE_READINESS_FILENAME,
     OWNER_MARKET_READINESS_FILENAME,
     MarketCaptureConfig,

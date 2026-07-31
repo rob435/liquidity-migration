@@ -3,7 +3,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from liquidity_migration.long_native import _long_equity_chart_metrics
+from liquidity_migration.research.backtest.long_native import _long_equity_chart_metrics
 
 
 def test_long_equity_chart_metrics_match_official_chart_contract() -> None:

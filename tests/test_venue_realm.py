@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account_route import derive_account_route
-from liquidity_migration.execution_environment import (
+from liquidity_migration.account.account_route import derive_account_route
+from liquidity_migration.account.execution_environment import (
     EXECUTION_ENVIRONMENT_CHOICES,
     EXECUTION_ENVIRONMENT_VALUES,
     ExecutionEnvironment,
@@ -16,7 +16,7 @@ from liquidity_migration.execution_environment import (
     execution_environment,
     venue_realm_for_environment,
 )
-from liquidity_migration.venue_realm import (
+from liquidity_migration.core.venue_realm import (
     REALM_CREDENTIAL_VARIABLES,
     REALM_REST_ENDPOINTS,
     VenueRealm,
@@ -88,11 +88,11 @@ def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
     """The environment arity is one enum, not a scatter of two-valued literals."""
 
     offenders: list[str] = []
-    for path in sorted((REPO / "liquidity_migration").glob("*.py")):
+    for path in sorted((REPO / "liquidity_migration").rglob("*.py")):
         if path.name in {
             "execution_environment.py",
             # Producer choices are asserted precisely by the test below.
-            "cli_parsers.py",
+            "parsers.py",
         }:
             continue
         source = path.read_text(encoding="utf-8")
@@ -112,7 +112,7 @@ def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() 
         "_add_carry_demo_cycle_parser",
         "_add_long_native_event_demo_cycle_parser",
     }
-    source = (REPO / "liquidity_migration" / "cli_parsers.py").read_text(encoding="utf-8")
+    source = (REPO / "liquidity_migration" / "cli" / "parsers.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     environment_choices: list[tuple[str, str]] = []
     for node in ast.walk(tree):
@@ -144,7 +144,7 @@ def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() 
 
 def test_the_owner_runner_defaults_its_realm_to_demo() -> None:
     source = (
-        REPO / "liquidity_migration" / "account_service_runner.py"
+        REPO / "liquidity_migration" / "runtime" / "account_service_runner.py"
     ).read_text(encoding="utf-8")
     assert 'default=VenueRealm.DEMO.value' in source
     # Every venue-touching construction must carry the resolved realm rather

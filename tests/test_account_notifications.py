@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.account_notifications as account_notifications_module
-from liquidity_migration.account_kernel import (
+import liquidity_migration.ops.account_notifications as account_notifications_module
+from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -17,9 +17,9 @@ from liquidity_migration.account_kernel import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account_notifications import AccountNotificationEngine, HOUR_NS
-from liquidity_migration.deterministic_runtime import VirtualClock
-from liquidity_migration.execution_adapters import ExecutionObservation, KernelExecutionDriver
+from liquidity_migration.ops.account_notifications import AccountNotificationEngine, HOUR_NS
+from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.account.execution_adapters import ExecutionObservation, KernelExecutionDriver
 
 
 def _setup_open(root: Path):
@@ -1305,7 +1305,7 @@ def test_paper_heading_labels_entry_risk_alerts(tmp_path: Path) -> None:
 def test_deliver_notification_batch_commits_only_after_full_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import liquidity_migration.telegram as telegram_module
+    import liquidity_migration.ops.telegram as telegram_module
 
     kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
     state_path = tmp_path / "notify-state.json"
@@ -1347,7 +1347,7 @@ def test_deliver_notification_batch_commits_only_after_full_delivery(
 def test_deliver_notification_batch_commits_empty_batches_without_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import liquidity_migration.telegram as telegram_module
+    import liquidity_migration.ops.telegram as telegram_module
 
     kernel, clock, market, rules, policy, snapshot, driver = _setup_open(tmp_path / "account")
     state_path = tmp_path / "notify-state.json"
