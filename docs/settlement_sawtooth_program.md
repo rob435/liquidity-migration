@@ -393,6 +393,72 @@ different risk profile — and it bears directly on the price leg's
 ~95%-of-variance problem, since under this reading the price leg is not a drag on
 the edge, it **is** the edge.
 
+### 0.67 The reframe is right and pays nothing — three doors, all closed
+
+§0.66 says the crowd fee is a wash and the book is really paid for price movement
+in dislocated names. If that is the mechanism, three axes had never been tested,
+because every feature this family has ever tried was a *funding* feature. All
+three were run 2026-08-01 against `lane2_carry_hold_v4`, on its own engine, with
+a control proving the harness reproduces v4 bit-identically before any variant
+ran.
+
+**Test 1 — the basis as a live detector.** Funding is a lagged 8-hour average of
+the premium; `basis = perp/index − 1` is the live version, and the carry family
+has never used it. *First attempt was mis-scaled* — gating instantaneous basis at
+20–100 bp against a −10 bp funding gate is 2–10× too tight, and gross collapsed
+from 0.0948 to 0.0319. Redone like-for-like on an 8-hour mean basis:
+
+| gate | bp/day | Sharpe | gross | vs v4 (phase 0) |
+| --- | ---: | ---: | ---: | ---: |
+| basis_8h alone @5/2 | +21.03 | 1.50 | 0.1409 | +0.42 (t 0.18) |
+| basis_8h alone @10/3 | +20.08 | 1.45 | 0.1322 | −0.58 (t −0.27) |
+| funding AND basis_8h @5/2 | +23.00 | 1.69 | 0.0959 | +0.36 (t 0.77) |
+| funding AND basis_8h @8/3 | +22.95 | 1.69 | 0.0956 | +0.31 (t 0.66) |
+| funding AND basis_8h @10/3 | +23.11 | 1.70 | 0.0950 | +0.48 (t 0.97) |
+
+**Basis is not a better detector than funding — it is an equivalent one.** That is
+the informative result: funding's 8-hour averaging costs nothing, because funding
+*is* the time-average of the basis. The premise of the test is refuted.
+
+**Test 2 — spot-momentum conditioning.** Requiring the *index* (not the perp) to
+be rising at entry, 3 lookbacks × 3 thresholds. Every one of the 9 cells is worse
+than v4, −3.34 to −5.02 bp/day. Same wall as the 2026-07-31 trend-filter run: on
+a 2–3 name book, dropping a candidate costs more than the loser saves.
+
+**Test 3 — exit on the rally rather than the fee.** v4 exits when funding
+recovers above −3 bp, which is a detector reading; if the edge is the rally, the
+exit should watch the rally. Best cell (`exit if spot_24h < 0`) was +0.57 bp/day,
+t 0.76 at phase 0.
+
+**All three die on the 24-phase sweep**, which is exactly why this dossier
+mandates it:
+
+| arm | bp/day | Sharpe | differential vs v4 | phases > 0 |
+| --- | ---: | ---: | ---: | ---: |
+| v4 baseline | +14.46 | 1.13 | — | — |
+| T1 funding AND basis_8h @10/3 | +14.11 | 1.11 | −0.46 (mean t −0.31) | **9/24** |
+| T3 exit if spot_24h < 0 | +14.38 | 1.13 | −0.24 (mean t −0.30) | **7/24** |
+| T1 + T3 | +14.00 | 1.11 | −0.73 (mean t −0.53) | **6/24** |
+
+The phase-0 positives were decision-hour luck, and the combined arm's per-phase
+differential runs −3.86 to +1.06 with a median of −0.69.
+
+**Why, and this is the durable statement.** A deep negative funding print is
+*already* a conjunction detector: it fires when the perpetual is below its index
+(dislocation) **and** the index is rallying (momentum, §0.2). v4's existing
+filters then re-encode the same two facts — the toxic band excludes names that
+are not rallying, the depth ladder sizes by dislocation magnitude, and crowding
+persistence requires the dislocation to be habitual. Adding an explicit basis or
+momentum gate re-supplies information the book already has, and pays for it by
+dropping positions off a 2–3 name book.
+
+**So the reframe is descriptively right and prescriptively empty.** The mechanism
+statement in `docs/carry_hold.md` should still be corrected — the book is not
+paid the crowd fee — but no rule change follows from correcting it. Anyone
+proposing a fourth funding-adjacent feature for this family should read this
+section first: the entry gate is not one signal, it is two, and there is no third
+one lying around.
+
 ### 0.7 H4 collapses into depth
 
 H4 proposed a name's own sawtooth amplitude as a third sizing axis. Given slope
