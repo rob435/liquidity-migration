@@ -1,8 +1,13 @@
 # The settlement sawtooth — mechanism dossier and research program
 
-**Status: CLOSED 2026-08-01. The mechanism is solved and it is arbitrage-free by
-construction.** Kill criteria 2 and 4 both fired. Nothing here is registered,
-nothing is deployed, nothing is graded. Every number was measured on
+**Status: CLOSED for trading 2026-08-01, with ONE measurement reopened.** The
+mechanism is largely solved: a deep funding print marks a coin in a violent spot
+rally whose perpetual sits at a discount, and at the settlement instant the perp
+steps down by most — **not all** — of the fee. Kill criteria 2 and 4 fired and
+every trade tried here is dead (§0.3–§0.5, §3). What is *not* settled is whether
+the residual left after that step is real; on the partial 1-minute root it is
+positive at every depth (§0.9). Nothing here is registered, nothing is deployed,
+nothing is graded. Every number was measured on
 already-seen data (Bybit and Binance full-PIT cross-venue panel, 2021-01..2026-07,
 plus 1-minute Bybit klines) and is therefore Lane-1. Evidence policy is
 `docs/governance.md`; the bar is `t >= 2.5`.
@@ -23,11 +28,19 @@ plus 1-minute Bybit klines) and is therefore Lane-1. Evidence policy is
 > priority-ordered by deep-print count). **Until a minute-level claim below is
 > re-derived from that root, treat it as UNVERIFIED and marked so.**
 >
-> The conclusion does not depend on it. The headline — ex-dividend adjustment —
-> reproduces at hourly resolution on the cross-venue panel that does exist:
-> pooled slope **1.1127** (t 62.3, n = 722,757) across prints from −450 to
-> +250 bp; deep-negative print −43.01 → move −44.52 (ratio 1.035); deep-positive
-> print +17.04 → move **+18.35** (ratio 1.077); shallow null. See §0.9.
+> **The first attempt to re-derive this hourly was itself wrong and is
+> withdrawn** — see §0.9. Panel `bar_ts_ms` is the kline *startTime*, so
+> `by_close` at bar `T` is the price at `T+1h`; the hour that *contains* a
+> settlement at `S` is the bar opening at `S`, not the one after it. The hourly
+> "slope 1.1127" measured the wrong hour. At hourly resolution the ex-dividend
+> step is invisible anyway: it is ~30 bp inside an hour that also carries ~+80 bp
+> of the pre-print rally.
+>
+> Re-derived from real 1-minute data (§0.9), the closure is **half right**. The
+> *shape* is confirmed and is genuinely instantaneous. The *magnitude* is not:
+> slope **0.7003**, not 1.0458, and the net to a long is **positive in every deep
+> bucket**, not zero. "Arbitrage-free by construction" is therefore **not
+> established**, and §0.1's conclusion is downgraded accordingly.
 
 Opened 2026-07-31 out of the hunt for a larger carry edge. Closed 2026-08-01.
 One operational result survives — §0.3, H7 — and it is a scheduling finding, not
@@ -37,7 +50,12 @@ an alpha claim.
 
 ## 0. What closed it
 
-### 0.1 The post-print fall is an ex-dividend adjustment
+### 0.1 The post-print fall is an ex-dividend adjustment — SHAPE CONFIRMED, MAGNITUDE WITHDRAWN
+
+> **⚠ Superseded in part by §0.9.** The step is real and instantaneous; the
+> "exactly" is not. On real 1-minute data the slope is **0.7003**, not 1.0458,
+> and the net to a long is **positive at every depth** rather than zero. The
+> table below came from the non-existent `bybit_render_1m` root. Read §0.9 first.
 
 The perpetual drops by **exactly the funding paid, at the instant it is paid**,
 and then holds the new level. Regressing the settlement-instant price move on
@@ -616,48 +634,78 @@ Related: [`docs/carry_hold.md`](carry_hold.md),
 
 ---
 
-## 0.9 Independent hourly re-derivation (2026-08-01)
+## 0.9 Minute-resolution re-derivation from `klines_1m` (2026-08-01)
 
-Run because the closure's minute-resolution numbers pointed at a root that does
-not exist. These use only the cross-venue panel, which does, and they are what
-the closure now rests on until `klines_1m` lands.
+**Two withdrawals first.**
 
-Regressing the hourly return *after* each settlement on the print, pooled over
-every depth, top-100, n = 722,757:
+1. *The hourly re-derivation is withdrawn.* It regressed the return of the bar
+   **after** the settlement bar on the print and got slope 1.1127 (t 62.3),
+   reading that as confirmation. Panel `bar_ts_ms` is the kline `startTime`
+   (verified: `panel.by_close` equals `klines_1h.close` on the same key, max
+   diff 0.0), so `by_close` at bar `T` is the price at `T+1h`, and the hour
+   containing a settlement at `S` is the bar opening at `S`. That hour reads
+   **+49.5 bp** for deep prints — *up*, because the pre-print rally dominates.
+   The +1.1127 slope was deeper-print-implies-bigger-rally-implies-bigger-fade,
+   not an ex-dividend measurement. **The step is not visible at hourly
+   resolution at all**, which is precisely why minute data was needed.
+2. *The first minute-level attempt was also wrong*, the same way: `ts_ms` is a
+   bar open, so keying on `T` and `T+1min` measures `T+1min → T+2min` and steps
+   over the instant. The bar **containing** the settlement is the one opening at
+   `T`.
 
-> **move(0 → +1h) = −0.780 bp + 1.1127 × print_bp,  t(slope) = 62.3**
+**Measured correctly**, on `bybit_full_pit/klines_1m`, 26 symbols with ≥120 day
+partitions, 114,909 top-100 settlements with full ±7-minute coverage:
 
-against the ex-dividend prediction of slope 1.0000. By bucket:
+| per-minute return, bp | −5 | −4 | −3 | −2 | −1 | **0** | +1 | +2 | +3 | +4 | +5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| deep neg < −10 bp (n 6,606) | +1.24 | +0.99 | +1.32 | +0.64 | +4.43 | **−30.20** | +6.52 | +2.27 | +0.34 | +0.62 | +1.72 |
+| deep pos > +10 bp (n 278) | +4.46 | +0.77 | −4.32 | +4.76 | −1.06 | −0.96 | −4.35 | −2.54 | +6.69 | −7.85 | −9.80 |
+| shallow (n 108,025) | −0.02 | −0.12 | +0.06 | −0.05 | −0.20 | −0.32 | +0.02 | −0.11 | +0.02 | −0.10 | −0.04 |
 
-| print bucket, bp | n | mean print | move 0→+1h | move/print | net to a long |
+**The shape is confirmed.** A single-minute step at the settlement, flat on both
+sides, and a clean null on shallow prints. Bar 0 is the only minute that moves.
+
+**The magnitude is not.** Regressing the bar-0 return on the print:
+
+> **move over [T, T+1min) = −0.309 bp + 0.7003 × print_bp,  t = 94.4,  n = 114,909**
+
+against the closure's 1.0458 and ex-dividend's 1.0000. Every deep bucket returns
+**less** than the fee, so the long keeps a residual:
+
+| print bucket, bp | n | mean print | bar-0 move | ratio | net to a long |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| < −100 | 2,997 | −167.18 | −193.61 | 1.158 | −26.43 |
-| [−100, −60) | 3,191 | −77.67 | −80.32 | 1.034 | −2.65 |
-| [−60, −40) | 3,214 | −48.74 | −54.66 | 1.122 | −5.93 |
-| [−40, −25) | 5,219 | −31.40 | −28.56 | 0.910 | +2.84 |
-| [−25, −15) | 7,899 | −19.30 | −15.24 | 0.789 | +4.06 |
-| [−15, −10) | 8,221 | −12.22 | −10.59 | 0.867 | +1.63 |
-| shallow \|f\| ≤ 10 | 685,294 | +0.31 | −0.62 | — | −0.93 |
-| **> +10 (positive)** | 6,722 | **+17.04** | **+18.35** | **1.077** | +1.31 |
+| < −60 | 1,233 | −117.84 | −82.22 | 0.698 | **+35.62** |
+| [−60, −40) | 622 | −48.63 | −41.77 | 0.859 | +6.86 |
+| [−40, −25) | 1,060 | −31.17 | −24.74 | 0.794 | +6.43 |
+| [−25, −15) | 1,843 | −19.19 | −14.36 | 0.748 | +4.83 |
+| [−15, −10) | 1,848 | −12.21 | −10.54 | 0.863 | +1.67 |
+| shallow | 108,025 | −0.21 | −0.32 | — | −0.12 |
 
-The hourly slope is noisier and slightly steeper than the minute-level 1.0458 —
-expected, since an hour of price noise is added to a one-instant step — and the
-deepest bucket overshoots. The qualitative result is unchanged and the mirror is
-unambiguous.
+**Consequence: "arbitrage-free by construction" is not established.** The
+closure's central claim was slope ≈ 1 with the net to a long zero at every
+depth. On real minute data the giveback is ~70–86% and the residual to a long is
+positive at every depth, rising with depth to +35.62 bp for prints below −60 bp
+— larger than the 15.56 bp round trip. §0.1 is downgraded from *solved* to
+*partly solved*: the mechanism is an ex-dividend-**like** step, not a complete
+one.
 
-**What this does *not* re-derive, and what still needs `klines_1m`:**
+**Do not read this as a trade yet.** Four reasons, in order of how much they
+could move the number:
 
-- §0.3's H7 result — that the CARRY sleeve's ~00:20 fill saves ~45 bp — is
-  **UNVERIFIED at minute resolution**. Its magnitude is corroborated (the hourly
-  drop is −44.52 bp for deep prints, so a fill landing after it avoids about
-  that much) and its direction is safe, but the claim that ~97% of the move
-  lands inside two minutes, and the +5m/+10m/+20m/+30m/+60m/+90m profile, are
-  not reproducible from the panel. **Do not act on the minute-level shape until
-  it is re-derived.** The operational advice it implies — do not reduce the
-  kline-availability lag — is supported by the hourly evidence on its own.
-- §0.5's "97.0% of the `j+1` move lands inside the first 2 minutes", which is
-  H1's declared kill criterion. H1 is dead on execution regardless (§0.5), so
-  this changes no verdict.
+- **26 of 568 symbols**, and they are the *most-crowded* ones by construction —
+  the fetch is ordered by deep-print count. This is the sample most likely to
+  overstate a crowding residual.
+- Capturing the residual means holding across the instant, so it is the same
+  position the carry book already runs; §0.66 measures the book-level version of
+  exactly this at **+4.85 bp/book-day at midnight and −1.44 at the median grid
+  phase**, which is a far less exciting number than +35.62 per settlement.
+- Bar-0 return includes whatever drift that minute carried anyway; the −1 minute
+  reading of +4.43 bp on deep prints suggests the run-up is still live going in.
+- Deep-positive n = 278 is too small to say anything about the mirror. §0.6's
+  mirror claim is **unresolved**, not confirmed, at minute resolution.
+
+**Re-run this when the fetch completes** (§0.10) before anything is concluded.
+The numbers above are the state at 26 symbols and will move.
 
 ## 0.10 Fetching the missing root
 
