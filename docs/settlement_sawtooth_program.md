@@ -459,6 +459,56 @@ proposing a fourth funding-adjacent feature for this family should read this
 section first: the entry gate is not one signal, it is two, and there is no third
 one lying around.
 
+### 0.68 The exit, tested properly — and a method lesson
+
+§0.67's Test 3 was **badly designed and its negative result does not stand**:
+every cell only ever *added* an exit condition, and more exits on a 2–3 name book
+hits the same attrition wall as more entry filters. The version the reframe
+actually implies — *hold longer while the rally is alive, through funding
+recovery* — was never run. Owner caught it; re-run 2026-08-01 with five exit
+families, again with a control asserting the harness reproduces v4 bit-identically.
+
+| exit rule | bp/day | Sharpe | gross | diff vs v4 | phases > 0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v4 baseline (exit on funding) | +14.46 | 1.13 | 0.0939 | — | — |
+| **A: veto the funding exit while spot_72h > 0** | **+16.49** | **1.24** | 0.1074 | **+2.28** (t 1.45) | **21/24** |
+| A: same, spot_24h > 0 | +15.48 | 1.18 | 0.0986 | +1.26 (t 1.00) | 21/24 |
+| B: rally is the ONLY exit, spot_72h ≥ 0 | +16.22 | 1.23 | 0.1048 | +1.99 (t 1.25) | 20/24 |
+| C: trailing stop 5 / 10 / 20% | ~+14.5 | 1.14 | — | ~0.00 | 9–14/24 |
+| D: exit when the basis recovers | ~+14.5 | 1.13 | — | ~0.00 | 7–13/24 |
+| E: exit at the next settlement | +14.45 | 1.13 | 0.0920 | −0.03 | 14/24 |
+
+Arms C, D and E are flat. Arm A looked like the best result this family has
+produced since the persistence size: a plateau over four adjacent cells,
+corroborated by a structurally different arm B, positive in 21 of 24 clocks.
+
+**A size-matched placebo kills it.** Shuffling `spot_72h` across symbols within
+each bar — same distribution of "hold longer" events, same frequency, wrong
+names — reproduces most of it:
+
+| | raw differential | phases > 0 | capital-normalised differential |
+| --- | ---: | ---: | ---: |
+| A, real `spot_72h` | +2.28 (t 1.45) | 21/24 | +1.45 (t **0.01**), 12/24 |
+| **placebo, shuffled `spot_72h`** | **+1.34** (t 0.97) | **21/24** | **+3.00** (t 0.10), 14/24 |
+
+The placebo captures 59% of the raw gain and is positive in the *same* 21 of 24
+phases; capital-normalised it is *better* than the real arm, and both are noise
+(t 0.01 and 0.10, 12/24 and 14/24). Arm A raises gross 0.0939 → 0.1074 and earns
+almost exactly the ratio: 153.5 bp per unit capital against v4's 154.0. The era
+split confirms it is noise — the same year takes opposite signs at different
+clocks (2026: −4.51 at phase 0, **+17.58** at phase 12).
+
+**What arm A actually does is hold ~14% more capital in a rising market.** The
+rally information contributes nothing measurable.
+
+**The method lesson, and it belongs in §7.** A 24-phase sweep tests the *clock*.
+It does not test *information content*, and it can look overwhelming while
+testing nothing — 21/24 was reproduced exactly by shuffled data. Phase-robustness
+and a matched placebo answer different questions and a result in this family
+needs **both**. The persistence size in `lane2_carry_hold_v4` is the reference
+for what passing both looks like: its shuffled-multiplier placebo costs
+−15.26 bp/day at t −2.71, and no shuffle gets near the real arm.
+
 ### 0.7 H4 collapses into depth
 
 H4 proposed a name's own sawtooth amplitude as a third sizing axis. Given slope
@@ -675,6 +725,12 @@ prone to three specific errors — the third of which it committed.
   #1 in the second, and the winning hour migrates by era. **Report any result
   here as a sweep over phases, never as a single clock.** Every verdict in §5
   carries its 24-phase sweep.
+- **A phase sweep is not a placebo.** Report both. A 24-phase sweep establishes
+  that a result does not depend on the decision hour; it says nothing about
+  whether the result uses the information it claims to. §0.68 has an arm that is
+  positive in 21 of 24 phases and is entirely reproduced by shuffled inputs. Any
+  claim in this family needs a size- or frequency-matched placebo beside the
+  sweep, and a capital-normalised differential beside the raw one.
 - **Cadence confounds.** Anything measured on a clock rather than in a symbol's
   own settlement sequence reports Bybit's interval mix, which has a strong era
   gradient. §0.5's anchored trade shows the confound in its final form: the
