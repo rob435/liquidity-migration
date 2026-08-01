@@ -4,8 +4,30 @@
 construction.** Kill criteria 2 and 4 both fired. Nothing here is registered,
 nothing is deployed, nothing is graded. Every number was measured on
 already-seen data (Bybit and Binance full-PIT cross-venue panel, 2021-01..2026-07,
-plus the 1-minute Bybit cache) and is therefore Lane-1. Evidence policy is
+plus 1-minute Bybit klines) and is therefore Lane-1. Evidence policy is
 `docs/governance.md`; the bar is `t >= 2.5`.
+
+> **Provenance correction, 2026-08-01.** The closure was first written against
+> `~/SHARED_DATA/bybit_render_1m/klines_1m`. **That root does not exist.**
+> `docs/data.md` records the `bybit_render_1m` and `binance_vision_alt` plans and
+> their fetchers as removed 2026-07-21, with an explicit instruction not to
+> recreate them from old documents; the cited validation receipt is dated
+> 2026-07-20, one day before that removal. Two further roots the closure named —
+> `bybit_full_pit/klines_5m` and `binance_vision_alt/klines_1m` — are also absent.
+> The minute-resolution numbers were therefore not reproducible when written.
+>
+> They are being made reproducible rather than deleted. `scripts/data/download_bybit_klines_1m.py`
+> fetches 1-minute klines into `bybit_full_pit/klines_1m` through the same
+> `BybitMarketData.get_klines` path the 1h builder uses, and a run is in progress
+> over the 568 symbols that carry a deep top-100 print (448,628 symbol-days,
+> priority-ordered by deep-print count). **Until a minute-level claim below is
+> re-derived from that root, treat it as UNVERIFIED and marked so.**
+>
+> The conclusion does not depend on it. The headline — ex-dividend adjustment —
+> reproduces at hourly resolution on the cross-venue panel that does exist:
+> pooled slope **1.1127** (t 62.3, n = 722,757) across prints from −450 to
+> +250 bp; deep-negative print −43.01 → move −44.52 (ratio 1.035); deep-positive
+> print +17.04 → move **+18.35** (ratio 1.077); shallow null. See §0.9.
 
 Opened 2026-07-31 out of the hunt for a larger carry edge. Closed 2026-08-01.
 One operational result survives — §0.3, H7 — and it is a scheduling finding, not
@@ -79,6 +101,14 @@ whose perpetual is at a persistent discount (basis level −41.7 bp at j−24,
 
 ### 0.3 What survives: H7, and it is operational
 
+> **⚠ UNVERIFIED at minute resolution.** Every number in this subsection came
+> from the non-existent `bybit_render_1m` root (see the provenance correction).
+> The *magnitude and direction* are independently corroborated at hourly
+> resolution — the drop in the hour after a deep print is −44.52 bp, so a fill
+> landing after it avoids about that much — and the operational advice therefore
+> stands on evidence that does exist. The minute-by-minute profile below does
+> not. **Re-derive from `bybit_full_pit/klines_1m` before citing the shape.**
+
 The deployed CARRY sleeve decides at 00:00 UTC and fills at ~00:20 because of
 kline availability. Measured on 1-minute bars (n = 18,566 deep prints inside the
 1m window), entry price relative to the price at the print:
@@ -119,16 +149,28 @@ conditioning is not knowable in advance (§0.5).
 
 ### 0.5 H1 was never blocked, and it dies on causality
 
-**The minute data existed the whole time.** `~/SHARED_DATA/bybit_render_1m/klines_1m`
-is a validated 1-minute Bybit cache: **1,202 day partitions 2023-03-26..2026-07-09,
-441 symbols, 354,146 symbol-day partitions**, with a validation receipt dated
-2026-07-20 recording 0 missing partitions, 0 missing entry bars, 1 known upstream
-gap, and worst price divergence versus the 1h cache of **0.0**. §4 below checked
-`bybit_full_pit/tick_ohlc_1m` (empty) and concluded no minute data existed
-anywhere. It was in a different root, landed ten days before this dossier was
-written. Also present and unused: `bybit_full_pit/klines_5m` (1,182 days from
-2023-04-01), `bybit_full_pit/taker_flow_5m`, `binance_vision_alt/klines_1m` and
-`premium_1m`, and `binance_full_pit/binance_usdm_metrics_5m` (§0.6).
+**On the minute data — both sides of this were wrong.**
+
+- ~~It existed the whole time in `bybit_render_1m`.~~ **WITHDRAWN.** That root
+  does not exist and is documented as removed 2026-07-21. Nor is
+  `bybit_full_pit/klines_5m` a thing — the 5-minute klines are Binance's
+  (`binance_full_pit/klines_5m`, 686 files), a venue mislabel.
+- ~~`tick_ohlc_1m` is empty (0 files).~~ **ALSO WITHDRAWN, and this one was
+  §4's.** It holds **5,648 parquet files over 814 date partitions,
+  2023-03-29..2026-05-24**. The original check globbed `*.parquet`
+  non-recursively against a `date=/symbol=/part.parquet` layout and read the
+  zero as absence. `docs/data.md`'s coverage census already described this root
+  correctly — Tier D, 401 symbols at a **median of 11 days each**, "event
+  windows; no cross-sectional flow or microstructure study can be built on
+  them" — and §4 did not read it before asserting a data gap.
+
+The corrected position: minute data of the right shape was never in the tree,
+but it was always *obtainable*. Bybit's v5 kline endpoint serves `interval="1"`
+back to 2021 for linear perps (verified 2026-08-01, 1,440 bars/day complete),
+and it is now being fetched into `bybit_full_pit/klines_1m` (§0.10). **H1 was
+neither blocked nor already answered; it was one afternoon of fetching away, and
+two consecutive passes over this question each got the tree wrong in a different
+direction.**
 
 With that data, **H1 fails its own declared kill criterion**: "more than ~60% of
 the `j+1` move landing inside the first 2 minutes" — measured, **97.0%** (−44.89
@@ -147,8 +189,21 @@ interval ending at `T` and publishes *at* `T`, while the position must open at
 | C premium at T−1h (corr 0.61) | yes | 73,683 | +11.66 | −3.90 | −0.80 | −1.77 |
 | D forming rate, elapsed window (corr 0.73) | yes | 35,601 | +12.14 | −3.42 | −0.63 | −1.37 |
 
-Arm A reproduces the dossier's headline (net Sharpe 2.97 / t 6.25 against its
-2.96 / 6.75), so this is the same trade. Every PIT replacement dies.
+Every PIT replacement dies, and that is the durable result.
+
+**But the attribution to look-ahead is withdrawn.** Arm A was matched to the
+original trade by *reproducing its Sharpe* (2.97 / t 6.25 against 2.96 / 6.75),
+which does not identify a construction — all four arms select ~30k events from
+the same population and similar Sharpes are cheap. Read from source, the original
+gate is `by_funding` at `T−h`, the last *settled* print as of the entry bar.
+Measured directly, `corr(gate at T−1h, print at T) = +0.7277` — that is arm B's
+gate, not arm A's. **The original trade was PIT-clean in its gate.**
+
+What actually made it score was the exit: it exits *at* `T`, before the
+ex-dividend hour, and the ex-dividend drop is the whole giveback. That is the
+same infeasibility the hunt already recorded (Sharpe 2.96 at zero exit lag,
+−2.14 at one hour) — now with the mechanism attached. H1 dies on **execution**,
+not on look-ahead, and dies just as completely.
 
 The look-ahead is directly measurable. Splitting arm A's deep prints by whether
 the forming rate saw them coming:
@@ -180,13 +235,19 @@ and the cadence confound being the same fact.
 
 §2 offered harvest flow and squeeze-and-fade. Both are refuted.
 
-- **The mirror the dossier called absent is present.** At 1-minute resolution
-  deep-positive prints (mean **+16.45 bp**) move **+33.10 bp** at the settlement
-  instant, t 16.49, n = 2,186 — price *rises* when longs pay, exactly as
-  ex-dividend requires. The "no inversion" finding in §2 was an artefact of
-  hourly bars, where a one-minute ~40 bp gap sits inside an hour whose own noise
-  is several hundred bp. The shallow control is a clean null: mean print
-  +0.33 bp, move +0.38 bp.
+- **The mirror the dossier called absent is present.** Confirmed at hourly
+  resolution on the panel that exists: deep-positive prints (mean **+17.04 bp**,
+  n = 6,722) move **+18.35 bp** in the hour after the print, t +3.85, ratio
+  1.077 — price *rises* when longs pay, exactly as ex-dividend requires. The
+  shallow control is a clean null (print +0.31, move −0.62).
+  The "no inversion" finding in §2 was not an artefact of hourly bars: it was an
+  artefact of comparing 5- and 6-hour window *sums*, which drown a ~20 bp
+  settlement-hour step in hours of several-hundred-bp noise. The mirror was
+  visible in §1's own `j+1` column all along.
+  *(The closure's original figure here — +33.10 bp at 1-minute resolution — is
+  withdrawn as internally inconsistent: its own regression, slope 1.0458 with
+  intercept +1.163, predicts +18.36 for a +16.45 bp print, and the independent
+  hourly measurement is +18.35. Re-derive from `klines_1m` when the fetch lands.)*
 - **Open interest rises into the print and never unwinds.** Harvest flow's
   distinguishing prediction is an unwind after the print. Bybit: **+849.3 bp
   pre (t 44.51), +166.9 post (t 15.49)**. Binance's independent series: **+738.3
@@ -251,23 +312,55 @@ clock-fragility disclosure `lane2_carry_hold_v4` already carries, reached by a
 different route and now with a mechanism attached. Era split at midnight:
 total +139.43 (2023), +125.15 (2024), +15.21 (2025), **−71.08 (2026)**.
 
-**What this does not show.** This is not `lane2_carry_hold_v4`. It has none of
-v4's toxic band, min-vol floor, depth ladder, persistence multiplier, exit rules
-or sizing, it charges no costs, and it is per *name-day* while v4's registered
-+45.70 bp/day funding and −2.70 bp/day price are per *book-day* at the book's own
-mean gross of 0.0948. The two are not on a common denominator and **nothing here
-refutes v4's attribution.** But the shape needs explaining: a signal-level
-decomposition says the crowd fee is a wash and the edge is the drift between
-settlements, while the book's registered attribution reads 2.1:1 funding-to-price.
+### 0.66 RESOLVED on the actual v4 book — the fee is a wash
 
-**Proposed next task, for the owner to accept or decline:** run the same
-decomposition through `score_carry_hold` on the actual v4 config so the two are
-on one denominator, and if it holds, restate the mechanism in
-[`docs/carry_hold.md`](carry_hold.md) — "crowded shorts pay longs" would be
-describing a cash flow that is returned at the moment it is paid, and the book's
-real edge would be the drift in deeply-shorted names between their settlements.
-That is a different claim with a different risk profile, and it is the kind of
-thing the price leg's ~95%-of-variance problem may look different under.
+Run 2026-08-01 on `lane2_carry_hold_v4` itself: its own weights, its own
+universe, its own decision grid, and its own denominator. The 24 forward hours of
+each held name-day are classified into **mutually exclusive** buckets — the
+1h-cadence trap is that every hour there is both "the hour ending at a print" and
+"the hour after a print", so the two classes must not both claim it.
+
+Denominator note: the registered +45.70 / −2.70 is per *active* day (944);
+these are per *book*-day (1,756). 45.70 × 944 / 1756 = 24.57, which reconciles.
+
+| component, bp per book-day | midnight | min | median | max | phases > 0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| funding received | +24.57 | +21.43 | +23.92 | +26.79 | 24/24 |
+| price, ex-dividend hour only | −13.94 | −18.01 | −15.08 | −13.10 | **0/24** |
+| price, hours that are both (1h cadence) | −5.78 | −15.31 | −9.84 | −5.78 | **0/24** |
+| **fee net of giveback** | **+4.85** | **−6.46** | **−1.44** | **+4.85** | **5/24** |
+| price, print hour only | +6.89 | +5.56 | +7.03 | +7.81 | 24/24 |
+| price, neither (DRIFT) | +6.72 | +3.45 | +5.74 | +8.09 | 24/24 |
+| engine `gross_bp` (compounded, authoritative) | +23.12 | +10.74 | +15.22 | +23.12 | 24/24 |
+
+**The funding leg is handed back.** +24.57 received against −19.72 given up in
+the hours the fee is paid, netting **+4.85 at the registered clock and −1.44 at
+the median phase — positive in only 5 of 24 phases.** Meanwhile the two
+components that *are* robust are the price move in the hour ending at the print
+(+7.03 median, 24/24) and the drift between settlements (+5.74 median, 24/24);
+together they carry essentially all of the engine's gross.
+
+**So v4's registered attribution is arithmetically right and economically
+misleading.** "+45.70 bp/day of funding, −2.70 of price" is a true statement
+about two columns; it is not a true statement about where the money comes from.
+The cash is received and the perpetual drops by the same amount in the hour it
+is received. What the book actually earns is the run-up into the print and the
+drift between prints in deeply-shorted names.
+
+**Caveat, stated rather than buried.** The hourly decomposition sums simple
+returns and the engine compounds a 24h return; the gap is −4.65 bp/book-day
+(sum-of-hourly +18.46 against engine +23.12, ~20%). The engine is authoritative
+for the level. The gap does not move the conclusion — funding +24.57 against a
+−19.72 giveback is far outside it — but any restatement should carry it.
+
+**Consequence, for the owner to accept or decline:** [`docs/carry_hold.md`](carry_hold.md)
+and `lane2_carry_hold_v4`'s `claim` describe the mechanism as crowded shorts
+paying longs. On this evidence that describes a cash flow returned at the moment
+it is paid. The honest mechanism is *drift and pre-print run-up in names whose
+perpetual sits at a persistent discount*, which is a different claim with a
+different risk profile — and it bears directly on the price leg's
+~95%-of-variance problem, since under this reading the price leg is not a drag on
+the edge, it **is** the edge.
 
 ### 0.7 H4 collapses into depth
 
@@ -520,3 +613,67 @@ Related: [`docs/carry_hold.md`](carry_hold.md),
 [`docs/governance.md`](governance.md),
 [`docs/backtesting_errors_we_never_repeat.md`](backtesting_errors_we_never_repeat.md),
 [`docs/archive/2026-07-31-trend-filters-and-persistence.md`](archive/2026-07-31-trend-filters-and-persistence.md).
+
+---
+
+## 0.9 Independent hourly re-derivation (2026-08-01)
+
+Run because the closure's minute-resolution numbers pointed at a root that does
+not exist. These use only the cross-venue panel, which does, and they are what
+the closure now rests on until `klines_1m` lands.
+
+Regressing the hourly return *after* each settlement on the print, pooled over
+every depth, top-100, n = 722,757:
+
+> **move(0 → +1h) = −0.780 bp + 1.1127 × print_bp,  t(slope) = 62.3**
+
+against the ex-dividend prediction of slope 1.0000. By bucket:
+
+| print bucket, bp | n | mean print | move 0→+1h | move/print | net to a long |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| < −100 | 2,997 | −167.18 | −193.61 | 1.158 | −26.43 |
+| [−100, −60) | 3,191 | −77.67 | −80.32 | 1.034 | −2.65 |
+| [−60, −40) | 3,214 | −48.74 | −54.66 | 1.122 | −5.93 |
+| [−40, −25) | 5,219 | −31.40 | −28.56 | 0.910 | +2.84 |
+| [−25, −15) | 7,899 | −19.30 | −15.24 | 0.789 | +4.06 |
+| [−15, −10) | 8,221 | −12.22 | −10.59 | 0.867 | +1.63 |
+| shallow \|f\| ≤ 10 | 685,294 | +0.31 | −0.62 | — | −0.93 |
+| **> +10 (positive)** | 6,722 | **+17.04** | **+18.35** | **1.077** | +1.31 |
+
+The hourly slope is noisier and slightly steeper than the minute-level 1.0458 —
+expected, since an hour of price noise is added to a one-instant step — and the
+deepest bucket overshoots. The qualitative result is unchanged and the mirror is
+unambiguous.
+
+**What this does *not* re-derive, and what still needs `klines_1m`:**
+
+- §0.3's H7 result — that the CARRY sleeve's ~00:20 fill saves ~45 bp — is
+  **UNVERIFIED at minute resolution**. Its magnitude is corroborated (the hourly
+  drop is −44.52 bp for deep prints, so a fill landing after it avoids about
+  that much) and its direction is safe, but the claim that ~97% of the move
+  lands inside two minutes, and the +5m/+10m/+20m/+30m/+60m/+90m profile, are
+  not reproducible from the panel. **Do not act on the minute-level shape until
+  it is re-derived.** The operational advice it implies — do not reduce the
+  kline-availability lag — is supported by the hourly evidence on its own.
+- §0.5's "97.0% of the `j+1` move lands inside the first 2 minutes", which is
+  H1's declared kill criterion. H1 is dead on execution regardless (§0.5), so
+  this changes no verdict.
+
+## 0.10 Fetching the missing root
+
+`scripts/data/download_bybit_klines_1m.py` writes
+`bybit_full_pit/klines_1m/date=<d>/symbol=<s>/part.parquet` with the same schema
+as `klines_1h`, via `BybitMarketData.get_klines(..., "1", ...)` — the same client
+path the 1h builder uses, `category=linear`. Resumable at (symbol, date), flushed
+every 14 days, so an interrupted run keeps what it has.
+
+Verified 2026-08-01: the v5 endpoint serves 1-minute klines back to at least
+2021-06 for BTCUSDT, 1,440 bars/day complete.
+
+Scope of the first run: the **568 symbols that carry at least one deep top-100
+print**, each over its own panel lifetime — 448,628 symbol-days, ordered by
+deep-print count so a partial run is still usable (top 100 symbols = 61.9% of
+deep prints, top 300 = 93.5%).
+
+This is a dataset inside `bybit_full_pit`. It is **not** a revival of the retired
+`bybit_render_1m` plan, which `docs/data.md` forbids recreating.
