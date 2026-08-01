@@ -34,16 +34,16 @@ plus 1-minute Bybit klines) and is therefore Lane-1. Evidence policy is
 > 00/04/08/12/16/20 UTC, exactly Bybit's 8h and 4h settlement times, while
 > `bar_ts_ms` itself lands on 23/03/07/11/15/19, which are not settlement times.
 >
-> Re-run on the correct anchor over `bybit_full_pit/klines_1m` (288 symbols,
-> 365,691 settlements, 27,542 of them deep), **every original finding is
-> confirmed**:
+> Re-run on the correct anchor over the **completed** `bybit_full_pit/klines_1m`
+> (510 symbols, 662,678 settlements, 29,330 of them deep), **every original
+> finding is confirmed**:
 >
 > | claim | this doc's intermediate "corrections" | correct | closure |
 > | --- | ---: | ---: | ---: |
-> | ex-dividend slope | 0.7003, then 0.3321 | **1.0340** (t 286.5) | 1.0458 ✓ |
-> | net to a long | +13.55, then +27.67 | **−3.13 to +0.80, i.e. zero** | zero ✓ |
-> | H7 wait +1m→+20m | "costs +23.57/+23.72" | **+0.96 (t 0.6), flat** | flat ✓ |
-> | H7 fill after the print | — | **−41.67 to −43.93 bp cheaper** | −44.87 ✓ |
+> | ex-dividend slope | 0.7003, then 0.3321 | **1.0307** (t 337.2) | 1.0458 ✓ |
+> | net to a long | +13.55, then +27.67 | **−3.02 to +0.82, i.e. zero** | zero ✓ |
+> | H7 wait +1m→+20m | "costs +23.57/+23.72" | **+0.25 (t 0.2), flat** | flat ✓ |
+> | H7 fill after the print | — | **−42.21 to −43.46 bp cheaper** | −44.87 ✓ |
 >
 > **"Arbitrage-free by construction" stands.** So does H7's recommendation: the
 > ~00:20 fill lag SAVES roughly 42 bp per entry and must not be reduced. The
@@ -144,20 +144,20 @@ The deployed CARRY sleeve decides at 00:00 UTC and fills at ~00:20 because of
 kline availability. For an 8h-cadence name 00:00 *is* a settlement instant, so
 the fill lands 20 minutes after the print.
 
-Re-derived 2026-08-01 on `bybit_full_pit/klines_1m` — 27,542 deep prints across
-288 symbols, anchored at the flagged bar's **close** (`bar_ts_ms + 1h`, §0.9).
-Entry price against the price just before the print; **negative means the sleeve
-buys cheaper**:
+Re-derived 2026-08-01 on the completed `bybit_full_pit/klines_1m` — **29,330
+deep prints across 510 symbols**, anchored at the flagged bar's **close**
+(`bar_ts_ms + 1h`, §0.9). Entry price against the price just before the print;
+**negative means the sleeve buys cheaper**:
 
 | fill at | +0m | +1m | +5m | +20m | +60m |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| entry price vs pre-print, bp | **−43.93** | −42.62 | −42.39 | **−41.67** | −58.99 |
-| t | −77.8 | −57.8 | −40.8 | −23.8 | −21.7 |
+| entry price vs pre-print, bp | **−43.46** | −42.46 | −42.26 | **−42.21** | −59.03 |
+| t | −79.6 | −59.7 | −42.0 | −24.8 | −22.3 |
 
 **The 00:20 lag is not a cost. It saves ~42 bp per entry**, because the sleeve
 fills *after* the ex-dividend drop rather than into it. The saving is essentially
-complete by +0m and flat out to +20m — waiting from +1m to +20m is **+0.96 bp,
-t 0.6**, i.e. free. That reproduces the original figures in this section
+complete by +0m and flat out to +20m — waiting from +1m to +20m is **+0.25 bp,
+t 0.2**, i.e. free. That reproduces the original figures in this section
 (−45.66 at +5m, −44.87 at +20m) to within 3 bp on data that exists.
 
 **Do not reduce the kline-availability lag.** Driving the fill toward 00:00 would
@@ -932,30 +932,33 @@ stacked on a one-minute step. Two right answers and two wrong ones, and the
 reasoning that discarded the right one was the same mis-identification of where
 the instant sits.
 
-**Correctly anchored**, 288 symbols, 365,691 settlements:
+**Correctly anchored**, on the completed root — 510 symbols, 662,678 settlements:
 
-> **move over [S, S+1min) = +0.138 bp + 1.0340 × print_bp,  t = 286.5**
+> **move over [S, S+1min) = −0.058 bp + 1.0307 × print_bp,  t = 337.2**
 
 against ex-dividend's prediction of slope 1.0000 and the closure's 1.0458.
 
 | print bucket, bp | n | mean print | move | ratio | net to a long |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| < −60 | 5,615 | −121.88 | −125.01 | 1.026 | −3.13 |
-| [−60, −40) | 2,899 | −48.75 | −50.37 | 1.033 | −1.62 |
-| [−40, −25) | 4,676 | −31.44 | −31.04 | 0.987 | +0.40 |
-| [−25, −15) | 7,076 | −19.31 | −18.51 | 0.958 | +0.80 |
-| [−15, −10) | 7,276 | −12.22 | −11.79 | 0.965 | +0.43 |
-| shallow | 335,535 | −0.06 | −0.06 | 0.939 | +0.00 |
-| > +10 (positive) | 2,614 | +17.62 | +25.63 | 1.455 | +8.01 |
+| < −60 | 5,910 | −121.29 | −124.31 | 1.025 | −3.02 |
+| [−60, −40) | 3,078 | −48.76 | −49.71 | 1.020 | −0.96 |
+| [−40, −25) | 4,954 | −31.41 | −30.59 | 0.974 | +0.82 |
+| [−25, −15) | 7,496 | −19.30 | −19.08 | 0.989 | +0.22 |
+| [−15, −10) | 7,892 | −12.21 | −11.71 | 0.959 | +0.50 |
+| shallow | 627,412 | +0.28 | +0.15 | — | −0.13 |
+| > +10 (positive) | 5,936 | +16.82 | +20.78 | 1.235 | +3.96 |
 
-**The net to a long is zero at every deep bucket.** The mirror is present and
-overshoots on the positive side (ratio 1.455 on n=2,614) — the closure's +33.10
-figure was directionally right and this doc's earlier criticism of it as
-"internally inconsistent" is withdrawn.
+**The net to a long is zero at every deep bucket** — −3.02 to +0.82 bp across a
+10× range of print depth. The mirror is present and overshoots slightly on the
+positive side (ratio **1.235** on n=5,936; it read 1.455 at 288 symbols and is
+converging toward 1 as coverage grows). The closure's +33.10 figure was
+directionally right and this doc's earlier criticism of it as "internally
+inconsistent" is withdrawn.
 
 **The residual is gone.** Holding past the instant, net to a long:
-−0.42 (t −0.89) at +0m, +0.88 at +1m, +1.12 at +5m, +1.84 at +20m, −15.48 at
-+60m; era means +5.95, +4.99, +0.03, −5.59, −3.65, +3.20. Noise. §0.9.1's claim
+**−0.38 (t −0.82)** at +0m, +0.62 at +1m, +0.82 at +5m, +0.88 at +20m, −15.95 at
++60m; era means +14.97, +4.89, −0.72, −4.87, −3.73, +3.32 — sign-unstable across
+eras and indistinguishable from zero at the instant. Noise. §0.9.1's claim
 of a large positive residual surviving every attack was the anchor error — it
 was measuring an hour *before* the settlement, where the pre-print rally lives.
 
@@ -977,8 +980,13 @@ Verified 2026-08-01: the v5 endpoint serves 1-minute klines back to at least
 
 Scope of the first run: the **568 symbols that carry at least one deep top-100
 print**, each over its own panel lifetime — 448,628 symbol-days, ordered by
-deep-print count so a partial run is still usable (top 100 symbols = 61.9% of
-deep prints, top 300 = 93.5%).
+deep-print count so a partial run is still usable.
+
+**COMPLETE 2026-08-01: 568/568 symbols, 448,607 partitions on disk, zero chunk
+failures.** 510 symbols clear the ≥200-day bar used for the minute-level work.
+Note for whoever uses this next: ~450k single-day parquet files is a poor shape
+for analysis — a glob scan costs more than the measurement, and loading all bars
+for 250+ symbols OOMs. Stream per symbol, or consolidate first.
 
 This is a dataset inside `bybit_full_pit`. It is **not** a revival of the retired
 `bybit_render_1m` plan, which `docs/data.md` forbids recreating.
