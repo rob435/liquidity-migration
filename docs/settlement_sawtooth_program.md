@@ -42,9 +42,10 @@ plus 1-minute Bybit klines) and is therefore Lane-1. Evidence policy is
 > bucket**, not zero. "Arbitrage-free by construction" is therefore **not
 > established**, and §0.1's conclusion is downgraded accordingly.
 
-Opened 2026-07-31 out of the hunt for a larger carry edge. Closed 2026-08-01.
-One operational result survives — §0.3, H7 — and it is a scheduling finding, not
-an alpha claim.
+Opened 2026-07-31 out of the hunt for a larger carry edge. Closed for trading
+2026-08-01. The one operational result it produced — §0.3, H7 — **reversed sign**
+when re-measured on real minute data, and the residual in §0.9.1 is reopened as a
+measurement. Neither is an alpha claim and neither authorizes a runtime change.
 
 ---
 
@@ -117,37 +118,49 @@ following day. A deep negative print selects a coin in a violent spot rally
 whose perpetual is at a persistent discount (basis level −41.7 bp at j−24,
 −55.4 at the print, −25.5 at j+24). It is a marker, not a cause.
 
-### 0.3 What survives: H7, and it is operational
+### 0.3 H7 — REVERSED on real 1-minute data
 
-> **⚠ UNVERIFIED at minute resolution.** Every number in this subsection came
-> from the non-existent `bybit_render_1m` root (see the provenance correction).
-> The *magnitude and direction* are independently corroborated at hourly
-> resolution — the drop in the hour after a deep print is −44.52 bp, so a fill
-> landing after it avoids about that much — and the operational advice therefore
-> stands on evidence that does exist. The minute-by-minute profile below does
-> not. **Re-derive from `bybit_full_pit/klines_1m` before citing the shape.**
+> **⚠ The original H7 finding is WITHDRAWN, and its recommendation was backwards.**
+> It was measured on the non-existent `bybit_render_1m` root. Re-measured on
+> `bybit_full_pit/klines_1m`, the sign flips.
 
 The deployed CARRY sleeve decides at 00:00 UTC and fills at ~00:20 because of
-kline availability. Measured on 1-minute bars (n = 18,566 deep prints inside the
-1m window), entry price relative to the price at the print:
+kline availability. For an 8h-cadence name, 00:00 *is* a settlement instant, so
+the fill lands 20 minutes after the print. Entry price for deep prints, against
+the price just before the print, n = 9,584 across 38 symbols — **negative means
+the sleeve buys cheaper**:
 
-| fill at | +0m | +5m | +10m | +20m | +30m | +60m | +90m |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| entry price vs print, bp | 0.00 | −45.66 | −44.32 | **−44.87** | −47.98 | −46.28 | −62.70 |
+| fill offset | −1m | +0m | +1m | +2m | +5m | +10m | **+20m** | +30m | +45m | +60m | +90m |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| entry price vs T−1m, bp | 0.00 | **−24.47** | −18.94 | −16.75 | −13.68 | −4.09 | **+4.63** | +15.52 | +33.61 | +6.96 | +16.13 |
 
-**The 00:20 lag is not a cost. It saves ~45 bp per entry**, because the sleeve
-fills *after* the ex-dividend drop rather than into it. Favourable in **24/24
-grid phases** (−81.04 to −12.16, median −40.54) and in every era: 2023 −33.25
-(t −6.08), 2024 −53.98 (t −9.02), 2025 −38.21 (t −13.49), 2026 −56.31 (t −14.08).
+**The cheapest fill is at the settlement itself, and it decays from there.** By
++20 minutes the sleeve is paying *more* than the pre-print price. Directly:
 
-**Do not "fix" the kline-availability lag.** Driving the fill toward 00:00 would
-hand back ~45 bp on every entry the sleeve makes. Nearly all of the saving is
-present by minute 1 and it is flat out to +60 min, so the current schedule is
-already capturing it. Extending the delay buys little and starts forgoing
-funding (§0.4).
+> **Waiting from +1m to +20m costs +23.57 bp per entry, t +8.3.**
 
-This is a cost-model and scheduling observation on the existing book. It is not
-a proposal, it authorizes nothing, and no runtime change follows from it here.
+The original claimed the opposite — that the same wait *saves* 44.87 bp — and
+concluded "do not reduce the kline-availability lag". On data that exists, the
+lag is a **cost**, not a saving. The mechanism is now clear and consistent with
+§0.9.1: the perp steps down ~30 bp at the instant and then *recovers within the
+hour*, so a buyer who waits buys the recovery.
+
+**This is a measurement, not a proposal, and it does not authorize a runtime
+change.** Three things would have to be established first, none of which is in
+scope here:
+
+- **Execution cost at the instant is not modelled.** Filling at a settlement
+  minute means trading when every other funding-sensitive participant does.
+  The 23.57 bp of price advantage could be wholly or partly consumed by spread
+  and impact, and this measurement uses close prices, not executable ones.
+- **Sample.** 38 of 568 symbols, and they are the most-crowded by construction.
+- **The sleeve does not only enter at deep prints.** This is conditioned on a
+  deep top-100 print; the population of actual CARRY entries is wider.
+
+The honest summary for the owner: the reason previously recorded for keeping the
+~00:20 lag is wrong, and the lag now looks like it costs roughly 20 bp an entry
+before execution costs. Whether it is worth changing is a live question, not a
+settled one.
 
 ### 0.4 H2 and H3 fail on the deployed book
 
@@ -706,6 +719,47 @@ could move the number:
 
 **Re-run this when the fetch completes** (§0.10) before anything is concluded.
 The numbers above are the state at 26 symbols and will move.
+
+### 0.9.1 The residual survives every attack it has been given
+
+Run on 8,715 deep prints across 35 symbols (the fetch had advanced). "Net to a
+long" = price move from the minute before the print out to `+X`, plus the fee
+received.
+
+| hold to | +0m | +5m | +15m | +30m | +60m |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| net to a long, bp | **+13.55** | +23.55 | +39.24 | +52.14 | +44.39 |
+| t | +14.52 | +13.01 | +14.61 | +13.74 | +8.92 |
+
+- **Not concentrated.** 30 of 35 symbols have a positive mean; the *median*
+  symbol is **+19.00 bp**, higher than the pooled mean of +13.55, so a few
+  negative names drag the average down rather than a few positive names carrying
+  it. Worst: PIPPINUSDT −15 (n 488), LABUSDT −11 (n 262). Best: API3USDT +72
+  (n 48), LPTUSDT +62 (n 113).
+- **Not an era artifact.** 2022 +22.07 (t 11.14), 2023 +60.51 (t 11.13), 2024
+  +44.32 (t 10.42), 2025 +11.14 (t 7.99), 2026 +10.97 (t 7.39). Decaying, but
+  alive in the two most recent years, which is where most of the sample is.
+- **Not a stale-print artifact.** Only 5.6% of deep prints have an identical
+  close at `T−2min` and `T−1min`.
+- **The step is transient.** Decomposing: the price falls ~−29.5 bp at the
+  instant (against a ~43 bp mean fee) and is back to roughly flat by +60 min.
+  The perpetual does not hold the lower level — it gives back ~70% of the fee
+  and reclaims it within the hour.
+
+**This does not make it a trade, and the reason is the one the closure got
+right.** The residual is measured *conditioning on the realised print at `T`*,
+which is published at `T` and is not knowable at `T−1min`. That is the same PIT
+wall that killed arms B, C and D in §0.5: the best available forward estimate of
+the print correlates +0.7325 with it, and every gate built on one loses money.
+A residual you can only identify after the fact is a fact about the market, not
+an edge.
+
+What it *does* do is retire "arbitrage-free by construction" as the reason the
+program is closed. The program is closed because **nothing that can be known in
+advance predicts the print well enough to pay 15.56 bp**, which is a much
+narrower and more fragile claim than a no-arbitrage argument. If a materially
+better forward predictor of the print ever exists, this reopens.
+
 
 ## 0.10 Fetching the missing root
 
