@@ -183,7 +183,19 @@ def _write_equity_benchmark_png(
     metric_tiles = _chart_metric_tiles(metrics)
     width = 1600
     chart_height = 940
-    table_height = 520 if table_rows else (118 if metric_tiles else 0)
+    # Offset from the chart to the top of the table, mirrored by `table_top`.
+    table_offset = MONTHLY_TABLE_OFFSET if metric_tiles else 130
+    if table_rows:
+        # Charts that fit the reserved area keep their exact historical size;
+        # only ones too long for the widest split grow, and those get padding.
+        needed = table_offset + monthly_table_height(len(table_rows))
+        table_height = (
+            MONTHLY_TABLE_BUDGET
+            if needed <= MONTHLY_TABLE_BUDGET
+            else needed + MONTHLY_TABLE_BOTTOM_PAD
+        )
+    else:
+        table_height = 118 if metric_tiles else 0
     height = chart_height + table_height
     left, right, top, bottom = 120, 58, 150, 190
     plot_w = width - left - right
@@ -288,7 +300,7 @@ def _write_equity_benchmark_png(
     text(left, 78, subtitle, (75, 85, 99, 255), font_subtitle)
     rounded((left, top, left + plot_w, top + plot_h), 4, (249, 250, 251, 255), (229, 231, 235, 255))
     metric_top = chart_height + 6
-    table_top = chart_height + (104 if metric_tiles else 130)
+    table_top = chart_height + table_offset
 
     for value in y_ticks:
         y = y_pos(value)
@@ -542,6 +554,67 @@ def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -
     ]
     return _fill_month_gaps(rows)
 
+MONTHLY_TABLE_ROW_H = 31
+MONTHLY_TABLE_HEADER_H = 34
+MONTHLY_TABLE_BASE_BLOCKS = 4
+MONTHLY_TABLE_MAX_BLOCKS = 6
+MONTHLY_TABLE_MIN_ROWS_PER_BLOCK = 9
+MONTHLY_TABLE_BOTTOM_PAD = 24
+# The table area the canvas has always reserved, and the offset above it.
+MONTHLY_TABLE_BUDGET = 520
+MONTHLY_TABLE_OFFSET = 104
+
+
+def _rows_fit_budget(rows_per_block: int) -> bool:
+    return (
+        MONTHLY_TABLE_OFFSET + MONTHLY_TABLE_HEADER_H + rows_per_block * MONTHLY_TABLE_ROW_H
+        <= MONTHLY_TABLE_BUDGET
+    )
+
+
+def monthly_table_layout(row_count: int) -> tuple[int, int]:
+    """Return (block_count, rows_per_block) for the monthly-return table.
+
+    The canvas sizer and the renderer both call this. They used to compute the
+    split independently against a hard-coded 520px table area, and once a run
+    needed 13+ rows per column the renderer drew past the bottom edge of the
+    PNG with nothing to indicate it. At the old 4-column cap that is 49 months:
+    a 64-month window lost 16 of them, the four most recent included.
+
+    The old 4-column split is kept wherever it already fitted, so charts that
+    were fine stay pixel-identical. Extra columns are added only when 4 would
+    overflow, and the canvas grows only when even the widest split will not do.
+    """
+    if row_count <= 0:
+        return 0, 0
+    base = min(
+        MONTHLY_TABLE_BASE_BLOCKS,
+        max(1, math.ceil(row_count / MONTHLY_TABLE_MIN_ROWS_PER_BLOCK)),
+    )
+    rows = math.ceil(row_count / base)
+    if _rows_fit_budget(rows):
+        return base, rows
+    for blocks in range(base + 1, MONTHLY_TABLE_MAX_BLOCKS + 1):
+        candidate = math.ceil(row_count / blocks)
+        if _rows_fit_budget(candidate):
+            return blocks, candidate
+    return MONTHLY_TABLE_MAX_BLOCKS, math.ceil(row_count / MONTHLY_TABLE_MAX_BLOCKS)
+
+
+def monthly_table_height(row_count: int) -> int:
+    """Pixels the table's own header and rows occupy, padding excluded.
+
+    Padding is added by the canvas sizer only when the table has outgrown the
+    reserved area; inside it the reserved area already supplies the slack, and
+    charging for padding there would nudge the canvas taller on runs that used
+    to fit exactly.
+    """
+    if row_count <= 0:
+        return 0
+    _, rows_per_block = monthly_table_layout(row_count)
+    return MONTHLY_TABLE_HEADER_H + rows_per_block * MONTHLY_TABLE_ROW_H
+
+
 def _draw_monthly_return_table(
     *,
     text: Any,
@@ -556,12 +629,11 @@ def _draw_monthly_return_table(
 ) -> None:
     if not rows:
         return
-    block_count = min(4, max(1, math.ceil(len(rows) / 9)))
-    rows_per_block = math.ceil(len(rows) / block_count)
+    block_count, rows_per_block = monthly_table_layout(len(rows))
     gap = 24
     block_w = (width - gap * (block_count - 1)) / block_count
-    row_h = 31
-    header_h = 34
+    row_h = MONTHLY_TABLE_ROW_H
+    header_h = MONTHLY_TABLE_HEADER_H
     for block_index in range(block_count):
         start_index = block_index * rows_per_block
         block_rows = rows[start_index : start_index + rows_per_block]

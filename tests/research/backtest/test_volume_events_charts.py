@@ -179,3 +179,72 @@ def test_chart_final_values_uses_common_end_window() -> None:
     # common end is 2025-02-01: strategy read THERE (1.5), not at its 2025-03 end (2.0)
     assert abs(finals["Strategy"] - 1.5) < 1e-9
     assert abs(finals["BTC"] - 1.2) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+
+
+def test_monthly_table_always_fits_inside_the_canvas() -> None:
+    """Every month row must land inside the PNG, at any history length.
+
+    The canvas used a fixed 520px table area while the renderer split rows into
+    at most 4 columns, so a long run asked for more rows than there was room
+    for and the bottom rows of EVERY column were cropped with no indication. A
+    64-month window silently lost 16 months, the four most recent among them.
+    """
+    from liquidity_migration.research.backtest.volume_events_charts import (
+        MONTHLY_TABLE_HEADER_H,
+        MONTHLY_TABLE_ROW_H,
+        monthly_table_height,
+        monthly_table_layout,
+    )
+
+    chart_height = 940
+    for months in range(1, 241):
+        block_count, rows_per_block = monthly_table_layout(months)
+        # the split must cover every row
+        assert block_count * rows_per_block >= months, months
+        # ...without an entirely empty trailing column
+        assert (block_count - 1) * rows_per_block < months, months
+
+        table_offset = 104  # metric tiles present, the standard render
+        needed = table_offset + monthly_table_height(months)
+        table_height = 520 if needed <= 520 else needed + 24
+        height = chart_height + table_height
+        table_top = chart_height + table_offset
+        table_bottom = table_top + MONTHLY_TABLE_HEADER_H + rows_per_block * MONTHLY_TABLE_ROW_H
+        assert table_bottom <= height, (
+            f"{months} months: table reaches {table_bottom}px on a {height}px canvas"
+        )
+
+    # the 64-month case that exposed this: all of it visible, nothing dropped
+    blocks, per_block = monthly_table_layout(64)
+    assert blocks * per_block >= 64
+    needed64 = 104 + monthly_table_height(64)
+    assert 940 + (520 if needed64 <= 520 else needed64 + 24) >= (
+        940 + 104 + MONTHLY_TABLE_HEADER_H + per_block * MONTHLY_TABLE_ROW_H
+    )
+
+
+def test_layout_is_unchanged_wherever_the_old_split_already_fitted() -> None:
+    """The old split was 4 columns of ceil(n/4); it overflowed only at 13+ rows
+    per column, i.e. 49+ months. Below that, layout and canvas must be exactly
+    what they were, so existing citable renders stay comparable."""
+    import math
+
+    from liquidity_migration.research.backtest.volume_events_charts import (
+        MONTHLY_TABLE_BUDGET,
+        monthly_table_height,
+        monthly_table_layout,
+    )
+
+    for months in range(1, 49):
+        old_blocks = min(4, max(1, math.ceil(months / 9)))
+        old_rows = math.ceil(months / old_blocks)
+        assert monthly_table_layout(months) == (old_blocks, old_rows), months
+        assert 104 + monthly_table_height(months) <= MONTHLY_TABLE_BUDGET, months
+
+    # 49 is the first month count the old 4-column split could not draw.
+    assert math.ceil(49 / 4) == 13
+    blocks, rows = monthly_table_layout(49)
+    assert blocks > 4 and rows <= 12, (blocks, rows)
