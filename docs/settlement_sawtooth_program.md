@@ -572,6 +572,68 @@ tests in future should be de-meaned before it is believed, and every one should
 be reported beside a shuffled control — §0.68's arm looked identical to this one
 on a phase sweep alone.
 
+### 0.70 CLOSED — gross-matching kills what the placebo left
+
+§0.69's arm survived a shuffle, so the next question was whether it survives
+having its leverage removed. Two diagnoses, then the kill.
+
+**Diagnosis 1: an absolute rank is six different rules.** `keep = top 50` was
+measured against the bar's whole ranked population, which grows from 11 symbols
+in 2021 to 479 in 2026 — so the filter is **no filter at all in 2021 (top 455%)
+and a top-decile cut in 2026**:
+
+| | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| symbols per bar | 11 | 135 | 185 | 286 | 420 | 479 |
+| `keep=50` is the top… | 455% | 37% | 27% | 17% | 12% | 10% |
+
+This is the same trap as the 2026-07-31 turnover-rank-decay bug — a raw rank
+*number* against a growing panel. **Repairing it to a percentile did not fix the
+2025 loss** (−8.77 against −9.01), so the bug was real and not the cause.
+
+**Diagnosis 2: the 2025 loss is the gross-reducing components.** Run separately,
+`hold` is **+2.23** in 2025 while `keep` is −10.22 and `size` is −8.31. 2025 is
+when deep prints went from ~2,000/year to 12,935, so anything that cuts positions
+forfeits the book's best year. Nothing subtle: they hold less in the year it paid.
+
+**The kill: match gross to v4 every day, so any difference is allocation and not
+leverage.**
+
+| arm, gross matched at 0.0939 | bp/day | Sharpe | differential | t |
+| --- | ---: | ---: | ---: | ---: |
+| v4 | +14.46 | 1.13 | — | — |
+| hold `rel_72h > 0` | +15.38 | **1.26** | **+0.92** | +0.78 |
+| keep pct25 | +13.36 | 1.11 | −1.33 | −0.29 |
+| keep pct50 | +13.48 | 1.13 | −1.20 | −0.22 |
+| size × `rel_72h` | +13.92 | 1.15 | −0.54 | −0.21 |
+| keep25 + size | +13.26 | 1.10 | −1.43 | −0.33 |
+| …its placebo | +12.93 | 1.03 | −1.75 | −0.47 |
+
+- **Every cross-sectional variant is dead.** Gross-matched they are all negative.
+  Their entire apparent contribution in §0.69 was holding less capital in 2025.
+- **The hold arm loses more than half its effect**: +2.19 → +0.92. That much was
+  leverage.
+- **And what remains is 207 days.** Era differentials are 2021 −0.01, 2022 −0.16,
+  2023 +0.26, 2024 −0.51, 2025 +0.56, **2026 +7.80**. Weighted by day count 2026
+  contributes **+0.92 of the +0.95 total; 2021–2025 together net +0.03.** 97% of
+  the effect sits in the most recent 12% of the record, at t 0.78.
+
+**This line is closed.** Nothing here is registered and nothing should be.
+
+**What survives is method, and it is worth more than the rule would have been.**
+Three filters now stand between a differential and belief in this program, and
+each one killed something the previous one passed:
+
+1. **The 24-phase sweep** — kills decision-hour luck. §0.67's three doors died here.
+2. **A matched shuffle** — kills market beta wearing a name-specific costume.
+   §0.68's arm was positive in 21/24 phases *and* 59% reproduced by shuffled data.
+3. **Gross matching** — kills leverage wearing an alpha costume. §0.69's arm
+   passed both of the above and lost 58% of itself here, with the remainder
+   living entirely in the last 207 days.
+
+A claim in this family that has not passed all three has not been tested.
+`lane2_carry_hold_v4`'s persistence size remains the only feature that has.
+
 ### 0.7 H4 collapses into depth
 
 H4 proposed a name's own sawtooth amplitude as a third sizing axis. Given slope
