@@ -509,6 +509,69 @@ needs **both**. The persistence size in `lane2_carry_hold_v4` is the reference
 for what passing both looks like: its shuffled-multiplier placebo costs
 −15.26 bp/day at t −2.71, and no shuffle gets near the real arm.
 
+### 0.69 A better exit: cross-sectional de-meaning, and the first arm to beat its placebo
+
+§0.68 killed "hold while spot_72h > 0" because a shuffled control reproduced 59%
+of it. The diagnosis pointed at the fix: `spot_72h > 0` is mostly a **market**
+condition, so in a rising market a random name's momentum proxies for it, which
+is exactly what the shuffle rode. Subtracting the cross-sectional median at each
+bar removes that component and leaves only name-specific information.
+
+**It works as designed.** Same construction, de-meaned input:
+
+| exit rule | raw diff | phases > 0 | Sharpe | **its own placebo** |
+| --- | ---: | ---: | ---: | ---: |
+| §0.68 hold while `spot_72h > 0` | +2.28 | 21/24 | 1.24 | **+1.34** (59% of it) |
+| hold while `rel_72h > 0` | +2.19 | 20/24 | 1.24 | **+0.22** (10%) |
+| hold while `rel_72h > +5%` | +2.12 | 20/24 | 1.24 | **−0.24** (negative) |
+| rally quality (`mom/vol`) | +2.11 | 21/24 | 1.24 | +0.77 |
+| hold while `rel_72h` ≥ its value at entry | +0.80 | 18/24 | 1.16 | **+0.97 — placebo wins** |
+| hold while the basis is still widening | +0.38 | 15/24 | 1.13 | — |
+
+Two other shapes, both gross-*reducing* rather than gross-raising:
+
+- **cross-sectional keep** — hold only names in the top 50 of the bar's relative
+  ranking (over ~210 symbols, so roughly the top quarter, not the top-100
+  universe): raw −2.05 but capital-normalised **+24.49**, 21/24, at 26% less gross.
+- **relative rally as a third size multiplier**, composed with depth and
+  persistence the way v4 composes those two: raw −1.51, but its placebo is
+  **−5.74**, the largest real-minus-placebo gap measured.
+
+**Composing all three is the best result, and its claim is risk, not return:**
+
+| | v4 | 1+5+6 | placebo (all inputs shuffled) |
+| --- | ---: | ---: | ---: |
+| bp/day | +14.46 | +14.58 | +7.81 |
+| Sharpe | 1.13 | **1.32**, better in **21/24** phases | 1.10, better in 10/24 |
+| max drawdown | −45.6% | **−33.3%**, better in **22/24** | −27.5% |
+| mean gross | 0.0939 | **0.0900** | 0.0479 |
+| raw differential | — | +0.24 (t 0.23) | −6.62 |
+
+Same money, 4% less capital, **+0.19 Sharpe and 12.3 points less drawdown**, and
+the placebo lands *below* v4 on Sharpe while destroying half the return. That is
+the shape `lane2_carry_hold_v4` itself registered on, reached a different way.
+
+**Why it is NOT registered here.** The era split is unstable and the headline is
+two large opposite numbers cancelling:
+
+| raw differential by era | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1+5+6 | +0.19 | −2.90 | +2.40 | −0.06 | **−9.01** | **+19.05** |
+| its placebo | +0.29 | −2.07 | −4.72 | −3.00 | −23.14 | +0.71 |
+
+A rule that loses 9 bp/day in 2025 and makes 19 in 2026 has not been shown to do
+anything except fit the most recent 207 days. The raw differential is t 0.23,
+nowhere near the `t >= 2.5` bar, and the Sharpe and drawdown gains are not
+expressed as a significance test at all. **The 2025 loss has to be explained
+before this is worth registering** — that is the next task, not a config.
+
+**What is durable regardless of whether this rule ever ships:** cross-sectional
+de-meaning is the technique that separates name information from market beta on
+this book, and it is now demonstrated. Every momentum-shaped feature this program
+tests in future should be de-meaned before it is believed, and every one should
+be reported beside a shuffled control — §0.68's arm looked identical to this one
+on a phase sweep alone.
+
 ### 0.7 H4 collapses into depth
 
 H4 proposed a name's own sawtooth amplitude as a third sizing axis. Given slope
