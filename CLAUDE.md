@@ -20,6 +20,7 @@ Bybit.
 | Data roots, timestamps, point-in-time membership, refresh | [docs/data.md](docs/data.md) |
 | The funded account: envelope, arming runbook, what is unproven | [docs/real_money.md](docs/real_money.md) |
 | What the evidence supports, including the negative results | [docs/research_findings.md](docs/research_findings.md) |
+| Ideas that work and still are not run, and what disqualifies each | [docs/research_theses.md](docs/research_theses.md) |
 | How evidence is graded, registered, and promoted | [docs/governance.md](docs/governance.md) |
 | Backtest failure modes we do not repeat | [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) |
 | The lead strategy in full | [docs/carry_hold.md](docs/carry_hold.md) |

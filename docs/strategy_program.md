@@ -712,6 +712,11 @@ bar: a stop × hold sweep tops out at t 1.84 and shortening the hold is not a
 substitute for the tightening (stop 3× at hold 2d is t −0.28) — the value is in
 cutting only what is losing, not in cutting everything.
 
+Measured-but-unrun ideas from this sweep — the momentum leg, financed-leaders,
+the carry liquidity screen and the capital-efficiency lever — are written up
+separately in [`research_theses.md`](research_theses.md), each with the specific
+thing that disqualifies it.
+
 **Two sleeves.** CARRY and LONG v12 correlate **+0.012** across all 24 decision
 clocks (+0.002 to +0.024), now explicable: CARRY is long what the crowd is short
 and paying for, LONG buys what the crowd has just piled into. At registered sizes

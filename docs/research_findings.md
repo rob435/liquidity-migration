@@ -127,9 +127,50 @@ CONTINUOUS sleeve runs again. `execution_arm` appears only in `passive_execution
 [execution_cost_model.py](../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
 report does not split by arm.
 
+**The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
+`LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; NOT deployed). All ~20 v11a quirks were ablated
+one at a time on the real engine — the harness reproduces the stored report to within the eight extra days
+of data (294 trades against 292). Every selectivity filter is load-bearing and loses Sharpe when loosened;
+the stop was not.
+
+A 1.5× ATR-14d stop is a two-week average applied to a name that moved 2.5σ *today*, so it sits inside the
+noise of the move that triggered the entry — 67 of 294 trades stopped out. Opening it to 3× ATR for 48h and
+then tightening back to 1.5× is worth **+0.48 bp/day, t 3.27, n 1927**.
+
+| LONG profile | trades | total | daily Sharpe | worst dip | MAR | stop / target / time exits |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `LongV11aDivWeekendVol` (deployed) | 292 | +40.7% | 1.28 | −4.11% | 1.72 | 66 / 36 / 190 |
+| [`LongV12WideStop`](../liquidity_migration/research/backtest/long_native.py) | 293 | **+52.2%** | **1.50** | **−3.32%** | **2.50** | 50 / 39 / 204 |
+
+Better or equal in all six calendar years (2022 flips −0.9% → +0.8%) and *less* concentrated than v11a
+(best-20 trades carry 62% of P&L against 78%), on flat gross (0.027 → 0.028) so it is not leverage.
+**Deploying it needs a runtime change, not a profile flip**: the producer publishes `stop_loss_pct` once in
+the entry-target metadata and cannot revise it, so the 48h tightening needs `_plan_time_stop_exits` extended
+to fire on a breached decayed stop. The wide initial stop alone is config-only but t 1.84, below the bar.
+Detail and the promotion note: [`trading_logic.md`](trading_logic.md), [`strategy_program.md`](strategy_program.md).
+
+**CARRY and LONG are the two-sleeve book because they are opposite sides of one crowd.** Daily book returns
+correlate **+0.012** across all 24 decision clocks (+0.002 to +0.024), and they hold the same symbol on the
+same day 11 times in 5.5 years — 1.04% of LONG's open name-days, 0.22% of CARRY's. CARRY is long what the
+crowd is short and paying for; LONG buys what the crowd has just piled into. At equal risk the pair is
+16.56 bp/day, Sharpe 1.81, worst dip −24.2%, against CARRY alone at 14.46 / 1.13 / −45.6%. Scaling LONG the
+8.5× that equal risk implies is an envelope decision, not a research one.
+
 ## 2. Do-not-retest ledger
 
 Rows marked *(stale)* have a superseded magnitude but a surviving direction (§3).
+
+### LONG entry, exit and stop geometry — ~165 cells on the real engine, 2026-08-01
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| funding condition on the LONG event | 16 gates, none beat the 1.24 baseline: 3d funding ≤ 0 → 1.07 (55 trades), ≤ −10 bp → **−0.00** (34 trades), ≥ 0 → 1.04, ≥ 25 bp → 1.20, bottom decile → −0.07 | CARRY's condition does not transfer. On the days LONG fires the median 3d funding is **+9.0 bp** and only 12.7% are ≤ 0 — the two books are conditioned on opposite states of the same variable |
+| "sell into strength" rally exits | 15 cells, best 1.17 against 1.24: trail 1.0–3.0× ATR → 0.52–0.93, breakeven at +1 ATR → 0.79 (hit rate collapses to 32.4%), exit on 1 lower close after +1 ATR → 1.00 at a 62.8% hit rate | every rule that reacts to a pullback shortens the hold and clips the winners. The give-back is at the bottom of the move, not the top. Supersedes the 2026-06 trailing test, which was confounded with hold-7 |
+| loss-only cooldown (re-buy a winner) | 0.87 with the deployed stop, 1.00 with 3× ATR, 1.07 with a range stop | a name that just hit its target is not a fresh signal |
+| concentrating on the best 1–2 candidates a day | t **−2.38** / **−2.00** vs baseline; best-1 puts 47% of P&L in five trades | the book's breadth is doing real work; the 10 slots never bind, so breadth was never a tested choice |
+| shorter hold as a substitute for the decayed stop | stop 3× at hold 2d → t −0.28, at hold 1d → t −1.78 | cutting every trade at two days is worse than leaving them. The value is in cutting only what is losing |
+| loosening the shape filters (close location, ATR ceiling) | t 1.33 full-sample and *worse* held-out (1.42 vs 1.52) | noise; the paired test caught what the Sharpe comparison suggested |
+| dropping the weekend 1.5× size boost | −0.19 bp/day, t −1.45 | its apparent Sharpe gain was the mechanical effect of running smaller |
 
 ### Cross-sectional and cross-venue screens
 

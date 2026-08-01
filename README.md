@@ -7,7 +7,7 @@ Bybit.
 
 | Sleeve | Profile | `deploy/sleeves.env` |
 | --- | --- | --- |
-| LONG | `LongV11aDivWeekendVol` | `LONG_SLEEVE=on` |
+| LONG | `LongV11aDivWeekendVol` | `LONG_SLEEVE=on` — successor `LongV12WideStop` registered 2026-08-01, not deployed ([why](docs/trading_logic.md)) |
 | CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE=on` |
 | CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE=off` — retired 2026-07-29 by owner override |
 | paper target mirror | republishes the demo fleet's targets onto the paper route | `PAPER_TARGET_MIRROR=on` |
