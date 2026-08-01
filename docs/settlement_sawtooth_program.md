@@ -285,10 +285,13 @@ and the cadence confound being the same fact.
   artefact of comparing 5- and 6-hour window *sums*, which drown a ~20 bp
   settlement-hour step in hours of several-hundred-bp noise. The mirror was
   visible in §1's own `j+1` column all along.
-  *(The closure's original figure here — +33.10 bp at 1-minute resolution — is
-  withdrawn as internally inconsistent: its own regression, slope 1.0458 with
-  intercept +1.163, predicts +18.36 for a +16.45 bp print, and the independent
-  hourly measurement is +18.35. Re-derive from `klines_1m` when the fetch lands.)*
+  *(Re-derived at minute resolution 2026-08-01: deep-positive prints of
+  +17.62 bp move **+25.63 bp** at the instant, ratio **1.455** on n = 2,614 — the
+  positive side genuinely overshoots the pooled slope. The closure's +33.10 is
+  high but directionally right, and this doc's earlier claim that it was
+  "internally inconsistent" is withdrawn. The hourly +18.35 and the minute
+  +25.63 are both correct and measure different windows: the hour includes the
+  partial recovery that follows the step.)*
 - **Open interest rises into the print and never unwinds.** Harvest flow's
   distinguishing prediction is an unwind after the print. Bybit: **+849.3 bp
   pre (t 44.51), +166.9 post (t 15.49)**. Binance's independent series: **+738.3
@@ -917,9 +920,17 @@ the instant is `bar_ts_ms + 1h`. Verified empirically on deep prints:
 | **`bar_ts_ms + 1h`** | **08h 17.2%, 16h 16.3%, 00h 15.7%, 12h 8.2%, 04h 8.1%** |
 
 Bybit settles at 00/08/16 (8h) and 00/04/08/12/16/20 (4h). Only `+1h` lands on
-them. Three separate re-derivations in this program — one hourly, two at minute
-resolution — anchored on `bar_ts_ms` and each produced a confident wrong answer
-(slope 1.1127, then 0.7003, then 0.3321, against the truth of 1.0340).
+them. **Two** minute-level re-derivations in this program anchored on
+`bar_ts_ms` and each produced a confident wrong answer — slope 0.7003, then
+0.3321, against the truth of 1.0340.
+
+The *hourly* regression in §0.6 was correctly anchored and its withdrawal is
+itself withdrawn. Because the flagged bar **closes** at the settlement, the next
+bar is the ex-dividend hour, which is exactly what it measured: slope **1.1127**
+against the minute truth of **1.0340**, the gap being an hour of price noise
+stacked on a one-minute step. Two right answers and two wrong ones, and the
+reasoning that discarded the right one was the same mis-identification of where
+the instant sits.
 
 **Correctly anchored**, 288 symbols, 365,691 settlements:
 
