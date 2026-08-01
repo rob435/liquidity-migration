@@ -87,6 +87,17 @@ position, scaled by how calm Bitcoin is, 1.5× on weekends, then the whole book
 halved by LONG's own size dial (0.5). Exits: 1.5 typical-daily-swings below
 entry, 4 above, out by 3 days, no re-buy for 7 days.
 
+**A replacement is ready but not switched on** (`LongV12WideStop`). Everything
+above stays; only the get-out line moves. It sits 1.5 typical-daily-swings below
+entry, but "typical" is a two-week average and this strategy only buys coins that
+moved two and a half times their normal amount *today* — so the line is inside the
+noise of the very jump it just bought, and 67 of 294 trades were knocked out by it.
+The new version leaves the line 3 swings away for the first two days, then pulls it
+back to 1.5. Over five years that turns +38.5% into +51.6%, smoothness 1.24 into
+1.49, and the worst dip gets slightly *shallower* (−4.4% to −3.9%). It is better in
+every one of the six years, and it is not one lucky trade — the best 20 trades carry
+62% of the profit instead of 78%.
+
 ## 5. CONTINUOUS — retired 2026-07-29
 
 The pump-fade strategy: short small coins that spiked, wait a day for the spike

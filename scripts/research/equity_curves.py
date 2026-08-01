@@ -68,12 +68,18 @@ def _run_long(
     out: Path,
     pit_tol: float,
     long_notional: float | None = None,
+    long_profile: str = "v11a",
 ) -> dict[str, Any]:
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
-    from liquidity_migration.research.backtest.long_native import long_v11a_profile, run_long_native_research
+    from liquidity_migration.research.backtest.long_native import (
+        long_v11a_profile,
+        long_v12_profile,
+        run_long_native_research,
+    )
 
-    cfg = replace(long_v11a_profile(), start_date=start, end_date=end)
+    profile = {"v11a": long_v11a_profile, "v12": long_v12_profile}[long_profile]
+    cfg = replace(profile(), start_date=start, end_date=end)
     if long_notional is not None:
         # Research convention is 1x; this option draws pure leverage on the same signal.
         cfg = replace(cfg, notional_multiplier=float(long_notional))
@@ -335,6 +341,16 @@ def main() -> int:
             "e.g. 5 draws pure leverage on the same signal."
         ),
     )
+    p.add_argument(
+        "--long-profile",
+        choices=("v11a", "v12"),
+        default="v11a",
+        help=(
+            "Which LONG profile to render. v11a is the deployed one; v12 is the "
+            "same signal with the stop widened to 3x ATR for two days and then "
+            "tightened to 1.5x."
+        ),
+    )
     p.add_argument("--venue", choices=sorted(VALID_CONTINUOUS_VENUES), default=None, help="Continuous venue override.")
     p.add_argument(
         "--continuous-render-only",
@@ -441,6 +457,7 @@ def main() -> int:
                     out,
                     0.0,
                     long_notional=args.long_notional_multiplier,
+                    long_profile=args.long_profile,
                 )
             elif s == "carry":
                 payload = _run_carry(args.panel_root, start, end, out)

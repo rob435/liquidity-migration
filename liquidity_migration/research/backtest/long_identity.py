@@ -6,6 +6,16 @@ from __future__ import annotations
 LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
 LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME = "LongV11aDivWeekendVol"
 
+# v12 differs from v11a only in stop geometry. It gets its own identity because
+# the string is a persisted account-journal key, not a code reference: two
+# profiles sharing one id would merge their positions under a single component.
+LONG_V12_WIDE_STOP_STRATEGY_ID = "long_native_v12_wide_stop"
+LONG_V12_WIDE_STOP_PROFILE_NAME = "LongV12WideStop"
+
+SUPPORTED_LONG_STRATEGY_IDS = frozenset(
+    {LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, LONG_V12_WIDE_STOP_STRATEGY_ID}
+)
+
 
 def long_trade_id(*, symbol: str, signal_ts_ms: int) -> str:
     normalized_symbol = str(symbol).strip().upper()

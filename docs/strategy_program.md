@@ -13,6 +13,31 @@ one-off runners are retired.
   prospective — earlier verdicts stand as recorded. Because it no longer controls
   family-wise error, a survivor needs a reported plateau and a failed placebo
   beside the number.
+- **`LongV12WideStop` is registered (2026-08-01) and is NOT deployed.** The LONG
+  sleeve still publishes v11a. v12 changes exactly one thing — the stop opens to
+  3× ATR and decays back to 1.5× after 48h — after ablating all ~20 v11a quirks on
+  the real engine. Paired daily difference **+0.48 bp/day, t 3.27, n 1927**; total
+  38.5% → 51.6%, daily Sharpe 1.24 → 1.49, worst dip −4.4% → −3.9%, better or equal
+  in all six years, and *less* concentrated (best-20 share 78% → 62%). Detail:
+  `docs/trading_logic.md`. **Deploying it needs a runtime change, not just a profile
+  flip**: the producer publishes `stop_loss_pct` once at entry and cannot revise it, so
+  the 48h tightening requires `_plan_time_stop_exits` extended to fire on a breached
+  decayed stop. The wide initial stop alone (`fc_atr_stop_mult=3.0`, no decay) IS
+  config-only and deployable today, but on its own it is t 1.84 — below the 2.5 bar —
+  and it costs drawdown (−6.6% against v11a's −4.4%). The pair is what clears the bar.
+  **No config-only cell clears it**: a 12-cell stop × hold sweep (stop 1.5/2/3/4 ×
+  hold 1/2/3) tops out at that same t 1.84, and shortening the hold is *not* a
+  substitute for the tightening — stop 3× at hold 2d is t −0.28, at hold 1d t −1.78.
+  Cutting every trade at two days is worse than leaving them; the value is in cutting
+  only the ones that are losing, which is what the decayed stop expresses. Negative results from the same sweep, all measured, all
+  do-not-retest: **every funding gate on the LONG event fails** (16 cells, none beat
+  1.24 — on the days LONG fires, median 3d funding is +9.0 bp and only 12.7% are
+  ≤ 0, so carry's condition does not transfer); **every "sell into strength" rally
+  exit fails** (trailing, breakeven ratchets, exit-on-lower-close: 15 cells, best
+  1.17); **loss-only cooldown fails** (0.87); **concentrating on the best 1-2
+  candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
+  across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
+  1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
 - **`lane2_carry_hold_v4` is registered (2026-07-31) and is NOT deployed.** The
   CARRY sleeve still publishes v3. v4 adds a crowding-persistence size multiplier
   and moves the toxic band's high edge to 0%; its claim is capital efficiency
@@ -642,6 +667,60 @@ missing?"). Full evidence, all cells and negatives:
   venue-scoped vs base, on post-commit days. The deployed profile is
   untouched; promotion would need a deliberate admission-scope engine field
   (identity-shifting), a frozen both-venue registry, and the five-line note.
+
+### 2026-08-01 — LONG v12 registered (owner instruction)
+
+Every v11a quirk was ablated one at a time on the real engine
+(`_run_long_pipeline`, validated against the stored report: 294 trades here
+against 292 there, the gap being eight extra days). ~165 cells. The selectivity
+filters are the alpha and all survive; the stop was the one number that was
+wrong. Full ledger including every negative below and in `docs/trading_logic.md`.
+
+**Promotion note (recorded change point):**
+
+```text
+Claim: LONG's stop is measured as 1.5x ATR-14d, a two-week average, on a name
+  that moved 2.5 sigma TODAY, so it sits inside the noise of the move that
+  triggered the entry (67 of 294 trades stopped out). Opening it to 3x ATR and
+  tightening back to 1.5x after 48h is worth +0.48 bp/day, t 3.27, n 1927:
+  total 38.5% -> 51.6%, daily Sharpe 1.24 -> 1.49, worst dip -4.4% -> -3.9%,
+  better or equal in all six calendar years, and LESS concentrated (best-20
+  share 78% -> 62%). Gross is flat (0.027 -> 0.028), so it is not leverage.
+Config commit: this commit — long_v12_profile(), execution identity
+  long_native_v12_wide_stop (separate id because that string is a persisted
+  account-journal key). v11a is untouched and bit-identical.
+Forward record (days, net delta vs baseline, tail behavior): none yet — Lane-1
+  seen-data evidence only. The forward clock starts at this commit. Every number
+  above is simulated on data that also chose the rule.
+Decision: REGISTER on owner instruction 2026-08-01. NOT deployed, and not
+  deployable by a profile flip: the producer publishes stop_loss_pct once in the
+  entry target's metadata and cannot revise it, so the 48h tightening needs
+  _plan_time_stop_exits extended to fire on a breached decayed stop. The wide
+  initial stop alone IS config-only but is t 1.84, below the 2.5 bar.
+Date: 2026-08-01.
+```
+
+**Negatives from the same sweep — measured, not assumed, all do-not-retest.**
+Every funding gate on the LONG event fails (16 cells, none beat 1.24; on the days
+LONG fires the median 3d funding is +9.0 bp and only 12.7% are ≤ 0, so CARRY's
+condition does not exist there). Every "sell into strength" rally exit fails (15
+cells — trailing the high-water mark, breakeven ratchets, exit-on-lower-close;
+best 1.17, and the 2026-06 trailing test that "already refuted" this was
+confounded with hold-7). Loss-only cooldown fails (0.87). Concentrating on the
+best 1–2 candidates a day fails (t −2.38 / −2.00). No config-only cell clears the
+bar: a stop × hold sweep tops out at t 1.84 and shortening the hold is not a
+substitute for the tightening (stop 3× at hold 2d is t −0.28) — the value is in
+cutting only what is losing, not in cutting everything.
+
+**Two sleeves.** CARRY and LONG v12 correlate **+0.012** across all 24 decision
+clocks (+0.002 to +0.024), now explicable: CARRY is long what the crowd is short
+and paying for, LONG buys what the crowd has just piled into. At registered sizes
+they are an order of magnitude apart in risk (≈47% vs ≈5.5% annualised), so the
+meaningful construction scales LONG up. At equal risk: 16.56 bp/day, Sharpe 1.81,
+worst dip −24.2%, against CARRY alone at 14.46 / 1.13 / −45.6%. Scaling LONG 8.5×
+is an envelope decision, not a research one — the Sharpe cost is zero
+(`max_concurrent_positions` 10 → 5 doubles size at 1.24 → 1.27) but the margin is
+real, and the owner declined `notional_multiplier` 1.0 on 2026-07-28 at ~4×.
 
 ## What survived the audit
 

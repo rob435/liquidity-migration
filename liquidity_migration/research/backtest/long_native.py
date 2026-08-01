@@ -46,7 +46,12 @@ from liquidity_migration.research.backtest.historical_account_replay import (
     submit_historical_decisions,
     synthetic_historical_rules_for_symbols,
 )
-from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, long_trade_id
+from liquidity_migration.research.backtest.long_identity import (
+    LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+    LONG_V12_WIDE_STOP_STRATEGY_ID,
+    SUPPORTED_LONG_STRATEGY_IDS,
+    long_trade_id,
+)
 from liquidity_migration.account.strategy_targets import component_target_intent
 from liquidity_migration.core._common import _date_range, _exclude_symbols, _iso_date, _iso_month
 from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart
@@ -93,6 +98,15 @@ class LongNativeConfig:
     weekend_size_mult: float = 1.5
     fc_close_loc_multi_day: float = 0.6
 
+    # Tighten the stop to N x ATR once a position is this many hours old. Zero
+    # disables, so v11a is unchanged. Pairs with a wide `fc_atr_stop_mult`:
+    # ATR-14d is a two-week average and this signal only fires when a name moved
+    # 2.5 sigma TODAY, so a narrow stop sits inside the noise of the very move
+    # that triggered the entry. Give the trade room through that move, then stop
+    # giving it room once it has had two days and gone nowhere.
+    fc_stop_time_decay_hours: int = 0
+    fc_stop_time_decay_atr_mult: float = 0.0
+
     max_concurrent_positions: int = 10
     cooldown_days: int = 7
     entry_delay_hours: int = 1
@@ -108,9 +122,41 @@ class LongNativeConfig:
 
 
 def long_v11a_profile() -> LongNativeConfig:
-    """Return the single registered LONG strategy profile."""
+    """Return the deployed LONG strategy profile."""
 
     return LongNativeConfig()
+
+
+def long_v12_profile() -> LongNativeConfig:
+    """v11a with the stop widened early and tightened late.
+
+    Every other v11a rule was ablated on the real engine and kept: the volume
+    rank, the BTC-and-ETH regime gate, the 2.5 sigma trigger family, the 7-day
+    cooldown, the 3-day hold, the 4xATR target, the 1%/6h retrace entry and the
+    top-50 universe all lose Sharpe when loosened. The stop was the one number
+    that was wrong.
+
+    A 1.5xATR stop is measured off a two-week average on a name that moved 2.5
+    sigma today, so it sits inside the noise of the move that triggered the
+    entry: 67 of 294 trades stopped out. Widening it to 3xATR for the first two
+    days and then tightening to 1.5xATR keeps the room where it is needed and
+    takes it back from trades that have gone nowhere.
+
+    Measured against v11a over 2021-04..2026-07 (paired daily difference
+    +0.48 bp/day, t 3.27): total 38.5% -> 51.6%, daily Sharpe 1.24 -> 1.49,
+    worst dip -4.4% -> -3.9%, better or equal in all six calendar years, and
+    LESS concentrated (best 20 trades carry 62% of P&L against 78%).
+
+    Lane-1 evidence: simulated on data that also shaped the choice. The forward
+    record starts at the commit that registers this profile.
+    """
+
+    return LongNativeConfig(
+        execution_strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
+        fc_atr_stop_mult=3.0,
+        fc_stop_time_decay_hours=48,
+        fc_stop_time_decay_atr_mult=1.5,
+    )
 
 
 def _diagnostic_data_end(exclusive_end: str) -> str | None:
@@ -402,8 +448,11 @@ def _long_equity_chart_metrics(summary: dict[str, Any], equity: pl.DataFrame) ->
 def _long_kernel_strategy_id(config: LongNativeConfig, costs: CostConfig) -> str:
     del costs
     strategy_id = config.execution_strategy_id.strip()
-    if strategy_id != LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID:
-        raise ValueError("LONG execution_strategy_id must be the registered v11a identity")
+    if strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
+        raise ValueError(
+            "LONG execution_strategy_id must be a registered identity: "
+            f"{sorted(SUPPORTED_LONG_STRATEGY_IDS)}"
+        )
     return strategy_id
 
 
@@ -1041,6 +1090,16 @@ def _run_long_pipeline(
             bar_low = float(bars["low"][idx])
             bar_close = float(bars["close"][idx])
             bar_end_ts = int(bars["bar_end_ts_ms"][idx])
+            if (
+                config.fc_stop_time_decay_hours > 0
+                and bar_end_ts - int(pos["entry_ts_ms"])
+                >= config.fc_stop_time_decay_hours * MS_PER_HOUR
+            ):
+                pos["stop_price"] = max(
+                    float(pos["stop_price"]),
+                    float(pos["entry_price"])
+                    * (1.0 - config.fc_stop_time_decay_atr_mult * float(pos["atr_pct"])),
+                )
             if bar_low <= pos["stop_price"]:
                 _record_exit_target(
                     pos,
@@ -1201,6 +1260,9 @@ def _run_long_pipeline(
                 "position_weight": float(position_weight),
                 "stop_pct": float(stop_pct),
                 "tp_pct": float(take_profit_pct),
+                # kept so a time-decaying stop can be re-derived from ATR rather
+                # than from the (possibly range-based) initial stop
+                "atr_pct": float(_safe_float(row.get("atr_14d_pct")) or 0.0),
                 "max_hold_days": int(hold_days),
                 "basket_id": f"native-{_iso_date(int(ts))}-{symbol}",
             }

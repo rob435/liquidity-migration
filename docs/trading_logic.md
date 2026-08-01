@@ -52,6 +52,45 @@ annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leve
 changes margin only, never quantity. Five new entries per cycle maximum; the producer
 refuses to run if projected full-book initial margin exceeds 50% of equity.
 
+### `LongV12WideStop` — registered 2026-08-01, NOT deployed
+
+Same signal, same universe, same sizing, same entry. One thing changes: the stop
+starts at **3× the typical daily swing instead of 1.5×**, and tightens back to 1.5×
+once a position is **48 hours old** (`long_v12_profile()`,
+`fc_atr_stop_mult` / `fc_stop_time_decay_hours` / `fc_stop_time_decay_atr_mult`).
+
+The reason the old stop is wrong: ATR-14d is a two-week average, and this signal only
+fires when a coin moved 2.5σ *today*, so the average understates today's range and the
+stop sits inside the noise of the very move that triggered the entry. 67 of 294 trades
+stopped out. v12 gives the trade room through that move and takes the room back once it
+has had two days and gone nowhere.
+
+Every other v11a rule was ablated on the real engine and kept — volume rank, the BTC-and-ETH
+regime gate, the 2.5σ trigger family, the 7-day cooldown, the 3-day hold, the 4×ATR target,
+the 1%/6h retrace, the top-50 universe all lose Sharpe when loosened. Measured over
+2021-04 → 2026-07 against v11a: total **38.5% → 51.6%**, daily Sharpe **1.24 → 1.49**,
+worst dip **−4.4% → −3.9%**, stop-outs 67 → 50, paired daily difference **+0.48 bp/day
+(t 3.27, n 1927)**, better or equal in all six calendar years, and less concentrated
+(best 20 trades carry 62% of P&L against 78%). Render it with
+`bash scripts/research/equity_curves.sh --sleeves long --long-profile v12`.
+
+Lane-1 evidence: simulated on the data that also chose the rule. The forward record starts
+at the registering commit. Its identity `long_native_v12_wide_stop` is separate from v11a's
+because that string is a persisted account-journal key.
+
+**v12 cannot publish yet — flipping the profile is not enough.** The producer sends
+`stop_loss_pct` once, in the entry target's metadata, and the account owner derives the
+resting stop price after the fill; there is no path for the producer to revise it later
+(`_long_entry_target_intents`). Only the *time* stop is re-evaluated per cycle
+(`_plan_time_stop_exits`). So v12's wide initial stop deploys as-is — it is just a bigger
+`stop_loss_pct` — but the 48-hour tightening needs `_plan_time_stop_exits` extended to
+publish a zero target when an open position is past `fc_stop_time_decay_hours` and price
+has breached `entry × (1 − fc_stop_time_decay_atr_mult × atr_14d_pct)`. The producer cycles
+every 60s against the backtest's hourly bars, so that check would be finer-grained than the
+measurement, not coarser. Until it exists, v12 is a research profile only, and the two
+halves of its stop would live in different places: the wide stop owner-side as resting
+protection, the tightening producer-side as an exit target.
+
 There is no separate per-order notional cap. `max_order_notional_pct_equity` is `0.0` in
 [`configs/operational.demo.json`](../configs/operational.demo.json), and 0 means *disabled —
 derive the slot from `gross_exposure / max_concurrent_positions × notional_multiplier`*

@@ -25,6 +25,7 @@ from liquidity_migration.research.backtest.long_native import (
     _run_long_pipeline,
     format_long_native_report,
     long_v11a_profile,
+    long_v12_profile,
 )
 from liquidity_migration.research.backtest.run_diagnostics import diagnose
 
@@ -149,6 +150,9 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
         "fc_sniper_deadline_hours",
         "weekend_size_mult",
         "fc_close_loc_multi_day",
+        # v12 stop geometry, consumed by _scan_position_exit
+        "fc_stop_time_decay_hours",
+        "fc_stop_time_decay_atr_mult",
         "max_concurrent_positions",
         "cooldown_days",
         "entry_delay_hours",
@@ -326,3 +330,51 @@ def test_report_is_descriptive_not_a_legacy_promotion_gate() -> None:
         )
         == "exploratory"
     )
+
+
+def test_v12_widens_the_stop_then_tightens_it_after_two_days(tmp_path: Path) -> None:
+    """v12's stop starts at 3xATR and ratchets to 1.5xATR at the 48h mark.
+
+    Bars sit flat at 100 with one dip to 96.0 -- 4% down, which is inside
+    3xATR (6%) but outside 1.5xATR (3%). Entry is the 6h sniper deadline, so
+    the early dip goes at h12 (6h held, before the decay) and the late one at
+    h60 (54h held, after it). v11a stops on either; v12 rides out the early one
+    and stops on the late one, which is the whole point of the rule.
+
+    h6 would not work as the early dip: that is the entry bar itself, and the
+    exit scan starts one bar after entry.
+    """
+    signal_ts = 1_700_000_000_000
+    atr_pct = 0.02
+
+    def _dip_bars(dip_hour: int) -> dict[str, object]:
+        bars = _bars(signal_ts, hours=96)
+        bars["low"] = np.array(bars["low"], dtype=np.float64)
+        bars["low"][dip_hour] = 96.0
+        return bars
+
+    for dip_hour, v11a_stops, v12_stops in ((12, True, False), (60, True, True)):
+        features = [_feature("AAAUSDT", signal_ts)]
+        bars = {"AAAUSDT": _dip_bars(dip_hour)}
+        for cfg, expected in (
+            (long_v11a_profile(), v11a_stops),
+            (long_v12_profile(), v12_stops),
+        ):
+            trades, stats, _events, _decisions, _session = _run(
+                tmp_path / f"{dip_hour}-{cfg.execution_strategy_id}",
+                features,
+                bars,
+                config=cfg,
+            )
+            assert trades.height == 1
+            stopped = trades["exit_reason"][0] == "stop_loss"
+            assert stopped is expected, (
+                f"dip at h{dip_hour} under {cfg.execution_strategy_id}: "
+                f"expected stop={expected}, got {trades['exit_reason'][0]}"
+            )
+            assert stats["exits_stop"] == (1 if expected else 0)
+
+    assert long_v12_profile().fc_atr_stop_mult == 3.0
+    assert long_v11a_profile().fc_stop_time_decay_hours == 0
+    assert abs(long_v12_profile().fc_stop_time_decay_atr_mult - 1.5) < 1e-12
+    assert atr_pct * 3.0 > 0.04 > atr_pct * 1.5
