@@ -12,6 +12,8 @@ from liquidity_migration.account.account_kernel import (
 )
 from liquidity_migration.venue.account_reconcile import (
     BYBIT_ACCOUNTING_MAX_WINDOW_MS,
+    DEFAULT_FUNDING_OVERLAP_MS,
+    DEFAULT_FUNDING_QUERY_INTERVAL_NS,
     FUNDING_HEALTH_MAX_AGE_FLOOR_NS,
     BybitAccountFundingReconciler,
 )
@@ -114,7 +116,7 @@ def test_funding_reconciler_records_and_idempotently_verifies_settlement(
 
     monkeypatch.setattr(kernel.journal, "events", read_cached_events)
 
-    clock.advance_ns(100_000_000)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
     second = reconciler.reconcile_once()
 
     assert cached_journal_reads == 1
@@ -165,7 +167,7 @@ def test_funding_reconciler_rejects_changed_immutable_venue_row(
     reconciler.reconcile_once()
     client.rows[0]["funding"] = "0.03"
     client.rows[0]["change"] = "0.03"
-    clock.advance_ns(100_000_000)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
 
     with pytest.raises(RuntimeError, match="disagrees with immutable"):
         reconciler.reconcile_once()
@@ -281,7 +283,7 @@ def test_funding_index_advances_incrementally_and_rebuilds_on_reset(
     # incrementally (no rebuild) and record only the newly returned row. The
     # index advances at pass start, so settlement-2 joins it on the NEXT pass.
     client.rows.append(second)
-    clock.advance_ns(100_000_000)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
     report_two = reconciler.reconcile_once()
     assert report_two.settlement_rows_recorded == 1
     assert set(reconciler._funding_index) == {"settlement-1"}
@@ -289,7 +291,7 @@ def test_funding_index_advances_incrementally_and_rebuilds_on_reset(
 
     # A third pass records nothing and the idempotent identity check still
     # verifies both settlements against the incremental index.
-    clock.advance_ns(100_000_000)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
     report_three = reconciler.reconcile_once()
     assert report_three.settlement_rows_recorded == 0
     assert report_three.settlement_rows_observed == 2
@@ -299,7 +301,7 @@ def test_funding_index_advances_incrementally_and_rebuilds_on_reset(
     reconciler._funding_index_count = 10_000
     reconciler._funding_index_tail_hash = "not-a-real-hash"
     reconciler._funding_index = {}
-    clock.advance_ns(100_000_000)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
     report_four = reconciler.reconcile_once()
     assert report_four.healthy
     assert set(reconciler._funding_index) == {"settlement-1", "settlement-2"}
@@ -378,3 +380,101 @@ def test_mainnet_funding_refuses_a_settlement_row_carrying_cash(tmp_path: Path) 
     )
     with pytest.raises(RuntimeError, match="double-count"):
         mainnet.reconcile_once()
+
+
+def test_funding_query_is_skipped_inside_the_interval_and_report_stays_fresh(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000)
+    kernel = _kernel(tmp_path, clock)
+    client = FundingClient([_settlement()])
+    reconciler = BybitAccountFundingReconciler(kernel=kernel, client=client, clock=clock)
+
+    first = reconciler.reconcile_once()
+    assert first.queried is True
+    assert first.settlement_rows_recorded == 1
+    assert len(client.calls) == 1
+
+    # Two seconds later — the owner's reconcile cadence — nothing is asked,
+    # but liveness still advances and the recovered-through bound is carried.
+    clock.advance_ns(2_000_000_000)
+    second = reconciler.reconcile_once()
+    assert len(client.calls) == 1
+    assert second.queried is False
+    assert second.healthy is True
+    assert second.settlement_rows_observed == 0
+    assert second.query_start_ms == first.query_start_ms
+    assert second.query_end_ms == first.query_end_ms
+    assert second.observed_ts_ns > first.observed_ts_ns
+
+
+def test_funding_query_runs_on_the_next_hour_boundary(tmp_path: Path) -> None:
+    # Start one second before a UTC hour: the second pass is only two seconds
+    # later — far inside the 60s interval — but a settlement could have
+    # landed on the hour, so the boundary forces a real query.
+    hour_ns = 3_600 * 1_000_000_000
+    clock = VirtualClock(current_wall_ns=hour_ns - 1_000_000_000)
+    kernel = _kernel(tmp_path, clock)
+    client = FundingClient([_settlement()])
+    reconciler = BybitAccountFundingReconciler(kernel=kernel, client=client, clock=clock)
+
+    reconciler.reconcile_once()
+    assert len(client.calls) == 1
+    clock.advance_ns(2_000_000_000)
+    crossed = reconciler.reconcile_once()
+    assert crossed.queried is True
+    assert len(client.calls) == 2
+
+
+def test_a_late_posted_row_inside_the_overlap_is_still_recovered(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000)
+    kernel = _kernel(tmp_path, clock)
+    client = FundingClient([_settlement()])
+    reconciler = BybitAccountFundingReconciler(kernel=kernel, client=client, clock=clock)
+    assert reconciler.reconcile_once().settlement_rows_recorded == 1
+
+    # The venue posts an old settlement late: it only becomes visible after
+    # the first query already covered its transaction time. The next real
+    # query's overlap window re-covers it, so it is recovered, just later.
+    late = dict(_settlement(), id="settlement-late", transactionTime="1200")
+    clock.advance_ns(2_000_000_000)
+    assert reconciler.reconcile_once().queried is False
+    client.rows.append(late)
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS)
+    recovered = reconciler.reconcile_once()
+    assert recovered.queried is True
+    assert recovered.settlement_rows_recorded == 1
+    assert "venue-funding:settlement-late" in kernel.state().pnl
+
+
+def test_query_interval_must_be_non_negative_and_under_the_overlap(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000)
+    kernel = _kernel(tmp_path, clock)
+    with pytest.raises(ValueError, match="query interval"):
+        BybitAccountFundingReconciler(
+            kernel=kernel,
+            client=FundingClient([]),
+            clock=clock,
+            query_interval_ns=-1,
+        )
+    with pytest.raises(ValueError, match="query interval"):
+        BybitAccountFundingReconciler(
+            kernel=kernel,
+            client=FundingClient([]),
+            clock=clock,
+            query_interval_ns=DEFAULT_FUNDING_OVERLAP_MS * 1_000_000,
+        )
+    # Zero disables the gate: every pass queries, matching the old behavior.
+    ungated = BybitAccountFundingReconciler(
+        kernel=kernel,
+        client=FundingClient([_settlement()]),
+        clock=clock,
+        query_interval_ns=0,
+    )
+    ungated.reconcile_once()
+    clock.advance_ns(2_000_000_000)
+    assert ungated.reconcile_once().queried is True

@@ -58,6 +58,37 @@ class AccountProtectionEngine:
         self.kernel = kernel
         self.inbox = inbox
         self.instrument_rules = rules
+        # The anchor projection is a pure function of the event prefix. On a
+        # tick where the journal did not move it would be rebuilt from the
+        # same inputs to the same values — two full event-list copies and
+        # seven passes at 10Hz — so remember it against the head. Any new
+        # event changes both key parts and drops the memo. One engine belongs
+        # to one owner loop; not thread-safe.
+        self._anchor_memo: (
+            tuple[tuple[str, int], Mapping[str, CanonicalComponentExecutionAnchor]] | None
+        ) = None
+
+    def _memoized_anchors(
+        self,
+    ) -> tuple[Mapping[str, CanonicalComponentExecutionAnchor], AccountState]:
+        state = self.kernel._state_ref()
+        key = (state.rolling_state_hash, state.events_applied)
+        memo = self._anchor_memo
+        if memo is not None and memo[0] == key:
+            return memo[1], state
+        events, snapshot_state = self.kernel._snapshot_ref()
+        anchors = {
+            anchor.target_key: anchor
+            for anchor in component_execution_anchors_from_snapshot(
+                events,
+                state=snapshot_state,
+            )
+        }
+        self._anchor_memo = (
+            (snapshot_state.rolling_state_hash, snapshot_state.events_applied),
+            anchors,
+        )
+        return anchors, snapshot_state
 
     def evaluate(
         self,
@@ -68,12 +99,13 @@ class AccountProtectionEngine:
         trusted_account_state: AccountState | None = None,
     ) -> tuple[AccountTargetRequest, ...]:
         requests: list[AccountTargetRequest] = []
+        memoized_anchors: Mapping[str, CanonicalComponentExecutionAnchor] | None = None
         if account_events is None:
             if trusted_account_state is not None:
                 raise ValueError("trusted protection state requires its account event snapshot")
             if verified_execution_anchors is not None:
                 raise ValueError("verified protection anchors require their account event snapshot")
-            events, state = self.kernel._snapshot_ref()
+            memoized_anchors, state = self._memoized_anchors()
         else:
             events = tuple(account_events)
             expected_state_hash = events[-1].state_hash if events else AccountState().rolling_state_hash
@@ -86,7 +118,9 @@ class AccountProtectionEngine:
                 ):
                     raise RuntimeError("trusted protection state does not match its account event snapshot")
                 state = trusted_account_state
-        if verified_execution_anchors is None:
+        if memoized_anchors is not None:
+            anchors = memoized_anchors
+        elif verified_execution_anchors is None:
             anchors = {
                 anchor.target_key: anchor
                 for anchor in component_execution_anchors_from_snapshot(

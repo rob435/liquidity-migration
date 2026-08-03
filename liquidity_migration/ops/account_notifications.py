@@ -104,6 +104,9 @@ class AccountNotificationEngine:
         self.loss_thresholds = thresholds
         self.heading = heading.strip()
         self.channel_label = label
+        # What we last durably wrote. An identical next state needs no
+        # rewrite, so an idle second costs no fsync.
+        self._committed_payload: bytes | None = None
 
     def prepare(
         self,
@@ -117,7 +120,13 @@ class AccountNotificationEngine:
         now_ns: int | None = None,
     ) -> AccountNotificationBatch:
         now = int(now_ns or self.clock.wall_time_ns())
-        events, kernel_state = self.kernel._snapshot_ref()
+        # Verified journal sequences are contiguous from 1, so the committed
+        # state's events_applied is the head sequence. When it matches what we
+        # last reported there is no tail to read, and copying the whole event
+        # list every poll is pure waste; the copy happens only on the branches
+        # that actually read events.
+        kernel_state = self.kernel._state_ref()
+        head_sequence = kernel_state.events_applied
         truth_status = (
             ("healthy" if position_truth_healthy else "mismatch")
             if position_truth_status is None
@@ -128,21 +137,30 @@ class AccountNotificationEngine:
         if position_truth_healthy != (truth_status in POSITION_TRUTH_LIFECYCLE_OK):
             raise ValueError("position truth health and status disagree")
         persisted = self._load()
-        first_run_with_history = persisted.last_sequence == 0 and bool(events)
-        if first_run_with_history:
+        first_run_with_history = persisted.last_sequence == 0 and head_sequence > 0
+        if persisted.last_sequence == head_sequence and head_sequence > 0:
+            # Nothing happened since the last poll: no event exists past
+            # last_sequence at this instant, so the tail is empty by
+            # definition and the event-list copy is skipped entirely.
+            new_events: list[AccountEvent] = []
+        elif first_run_with_history:
             # First run adopts current truth instead of replaying months of
             # old lifecycle messages; the hourly summary still reports what is
             # open now.
+            events, kernel_state = self.kernel._snapshot_ref()
+            head_sequence = kernel_state.events_applied
             persisted.positions = _position_snapshot(kernel_state)
-            persisted.last_sequence = events[-1].sequence
-            new_events: list[AccountEvent] = []
+            persisted.last_sequence = head_sequence
+            new_events = []
         else:
             # Verified journal events are sequence-contiguous from 1, so the
             # events after ``last_sequence`` are exactly the tail slice — an
             # O(new) read instead of an O(journal age) scan every poll.
+            events, kernel_state = self.kernel._snapshot_ref()
+            head_sequence = kernel_state.events_applied
             new_events = list(events[persisted.last_sequence :])
         next_state = AccountNotificationState(
-            last_sequence=events[-1].sequence if events else persisted.last_sequence,
+            last_sequence=head_sequence if head_sequence else persisted.last_sequence,
             last_hour_bucket=persisted.last_hour_bucket,
             positions={symbol: dict(row) for symbol, row in persisted.positions.items()},
             loss_level_by_symbol=dict(persisted.loss_level_by_symbol),
@@ -229,9 +247,14 @@ class AccountNotificationEngine:
 
     def commit(self, batch: AccountNotificationBatch) -> None:
         payload = canonical_json(asdict(batch.next_state)) + b"\n"
+        if payload == self._committed_payload and self.state_path.exists():
+            return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_name(f".{self.state_path.name}.{os.getpid()}.tmp")
         fd: int | None = None
+        # Cleared before the write starts so a partial or failed write can
+        # never satisfy the skip above; restored only after both fsyncs.
+        self._committed_payload = None
         try:
             fd = os.open(str(temporary), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
             view = memoryview(payload)
@@ -246,6 +269,7 @@ class AccountNotificationEngine:
             fd = None
             os.replace(temporary, self.state_path)
             _fsync_directory(self.state_path.parent)
+            self._committed_payload = payload
         finally:
             if fd is not None:
                 os.close(fd)

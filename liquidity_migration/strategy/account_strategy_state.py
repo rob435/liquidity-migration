@@ -65,8 +65,10 @@ def canonical_entry_attempts(
     its decision is journal corruption, not retry state.
     """
 
+    # No copy: both walks below only read, and on every per-cycle path the
+    # caller passes the retained projection tuple.
     events = (
-        list(account_events)
+        account_events
         if account_events is not None
         else read_account_journal(account_root, verify=True)
     )

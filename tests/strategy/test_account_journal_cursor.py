@@ -393,3 +393,81 @@ def test_planning_cursor_trades_memo_is_scope_keyed(tmp_path: Path) -> None:
         strategy_ids=("long-v1",),
     )
     assert long_trades is not carry_trades
+
+
+def test_planning_cursor_memoizes_rejected_attempts_until_a_new_event(tmp_path: Path) -> None:
+    from liquidity_migration.account.account_service import SleeveAdapterKind
+    from liquidity_migration.strategy.account_strategy_state import terminal_entry_attempt_keys
+    from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
+
+    kernel = _journal(tmp_path)
+    cursor = new_planning_journal_cursor()
+    digest = cursor.read(tmp_path)
+    projection = cursor.memoized_projection(digest)
+
+    first = cursor.memoized_rejected_entry_attempts(
+        tmp_path,
+        digest=digest,
+        projection=projection,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+    # Equality with the unmemoized journal-pure half (inbox=None).
+    assert first == terminal_entry_attempt_keys(
+        tmp_path,
+        sleeve=SleeveAdapterKind.CARRY.value,
+        strategy_ids=("carry-v1",),
+        inbox=None,
+        account_events=projection.events,
+    )
+    # Same head: served from the memo.
+    assert (
+        cursor.memoized_rejected_entry_attempts(
+            tmp_path,
+            digest=cursor.read(tmp_path),
+            projection=projection,
+            sleeve=SleeveAdapterKind.CARRY,
+            strategy_ids=("carry-v1",),
+        )
+        is first
+    )
+
+    # Any new event drops the memo.
+    _submit(kernel, "batch-attempt-invalidate", 9.0)
+    digest_new = cursor.read(tmp_path)
+    projection_new = cursor.memoized_projection(digest_new)
+    rebuilt = cursor.memoized_rejected_entry_attempts(
+        tmp_path,
+        digest=digest_new,
+        projection=projection_new,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+    assert rebuilt is not first
+    assert rebuilt == first
+
+
+def test_planning_cursor_rejected_attempts_memo_is_scope_keyed(tmp_path: Path) -> None:
+    from liquidity_migration.account.account_service import SleeveAdapterKind
+    from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
+
+    _journal(tmp_path)
+    cursor = new_planning_journal_cursor()
+    digest = cursor.read(tmp_path)
+    projection = cursor.memoized_projection(digest)
+    carry = cursor.memoized_rejected_entry_attempts(
+        tmp_path,
+        digest=digest,
+        projection=projection,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+    long_scope = cursor.memoized_rejected_entry_attempts(
+        tmp_path,
+        digest=digest,
+        projection=projection,
+        sleeve=SleeveAdapterKind.LONG,
+        strategy_ids=("long-v1",),
+    )
+    # A different scope may not reuse the other scope's memo entry.
+    assert long_scope is not carry

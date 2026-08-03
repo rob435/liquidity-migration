@@ -33,6 +33,15 @@ from liquidity_migration.core.venue_realm import VenueRealm
 NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS = 5_000_000_000
 BYBIT_ACCOUNTING_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 DEFAULT_FUNDING_OVERLAP_MS = 24 * 60 * 60 * 1000
+# A settled funding row is immutable and Bybit settles hourly at the fastest,
+# so re-asking every reconcile pass re-fetches facts the journal already
+# holds. The overlap window above is what makes a late posting safe; this
+# only decides how often the window is asked for, and it must stay far under
+# the overlap: consecutive query windows [t-overlap, t] keep unbroken
+# coverage of transaction time whenever queries are less than the overlap
+# apart, so a 60s cadence delays discovery of a late-posted row by at most
+# 60s and can never miss one. Zero disables the gate (query every pass).
+DEFAULT_FUNDING_QUERY_INTERVAL_NS = 60 * 1_000_000_000
 # Funding settles hourly at the fastest and one recovery pass makes several
 # paginated REST calls, so the 2x-reconcile-cadence bound turned a slow venue
 # response into a false staleness page. This floor still fails a wedged
@@ -560,6 +569,10 @@ class AccountFundingReconciliationReport:
     settlement_rows_observed: int
     settlement_rows_recorded: int
     observed_ts_ns: int
+    # False on a pass that skipped the venue query inside the gate interval:
+    # telemetry must never read "we looked and saw nothing" when the truth is
+    # "we did not look".
+    queried: bool = True
 
     def require_healthy(self) -> None:
         if not self.healthy:
@@ -583,17 +596,22 @@ class BybitAccountFundingReconciler:
         clock: Clock | None = None,
         overlap_ms: int = DEFAULT_FUNDING_OVERLAP_MS,
         health_max_age_floor_ns: int = FUNDING_HEALTH_MAX_AGE_FLOOR_NS,
+        query_interval_ns: int = DEFAULT_FUNDING_QUERY_INTERVAL_NS,
     ) -> None:
         self.realm = require_named_realm(client, label="account funding reconciler")
         if int(overlap_ms) <= 0 or int(overlap_ms) > BYBIT_ACCOUNTING_MAX_WINDOW_MS:
             raise ValueError("funding reconciliation overlap must be in (0, 7 days]")
         if int(health_max_age_floor_ns) <= 0:
             raise ValueError("funding health max-age floor must be positive")
+        if int(query_interval_ns) < 0 or int(query_interval_ns) // 1_000_000 >= int(overlap_ms):
+            raise ValueError("funding query interval must be non-negative and well under the overlap")
         self.kernel = kernel
         self.client = client
         self.clock = clock or SystemClock()
         self.overlap_ms = int(overlap_ms)
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
+        self.query_interval_ns = int(query_interval_ns)
+        self._last_query_ns: int | None = None
         self._next_query_start_ms: int | None = None
         self.last_report: AccountFundingReconciliationReport | None = None
         # Incremental settlement index: the committed event list only extends,
@@ -648,6 +666,27 @@ class BybitAccountFundingReconciler:
         epoch_start_ms = max(events[0].wall_ts_ns // 1_000_000, 1)
         observed_ns = self.clock.wall_time_ns()
         observed_ms = observed_ns // 1_000_000
+        prior_report = self.last_report
+        due = (
+            self._last_query_ns is None
+            or observed_ns < self._last_query_ns
+            or observed_ns - self._last_query_ns >= self.query_interval_ns
+            or (observed_ms // 3_600_000) != (self._last_query_ns // 1_000_000 // 3_600_000)
+        )
+        if not due and prior_report is not None:
+            # Nothing was asked, so the recovered-through bound is carried
+            # forward unchanged; only liveness advances.
+            report = AccountFundingReconciliationReport(
+                healthy=True,
+                query_start_ms=prior_report.query_start_ms,
+                query_end_ms=prior_report.query_end_ms,
+                settlement_rows_observed=0,
+                settlement_rows_recorded=0,
+                observed_ts_ns=observed_ns,
+                queried=False,
+            )
+            self.last_report = report
+            return report
         query_start_ms = max(
             epoch_start_ms,
             self._next_query_start_ms
@@ -742,6 +781,7 @@ class BybitAccountFundingReconciler:
             epoch_start_ms,
             observed_ms - self.overlap_ms,
         )
+        self._last_query_ns = observed_ns
         report = AccountFundingReconciliationReport(
             healthy=True,
             query_start_ms=query_start_ms,

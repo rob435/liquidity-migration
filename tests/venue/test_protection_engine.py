@@ -504,3 +504,97 @@ def test_native_breach_flat_covers_current_and_pending_component_revisions(
     assert len(second) == 1
     assert second[0].request_id != first[0].request_id
     assert second[0].created_ts_ns == 4_000
+
+
+def _entry_filled_engine(tmp_path: Path) -> tuple[AccountProtectionEngine, "AccountExecutionKernel"]:
+    route = ensure_account_route(
+        account_id="protection",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    clock = VirtualClock(current_wall_ns=1_000, current_monotonic_ns=0)
+    kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id, clock=clock)
+    runtime = AccountKernelRuntime(kernel)
+    runtime.process_cycle(
+        batch_id="entry",
+        intents=[
+            AdaptedIntent(
+                LongTargetAdapter(),
+                SleeveTargetIntent(
+                    decision_key="entry-d",
+                    target_key="long/main/BUSDT",
+                    strategy_id="long-v1",
+                    component_id="main",
+                    symbol="BUSDT",
+                    signed_notional_usdt=20.0,
+                    leverage=10.0,
+                    reason="entry",
+                    metadata={"stop_loss_pct": 0.10, "take_profit_pct": 0.20},
+                ),
+            )
+        ],
+        market_inputs={"BUSDT": _market(key="entry-book", price=10.0, ts=1_000)},
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet-1", 990),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+        execution_adapter=_twin(bid=9.9, ask=10.1, ts=1_000),
+    )
+    assert kernel.state().positions["BUSDT"].signed_qty == 2.0
+    engine = AccountProtectionEngine(
+        kernel=kernel,
+        inbox=AccountIntentInbox(route),
+        instrument_rules=RULES,
+    )
+    return engine, kernel
+
+
+def test_protection_anchor_memo_matches_a_full_reprojection_and_is_reused(
+    tmp_path: Path,
+) -> None:
+    engine, kernel = _entry_filled_engine(tmp_path)
+
+    anchors_one, state_one = engine._memoized_anchors()
+    expected = {
+        anchor.target_key: anchor
+        for anchor in canonical_component_execution_anchors(
+            kernel.journal.root,
+            account_events=tuple(kernel.journal.events()),
+        )
+    }
+    assert anchors_one == expected
+    assert state_one.events_applied == kernel._state_ref().events_applied
+
+    # Same journal head: the projection is served from the memo, not rebuilt.
+    anchors_two, _ = engine._memoized_anchors()
+    assert anchors_two is anchors_one
+
+    # Any new event drops the memo — even one that cannot move an anchor.
+    kernel.record_venue_snapshot(
+        snapshot_key="memo-drop",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=2_000_000_000,
+        metadata={"source": "test"},
+    )
+    anchors_three, _ = engine._memoized_anchors()
+    assert anchors_three is not anchors_one
+    assert anchors_three == anchors_one
+
+
+def test_protection_memo_hit_still_emits_the_trigger(tmp_path: Path) -> None:
+    engine, _kernel = _entry_filled_engine(tmp_path)
+
+    # First evaluate primes the memo and finds nothing to do at this price.
+    assert engine.evaluate({"BUSDT": _market(key="too-early", price=12.1, ts=1_900)}) == ()
+    # Second evaluate is a memo hit — the journal did not move — and the
+    # market crossing the take-profit line must still emit the request.
+    requests = engine.evaluate({"BUSDT": _market(key="tp-book", price=12.2, ts=2_000)})
+    assert len(requests) == 1
+    assert requests[0].intents[0].intent.reason == "take_profit"
+
+    # The trigger journaled protection state, so the head moved: the next
+    # evaluate rebuilds from the new head and correctly emits nothing.
+    assert engine.evaluate({"BUSDT": _market(key="after", price=12.2, ts=2_100)}) == ()

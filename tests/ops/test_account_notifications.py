@@ -1390,3 +1390,121 @@ def test_retired_sleeve_contributes_no_digest_line(tmp_path: Path) -> None:
     assert "CONTINUOUS" not in report.message
     assert "cycle root not configured" not in report.message
     assert "Health: healthy" in report.message
+
+
+def test_repeated_commit_of_identical_state_writes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notifications" / "state.json",
+        clock=clock,
+    )
+    fsyncs = 0
+    real_fsync = os.fsync
+
+    def counting_fsync(descriptor: int) -> None:
+        nonlocal fsyncs
+        fsyncs += 1
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(account_notifications_module.os, "fsync", counting_fsync)
+
+    batch = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    notifier.commit(batch)
+    after_first = fsyncs
+    assert after_first >= 2
+
+    # An idle second re-prepares the identical state: no rewrite, no fsync.
+    notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
+    notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
+    assert fsyncs == after_first
+
+
+def test_commit_writes_again_after_the_state_file_is_removed(
+    tmp_path: Path,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notifications" / "state.json",
+        clock=clock,
+    )
+    batch = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    notifier.commit(batch)
+    notifier.state_path.unlink()
+
+    notifier.commit(batch)
+    assert notifier.state_path.exists()
+
+
+def test_commit_writes_again_after_a_failed_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notifications" / "state.json",
+        clock=clock,
+    )
+    real_replace = os.replace
+    fail = True
+
+    def flaky_replace(source: object, destination: object) -> None:
+        if fail:
+            raise OSError("injected replace failure")
+        real_replace(source, destination)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(account_notifications_module.os, "replace", flaky_replace)
+    batch = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    with pytest.raises(OSError, match="injected replace failure"):
+        notifier.commit(batch)
+
+    # A failed write must not satisfy the identical-state skip.
+    fail = False
+    notifier.commit(batch)
+    assert notifier.state_path.exists()
+
+
+def test_idle_poll_does_not_copy_the_event_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel, clock, *_ = _setup_open(tmp_path / "account")
+    notifier = AccountNotificationEngine(
+        kernel=kernel,
+        state_path=tmp_path / "notifications" / "state.json",
+        clock=clock,
+    )
+    # First poll adopts current truth (the slow path) and persists it.
+    notifier.commit(notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy"))
+
+    snapshots = 0
+    real_snapshot_ref = kernel._snapshot_ref
+
+    def counting_snapshot_ref():
+        nonlocal snapshots
+        snapshots += 1
+        return real_snapshot_ref()
+
+    monkeypatch.setattr(kernel, "_snapshot_ref", counting_snapshot_ref)
+
+    idle = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    assert snapshots == 0
+    assert idle.next_state.last_sequence == kernel._state_ref().events_applied
+
+    # A new journal event puts the next poll back on the copying path.
+    kernel.record_venue_snapshot(
+        snapshot_key="idle-test",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=0,
+        local_receive_ts_ns=clock.wall_time_ns(),
+        metadata={"source": "test"},
+    )
+    notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
+    assert snapshots == 1

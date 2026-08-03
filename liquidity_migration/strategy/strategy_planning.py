@@ -30,7 +30,10 @@ from liquidity_migration.account.account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
 )
-from liquidity_migration.account.account_intent_client import CompletedEntryAttemptCursor
+from liquidity_migration.account.account_intent_client import (
+    CompletedEntryAttemptCursor,
+    completed_expired_entry_attempt_keys,
+)
 from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
 from liquidity_migration.account.account_route import AccountRoute
 from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
@@ -107,12 +110,15 @@ class PlanningJournalCursor(AccountJournalCursor):
     daemon; not thread-safe.
     """
 
-    __slots__ = ("_projection_memo", "_trades_memo", "completed_attempts")
+    __slots__ = ("_projection_memo", "_trades_memo", "_rejected_attempts_memo", "completed_attempts")
 
     def __init__(self) -> None:
         super().__init__(retain_event_types=PROJECTION_EVENT_TYPES)
         self._projection_memo: tuple[tuple[str, int], CanonicalAccountProjection] | None = None
         self._trades_memo: tuple[tuple[str, int, str, tuple[str, ...]], pl.DataFrame] | None = None
+        self._rejected_attempts_memo: (
+            tuple[tuple[str, int, str, tuple[str, ...]], frozenset[str]] | None
+        ) = None
         self.completed_attempts = CompletedEntryAttemptCursor()
 
     def memoized_projection(self, digest: AccountJournalDigest) -> CanonicalAccountProjection:
@@ -149,6 +155,36 @@ class PlanningJournalCursor(AccountJournalCursor):
         )
         self._trades_memo = (key, trades)
         return trades
+
+    def memoized_rejected_entry_attempts(
+        self,
+        account_root: Path,
+        *,
+        digest: AccountJournalDigest,
+        projection: CanonicalAccountProjection,
+        sleeve: SleeveAdapterKind,
+        strategy_ids: tuple[str, ...] | list[str] | set[str],
+    ) -> frozenset[str]:
+        # The rejected half of the terminal-attempt set is a pure function of
+        # the journal and the sleeve scope. The expired half comes from the
+        # inbox and keeps its own cursor, so only this half is memoized.
+        key = (
+            digest.head_event_hash,
+            digest.events_folded,
+            sleeve.value,
+            tuple(sorted(str(value) for value in strategy_ids)),
+        )
+        if self._rejected_attempts_memo is not None and self._rejected_attempts_memo[0] == key:
+            return self._rejected_attempts_memo[1]
+        rejected = terminal_entry_attempt_keys(
+            account_root,
+            sleeve=sleeve.value,
+            strategy_ids=strategy_ids,
+            inbox=None,
+            account_events=projection.events,
+        )
+        self._rejected_attempts_memo = (key, rejected)
+        return rejected
 
 
 def new_planning_journal_cursor() -> PlanningJournalCursor:
@@ -215,14 +251,32 @@ def sleeve_planning_snapshot(
             strategy_ids=strategy_ids,
             account_projection=projection,
         )
-    terminal_attempts = terminal_entry_attempt_keys(
-        account_root,
-        sleeve=sleeve.value,
-        strategy_ids=strategy_ids,
-        inbox=publisher.inbox,
-        account_events=projection.events,
-        completed_cursor=completed_cursor,
-    )
+    if isinstance(journal_cursor, PlanningJournalCursor):
+        # The journal-pure rejected half rides the cursor's memo; the
+        # inbox-driven expired half keeps its own incremental cursor. The
+        # union is order-independent, so splitting the two halves here is a
+        # pure refactor of terminal_entry_attempt_keys.
+        terminal_attempts = journal_cursor.memoized_rejected_entry_attempts(
+            account_root,
+            digest=digest,
+            projection=projection,
+            sleeve=sleeve,
+            strategy_ids=strategy_ids,
+        ) | completed_expired_entry_attempt_keys(
+            publisher.inbox,
+            sleeve=sleeve.value,
+            strategy_ids=tuple(strategy_ids),
+            cursor=completed_cursor,
+        )
+    else:
+        terminal_attempts = terminal_entry_attempt_keys(
+            account_root,
+            sleeve=sleeve.value,
+            strategy_ids=strategy_ids,
+            inbox=publisher.inbox,
+            account_events=projection.events,
+            completed_cursor=completed_cursor,
+        )
     return SleevePlanningSnapshot(
         publisher=publisher,
         unresolved_targets=unresolved,
