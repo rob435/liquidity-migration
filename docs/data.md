@@ -360,14 +360,15 @@ match its directory is rejected: "lock path owner must match its lock directory"
 
 Host-maintenance and account-owner leases follow the same persistent-inode rule: parent namespaces and
 leaves are opened with no-follow descriptors and checked for single-link ownership and mount identity;
-normal owners keep the validated descriptor. During reset the lease identities are handed to the shell
-as inherited file descriptors plus (device, inode) metadata rather than paths, and revalidated around
-acquisition — account-lease metadata is written only after the inherited descriptor still matches the
-prepared path **and** holds the kernel flock (`account_owner_lease.py:535-645`,
-`revalidate_inherited_account_owner_lease` at `:647-727`; canonical demo lease directory
-`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_ledgers.sh`, where the host
-maintenance lock dir is the different path `/run/liquidity-migration`). Simplifying that handoff to a
-plain path breaks the revalidation.
+normal owners keep the validated descriptor. During reset the leases are opened and held in one
+process (`liquidity_migration/ops/demo_ledger_reset.py`, the reset orchestrator since 2026-08-03):
+each prepared leaf is opened without truncation, revalidated against its (device, inode) identity at
+acquisition, and the held descriptor is revalidated again immediately before the epoch clear
+(`revalidate_inherited_account_owner_lease` in `account_owner_lease.py`) — account-lease metadata is
+written only after the descriptor still matches the prepared path **and** holds the kernel flock. The
+canonical demo lease directory is `/run/lock/liquidity-migration`; the host maintenance lock dir is
+the different path `/run/liquidity-migration`. Simplifying that handoff to a plain path breaks the
+revalidation.
 
 The "never delete a lock" rule has exactly one exception: a separately designed full-root retirement may
 remove a canonical leaf, and only while every possible client is stopped under a stronger operational

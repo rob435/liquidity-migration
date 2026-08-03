@@ -1,118 +1,80 @@
-from __future__ import annotations
+"""Fail-closed handoff behavior of the demo ledger reset.
 
-import os
-import re
-import subprocess
-from pathlib import Path
+A reset that stopped the fleet but cannot restore it must end with every
+managed unit verifiably stopped — a partial topology (producers without their
+owner, or an owner mid-epoch) is worse than an outage.
+"""
+
+from __future__ import annotations
 
 import pytest
 
+from liquidity_migration.ops.demo_ledger_reset import (
+    DOWNSTREAM_RESTART_UNITS,
+    OWNER_RESTART_UNITS,
+    RESTART_UNITS,
+    STOP_UNITS,
+    Execution,
+    ResetOptions,
+)
+from tests.scripts.test_reset_runtime_contract import FakeSystemctl
 
-ROOT = Path(__file__).resolve().parents[2]
-RESET_SCRIPT = ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh"
+_OWNER = OWNER_RESTART_UNITS[0]
+_WORKER = DOWNSTREAM_RESTART_UNITS[0]
 
 
-def _function_source(name: str) -> str:
-    text = RESET_SCRIPT.read_text(encoding="utf-8")
-    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
-    assert match is not None, f"missing shell function {name}"
-    return match.group(0)
+@pytest.mark.parametrize("failed_unit", [_OWNER, _WORKER])
+def test_failed_post_clear_restart_fails_closed_to_all_inactive(failed_unit: str) -> None:
+    systemctl = FakeSystemctl(fail_start={failed_unit})
+    execution = Execution(
+        systemctl=systemctl,
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
+        services_stopped=True,
+        failure_recovery_allowed=True,
+    )
+    execution.fail_closed_cleanup()
+    # Recovery was attempted, failed at the parametrized unit, and the fleet
+    # was then stopped whole — with nothing left active.
+    stops = [unit for verb, unit in systemctl.calls if verb == "stop"]
+    assert stops == list(STOP_UNITS)
+    assert not systemctl.active
+    if failed_unit == _OWNER:
+        # A dead owner must keep every downstream producer un-started.
+        starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+        assert starts == [_OWNER]
 
 
-@pytest.mark.parametrize("failed_unit", ["owner-b", "worker-b"])
-def test_failed_post_clear_restart_fails_closed_to_all_inactive(
-    tmp_path: Path,
-    failed_unit: str,
+def test_failed_stop_during_fail_closed_is_reported_critical(
+    capsys: pytest.CaptureFixture,
 ) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    fake_systemctl = tmp_path / "systemctl"
-    fake_systemctl.write_text(
-        """#!/usr/bin/env bash
-set -euo pipefail
-command="$1"
-shift
-if [[ "${1:-}" == "--quiet" ]]; then
-  shift
-fi
-unit="$1"
-case "$command" in
-  start)
-    [[ "$unit" != "$FAILED_UNIT" ]] || exit 1
-    : > "$STATE/$unit.active"
-    ;;
-  stop)
-    rm -f -- "$STATE/$unit.active"
-    printf '%s\\n' "$unit" >> "$STATE/stops"
-    ;;
-  is-active)
-    [[ -e "$STATE/$unit.active" ]]
-    ;;
-  *) exit 2 ;;
-esac
-""",
-        encoding="utf-8",
+    stuck = DOWNSTREAM_RESTART_UNITS[1]
+    systemctl = FakeSystemctl(fail_start={_OWNER}, fail_stop={stuck})
+    systemctl.active.add(stuck)
+    execution = Execution(
+        systemctl=systemctl,
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
+        services_stopped=True,
+        failure_recovery_allowed=True,
     )
-    fake_systemctl.chmod(0o700)
+    execution.fail_closed_cleanup()
+    captured = capsys.readouterr()
+    assert "CRITICAL: at least one managed unit could not be stopped." in captured.err
+    assert f"STILL ACTIVE after failed handoff: {stuck}" in captured.err
 
-    functions = "\n".join(
-        _function_source(name)
-        for name in (
-            "restart_previously_active",
-            "stop_all_managed_units_after_failed_handoff",
-            "cleanup",
-        )
-    )
-    harness = tmp_path / "harness.sh"
-    harness.write_text(
-        f"""#!/usr/bin/env bash
-set -euo pipefail
-STOP_UNITS=(worker-a worker-b owner-a owner-b)
-OWNER_RESTART_UNITS=(owner-a owner-b)
-DOWNSTREAM_RESTART_UNITS=(worker-a worker-b)
-ACTIVE_BEFORE=(worker-a worker-b owner-a owner-b)
-SYSTEMCTL_BIN={fake_systemctl!s}
-SETTLE_SECONDS=0
-SERVICES_STOPPED=1
-RESTART_COMPLETE=0
-FAILURE_RECOVERY_ALLOWED=0
-LEAVE_STOPPED=0
-MANIFEST_DIR=""
-DEMO_ACCOUNT_LEASE_HELD=0
-was_active() {{
-  local needle="$1" unit
-  for unit in "${{ACTIVE_BEFORE[@]}}"; do
-    [[ "$unit" == "$needle" ]] && return 0
-  done
-  return 1
-}}
-release_demo_account_lease() {{ DEMO_ACCOUNT_LEASE_HELD=0; }}
-{functions}
-trap cleanup EXIT
-restart_previously_active "normal completion"
-RESTART_COMPLETE=1
-""",
-        encoding="utf-8",
-    )
-    harness.chmod(0o700)
 
-    environment = os.environ.copy()
-    environment.update(STATE=str(state), FAILED_UNIT=failed_unit)
-    result = subprocess.run(
-        [str(harness)],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=10.0,
-        check=False,
+def test_successful_recovery_restores_the_previously_active_set() -> None:
+    systemctl = FakeSystemctl()
+    execution = Execution(
+        systemctl=systemctl,
+        options=ResetOptions(settle_seconds=0),
+        active_before=(_OWNER, _WORKER),
+        services_stopped=True,
+        failure_recovery_allowed=True,
     )
-
-    assert result.returncode != 0
-    assert not list(state.glob("*.active")), result.stderr
-    assert (state / "stops").read_text(encoding="utf-8").splitlines() == [
-        "worker-a",
-        "worker-b",
-        "owner-a",
-        "owner-b",
-    ]
+    execution.fail_closed_cleanup()
+    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+    assert starts == [_OWNER, _WORKER]
+    stops = [unit for verb, unit in systemctl.calls if verb == "stop"]
+    assert stops == []

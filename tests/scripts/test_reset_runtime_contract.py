@@ -1,306 +1,576 @@
+"""Behavioral contract for the demo ledger reset.
+
+Ported 2026-08-03 from textual assertions on the retired bash implementation
+to direct tests of ``liquidity_migration.ops.demo_ledger_reset``.
+"""
+
 from __future__ import annotations
 
 import os
-import re
-import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "maintain" / "reset_demo_ledgers.sh"
+from liquidity_migration.ops import demo_ledger_reset as reset
+from liquidity_migration.ops.demo_ledger_reset import (
+    ACCOUNT_BOUND_UNITS,
+    DOWNSTREAM_RESTART_UNITS,
+    NON_RESTARTABLE_ONESHOTS,
+    OWNER_RESTART_UNITS,
+    RESTART_UNITS,
+    STOP_UNITS,
+    CleanCheckout,
+    Execution,
+    ResetError,
+    ResetOptions,
+    build_plan,
+    check_account_root_disjointness,
+    check_archive_dir_containment,
+    parse_options,
+    parse_sleeves,
+    refresh_existing_targets,
+    run_reset,
+    validate_real_money_value,
+    verify_exclusive_unit_environment,
+)
 
 
-def _text() -> str:
-    return SCRIPT.read_text(encoding="utf-8")
+class FakeSystemctl:
+    """Recording double for the validated systemctl wrapper."""
+
+    def __init__(
+        self,
+        *,
+        active: set[str] | None = None,
+        fail_start: set[str] | None = None,
+        fail_stop: set[str] | None = None,
+        properties: dict[tuple[str, str], str] | None = None,
+    ) -> None:
+        self.active = set(active or ())
+        self.fail_start = set(fail_start or ())
+        self.fail_stop = set(fail_stop or ())
+        self.properties = dict(properties or {})
+        self.calls: list[tuple[str, str]] = []
+
+    def show_value(self, unit: str, property_name: str) -> str | None:
+        self.calls.append((f"show:{property_name}", unit))
+        if (unit, property_name) in self.properties:
+            return self.properties[(unit, property_name)]
+        if property_name == "LoadState":
+            return "loaded"
+        if property_name == "ActiveState":
+            return "active" if unit in self.active else "inactive"
+        return ""
+
+    def is_active(self, unit: str) -> bool:
+        self.calls.append(("is-active", unit))
+        return unit in self.active
+
+    def stop(self, unit: str) -> bool:
+        self.calls.append(("stop", unit))
+        if unit in self.fail_stop:
+            return False
+        self.active.discard(unit)
+        return True
+
+    def start(self, unit: str) -> bool:
+        self.calls.append(("start", unit))
+        if unit in self.fail_start:
+            return False
+        self.active.add(unit)
+        return True
+
+    def reset_failed(self, unit: str) -> bool:
+        self.calls.append(("reset-failed", unit))
+        return True
 
 
-def _function_source(name: str) -> str:
-    match = re.search(
-        rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
-        _text(),
+def _fixture_repository(tmp_path: Path) -> Path:
+    repository = tmp_path
+    (repository / "liquidity_migration").mkdir(exist_ok=True)
+    (repository / "data").mkdir(exist_ok=True)
+    env_file = repository / "account-execution.env"
+    env_file.write_text(
+        "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1\n"
+        "ACCOUNT_EXECUTION_ROOT=data/bybit-demo-account\n"
+        "ACCOUNT_INTENT_INBOX_ROOT=data/bybit-demo-account-inbox\n"
+        "ACCOUNT_CAPTURE_ROOT=data/bybit-demo-account-capture\n",
+        encoding="utf-8",
     )
-    assert match is not None, f"missing shell function {name}"
-    return match.group(0)
+    return repository
 
 
-def test_reset_defaults_to_dry_run_before_any_service_mutation() -> None:
-    text = _text()
-    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in text
-    assert "export PATH" in text
-    assert 'SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"' in text
-    assert '[[ "$SYSTEMCTL_BIN" == /* && -x "$SYSTEMCTL_BIN" && ! -L "$SYSTEMCTL_BIN" ]]' in text
-    assert 'MODE="dry-run"' in text
-    dry_run = text.index('if [[ "$MODE" == "dry-run" ]]')
-    first_stop = text.index('"$SYSTEMCTL_BIN" stop')
-    assert dry_run < first_stop
-    assert "DRY RUN: no services or files were changed." in text[dry_run:first_stop]
+def _dry_run(repository: Path, *arguments: str, capsys: pytest.CaptureFixture) -> str:
+    exit_code = run_reset(
+        ["--account-env-file", str(repository / "account-execution.env"), *arguments],
+        repository=repository,
+    )
+    assert exit_code == 0
+    return capsys.readouterr().out
 
 
-def test_reset_rejects_real_money_and_bad_routes_before_service_mutation() -> None:
-    text = _text()
-    first_stop = text.index('"$SYSTEMCTL_BIN" stop')
-    prefix = text[:first_stop]
-    assert "validate_real_money_value" in prefix
-    assert "account execution roots must be pairwise disjoint" in prefix
-    assert "--archive-dir must be outside reset targets" in prefix
-    assert "--archive-dir must not contain reset targets" in prefix
-    archive_checks = prefix[prefix.index('archive_compare="') :]
-    assert 'case "$archive_compare/"' in archive_checks
-    assert 'case "$target_compare/"' in archive_checks
+def test_reset_defaults_to_dry_run_before_any_service_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    repository = _fixture_repository(tmp_path)
+    out = _dry_run(repository, capsys=capsys)
+    assert "mode: dry-run" in out
+    assert "DRY RUN: no services or files were changed." in out
+    # The preview names the execute refusals instead of performing any of them.
+    assert "Execute will refuse REAL_MONEY" in out
 
 
-def test_reset_stops_producers_before_the_account_owner() -> None:
-    text = _text()
-    units = text[text.index("STOP_UNITS=(") : text.index("ACCOUNT_BOUND_UNITS=(")]
-    demo_owner = units.index("liquidity-migration-account-execution.service")
+def test_dry_run_previews_existing_targets_without_traversal(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    repository = _fixture_repository(tmp_path)
+    (repository / "data/bybit-long-demo-event/long_native_demo_cycles").mkdir(parents=True)
+    out = _dry_run(repository, "--sleeves", "long", capsys=capsys)
+    assert "sleeves: long" in out
+    assert (
+        "    - data/bybit-long-demo-event/long_native_demo_cycles "
+        "(present; size not traversed during preview)" in out
+    )
+    assert "existing targets: 1" in out
+
+
+def test_dry_run_hint_reconstructs_the_selected_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    repository = _fixture_repository(tmp_path)
+    out = _dry_run(
+        repository,
+        "--sleeves",
+        "carry",
+        "--label",
+        "exit-overhaul",
+        "--include-reports",
+        "--leave-stopped",
+        capsys=capsys,
+    )
+    assert (
+        "scripts/maintain/reset_demo_ledgers.sh --execute --sleeves carry "
+        "--label exit-overhaul --include-reports --leave-stopped" in out
+    )
+
+
+def test_reset_rejects_real_money_and_bad_routes_before_service_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    repository = _fixture_repository(tmp_path)
+    monkeypatch.setenv("REAL_MONEY", "true")
+    with pytest.raises(ResetError, match="selects mainnet"):
+        run_reset(
+            ["--account-env-file", str(repository / "account-execution.env")],
+            repository=repository,
+        )
+    monkeypatch.delenv("REAL_MONEY")
+
+    (repository / "account-execution.env").write_text(
+        "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1\n"
+        "ACCOUNT_EXECUTION_ROOT=/etc/passwd-adjacent\n"
+        "ACCOUNT_INTENT_INBOX_ROOT=data/inbox\n"
+        "ACCOUNT_CAPTURE_ROOT=data/capture\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ResetError, match="must stay below"):
+        run_reset(
+            ["--account-env-file", str(repository / "account-execution.env")],
+            repository=repository,
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "0", "false", "no", "off", "__unset__"],
+)
+def test_real_money_falsy_values_pass(value: str) -> None:
+    validate_real_money_value("test", value)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE"])
+def test_real_money_truthy_values_die(value: str) -> None:
+    with pytest.raises(ResetError, match="selects mainnet"):
+        validate_real_money_value("test", value)
+
+
+def test_real_money_ambiguous_values_die() -> None:
+    with pytest.raises(ResetError, match="ambiguous REAL_MONEY"):
+        validate_real_money_value("test", "maybe")
+
+
+def test_account_roots_must_be_disjoint_from_each_other_and_strategy_roots(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ResetError, match="pairwise disjoint"):
+        check_account_root_disjointness(
+            tmp_path, ("data/account", "data/account/inbox", "data/capture")
+        )
+    with pytest.raises(ResetError, match="pairwise disjoint"):
+        check_account_root_disjointness(
+            tmp_path,
+            ("data/bybit-long-demo-event/nested", "data/inbox", "data/capture"),
+        )
+    check_account_root_disjointness(tmp_path, ("data/a", "data/b", "data/c"))
+
+
+def test_sleeve_selection_is_canonical_and_rejects_unknowns() -> None:
+    assert parse_sleeves("all") == ("long", "continuous", "carry")
+    assert parse_sleeves("carry,long") == ("long", "carry")
+    assert parse_sleeves("CONTINUOUS") == ("continuous",)
+    with pytest.raises(SystemExit) as excinfo:
+        parse_sleeves("margin")
+    assert excinfo.value.code == 2
+    with pytest.raises(ResetError, match="--sleeves must not be empty"):
+        parse_sleeves(" , ")
+
+
+def test_option_validation_matches_the_retired_shell() -> None:
+    with pytest.raises(ResetError, match="--label must match"):
+        parse_options(["--label", "-bad"])
+    with pytest.raises(ResetError, match="must not exceed 60"):
+        parse_options(["--settle-seconds", "61"])
+    with pytest.raises(ResetError, match="must be an integer"):
+        parse_options(["--settle-seconds", "-1"])
+    with pytest.raises(ResetError, match="--archive-dir must not be empty"):
+        parse_options(["--archive-dir", ""])
+    with pytest.raises(SystemExit) as excinfo:
+        parse_options(["--frobnicate"])
+    assert excinfo.value.code == 2
+
+
+def test_plan_composition_dedupes_and_appends_reports_and_caches() -> None:
+    options = ResetOptions(sleeves_raw="long,long", include_reports=True, include_caches=True)
+    plan = build_plan(options, ("data/account", "data/inbox", "data/capture"))
+    assert plan.selected_sleeves == ("long",)
+    assert plan.selected_roots == ("data/bybit-long-demo-event",)
+    assert plan.targets.count("data/bybit-long-demo-event/strategy_event_tape.jsonl") == 1
+    assert "data/bybit-long-demo-event/reports" in plan.targets
+    assert "data/bybit-long-demo-event/.cache" in plan.targets
+    assert plan.targets[-2:] == (
+        "data/bybit-long-demo-event/reports",
+        "data/bybit-long-demo-event/.cache",
+    )
+
+
+def test_refresh_existing_targets_refuses_non_data_and_traversal_targets(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan(ResetOptions(), ("data/bybit-a", "data/bybit-b", "data/bybit-c"))
+    object.__setattr__(plan, "targets", ("configs/secrets",))
+    with pytest.raises(ResetError, match="non-data target"):
+        refresh_existing_targets(plan, tmp_path)
+    object.__setattr__(plan, "targets", ("data/bybit-../escape",))
+    with pytest.raises(ResetError, match="traversal target"):
+        refresh_existing_targets(plan, tmp_path)
+
+
+def test_archive_dir_must_be_outside_reset_targets(tmp_path: Path) -> None:
+    with pytest.raises(ResetError, match="must be outside reset targets"):
+        check_archive_dir_containment(
+            "data/bybit-long-demo-event/_archive",
+            ("data/bybit-long-demo-event",),
+            tmp_path,
+        )
+    with pytest.raises(ResetError, match="must not contain reset targets"):
+        check_archive_dir_containment("data", ("data/bybit-long-demo-event",), tmp_path)
+    check_archive_dir_containment("data/_archive", ("data/bybit-long-demo-event",), tmp_path)
+
+
+def test_stop_order_quiesces_producers_before_the_account_owner() -> None:
+    owner = "liquidity-migration-account-execution.service"
+    assert STOP_UNITS[-1] == owner
     for producer in (
         "liquidity-migration-bybit-long-demo.service",
         "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-carry-demo.service",
-        "liquidity-migration-continuous-hedge.service",
     ):
-        assert units.index(producer) < demo_owner
+        assert STOP_UNITS.index(producer) < STOP_UNITS.index(owner)
+    # Restart is the reverse handoff: the owner starts first, producers follow.
+    assert RESTART_UNITS[0] == owner
+    assert OWNER_RESTART_UNITS == (owner,)
+    assert owner in ACCOUNT_BOUND_UNITS
+    for oneshot in NON_RESTARTABLE_ONESHOTS:
+        assert oneshot in STOP_UNITS
+        assert oneshot not in RESTART_UNITS
 
 
-def test_reset_holds_process_and_account_leases_across_archive() -> None:
-    text = _text()
-    archive = text.index("liquidity_migration.ops.account_reset_archive")
-    lease_helper = (
-        SCRIPT.parents[2] / "liquidity_migration" / "account" / "account_owner_lease.py"
-    ).read_text(encoding="utf-8")
-    assert "LOCK_EX | fcntl.LOCK_NB" in lease_helper
-    assert "canonical_demo_account_lease_path" in text
-    assert text.index("\nacquire_demo_account_lease\n") < archive
-    assert archive < text.index('release_demo_account_lease "normal completion"')
-    assert "canonical demo-account lease is already held" in text
-    assert "failure recovery" in text
-
-
-def test_reset_opens_the_account_lease_without_path_truncation() -> None:
-    text = _text()
-    demo = text[text.index("acquire_demo_account_lease()") : text.index("release_demo_account_lease()")]
-    nontruncating_open = demo.index('exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"')
-    acquire = demo.index("acquire-inherited", nontruncating_open)
-    assert nontruncating_open < acquire
-    assert "install -d -m 0700" in demo[:nontruncating_open]
-    assert "mkdir -p" not in demo
-    assert 'exec 8>"' not in demo
-
-
-def test_reset_and_deploy_share_host_maintenance_lock_with_legacy_bridge() -> None:
-    reset = _text()
-    deploy = (
-        SCRIPT.parents[1].joinpath("deploy_vps_live.sh")
-        .read_text(encoding="utf-8")
+def test_restart_handoff_is_owner_first_with_settle_and_verification() -> None:
+    systemctl = FakeSystemctl()
+    execution = Execution(
+        systemctl=systemctl,  # type: ignore[arg-type]
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
     )
-    legacy_reset = "/run/lock/liquidity-migration-ledger-reset.lock"
-
-    assert "MAINTENANCE_LOCK_DIR=/run/liquidity-migration" in reset
-    assert 'MAINTENANCE_LOCK_FILE="$MAINTENANCE_LOCK_DIR/maintenance.lock"' in reset
-    assert 'LEGACY_DEPLOY_LOCK_FILE="$MAINTENANCE_LOCK_DIR/deploy.lock"' in reset
-    assert "local lock_dir=/run/liquidity-migration" in deploy
-    assert '"$lock_dir/maintenance.lock"' in deploy
-    assert '"$lock_dir/deploy.lock"' in deploy
-    assert legacy_reset in reset and legacy_reset in deploy
-    assert "prepare-host" in reset and "acquire-inherited" in reset
-    assert "prepare-host" in deploy and "acquire-inherited" in deploy
-    assert 'exec 9<"$MAINTENANCE_LOCK_FILE"' in reset
-    assert 'exec 6<"$LEGACY_DEPLOY_LOCK_FILE"' in reset
-    assert 'exec 5<"$LEGACY_RESET_LOCK_FILE"' in reset
-    assert 'exec 9<"$lock_dir/maintenance.lock"' in deploy
-    assert 'exec 8<"$lock_dir/deploy.lock"' in deploy
-    assert "exec 7</run/lock/liquidity-migration-ledger-reset.lock" in deploy
-    assert 'exec 9>"' not in reset and 'exec 9>"' not in deploy
-    acquire = reset.index("\n  acquire_host_maintenance_locks\n")
-    first_deployed_read = reset.index("[[ -d liquidity_migration && -d data ]]")
-    assert acquire < first_deployed_read
+    assert execution.restart_previously_active("test")
+    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+    assert starts == list(RESTART_UNITS)
+    assert starts[0] == "liquidity-migration-account-execution.service"
 
 
-def test_execute_binds_clean_candidate_before_deployed_state_and_rechecks_before_clear() -> None:
-    text = _text()
-    acquire = text.index("\n  acquire_host_maintenance_locks\n")
-    bind = text.index("\n  bind_clean_candidate_checkout\n", acquire)
-    first_env_read = text.index('[[ -r "$ACCOUNT_ENV_FILE" ]]')
-    archive_durable = text.index('echo "  digest sidecar: $SHA_PATH"')
-    final_recheck = text.index("\nverify_clean_candidate_checkout\n", archive_durable)
-    final_archive_recheck = text.index("account_reset_archive verify", final_recheck)
-    destructive_boundary = text.index("FAILURE_RECOVERY_ALLOWED=0", final_recheck)
+def test_failed_owner_start_leaves_downstream_stopped() -> None:
+    owner = "liquidity-migration-account-execution.service"
+    systemctl = FakeSystemctl(fail_start={owner})
+    execution = Execution(
+        systemctl=systemctl,  # type: ignore[arg-type]
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
+    )
+    assert not execution.restart_previously_active("test")
+    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+    assert starts == [owner]
+    assert not any(unit in starts for unit in DOWNSTREAM_RESTART_UNITS)
 
-    assert acquire < bind < first_env_read
-    assert archive_durable < final_recheck < final_archive_recheck < destructive_boundary
-    clean_git = text[text.index("clean_candidate_git()") : text.index("bind_clean_candidate_checkout()")]
-    assert "/usr/bin/env -i" in clean_git
-    assert '"PATH=/usr/bin:/bin"' in clean_git
-    assert 'HOME=/nonexistent' in clean_git
-    assert 'GIT_CONFIG_NOSYSTEM=1' in clean_git
-    assert 'GIT_NO_REPLACE_OBJECTS=1' in clean_git
-    assert "/usr/bin/git --no-optional-locks" in clean_git
-    assert '-C "$PWD"' in clean_git
-    assert '--git-dir="$PWD/.git"' in clean_git
-    assert '--work-tree="$PWD"' in clean_git
-    assert '[[ -d "$PWD/.git" && ! -L "$PWD/.git" ]]' in clean_git
-    clean_status = text[
-        text.index("clean_candidate_checkout_status()") : text.index("bind_clean_candidate_checkout()")
-    ]
-    assert 'read-tree "$expected_commit"' in clean_status
-    assert 'diff-index --quiet "$expected_commit" --' in clean_status
-    assert "ls-files --others --exclude-standard" in clean_status
-    assert "repository HEAD changed while candidate cleanliness was bound" in text
-    assert "repository HEAD changed during candidate cleanliness recheck" in text
+
+def test_failed_handoff_fails_closed_to_every_unit_stopped() -> None:
+    owner = "liquidity-migration-account-execution.service"
+    systemctl = FakeSystemctl(fail_start={owner})
+    execution = Execution(
+        systemctl=systemctl,  # type: ignore[arg-type]
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
+        services_stopped=True,
+        failure_recovery_allowed=True,
+    )
+    execution.fail_closed_cleanup()
+    stops = [unit for verb, unit in systemctl.calls if verb == "stop"]
+    assert stops == list(STOP_UNITS)
+    assert not systemctl.active
+
+
+def test_no_auto_restart_after_the_destructive_boundary() -> None:
+    systemctl = FakeSystemctl()
+    execution = Execution(
+        systemctl=systemctl,  # type: ignore[arg-type]
+        options=ResetOptions(settle_seconds=0),
+        active_before=RESTART_UNITS,
+        services_stopped=True,
+        failure_recovery_allowed=False,
+    )
+    execution.fail_closed_cleanup()
+    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+    assert starts == []
+    stops = [unit for verb, unit in systemctl.calls if verb == "stop"]
+    assert stops == list(STOP_UNITS)
+
+
+def test_leave_stopped_failure_never_restarts() -> None:
+    systemctl = FakeSystemctl()
+    execution = Execution(
+        systemctl=systemctl,  # type: ignore[arg-type]
+        options=ResetOptions(settle_seconds=0, leave_stopped=True),
+        active_before=RESTART_UNITS,
+        services_stopped=True,
+        failure_recovery_allowed=True,
+    )
+    execution.fail_closed_cleanup()
+    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
+    assert starts == []
+
+
+def test_exclusive_environment_accepts_only_the_selected_file(tmp_path: Path) -> None:
+    expected = tmp_path / "bybit-demo.env"
+    expected.write_text("BYBIT_DEMO_API_KEY=k\n", encoding="utf-8")
+    systemctl = FakeSystemctl(
+        properties={
+            ("owner", "EnvironmentFiles"): f"{expected} (ignore_errors=no)",
+            ("owner", "Environment"): "",
+        }
+    )
+    verify_exclusive_unit_environment(
+        systemctl,  # type: ignore[arg-type]
+        "owner",
+        expected,
+        frozenset({"REAL_MONEY", "DEMO"}),
+        protected_prefix="BYBIT_",
+        failure="refused",
+    )
+
+
+def test_exclusive_environment_rejects_a_conflicting_second_file(tmp_path: Path) -> None:
+    expected = tmp_path / "bybit-demo.env"
+    expected.write_text("BYBIT_DEMO_API_KEY=k\n", encoding="utf-8")
+    rogue = tmp_path / "rogue.env"
+    rogue.write_text("BYBIT_DEMO_API_KEY=other\n", encoding="utf-8")
+    systemctl = FakeSystemctl(
+        properties={
+            ("owner", "EnvironmentFiles"): (
+                f"{expected} (ignore_errors=no)\n{rogue} (ignore_errors=yes)"
+            ),
+            ("owner", "Environment"): "",
+        }
+    )
+    with pytest.raises(ResetError, match="refused"):
+        verify_exclusive_unit_environment(
+            systemctl,  # type: ignore[arg-type]
+            "owner",
+            expected,
+            frozenset({"REAL_MONEY", "DEMO"}),
+            protected_prefix="BYBIT_",
+            failure="refused",
+        )
+
+
+def test_exclusive_environment_rejects_direct_assignments_and_missing_file(
+    tmp_path: Path,
+) -> None:
+    expected = tmp_path / "bybit-demo.env"
+    expected.write_text("BYBIT_DEMO_API_KEY=k\n", encoding="utf-8")
+    systemctl = FakeSystemctl(
+        properties={
+            ("owner", "EnvironmentFiles"): f"{expected} (ignore_errors=no)",
+            ("owner", "Environment"): "REAL_MONEY=true",
+        }
+    )
+    with pytest.raises(ResetError, match="refused"):
+        verify_exclusive_unit_environment(
+            systemctl,  # type: ignore[arg-type]
+            "owner",
+            expected,
+            frozenset({"REAL_MONEY", "DEMO"}),
+            protected_prefix="BYBIT_",
+            failure="refused",
+        )
+    systemctl = FakeSystemctl(
+        properties={("owner", "EnvironmentFiles"): "", ("owner", "Environment"): ""}
+    )
+    with pytest.raises(ResetError, match="refused"):
+        verify_exclusive_unit_environment(
+            systemctl,  # type: ignore[arg-type]
+            "owner",
+            expected,
+            frozenset({"REAL_MONEY", "DEMO"}),
+            protected_prefix="BYBIT_",
+            failure="refused",
+        )
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.invalid",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        },
+    )
+    return completed.stdout.strip()
 
 
 def test_reset_clean_candidate_check_ignores_git_replace_refs(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
-    subprocess.run(["git", "init", "-q", str(repository)], check=True)
-    subprocess.run(
-        ["git", "-C", str(repository), "config", "user.email", "test@example.invalid"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repository), "config", "user.name", "Test"],
-        check=True,
-    )
+    repository.mkdir()
+    _git(repository, "init", "-q")
     tracked = repository / "tracked.txt"
     tracked.write_text("original\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repository), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repository), "commit", "-qm", "original"],
-        check=True,
-    )
-    original = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "-qm", "original")
+    original = _git(repository, "rev-parse", "HEAD")
     tracked.write_text("replacement\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repository), "commit", "-qam", "replacement"], check=True)
-    replacement = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    subprocess.run(["git", "-C", str(repository), "checkout", "-q", original], check=True)
-    subprocess.run(["git", "-C", str(repository), "replace", original, replacement], check=True)
+    _git(repository, "commit", "-qam", "replacement")
+    replacement = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "checkout", "-q", original)
+    _git(repository, "replace", original, replacement)
     tracked.write_text("replacement\n", encoding="utf-8")
 
-    temporary_root = tmp_path / "temporary-indexes"
-    temporary_root.mkdir()
-    harness = (
-        "set -euo pipefail\n"
-        "die() { printf '%s\\n' \"$*\" >&2; return 1; }\n"
-        f"{_function_source('clean_candidate_git')}\n"
-        f"{_function_source('clean_candidate_checkout_status')}\n"
-        f"cd {shlex.quote(str(repository))}\n"
-        f"clean_candidate_checkout_status {original}\n"
+    checkout = CleanCheckout(repository)
+    status = checkout._status(original)
+    # GIT_NO_REPLACE_OBJECTS makes the replace ref invisible, so the doctored
+    # worktree is reported dirty instead of silently matching the replacement.
+    assert status is not None
+    assert "tracked worktree differs from HEAD" in status
+
+
+def test_clean_candidate_bind_requires_a_real_git_directory(tmp_path: Path) -> None:
+    checkout = CleanCheckout(tmp_path)
+    with pytest.raises(ResetError, match="real checkout .git directory"):
+        checkout.bind()
+
+
+def test_flatness_guard_reports_conditional_orders(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import liquidity_migration.venue.bybit as bybit
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_positions(self, **_kwargs: object) -> list[dict]:
+            return []
+
+        def get_open_orders(self, **kwargs: object) -> list[dict]:
+            if kwargs.get("order_filter") == "StopOrder":
+                return [{"orderId": "c1", "symbol": "TESTUSDT", "orderStatus": "Untriggered"}]
+            return []
+
+    monkeypatch.setattr(bybit, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(bybit, "resolve_demo_credentials", lambda: ("k", "s"))
+    with pytest.raises(ResetError, match="not flat"):
+        reset.verify_demo_account_flat()
+    captured = capsys.readouterr()
+    assert "open_orders=1" in captured.err
+    assert "TESTUSDT" in captured.err
+
+
+def test_flatness_guard_passes_a_flat_account(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import liquidity_migration.venue.bybit as bybit
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_positions(self, **_kwargs: object) -> list[dict]:
+            return [{"size": "0"}]
+
+        def get_open_orders(self, **_kwargs: object) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(bybit, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(bybit, "resolve_demo_credentials", lambda: ("k", "s"))
+    reset.verify_demo_account_flat()
+    assert "demo-account-flat-ok positions=0 open_orders=0" in capsys.readouterr().out
+
+
+def test_scrubbed_credentials_expose_exactly_the_frozen_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "real")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "stale")
+    with reset.scrubbed_demo_credentials("1", "false", "key", "secret"):
+        assert os.environ["BYBIT_DEMO_API_KEY"] == "key"
+        assert os.environ["BYBIT_DEMO_API_SECRET"] == "secret"
+        assert "BYBIT_REAL_API_KEY" not in os.environ
+        assert "TELEGRAM_BOT_TOKEN" not in os.environ
+    assert os.environ["BYBIT_REAL_API_KEY"] == "real"
+    assert os.environ["BYBIT_DEMO_API_KEY"] == "stale"
+
+
+def test_usage_names_the_operator_entry_point() -> None:
+    text = reset.usage()
+    assert "scripts/maintain/reset_demo_ledgers.sh" in text
+    assert "--execute" in text
+    assert "never cancels orders or closes positions" in text
+
+
+def test_shell_wrapper_only_pins_path_and_execs_the_module() -> None:
+    wrapper = (
+        Path(__file__).resolve().parents[2] / "scripts" / "maintain" / "reset_demo_ledgers.sh"
+    ).read_text(encoding="utf-8")
+    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in wrapper
+    assert 'exec "$PYTHON" -m liquidity_migration.ops.demo_ledger_reset "$@"' in wrapper
+    # The wrapper must stay logic-free: no systemctl, tar, lease, or git calls.
+    code_lines = "\n".join(
+        line for line in wrapper.splitlines() if not line.lstrip().startswith("#")
     )
-    completed = subprocess.run(
-        ["bash", "-c", harness],
-        env={**os.environ, "TMPDIR": str(temporary_root)},
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "tracked worktree differs from HEAD" in completed.stdout
-    assert list(temporary_root.iterdir()) == []
-
-
-def test_reset_requires_explicit_flatness_including_conditional_orders() -> None:
-    text = _text()
-    flat = text[text.index("Checking demo/mainnet boundary") : text.index("Archiving ${#EXISTING_TARGETS")]
-    assert "get_positions" in flat
-    assert "get_open_orders(settle_coin=\"USDT\")" in flat
-    assert 'order_filter="StopOrder"' in flat
-    assert "open_positions={len(positions)} open_orders={len(orders)}" in flat
-
-
-def test_reset_clears_account_epochs_in_place_without_retiring_lock_inodes() -> None:
-    text = _text()
-    invocation = text.index('"$PYTHON" - \\\n  "$DEMO_ACCOUNT_LEASE_PATH"')
-    clear = text.index("clear_account_epoch_roots_preserving_locks")
-    generic_remove = text.index("generic_remove_args=(remove", clear)
-    normalize = text.index("demo_account_normalize_args=(", generic_remove)
-
-    assert invocation < clear < generic_remove < normalize
-    assert "preserving persistent locks while clearing" in text[generic_remove:normalize]
-    assert '"${ACCOUNT_STATE_TARGETS[@]}"' in text[invocation:clear]
-    assert 'rm -rf -- "$target"' not in text
-    assert "Finalizing fresh canonical account roots" not in text
-
-
-def test_reset_revalidates_the_held_owner_lease_in_clear_process() -> None:
-    text = _text()
-    clear_process = text[text.index('"$PYTHON" - \\\n  "$DEMO_ACCOUNT_LEASE_PATH"') :]
-    demo_check = clear_process.index("revalidate_inherited_account_owner_lease(8, sys.argv[1])")
-    helper_call = clear_process.index(
-        "clear_account_epoch_roots_preserving_locks(sys.argv[3:])"
-    )
-
-    assert demo_check < helper_call
-
-
-def test_reset_restores_private_ownership_and_only_shares_public_demo_inputs() -> None:
-    text = _text()
-    boundary = text[
-        text.index("# Reset runs as root") : text.index(
-            'release_demo_account_lease "normal completion"'
-        )
-    ]
-    assert "ROOT_RUNTIME_UID" in boundary and "ROOT_RUNTIME_GID" in boundary
-    assert "demo_account_normalize_args" in boundary
-    assert "normalize-private" in boundary
-    assert "normalize-demo" in boundary
-    assert "--continuous-root" in boundary
-    for forbidden in ("chown -R", 'find "$root"', "install -d", "mkdir -p"):
-        assert forbidden not in boundary
-
-
-def test_reset_strictly_preflights_runtime_paths_before_owner_leases_and_clear() -> None:
-    text = _text()
-    stopped = text.index('"$SYSTEMCTL_BIN" stop "$unit"')
-    load_state = text.index("unit_load_state=", stopped)
-    failed_only = text.index('if [[ "$unit_active_state" == failed ]]', load_state)
-    reset_failed = text.index('"$SYSTEMCTL_BIN" reset-failed "$unit"', failed_only)
-    literal_inactive = text.index("unit is not literally inactive", reset_failed)
-    quiescence = text.index(
-        'echo "  quiescence verified (all managed units loaded and inactive)"',
-        literal_inactive,
-    )
-    strict = text.index("account_preflight_args=(preflight", quiescence)
-    demo = text.index("preflight-demo", strict)
-    demo_lease = text.index("\nacquire_demo_account_lease\n", demo)
-    destructive = text.index("FAILURE_RECOVERY_ALLOWED=0", demo_lease)
-
-    assert stopped < load_state < failed_only < reset_failed < literal_inactive < quiescence
-    assert quiescence < strict < demo < demo_lease < destructive
-    assert "--reject-symlinks" in text[strict:demo]
-
-
-def test_reset_never_auto_restarts_after_destructive_epoch_clear_begins() -> None:
-    text = _text()
-    archive_durable = text.index('echo "  digest sidecar: $SHA_PATH"')
-    disable_recovery = text.index("FAILURE_RECOVERY_ALLOWED=0", archive_durable)
-    destructive_clear = text.index("Removing only archived generated projections", archive_durable)
-
-    assert archive_durable < disable_recovery < destructive_clear
-
-
-def test_failed_post_clear_handoff_stops_and_verifies_every_managed_unit() -> None:
-    text = _text()
-    cleanup = text[text.index("cleanup() {") : text.index("trap cleanup EXIT")]
-    failed_stop = text.index("stop_all_managed_units_after_failed_handoff()")
-    cleanup_stop = cleanup.index("stop_all_managed_units_after_failed_handoff")
-    stopped_release = cleanup.index('release_demo_account_lease "failed stopped handoff"')
-
-    assert failed_stop < text.index("cleanup() {")
-    assert cleanup_stop < stopped_release
-    assert "trap '' INT TERM" in cleanup[:cleanup_stop]
-    assert '"$SYSTEMCTL_BIN" stop "$unit"' in text[failed_stop : text.index("cleanup() {")]
-    assert '"$SYSTEMCTL_BIN" is-active --quiet "$unit"' in text[
-        failed_stop : text.index("cleanup() {")
-    ]
-
-
+    for forbidden in ("systemctl", "tar ", "flock", "git "):
+        assert forbidden not in code_lines

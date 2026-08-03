@@ -985,15 +985,24 @@ def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> Non
 
 
 def test_rollout_and_reset_survive_a_dying_ssh_transport() -> None:
-    for script in (DEPLOY, ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh"):
-        text = _read(script)
-        assert "trap 'exit 129' HUP" in text
-        assert "trap 'exit 141' PIPE" in text
-        # Cleanup output must outlive a dead stdout.
-        assert "cleanup_notice()" in text
-        assert "logger -t liquidity-migration-" in text
     deploy = _read(DEPLOY)
+    assert "trap 'exit 129' HUP" in deploy
+    assert "trap 'exit 141' PIPE" in deploy
+    # Cleanup output must outlive a dead stdout.
+    assert "cleanup_notice()" in deploy
+    assert "logger -t liquidity-migration-" in deploy
     assert "trap '' INT TERM HUP PIPE" in deploy
+    # The reset moved to Python (2026-08-03): HUP/PIPE route through the
+    # fail-closed handoff with the same exit codes, and cleanup lines still
+    # reach the host journal even on a dead transport.
+    reset_module = _read(
+        ROOT / "liquidity_migration" / "ops" / "demo_ledger_reset.py"
+    )
+    assert '_raise_signal(129)' in reset_module
+    assert '_raise_signal(141)' in reset_module
+    assert 'signal.SIGHUP' in reset_module and 'signal.SIGPIPE' in reset_module
+    assert '"logger", "-t", "liquidity-migration-reset"' in reset_module
+    assert "def cleanup_notice" in reset_module
 
 
 def test_oneshot_units_have_explicit_start_timeouts_and_memory_bounds() -> None:
