@@ -44,8 +44,12 @@ ProtectSystem=full
 ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=768M
-MemoryMax=896M
+# No MemoryHigh: measured 2026-08-03 pinned at the old watermark (reclaim
+# throttling, swapped pages, slow cycles entering on stale prices). The
+# producer restarts clean off the journal cursor, so MemoryMax fails loud
+# instead of degrading silently. Sized after the paper retirement freed
+# ~740 MiB on the 3.7 GiB host; observed working set ~830M.
+MemoryMax=1152M
 MemorySwapMax=384M
 
 [Install]

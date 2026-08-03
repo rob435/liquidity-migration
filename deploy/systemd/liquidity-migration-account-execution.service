@@ -37,7 +37,9 @@ ReadWritePaths=/opt/liquidity-migration
 # No MemoryHigh: reclaim throttling on the latency-critical owner stretched
 # venue round-trips into the stale-exposure wedge. MemoryMax already bounds it.
 MemoryMax=1024M
-MemorySwapMax=256M
+# 384M: the owner sat pinned at the old 256M swap cap (255M used) under the
+# pre-retirement squeeze; the raise keeps spill room during co-peaks.
+MemorySwapMax=384M
 
 [Install]
 WantedBy=multi-user.target

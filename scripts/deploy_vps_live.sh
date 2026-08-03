@@ -912,9 +912,12 @@ install_mode() {
     # Bound journald so logs cannot crowd the data roots, and keep at most the
     # newest timestamped backup of the demo credential file.
     install -d -m 0755 /etc/systemd/journald.conf.d
-    printf '[Journal]\nSystemMaxUse=1G\n' \
+    printf '[Journal]\nSystemMaxUse=500M\n' \
         > /etc/systemd/journald.conf.d/liquidity-migration.conf
     systemctl restart systemd-journald 2>/dev/null || true
+    # Keep hot strategy state resident; swap is overflow, not steady state.
+    printf 'vm.swappiness = 20\n' > /etc/sysctl.d/90-liquidity-migration.conf
+    sysctl -q -p /etc/sysctl.d/90-liquidity-migration.conf || true
     find /etc/liquidity-migration -maxdepth 1 -name 'bybit-demo.env.backup.*' -type f \
         | sort | head -n -1 | while IFS= read -r stale_backup; do
         rm -f -- "$stale_backup"

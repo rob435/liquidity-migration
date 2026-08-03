@@ -112,16 +112,23 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
 
 
 def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
+    """carry/long are MemoryMax-only since the 2026-08-03 retune: both ran
+    pinned at their MemoryHigh watermark for weeks (reclaim throttling, slow
+    cycles), and a restart off the journal cursor beats silently stale cycles.
+    """
     expected = {
-        "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
-        "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),
-        "liquidity-migration-bybit-carry-demo.service": ("768M", "896M", "384M"),
+        "liquidity-migration-bybit-long-demo.service": ("1024M", "384M"),
+        "liquidity-migration-bybit-carry-demo.service": ("1152M", "384M"),
     }
-    for unit, (high, maximum, swap) in expected.items():
+    for unit, (maximum, swap) in expected.items():
         fragment = _unit(unit)
-        assert f"MemoryHigh={high}" in fragment
+        assert "MemoryHigh=" not in fragment, unit
         assert f"MemoryMax={maximum}" in fragment
         assert f"MemorySwapMax={swap}" in fragment
+    fragment = _unit("liquidity-migration-bybit-continuous-demo.service")
+    assert "MemoryHigh=768M" in fragment
+    assert "MemoryMax=896M" in fragment
+    assert "MemorySwapMax=384M" in fragment
 
 
 def test_demo_owner_is_bounded_but_never_reclaim_throttled() -> None:
@@ -132,7 +139,7 @@ def test_demo_owner_is_bounded_but_never_reclaim_throttled() -> None:
     fragment = _unit("liquidity-migration-account-execution.service")
     assert "MemoryHigh=" not in fragment
     assert "MemoryMax=1024M" in fragment
-    assert "MemorySwapMax=256M" in fragment
+    assert "MemorySwapMax=384M" in fragment
 
 
 def test_liveness_timer_has_one_bounded_activation_grace() -> None:

@@ -27,8 +27,11 @@ UMask=0027
 ReadWritePaths=/opt/liquidity-migration
 # The full-rewrite refresh (POLARS_MAX_THREADS=8) is the heaviest managed
 # workload; without a ceiling it pressures the global OOM killer against the
-# co-resident account owners on the 4 GiB host. MemoryHigh throttles first;
-# MemoryMax is a guard bound, not a target.
+# co-resident demo account owner on the 3.7 GiB host. MemoryHigh throttles
+# first; MemoryMax is a guard bound, not a target. Re-enabling CONTINUOUS
+# needs a fleet re-budget: this 1G high plus the producer ceilings raised
+# after the 2026-08-03 paper retirement do not all fit without accepting
+# swap during refresh windows.
 MemoryHigh=1G
 MemoryMax=1536M
 

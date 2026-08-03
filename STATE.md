@@ -19,6 +19,19 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — demo fleet memory retune (owner-approved), spending the
+  ~740 MiB the paper retirement frees on the same 3.7 GiB host. Rides the
+  same deploy as the retirement below.** Measured before the change: carry
+  and long producers pinned exactly at their MemoryHigh watermarks (800M/805M
+  and 603M/604M) with 850 MiB swapped host-wide and the owner pinned at its
+  256M swap cap — silent reclaim throttling, the mechanism behind slow
+  cycles. Producers drop MemoryHigh entirely (kill-and-restart at MemoryMax
+  is loud and recovers off the journal cursor; throttling is quiet and
+  persisted for weeks): carry MemoryMax 896M→1152M, long 640M→1024M, owner
+  MemorySwapMax 256M→384M. Deploy also installs `vm.swappiness=20` and
+  tightens the journald cap 1G→500M. Re-enabling CONTINUOUS requires a fleet
+  re-budget (noted in the rmom-refresh unit).
+
 - **2026-08-03 — paper trading retired whole (owner instruction). DEPLOY
   PENDING — rides the next fleet deploy (agreed with the concurrent
   recovery/defriction session, which drives it); this entry gains the receipt
