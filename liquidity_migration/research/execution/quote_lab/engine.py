@@ -33,7 +33,12 @@ from liquidity_migration.research.execution.quote_lab.records import (
 
 WOULD_CROSS_BACKOFF_SECONDS = 5.0
 MAX_WOULD_CROSS_RETRIES = 3
-FLATTEN_TIMEOUT_SECONDS = 15.0
+# The demo positions endpoint can lag a filled reduce-only close by well over
+# 15 s, and a cancel that races a fill can leave more position than the first
+# close covered. So a flatten gets several rounds, each re-closing whatever
+# the venue currently reports, before the engine gives up and aborts.
+FLATTEN_TIMEOUT_SECONDS = 20.0
+FLATTEN_MAX_ROUNDS = 3
 
 _GONE_STATUSES = frozenset({"Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"})
 
@@ -171,6 +176,7 @@ class _SymbolState:
     fill_price: float = 0.0
     fill_qty_text: str = ""
     flatten_deadline_monotonic: float = 0.0
+    flatten_rounds: int = 0
 
 
 def _opposite(side: str) -> str:
@@ -481,6 +487,7 @@ class QuoteEngine:
         except Exception as exc:  # noqa: BLE001 - the flatten deadline decides
             self._emit(symbol=symbol, kind="error", link=flatten_link, detail=f"flatten_submit_failed: {exc}")
         state.phase = _FLATTENING
+        state.flatten_rounds = 0
         state.flatten_deadline_monotonic = self.clock.monotonic() + FLATTEN_TIMEOUT_SECONDS
 
     def _flatten_orphan(self, state: _SymbolState, position_row: Mapping[str, Any]) -> None:
@@ -501,6 +508,7 @@ class QuoteEngine:
         except Exception as exc:  # noqa: BLE001 - the flatten deadline decides
             self._emit(symbol=symbol, kind="error", link=flatten_link, detail=f"flatten_submit_failed: {exc}")
         state.phase = _FLATTENING
+        state.flatten_rounds = 0
         state.flatten_deadline_monotonic = self.clock.monotonic() + FLATTEN_TIMEOUT_SECONDS
 
     # -------------------------------------------------------------------- tick
@@ -740,6 +748,37 @@ class QuoteEngine:
             )
             return
         if now_monotonic >= state.flatten_deadline_monotonic:
+            if state.flatten_rounds + 1 < FLATTEN_MAX_ROUNDS:
+                # Re-close whatever the venue reports right now: a raced fill
+                # can have grown the position past the first close, and plain
+                # propagation lag clears on its own while we wait. A
+                # reduce-only close on a position that is already flat gets
+                # rejected; the next positions poll then resolves this leg.
+                state.flatten_rounds += 1
+                size_text = str(position.get("size") or "")
+                side = str(position.get("side") or self.config.side)
+                retry_link = self._new_link(symbol)
+                self._emit(
+                    symbol=symbol,
+                    kind="flatten_submitted",
+                    link=retry_link,
+                    side=_opposite(side),
+                    qty=_position_size(position),
+                    detail=f"retry_round_{state.flatten_rounds}",
+                )
+                try:
+                    self.venue.place_reduce_only_market(
+                        symbol, _opposite(side), size_text, retry_link
+                    )
+                except Exception as exc:  # noqa: BLE001 - the next poll decides
+                    self._emit(
+                        symbol=symbol,
+                        kind="error",
+                        link=retry_link,
+                        detail=f"flatten_retry_submit_failed: {str(exc)[:200]}",
+                    )
+                state.flatten_deadline_monotonic = now_monotonic + FLATTEN_TIMEOUT_SECONDS
+                return
             self._emit(symbol=symbol, kind="error", detail="flatten_unverified_within_deadline")
             if state.attempt is not None:
                 self._close_attempt(

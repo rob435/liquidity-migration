@@ -451,3 +451,44 @@ def test_attempt_rollup_correctness():
     assert attempt.fill_price == pytest.approx(1.004)
     assert attempt.terminal_ts_ns > attempt.decision_ts_ns
     assert attempt.metadata["fill_qty"] == pytest.approx(10.0)
+
+
+def test_flatten_retry_reclosing_current_size_heals():
+    venue, touch, clock, engine = _fresh()
+    engine.tick()
+    link = venue.calls[-1][5]
+    venue.fill(link, price=1.000)
+    venue.block_flatten = True  # the first close never clears the position
+    clock.advance(1.0)
+    engine.tick()  # detect fill, submit the first flatten (blocked)
+    assert "flatten_submitted" in _kinds(engine)
+    clock.advance(21.0)
+    venue.block_flatten = False  # the retry's close lands
+    engine.tick()  # deadline passed -> retry round 1 re-closes current size
+    retry_events = [e for e in engine.events if e.detail.startswith("retry_round_")]
+    assert len(retry_events) == 1 and retry_events[0].qty == pytest.approx(10.0)
+    clock.advance(1.0)
+    engine.tick()  # position gone -> attempt closes filled, engine stays alive
+    assert engine.active and not engine.aborted
+    assert engine.attempts[0].terminal_state == TERMINAL_FILLED
+
+
+def test_flatten_retry_rounds_exhausted_aborts():
+    venue, touch, clock, engine = _fresh()
+    engine.tick()
+    link = venue.calls[-1][5]
+    venue.fill(link, price=1.000)
+    venue.block_flatten = True
+    clock.advance(1.0)
+    engine.tick()  # first flatten, blocked
+    for _ in range(2):  # rounds 1 and 2
+        clock.advance(21.0)
+        engine.tick()
+    retry_events = [e for e in engine.events if e.detail.startswith("retry_round_")]
+    assert [e.detail for e in retry_events] == ["retry_round_1", "retry_round_2"]
+    assert engine.active  # still trying
+    clock.advance(21.0)
+    engine.tick()  # rounds exhausted -> abort
+    assert engine.aborted and engine.abort_reason.startswith("flatten_timeout")
+    assert engine.attempts[0].terminal_state == TERMINAL_FILLED
+    assert engine.attempts[0].metadata["terminal_detail"] == "flatten_unverified"
