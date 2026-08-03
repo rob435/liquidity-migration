@@ -971,7 +971,8 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         'chmod() { :; }\n'
         'mkdir() { printf "mkdir:%s\\n" "$*"; }\n'
         "lm_load_private_systemd_environment() {\n"
-        '    printf "load:%s\\n" "$2"\n'
+        '    shift\n'
+        '    printf "load:%s\\n" "$*"\n'
         "    ACCOUNT_RISK_POLICY_FILE=/fake/etc/risk-policy.json\n"
         "    ACCOUNT_SYMBOLS_FILE=/fake/etc/candidate-universe.json\n"
         "    ACCOUNT_DEMO_RULES_FILE=/fake/etc/venue-rules.json\n"

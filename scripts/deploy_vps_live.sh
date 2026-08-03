@@ -1242,10 +1242,13 @@ MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 # else. The subshell keeps them out of this script's scope and its logs.
 lm_run_with_mainnet_credentials() {
     (
-        unset BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
+        # The credential resolver refuses mainnet credentials unless the
+        # owner's armed switch travels with them, so the switch is loaded
+        # from the same owner-written file and goes only to this subprocess.
+        unset BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
         lm_load_private_systemd_environment "$PYTHON" "$MAINNET_CREDENTIAL_ENV" \
-            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET || exit 3
-        export BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
+            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY || exit 3
+        export BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
         "$@"
     )
 }
