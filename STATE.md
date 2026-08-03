@@ -19,6 +19,27 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — Telegram rework deployed and the demo book reset to a clean
+  slate (owner order), both in one window.** The main Telegram line now
+  carries only the book's story in plain words (digest, fills, closes, stops,
+  loss warnings, entry blocks); accounting boilerplate and component
+  bookkeeping moved to the owner's service journal. Watchdog pages moved to a
+  second chat line — `TELEGRAM_ALERT_CHAT_ID`, same bot, plain one-line
+  headline plus a stable `ref <key>` to hand to Claude; full technical detail
+  stays on the watchdog's journald. The var is empty on the host, so alerts
+  still fall back to the main chat until the owner creates the alerts group
+  (`docs/notifications.md` has the 3-step setup). Deployed at `4152d3b`:
+  `rollout-ok commit=4152d3b profile=operational` 14:37 UTC, book proved flat
+  at every rollout phase. Immediately after, the **clean-slate ledger reset**
+  ran as the first production use of the Python reset tool (`3f52edd`): all
+  three sleeve roots + account journal/inbox/capture + reports + caches
+  archived to `data/_archive/ledger-reset-20260803T143852Z.tar.gz` (sha256
+  `4b729c34…937a`), demo venue-flat verified at the boundary, fresh empty
+  epoch, owner-first restart, pre-reset active set restored and verified.
+  First digest of the new epoch delivered 14:41 UTC in the new format
+  (`🕐 Bybit demo · 14:41 UTC`, 1 page, 105 chars). All equity/P&L numbers
+  before this boundary belong to the archived epoch.
+
 - **2026-08-03 — two owner-ordered follow-ups to the purge, deployed the same
   afternoon.** (1) **The account-owner lease slimmed to its load-bearing core**
   (`1c8d32c`, rollout-ok 12:53 UTC, first watchdog run after it "0 active
