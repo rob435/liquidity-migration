@@ -1230,6 +1230,70 @@ MAINNET_OWNER_UNIT=liquidity-migration-account-execution-mainnet.service
 MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
 MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
 
+MAINNET_ROUTE_ENV=/etc/liquidity-migration/account-execution-mainnet.env
+MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
+
+# Run one command with the live credentials in its environment and nowhere
+# else. The subshell keeps them out of this script's scope and its logs.
+lm_run_with_mainnet_credentials() {
+    (
+        unset BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
+        lm_load_private_systemd_environment "$PYTHON" "$MAINNET_CREDENTIAL_ENV" \
+            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET || exit 3
+        export BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
+        "$@"
+    )
+}
+
+# The owner writes one file: the credential env (key, secret, REAL_MONEY,
+# optional dials). Everything the old nine-step runbook demanded by hand is
+# derived here at activation, and preflight still gates below.
+provision_mainnet_prerequisites() {
+    if [ ! -f "$MAINNET_ROUTE_ENV" ]; then
+        # Fully static committed template, no secrets. Installed only when
+        # absent so a hand-edited copy is never overwritten.
+        install -o root -g root -m 600 \
+            "$REPO_DIR/deploy/account-execution-mainnet.env.template" "$MAINNET_ROUTE_ENV" \
+            || fail "cannot install the mainnet route env from the template"
+        echo "provision: installed $MAINNET_ROUTE_ENV from the committed template"
+    fi
+    # The strict loader's ownership and mode demands are mechanical: normalize
+    # them instead of failing an activation over a chmod.
+    chown root:root "$MAINNET_CREDENTIAL_ENV" "$MAINNET_ROUTE_ENV" 2>/dev/null || true
+    chmod 600 "$MAINNET_CREDENTIAL_ENV" "$MAINNET_ROUTE_ENV" 2>/dev/null || true
+    # A funded book that cannot page is a hazard: default a missing Telegram
+    # pair from the demo file (existing values are never touched).
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
+        --from-env "$MAINNET_DEMO_TELEGRAM_ENV" --execute \
+        || fail "cannot default the mainnet Telegram pair"
+    # Artifact paths come from the route file itself, not from copies here.
+    local risk_policy_file="" universe_file="" rules_file=""
+    lm_load_private_systemd_environment "$PYTHON" "$MAINNET_ROUTE_ENV" \
+        ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
+        || fail "cannot read artifact paths from $MAINNET_ROUTE_ENV"
+    risk_policy_file="$ACCOUNT_RISK_POLICY_FILE"
+    universe_file="$ACCOUNT_SYMBOLS_FILE"
+    rules_file="$ACCOUNT_DEMO_RULES_FILE"
+    mkdir -p "$(dirname "$risk_policy_file")"
+    chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
+    # The installed profile is always the render of the current dials, so a
+    # dial edit can never drift from what the kernel enforces.
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
+        --execute --overwrite --output "$risk_policy_file" \
+        || fail "mainnet dials do not render a loadable profile"
+    # Frozen inputs only when absent: universe first, then rules bound to it.
+    if [ ! -f "$universe_file" ]; then
+        "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
+            --realm mainnet --output "$universe_file" \
+            || fail "mainnet candidate-universe freeze failed"
+    fi
+    if [ ! -f "$rules_file" ]; then
+        lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
+            --realm mainnet --symbols-file "$universe_file" --output "$rules_file" \
+            || fail "mainnet venue-rules freeze failed"
+    fi
+}
+
 ensure_mainnet_state_roots() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming create-state-roots --execute \
         || fail "mainnet state root creation failed"
@@ -1248,6 +1312,7 @@ require_mainnet_preflight() {
 # decision; the preflight proves the profile is the render of the dials
 # before anything starts.
 start_mainnet_fleet() {
+    provision_mainnet_prerequisites
     ensure_mainnet_state_roots
     require_mainnet_preflight
     systemctl enable "$MAINNET_OWNER_UNIT"

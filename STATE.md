@@ -19,6 +19,23 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 (late) — Arming path collapsed to two owner acts (operator
+  override), and the quote lab ships.** The nine-step real-money runbook is
+  now: write `/etc/liquidity-migration/bybit-mainnet.env` by hand (key,
+  secret, dials, `REAL_MONEY=true`), then `deploy --execute activate`.
+  Activation itself installs the static route env, normalizes perms,
+  defaults a missing Telegram pair from the demo file, **always re-renders
+  the risk profile from the current dials**, freezes universe/rules when
+  absent, creates state roots, and still gates on the full preflight —
+  every capital control (loss halt, envelope, native stops, partition,
+  single-writer lease, reconciliation) unchanged. `REAL_MONEY` in the
+  root-owned host file remains the single arming switch; no agent handles
+  the live key. Quote lab: `b7ecca4`+`44a26cb` (registration is the
+  commit), two real-order windows run 2026-08-03 evening on the fleet
+  account in staged-install pauses (book flat both sides, receipts in
+  `/var/lib/liquidity-migration/quote-lab/`), and an all-night policy-
+  rotating run is live on the second, separate demo account
+  (`bybit-quote-lab.env`) beside the untouched fleet.
 - **2026-08-03 — The audit's whole program lands: decode gate, journal
   decoupling, day buckets, owner diet, continuous-runtime removal.** Owner
   directive: fix the ranked findings from audit pass 2, agents doing the

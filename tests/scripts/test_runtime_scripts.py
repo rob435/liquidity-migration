@@ -966,6 +966,20 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         '    case "$*" in *preflight*) return "$PREFLIGHT_STATUS" ;; esac\n'
         "    return 0\n"
         "}\n"
+        'install() { printf "install:%s\\n" "$*"; }\n'
+        'chown() { :; }\n'
+        'chmod() { :; }\n'
+        'mkdir() { printf "mkdir:%s\\n" "$*"; }\n'
+        "lm_load_private_systemd_environment() {\n"
+        '    printf "load:%s\\n" "$2"\n'
+        "    ACCOUNT_RISK_POLICY_FILE=/fake/etc/risk-policy.json\n"
+        "    ACCOUNT_SYMBOLS_FILE=/fake/etc/candidate-universe.json\n"
+        "    ACCOUNT_DEMO_RULES_FILE=/fake/etc/venue-rules.json\n"
+        "    BYBIT_REAL_API_KEY=fake-key\n"
+        "    BYBIT_REAL_API_SECRET=fake-secret\n"
+        "    return 0\n"
+        "}\n"
+        'REPO_DIR=/fake/repo\n'
         + library[library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")]
         + text[
             text.index("# The single arming switch") : text.index("# verify_topology collects")
@@ -1000,6 +1014,23 @@ def test_mainnet_start_creates_roots_then_gates_on_preflight() -> None:
     assert started.returncode == 0, combined
     assert "python:-m liquidity_migration.policy.real_money_arming create-state-roots --execute" in combined
     assert combined.index("create-state-roots") < combined.index("preflight")
+    # The collapsed arming path provisions everything before the gate: route
+    # env from the template, telegram default, profile always re-rendered
+    # from the dials, frozen inputs when absent — in that order, all of it
+    # before create-state-roots and the preflight.
+    assert "install:-o root -g root -m 600" in combined
+    assert "default-telegram" in combined
+    assert (
+        "render-profile --execute --overwrite --output /fake/etc/risk-policy.json"
+        in combined
+    )
+    assert "freeze_account_candidate_universe.py --realm mainnet" in combined
+    assert (
+        "freeze_venue_instrument_rules.py --realm mainnet "
+        "--symbols-file /fake/etc/candidate-universe.json" in combined
+    )
+    assert combined.index("install:") < combined.index("default-telegram")
+    assert combined.index("render-profile") < combined.index("create-state-roots")
     assert (
         "systemctl:enable liquidity-migration-account-execution-mainnet.service" in combined
     )
@@ -1647,3 +1678,18 @@ def test_stop_mainnet_cannot_report_ok_without_systemctl() -> None:
     assert result.returncode != 0, combined
     assert "systemctl is unavailable" in combined
     assert "stop-mainnet-ok" not in combined
+
+
+def test_mainnet_provision_runs_before_a_blocked_preflight_gate() -> None:
+    """A blocked preflight still blocks every unit start, and provisioning ran
+    first so the report the operator sees reflects the provisioned state."""
+    blocked = subprocess.run(
+        ["bash", "-c", _mainnet_harness("armed", 1) + "\nstart_mainnet_fleet\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "systemctl:enable" not in combined
+    assert "systemctl:start" not in combined
+    assert combined.index("render-profile") < combined.index("preflight")

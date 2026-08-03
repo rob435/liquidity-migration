@@ -197,50 +197,44 @@ there, naming the dial to move, instead of at start-up over a funded account.
 
 ### Arming (owner-executed)
 
-Run `scripts/ops.sh real-money preflight` at any point to see which of these is
-still outstanding (`LOCAL=1` runs it against this checkout instead of the VPS).
-It reads only, reports a credential by name and never by value, takes `--json`,
-and exits 1 while anything is outstanding.
+Two acts, both yours:
 
-1. **Confirm the account is flat by hand.** No manual position, no open order.
-   The owner's startup check and the reconciler see USDT-settled linear only, so
-   anything else on the UID stays invisible to both — see *Still unproven*.
-2. **Create the API key** on the funded account: contract trading only,
-   **withdrawal disabled**, IP-allowlisted to the VPS.
-3. **Fill in the credential file.** Copy
-   [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template) to
-   `/etc/liquidity-migration/bybit-mainnet.env`, root-owned `0600`, edited on the
-   VPS by hand — the key and secret never enter an agent session. Paste into
-   `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` — deliberately different
-   variables from the demo pair — and set the dials.
-4. **Copy the route file.**
-   [`deploy/account-execution-mainnet.env.template`](../deploy/account-execution-mainnet.env.template)
-   to `/etc/liquidity-migration/account-execution-mainnet.env`, root-owned `0600`.
-   Its roots are disjoint from demo.
-5. **Create the state roots**: `scripts/ops.sh real-money create-state-roots
-   --execute` (dry run without `--execute`). It refuses a relative root, a root
-   that is not a directory, and any root inside a directory the demo owner
-   declares.
-6. **Render the profile** (`D=/etc/liquidity-migration/account-execution-mainnet`):
-   `scripts/ops.sh real-money render-profile --execute --output $D/risk-policy.json`.
-7. **Freeze the inputs** — universe first, then rules against it:
-   `scripts/maintain/freeze_account_candidate_universe.py --realm mainnet` and
-   `scripts/maintain/freeze_venue_instrument_rules.py --realm mainnet`. Rules
-   come from the read-only `get_instruments_info` endpoint; never run the demo
-   order probe against mainnet (it places live orders and refuses any realm but
-   demo by name).
-8. **Flip the switch**: `REAL_MONEY=true` in the credential file, by your own
-   hand. This is the whole arming decision.
-9. **Start the fleet**, at Tier 1 size: `scripts/ops.sh deploy activate`.
+1. **Write the one file.** On the VPS, edit
+   `/etc/liquidity-migration/bybit-mainnet.env` (start from
+   [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)):
+   paste `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` (contract trading
+   only, **withdrawal disabled**, IP-allowlisted to the VPS), set any `RM_*`
+   dials you want off their defaults, and set `REAL_MONEY=true` — the whole
+   arming decision, by your own hand. The live key never passes through an
+   agent session.
+2. **Start the fleet**: `scripts/ops.sh deploy --execute activate`.
 
-Changing any dial afterwards means re-rendering the profile and reinstalling.
-Preflight verifies: both env files exist as strict root-owned `0600` `KEY=value`;
-credentials present with both demo variables absent; `REAL_MONEY` a recognised
-value (an unrecognised value fails rather than being guessed); the Telegram pair
-set; the dials parse, render, and load; all 12 route keys declared with
-`ACCOUNT_VENUE_REALM=mainnet`; state roots and frozen artifacts exist; and the
-installed profile is byte-identical to the render of the current dials — the
-likeliest arming mistake is editing a dial and forgetting to re-render.
+Activation derives everything else before anything starts: the route env
+installs from the committed template when absent (static, no secrets — kept a
+separate file so producer units never load the file holding the key), file
+ownership and mode are normalized, a missing Telegram pair is copied from the
+demo env (a funded book that cannot page is a hazard), the risk profile is
+re-rendered from the current dials on every activation (so a dial edit can
+never drift from what the kernel enforces), the mainnet candidate universe
+and instrument rules freeze themselves when absent, and the state roots are
+created. Then preflight runs as the gate: any check it cannot satisfy stops
+the deploy with the item named, and nothing mainnet starts.
+
+`scripts/ops.sh real-money preflight` is yours to run any time as a read-only
+diagnostic (`LOCAL=1` for this checkout, `--json` for tools; credentials are
+reported by name, never by value). It verifies: both env files strict
+root-owned `0600` `KEY=value`; credentials present with both demo variables
+absent; `REAL_MONEY` a recognised value (an unrecognised value fails rather
+than being guessed); the Telegram pair set; the dials parse, render, and
+load; all 12 route keys declared with `ACCOUNT_VENUE_REALM=mainnet`; state
+roots and frozen artifacts exist; and the installed profile byte-identical to
+the render of the current dials.
+
+Before flipping the switch, confirm the funded account is flat by hand — the
+owner's startup check and the reconciler see USDT-settled linear only, so
+anything else on the account stays invisible to both (*Still unproven*).
+Start small: `RM_EQUITY_FRACTION` is the size dial, and the envelope and the
+watchdog thresholds are unexercised on a funded account until Tier 1 runs.
 
 ### Capital controls in force
 

@@ -792,3 +792,107 @@ def test_create_state_roots_reports_an_unreadable_owner_env(tmp_path: Path, caps
 
     assert main(["create-state-roots", "--owner-env", str(tmp_path / "absent.env")]) == 2
     assert "does not exist" in capsys.readouterr().err
+
+
+def _demo_telegram_env(tmp_path: Path, **overrides: str) -> Path:
+    values = {
+        "BYBIT_DEMO_API_KEY": "demo-key",
+        "BYBIT_DEMO_API_SECRET": "demo-secret",
+        "TELEGRAM_BOT_TOKEN": "demo-bot-token",
+        "TELEGRAM_CHAT_ID": "demo-chat-id",
+        "TELEGRAM_ALERT_CHAT_ID": "demo-alert-id",
+        **overrides,
+    }
+    body = "\n".join(f"{key}={value}" for key, value in values.items()) + "\n"
+    return _env_file(tmp_path, "bybit-demo.env", body)
+
+
+def test_default_telegram_appends_missing_pair_without_printing_values(
+    tmp_path: Path, capsys
+) -> None:
+    from liquidity_migration.policy.real_money_arming import main
+
+    credential = _filled_credential_env(tmp_path)  # template pair is empty
+    source = _demo_telegram_env(tmp_path)
+    rc = main(
+        [
+            "default-telegram",
+            "--credential-env",
+            str(credential),
+            "--from-env",
+            str(source),
+            "--execute",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "TELEGRAM_BOT_TOKEN" in out and "TELEGRAM_CHAT_ID" in out
+    assert "demo-bot-token" not in out and "demo-chat-id" not in out
+    from liquidity_migration.policy.systemd_environment import (
+        parse_systemd_environment_bytes,
+    )
+
+    values = parse_systemd_environment_bytes(credential.read_bytes(), label="cred")
+    assert values["TELEGRAM_BOT_TOKEN"] == "demo-bot-token"
+    assert values["TELEGRAM_CHAT_ID"] == "demo-chat-id"
+    assert values["TELEGRAM_ALERT_CHAT_ID"] == "demo-alert-id"
+    assert stat.S_IMODE(credential.stat().st_mode) == 0o600
+
+
+def test_default_telegram_leaves_an_existing_pair_alone(tmp_path: Path) -> None:
+    from liquidity_migration.policy.real_money_arming import main
+
+    credential = _filled_credential_env(
+        tmp_path,
+        TELEGRAM_BOT_TOKEN="owner-token",
+        TELEGRAM_CHAT_ID="owner-chat",
+    )
+    source = _demo_telegram_env(tmp_path)
+    before = credential.read_bytes()
+    rc = main(
+        [
+            "default-telegram",
+            "--credential-env",
+            str(credential),
+            "--from-env",
+            str(source),
+            "--execute",
+        ]
+    )
+    assert rc == 0
+    assert credential.read_bytes() == before
+
+
+def test_default_telegram_dry_run_writes_nothing(tmp_path: Path) -> None:
+    from liquidity_migration.policy.real_money_arming import main
+
+    credential = _filled_credential_env(tmp_path)
+    source = _demo_telegram_env(tmp_path)
+    before = credential.read_bytes()
+    rc = main(
+        ["default-telegram", "--credential-env", str(credential), "--from-env", str(source)]
+    )
+    assert rc == 0
+    assert credential.read_bytes() == before
+
+
+def test_default_telegram_fails_closed_when_the_source_lacks_the_pair(
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration.policy.real_money_arming import main
+
+    credential = _filled_credential_env(tmp_path)
+    source = _demo_telegram_env(tmp_path, TELEGRAM_BOT_TOKEN="")
+    before = credential.read_bytes()
+    rc = main(
+        [
+            "default-telegram",
+            "--credential-env",
+            str(credential),
+            "--from-env",
+            str(source),
+            "--execute",
+        ]
+    )
+    assert rc == 2
+    assert credential.read_bytes() == before

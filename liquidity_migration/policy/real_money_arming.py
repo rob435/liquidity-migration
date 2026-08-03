@@ -460,6 +460,89 @@ def _create_state_roots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _default_telegram(args: argparse.Namespace) -> int:
+    """Copy a missing Telegram pair into the credential file from another env.
+
+    A funded book that cannot page is a hazard, so activation defaults the
+    pair from the demo file when the owner left it out. Existing values are
+    never touched, values are never printed, and the append preserves the
+    file's strict format (the parser accepts comments and blank lines).
+    """
+    credential = Path(args.credential_env)
+    source = Path(args.from_env)
+    values, check = _read_environment(credential)
+    if values is None:
+        print(check.render(), file=sys.stderr)
+        return 2
+    missing = [
+        key
+        for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+        if not str(values.get(key) or "").strip()
+    ]
+    if not missing:
+        print(f"{credential.name}: telegram pair already present; nothing to do")
+        return 0
+    source_values, source_check = _read_environment(source)
+    if source_values is None:
+        print(
+            f"{credential.name} has no telegram pair and the fallback is unusable:",
+            file=sys.stderr,
+        )
+        print(source_check.render(), file=sys.stderr)
+        return 2
+    additions: dict[str, str] = {}
+    for key in missing:
+        value = str(source_values.get(key) or "").strip()
+        if not value:
+            print(
+                f"{source} does not hold {key}; set the pair by hand in {credential}",
+                file=sys.stderr,
+            )
+            return 2
+        additions[key] = value
+    alert_chat = str(source_values.get("TELEGRAM_ALERT_CHAT_ID") or "").strip()
+    if alert_chat and not str(values.get("TELEGRAM_ALERT_CHAT_ID") or "").strip():
+        additions["TELEGRAM_ALERT_CHAT_ID"] = alert_chat
+    names = ", ".join(sorted(additions))
+    if not args.execute:
+        print(f"dry-run: would set {names} in {credential} from {source.name}")
+        return 0
+    # The template ships the keys as empty assignments, so a plain append would
+    # duplicate them and the strict parser refuses duplicates: replace existing
+    # assignments in place and append only keys the file does not carry at all.
+    lines = credential.read_bytes().decode("utf-8").splitlines()
+    remaining = dict(additions)
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        key = stripped.partition("=")[0]
+        if key in remaining:
+            lines[index] = f"{key}={remaining.pop(key)}"
+    body = "\n".join(lines)
+    if remaining:
+        body += "\n# Telegram pair defaulted from the demo env at activation.\n"
+        body += "\n".join(f"{key}={remaining[key]}" for key in sorted(remaining))
+    if not body.endswith("\n"):
+        body += "\n"
+    parse_systemd_environment_bytes(body.encode("utf-8"), label=str(credential))
+    scratch = credential.with_name(credential.name + ".tmp")
+    descriptor = os.open(
+        scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(scratch, credential)
+    except BaseException:
+        scratch.unlink(missing_ok=True)
+        raise
+    print(f"set {names} in {credential} (values from {source.name}, never printed)")
+    return 0
+
+
 def _render(args: argparse.Namespace) -> int:
     dials = RealMoneyDials()
     source = "committed defaults"
@@ -536,7 +619,21 @@ def main(argv: list[str] | None = None) -> int:
     roots.add_argument("--owner-env", default=str(MAINNET_OWNER_ENV))
     roots.add_argument("--execute", action="store_true")
 
+    telegram = subparsers.add_parser(
+        "default-telegram",
+        help="Copy a missing Telegram pair into the credential file from another env file.",
+    )
+    telegram.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
+    telegram.add_argument("--from-env", required=True)
+    telegram.add_argument("--execute", action="store_true")
+
     args = parser.parse_args(argv)
+    if args.command == "default-telegram":
+        try:
+            return _default_telegram(args)
+        except (OSError, ValueError) as exc:
+            print(f"default-telegram failed: {exc}", file=sys.stderr)
+            return 2
     if args.command == "create-state-roots":
         try:
             return _create_state_roots(args)
