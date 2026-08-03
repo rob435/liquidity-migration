@@ -337,16 +337,15 @@ telemetry changes only the notification message, never account admission. A STAL
 gate line is cosmetic; do not build a richer digest by reading the whole cycle ledger per
 hour.
 
-**Notifications.** When lifecycle output is downgraded to "local journal … awaiting venue
-reconciliation" the notifier stores an exact pending confirmation via
-`_queue_lifecycle_confirmation` and emits it once position truth becomes healthy
-(`account_notifications.py:331-336, 405-410`) — a downgraded alert is not a lost alert.
-Notification state advances only after all lossless Telegram-sized pages are delivered. The
-demo hourly digest labels owner/reconciliation state `Account execution health`
-(`:491,547`). Account P&L text describes the implemented scope — fill reconstruction,
-separately journaled funding, offline venue closed-P&L cross-checking, and unallocated
-account-netted component reductions — not an online finalizer, so a digest number is
-reconstructed, never venue-final. The CONTINUOUS BTC gate and entry-funnel line comes from
+**Notifications.** When lifecycle output is downgraded to "… waiting for the exchange to
+confirm" the notifier stores an exact pending confirmation via
+`_queue_lifecycle_confirmation` and emits it once position truth becomes healthy — a
+downgraded alert is not a lost alert. Notification state advances only after all lossless
+Telegram-sized pages are delivered. The hourly digest labels owner/reconciliation state
+`Health:`, and realized P&L carries a short `(pending: …)` note whenever parts (funding
+fees, trade fees, the exchange cross-check) are not final — the digest number is
+reconstructed from fills, never venue-final. Component-level bookkeeping detail is logged
+to the service journal instead of the Telegram line. The CONTINUOUS BTC gate and entry-funnel line comes from
 a separate receipt-bound projection shown only when `CONTINUOUS_CYCLE_ROOT` is configured;
 it is deliberately unset on the owner unit
 (`deploy/systemd/liquidity-migration-account-execution.service`, pinned by

@@ -13,8 +13,10 @@ immediately, a persisting one re-alerts at most every --cooldown-min, and a
 cleared one sends a one-line "resolved" note. --heartbeat-url (or
 LIVENESS_HEARTBEAT_URL) is pinged on every healthy run so an external
 dead-man's-switch catches a box death the on-box watchdog cannot; no URL is
-provisioned by default. Telegram delivery uses TELEGRAM_BOT_TOKEN and
-TELEGRAM_CHAT_ID.
+provisioned by default. Telegram delivery uses TELEGRAM_BOT_TOKEN with
+TELEGRAM_ALERT_CHAT_ID (falling back to TELEGRAM_CHAT_ID), so alerts land on
+a separate line from the trading digest: plain headline + `ref <key>` in the
+chat, full technical detail on stdout/journald.
 
 Exits 0 always (a watchdog must not crash-loop); a failure to verify degrades to
 an alert.
@@ -67,6 +69,14 @@ from liquidity_migration.ops.telegram import send_telegram_message  # noqa: E402
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+
+
+def _plain_name(label: str) -> str:
+    """Human name for a data root or systemd unit, for Telegram headlines."""
+    name = label.removeprefix("liquidity-migration-")
+    name = name.removesuffix(".service").removesuffix(".timer")
+    name = name.removeprefix("bybit-").removesuffix("-event")
+    return name.replace("-", " ") or label
 DEMO_RULE_MAINTENANCE_WARNING_HOURS = 24.0
 
 _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
@@ -98,6 +108,14 @@ class Alert:
     key: str  # stable identity for cooldown/dedup
     severity: str
     message: str
+    #: Plain-language one-liner for the Telegram alerts channel. The full
+    #: technical ``message`` always goes to stdout/journald for debugging;
+    #: an empty headline falls back to it.
+    headline: str = ""
+
+    @property
+    def telegram_line(self) -> str:
+        return self.headline or self.message
 
 
 @dataclass(frozen=True)
@@ -128,6 +146,7 @@ def evaluate_cycle_liveness(
             key=f"liveness:{label}",
             severity=CRITICAL,
             message=f"{label}: no cycle reports found — daemon may have never started.",
+            headline=f"{_plain_name(label)}: no cycles ever recorded — the producer may never have started.",
         )
     age_min = (now_ms - latest_cycle_ts_ms) / 60_000.0
     if age_min < 0.0:
@@ -137,6 +156,7 @@ def evaluate_cycle_liveness(
             message=(
                 f"{label}: latest cycle is {-age_min:.1f} min future-dated; scheduler liveness evidence is invalid."
             ),
+            headline=f"{_plain_name(label)}: cycle timestamps are in the future — clock or data problem.",
         )
     if age_min > max_age_minutes:
         return Alert(
@@ -146,6 +166,7 @@ def evaluate_cycle_liveness(
                 f"{label}: DAEMON DOWN/HUNG — last cycle {age_min:.1f} min ago "
                 f"(> {max_age_minutes:.0f} min). Check positions; manual close may be needed."
             ),
+            headline=f"{_plain_name(label)}: producer down or hung — last cycle {age_min:.0f} min ago.",
         )
     return None
 
@@ -170,6 +191,7 @@ def _unverified_generation_cycle_alert(*, label: str, detail: str) -> Alert:
             f"{label}: DAEMON DOWN/HUNG — no verified completed cycle for the "
             f"current service generation ({detail[:300]})."
         ),
+        headline=f"{_plain_name(label)}: producer restarted but has not completed a checkable cycle.",
     )
 
 
@@ -221,6 +243,7 @@ def evaluate_unit_states(
                                 else " (debouncing one interval; escalates to CRITICAL if still down next run)"
                             )
                         ),
+                        headline=f"The {_plain_name(unit)} timer is off — its scheduled job will not run.",
                     )
                 )
         elif state == "failed":
@@ -233,6 +256,7 @@ def evaluate_unit_states(
                         "verify account positions; a timer-driven oneshot may retry "
                         "on its next scheduled activation."
                     ),
+                    headline=f"The {_plain_name(unit)} service has failed.",
                 )
             )
         elif state != "active" and enabled_states.get(unit) in _ENABLED_UNIT_STATES:
@@ -251,6 +275,7 @@ def evaluate_unit_states(
                             else " (debouncing one interval; escalates to CRITICAL if still down next run)"
                         )
                     ),
+                    headline=f"The {_plain_name(unit)} service is stopped but should be running.",
                 )
             )
     return alerts
@@ -279,6 +304,9 @@ def evaluate_required_account_owner_states(
                     f"required account owner {unit} is {state.upper()} (not active); "
                     "target execution and account-owned protection are unavailable."
                 ),
+                headline=(
+                    f"The account owner is {state} — nothing can trade or protect positions."
+                ),
             )
         )
     return alerts
@@ -300,6 +328,7 @@ def gather_hedge_model_prior_alerts(*, model_prior_path: Path, now_ms: int, book
                     f"continuous hedge {HEDGE_MODEL_PRIOR_KIND} is unusable: {str(exc)[:300]}. "
                     "The armed hedge will fail closed until the commit-owned artifact is repaired."
                 ),
+                headline="The hedge model file is unusable — hedging will refuse to run.",
             )
         ]
     return []
@@ -318,6 +347,10 @@ def evaluate_ws_staleness(
             message=(
                 f"{label}: WS kline feed stalled — newest bar {lag_h:.1f}h old "
                 f"(> {max_lag_hours:.0f}h). REST fallback still covers data; watch for escalation."
+            ),
+            headline=(
+                f"{_plain_name(label)}: live price feed stalled — newest bar {lag_h:.1f}h old "
+                "(a fallback source still covers it)."
             ),
         )
     return None
@@ -339,6 +372,7 @@ def evaluate_rmom_staleness(*, max_rmom_day_ts: int, now_ms: int, max_stale_days
                 f"symbol (silent zero-signal blackout). Rebuild residual_momentum.parquet "
                 f"(precompute_residual_momentum.py) and check the continuous-rmom-refresh timer."
             ),
+            headline=f"{_plain_name(label)}: the momentum signal file is empty — the sleeve sees no candidates.",
         )
     stale_days = (now_ms - max_rmom_day_ts) / 86_400_000.0
     if stale_days > max_stale_days:
@@ -349,6 +383,10 @@ def evaluate_rmom_staleness(*, max_rmom_day_ts: int, now_ms: int, max_stale_days
                 f"{label}: rmom signal gate STALE — newest residual_momentum day {stale_days:.1f}d old "
                 f"(> {max_stale_days:.0f}d). The live decile silently empties; the continuous-rmom-refresh "
                 f"timer likely failed — rebuild residual_momentum.parquet."
+            ),
+            headline=(
+                f"{_plain_name(label)}: the momentum signal file is {stale_days:.1f} days old — "
+                "the sleeve is going blind."
             ),
         )
     return None
@@ -370,6 +408,7 @@ def evaluate_demo_rule_age(
                 f"demo-rule evidence is {-age_hours:.1f}h future-dated; "
                 "runtime quantity authority is invalid."
             ),
+            headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
         return Alert(
@@ -379,6 +418,7 @@ def evaluate_demo_rule_age(
                 f"demo-rule evidence expired {abs(remaining_hours):.1f}h ago; "
                 "the next authorized runtime start will fail closed and require a full probe."
             ),
+            headline="The trading-rules receipt has expired — the next restart will refuse to start.",
         )
     if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
         return Alert(
@@ -388,6 +428,7 @@ def evaluate_demo_rule_age(
                 f"demo-rule evidence expires in {remaining_hours:.1f}h; schedule the guarded "
                 "flat-account maintenance window before expiry so the slow path is planned."
             ),
+            headline=f"The trading-rules receipt expires in {remaining_hours:.0f}h — plan the refresh.",
         )
     return None
 
@@ -426,6 +467,7 @@ def gather_demo_rule_alerts(
                     "bound demo-rule evidence is unreadable or invalid: "
                     f"{type(exc).__name__}: {str(exc)[:300]}"
                 ),
+                headline="The trading-rules receipt cannot be read.",
             )
         ]
     return [] if alert is None else [alert]
@@ -445,6 +487,7 @@ def evaluate_disk_space(
             key="disk_space",
             severity=WARNING,
             message=f"disk usage for {path} is unreadable: {type(exc).__name__}: {exc}",
+            headline="Disk usage cannot be read.",
         )
     total = usage.f_blocks * usage.f_frsize
     if total <= 0:
@@ -461,6 +504,10 @@ def evaluate_disk_space(
             f"disk holding {path} is {used_fraction:.0%} full "
             f"({available / 1e9:.1f} GB free); journals and capture roots "
             "fail closed when it fills"
+        ),
+        headline=(
+            f"The disk is {used_fraction:.0%} full ({available / 1e9:.1f} GB free) — "
+            "trading stops if it fills."
         ),
     )
 
@@ -489,6 +536,7 @@ def evaluate_notification_delivery(
                 "account notification state is unreadable: "
                 f"{type(exc).__name__}: {str(exc)[:200]}"
             ),
+            headline="The digest bookkeeping file cannot be read.",
         )
     if last_hour_bucket <= 0:
         return None
@@ -503,6 +551,10 @@ def evaluate_notification_delivery(
             f"account Telegram digest has not committed for {missed} full hour(s); "
             "the notification channel may be dead (token/chat change or API outage) "
             "while the fleet looks healthy"
+        ),
+        headline=(
+            f"The hourly digest has not arrived for {missed} hour(s) — "
+            "the main Telegram line may be dead."
         ),
     )
 
@@ -529,6 +581,10 @@ def evaluate_oneshot_runtime(
             f"{unit} last run took {duration_seconds:.0f}s "
             f"(bound {max_seconds:.0f}s); on a saturated host it can overrun "
             "its own cadence and starve the fleet"
+        ),
+        headline=(
+            f"The {_plain_name(unit)} job took {duration_seconds:.0f}s — "
+            "slow enough to clog its own schedule."
         ),
     )
 
@@ -932,6 +988,7 @@ def gather_continuous_alerts(
                         key=f"continuous_universe_empty:{label}",
                         severity=WARNING,
                         message=f"{label}: continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
+                        headline=f"{_plain_name(label)}: no tradable symbols were found this cycle.",
                     )
                 )
             kline_rows = (
@@ -952,6 +1009,10 @@ def gather_continuous_alerts(
                         message=(
                             f"{label}: continuous sleeve {detail} (rows=0); "
                             "public REST fallback may be carrying the cycle."
+                        ),
+                        headline=(
+                            f"{_plain_name(label)}: the live price store is empty — "
+                            "running on fallback data."
                         ),
                     )
                 )
@@ -1110,6 +1171,10 @@ def gather_carry_alerts(
                             f"{label}: carry sleeve is holding PREVIOUS targets — the latest "
                             f"cycle could not produce a fresh decision{suffix}."
                         ),
+                        headline=(
+                            f"{_plain_name(label)}: carry is holding old targets — "
+                            "it could not make a fresh decision."
+                        ),
                     )
                 )
             elif str(row.get("decision_error") or "").strip():
@@ -1121,6 +1186,7 @@ def gather_carry_alerts(
                             f"{label}: carry cycle reported a decision error: "
                             f"{str(row.get('decision_error'))[:300]}"
                         ),
+                        headline=f"{_plain_name(label)}: carry reported a decision error.",
                     )
                 )
     return alerts
@@ -1166,6 +1232,9 @@ def gather_account_capture_alerts(
                     f"{owner_label} owner has no usable bounded live-L2 readiness; "
                     f"decisions cannot be executed safely ({type(exc).__name__}: {str(exc)[:160]})."
                 ),
+                headline=(
+                    f"The {owner_label} owner has no live price feed — it cannot trade safely."
+                ),
             )
         ]
     observed_now_ms = _now_ms() if now_ms is None else now_ms
@@ -1178,6 +1247,10 @@ def gather_account_capture_alerts(
                 message=(
                     f"{owner_label} live L2 is {age_minutes:.1f} min stale "
                     f"(> {max_age_minutes:g} min); owner may be hung or disconnected."
+                ),
+                headline=(
+                    f"Live prices for the {owner_label} owner are {age_minutes:.0f} min stale — "
+                    "it may be hung or disconnected."
                 ),
             )
         ]
@@ -1207,6 +1280,7 @@ def gather_account_health_alerts(
                 key="account_health_unreadable",
                 severity=CRITICAL,
                 message=(f"canonical account health journal is unreadable: {type(exc).__name__}: {str(exc)[:200]}"),
+                headline="The account journal cannot be read.",
             )
         ]
     snapshots = [event for event in events if event.event_type == AccountEventType.VENUE_SNAPSHOT.value]
@@ -1219,6 +1293,7 @@ def gather_account_health_alerts(
                     "canonical account journal has no venue reconciliation health snapshot; "
                     "demo execution health is unproven."
                 ),
+                headline="The account journal has no health snapshot yet — health is unproven.",
             )
         ]
     latest = max(
@@ -1238,6 +1313,9 @@ def gather_account_health_alerts(
                     f"canonical account reconciliation health is {age_minutes:.1f} min old "
                     f"(allowed 0..{bound_minutes:g} min); owner health is stale or future-dated."
                 ),
+                headline=(
+                    f"Account health is {age_minutes:.1f} min old — the owner may be stuck."
+                ),
             )
         ]
     if not bool(latest.payload.get("healthy")):
@@ -1248,6 +1326,7 @@ def gather_account_health_alerts(
                 key="account_health_unhealthy",
                 severity=CRITICAL,
                 message=f"canonical account reconciliation is UNHEALTHY: {detail[:500]}",
+                headline="The exchange and our records disagree — the account needs checking.",
             )
         ]
     return []
@@ -1301,6 +1380,14 @@ def gather_account_owner_health_alerts(
             # alive enough to report BLOCKED still pages: that is evidence, not
             # the absence of it.
             return []
+        detail = str(exc)
+        if detail.startswith(_OWNER_BLOCKED_PREFIX):
+            headline = (
+                f"The {environment} account owner is blocked: "
+                f"{detail[len(_OWNER_BLOCKED_PREFIX):].strip()[:160]}"
+            )
+        else:
+            headline = f"The {environment} account owner has no fresh proof it is healthy."
         return [
             Alert(
                 key=f"account_owner_health:{environment}",
@@ -1309,6 +1396,7 @@ def gather_account_owner_health_alerts(
                     f"{environment} account owner has no fresh healthy status/capital evidence: "
                     f"{type(exc).__name__}: {str(exc)[:400]}"
                 ),
+                headline=headline,
             )
         ]
     return []
@@ -1664,14 +1752,23 @@ def main() -> int:
         new_state[f"{_PENDING_SERVICE_PREFIX}{unit}"] = now_ms
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    scope_name = "mainnet" if mainnet else "demo"
     telegram_send_failed = False
     for alert in to_send:
-        line = f"🚨 [{alert.severity}] liquidity-migration {ts}\n{alert.message}"
-        print(line)
+        # Full technical detail goes to stdout/journald for debugging; the
+        # Telegram alerts channel gets the plain headline plus the stable key
+        # (the "ref") so the owner can hand the alert over verbatim.
+        print(f"[{alert.severity}] liquidity-migration {ts} {alert.key}: {alert.message}")
+        icon = "🚨" if alert.severity == CRITICAL else "⚠️"
+        line = (
+            f"{icon} {alert.severity} · {scope_name} fleet · {ts}\n"
+            f"{alert.telegram_line}\n"
+            f"ref {alert.key}"
+        )
         if args.telegram:
             delivered = False
             try:
-                delivered = send_telegram_message(line)
+                delivered = send_telegram_message(line, channel="alerts")
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:
@@ -1689,13 +1786,13 @@ def main() -> int:
                 else:
                     new_state.pop(sev_key, None)
     for key in resolved:
-        line = f"✅ liquidity-migration {ts}: resolved — {key}"
+        line = f"✅ {scope_name} fleet · {ts} · cleared: {key}"
         print(line)
         retry_key = f"{_RESOLVED_PREFIX}{key}"
         if args.telegram:
             delivered = False
             try:
-                delivered = send_telegram_message(line)
+                delivered = send_telegram_message(line, channel="alerts")
             except Exception as exc:  # noqa: BLE001
                 print(f"(telegram send failed: {exc})")
             if not delivered:

@@ -637,6 +637,7 @@ def scrubbed_demo_credentials(
         "BYBIT_REAL_API_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
+        "TELEGRAM_ALERT_CHAT_ID",
     )
     saved = {name: os.environ.get(name) for name in scrubbed}
     try:

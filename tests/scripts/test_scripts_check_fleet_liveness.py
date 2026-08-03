@@ -1742,7 +1742,7 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
     # main() passes the timer debounce set, the install states, and the service
     # debounce set; **kwargs keeps this stub from breaking on the next keyword.
     monkeypatch.setattr(M, "evaluate_unit_states", lambda states, **_kwargs: [alert])
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: False)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -1763,7 +1763,7 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
     assert "unit:fake.service" not in M._load_state(state_file)
 
     # delivered send DOES advance the cooldown
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
     assert M.main() == 0
     assert "unit:fake.service" in M._load_state(state_file)
 
@@ -2020,7 +2020,7 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
     _stub_account_authority(monkeypatch)
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: sent.append(line) or True)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
 
     common_argv = [
         "check_fleet_liveness.py",
@@ -2033,21 +2033,59 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
         str(state_file),
     ]
 
-    # Run 1: timer inactive (deploy window) -> WARNING, NOT CRITICAL.
+    # Run 1: timer inactive (deploy window) -> WARNING, NOT CRITICAL. The full
+    # debounce detail stays on stdout/journald; Telegram gets the plain
+    # headline plus the stable ref key.
     monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "inactive"})
     monkeypatch.setattr("sys.argv", common_argv)
     assert M.main() == 0
     out1 = capsys.readouterr().out
     assert "[WARNING]" in out1 and "[CRITICAL]" not in out1
-    assert any("debouncing" in s for s in sent)
+    assert "debouncing" in out1
+    assert any("ref unit:blip.timer" in s for s in sent)
+    assert not any("debouncing" in s for s in sent)
 
-    # Run 2: timer back to active -> resolved note, still no CRITICAL.
+    # Run 2: timer back to active -> cleared note, still no CRITICAL.
     sent.clear()
     monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "active"})
     monkeypatch.setattr("sys.argv", common_argv)
     assert M.main() == 0
     out2 = capsys.readouterr().out
-    assert "resolved" in out2 and "[CRITICAL]" not in out2
+    assert "cleared: unit:blip.timer" in out2 and "[CRITICAL]" not in out2
+
+
+def test_main_routes_alerts_and_cleared_notes_to_the_alerts_channel(tmp_path, monkeypatch, capsys) -> None:
+    """Watchdog Telegram traffic never lands on the main trading line."""
+    state_file = tmp_path / "state.json"
+    sent: list[tuple[str, str]] = []
+    _stub_account_authority(monkeypatch)
+
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
+    monkeypatch.setattr(
+        M,
+        "send_telegram_message",
+        lambda line, **kwargs: sent.append((kwargs.get("channel", "main"), line)) or True,
+    )
+    common_argv = [
+        "check_fleet_liveness.py",
+        "--telegram",
+        "--continuous-root",
+        "",
+        "--long-root",
+        "",
+        "--state-file",
+        str(state_file),
+    ]
+
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "inactive"})
+    monkeypatch.setattr("sys.argv", common_argv)
+    assert M.main() == 0
+    monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "active"})
+    monkeypatch.setattr("sys.argv", common_argv)
+    assert M.main() == 0
+
+    assert sent, "expected at least one alert and one cleared note"
+    assert all(channel == "alerts" for channel, _line in sent)
 
 
 def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatch, capsys) -> None:
@@ -2058,7 +2096,7 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
 
     common_argv = [
         "check_fleet_liveness.py",
@@ -2216,7 +2254,7 @@ def test_main_pings_the_dead_mans_switch_on_a_healthy_run(tmp_path, monkeypatch)
     _stub_account_authority(monkeypatch)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["healthy.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"healthy.timer": "active"})
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
     monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
 
     monkeypatch.setattr("sys.argv", _heartbeat_argv(state_file, "https://hb.example/ok"))
@@ -2231,7 +2269,7 @@ def test_main_suppresses_the_heartbeat_when_a_telegram_send_fails(tmp_path, monk
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "inactive"})
     # A dead notification channel must page externally, not look like "all quiet".
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: False)
     monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
 
     monkeypatch.setattr("sys.argv", _heartbeat_argv(state_file, "https://hb.example/ok"))
@@ -2245,7 +2283,7 @@ def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, mo
     _stub_account_authority(monkeypatch)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
-    monkeypatch.setattr(M, "send_telegram_message", lambda line: True)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
     monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
 
     argv = _heartbeat_argv(state_file, "https://hb.example/ok")

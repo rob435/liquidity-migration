@@ -110,6 +110,46 @@ def test_successful_send_builds_expected_request(monkeypatch: pytest.MonkeyPatch
     assert decoded["disable_web_page_preview"] == ["true"]
 
 
+def test_alerts_channel_uses_the_alert_chat_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_credentials(monkeypatch, token="t", chat_id="main-chat")
+    monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", "alert-chat")
+    calls = _install_urlopen(monkeypatch, lambda req: FakeResponse(200))
+
+    assert send_telegram_message("watchdog page", channel="alerts") is True
+    decoded = urllib.parse.parse_qs(calls[0]["data"].decode("utf-8"))
+    assert decoded["chat_id"] == ["alert-chat"]
+
+    # The main channel is untouched by the alert chat id.
+    assert send_telegram_message("digest", channel="main") is True
+    decoded = urllib.parse.parse_qs(calls[1]["data"].decode("utf-8"))
+    assert decoded["chat_id"] == ["main-chat"]
+
+
+@pytest.mark.parametrize("alert_env", [None, "", "   "])
+def test_alerts_channel_falls_back_to_the_main_chat(
+    monkeypatch: pytest.MonkeyPatch, alert_env: str | None
+) -> None:
+    """An unset/blank alert chat must not silently drop watchdog pages."""
+    _set_credentials(monkeypatch, token="t", chat_id="main-chat")
+    if alert_env is None:
+        monkeypatch.delenv("TELEGRAM_ALERT_CHAT_ID", raising=False)
+    else:
+        monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", alert_env)
+    calls = _install_urlopen(monkeypatch, lambda req: FakeResponse(200))
+
+    assert send_telegram_message("watchdog page", channel="alerts") is True
+    decoded = urllib.parse.parse_qs(calls[0]["data"].decode("utf-8"))
+    assert decoded["chat_id"] == ["main-chat"]
+
+
+def test_unknown_channel_is_rejected_before_any_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_credentials(monkeypatch, token="t", chat_id="c")
+    calls = _install_urlopen(monkeypatch, lambda req: FakeResponse(200))
+    with pytest.raises(ValueError, match="unknown telegram channel"):
+        send_telegram_message("x", channel="broadcast")
+    assert calls == []
+
+
 def test_payload_url_encodes_special_characters(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_credentials(monkeypatch, token="t", chat_id="c")
     calls = _install_urlopen(monkeypatch, lambda req: FakeResponse(200))

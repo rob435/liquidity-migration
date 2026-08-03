@@ -1,20 +1,32 @@
 # Notifications and alerting
 
-Two independent Telegram channels. The account owner reports what the book did; the liveness
+Two message senders, two chat lines. The account owner reports what the book did; the liveness
 watchdog reports that the fleet is still running. They watch each other — the watchdog alerts when
 the owner's digest stops arriving, and the owner is the only thing that reports a fill.
 
-Both read `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-([`telegram.py`](../liquidity_migration/ops/telegram.py)). Missing either is not an error: the send
-returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`.
+**The main line** (`TELEGRAM_CHAT_ID`) carries only the book's story: the hourly digest, fills,
+closes, stop events, loss warnings, entry blocks. **The alerts line** (`TELEGRAM_ALERT_CHAT_ID`)
+carries watchdog pages and their cleared notes — the "something needs fixing" traffic. Each alert
+is a plain one-line headline plus a stable `ref <key>`; paste the whole message to Claude to hand
+the problem over. The full technical detail is never in the chat — it stays in the watchdog's
+journal (`journalctl -u liquidity-migration-demo-liveness`).
 
-| Unit | Telegram | Sends |
-| --- | --- | --- |
-| `account-execution` (demo owner) | on | digest + event notices |
-| `account-execution-mainnet` | on | digest + event notices, funded book |
-| `demo-liveness` | on | watchdog alerts, demo scope |
-| `mainnet-liveness` | on | watchdog alerts, mainnet scope |
-| every producer, hedge, rmom | off or unset | nothing |
+An empty `TELEGRAM_ALERT_CHAT_ID` sends alerts to the main chat instead — nothing goes silent
+while the second chat is not set up. To split the lines: create a Telegram group, add the bot to
+it, send any message there, then read the group's chat id from the bot's `getUpdates` API and put
+it in the host env file as `TELEGRAM_ALERT_CHAT_ID`.
+
+All senders read `TELEGRAM_BOT_TOKEN` plus the chat ids
+([`telegram.py`](../liquidity_migration/ops/telegram.py)). Missing token/chat is not an error: the
+send returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`.
+
+| Unit | Telegram | Sends | Line |
+| --- | --- | --- | --- |
+| `account-execution` (demo owner) | on | digest + event notices | main |
+| `account-execution-mainnet` | on | digest + event notices, funded book | main |
+| `demo-liveness` | on | watchdog alerts, demo scope | alerts |
+| `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
+| every producer, hedge, rmom | off or unset | nothing | — |
 
 Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem,
 not its own.
@@ -24,11 +36,13 @@ not its own.
 [`account_notifications.py`](../liquidity_migration/ops/account_notifications.py), rendered from the
 canonical account journal — never from a projection or a venue read.
 
-- **Hourly summary** on the UTC hour boundary: open positions with side, quantity, entry, mark and
-  active stop; realized P&L; account health; position-truth status; entry-rejection counts. When
-  journal and venue disagree the summary shows both sides rather than picking one.
+- **Hourly summary** on the UTC hour boundary: open positions with side, quantity, price, open P&L
+  and stop; realized P&L (with a short `(pending: …)` note when funding/fees are not final);
+  account health; entry-block counts. When journal and venue disagree the summary shows both sides
+  rather than picking one ("Exchange:" vs "Our records:").
 - **Event notices** as they commit, for `FILL`, `PNL`, `PROTECTION`, and `RISK_DECISION`. Everything
-  else is left to the hourly roll-up.
+  else is left to the hourly roll-up. Bookkeeping detail (component ids, accounting provenance) is
+  logged to the owner's service journal, not sent to the chat.
 - Position truth is five-valued — `healthy`, `settling`, `mismatch`, `stale`, `unavailable`. Only
   the first two count as healthy; `settling` means venue and journal disagree by less than a
   settlement window.

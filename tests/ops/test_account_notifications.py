@@ -282,10 +282,10 @@ def test_first_run_silently_recovers_unresolved_entry_risk_state(
     first = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
     assert first.event_messages == ()
-    assert "Entry blocked by account risk" not in first.message
-    assert "Entry risk: 1 unresolved attempt(s)" in first.message
+    assert "Entry blocked ·" not in first.message
+    assert "Blocked entries: 1 unresolved" in first.message
     assert "below min notional" in first.message
-    assert "0 rejected evaluation" not in first.message
+    assert "0 rejection" not in first.message
 
 
 def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: Path) -> None:
@@ -298,9 +298,9 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
 
     first = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
     assert first.hourly_included
-    assert "Bybit demo · account update" in first.message
+    assert "🕐 Bybit demo · " in first.message
     assert "BUSDT long 2" in first.message
-    assert "SL $9" in first.message
+    assert "stop $9" in first.message
     assert "Opened" not in first.message  # no replay storm on first startup
     # Until delivery is acknowledged the exact hourly update remains pending.
     assert notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy").message == first.message
@@ -308,9 +308,9 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
 
     loss = notifier.prepare(midpoint_by_symbol={"BUSDT": 9.4}, health="healthy")
     assert not loss.hourly_included
-    assert "is losing -6.0%" in loss.message
-    assert "estimated -$1.20" in loss.message
-    assert "L2 midpoint $9.4" in loss.message
+    assert "down 6.0%" in loss.message
+    assert "(-$1.20)" in loss.message
+    assert "price $9.4" in loss.message
     assert "mark" not in loss.message.lower()
     notifier.commit(loss)
     assert notifier.prepare(midpoint_by_symbol={"BUSDT": 9.3}, health="healthy").message == ""
@@ -364,19 +364,19 @@ def test_hourly_summary_loss_alert_and_confirmed_close_are_low_noise(tmp_path: P
     closed = notifier.prepare(midpoint_by_symbol={}, health="healthy")
     assert "✅ Closed BUSDT · time stop" in closed.message
     assert "P&L -$1.63" in closed.message
-    assert "funding journaled separately" in closed.message
-    assert "venue closed-PnL not cross-checked online" in closed.message
-    assert "fees unresolved" in closed.message
-    assert "P&L account-netted; component attribution tracked in canonical trade rows" in closed.message
+    assert "funding fees" in closed.message
+    assert "exchange cross-check" in closed.message
+    assert "trade fees" in closed.message
+    assert "account-netted" not in closed.message
     assert "awaiting" not in closed.message.lower()
     notifier.commit(closed)
 
     clock.advance_ns(HOUR_NS)
     flat = notifier.prepare(midpoint_by_symbol={}, health="healthy")
-    assert "Flat · no open positions" in flat.message
+    assert "No open positions" in flat.message
     assert "realized -$1.63" in flat.message
-    assert "funding journaled separately" in flat.message
-    assert "venue closed-PnL not cross-checked online" in flat.message
+    assert "funding fees" in flat.message
+    assert "exchange cross-check" in flat.message
 
 
 def test_fill_pnl_without_reconciliation_status_stays_conservatively_provisional(
@@ -419,9 +419,9 @@ def test_fill_pnl_without_reconciliation_status_stays_conservatively_provisional
     update = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
 
     assert "✅ Reduced BUSDT · take profit" in update.message
-    assert "funding journaled separately" in update.message
-    assert "venue closed-PnL not cross-checked online" in update.message
-    assert "fees unresolved" in update.message
+    assert "funding fees" in update.message
+    assert "exchange cross-check" in update.message
+    assert "trade fees" in update.message
     assert "component b, a, d" not in update.message
 
 
@@ -519,8 +519,9 @@ def test_same_symbol_component_exit_reports_reduction_before_later_close(
         fee=0.02,
     )
     first_exit = notifier.prepare(midpoint_by_symbol={"BUSDT": 12.0}, health="healthy")
-    assert "✅ Reduced BUSDT · take profit · component trade" in first_exit.message
-    assert "P&L account-netted; component attribution tracked in canonical trade rows" in first_exit.message
+    assert "✅ Reduced BUSDT · take profit" in first_exit.message
+    assert "component trade" not in first_exit.message
+    assert "account-netted" not in first_exit.message
     notifier.commit(first_exit)
 
     target_and_fill(
@@ -533,7 +534,8 @@ def test_same_symbol_component_exit_reports_reduction_before_later_close(
         fee=0.01,
     )
     second_exit = notifier.prepare(midpoint_by_symbol={}, health="healthy")
-    assert "✅ Closed BUSDT · time stop · component component-b" in second_exit.message
+    assert "✅ Closed BUSDT · time stop" in second_exit.message
+    assert "component component-b" not in second_exit.message
     assert "take profit" not in second_exit.message
     assert len(kernel.state().pnl) == 2
 
@@ -554,11 +556,11 @@ def test_venue_flat_mismatch_suppresses_phantom_position_loss_alerts(tmp_path: P
     )
 
     assert mismatch.hourly_included
-    assert "Position truth mismatch" in mismatch.message
-    assert "Venue: flat" in mismatch.message
-    assert "Local reconstruction: BUSDT long 2" in mismatch.message
-    assert "exposure/estimated uPnL suppressed until reconciled" in mismatch.message
-    assert "is losing" not in mismatch.message
+    assert "The exchange and our records disagree" in mismatch.message
+    assert "Exchange: flat" in mismatch.message
+    assert "Our records: BUSDT long 2" in mismatch.message
+    assert "open P&L hidden until this clears" in mismatch.message
+    assert " down " not in mismatch.message
 
 
 def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) -> None:
@@ -577,10 +579,10 @@ def test_stale_matching_position_truth_is_not_called_a_mismatch(tmp_path: Path) 
         position_truth_status="stale",
     )
 
-    assert "Position truth stale" in stale.message
-    assert "Position truth mismatch" not in stale.message
-    assert "Venue: BUSDT long 2" in stale.message
-    assert "Local reconstruction: BUSDT long 2" in stale.message
+    assert "Position check is stale" in stale.message
+    assert "records disagree" not in stale.message
+    assert "Exchange: BUSDT long 2" in stale.message
+    assert "Our records: BUSDT long 2" in stale.message
 
 
 def test_settling_states_the_reduction_once_and_queues_no_retraction(tmp_path: Path) -> None:
@@ -635,8 +637,8 @@ def test_settling_states_the_reduction_once_and_queues_no_retraction(tmp_path: P
     )
 
     assert "✅ Reduced BUSDT" in update.message
-    assert "Local journal reduction" not in update.message
-    assert "awaiting venue reconciliation" not in update.message
+    assert "(our records)" not in update.message
+    assert "waiting for the exchange to confirm" not in update.message
     assert update.next_state.pending_lifecycle_confirmations == {}
 
 
@@ -703,8 +705,8 @@ def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> No
         position_truth_healthy=False,
     )
 
-    assert "⚠️ Local journal reduction BUSDT" in update.message
-    assert "awaiting venue reconciliation" in update.message
+    assert "⚠️ BUSDT closed (our records)" in update.message
+    assert "waiting for the exchange to confirm" in update.message
     assert "✅ Closed BUSDT" not in update.message
     assert "✅ Reduced BUSDT" not in update.message
     assert len(update.next_state.pending_lifecycle_confirmations) == 1
@@ -716,7 +718,7 @@ def test_position_mismatch_never_renders_green_close_event(tmp_path: Path) -> No
         venue_positions={},
         position_truth_healthy=True,
     )
-    assert "✅ Venue reconciliation confirmed prior update" in confirmed.message
+    assert "✅ Exchange confirmed" in confirmed.message
     assert "Closed BUSDT · take profit" in confirmed.message
     assert confirmed.next_state.pending_lifecycle_confirmations == {}
     # Delivery state remains transactional: no commit means the confirmation is
@@ -820,9 +822,9 @@ def test_native_stop_breach_and_software_recovery_are_immediately_visible(
         health="BLOCKED · native protection breach",
     )
 
-    assert "🚨 BUSDT native disaster stop absent after threshold breach" in update.message
-    assert "new exposure blocked; software flat recovery required" in update.message
-    assert "🛡️ BUSDT durable reduce-only recovery queued" in update.message
+    assert "🚨 BUSDT passed its stop with no exchange stop in place" in update.message
+    assert "closing it in software; new entries blocked" in update.message
+    assert "🛡️ BUSDT is being closed to zero after the stop failure" in update.message
 
 
 def test_fresh_notifier_surfaces_existing_unresolved_native_breach(
@@ -854,7 +856,7 @@ def test_fresh_notifier_surfaces_existing_unresolved_native_breach(
         health="BLOCKED · native protection breach",
     )
 
-    assert "🚨 BUSDT native disaster stop absent after threshold breach" in update.message
+    assert "🚨 BUSDT passed its stop with no exchange stop in place" in update.message
 
 
 def test_hourly_open_position_without_fresh_midpoint_reports_unknown_valuation(
@@ -869,9 +871,9 @@ def test_hourly_open_position_without_fresh_midpoint_reports_unknown_valuation(
 
     report = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
-    assert "L2 midpoint/notional/estimated uPnL unavailable" in report.message
-    assert "L2 midpoint valuation unavailable: BUSDT" in report.message
-    assert "Account execution health: BLOCKED · L2 midpoint valuation unavailable" in report.message
+    assert "live price unavailable" in report.message
+    assert "No live price for: BUSDT" in report.message
+    assert "Health: blocked · live prices unavailable" in report.message
     assert "BUSDT long 2 · $20.00 · uPnL +$0.00" not in report.message
 
 
@@ -892,9 +894,9 @@ def test_native_protection_failure_does_not_claim_position_truth_mismatch(
         position_truth_healthy=True,
     )
 
-    assert "Position truth mismatch" not in report.message
+    assert "records disagree" not in report.message
     assert "BUSDT long 2" in report.message
-    assert "Account execution health: BLOCKED · native protection missing" in report.message
+    assert "Health: BLOCKED · native protection missing" in report.message
 
 
 @pytest.mark.parametrize(
@@ -930,7 +932,7 @@ def test_hourly_summary_explicitly_separates_continuous_gate_from_account_health
     )
 
     assert continuous_status in report.message
-    assert "Account execution health:" in report.message
+    assert "Health:" in report.message
     assert "\nExecution health:" not in report.message
 
 
@@ -947,10 +949,10 @@ def test_entry_risk_first_rejection_sends_one_actionable_alert(tmp_path: Path) -
 
     assert not result.accepted
     assert len(update.event_messages) == 1
-    assert "⚠️ Entry blocked by account risk · Bybit demo" in update.message
+    assert "⚠️ Entry blocked · Bybit demo" in update.message
     assert "BUSDT · component trade-a" in update.message
-    assert "Reasons: below min notional" in update.message
-    assert "No order was sent" in update.message
+    assert "Why: below min notional" in update.message
+    assert "No order sent" in update.message
     assert "risk-first" not in update.message
     assert update.next_state.entry_rejections["attempt:trade-a"]["count"] == 1
 
@@ -1027,8 +1029,8 @@ def test_entry_risk_reason_change_sends_one_changed_alert(tmp_path: Path) -> Non
     changed = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
     assert len(changed.event_messages) == 1
-    assert "⚠️ Entry risk block changed · Bybit demo" in changed.message
-    assert "Reasons: component gross limit" in changed.message
+    assert "⚠️ Entry block changed · Bybit demo" in changed.message
+    assert "Why: component gross limit" in changed.message
     assert "below min notional" not in changed.message
     assert changed.next_state.entry_rejections["attempt:trade-a"]["reasons"] == ["component_gross_limit"]
 
@@ -1054,9 +1056,9 @@ def test_later_accepted_entry_risk_clears_active_block_once(tmp_path: Path) -> N
 
     assert accepted.accepted
     assert len(resolved.event_messages) == 1
-    assert "✅ Entry risk block cleared · Bybit demo" in resolved.message
-    assert "after 1 rejected evaluation" in resolved.message
-    assert "execution/fill is still pending" in resolved.message
+    assert "✅ Entry block cleared · Bybit demo" in resolved.message
+    assert "after 1 rejected try" in resolved.message
+    assert "no fill yet" in resolved.message
     assert resolved.next_state.entry_rejections == {}
     notifier.commit(resolved)
     assert notifier.prepare(midpoint_by_symbol={}, health="healthy").message == ""
@@ -1093,7 +1095,7 @@ def test_failed_entry_risk_alert_delivery_leaves_state_unchanged(tmp_path: Path)
 
     unsent = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
-    assert "Entry blocked by account risk" in unsent.message
+    assert "Entry blocked ·" in unsent.message
     assert notifier.state_path.read_bytes() == before
     retry = notifier.prepare(midpoint_by_symbol={}, health="healthy")
     assert retry.message == unsent.message
@@ -1128,8 +1130,8 @@ def test_hourly_summary_aggregates_entry_risk_repeats(tmp_path: Path) -> None:
     hourly = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
     assert hourly.hourly_included
-    assert "Entry risk: 1 unresolved attempt(s)" in hourly.message
-    assert "2 rejected evaluation(s) across 1 attempt(s)" in hourly.message
+    assert "Blocked entries: 1 unresolved" in hourly.message
+    assert "2 rejection(s) across 1 attempt(s)" in hourly.message
     assert "below min notional ×2" in hourly.message
     assert "risk-hourly" not in hourly.message
     assert hourly.next_state.recent_entry_rejection_count == 0
@@ -1190,9 +1192,9 @@ def test_first_notification_run_does_not_replay_old_entry_risk_rejections(
     first = fresh.prepare(midpoint_by_symbol={}, health="healthy")
 
     assert first.hourly_included
-    assert "Entry blocked by account risk" not in first.message
-    assert "Entry risk: 1 unresolved attempt(s)" in first.message
-    assert "active reasons below min notional" in first.message
+    assert "Entry blocked ·" not in first.message
+    assert "Blocked entries: 1 unresolved" in first.message
+    assert "why: below min notional" in first.message
     assert len(first.next_state.entry_rejections) == 1
 
 
@@ -1210,7 +1212,7 @@ def test_paper_heading_and_channel_label_stamp_every_page(tmp_path: Path) -> Non
 
     assert first.hourly_included
     assert first.messages
-    assert "🕐 Bybit paper · account update" in first.message
+    assert "🕐 Bybit paper · " in first.message
     assert "Bybit demo" not in first.message
     for page in first.messages:
         assert page.startswith("🧪 PAPER · integration-only twin\n")
@@ -1226,7 +1228,7 @@ def test_default_engine_output_carries_no_channel_label(tmp_path: Path) -> None:
 
     first = notifier.prepare(midpoint_by_symbol={"BUSDT": 10.0}, health="healthy")
 
-    assert "Bybit demo · account update" in first.message
+    assert "🕐 Bybit demo · " in first.message
     assert "PAPER" not in first.message
     for page in first.messages:
         assert page.startswith("🕐")
@@ -1298,7 +1300,7 @@ def test_paper_heading_labels_entry_risk_alerts(tmp_path: Path) -> None:
     )
     update = notifier.prepare(midpoint_by_symbol={}, health="healthy")
 
-    assert "⚠️ Entry blocked by account risk · Bybit paper" in update.message
+    assert "⚠️ Entry blocked · Bybit paper" in update.message
     assert "Bybit demo" not in update.message
 
 
@@ -1387,4 +1389,4 @@ def test_retired_sleeve_contributes_no_digest_line(tmp_path: Path) -> None:
     assert report.hourly_included
     assert "CONTINUOUS" not in report.message
     assert "cycle root not configured" not in report.message
-    assert "Account execution health: healthy" in report.message
+    assert "Health: healthy" in report.message

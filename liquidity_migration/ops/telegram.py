@@ -13,6 +13,9 @@ from dataclasses import dataclass
 class TelegramConfig:
     token_env: str = "TELEGRAM_BOT_TOKEN"
     chat_id_env: str = "TELEGRAM_CHAT_ID"
+    #: Optional separate chat for operational alerts; empty env falls back to
+    #: the main chat so alerts are never silently dropped.
+    alert_chat_id_env: str = "TELEGRAM_ALERT_CHAT_ID"
     timeout_seconds: float = 10.0
     #: Cap on the single in-process 429 retry wait.
     rate_limit_retry_cap_seconds: float = 5.0
@@ -23,15 +26,23 @@ def send_telegram_message(
     *,
     config: TelegramConfig | None = None,
     enabled: bool = True,
+    channel: str = "main",
 ) -> bool:
     # True on 2xx; False when disabled or the token/chat_id vars are absent.
     # Transport errors propagate — callers that must not crash wrap this
     # themselves. The only internal retry is the bounded 429 case below.
+    #
+    # channel="main" is the trading story; channel="alerts" is the watchdog /
+    # needs-fixing line and goes to TELEGRAM_ALERT_CHAT_ID when that is set.
+    if channel not in ("main", "alerts"):
+        raise ValueError(f"unknown telegram channel {channel!r}")
     if not enabled:
         return False
     cfg = config or TelegramConfig()
     token = os.environ.get(cfg.token_env)
     chat_id = os.environ.get(cfg.chat_id_env)
+    if channel == "alerts":
+        chat_id = os.environ.get(cfg.alert_chat_id_env, "").strip() or chat_id
     if not token or not chat_id:
         return False
 

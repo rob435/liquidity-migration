@@ -931,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
         AccountNotificationEngine(
             kernel=kernel,
             state_path=(args.notification_state or str(route.account_path / "account_notifications.json")),
+            heading=f"Bybit {realm.value}",
         )
         if args.telegram
         else None

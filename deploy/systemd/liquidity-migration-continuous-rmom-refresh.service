@@ -14,7 +14,7 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 Environment=POLARS_MAX_THREADS=8
 Environment=PYTHONDONTWRITEBYTECODE=1
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-continuous-rmom-refresh.service main
 Nice=10
 IOSchedulingClass=best-effort

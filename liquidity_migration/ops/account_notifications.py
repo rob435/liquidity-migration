@@ -19,6 +19,10 @@ from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 
+#: Detail that would clutter the Telegram line (component ids, accounting
+#: bookkeeping) is logged here instead; the account journal stays the full
+#: record.
+_logger = logging.getLogger(__name__)
 
 NOTIFICATION_SCHEMA_VERSION = 3
 HOUR_NS = 3_600_000_000_000
@@ -326,14 +330,13 @@ class AccountNotificationEngine:
                         messages.append(confirmed)
                     else:
                         messages.append(
-                            f"⚠️ Local journal shows {symbol} {_side(next_qty)} "
-                            f"{abs(next_qty):g} @ ${fill_price:,.8g} · "
-                            "awaiting venue reconciliation"
+                            f"⚠️ {symbol} {_side(next_qty)} {abs(next_qty):g} @ ${fill_price:,.8g} "
+                            "recorded — waiting for the exchange to confirm"
                         )
                         _queue_lifecycle_confirmation(
                             state,
                             event,
-                            "✅ Venue reconciliation confirmed prior update · " + confirmed.removeprefix("🟢 "),
+                            "✅ Exchange confirmed · " + confirmed.removeprefix("🟢 "),
                         )
                     state.loss_level_by_symbol.pop(symbol, None)
                 elif next_qty == 0.0:
@@ -345,19 +348,19 @@ class AccountNotificationEngine:
                 if status == "triggered" and event.symbol not in pnl_symbols:
                     metadata = event.payload.get("metadata") or {}
                     reason = str(metadata.get("reason") or "native protection")
-                    messages.append(f"🛡️ {event.symbol} protection triggered · {_human_reason(reason)}")
+                    messages.append(f"🛡️ {event.symbol} stop triggered · {_human_reason(reason)}")
                 elif status == "breached_unprotected":
                     metadata = event.payload.get("metadata") or {}
                     stop = float(event.payload.get("stop_price") or 0.0)
                     mark = float(metadata.get("breach_mark") or 0.0)
                     messages.append(
-                        f"🚨 {event.symbol} native disaster stop absent after threshold breach · "
-                        f"SL ${stop:,.8g} · authenticated mark ${mark:,.8g} · "
-                        "new exposure blocked; software flat recovery required"
+                        f"🚨 {event.symbol} passed its stop with no exchange stop in place · "
+                        f"stop ${stop:,.8g} · price ${mark:,.8g} · "
+                        "closing it in software; new entries blocked"
                     )
                 elif status == "software_flat_requested":
                     messages.append(
-                        f"🛡️ {event.symbol} durable reduce-only recovery queued · native disaster stop breach"
+                        f"🛡️ {event.symbol} is being closed to zero after the stop failure"
                     )
             elif event.event_type == AccountEventType.PNL.value:
                 close_key = str(event.payload.get("close_key") or "")
@@ -385,29 +388,33 @@ class AccountNotificationEngine:
                     if isinstance(raw_component_ids, (list, tuple))
                     else ()
                 )
-                component = " · component " + ", ".join(component_ids) if component_ids else ""
-                attribution = (
-                    " · P&L account-netted; component attribution tracked in canonical trade rows"
-                    if _component_attribution_pending(event.payload)
-                    else ""
-                )
+                if component_ids or _component_attribution_pending(event.payload):
+                    # Bookkeeping detail: off the Telegram line, into the
+                    # service journal; the canonical trade rows carry it too.
+                    _logger.info(
+                        "%s %s close detail: components=%s account_netted=%s",
+                        action.lower(),
+                        event.symbol,
+                        ",".join(component_ids) or "-",
+                        _component_attribution_pending(event.payload),
+                    )
                 confirmed = (
-                    f"✅ {action} {event.symbol} · {reason}{component} · "
-                    f"account P&L {_usd(net, signed=True)}{accounting_scope}{attribution}"
+                    f"✅ {action} {event.symbol} · {reason} · "
+                    f"P&L {_usd(net, signed=True)}{accounting_scope}"
                 )
                 if position_truth_healthy:
                     messages.append(confirmed)
                 else:
                     messages.append(
-                        f"⚠️ Local journal reduction {event.symbol} · "
-                        f"{reason}{component} · account P&L "
-                        f"{_usd(net, signed=True)}{accounting_scope}{attribution} · "
-                        "awaiting venue reconciliation"
+                        f"⚠️ {event.symbol} {action.lower()} (our records) · "
+                        f"{reason} · P&L "
+                        f"{_usd(net, signed=True)}{accounting_scope} — "
+                        "waiting for the exchange to confirm"
                     )
                     _queue_lifecycle_confirmation(
                         state,
                         event,
-                        "✅ Venue reconciliation confirmed prior update · " + confirmed.removeprefix("✅ "),
+                        "✅ Exchange confirmed · " + confirmed.removeprefix("✅ "),
                     )
         # Snap to reconstructed state after applying messages: journal fills
         # are authoritative and this drops accumulated float noise.
@@ -439,11 +446,11 @@ class AccountNotificationEngine:
             if level > prior_level:
                 unrealized = abs(qty) * (midpoint - average) * (1.0 if qty > 0.0 else -1.0)
                 stop = _active_stop(kernel_state, symbol)
-                stop_text = f" · disaster SL ${stop:,.8g}" if stop > 0.0 else ""
+                stop_text = f" · stop ${stop:,.8g}" if stop > 0.0 else ""
                 messages.append(
-                    f"⚠️ {symbol} {_side(qty)} is losing {position_return:.1%} "
-                    f"(estimated {_usd(unrealized, signed=True)}) · "
-                    f"L2 midpoint ${midpoint:,.8g}{stop_text}"
+                    f"⚠️ {symbol} {_side(qty)} down {abs(position_return):.1%} "
+                    f"({_usd(unrealized, signed=True)}) · "
+                    f"price ${midpoint:,.8g}{stop_text}"
                 )
                 state.loss_level_by_symbol[symbol] = level
         return messages
@@ -469,45 +476,45 @@ def _hourly_summary(
         venue = {
             str(symbol).upper(): float(qty) for symbol, qty in (venue_positions or {}).items() if float(qty) != 0.0
         }
-        lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
+        lines = [f"🕐 {heading} · {_utc_hhmm(now_ns)} UTC"]
         if position_truth_status == "mismatch":
-            lines.append("⚠️ Position truth mismatch · venue and local reconstruction disagree")
+            lines.append("⚠️ The exchange and our records disagree — showing both")
         elif position_truth_status == "stale":
-            lines.append("⚠️ Position truth stale · last venue/local agreement is too old")
+            lines.append("⚠️ Position check is stale — last agreement with the exchange is too old")
         else:
-            lines.append("⚠️ Position truth unavailable · venue/local agreement is unproven")
-        lines.append("- Venue: " + (_quantity_summary(venue) if venue else "flat"))
+            lines.append("⚠️ Cannot verify positions against the exchange right now")
+        lines.append("- Exchange: " + (_quantity_summary(venue) if venue else "flat"))
         local = {symbol: position.signed_qty for symbol, position in positions}
-        lines.append("- Local reconstruction: " + (_quantity_summary(local) if local else "flat"))
+        lines.append("- Our records: " + (_quantity_summary(local) if local else "flat"))
         realized = _realized_pnl_truth(state)
-        lines.append(f"Local journal {_realized_text(realized)} · exposure/estimated uPnL suppressed until reconciled")
+        lines.append(f"Our records {_realized_text(realized)} · open P&L hidden until this clears")
         if realized.component_attribution_pending:
-            lines.append(_component_netting_scope_line(realized.component_attribution_pending))
+            _logger.info(_component_netting_scope_line(realized.component_attribution_pending))
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
             lines.append(rejection_summary)
         if continuous_status.strip():
             lines.extend(continuous_status.strip().splitlines())
-        lines.append(f"Account execution health: {health or 'unknown'}")
+        lines.append(f"Health: {health or 'unknown'}")
         return "\n".join(lines)
 
     exposure = 0.0
     unrealized = 0.0
     unpriced_symbols: list[str] = []
-    lines = [f"🕐 {heading} · account update · {_utc_hhmm(now_ns)} UTC"]
+    lines = [f"🕐 {heading} · {_utc_hhmm(now_ns)} UTC"]
     if position_truth_status == "settling":
         # Rare (seconds-wide window, hourly render), but a suppressed alarm
         # would read as a clean one.
-        lines.append("ℹ️ Venue position view is catching up to a just-journaled fill")
+        lines.append("ℹ️ The exchange is catching up to a fill from moments ago")
     for symbol, position in positions:
         stop = _active_stop(state, symbol)
-        stop_text = f" · SL ${stop:,.8g}" if stop > 0.0 else " · SL unavailable"
+        stop_text = f" · stop ${stop:,.8g}" if stop > 0.0 else " · stop unknown"
         midpoint = float(midpoint_by_symbol.get(symbol) or 0.0)
         if not math.isfinite(midpoint) or midpoint <= 0.0:
             unpriced_symbols.append(symbol)
             lines.append(
                 f"- {symbol} {_side(position.signed_qty)} {abs(position.signed_qty):g} · "
-                f"L2 midpoint/notional/estimated uPnL unavailable{stop_text}"
+                f"live price unavailable{stop_text}"
             )
             continue
         notional = abs(position.signed_qty) * midpoint
@@ -519,23 +526,22 @@ def _hourly_summary(
         exposure += notional
         unrealized += pnl
         lines.append(
-            f"- {symbol} {_side(position.signed_qty)} {abs(position.signed_qty):g} · "
-            f"L2 midpoint ${midpoint:,.8g} · ${notional:,.2f} notional · "
-            f"estimated uPnL {_usd(pnl, signed=True)}{stop_text}"
+            f"- {symbol} {_side(position.signed_qty)} {abs(position.signed_qty):g} @ "
+            f"${midpoint:,.8g} · open P&L {_usd(pnl, signed=True)}{stop_text}"
         )
     realized = _realized_pnl_truth(state)
     if not positions:
-        lines.append("- Flat · no open positions")
-    valuation_scope = " known positions only" if unpriced_symbols else ""
+        lines.append("- No open positions")
+    valuation_scope = " (priced only)" if unpriced_symbols else ""
     lines.append(
-        f"Midpoint exposure{valuation_scope} ${exposure:,.2f} · "
-        f"estimated uPnL{valuation_scope} {_usd(unrealized, signed=True)} · "
+        f"Open{valuation_scope} ${exposure:,.2f} · "
+        f"open P&L{valuation_scope} {_usd(unrealized, signed=True)} · "
         f"{_realized_text(realized)}"
     )
     if unpriced_symbols:
-        lines.append("⚠️ L2 midpoint valuation unavailable: " + ", ".join(unpriced_symbols))
+        lines.append("⚠️ No live price for: " + ", ".join(unpriced_symbols))
     if realized.component_attribution_pending:
-        lines.append(_component_netting_scope_line(realized.component_attribution_pending))
+        _logger.info(_component_netting_scope_line(realized.component_attribution_pending))
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
         lines.append(rejection_summary)
@@ -543,8 +549,8 @@ def _hourly_summary(
         lines.extend(continuous_status.strip().splitlines())
     effective_health = health or "unknown"
     if unpriced_symbols and effective_health.lower().startswith("healthy"):
-        effective_health = "BLOCKED · L2 midpoint valuation unavailable"
-    lines.append(f"Account execution health: {effective_health}")
+        effective_health = "blocked · live prices unavailable"
+    lines.append(f"Health: {effective_health}")
     return "\n".join(lines)
 
 
@@ -577,12 +583,11 @@ def _entry_risk_decision_messages(
         if not resolved:
             return []
         scope = _entry_scope(resolved)
-        evaluation_label = "evaluation" if rejected_evaluations == 1 else "evaluations"
+        evaluation_label = "try" if rejected_evaluations == 1 else "tries"
         return [
-            f"✅ Entry risk block cleared · {heading}\n"
+            f"✅ Entry block cleared · {heading}\n"
             f"{scope}\n"
-            f"Account risk accepted after {rejected_evaluations} rejected "
-            f"{evaluation_label}; execution/fill is still pending."
+            f"Accepted after {rejected_evaluations} rejected {evaluation_label}; no fill yet."
         ]
 
     raw_rejection_keys = event.payload.get("rejection_keys") or ()
@@ -634,17 +639,16 @@ def _entry_risk_decision_messages(
     if not first and not changed:
         return []
     title = (
-        f"⚠️ Entry blocked by account risk · {heading}"
+        f"⚠️ Entry blocked · {heading}"
         if first
-        else f"⚠️ Entry risk block changed · {heading}"
+        else f"⚠️ Entry block changed · {heading}"
     )
     human_reasons = "; ".join(_human_reason(reason) for reason in reasons)
     return [
         f"{title}\n"
         f"{_entry_scope(list(attempts.values()))}\n"
-        f"Reasons: {human_reasons}\n"
-        "No order was sent. Check sizing and venue rules; identical repeats "
-        "will be summarized hourly."
+        f"Why: {human_reasons}\n"
+        "No order sent; repeats roll up in the hourly summary."
     ]
 
 
@@ -742,9 +746,9 @@ def _entry_rejection_summary(state: AccountNotificationState) -> str:
     if unresolved == 0 and recent == 0:
         return ""
     attempt_count = len(state.recent_entry_rejection_attempts)
-    parts = [f"Entry risk: {unresolved} unresolved attempt(s)"]
+    parts = [f"Blocked entries: {unresolved} unresolved"]
     if recent:
-        parts.append(f"{recent} rejected evaluation(s) across {attempt_count} attempt(s) since last update")
+        parts.append(f"{recent} rejection(s) across {attempt_count} attempt(s) since last update")
     if state.recent_entry_rejection_reasons:
         reasons = sorted(
             state.recent_entry_rejection_reasons.items(),
@@ -753,13 +757,13 @@ def _entry_rejection_summary(state: AccountNotificationState) -> str:
         rendered = [f"{_human_reason(reason)} ×{count}" for reason, count in reasons[:3]]
         if len(reasons) > 3:
             rendered.append(f"+{len(reasons) - 3} more")
-        parts.append("reasons " + ", ".join(rendered))
+        parts.append("why: " + ", ".join(rendered))
     elif unresolved:
         active_reasons = sorted(
             {str(reason) for row in state.entry_rejections.values() for reason in row.get("reasons", ()) if str(reason)}
         )
         if active_reasons:
-            parts.append("active reasons " + ", ".join(_human_reason(reason) for reason in active_reasons[:3]))
+            parts.append("why: " + ", ".join(_human_reason(reason) for reason in active_reasons[:3]))
     return " · ".join(parts)
 
 
@@ -890,13 +894,13 @@ def _current_protection_hazard_messages(state: AccountState) -> list[str]:
             stop = float(row.get("stop_price") or 0.0)
             mark = float(metadata.get("breach_mark") or 0.0)
             messages.append(
-                f"🚨 {symbol} native disaster stop absent after threshold breach · "
-                f"SL ${stop:,.8g} · authenticated mark ${mark:,.8g} · "
-                "new exposure blocked; software flat recovery required"
+                f"🚨 {symbol} passed its stop with no exchange stop in place · "
+                f"stop ${stop:,.8g} · price ${mark:,.8g} · "
+                "closing it in software; new entries blocked"
             )
         elif status == "software_flat_requested":
             messages.append(
-                f"🛡️ {symbol} durable reduce-only recovery queued · native disaster stop breach"
+                f"🛡️ {symbol} is being closed to zero after the stop failure"
             )
     return messages
 
@@ -949,18 +953,22 @@ def _component_netting_scope_line(count: int) -> str:
 
 
 def _accounting_scope_text(labels: Sequence[str]) -> str:
-    """Render the journal's accounting-scope limitations."""
+    """Short plain note for realized-P&L parts that are not final yet.
+
+    The precise per-row statuses (funding_status, fee_status, source) live in
+    the account journal; this only keeps the number honestly labelled.
+    """
 
     if not labels:
         return ""
     descriptions = {
-        "funding": "funding journaled separately",
-        "venue closed-PnL": "venue closed-PnL not cross-checked online",
-        "fees": "fees unresolved",
-        "accounting provenance": "accounting provenance unknown",
+        "funding": "funding fees",
+        "venue closed-PnL": "exchange cross-check",
+        "fees": "trade fees",
+        "accounting provenance": "origin unknown",
     }
     rendered = [descriptions.get(label, label) for label in labels]
-    return " · accounting scope: fill reconstruction; " + "; ".join(rendered)
+    return " (pending: " + ", ".join(rendered) + ")"
 
 
 def _paginate_sections(
