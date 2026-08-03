@@ -80,7 +80,6 @@ from liquidity_migration.venue.bybit import (
     BybitPrivateWebSocketStream,
     api_key_allows_order_submit,
     resolve_private_credentials,
-    validate_private_order_permission,
 )
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.account.market_capture import (
@@ -563,7 +562,10 @@ def main(argv: list[str] | None = None) -> int:
         "--max-demo-rule-age-hours",
         type=float,
         default=168.0,
-        help="Fail startup when empirical demo order-rule receipts are older than this.",
+        help=(
+            "Fail startup when empirical demo order-rule receipts are older than this. "
+            "Mainnet caps this at the registered 168 hours; demo takes any positive value."
+        ),
     )
     parser.add_argument(
         "--disaster-stop-fraction",
@@ -578,7 +580,10 @@ def main(argv: list[str] | None = None) -> int:
         "--request-market-warmup-timeout-seconds",
         type=float,
         default=30.0,
-        help="Latch owner health blocked if the durable queue head lacks healthy fresh L2.",
+        help=(
+            "Report owner health blocked while the durable queue head lacks healthy "
+            "fresh L2 for longer than this. Mainnet caps it at the registered 30 seconds."
+        ),
     )
     parser.add_argument(
         "--max-unsubmitted-exposure-age-seconds",
@@ -591,7 +596,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--idle-seconds", type=float, default=0.1)
-    parser.add_argument("--confirm-demo-orders", action="store_true")
+    parser.add_argument(
+        "--confirm-demo-orders",
+        action="store_true",
+        help=(
+            "deprecated no-op: order submission is gated by the named realm and "
+            "its credentials. Still accepted so a deployed wrapper keeps starting."
+        ),
+    )
     parser.add_argument("--telegram", action="store_true")
     parser.add_argument("--notification-state", default="")
     parser.add_argument("--notification-poll-seconds", type=float, default=1.0)
@@ -627,16 +639,24 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
         parser.error("--private-ws-reconnect-seconds must be positive and finite")
+    realm = venue_realm(args.realm)
+    # Mainnet holds every registered startup bound. Demo only needs values that
+    # are finite and positive, so a stale rule receipt or a slow reconnecting
+    # link is an operator flag away from starting rather than a code deploy.
+    mainnet = realm is VenueRealm.MAINNET
     try:
-        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(args.max_demo_rule_age_hours)
+        args.max_demo_rule_age_hours = require_registered_demo_rule_max_age_hours(
+            args.max_demo_rule_age_hours,
+            enforce_registered_ceiling=mainnet,
+        )
         args.request_market_warmup_timeout_seconds = require_registered_request_market_warmup_timeout(
-            args.request_market_warmup_timeout_seconds
+            args.request_market_warmup_timeout_seconds,
+            enforce_registered_ceiling=mainnet,
         )
     except ValueError as exc:
         parser.error(str(exc))
-    invocation_id = require_systemd_invocation_id()
+    invocation_id = require_systemd_invocation_id(require_systemd=mainnet)
 
-    realm = venue_realm(args.realm)
     # The realm is baked into the on-disk route identity and
     # ensure_account_route refuses to rewrite an existing one, so each realm
     # gets its own journal root with no migration path between them.
@@ -651,10 +671,6 @@ def main(argv: list[str] | None = None) -> int:
             f"--account-id {args.account_id!r} does not belong to realm {realm.value!r}"
         )
 
-    validate_private_order_permission(
-        confirm_orders=args.confirm_demo_orders,
-        realm=realm,
-    )
     api_key, api_secret = resolve_private_credentials(realm=realm)
     if not api_key or not api_secret:
         key_variable, secret_variable = REALM_CREDENTIAL_VARIABLES[realm]
@@ -748,14 +764,26 @@ def main(argv: list[str] | None = None) -> int:
             native_order_verifier=native_protection.is_verified_native_order,
         )
     except Exception as exc:  # noqa: BLE001 - classified by degrade_or_raise
-        startup_degradations.append(
-            degrade_or_raise(
-                stage="venue order ownership",
-                error=exc,
-                kernel=kernel,
-                report=None,
+        if mainnet:
+            startup_degradations.append(
+                degrade_or_raise(
+                    stage="venue order ownership",
+                    error=exc,
+                    kernel=kernel,
+                    report=None,
+                )
             )
-        )
+        else:
+            # An owner that refuses to start cannot cancel the stray order it
+            # refused over. The 2s reconciler runs the same check every cycle
+            # and marks health, which blocks entries and still permits exits.
+            _logger.warning(
+                "unowned venue orders at startup on realm %s; starting anyway so "
+                "reconciliation can adopt or cancel them: %s: %s",
+                realm.value,
+                type(exc).__name__,
+                str(exc)[:900],
+            )
 
     def build_private_stream() -> BybitPrivateWebSocketStream:
         return BybitPrivateWebSocketStream(

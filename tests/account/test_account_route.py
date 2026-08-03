@@ -88,7 +88,6 @@ def test_owner_acquires_lease_before_route_initialization(
             def close(self) -> None:
                 calls.append("lease-closed")
 
-        monkeypatch.setattr(runner, "validate_private_order_permission", lambda **_kwargs: None)
         monkeypatch.setattr(
             runner, "resolve_private_credentials", lambda **_kwargs: ("demo-key", "demo-secret")
         )

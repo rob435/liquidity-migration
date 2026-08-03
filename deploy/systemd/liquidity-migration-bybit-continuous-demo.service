@@ -1,7 +1,10 @@
 [Unit]
 Description=liquidity-migration Bybit continuous-fade demo target producer
 Wants=network-online.target
-Requires=liquidity-migration-account-execution.service
+# Wants=, not Requires=: a dead owner must not take the producers down with it.
+# Producers re-check owner health per cycle and plan entries as blocked while
+# still publishing exits, so a degraded fleet keeps draining risk.
+Wants=liquidity-migration-account-execution.service
 After=network-online.target liquidity-migration-account-execution.service
 
 [Service]
@@ -28,7 +31,7 @@ ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-m
 Restart=always
 RestartSec=30
 KillMode=control-group
-TimeoutStopSec=180
+TimeoutStopSec=90
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

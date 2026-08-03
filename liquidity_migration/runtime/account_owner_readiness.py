@@ -9,7 +9,6 @@ boundary, for systemd ``ExecStartPost`` and checked deployment.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -17,25 +16,20 @@ import stat
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from liquidity_migration.account.account_owner_health import (
     require_recent_account_owner_health,
     validate_systemd_invocation_id,
 )
 from liquidity_migration.account.account_route import require_account_route
-from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.account.execution_environment import (
     EXECUTION_ENVIRONMENT_CHOICES,
     account_id_for_environment,
     execution_environment,
 )
 from liquidity_migration.account.market_capture import (
-    MAX_OWNER_CAPTURE_RECORD_BYTES,
-    OwnerCaptureReadinessSidecar,
     OwnerMarketReadinessSidecar,
-    capture_record_id,
-    owner_capture_readiness_path,
     owner_market_readiness_path,
 )
 
@@ -94,99 +88,40 @@ def _absolute_directory(path: str | Path, *, label: str) -> Path:
     return candidate.resolve(strict=True)
 
 
-def _stable_signature(metadata: os.stat_result) -> tuple[int, ...]:
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_uid,
-        metadata.st_gid,
-        metadata.st_nlink,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
-    )
-
-
-def _stable_private_sidecar(
+def _read_private_sidecar(
     path: Path,
     *,
-    label: str = "capture",
+    label: str,
     expected_owner_uid: int | None = None,
 ) -> bytes:
-    """Read the small atomically replaced sidecar without following aliases."""
+    """Read the small sidecar the owner replaced atomically, without following aliases.
 
-    owner_uid = os.geteuid() if expected_owner_uid is None else expected_owner_uid
-    if type(owner_uid) is not int or owner_uid < 0:
-        raise ValueError("expected readiness sidecar owner uid must be non-negative")
+    ``os.replace`` publishes a complete file or none of it, so there is nothing
+    to observe half-written. Distinct failures keep distinct messages: absent,
+    not a regular file, wrongly sized, or written by some other account.
+    """
 
-    try:
-        before_path = path.lstat()
-    except OSError as exc:
-        raise ValueError(f"account owner {label} readiness sidecar is unavailable: {path}") from exc
-    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
-        raise ValueError(f"account owner {label} readiness sidecar must be a regular non-symlink file")
-    if before_path.st_size <= 0 or before_path.st_size > _MAX_CAPTURE_SIDECAR_BYTES:
-        raise ValueError(f"account owner {label} readiness sidecar has an invalid bounded size")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(str(path), flags)
     except OSError as exc:
-        raise ValueError(f"account owner {label} readiness sidecar cannot be opened safely") from exc
-    try:
-        before_descriptor = os.fstat(descriptor)
-        if _stable_signature(before_descriptor) != _stable_signature(before_path):
-            raise RuntimeError(f"account owner {label} readiness sidecar changed while opening")
-        if (
-            not stat.S_ISREG(before_descriptor.st_mode)
-            or stat.S_IMODE(before_descriptor.st_mode) != 0o600
-            or before_descriptor.st_uid != owner_uid
-            or before_descriptor.st_nlink != 1
-        ):
-            raise ValueError(f"account owner {label} readiness sidecar must be private and singly linked")
-        chunks: list[bytes] = []
-        remaining = before_descriptor.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 4096))
-            if not chunk:
-                raise RuntimeError(f"account owner {label} readiness sidecar ended while reading")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        after_descriptor = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        after_path = path.lstat()
-    except OSError as exc:
-        raise RuntimeError(f"account owner {label} readiness sidecar disappeared while reading") from exc
-    expected_signature = _stable_signature(before_descriptor)
-    if (
-        _stable_signature(after_descriptor) != expected_signature
-        or _stable_signature(after_path) != expected_signature
-    ):
-        raise RuntimeError(f"account owner {label} readiness sidecar changed while reading")
-    return data
-
-
-def _read_owner_capture_sidecar(root: Path) -> OwnerCaptureReadinessSidecar:
-    path = owner_capture_readiness_path(root)
-    data = _stable_private_sidecar(path)
-    try:
-        payload = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("account owner capture readiness sidecar is invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("account owner capture readiness sidecar must contain an object")
-    try:
-        return OwnerCaptureReadinessSidecar.from_dict(payload)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid account owner capture readiness sidecar: {exc}") from exc
+        raise ValueError(f"account owner {label} readiness sidecar is unavailable: {path}") from exc
+    with os.fdopen(descriptor, "rb") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"account owner {label} readiness sidecar must be a regular non-symlink file")
+        if metadata.st_size <= 0 or metadata.st_size > _MAX_CAPTURE_SIDECAR_BYTES:
+            raise ValueError(
+                f"account owner {label} readiness sidecar has an invalid bounded size: "
+                f"{metadata.st_size} bytes"
+            )
+        owner_uid = os.geteuid() if expected_owner_uid is None else expected_owner_uid
+        if metadata.st_uid != owner_uid:
+            raise ValueError(
+                f"account owner {label} readiness sidecar is owned by uid {metadata.st_uid}, "
+                f"not the expected owner uid {owner_uid}"
+            )
+        return handle.read()
 
 
 def _read_owner_market_sidecar(
@@ -195,7 +130,7 @@ def _read_owner_market_sidecar(
     expected_owner_uid: int | None = None,
 ) -> OwnerMarketReadinessSidecar:
     path = owner_market_readiness_path(root)
-    data = _stable_private_sidecar(
+    data = _read_private_sidecar(
         path,
         label="market",
         expected_owner_uid=expected_owner_uid,
@@ -210,190 +145,6 @@ def _read_owner_market_sidecar(
         return OwnerMarketReadinessSidecar.from_dict(payload)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid account owner market readiness sidecar: {exc}") from exc
-
-
-def _path_identity(metadata: os.stat_result) -> tuple[int, ...]:
-    """Identity fields which do not change during a concurrent append."""
-
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_uid,
-        metadata.st_gid,
-        metadata.st_nlink,
-    )
-
-
-def _open_directory(parent_descriptor: int, name: str) -> int:
-    try:
-        before_path = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except OSError as exc:
-        raise ValueError(f"owner capture segment directory is unavailable: {name}") from exc
-    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISDIR(before_path.st_mode):
-        raise ValueError(f"owner capture segment path component is not a real directory: {name}")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-    )
-    try:
-        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-    except OSError as exc:
-        raise ValueError(f"owner capture segment directory cannot be opened safely: {name}") from exc
-    metadata = os.fstat(descriptor)
-    if _path_identity(metadata) != _path_identity(before_path):
-        os.close(descriptor)
-        raise RuntimeError(f"owner capture segment directory changed while opening: {name}")
-    return descriptor
-
-
-def _pread_exact(descriptor: int, *, offset: int, length: int) -> bytes:
-    chunks: list[bytes] = []
-    cursor = offset
-    remaining = length
-    while remaining:
-        chunk = os.pread(descriptor, min(remaining, 1024 * 1024), cursor)
-        if not chunk:
-            raise RuntimeError("owner capture segment ended before the referenced record")
-        chunks.append(chunk)
-        cursor += len(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _read_referenced_capture_record(
-    root: Path,
-    sidecar: OwnerCaptureReadinessSidecar,
-) -> Mapping[str, Any]:
-    """Open only the sidecar target and verify its immutable byte range."""
-
-    parts = tuple(sidecar.segment_path.split("/"))
-    if not parts:
-        raise ValueError("owner capture segment path is empty")
-    root_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-    )
-    try:
-        root_descriptor = os.open(str(root), root_flags)
-    except OSError as exc:
-        raise ValueError("account capture root cannot be opened safely") from exc
-    opened_directories = [root_descriptor]
-    segment_descriptor: int | None = None
-    try:
-        root_metadata = os.fstat(root_descriptor)
-        lexical_root = root.lstat()
-        if _path_identity(root_metadata) != _path_identity(lexical_root):
-            raise RuntimeError("account capture root changed while opening")
-        parent_descriptor = root_descriptor
-        for component in parts[:-1]:
-            parent_descriptor = _open_directory(parent_descriptor, component)
-            opened_directories.append(parent_descriptor)
-        filename = parts[-1]
-        try:
-            before_path = os.stat(
-                filename,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-        except OSError as exc:
-            raise ValueError("referenced owner capture segment is unavailable") from exc
-        if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
-            raise ValueError("referenced owner capture segment must be a regular non-symlink file")
-        segment_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        try:
-            segment_descriptor = os.open(
-                filename,
-                segment_flags,
-                dir_fd=parent_descriptor,
-            )
-        except OSError as exc:
-            raise ValueError("referenced owner capture segment cannot be opened safely") from exc
-        before_descriptor = os.fstat(segment_descriptor)
-        if _path_identity(before_descriptor) != _path_identity(before_path):
-            raise RuntimeError("referenced owner capture segment changed while opening")
-        if (
-            before_descriptor.st_dev != sidecar.segment_device
-            or before_descriptor.st_ino != sidecar.segment_inode
-        ):
-            raise ValueError("referenced owner capture segment inode does not match the sidecar")
-        if (
-            stat.S_IMODE(before_descriptor.st_mode) != 0o600
-            or before_descriptor.st_uid != os.geteuid()
-            or before_descriptor.st_nlink != 1
-        ):
-            raise ValueError("referenced owner capture segment must be private and singly linked")
-        range_end = sidecar.byte_offset + sidecar.byte_length
-        if sidecar.byte_length > MAX_OWNER_CAPTURE_RECORD_BYTES or before_descriptor.st_size < range_end:
-            raise ValueError("referenced owner capture byte range is outside the segment")
-        data = _pread_exact(
-            segment_descriptor,
-            offset=sidecar.byte_offset,
-            length=sidecar.byte_length,
-        )
-        after_descriptor = os.fstat(segment_descriptor)
-        after_path = os.stat(
-            filename,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-        if (
-            _path_identity(after_descriptor) != _path_identity(before_descriptor)
-            or _path_identity(after_path) != _path_identity(before_descriptor)
-            or after_descriptor.st_size < range_end
-        ):
-            raise RuntimeError("referenced owner capture segment identity changed while reading")
-    finally:
-        if segment_descriptor is not None:
-            os.close(segment_descriptor)
-        for descriptor in reversed(opened_directories):
-            os.close(descriptor)
-
-    if hashlib.sha256(data).hexdigest() != sidecar.record_sha256:
-        raise ValueError("referenced owner capture record hash does not match the sidecar")
-    if not data.endswith(b"\n"):
-        raise ValueError("referenced owner capture record is not a complete JSONL row")
-    try:
-        payload = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("referenced owner capture record is invalid JSON") from exc
-    if not isinstance(payload, dict) or canonical_json(payload) + b"\n" != data:
-        raise ValueError("referenced owner capture record is not one canonical JSON object")
-    if payload.get("schema_version") != 1:
-        raise ValueError("referenced owner capture record has an unsupported schema")
-    if payload.get("owner_invocation_id") != sidecar.owner_invocation_id:
-        raise ValueError("referenced owner capture record invocation does not match the sidecar")
-    if payload.get("local_receive_ts_ns") != sidecar.local_receive_ts_ns:
-        raise ValueError("referenced owner capture record timestamp does not match the sidecar")
-    if payload.get("record_id") != sidecar.record_id or capture_record_id(payload) != sidecar.record_id:
-        raise ValueError("referenced owner capture record id does not match the sidecar")
-    return payload
-
-
-def latest_capture_receive_ts_ns(
-    capture_root: str | Path,
-    *,
-    expected_invocation_id: str,
-) -> int:
-    """Verify and return the bounded sidecar arrival for one owner generation."""
-
-    expected_generation = validate_systemd_invocation_id(
-        expected_invocation_id,
-        label="expected account-owner capture invocation id",
-    )
-    root = _absolute_directory(capture_root, label="account capture root")
-    sidecar = _sidecar_for_generation(root, expected_generation=expected_generation)
-    _read_referenced_capture_record(root, sidecar)
-    return sidecar.local_receive_ts_ns
 
 
 def latest_market_readiness(
@@ -446,20 +197,6 @@ def latest_market_receive_ts_ns(
     return timestamp
 
 
-def _sidecar_for_generation(
-    root: Path,
-    *,
-    expected_generation: str,
-) -> OwnerCaptureReadinessSidecar:
-    sidecar = _read_owner_capture_sidecar(root)
-    if sidecar.owner_invocation_id != expected_generation:
-        raise RuntimeError(
-            "account owner market capture does not match the current systemd generation: "
-            f"capture={sidecar.owner_invocation_id}, expected={expected_generation}"
-        )
-    return sidecar
-
-
 def require_account_owner_ready(
     *,
     environment: str,
@@ -489,8 +226,6 @@ def require_account_owner_ready(
     account = _absolute_directory(account_root, label="account root")
     inbox = _absolute_directory(inbox_root, label="account inbox root")
     capture = _absolute_directory(capture_root, label="account capture root")
-    if len({account, inbox, capture}) != 3:
-        raise ValueError("account, inbox, and capture roots must be distinct")
     route = require_account_route(
         account_id=account_id,
         environment=selected,
@@ -635,7 +370,6 @@ if __name__ == "__main__":
 
 __all__ = [
     "AccountOwnerReadiness",
-    "latest_capture_receive_ts_ns",
     "latest_market_readiness",
     "latest_market_receive_ts_ns",
     "require_account_owner_ready",

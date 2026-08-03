@@ -49,8 +49,6 @@ __all__ = [
     "api_key_allows_order_submit",
     "resolve_demo_credentials",
     "resolve_private_credentials",
-    "validate_demo_order_permission",
-    "validate_private_order_permission",
 ]
 
 #: The only REST host addressed with demo credentials.
@@ -121,25 +119,6 @@ def resolve_demo_credentials() -> tuple[str | None, str | None]:
     """
 
     return resolve_private_credentials(realm=VenueRealm.DEMO)
-
-
-def validate_private_order_permission(
-    *,
-    confirm_orders: bool,
-    realm: VenueRealm | str,
-) -> None:
-    """Guard an order-submitting owner: explicit confirmation plus a named realm."""
-
-    if not confirm_orders:
-        raise RuntimeError("Refusing to submit orders without explicit order confirmation")
-    resolve_private_credentials(realm=realm)
-
-
-def validate_demo_order_permission(*, confirm_demo_orders: bool) -> None:
-    """Guard the demo account owner: explicit confirmation and demo credentials only."""
-    if not confirm_demo_orders:
-        raise RuntimeError("Refusing to submit orders without --confirm-demo-orders")
-    resolve_demo_credentials()
 
 
 def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, str]:

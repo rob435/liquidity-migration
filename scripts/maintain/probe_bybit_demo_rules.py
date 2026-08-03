@@ -33,7 +33,6 @@ from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
     resolve_demo_credentials,
-    validate_demo_order_permission,
 )
 from liquidity_migration.marketdata.bybit_market_data import BybitRestRateLimiter  # noqa: E402
 from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
@@ -463,7 +462,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.prior_rules_file,
                 expected_symbols=symbols,
             )
-        validate_demo_order_permission(confirm_demo_orders=True)
         api_key, api_secret = resolve_demo_credentials()
         if not api_key or not api_secret:
             raise RuntimeError("BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required")

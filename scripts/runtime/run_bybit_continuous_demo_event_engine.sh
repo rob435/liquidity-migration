@@ -22,42 +22,11 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-case "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_EXECUTION_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$paper_kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-
+# The route a producer publishes onto is EXECUTION_ENVIRONMENT plus its owner
+# roots. The kernel-latch variables only restated what the unit files already
+# hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
+    demo | paper) ;;
     *)
         echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
         exit 2

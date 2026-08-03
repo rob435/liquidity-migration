@@ -82,30 +82,13 @@ def _add_download_binance_proxy_parser(subparsers) -> None:
     binance_proxy.add_argument("--period", default="1h", help="Binance period for open_interest and taker_flow_1h.")
 
 
-def _add_discover_universe_parser(subparsers) -> None:
-    universe = subparsers.add_parser("discover-universe", help="Build a current Bybit USDT perp universe snapshot.")
-    universe.add_argument("--name", default="auto", help="Name used for universe report files.")
-    universe.add_argument("--rank-start", type=int, default=None, help="First current 24h-turnover rank to include.")
-    universe.add_argument(
-        "--rank-end", type=int, default=None, help="Last current 24h-turnover rank to include; 0 disables."
-    )
-    universe.add_argument("--max-symbols", type=int, default=None, help="Maximum symbols after filtering; 0 disables.")
-    universe.add_argument("--min-turnover-24h", type=float, default=None, help="Minimum current 24h quote turnover.")
-    universe.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age in days.")
-    universe.add_argument("--max-age-days", type=int, default=None, help="Maximum listing age in days; 0 disables.")
-    universe.add_argument("--exclude-symbols", default=None, help="Comma-separated symbols to exclude.")
-    exclusion_group = universe.add_mutually_exclusive_group()
-    exclusion_group.add_argument(
-        "--exclude-defaults",
-        dest="exclude_majors",
-        action="store_true",
-        help="Use the default stable/peg excluded-symbol list.",
-    )
-    exclusion_group.add_argument(
-        "--include-excluded",
-        dest="include_majors",
-        action="store_true",
-        help="Do not exclude symbols from config.",
+def _add_coverage_parser(subparsers) -> None:
+    subparsers.add_parser(
+        "coverage",
+        help=(
+            "Print point-in-time dataset coverage for the data root. Reads "
+            "partition directory names only: no network, no mutation."
+        ),
     )
 
 
@@ -129,39 +112,6 @@ def _add_archive_manifest_parser(subparsers) -> None:
         action="store_true",
         help="Override the PIT gate: write the manifest even when the v5 supplement failed "
         "or the universe shrank vs the persisted manifest (intentional rebuilds only).",
-    )
-
-
-def _add_archive_download_klines_1h_parser(subparsers) -> None:
-    archive_klines_1h = subparsers.add_parser(
-        "archive-download-klines-1h",
-        help="Download manifest rows and build 1h klines directly from Bybit public trade archives.",
-    )
-    archive_klines_1h.add_argument(
-        "--name", default="bybit-public-trading-klines-1h", help="Name used for download report files."
-    )
-    archive_klines_1h.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
-    archive_klines_1h.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
-    archive_klines_1h.add_argument(
-        "--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included)."
-    )
-    archive_klines_1h.add_argument(
-        "--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables."
-    )
-    archive_klines_1h.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
-    archive_klines_1h.add_argument(
-        "--include-existing", action="store_true", help="Rebuild rows even when the 1h partition already exists."
-    )
-    archive_klines_1h.add_argument(
-        "--min-existing-bars",
-        type=int,
-        default=1,
-        help="With missing-only mode, rebuild partitions with fewer than this many 1h bars; default treats any written partition as processed.",
-    )
-    archive_klines_1h.add_argument(
-        "--discard-archives-after-success",
-        action="store_true",
-        help="Delete locally downloaded raw trade archives after 1h klines are written successfully.",
     )
 
 
@@ -517,16 +467,11 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
             "REST. Empty (default) = demo REST path."
         ),
     )
-    run_mode = p.add_mutually_exclusive_group()
-    run_mode.add_argument(
+    p.add_argument(
         "--daemon",
         action="store_true",
-        help="Run the long-lived 60s diff loop (daily decision, idempotent publication).",
-    )
-    run_mode.add_argument(
-        "--once",
-        action="store_true",
-        help="Run exactly one cycle (the default when --daemon is not set).",
+        help="Run the long-lived 60s diff loop (daily decision, idempotent "
+        "publication). Without it, exactly one cycle runs.",
     )
     p.add_argument("--interval-seconds", type=float, default=60.0, help="Daemon heartbeat cadence.")
     p.add_argument(

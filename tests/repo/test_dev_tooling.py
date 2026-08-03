@@ -44,20 +44,29 @@ def test_locked_requirement_parser_rejects_ambiguous_lines(tmp_path: Path) -> No
         repo_doctor.read_locked_requirements(lock)
 
 
-def test_skill_report_compares_complete_trees(tmp_path: Path) -> None:
+def test_skill_report_requires_one_linked_tree(tmp_path: Path) -> None:
+    """`.claude/skills` is a symlink into `.codex/skills`: one tree, one edit,
+    nothing to hand-copy or hash-compare."""
+
     codex = tmp_path / ".codex" / "skills" / "example"
-    claude = tmp_path / ".claude" / "skills" / "example"
     codex.mkdir(parents=True)
-    claude.mkdir(parents=True)
-    (codex / "SKILL.md").write_text("same\n", encoding="utf-8")
-    (claude / "SKILL.md").write_text("same\n", encoding="utf-8")
+    (codex / "SKILL.md").write_text("content\n", encoding="utf-8")
+    claude_root = tmp_path / ".claude"
+    claude_root.mkdir(parents=True)
+    (claude_root / "skills").symlink_to(Path("..") / ".codex" / "skills")
 
-    assert repo_doctor.skill_mirror_report(tmp_path)["status"] == "matched"
+    report = repo_doctor.skill_mirror_report(tmp_path)
+    assert report["status"] == "matched"
+    assert report["mirror_is_link"] is True
 
-    (claude / "SKILL.md").write_text("different\n", encoding="utf-8")
+    # A diverging hand-maintained copy is exactly what the check refuses.
+    (claude_root / "skills").unlink()
+    copy = claude_root / "skills" / "example"
+    copy.mkdir(parents=True)
+    (copy / "SKILL.md").write_text("content\n", encoding="utf-8")
     report = repo_doctor.skill_mirror_report(tmp_path)
     assert report["status"] == "error"
-    assert report["mismatched"] == ["example/SKILL.md"]
+    assert report["resolved_equal"] is False
 
 
 def test_repository_doctor_emits_machine_readable_state() -> None:
@@ -75,7 +84,7 @@ def test_repository_doctor_emits_machine_readable_state() -> None:
     assert report["git"]["status"] in {"clean", "dirty"}
     assert report["dependency_lock"]["status"] in {"matched", "drift"}
     assert report["skill_mirrors"]["status"] == "matched"
-    assert report["graphify"]["status"] in {"ready", "missing_tool", "missing_report"}
+    assert "graphify" not in report
 
 
 def test_dev_help_works_outside_repository(tmp_path: Path) -> None:

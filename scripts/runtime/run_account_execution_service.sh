@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Ready-gated demo account execution owner. Inert until the operator supplies
-# verified demo rules and an explicit disaster-stop fraction; no defaults.
+# Bybit account execution owner (demo or mainnet, per ACCOUNT_VENUE_REALM).
+# Inert until the operator supplies verified demo rules and an explicit
+# disaster-stop fraction; no defaults.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +18,7 @@ ACCOUNT_RISK_POLICY_FILE="${ACCOUNT_RISK_POLICY_FILE:-/etc/liquidity-migration/a
 MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"
-ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-}"
+ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"
 CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
 CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
@@ -32,22 +33,23 @@ case "$ACCOUNT_VENUE_REALM" in
 esac
 ACCOUNT_ID="${ACCOUNT_ID:-$ACCOUNT_ID_DEFAULT}"
 
-if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
-    echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for the demo account owner." >&2
-    exit 2
-fi
 if [[ -z "$ACCOUNT_ROOT" || -z "$ACCOUNT_INTENT_INBOX_ROOT" || -z "$ACCOUNT_CAPTURE_ROOT" ]]; then
     echo "ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_CAPTURE_ROOT are required." >&2
     exit 2
 fi
-if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
-    echo "CONFIRM_DEMO_ORDERS=1 is required for the account execution owner." >&2
-    exit 2
-fi
 # The realm and the credentials must agree here, not only inside the client: a
-# mainnet owner on demo keys would reconcile the wrong account.
+# mainnet owner on demo keys would reconcile the wrong account. The demo arm
+# re-checks nothing its own unit set two lines earlier.
 case "$ACCOUNT_VENUE_REALM" in
     mainnet)
+        if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
+            echo "ACCOUNT_EXECUTION_KERNEL_REQUIRED=1 is required for the mainnet account owner." >&2
+            exit 2
+        fi
+        if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
+            echo "CONFIRM_DEMO_ORDERS=1 is required for the mainnet account owner." >&2
+            exit 2
+        fi
         if [[ -z "${BYBIT_REAL_API_KEY:-}" || -z "${BYBIT_REAL_API_SECRET:-}" ]]; then
             echo "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." >&2
             exit 2
@@ -87,22 +89,21 @@ for required in "$ACCOUNT_SYMBOLS_FILE" "$ACCOUNT_DEMO_RULES_FILE" "$ACCOUNT_RIS
     fi
 done
 
+# Bulk raw-market persistence is a diagnostic, off unless asked for.
 case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
     1) raw_market_args=(--persist-raw-market) ;;
-    0) raw_market_args=(--no-persist-raw-market) ;;
-    *)
-        echo "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1." >&2
-        exit 2
-        ;;
+    *) raw_market_args=(--no-persist-raw-market) ;;
 esac
 
+# A notification channel never keeps the account owner down: misconfigured
+# Telegram degrades to no Telegram, and the owner still executes and protects.
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
     if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        echo "Telegram is enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing." >&2
-        exit 2
+        echo "Telegram is enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing; running without Telegram." >&2
+    else
+        telegram_args+=(--telegram)
     fi
-    telegram_args+=(--telegram)
 fi
 
 # A sleeve with no configured cycle root is not running. Pass nothing rather
@@ -130,5 +131,4 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
-    --confirm-demo-orders \
     "${telegram_args[@]}"

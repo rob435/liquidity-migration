@@ -2873,6 +2873,40 @@ def test_non_stale_failure_with_expired_entries_still_releases(
     assert list((inbox.root / "failed").glob("*.json")) == []
 
 
+def test_a_head_request_cannot_retry_past_the_inbox_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-08-01 loop shape: a head that fails every pass retires to
+    failed/ once the retry budget is spent, instead of blocking the queue
+    forever. The producer's next cycle publishes a fresh request."""
+
+    inbox = _inbox(tmp_path)
+    _submit_entry_request(tmp_path, inbox, signal_valid_until_ms=10_000_000_000)
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    service = _service(tmp_path / "account", CountingTwin(), clock=clock)
+
+    def _always_fails(request: AccountTargetRequest) -> None:
+        raise RuntimeError("simulated persistent failure")
+
+    monkeypatch.setattr(service, "handle", _always_fails)
+
+    with pytest.raises(RuntimeError, match="persistent failure"):
+        service.run_once(inbox)
+    # Inside the budget: released back to pending for retry.
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+    assert list((inbox.root / "failed").glob("*.json")) == []
+
+    clock.advance_ns(service.inbox_retry_budget_ns + 1)
+    with pytest.raises(RuntimeError, match="persistent failure"):
+        service.run_once(inbox)
+
+    assert list((inbox.root / "pending").glob("*.json")) == []
+    failed = list((inbox.root / "failed").glob("*.json"))
+    assert len(failed) == 1
+    payload = json.loads(failed[0].read_bytes())
+    assert payload["error_type"] == "RuntimeError"
+
+
 def test_exit_request_failure_never_retires_terminally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

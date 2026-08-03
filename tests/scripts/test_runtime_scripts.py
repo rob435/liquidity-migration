@@ -79,12 +79,20 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
         assert f"{unit}:main" in wrapper
         fragment = _unit(unit)
         assert f"run_authorized_runtime.sh {unit} main" in fragment
+    # The readiness entrypoint stays registered for manual and verify use even
+    # where it no longer gates startup.
     for owner in (
         "liquidity-migration-account-execution.service",
         "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-account-execution-mainnet.service",
     ):
         assert f"{owner}:readiness" in wrapper
-        assert f"run_authorized_runtime.sh {owner} readiness" in _unit(owner)
+    # Only these owners still run it as an ExecStartPost startup gate.
+    for gated in (
+        "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-account-execution-mainnet.service",
+    ):
+        assert f"run_authorized_runtime.sh {gated} readiness" in _unit(gated)
     assert "--account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env" in wrapper
 
 
@@ -129,10 +137,6 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
 
 def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> None:
     expected = {
-        # The demo owner was throttled at its old 384M high during the
-        # 2026-08-03 recovery (peak 384.2M, 27M swapped) while being the one
-        # unit that must never stall; it now gets at least the producers' room.
-        "liquidity-migration-account-execution.service": ("768M", "1024M", "256M"),
         "liquidity-migration-account-paper-execution.service": ("256M", "384M", "256M"),
         "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
         "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),
@@ -148,33 +152,55 @@ def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> Non
         assert f"MemorySwapMax={swap}" in fragment
 
 
+def test_demo_owner_is_bounded_but_never_reclaim_throttled() -> None:
+    """MemoryHigh throttles rather than kills, and throttling the one latency-critical
+    unit is what stretched venue round-trips into the 2026-08-01..03 stale-exposure
+    wedge. MemoryMax already bounds the cgroup, so the high watermark is gone.
+    """
+    fragment = _unit("liquidity-migration-account-execution.service")
+    assert "MemoryHigh=" not in fragment
+    assert "MemoryMax=1024M" in fragment
+    assert "MemorySwapMax=256M" in fragment
+
+
 def test_liveness_timer_has_one_bounded_activation_grace() -> None:
-    for name in (
-        "liquidity-migration-demo-liveness.timer",
-        "liquidity-migration-mainnet-liveness.timer",
-    ):
+    # The demo watchdog's first pass is one minute after the timer arms: cold
+    # start noise is handled by the watchdog's own startup grace, not by staying
+    # blind for ten minutes across the window the owner now restarts in.
+    expected_first_pass = {
+        "liquidity-migration-demo-liveness.timer": "OnActiveSec=1min",
+        "liquidity-migration-mainnet-liveness.timer": "OnActiveSec=10min",
+    }
+    for name, first_pass in expected_first_pass.items():
         timer = _unit(name)
-        assert "OnActiveSec=10min" in timer
+        assert first_pass in timer
         assert "OnUnitActiveSec=3min" in timer
         assert "OnBootSec=" not in timer
 
 
 def test_producers_require_owner_readiness_and_never_hold_private_order_authority() -> None:
     mainnet_owner = "liquidity-migration-account-execution-mainnet.service"
+    demo_owner = "liquidity-migration-account-execution.service"
+    # A demo producer only ORDERS after its owner; it is not bound to the
+    # owner's fate. See test_demo_producers_are_ordered_after_the_owner_but_
+    # never_taken_down_with_it for why.
+    ordered_only = {
+        "liquidity-migration-bybit-long-demo.service": demo_owner,
+        "liquidity-migration-bybit-continuous-demo.service": demo_owner,
+        "liquidity-migration-bybit-carry-demo.service": demo_owner,
+        "liquidity-migration-continuous-hedge.service": demo_owner,
+    }
     pairs = {
-        "liquidity-migration-bybit-long-demo.service": "liquidity-migration-account-execution.service",
-        "liquidity-migration-bybit-continuous-demo.service": "liquidity-migration-account-execution.service",
-        "liquidity-migration-bybit-carry-demo.service": "liquidity-migration-account-execution.service",
-        "liquidity-migration-continuous-hedge.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-bybit-long-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-continuous-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-carry-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-long-mainnet.service": mainnet_owner,
         "liquidity-migration-bybit-carry-mainnet.service": mainnet_owner,
     }
-    for producer, owner in pairs.items():
+    for producer, owner in {**ordered_only, **pairs}.items():
         fragment = _unit(producer)
-        assert f"Requires={owner}" in fragment
+        if producer in pairs:
+            assert f"Requires={owner}" in fragment
         assert owner in next(line for line in fragment.splitlines() if line.startswith("After="))
         # Every producer, in every realm, has both credential pairs and the
         # arming switch stripped from its inherited environment.
@@ -204,6 +230,177 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
                 assert f"{variable}=" not in line.replace(f"{variable}:-", ""), (runner, line)
                 assert "--api-secret" not in line, (runner, line)
                 assert "export" not in line, (runner, line)
+
+
+def test_demo_producers_are_ordered_after_the_owner_but_never_taken_down_with_it() -> None:
+    """``Requires=`` propagates a stop: when the demo owner failed on 2026-08-01 it took
+    every producer down with it and kept them down for two days. Every invariant the
+    hard dependency was standing in for is enforced at point of use — producers
+    re-check owner health per cycle and plan entries as blocked while still publishing
+    exits, queued entries self-expire, exits never expire, and order submission is
+    gated inside the owner — so ordering is all the unit file needs to say.
+    """
+    owner = "liquidity-migration-account-execution.service"
+    for producer in (
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-continuous-demo.service",
+        "liquidity-migration-bybit-carry-demo.service",
+    ):
+        directives = [line for line in _unit(producer).splitlines() if not line.startswith("#")]
+        assert f"Requires={owner}" not in directives, producer
+        assert f"Wants={owner}" in directives, producer
+        assert owner in next(line for line in directives if line.startswith("After="))
+        # A producer draining a cycle must not hold a restart for three minutes.
+        assert "TimeoutStopSec=90" in directives, producer
+        assert "TimeoutStopSec=180" not in directives, producer
+
+    # The hedge publishes into a durable inbox and already degrades in-process on
+    # dead-owner health; it declares no lifecycle dependency on the owner at all.
+    hedge = [line for line in _unit("liquidity-migration-continuous-hedge.service").splitlines() if not line.startswith("#")]
+    assert not [line for line in hedge if line.startswith("Requires=")]
+    assert f"Wants={owner}" not in hedge
+    assert owner in next(line for line in hedge if line.startswith("After="))
+
+
+def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -> None:
+    """The ExecStartPost readiness gate failed while the book was wedged and systemd
+    killed a live owner that was still draining exits; RestartSec=2 plus the 180s gate
+    made a ~182s cycle that never trips the default rate limiter. Removing the gate
+    removes the kill; the slower RestartSec keeps a genuine crash loop visible in the
+    journal rather than pegged.
+    """
+    fragment = _unit("liquidity-migration-account-execution.service")
+    assert "ExecStartPost=" not in fragment
+    # TimeoutStartSec existed only to bound that gate.
+    assert "TimeoutStartSec=" not in fragment
+    assert "Restart=always" in fragment
+    assert "RestartSec=5" in fragment
+    # No rate limiter: a limiter that trips leaves the owner stopped, which is
+    # the outcome this whole change exists to prevent.
+    assert "StartLimit" not in fragment
+    # The mainnet owner is deliberately untouched: it gates, and it may.
+    mainnet = _unit("liquidity-migration-account-execution-mainnet.service")
+    assert (
+        "ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh "
+        "liquidity-migration-account-execution-mainnet.service readiness"
+    ) in mainnet
+    assert "TimeoutStartSec=240" in mainnet
+    assert "RestartSec=2" in mainnet
+
+
+def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:
+    """A six-hour cooldown meant one page, then silence across the whole outage."""
+    wrapper = _read(WRAPPER)
+    for unit in (
+        "liquidity-migration-demo-liveness.service",
+        "liquidity-migration-mainnet-liveness.service",
+    ):
+        start = wrapper.index(f"{unit}:main)")
+        case = wrapper[start : wrapper.index("\n        ;;", start)]
+        assert "--cooldown-min 60" in case, unit
+        assert "--cooldown-min 360" not in case, unit
+
+
+def test_owner_runner_degrades_rather_than_refusing_to_start() -> None:
+    """A notification channel, and an unset diagnostic toggle, must never be able to
+    keep the account owner down. Only the mainnet realm still re-checks the latch
+    variables its own unit sets.
+    """
+    script = _read("scripts/runtime/run_account_execution_service.sh")
+
+    # Misconfigured Telegram drops the flag and warns; it does not exit.
+    telegram = script[script.index("telegram_args=()") : script.index("continuous_cycle_args=()")]
+    assert "running without Telegram" in telegram
+    assert "exit 2" not in telegram
+    assert "--telegram" in telegram
+
+    # Bulk raw-market persistence is a diagnostic; unset means off.
+    assert 'ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"' in script
+    assert "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set" not in script
+    raw_market = script[script.index("case \"$ACCOUNT_RAW_MARKET_PERSISTENCE\"") :]
+    raw_market = raw_market[: raw_market.index("esac")]
+    assert "--no-persist-raw-market" in raw_market
+    assert "exit 2" not in raw_market
+
+    # The unit sets these two lines above the check; only mainnet re-reads them.
+    realm_case = script[script.index('case "$ACCOUNT_VENUE_REALM" in\n    mainnet)') :]
+    mainnet_arm = realm_case[: realm_case.index("    demo)")]
+    demo_arm = realm_case[realm_case.index("    demo)") : realm_case.index("\nesac")]
+    for variable in ("ACCOUNT_EXECUTION_KERNEL_REQUIRED", "CONFIRM_DEMO_ORDERS"):
+        assert variable in mainnet_arm, variable
+        assert variable not in demo_arm, variable
+    # The mainnet credential/REAL_MONEY strip verification is unchanged.
+    assert "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." in mainnet_arm
+    assert "requires REAL_MONEY to be explicitly armed by the owner." in mainnet_arm
+    assert "The demo owner must not receive mainnet credentials." in demo_arm
+
+    # The Python runner accepts --confirm-demo-orders as a deprecated no-op, so
+    # the wrapper stops passing a flag that decides nothing.
+    assert "--confirm-demo-orders" not in script
+
+
+def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
+    """Two tri-state parsers with eight accepted spellings each, plus an
+    EXECUTION_ENVIRONMENT x latch consistency matrix, only re-derived values the unit
+    files hard-code. The demo Telegram refusals were the same shape and were a latent
+    fleet-wide start failure: the two runners that had them would exit 2 on a variable
+    the third ignores, and no runner passes --telegram either way.
+    """
+    for runner in (
+        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
+        "scripts/runtime/run_continuous_hedge.sh",
+    ):
+        text = _read(runner)
+        assert "ACCOUNT_PAPER_KERNEL_REQUIRED" not in text, runner
+        assert "kernel_required" not in text, runner
+        assert "Kernel latch requires" not in text, runner
+        assert "requires only ACCOUNT_" not in text, runner
+        assert "Sleeve Telegram is retired" not in text, runner
+        assert "--telegram" not in text, runner
+        # What is left is the route and its owner roots.
+        assert "case \"${EXECUTION_ENVIRONMENT:-}\" in" in text, runner
+        assert "    demo | paper) ;;" in text, runner
+        assert "EXECUTION_ENVIRONMENT must be explicitly set" in text, runner
+    for runner in (
+        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
+    ):
+        text = _read(runner)
+        assert (
+            'if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then' in text
+        ), runner
+    # Both mainnet-capable producer runners keep their strip verification verbatim.
+    for runner in (
+        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
+    ):
+        text = _read(runner)
+        mainnet_arm = text[text.index("    mainnet)") : text.index("\n    *)\n        echo \"EXECUTION_ENVIRONMENT")]
+        assert "A target producer must not receive venue credentials." in mainnet_arm, runner
+        assert "A target producer must not receive REAL_MONEY; it submits no orders." in mainnet_arm, runner
+
+
+def test_only_the_mainnet_owner_surface_check_asserts_an_exec_start_post() -> None:
+    """``lm_verify_guarded_unit_surfaces`` would fail every verify against the demo
+    owner now that it has no ExecStartPost. The ExecStart argv check still covers
+    every guarded unit.
+    """
+    text = _read("deploy/lib_sleeves.sh")
+    function = text[text.index("lm_verify_guarded_unit_surfaces() {") :]
+    function = function[: function.index("\nlm_install_current_systemd_units")]
+    post_case = function[function.index("--property=ExecStartPost") - 400 :]
+    assert "liquidity-migration-account-execution-mainnet.service)" in post_case
+    assert "liquidity-migration-account-execution.service |" not in post_case
+    # Argv verification is unscoped and stays that way.
+    assert 'run_authorized_runtime.sh $_lvgus_unit main ;"*) ;;' in function
+
+
+def test_retired_auth_shutdown_toggle_has_no_remaining_reference() -> None:
+    for path in (".env.example", "scripts/deploy_vps_live.sh", "deploy/lib_sleeves.sh"):
+        assert "AUTH_SHUTDOWN_EXPIRED_DEMO_RULES" not in _read(path), path
 
 
 def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> None:
@@ -383,17 +580,21 @@ def test_install_is_stopped_exact_commit_preparation_only() -> None:
     assert install.index("git_fetch fetch") < install.index("git checkout -B")
     assert "requirements.lock" in install
     assert "--no-deps" in install and "--only-binary=:all:" in install
-    assert "tests/ops/test_candidate_rule_coverage.py" in install
-    assert "tests/venue/test_demo_rule_probe.py" in install
+    # No lint/type/test phase: CI runs scripts/dev.sh lint+types+test on every
+    # push to main and install proves the commit is an ancestor of the branch,
+    # so re-running them only lengthens the stopped window.
+    assert "-m ruff check" not in install
+    assert "-m mypy" not in install
+    assert "-m pytest" not in install
     assert "lm_install_current_systemd_units" in install
     assert "systemctl disable --now" in install
     assert "systemctl start" not in install
     assert "systemctl enable --now" not in install
     assert "lm_write_resolved_sleeve_toggles" in install
-    # A host upgraded from an older release still has the old gate file on disk;
-    # install moves it aside so no operator later reads a dead receipt as a live
-    # control.
-    assert "retire_stale_operational_receipt" in install
+    # The resolved toggles are written atomically (mktemp + mv), so install does
+    # not re-read its own write; load_authorization validates the file a
+    # previous process wrote.
+    assert "lm_verify_resolved_sleeve_toggles" not in install
     assert "units_started=0" in install
 
 
@@ -471,9 +672,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert rollout.index("stop-downstream-units") < rollout.index("post-producer-flat-account-proof")
     assert rollout.index("post-producer-flat-account-proof") < rollout.index("stop-account-owners")
     assert rollout.index("stop-account-owners") < rollout.index("final-stopped-flat-account-proof")
-    assert rollout.index("rollout-recovery-boundary rollback=unavailable") < rollout.index(
-        "ROLLOUT_STOPPED=1"
-    )
     assert rollout.index("final-stopped-flat-account-proof") < rollout.rindex(
         "ROLLOUT_IRREVERSIBLE=1"
     )
@@ -482,7 +680,15 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("record-installed-profile")
     assert rollout.index("record-installed-profile") < rollout.index("activate-and-verify")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
-    assert "rollout-recovery-boundary rollback=unavailable" in rollout
+    # Every flat-account proof runs in the same order either way; only whether a
+    # residual stops the rollout depends on the realm.
+    for proof in (
+        "pre-stop-flat-account-proof",
+        "post-producer-flat-account-proof",
+        "final-stopped-flat-account-proof",
+        "post-rule-refresh-flat-account-proof",
+    ):
+        assert f"rollout_flat_phase {proof}" in rollout
 
     readiness = _read("scripts/vps/check_deploy_rollout_readiness.py")
     assert "read_account_journal(root, verify=True)" in readiness
@@ -520,10 +726,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert "freeze_account_candidate_universe.py" in refresh
     assert "build_candidate_rule_coverage" in refresh
     assert "demo-rule refresh refuses mainnet credentials" in refresh
-    assert "expired-authority-pre-exec" in text
-    assert "ExecMainStatus" in text
-    assert "expected_downstream_on()" in text
-    assert "enabled-not-active cause=expired-authority-recovery" in text
 
 
 
@@ -538,7 +740,6 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
     assert 'if wait "$left_pid"; then left_status=0; else left_status=$?; fi' in text
     for phase in (
         "install-locked-dependencies",
-        "focused-runtime-tests",
         "paper-tree-preflight",
         "paper-tree-normalize",
         "seed-residual-momentum",
@@ -722,14 +923,17 @@ def test_workflow_runs_ci_on_push_and_only_manual_guarded_vps_modes() -> None:
     assert "--owner-acknowledgement" not in workflow
     # No dispatchable branch may name a mode the deploy script does not have.
     assert "\n            recover)" not in workflow
-    assert "authorize_demo_paper_operation:" in workflow
-    assert "authorization_reference:" in workflow
+    # Dispatching the workflow at all is the operator's act. A checkbox and a
+    # free-text reference that no script reads added nothing to that, so both
+    # inputs and their four `test` assertions are gone.
+    assert "authorize_demo_paper_operation" not in workflow
+    assert "authorization_reference" not in workflow
+    assert "DEPLOY_OWNER_ACKNOWLEDGED_INPUT" not in workflow
+    assert "DEPLOY_AUTHORIZATION_REFERENCE_INPUT" not in workflow
     assert 'deploy_args=("$DEPLOY_MODE_INPUT")' in workflow
     assert 'scripts/deploy_vps_live.sh "${deploy_args[@]}"' in workflow
-    # The operator's confirmation in the dispatch UI gates a rollout; no script
-    # reads the acknowledgement token, so nothing asserts its presence.
-    assert 'test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true' in workflow
     assert 'deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT")' in workflow
+    assert 'EXPECTED_COMMIT="$GITHUB_SHA"' in workflow
 
 
 def test_workflow_serializes_vps_operations_across_refs() -> None:
@@ -912,12 +1116,26 @@ def test_every_mode_level_phase_uses_the_strict_wrapper() -> None:
 def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> None:
     text = _read(DEPLOY)
     for gate in (
-        'check_demo_order_permissions verify \\\n        || fail',
         'check_demo_order_permissions deploy \\\n        || fail',
         'validate_hedge_model_prior || fail',
         '--confirm-demo-probe \\\n            || fail',
     ):
         assert gate in text, gate
+    # Inside verify_topology the same two probes route through verify_probe,
+    # which records a mismatch (fatal at the end of any mode but read-only
+    # `verify`) rather than swallowing a nonzero status.
+    verify = text[text.index("verify_topology()") : text.index("start_if()")]
+    assert (
+        'verify_probe demo-order-permissions "demo order permission verification failed" \\\n'
+        "        check_demo_order_permissions verify" in verify
+    )
+    assert (
+        'verify_probe hedge-model-prior "hedge model prior validation failed" \\\n'
+        "            validate_hedge_model_prior" in verify
+    )
+    probe = text[text.index("verify_probe() {") : text.index("verify_unit() {")]
+    assert "verify_note" in probe
+    assert 'if verify_report_only; then' in probe
 
 
 def test_rollout_and_reset_survive_a_dying_ssh_transport() -> None:
@@ -1020,7 +1238,7 @@ def _mainnet_harness(carry: str, long_: str, preflight_status: int) -> str:
         "}\n"
         + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
         + text[
-            text.index("any_mainnet_sleeve_on()") : text.index("expected_downstream_on()")
+            text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")
         ]
         + text[text.index("start_if() {") : text.index("seed_rmom()")]
         + text[
@@ -1128,7 +1346,7 @@ def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> 
     verify = text[text.index("verify_topology()") : text.index("start_if()")]
     assert "if any_mainnet_sleeve_on; then" in verify
     assert "mainnet owner is not active and enabled" in verify
-    assert "timer_on liquidity-migration-mainnet-liveness.timer" in verify
+    assert "verify_unit on liquidity-migration-mainnet-liveness.timer" in verify
     assert "is active under demo/paper authorization" in verify
     # The mirror unit is verified too, or a toggled-on mirror is invisible here.
     assert "liquidity-migration-paper-target-mirror.service" in verify
@@ -1137,8 +1355,11 @@ def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> 
     # An enabled timer is not a succeeding watchdog: without this the funded
     # observer can fail every fire and verify still reads green. Scoped inside
     # the mainnet branch so a stale failure cannot break demo/paper verify.
-    failed_check = "! systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service"
+    failed_check = "systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service"
     assert failed_check in verify
+    assert (
+        'verify_note "liquidity-migration-mainnet-liveness.service is failed"' in verify
+    )
     assert verify.index("if any_mainnet_sleeve_on; then") < verify.index(failed_check)
     assert verify.index(failed_check) < verify.index("for oneshot in")
 
@@ -1222,8 +1443,36 @@ def test_deploy_rejects_an_unknown_mode_and_a_stray_mode_argument() -> None:
     usage = subprocess.run(
         ["bash", str(DEPLOY), "verify", "--extra"], capture_output=True, text=True, check=False
     ).stderr
-    for mode in ("install", "activate", "verify", "rollout", "activate-mainnet", "stop-mainnet"):
+    for mode in (
+        "install",
+        "activate",
+        "verify",
+        "staged",
+        "rollout",
+        "activate-mainnet",
+        "stop-mainnet",
+    ):
         assert mode in usage, mode
+    # Every flag is scoped to the modes that read it, and the usage says so.
+    for flag in ("--profile", "--stop-first", "--require-flat", "--refresh-demo-rules"):
+        assert flag in usage, flag
+    for argv in (
+        ["verify", "--stop-first"],
+        ["install", "--profile", "operational"],
+        ["install", "--require-flat"],
+        ["rollout", "--refresh-demo-rules"],
+    ):
+        rejected = subprocess.run(
+            ["bash", str(DEPLOY), *argv], capture_output=True, text=True, check=False
+        )
+        assert rejected.returncode == 2, argv
+        assert f"is not a {argv[0]} argument" in rejected.stderr, argv
+    for mode in ("staged", "rollout"):
+        missing = subprocess.run(
+            ["bash", str(DEPLOY), mode], capture_output=True, text=True, check=False
+        )
+        assert missing.returncode == 2, mode
+        assert f"{mode} requires --profile" in missing.stderr, mode
 
 
 def test_stop_mainnet_says_the_sleeves_still_restart_the_fleet() -> None:
@@ -1240,6 +1489,368 @@ def test_stop_mainnet_says_the_sleeves_still_restart_the_fleet() -> None:
     combined = result.stdout + result.stderr
     assert "the next activate or rollout restarts this fleet" in combined
     assert "CARRY_MAINNET_SLEEVE/LONG_MAINNET_SLEEVE off" in combined
+
+
+def _verify_harness(
+    mode: str,
+    active: str,
+    enabled: str,
+    failed: str = "",
+    permissions_status: int = 0,
+) -> str:
+    """The real verify_topology over a stub systemd, so accumulation is exercised
+    rather than pattern-matched. demo-operational with every sleeve off is the
+    smallest topology that still covers on-expectations, off-expectations, the
+    oneshot sweep and the venue probe.
+    """
+
+    text = _read(DEPLOY)
+    library = _read("deploy/lib_sleeves.sh")
+    return (
+        "set -u\n"
+        f"MODE={mode}\n"
+        "AUTH_PROFILE=demo-operational\n"
+        "PYTHON=fake_python\n"
+        "EXPECTED_COMMIT=abc123\n"
+        "EXPECTED_COMMIT_EXPLICIT=1\n"
+        "LONG_SLEEVE=off\nCONTINUOUS_SLEEVE=off\nCONTINUOUS_PAPER_SLEEVE=off\n"
+        "CARRY_SLEEVE=off\nCARRY_PAPER_SLEEVE=off\nPAPER_TARGET_MIRROR=off\n"
+        "CARRY_MAINNET_SLEEVE=off\nLONG_MAINNET_SLEEVE=off\nCONTINUOUS_HEDGE_TIMER=off\n"
+        f"ACTIVE_UNITS={active!r}\nENABLED_UNITS={enabled!r}\nFAILED_UNITS={failed!r}\n"
+        f"PERMISSIONS_STATUS={permissions_status}\n"
+        'fail() { echo "fail:$*" >&2; exit 1; }\n'
+        'safe_git() { echo "$EXPECTED_COMMIT"; }\n'
+        'fake_python() { return 0; }\n'
+        "check_demo_order_permissions() { return \"$PERMISSIONS_STATUS\"; }\n"
+        "systemctl() {\n"
+        '    local verb="$1" unit\n'
+        "    shift\n"
+        '    [ "${1:-}" != --quiet ] || shift\n'
+        '    unit="${1:-}"\n'
+        '    case "$verb" in\n'
+        "        is-active)\n"
+        '            case " $ACTIVE_UNITS " in *" $unit "*) echo active; return 0 ;; esac\n'
+        "            echo inactive; return 3 ;;\n"
+        "        is-enabled)\n"
+        '            case " $ENABLED_UNITS " in *" $unit "*) echo enabled; return 0 ;; esac\n'
+        "            echo disabled; return 1 ;;\n"
+        "        is-failed)\n"
+        '            case " $FAILED_UNITS " in *" $unit "*) echo failed; return 0 ;; esac\n'
+        "            echo active; return 1 ;;\n"
+        "    esac\n"
+        "    return 0\n"
+        "}\n"
+        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + text[text.index("unit_on() {") : text.index("check_demo_order_permissions() {")]
+        + text[text.index("verify_topology()") : text.index("start_if()")]
+    )
+
+
+_VERIFY_GREEN = (
+    "liquidity-migration-account-execution.service "
+    "liquidity-migration-demo-liveness.timer"
+)
+
+
+def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() -> None:
+    """Failing on the first mismatch made every check after it invisible: the operator
+    fixed one line, re-ran, and found the next. One run now names them all.
+    """
+
+    green = subprocess.run(
+        ["bash", "-c", _verify_harness("verify", _VERIFY_GREEN, _VERIFY_GREEN) + "\nverify_topology\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = green.stdout + green.stderr
+    assert green.returncode == 0, combined
+    assert "verify-ok commit=abc123" in combined
+    assert "verify-units unit|expected|active|enabled" in combined
+    # Units that pass are in the table too, or the table is only a failure list.
+    assert "liquidity-migration-account-execution.service|on|active|enabled" in combined
+    assert (
+        "liquidity-migration-account-paper-execution.service|off|inactive|disabled" in combined
+    )
+    assert "verify-mismatch" not in combined
+
+    # Owner down, liveness timer down, one failed oneshot, and the venue probe
+    # refusing: four independent findings from a single run.
+    broken = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _verify_harness(
+                "activate",
+                "",
+                "",
+                failed="liquidity-migration-continuous-hedge.service",
+                permissions_status=1,
+            )
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = broken.stdout + broken.stderr
+    assert broken.returncode != 0
+    for finding in (
+        "verify-mismatch demo owner is not active and enabled",
+        "verify-mismatch liveness timer is not active",
+        "verify-mismatch liquidity-migration-continuous-hedge.service is failed",
+        "verify-mismatch demo order permission verification failed",
+    ):
+        assert finding in combined, finding
+    assert "found 4 mismatch(es)" in combined
+    assert "verify-ok" not in combined
+    # The table is printed before the verdict, so it survives the failure.
+    assert combined.index("verify-units") < combined.index("fail:topology verification")
+
+
+def test_the_live_venue_probes_report_in_verify_and_still_gate_every_other_mode() -> None:
+    """`verify` is the read-only status command an operator runs to find out what is
+    wrong; a venue probe that cannot answer must not be what stops it printing the
+    topology. Every mutating mode still treats the same probe as fatal.
+    """
+
+    reporting = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _verify_harness("verify", _VERIFY_GREEN, _VERIFY_GREEN, permissions_status=1)
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = reporting.stdout + reporting.stderr
+    assert reporting.returncode == 0, combined
+    assert "verify-warn demo-order-permissions" in combined
+    assert "verify-ok" in combined
+
+    for mode in ("activate", "rollout"):
+        gating = subprocess.run(
+            [
+                "bash",
+                "-c",
+                _verify_harness(mode, _VERIFY_GREEN, _VERIFY_GREEN, permissions_status=1)
+                + "\nverify_topology\n",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        combined = gating.stdout + gating.stderr
+        assert gating.returncode != 0, mode
+        assert "verify-mismatch demo order permission verification failed" in combined
+
+
+def test_verify_reports_commit_drift_as_information_only_when_it_was_defaulted() -> None:
+    harness = _verify_harness("verify", _VERIFY_GREEN, _VERIFY_GREEN).replace(
+        'safe_git() { echo "$EXPECTED_COMMIT"; }', "safe_git() { echo other-commit; }"
+    )
+    explicit = subprocess.run(
+        ["bash", "-c", harness + "\nverify_topology\n"], capture_output=True, text=True
+    )
+    combined = explicit.stdout + explicit.stderr
+    assert explicit.returncode != 0
+    assert "verify-mismatch installed checkout is other-commit" in combined
+
+    defaulted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness.replace("EXPECTED_COMMIT_EXPLICIT=1", "EXPECTED_COMMIT_EXPLICIT=0")
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = defaulted.stdout + defaulted.stderr
+    assert defaulted.returncode == 0, combined
+    assert "verify-drift installed=other-commit expected=abc123" in combined
+    assert "verify-ok commit=other-commit" in combined
+
+
+def _quiescence_harness(tmp_path: Path, stop_first: str, mainnet: str) -> str:
+    text = _read(DEPLOY)
+    library = _read("deploy/lib_sleeves.sh")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    state = tmp_path / "units"
+    state.write_text(
+        "liquidity-migration-bybit-carry-demo.service loaded active running carry\n"
+        "liquidity-migration-account-execution.service loaded active running owner\n",
+        encoding="utf-8",
+    )
+    return (
+        "set -u\n"
+        f"STATE_FILE={state}\n"
+        f"STOP_FIRST={stop_first}\n"
+        f"CARRY_MAINNET_SLEEVE={mainnet}\nLONG_MAINNET_SLEEVE=off\n"
+        'fail() { echo "fail:$*" >&2; exit 1; }\n'
+        "systemctl() {\n"
+        '    case "$1" in\n'
+        '        list-units) cat "$STATE_FILE"; return 0 ;;\n'
+        "        stop)\n"
+        '            printf "stopped:%s\\n" "$2"\n'
+        '            grep -v "^$2 " "$STATE_FILE" > "$STATE_FILE.tmp" || true\n'
+        '            mv "$STATE_FILE.tmp" "$STATE_FILE"\n'
+        "            return 0 ;;\n"
+        "        is-active)\n"
+        '            grep -q "^${2#--quiet } " "$STATE_FILE"\n'
+        "            return $? ;;\n"
+        "    esac\n"
+        "    return 0\n"
+        "}\n"
+        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + text[text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")]
+        + text[text.index("running_liqmig_units() {") : text.index("git_fetch() {")]
+        + text[
+            text.index("ROLLOUT_DOWNSTREAM_UNITS=(") : text.index(
+                "stop_all_rollout_units_best_effort()"
+            )
+        ]
+    )
+
+
+def test_stop_first_stops_a_demo_paper_fleet_and_refuses_a_funded_one(
+    tmp_path: Path,
+) -> None:
+    """A demo/paper install that found the fleet running used to print a list and quit,
+    leaving the operator to stop it by hand. It stops it now -- except when a funded
+    sleeve is on, where the refusal is the whole point.
+    """
+
+    demo = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _quiescence_harness(tmp_path / "demo", "auto", "off")
+            + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = demo.stdout + demo.stderr
+    assert demo.returncode == 0, combined
+    assert "stop-first: stopping the running fleet" in combined
+    assert "stopped:liquidity-migration-bybit-carry-demo.service" in combined
+    assert "stopped:liquidity-migration-account-execution.service" in combined
+    # Producers stop before owners. On the demo fleet that order comes from the
+    # stop list itself, not from a Requires= (see
+    # test_demo_producers_are_ordered_after_the_owner_but_never_taken_down_with_it).
+    assert combined.index("stopped:liquidity-migration-bybit-carry-demo.service") < combined.index(
+        "stopped:liquidity-migration-account-execution.service"
+    )
+    assert "quiescent-ok" in combined
+
+    funded = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _quiescence_harness(tmp_path / "funded", "auto", "on")
+            + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = funded.stdout + funded.stderr
+    assert funded.returncode == 1
+    assert "quiesce these units first" in combined
+    assert "stopped:" not in combined
+    assert "quiescent-ok" not in combined
+
+    explicit_off = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _quiescence_harness(tmp_path / "explicit", "0", "off")
+            + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = explicit_off.stdout + explicit_off.stderr
+    assert explicit_off.returncode == 1
+    assert "quiesce these units first" in combined
+
+
+def test_staged_installs_records_the_profile_then_activates_in_one_session() -> None:
+    """Only rollout used to write the profile marker, so a staged install left
+    load_authorization falling back to `operational` whatever the operator asked for.
+    """
+
+    text = _read(DEPLOY)
+    harness = (
+        "set -Eeuo pipefail\n"
+        "DEPLOY_PROFILE=demo-operational\n"
+        "EXPECTED_COMMIT=abc123\n"
+        + text[text.index("fail() {") : text.index("run_phase_pair() {")]
+        + 'install_mode() { echo "ran:install"; }\n'
+        'record_installed_profile() { echo "ran:profile-marker=$DEPLOY_PROFILE"; }\n'
+        'activate_mode() { echo "ran:activate"; }\n'
+        + text[text.index("staged_mode() {") : text.index("# A funded fleet keeps")]
+        + "\nstaged_mode\n"
+    )
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert combined.index("ran:install") < combined.index("ran:profile-marker=demo-operational")
+    assert combined.index("ran:profile-marker=demo-operational") < combined.index("ran:activate")
+    assert "staged-ok commit=abc123 profile=demo-operational" in combined
+    # Each step is a strict phase, so a failure aborts rather than continuing to
+    # activate a half-installed checkout.
+    failing = subprocess.run(
+        ["bash", "-c", harness.replace('install_mode() { echo "ran:install"; }', "install_mode() { false; }")],
+        capture_output=True,
+        text=True,
+    )
+    combined = failing.stdout + failing.stderr
+    assert failing.returncode != 0
+    assert "phase-failed name=staged-install" in combined
+    assert "ran:activate" not in combined
+    assert "staged-ok" not in combined
+
+
+def test_rollout_gates_on_a_flat_account_for_a_funded_fleet_and_reports_for_a_demo_one() -> None:
+    """The hard gate is what made rollout unusable on the demo fleet: a single residual
+    stopped the deploy and its rollback machinery with it. It still gates the funded
+    fleet, and --require-flat asks for the same gate anywhere.
+    """
+
+    text = _read(DEPLOY)
+    library = _read("deploy/lib_sleeves.sh")
+
+    def harness(require_flat: str, mainnet: str) -> str:
+        return (
+            "set -Eeuo pipefail\n"
+            f"REQUIRE_FLAT={require_flat}\n"
+            f"CARRY_MAINNET_SLEEVE={mainnet}\nLONG_MAINNET_SLEEVE=off\n"
+            + text[text.index("fail() {") : text.index("run_phase_pair() {")]
+            + library[
+                library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")
+            ]
+            + text[
+                text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")
+            ]
+            + text[text.index("rollout_flat_required() {") : text.index("rollout_mode() {")]
+            + "\nresidual() { return 4; }\n"
+            "rollout_flat_phase pre-stop-flat-account-proof residual\n"
+            "echo reached-the-stop\n"
+        )
+
+    demo = subprocess.run(["bash", "-c", harness("0", "off")], capture_output=True, text=True)
+    combined = demo.stdout + demo.stderr
+    assert demo.returncode == 0, combined
+    assert "rollout-flat-warn phase=pre-stop-flat-account-proof status=4" in combined
+    assert "reached-the-stop" in combined
+
+    for require_flat, mainnet in (("0", "on"), ("1", "off")):
+        gated = subprocess.run(
+            ["bash", "-c", harness(require_flat, mainnet)], capture_output=True, text=True
+        )
+        combined = gated.stdout + gated.stderr
+        assert gated.returncode != 0, (require_flat, mainnet)
+        assert "phase-failed name=pre-stop-flat-account-proof" in combined
+        assert "reached-the-stop" not in combined
 
 
 def test_stop_mainnet_cannot_report_ok_without_systemctl() -> None:

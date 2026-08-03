@@ -1197,6 +1197,7 @@ class AccountExecutionService:
         convergence_retry_backoff_ns: int = 1_000_000_000,
         convergence_retry_backoff_cap_ns: int = DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS,
         max_convergence_retries: int = 3,
+        inbox_retry_budget_ns: int = 600_000_000_000,
     ) -> None:
         self.route = _require_verified_account_route(route)
         kernel_root = str(kernel.journal.root.expanduser().resolve(strict=False))
@@ -1226,6 +1227,15 @@ class AccountExecutionService:
         self.convergence_retry_backoff_ns = convergence_retry_backoff_ns
         self.convergence_retry_backoff_cap_ns = convergence_retry_backoff_cap_ns
         self.max_convergence_retries = max_convergence_retries
+        if int(inbox_retry_budget_ns) <= 0:
+            raise ValueError("inbox retry budget must be positive")
+        self.inbox_retry_budget_ns = int(inbox_retry_budget_ns)
+        # First monotonic instant each inbox file started failing, cleared on
+        # success or retirement. The 2026-08-01 outage was a head request
+        # bouncing pending<->claimed every ~2s for two days: a request that
+        # cannot succeed inside this budget retires to failed/ and the
+        # producer's next cycle publishes a fresh one.
+        self._inbox_failure_first_ns: dict[str, int] = {}
         # First wall time each symbol was seen unconverged, cleared when it
         # converges. Revision-based ages re-arm on every republication, so
         # re-asserting an unchanged target could suppress the grace-based health
@@ -2075,12 +2085,13 @@ class AccountExecutionService:
             if unresendable:
                 # Replaying this plan raises AmbiguousExposureSubmission every
                 # pass, and this loop returns on the first commanded plan, so
-                # one wedged symbol would starve the rest of the book. Only an
-                # operator-authorized transition can terminalize the wedge, so
-                # step over it and keep converging.
+                # one wedged symbol would starve the rest of the book. Step
+                # over it and keep converging; the reconciler's automatic
+                # wedge pass terminalizes it on venue evidence (on mainnet,
+                # `ops.sh wedged-command` is the operator path).
                 _logger.error(
-                    "convergence skipped wedged batch %s (%s); it needs "
-                    "`ops.sh wedged-command` to leave the commanded state",
+                    "convergence skipped wedged batch %s (%s) until the wedge "
+                    "terminalizes on venue evidence",
                     batch_id,
                     "; ".join(wedge.describe() for wedge in unresendable),
                 )
@@ -2242,8 +2253,15 @@ class AccountExecutionService:
             receipt = self.handle(request)
         except Exception as exc:
             terminal: StaleEntryRequestExpired | None = None
+            failing_since_ns = self._inbox_failure_first_ns.setdefault(
+                path.name, self.clock.monotonic_ns()
+            )
+            retry_budget_spent = (
+                self.clock.monotonic_ns() - failing_since_ns >= self.inbox_retry_budget_ns
+            )
             if permanent_failure:
                 inbox.fail(path, error=exc)
+                self._inbox_failure_first_ns.pop(path.name, None)
             elif isinstance(exc, StaleUnsubmittedExposureCommand) and self._entry_request_retry_expired(request):
                 # The 2026-08-01 outage: a committed entry batch bounced
                 # pending<->failed for two days, partially re-executing a stale
@@ -2251,8 +2269,9 @@ class AccountExecutionService:
                 # request is past its own declared signal validity, the retry
                 # loop can only ever act on dead decisions — retire the request
                 # terminally instead. Never-attempted commands the batch may
-                # have journaled stay for `ops.sh wedged-command` to
-                # terminalize on venue evidence; already-attempted commands
+                # have journaled terminalize on venue evidence via the
+                # reconciler's automatic wedge pass (`ops.sh wedged-command`
+                # remains the manual path); already-attempted commands
                 # reconcile through the normal position/order truth paths.
                 terminal = StaleEntryRequestExpired(
                     "entry request retired: every entry signal in "
@@ -2261,6 +2280,22 @@ class AccountExecutionService:
                     f"final ({type(exc).__name__}: {exc})"
                 )
                 inbox.fail(path, error=terminal)
+                self._inbox_failure_first_ns.pop(path.name, None)
+            elif retry_budget_spent:
+                # No head request may retry forever: past the budget it
+                # retires to failed/ with its last error, and the producer's
+                # next cycle publishes a fresh request. Standing targets are
+                # unaffected — convergence keeps pursuing them either way.
+                _logger.error(
+                    "account request %s retired to failed/ after %.0fs of "
+                    "continuous retries: %s: %s",
+                    request.request_id,
+                    self.inbox_retry_budget_ns / 1e9,
+                    type(exc).__name__,
+                    exc,
+                )
+                inbox.fail(path, error=exc)
+                self._inbox_failure_first_ns.pop(path.name, None)
             else:
                 inbox.release(path)
             # A failing queue head must not starve convergence: reduce-only
@@ -2274,6 +2309,7 @@ class AccountExecutionService:
                 raise terminal from exc
             raise
         inbox.complete(path, receipt)
+        self._inbox_failure_first_ns.pop(path.name, None)
         return receipt
 
     def run_safety_flat_once(

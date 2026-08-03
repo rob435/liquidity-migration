@@ -116,9 +116,11 @@ def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
     assert "future-dated" in future.message
 
 
-def test_unit_states_alert_only_on_terminal_failed() -> None:
-    # Transient restart states (activating/deactivating/inactive) must NOT alert —
-    # they happen on every deploy; only the terminal 'failed' is unambiguous.
+def test_unit_states_alert_only_on_terminal_failed_without_install_state() -> None:
+    # With no `systemctl is-enabled` reading available, a service's transient
+    # restart states (activating/deactivating/inactive) cannot be told apart from
+    # a static oneshot idling between timer runs, so only the terminal 'failed'
+    # is unambiguous. The enabled-but-stopped case is covered separately.
     states = {
         "a.service": "active",
         "b.service": "activating",
@@ -129,6 +131,91 @@ def test_unit_states_alert_only_on_terminal_failed() -> None:
     alerts = M.evaluate_unit_states(states)
     assert {a.key for a in alerts} == {"unit:e.service"}
     assert alerts[0].severity == M.CRITICAL
+
+
+def test_enabled_but_inactive_service_alerts_and_escalates_after_one_interval() -> None:
+    """The 2026-08-01..03 outage's silent shape: a producer whose ``Requires=`` owner
+    failed is left ENABLED and INACTIVE, with no failure of its own. Failed-only
+    alerting saw nothing for two days while the whole fleet was down.
+    """
+    states = {"producer.service": "inactive"}
+    enabled = {"producer.service": "enabled"}
+
+    first = M.evaluate_unit_states(states, unit_enabled_states=enabled)
+    assert [a.key for a in first] == ["unit:producer.service"]
+    assert first[0].severity == M.WARNING
+    assert "ENABLED but INACTIVE" in first[0].message
+    assert "debouncing" in first[0].message
+
+    second = M.evaluate_unit_states(
+        states,
+        unit_enabled_states=enabled,
+        prior_not_active_services={"producer.service"},
+    )
+    assert [a.key for a in second] == ["unit:producer.service"]
+    assert second[0].severity == M.CRITICAL
+    assert "debouncing" not in second[0].message
+
+
+def test_static_and_disabled_services_stay_silent_while_inactive() -> None:
+    """A timer-driven oneshot is inactive between runs by design, and a deliberately
+    disabled sleeve is not a fault. Only an install state that means "should be
+    running" turns inactive into an alert.
+    """
+    states = {
+        "hedge.service": "inactive",
+        "retired.service": "inactive",
+        "runtime.service": "inactive",
+        "unknowable.service": "inactive",
+        "healthy.service": "active",
+    }
+    enabled = {
+        "hedge.service": "static",
+        "retired.service": "disabled",
+        "runtime.service": "enabled-runtime",
+        "unknowable.service": "unknown",
+        "healthy.service": "enabled",
+    }
+    alerts = M.evaluate_unit_states(states, unit_enabled_states=enabled)
+    assert [a.key for a in alerts] == ["unit:runtime.service"]
+
+
+def test_failed_service_reports_the_failure_not_the_install_state() -> None:
+    """``failed`` keeps its own message and its immediate CRITICAL; it must not be
+    demoted to the debounced enabled-but-stopped WARNING.
+    """
+    alerts = M.evaluate_unit_states(
+        {"producer.service": "failed"},
+        unit_enabled_states={"producer.service": "enabled"},
+    )
+    assert [a.key for a in alerts] == ["unit:producer.service"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "is FAILED" in alerts[0].message
+
+
+def test_unit_enabled_states_reads_is_enabled_despite_its_nonzero_exit(monkeypatch) -> None:
+    """``systemctl is-enabled`` exits nonzero for a disabled or static unit and still
+    prints the word, so the status must be ignored and the word kept.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return SimpleNamespace(stdout="static\n", stderr="", returncode=1)
+
+    monkeypatch.setattr(M.subprocess, "run", fake_run)
+    states = M._unit_enabled_states(["a.service", "a.service", "b.timer"])
+
+    assert states == {"a.service": "static"}
+    assert calls == [["systemctl", "is-enabled", "a.service"]]
+
+
+def test_unit_enabled_states_degrades_to_unknown_instead_of_crashing(monkeypatch) -> None:
+    def explode(*_args, **_kwargs):
+        raise OSError("systemctl is unavailable")
+
+    monkeypatch.setattr(M.subprocess, "run", explode)
+    assert M._unit_enabled_states(["a.service"]) == {"a.service": "unknown"}
 
 
 def test_unit_runtime_metadata_uses_systemd_generation_and_boottime(
@@ -531,6 +618,134 @@ def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     )
     assert [alert.key for alert in paper] == ["account_capture_missing_paper"]
     assert "paper account execution" in paper[0].message
+
+    # An owner inside its startup grace has not subscribed yet; a restart is not
+    # an outage. Grace is opt-in, so the calls above are unaffected by it.
+    starting = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=2.0)
+    assert (
+        M.gather_account_capture_alerts(
+            capture_root=tmp_path / "never-written",
+            now_ms=receive_ms,
+            max_age_minutes=3,
+            startup_grace_minutes=10,
+            unit_runtime=starting,
+        )
+        == []
+    )
+    assert (
+        M.gather_account_capture_alerts(
+            capture_root=capture,
+            now_ms=receive_ms + 4 * MIN,
+            max_age_minutes=3,
+            startup_grace_minutes=10,
+            unit_runtime=starting,
+        )
+        == []
+    )
+    # Past the grace window the same two conditions page again.
+    established = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=10.01)
+    assert [
+        alert.key
+        for alert in M.gather_account_capture_alerts(
+            capture_root=capture,
+            now_ms=receive_ms + 4 * MIN,
+            max_age_minutes=3,
+            startup_grace_minutes=10,
+            unit_runtime=established,
+        )
+    ] == ["account_capture_stale"]
+    # An unknown generation earns no grace at all.
+    assert [
+        alert.key
+        for alert in M.gather_account_capture_alerts(
+            capture_root=capture,
+            now_ms=receive_ms + 4 * MIN,
+            max_age_minutes=3,
+            startup_grace_minutes=10,
+            unit_runtime=M.UnitRuntime(invocation_id=None, active_age_minutes=2.0),
+        )
+    ] == ["account_capture_stale"]
+
+
+def test_owner_health_startup_grace_covers_absent_evidence_but_never_a_blocked_owner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The demo owner restarts routinely now that no ExecStartPost gate kills it, and
+    its first health projection lands a cycle later. Paging on that window turns every
+    restart into a CRITICAL. An owner alive enough to report BLOCKED still pages: that
+    is evidence, not the absence of it.
+    """
+    starting = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=3.0)
+    established = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=10.01)
+
+    def stale(*_args, **_kwargs) -> None:
+        raise RuntimeError("account-owner health is stale: age_ns=999")
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", stale)
+    for runtime in (starting,):
+        assert (
+            M.gather_account_owner_health_alerts(
+                account_root=tmp_path,
+                environment="demo",
+                max_age_minutes=1,
+                startup_grace_minutes=10,
+                unit_runtime=runtime,
+            )
+            == []
+        )
+    # Same condition, established generation -> pages.
+    assert [
+        alert.key
+        for alert in M.gather_account_owner_health_alerts(
+            account_root=tmp_path,
+            environment="demo",
+            max_age_minutes=1,
+            startup_grace_minutes=10,
+            unit_runtime=established,
+        )
+    ] == ["account_owner_health:demo"]
+    # No runtime metadata, or no grace configured -> no grace.
+    for runtime, grace in ((None, 10), (starting, 0.0)):
+        assert [
+            alert.key
+            for alert in M.gather_account_owner_health_alerts(
+                account_root=tmp_path,
+                environment="demo",
+                max_age_minutes=1,
+                startup_grace_minutes=grace,
+                unit_runtime=runtime,
+            )
+        ] == ["account_owner_health:demo"]
+
+    def missing(*_args, **_kwargs) -> None:
+        raise ValueError("cannot read account-owner health artifact")
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", missing)
+    assert (
+        M.gather_account_owner_health_alerts(
+            account_root=tmp_path,
+            environment="demo",
+            max_age_minutes=1,
+            startup_grace_minutes=10,
+            unit_runtime=starting,
+        )
+        == []
+    )
+
+    def blocked(*_args, **_kwargs) -> None:
+        raise RuntimeError("account owner is blocked: disaster stop latched")
+
+    monkeypatch.setattr(M, "require_recent_account_owner_health", blocked)
+    inside_grace = M.gather_account_owner_health_alerts(
+        account_root=tmp_path,
+        environment="demo",
+        max_age_minutes=1,
+        startup_grace_minutes=10,
+        unit_runtime=starting,
+    )
+    assert [alert.key for alert in inside_grace] == ["account_owner_health:demo"]
+    assert inside_grace[0].severity == M.CRITICAL
 
 
 def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
@@ -1675,9 +1890,9 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["fake.service"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"fake.service": "failed"})
-    # main() now calls evaluate_unit_states(states, prior_not_active_timers=...) for the
-    # one-interval timer debounce, so the stub must accept that keyword (round 4).
-    monkeypatch.setattr(M, "evaluate_unit_states", lambda states, *, prior_not_active_timers=None: [alert])
+    # main() passes the timer debounce set, the install states, and the service
+    # debounce set; **kwargs keeps this stub from breaking on the next keyword.
+    monkeypatch.setattr(M, "evaluate_unit_states", lambda states, **_kwargs: [alert])
     monkeypatch.setattr(M, "send_telegram_message", lambda line: False)
     monkeypatch.setattr(
         "sys.argv",

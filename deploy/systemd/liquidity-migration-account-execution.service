@@ -12,15 +12,18 @@ EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
-Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
 # No CONTINUOUS_CYCLE_ROOT: the owner then reports no CONTINUOUS gate line.
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution.service main
-ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution.service readiness
+# No ExecStartPost readiness gate: a failing gate killed a live owner that was
+# still draining exits (2026-08-01..03). Every invariant it asserted is enforced
+# at point of use — producers re-check owner health per cycle, queued entries
+# self-expire, exits never expire, submission is gated inside the owner, and the
+# watchdog re-reads the same artifacts every 3 minutes. The readiness module
+# stays for manual and verify use.
 Restart=always
-RestartSec=2
-TimeoutStartSec=240
+RestartSec=5
 KillMode=control-group
 TimeoutStopSec=180
 Nice=-5
@@ -31,7 +34,8 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=768M
+# No MemoryHigh: reclaim throttling on the latency-critical owner stretched
+# venue round-trips into the stale-exposure wedge. MemoryMax already bounds it.
 MemoryMax=1024M
 MemorySwapMax=256M
 

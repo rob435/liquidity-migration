@@ -709,7 +709,6 @@ def test_probe_script_retains_private_self_hashed_failure_receipt(
         raise RuntimeError("synthetic probe failure")
 
     client = Client()
-    monkeypatch.setattr(module, "validate_demo_order_permission", lambda **_params: None)
     monkeypatch.setattr(module, "resolve_demo_credentials", lambda: ("demo-key", "secret"))
     monkeypatch.setattr(module, "api_key_allows_order_submit", lambda _row: (True, ""))
     monkeypatch.setattr(module, "BybitRestRateLimiter", lambda **_params: object())

@@ -231,21 +231,101 @@ def test_resolution_refuses_a_command_that_may_still_be_in_flight(tmp_path: Path
         )
 
 
-def test_resolution_requires_a_named_operator_and_a_reason(tmp_path: Path) -> None:
+def test_operator_and_reason_are_optional_receipts(tmp_path: Path) -> None:
+    """Resolution is authorized by evidence, not by typing intent strings."""
+
     kernel, _clock, wedged_id = _wedged_kernel(tmp_path)
-    for operator, reason, message in (
-        ("", "why", "named operator"),
-        ("owner", "  ", "explicit reason"),
-    ):
-        with pytest.raises(WedgedCommandResolutionRefused, match=message):
-            resolve_wedged_command(
-                kernel=kernel,
-                client=_Venue(),
-                command_id=wedged_id,
-                operator=operator,
-                reason=reason,
-                authorize_absent=True,
-            )
+
+    evidence = resolve_wedged_command(
+        kernel=kernel,
+        client=_Venue(),
+        command_id=wedged_id,
+        authorize_absent=True,
+    )
+
+    assert evidence.classification == "absent"
+    journaled = [
+        event
+        for event in read_account_journal(tmp_path)
+        if str(event.payload.get("command_id") or "") == wedged_id
+        and (event.payload.get("metadata") or {}).get("wedged_command_resolution")
+    ]
+    metadata = journaled[0].payload["metadata"]
+    assert metadata["resolved_by"] == "cli"
+    assert "operator" not in metadata
+    assert "reason" not in metadata
+
+
+def test_an_attempted_command_still_needs_absent_authorization(tmp_path: Path) -> None:
+    """Absence after a real submission attempt may be venue visibility lag."""
+
+    kernel, _clock, wedged_id = _wedged_kernel(tmp_path)
+
+    with pytest.raises(WedgedCommandResolutionRefused, match="absent-order authorization"):
+        resolve_wedged_command(kernel=kernel, client=_Venue(), command_id=wedged_id)
+
+
+def test_a_never_submitted_command_needs_no_absent_authorization(tmp_path: Path) -> None:
+    """The journal proves zero dispatch attempts; venue absence merely confirms it."""
+
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="wedge", clock=clock, id_seed="never")
+    parked = kernel.submit_targets(
+        batch_id="never-dispatched",
+        market_inputs=(_market(),),
+        targets=(_target(5.0, decision="d-never"),),
+        risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 950),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+    )
+    never_id = parked.commands[0].command_id
+    assert kernel.state().orders[never_id].submission_attempts == 0
+    clock.advance_ns(DEFAULT_WEDGE_AFTER_NS + 1_000_000_000)
+
+    evidence = resolve_wedged_command(kernel=kernel, client=_Venue(), command_id=never_id)
+
+    assert evidence.classification == "absent"
+    assert kernel.state().orders[never_id].status == "cancelled"
+
+
+def test_terminal_answer_outranks_a_failed_trade_history_read(tmp_path: Path) -> None:
+    """A rate-limited fills read must not veto an unambiguous Cancelled row."""
+
+    kernel, _clock, wedged_id = _wedged_kernel(tmp_path)
+    venue = _Venue(
+        order_history=[
+            {"orderLinkId": wedged_id, "orderStatus": "Cancelled", "orderId": "v7", "cumExecQty": "0"}
+        ],
+        fail="trade_history",
+    )
+
+    evidence = resolve_wedged_command(
+        kernel=kernel, client=venue, command_id=wedged_id
+    )
+
+    assert evidence.classification == "terminal"
+    assert kernel.state().orders[wedged_id].status == "cancelled"
+
+
+def test_terminal_row_fill_quantity_still_blocks_resolution(tmp_path: Path) -> None:
+    """cumExecQty on the terminal row itself proves unreconstructed fills even
+    when the trade-history read failed."""
+
+    kernel, _clock, wedged_id = _wedged_kernel(tmp_path)
+    venue = _Venue(
+        order_history=[
+            {
+                "orderLinkId": wedged_id,
+                "orderStatus": "PartiallyFilledCanceled",
+                "orderId": "v8",
+                "cumExecQty": "2",
+            }
+        ],
+        fail="trade_history",
+    )
+
+    with pytest.raises(WedgedCommandResolutionRefused, match="let reconciliation reduce"):
+        resolve_wedged_command(kernel=kernel, client=venue, command_id=wedged_id)
 
 
 def test_venue_terminal_status_resolves_without_absent_authorization(tmp_path: Path) -> None:

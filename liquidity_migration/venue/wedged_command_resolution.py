@@ -1,4 +1,4 @@
-"""The operator-authorized exit from a wedged ``commanded`` order.
+"""The evidence-based exit from a wedged or stalled order command.
 
 ``wedged_command_watch`` names and ranks a command that can no longer progress;
 this module supplies the journal transition that resolves one, and the evidence
@@ -6,26 +6,30 @@ standard it must clear. Nothing here resubmits, retries, or recreates an order:
 the only journal effect is terminalizing a command the venue demonstrably does
 not hold, which unfreezes the symbol for ordinary convergence.
 
+On demo the account reconciler runs this automatically every pass
+(``BybitAccountReconciler``), so a wedge self-clears within seconds; this CLI
+remains for mainnet and for manual inspection.
+
 The evidence standard, in order of strictness:
 
 ``live``
     The venue reports a working order under this ``orderLinkId``. Refused: the
     order is real and its executions are still coming.
-``unreadable``
-    A query failed. Refused: an absent answer is not evidence of an absent order.
-``unreconstructed_fills``
-    Executions exist that the journal has not reduced yet. Refused until
-    reconciliation catches up; terminalizing first would lose fills.
 ``terminal``
     The venue's order history reports Cancelled/Rejected/Filled/
     PartiallyFilledCanceled. The resolution records the answer the venue gave.
+    An affirmative terminal row outranks an unrelated failed read.
+``unreadable``
+    Every read failed to produce an answer. Refused: an absent answer is not
+    evidence of an absent order.
+``unreconstructed_fills``
+    Executions exist that the journal has not reduced yet. Refused until
+    reconciliation catches up; terminalizing first would lose fills.
 ``absent``
-    Nothing at the venue under this id, and the command is older than Bybit's own
-    visibility lag. The genuinely ambiguous case, and the only one that consumes
-    operator authorization.
-
-A ``never_submitted`` wedge (``submission_attempts == 0``) is journal-proven never
-to have left the process, but is still probed.
+    Nothing at the venue under this id. Auto-authorized for a
+    ``never_submitted`` wedge (``submission_attempts == 0``: the journal proves
+    nothing was dispatched); an attempted command still takes explicit
+    authorization on the CLI, because absence there may be venue visibility lag.
 """
 
 from __future__ import annotations
@@ -36,9 +40,7 @@ from typing import Any, Mapping, Sequence
 
 from liquidity_migration.account.wedged_command_watch import (
     DEFAULT_WEDGE_AFTER_NS,
-    WEDGE_AMBIGUOUS_SUBMISSION,
     WEDGE_NEVER_SUBMITTED,
-    WEDGE_STALLED_WORKING_ORDER,
     stalled_working_orders,
     wedged_commands,
 )
@@ -51,13 +53,15 @@ __all__ = [
     "main",
     "probe_wedged_command",
     "resolve_wedged_command",
+    "terminalize_wedged_command",
 ]
 
 _logger = logging.getLogger(__name__)
 
 #: Recorded on the terminal event so a resolved wedge is never mistaken for an
-#: ordinary venue cancellation in later accounting.
-RESOLUTION_REJECTION_KEY = "operator_resolved_wedged_command"
+#: ordinary venue cancellation in later accounting. (Events written before
+#: 2026-08-03 carry the older "operator_resolved_wedged_command" spelling.)
+RESOLUTION_REJECTION_KEY = "wedged_command_resolved"
 
 #: Order statuses that mean the venue still holds this order.
 _LIVE_STATUSES = frozenset({"new", "created", "untriggered", "triggered", "partiallyfilled"})
@@ -189,16 +193,11 @@ def probe_wedged_command(
             query_errors=errors,
             detail="the venue still holds a working order under this command id",
         )
-    if errors:
-        return WedgeEvidence(
-            command_id=command_id,
-            symbol=symbol,
-            classification="unreadable",
-            observed_execution_ids=tuple(execution_ids),
-            observed_filled_qty=observed_filled,
-            query_errors=errors,
-            detail="venue truth is incomplete; an absent answer is not an absent order",
-        )
+    # An affirmative terminal answer outranks an unrelated failed read: a
+    # rate-limited trade-history query must not veto an unambiguous Cancelled
+    # row from order history. The row's own cumulative-executed quantity joins
+    # the fill evidence, so the downstream fills check still refuses a
+    # partially-filled cancel even when the trade-history read failed.
     if terminal:
         row = terminal[0]
         return WedgeEvidence(
@@ -208,9 +207,19 @@ def probe_wedged_command(
             venue_order_status=_status(row),
             venue_order_id=str(row.get("orderId") or row.get("order_id") or ""),
             observed_execution_ids=tuple(execution_ids),
-            observed_filled_qty=observed_filled,
+            observed_filled_qty=max(observed_filled, _row_cum_exec_qty(row)),
             query_errors=errors,
             detail="the venue already answered for this command",
+        )
+    if errors:
+        return WedgeEvidence(
+            command_id=command_id,
+            symbol=symbol,
+            classification="unreadable",
+            observed_execution_ids=tuple(execution_ids),
+            observed_filled_qty=observed_filled,
+            query_errors=errors,
+            detail="venue truth is incomplete; an absent answer is not an absent order",
         )
     if matched:
         row = matched[0]
@@ -240,55 +249,34 @@ def _status(row: Mapping[str, Any]) -> str:
     return str(row.get("orderStatus") or row.get("order_status") or "").strip().lower()
 
 
-def resolve_wedged_command(
+def _row_cum_exec_qty(row: Mapping[str, Any]) -> float:
+    try:
+        return abs(float(row.get("cumExecQty") or row.get("cum_exec_qty") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def terminalize_wedged_command(
     *,
     kernel: Any,
-    client: Any,
-    command_id: str,
-    operator: str,
-    reason: str,
+    order: Any,
+    wedge: Any,
+    evidence: WedgeEvidence,
+    now_ns: int,
+    resolved_by: str,
     authorize_absent: bool = False,
-    now_ns: int | None = None,
-    wedge_after_ns: int = DEFAULT_WEDGE_AFTER_NS,
+    operator: str = "",
+    reason: str = "",
 ) -> WedgeEvidence:
-    """Terminalize one wedged command, on evidence, under a named operator.
+    """Terminalize one wedged command on venue evidence.
 
-    Returns the evidence that justified it, or raises
-    :class:`WedgedCommandResolutionRefused` when the evidence does not support
-    the transition.
+    Shared by the operator CLI and the demo reconciler's automatic pass. Every
+    refusal here is evidence-based: a live venue order, an unreadable venue,
+    or venue fills the journal has not reduced yet refuse the transition in
+    every realm, automated or not.
     """
 
-    operator = str(operator).strip()
-    reason = str(reason).strip()
-    if not operator:
-        raise WedgedCommandResolutionRefused("resolution requires a named operator")
-    if not reason:
-        raise WedgedCommandResolutionRefused("resolution requires an explicit reason")
-
-    state = kernel._state_ref()
-    order = state.orders.get(command_id)
-    if order is None:
-        raise WedgedCommandResolutionRefused(f"unknown command {command_id!r}")
-    if order.status not in ("commanded", "acknowledged", "partially_filled"):
-        raise WedgedCommandResolutionRefused(
-            f"command {command_id} is {order.status}, not a working order; "
-            "there is no wedge to resolve"
-        )
-    observed_ns = int(now_ns if now_ns is not None else kernel.clock.wall_time_ns())
-    wedges = {
-        wedge.command_id: wedge
-        for wedge in (
-            *wedged_commands([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
-            *stalled_working_orders([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
-        )
-    }
-    wedge = wedges.get(command_id)
-    if wedge is None:
-        raise WedgedCommandResolutionRefused(
-            f"command {command_id} is younger than the wedge bound; it may still be in flight"
-        )
-
-    evidence = probe_wedged_command(client=client, command_id=command_id, symbol=order.symbol)
+    command_id = str(order.command_id)
     if evidence.classification == "live":
         raise WedgedCommandResolutionRefused(
             f"refusing to resolve {command_id}: {evidence.detail} "
@@ -314,36 +302,97 @@ def resolve_wedged_command(
         )
 
     status = "partially_filled_cancelled" if abs(order.filled_signed_qty) > 0.0 else "cancelled"
+    metadata: dict[str, Any] = {
+        "wedged_command_resolution": True,
+        "wedge_kind": wedge.kind,
+        "wedge_age_ns": wedge.age_ns,
+        "blocked_exit": wedge.blocks_exit,
+        "resolved_by": resolved_by,
+        "authorized_absent_order": bool(
+            evidence.classification == "absent" and authorize_absent
+        ),
+        "venue_evidence": evidence.as_metadata(),
+    }
+    if operator:
+        metadata["operator"] = operator
+    if reason:
+        metadata["reason"] = reason
     kernel.record_order_status(
         command_id=command_id,
         status=status,
         cumulative_filled_qty=abs(order.filled_signed_qty),
         exchange_ts_ns=0,
-        local_receive_ts_ns=observed_ns,
+        local_receive_ts_ns=int(now_ns),
         rejection_key=RESOLUTION_REJECTION_KEY,
-        metadata={
-            "wedged_command_resolution": True,
-            "wedge_kind": wedge.kind,
-            "wedge_age_ns": wedge.age_ns,
-            "blocked_exit": wedge.blocks_exit,
-            "operator": operator,
-            "reason": reason,
-            "authorized_absent_order": bool(
-                evidence.classification == "absent" and authorize_absent
-            ),
-            "venue_evidence": evidence.as_metadata(),
-        },
+        metadata=metadata,
     )
     _logger.warning(
-        "resolved wedged command %s (%s) as %s on %s evidence, authorized by %s: %s",
+        "resolved wedged command %s (%s) as %s on %s evidence by %s%s",
         command_id,
         wedge.kind,
         status,
         evidence.classification,
-        operator,
-        reason,
+        resolved_by,
+        f": {reason}" if reason else "",
     )
     return evidence
+
+
+def resolve_wedged_command(
+    *,
+    kernel: Any,
+    client: Any,
+    command_id: str,
+    operator: str = "",
+    reason: str = "",
+    authorize_absent: bool = False,
+    now_ns: int | None = None,
+    wedge_after_ns: int = DEFAULT_WEDGE_AFTER_NS,
+) -> WedgeEvidence:
+    """Resolve one wedged command from the CLI, on the shared evidence core.
+
+    A journal-proven ``never_submitted`` command (zero submission attempts)
+    needs no absent-order authorization: the journal proves nothing was
+    dispatched and the venue confirms nothing exists. Attempted commands keep
+    the authorization step, because absence there may still be venue
+    visibility lag.
+    """
+
+    state = kernel._state_ref()
+    order = state.orders.get(command_id)
+    if order is None:
+        raise WedgedCommandResolutionRefused(f"unknown command {command_id!r}")
+    if order.status not in ("commanded", "acknowledged", "partially_filled"):
+        raise WedgedCommandResolutionRefused(
+            f"command {command_id} is {order.status}, not a working order; "
+            "there is no wedge to resolve"
+        )
+    observed_ns = int(now_ns if now_ns is not None else kernel.clock.wall_time_ns())
+    wedges = {
+        wedge.command_id: wedge
+        for wedge in (
+            *wedged_commands([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
+            *stalled_working_orders([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
+        )
+    }
+    wedge = wedges.get(command_id)
+    if wedge is None:
+        raise WedgedCommandResolutionRefused(
+            f"command {command_id} is younger than the wedge bound; it may still be in flight"
+        )
+
+    evidence = probe_wedged_command(client=client, command_id=command_id, symbol=order.symbol)
+    return terminalize_wedged_command(
+        kernel=kernel,
+        order=order,
+        wedge=wedge,
+        evidence=evidence,
+        now_ns=observed_ns,
+        resolved_by="cli",
+        authorize_absent=bool(authorize_absent) or wedge.kind == WEDGE_NEVER_SUBMITTED,
+        operator=str(operator).strip(),
+        reason=str(reason).strip(),
+    )
 
 
 def _fill_tolerance(signed_qty: float) -> float:
@@ -359,25 +408,12 @@ def describe_wedges(
     """Operator-readable lines, worst first, for a read-only report."""
 
     return tuple(
-        f"{wedge.describe()} [{_KIND_ADVICE[wedge.kind]}]"
+        wedge.describe()
         for wedge in (
             *wedged_commands(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
             *stalled_working_orders(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
         )
     )
-
-
-_KIND_ADVICE = {
-    WEDGE_AMBIGUOUS_SUBMISSION: (
-        "the answer was lost; the venue may hold a live order, so probe before resolving"
-    ),
-    WEDGE_NEVER_SUBMITTED: (
-        "journal-proven never dispatched; still probed before any resolution"
-    ),
-    WEDGE_STALLED_WORKING_ORDER: (
-        "venue-side order whose terminal status never arrived; a live probe refuses resolution"
-    ),
-}
 
 
 # --------------------------------------------------------------------------
@@ -404,17 +440,29 @@ def _parser() -> Any:
     probe = commands.add_parser("probe", help="Read venue truth for one command. Reads only.")
     probe.add_argument("--command-id", required=True)
     resolve = commands.add_parser(
-        "resolve", help="Terminalize one wedged command on evidence."
+        "resolve", help="Terminalize wedged commands on evidence."
     )
-    resolve.add_argument("--command-id", required=True)
-    resolve.add_argument("--operator", required=True, help="Who is authorizing this.")
-    resolve.add_argument("--reason", required=True, help="What they checked, and what they saw.")
+    resolve.add_argument("--command-id", help="One command to resolve.")
+    resolve.add_argument(
+        "--all",
+        action="store_true",
+        help="Sweep every wedged command; resolve the ones the evidence clears.",
+    )
+    resolve.add_argument("--operator", default="", help="Optional: recorded in the journal event.")
+    resolve.add_argument("--reason", default="", help="Optional: recorded in the journal event.")
+    resolve.add_argument(
+        "--wedge-after-seconds",
+        type=float,
+        default=DEFAULT_WEDGE_AFTER_NS / 1_000_000_000,
+        help="Age past which a working command counts as wedged.",
+    )
     resolve.add_argument(
         "--authorize-absent-order",
         action="store_true",
         help=(
-            "Required only when the venue reports nothing at all under this id. "
-            "Absence is strong evidence, not proof: confirm the account by hand first."
+            "Needed only for a command that WAS attempted and now shows nothing "
+            "at the venue (possible visibility lag). Journal-proven "
+            "never-submitted commands need no authorization."
         ),
     )
     return parser
@@ -466,6 +514,39 @@ def main(argv: Any = None) -> int:
         print(json.dumps(evidence.as_metadata(), indent=2, sort_keys=True))
         return 0
 
+    wedge_after_ns = max(int(args.wedge_after_seconds * 1_000_000_000), 0)
+    if bool(args.all) == bool(args.command_id):
+        print("resolve takes exactly one of --command-id or --all", file=sys.stderr)
+        return 2
+
+    if args.all:
+        orders = list(kernel._state_ref().orders.values())
+        targets = (
+            *wedged_commands(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
+            *stalled_working_orders(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
+        )
+        results = []
+        for wedge in targets:
+            try:
+                evidence = resolve_wedged_command(
+                    kernel=kernel,
+                    client=client,
+                    command_id=wedge.command_id,
+                    operator=args.operator,
+                    reason=args.reason,
+                    authorize_absent=args.authorize_absent_order,
+                    now_ns=now_ns,
+                    wedge_after_ns=wedge_after_ns,
+                )
+            except WedgedCommandResolutionRefused as exc:
+                results.append({"command_id": wedge.command_id, "resolved": False, "refused": str(exc)})
+            else:
+                results.append(
+                    {"command_id": wedge.command_id, "resolved": True, **evidence.as_metadata()}
+                )
+        print(json.dumps({"results": results}, indent=2, sort_keys=True))
+        return 0
+
     try:
         evidence = resolve_wedged_command(
             kernel=kernel,
@@ -475,6 +556,7 @@ def main(argv: Any = None) -> int:
             reason=args.reason,
             authorize_absent=args.authorize_absent_order,
             now_ns=now_ns,
+            wedge_after_ns=wedge_after_ns,
         )
     except WedgedCommandResolutionRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)

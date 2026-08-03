@@ -7,8 +7,10 @@ evidence, not a trading-domain event, and must not move execution state hashes.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -25,6 +27,8 @@ from liquidity_migration.account.account_kernel import read_account_journal_head
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
+
+_logger = logging.getLogger(__name__)
 
 ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 2
 ACCOUNT_OWNER_HEALTH_FILENAME = "account_owner_health.json"
@@ -84,13 +88,32 @@ def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOC
 
 def require_systemd_invocation_id(
     environment: Mapping[str, str] | None = None,
+    *,
+    require_systemd: bool = True,
 ) -> str:
-    """Read and strictly validate the current service generation from systemd."""
+    """Read and strictly validate the current service generation from systemd.
+
+    Run by hand there is no ``INVOCATION_ID``. A funded owner must be the one
+    systemd supervises, so mainnet still refuses to start without it. Demo and
+    paper synthesize a generation id of the same shape and say so loudly: the
+    id only has to be unique per process for health and capture to be bound to
+    one generation.
+
+    A present but malformed value is a fault either way and still raises.
+    """
 
     source = os.environ if environment is None else environment
     value = source.get("INVOCATION_ID")
     if value is None:
-        raise RuntimeError("systemd INVOCATION_ID is required for account-owner startup")
+        if require_systemd:
+            raise RuntimeError("systemd INVOCATION_ID is required for account-owner startup")
+        generation = secrets.token_hex(16)
+        _logger.warning(
+            "no systemd INVOCATION_ID: this owner is not systemd-supervised; "
+            "synthesized generation id %s for its health and capture projections",
+            generation,
+        )
+        return generation
     try:
         return validate_systemd_invocation_id(value)
     except ValueError as exc:

@@ -15,47 +15,12 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-case "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_EXECUTION_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$paper_kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-
+# The route a producer publishes onto is EXECUTION_ENVIRONMENT plus its owner
+# roots. The kernel-latch variables only restated what the unit files already
+# hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
+    demo | paper) ;;
     mainnet)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
         # The unit strips these; fail loudly if the strip ever misses.
         if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
             echo "A target producer must not receive venue credentials." >&2
@@ -125,11 +90,6 @@ ws_klines_args+=(--ws-klines-universe-refresh-seconds "$WS_KLINES_UNIVERSE_REFRE
 ws_klines_args+=(--ws-klines-topics-per-connection "$WS_KLINES_TOPICS_PER_CONNECTION")
 ws_klines_args+=(--ws-klines-stale-warning-seconds "$WS_KLINES_STALE_WARNING_SECONDS")
 ws_klines_args+=(--ws-klines-stale-reconnect-seconds "$WS_KLINES_STALE_RECONNECT_SECONDS")
-
-if [[ "${TELEGRAM_ENABLED:-0}" != "0" ]]; then
-    echo "Sleeve Telegram is retired; the account execution owner owns notifications." >&2
-    exit 2
-fi
 
 target_route_args=(
     --strategy-profile "$LONG_STRATEGY_PROFILE"

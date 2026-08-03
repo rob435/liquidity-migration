@@ -28,16 +28,25 @@ from liquidity_migration.core.deterministic_serialization import canonical_json
 REGISTERED_MAX_DEMO_RULE_AGE_HOURS = 168.0
 
 
-def require_registered_demo_rule_max_age_hours(value: object) -> float:
+def require_registered_demo_rule_max_age_hours(
+    value: object,
+    *,
+    enforce_registered_ceiling: bool = True,
+) -> float:
+    """Validate the instrument-rule receipt age bound.
+
+    Mainnet holds the registered 168-hour ceiling. Demo and paper only need a
+    finite positive value: with a stale receipt and a probe that will not run,
+    a hard ceiling leaves no way to start the owner short of a code deploy.
+    """
+
     try:
         hours = float(str(value))
     except (TypeError, ValueError) as exc:
         raise ValueError("max demo rule age must be numeric") from exc
-    if (
-        not math.isfinite(hours)
-        or hours <= 0.0
-        or hours > REGISTERED_MAX_DEMO_RULE_AGE_HOURS
-    ):
+    if not math.isfinite(hours) or hours <= 0.0:
+        raise ValueError("max demo rule age must be finite and positive")
+    if enforce_registered_ceiling and hours > REGISTERED_MAX_DEMO_RULE_AGE_HOURS:
         raise ValueError("max demo rule age cannot exceed the registered 168 hours")
     return hours
 

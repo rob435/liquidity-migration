@@ -22,7 +22,6 @@ ACTIVE_MARKET_DATA_PRODUCERS = (
     "marketdata/kline_stream_manager.py",
     "strategy/long_native_event_demo.py",
     "strategy/long_native_event_demo_daemon.py",
-    "data/universe.py",
 )
 PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.marketdata.bybit_market_data",

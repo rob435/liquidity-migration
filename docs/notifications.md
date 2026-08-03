@@ -41,9 +41,10 @@ never arrived — which is what the watchdog reads.
 ## The liveness watchdog
 
 [`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per timer fire,
-every 3 minutes after a 10-minute cold-start grace. `--account-scope` selects `demo`, `demo-paper`,
-or `mainnet`; the mainnet scope runs only the mainnet owner and producers against roots disjoint
-from demo and paper.
+every 3 minutes. The demo timer's first pass is 1 minute after it arms, the mainnet timer's is 10;
+cold-start noise is absorbed by a per-unit startup grace inside the watchdog rather than by staying
+blind. `--account-scope` selects `demo`, `demo-paper`, or `mainnet`; the mainnet scope runs only the
+mainnet owner and producers against roots disjoint from demo and paper.
 
 It **always exits 0**. A watchdog that crash-loops is a watchdog that is off, so a failure to verify
 degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120` sits under the
@@ -54,6 +55,18 @@ freshness; per-sleeve producer cycle age; demo/paper book agreement; the frozen 
 remaining life; residual-momentum signal staleness; the committed hedge model prior; oneshot
 run duration; free disk; and the owner's digest.
 
+On unit states it pages for a `failed` unit, a timer that is not active, and a service that
+`systemctl is-enabled` calls enabled while `is-active` says it is not running. That last one is the
+shape the 2026-08-01..03 outage took — a producer whose owner dependency failed is left stopped with
+no failure of its own — and failed-only alerting saw nothing for two days. Static and disabled units
+stay silent: a timer-driven oneshot is idle between runs by design. Timers and enabled services both
+warn on the first observation and escalate to CRITICAL on the second consecutive one.
+
+A restarting account owner has no fresh health projection or L2 readiness for a moment. Inside a
+unit's startup grace — a known current systemd generation, younger than `--max-cycle-age-min` — the
+missing-evidence pages are suppressed. An owner alive enough to report *blocked* still pages: that
+is evidence, not the absence of it.
+
 | Threshold | Default | Meaning |
 | --- | --- | --- |
 | `--max-cycle-age-min` | 10 | no producer cycle within this many minutes |
@@ -62,7 +75,7 @@ run duration; free disk; and the owner's digest.
 | `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
 | `--max-rmom-stale-days` | 2 | residual-momentum gate's newest day |
 | `--max-oneshot-run-seconds` | 180 | a completed periodic oneshot ran longer than this |
-| `--cooldown-min` | 30 | re-alert interval; **deployed as 360 for demo, 60 for mainnet** |
+| `--cooldown-min` | 30 | re-alert interval; **deployed as 60 for both demo and mainnet** |
 
 ### How an alert behaves
 

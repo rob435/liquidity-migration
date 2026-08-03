@@ -8,7 +8,8 @@
 # target while this is converging, and the module reports that rather than
 # fighting it. Stop the producing sleeve first.
 #
-# Dry run unless --execute is passed.
+# Dry run unless --execute is passed. --environment is required and has no
+# default; --reason defaults to "operator flatten".
 
 set -euo pipefail
 
@@ -56,7 +57,7 @@ case "$ENVIRONMENT" in
         exit 2
         ;;
 esac
-[ -n "$REASON" ] || { echo "--reason is required" >&2; exit 2; }
+[ -n "$REASON" ] || REASON="operator flatten"
 [ -f "$ENVIRONMENT_FILE" ] || {
     echo "no owner environment for '$ENVIRONMENT' at $ENVIRONMENT_FILE" >&2
     exit 2

@@ -2,7 +2,7 @@
 """Read-only repository and developer-environment diagnostics.
 
 Reports the local facts that commonly make repository work misleading: a dirty
-tree, dependency drift, broken skill mirrors, missing navigation tooling.
+tree, dependency drift, and a broken skill-tree link.
 """
 
 from __future__ import annotations
@@ -106,25 +106,25 @@ def _skill_tree(root: Path) -> dict[str, str]:
 
 
 def skill_mirror_report(repository: Path) -> dict[str, Any]:
+    # One skill tree, two names: `.claude/skills` is a symlink into
+    # `.codex/skills`, so an edit lands once instead of being hand-copied and
+    # hash-compared across two trees.
     canonical_root = repository / ".codex" / "skills"
     mirror_root = repository / ".claude" / "skills"
     canonical = _skill_tree(canonical_root)
-    mirror = _skill_tree(mirror_root)
-    canonical_only = sorted(set(canonical) - set(mirror))
-    mirror_only = sorted(set(mirror) - set(canonical))
-    mismatched = sorted(path for path in set(canonical) & set(mirror) if canonical[path] != mirror[path])
-    missing_root = [str(path) for path in (canonical_root, mirror_root) if not path.is_dir()]
-    matched = bool(canonical) and not missing_root and not canonical_only and not mirror_only and not mismatched
+    resolved_equal = (
+        canonical_root.is_dir()
+        and mirror_root.exists()
+        and mirror_root.resolve() == canonical_root.resolve()
+    )
+    matched = bool(canonical) and resolved_equal
     return {
         "status": "matched" if matched else "error",
         "canonical_root": str(canonical_root),
         "mirror_root": str(mirror_root),
         "canonical_file_count": len(canonical),
-        "mirror_file_count": len(mirror),
-        "missing_roots": missing_root,
-        "canonical_only": canonical_only,
-        "mirror_only": mirror_only,
-        "mismatched": mismatched,
+        "mirror_is_link": mirror_root.is_symlink(),
+        "resolved_equal": resolved_equal,
     }
 
 
@@ -174,29 +174,11 @@ def git_report(repository: Path) -> dict[str, Any]:
     }
 
 
-def graphify_report(repository: Path) -> dict[str, Any]:
-    executable = shutil.which("graphify")
-    report = repository / "graphify-out" / "GRAPH_REPORT.md"
-    if executable is None:
-        status = "missing_tool"
-    elif not report.is_file():
-        status = "missing_report"
-    else:
-        status = "ready"
-    return {
-        "status": status,
-        "executable": executable,
-        "report": str(report),
-        "report_exists": report.is_file(),
-    }
-
-
 def build_report(repository: Path, *, strict_lock: bool = False) -> dict[str, Any]:
     python_supported = sys.version_info[:2] >= MINIMUM_PYTHON
     lock = dependency_lock_report(repository)
     skills = skill_mirror_report(repository)
     git = git_report(repository)
-    graphify = graphify_report(repository)
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -205,16 +187,14 @@ def build_report(repository: Path, *, strict_lock: bool = False) -> dict[str, An
     if git["status"] == "error":
         errors.append(f"Git inspection failed: {git['error']}")
     if skills["status"] != "matched":
-        errors.append("Codex and Claude project skill trees are not mechanical mirrors")
+        errors.append(
+            "`.claude/skills` must be a symlink resolving to `.codex/skills`"
+        )
     if lock["status"] == "error":
         errors.append(f"Dependency lock inspection failed: {lock['error']}")
     elif lock["status"] == "drift":
         message = "The selected Python environment does not match requirements.lock"
         (errors if strict_lock else warnings).append(message)
-    if graphify["status"] == "missing_tool":
-        warnings.append("Graphify is unavailable; direct source navigation still works")
-    elif graphify["status"] == "missing_report":
-        warnings.append("Graphify is installed but the repository report is missing")
 
     overall = "error" if errors else "warning" if warnings else "ready"
     return {
@@ -230,7 +210,6 @@ def build_report(repository: Path, *, strict_lock: bool = False) -> dict[str, An
         "git": git,
         "dependency_lock": lock,
         "skill_mirrors": skills,
-        "graphify": graphify,
         "diagnostics": {"errors": errors, "warnings": warnings},
     }
 
@@ -240,7 +219,6 @@ def format_human(report: Mapping[str, Any]) -> str:
     git = report["git"]
     lock = report["dependency_lock"]
     skills = report["skill_mirrors"]
-    graphify = report["graphify"]
     lines = [f"repository: {report['repository']}"]
     python_label = "ok" if python["supported"] else "error"
     lines.append(f"[{python_label}] python {python['version']} ({python['executable']})")
@@ -264,11 +242,11 @@ def format_human(report: Mapping[str, Any]) -> str:
         for item in lock["mismatched"]:
             lines.append(f"  {item['name']}: installed {item['installed']}, expected {item['expected']}")
     if skills["status"] == "matched":
-        lines.append(f"[ok] skill mirrors: {skills['canonical_file_count']} file(s) matched")
+        lines.append(f"[ok] skills: {skills['canonical_file_count']} file(s), one linked tree")
     else:
-        lines.append("[error] skill mirrors differ; inspect --json output for exact paths")
-    graph_label = "ok" if graphify["status"] == "ready" else "warn"
-    lines.append(f"[{graph_label}] graphify: {graphify['status']} ({graphify['report']})")
+        lines.append(
+            "[error] .claude/skills must be a symlink to .codex/skills; inspect --json output"
+        )
     lines.append(f"overall: {report['overall']}")
     return "\n".join(lines)
 

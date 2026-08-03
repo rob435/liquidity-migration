@@ -393,8 +393,10 @@ lm_verify_guarded_unit_surfaces() {
                 return 1
                 ;;
         esac
+        # Only the mainnet owner still gates startup on a readiness ExecStartPost;
+        # the demo owner's was removed after it killed a live owner mid-drain.
         case "$_lvgus_unit" in
-            liquidity-migration-account-execution.service | liquidity-migration-account-paper-execution.service | liquidity-migration-account-execution-mainnet.service)
+            liquidity-migration-account-execution-mainnet.service)
                 _lvgus_post="$(systemctl show "$_lvgus_unit" --property=ExecStartPost --value --no-pager)" || return 1
                 case "$_lvgus_post" in
                     *"argv[]=/opt/liquidity-migration/scripts/run_authorized_runtime.sh $_lvgus_unit readiness ;"*) ;;

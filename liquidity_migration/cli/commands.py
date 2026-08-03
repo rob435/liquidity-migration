@@ -6,14 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from liquidity_migration.data.archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
-from liquidity_migration.data.archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
+from liquidity_migration.data.archive_manifest import ArchiveHourlyKlineApiDownloadConfig
 from liquidity_migration.data.archive_manifest import ArchiveManifestConfig, run_archive_manifest
 from liquidity_migration.data.archive_manifest import _safe_name as _archive_safe_name
-from liquidity_migration.data.archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
+from liquidity_migration.data.archive_manifest import run_archive_hourly_klines_api_download
 from liquidity_migration.core.config import (
-    DEFAULT_EXCLUDED_SYMBOLS,
     ResearchConfig,
-    UniverseConfig,
     ensure_data_root_exists,
     load_config,
 )
@@ -27,15 +25,12 @@ from liquidity_migration.data.downloaders import (
 )
 from liquidity_migration.data.ingestion import generate_fixture_data
 from liquidity_migration.data.pit_coverage import coverage_status, format_coverage
-from liquidity_migration.data.universe import _safe_name as _universe_safe_name
-from liquidity_migration.data.universe import run_discover_universe
 from liquidity_migration.cli.parsers import (  # argparse subcommand builders (extracted); build_parser() calls these
     _add_archive_download_klines_1h_api_parser,
-    _add_archive_download_klines_1h_parser,
     _add_archive_manifest_parser,
     _add_carry_demo_cycle_parser,
     _add_continuous_event_demo_cycle_parser,
-    _add_discover_universe_parser,
+    _add_coverage_parser,
     _add_download_binance_proxy_parser,
     _add_download_data_parser,
     _add_long_native_event_demo_cycle_parser,
@@ -82,9 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_download_data_parser(subparsers)
     _add_download_binance_proxy_parser(subparsers)
-    _add_discover_universe_parser(subparsers)
+    _add_coverage_parser(subparsers)
     _add_archive_manifest_parser(subparsers)
-    _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_continuous_event_demo_cycle_parser(subparsers)
@@ -152,10 +146,18 @@ def _cmd_download_data(args: argparse.Namespace, config: ResearchConfig, data_ro
         from liquidity_migration.data.archive_manifest import run_archive_manifest as _run_archive_manifest
 
         end = (_dt.datetime.now(_dt.timezone.utc).date() + _dt.timedelta(days=2)).isoformat()
+        # Same scope as the printed remediation: a one-week overlap window
+        # behind the latest signal day, not a full-epoch rescan.
+        pre = coverage_status(data_root)
+        window_start = (
+            (pre.latest_signal_trading_day - _dt.timedelta(days=7)).isoformat()
+            if pre.latest_signal_trading_day is not None
+            else None
+        )
         try:
             _run_archive_manifest(
                 data_root,
-                config=ArchiveManifestConfig(end=end),
+                config=ArchiveManifestConfig(start=window_start, end=end),
             )
             print(f"archive_trade_manifest refreshed (end={end}).", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - never fail the download on a manifest refresh
@@ -191,15 +193,8 @@ def _cmd_download_binance_proxy(args: argparse.Namespace, config: ResearchConfig
     return 0
 
 
-def _cmd_discover_universe(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-    universe_config = _universe_config_from_args(config.universe, args)
-    payload = run_discover_universe(data_root, config=config, universe_config=universe_config, name=args.name)
-    # Report the sanitized on-disk name.
-    print(
-        f"universe rows={payload['rows']} "
-        f"path={data_root / 'reports' / ('universe_' + _universe_safe_name(args.name) + '.md')}"
-    )
-    print(payload["symbol_csv"])
+def _cmd_coverage(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
+    print(format_coverage(coverage_status(data_root)))
     return 0
 
 
@@ -226,31 +221,6 @@ def _cmd_archive_manifest(args: argparse.Namespace, config: ResearchConfig, data
     if survivorship_warning:
         print(f"WARNING: {survivorship_warning}")
     return 0
-
-
-def _cmd_archive_download_klines_1h(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-    kline_config_1h = ArchiveHourlyKlineDownloadConfig(
-        start=args.start,
-        end=args.end,
-        symbols=_csv_str(args.symbols, ()),
-        max_rows=args.max_rows,
-        workers=args.workers,
-        missing_only=not args.include_existing,
-        min_existing_bars=args.min_existing_bars,
-        discard_archives_after_success=args.discard_archives_after_success,
-        name=args.name,
-    )
-    payload = run_archive_hourly_klines_download(data_root, config=kline_config_1h)
-    print(
-        "archive 1h klines "
-        f"rows={payload['rows']} "
-        f"downloaded={payload['downloaded']} "
-        f"cached={payload['cached']} "
-        f"archives_deleted={payload.get('archives_deleted', 0)} "
-        f"failed={payload['failures']} "
-        f"path={data_root / 'reports' / ('archive_klines_1h_' + _archive_safe_name(args.name) + '.md')}"
-    )
-    return 1 if payload["failures"] else 0
 
 
 def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
@@ -526,9 +496,8 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
 _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Path], int]] = {
     "download-data": _cmd_download_data,
     "download-binance-proxy": _cmd_download_binance_proxy,
-    "discover-universe": _cmd_discover_universe,
+    "coverage": _cmd_coverage,
     "archive-manifest": _cmd_archive_manifest,
-    "archive-download-klines-1h": _cmd_archive_download_klines_1h,
     "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
     "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
     "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
@@ -587,26 +556,3 @@ def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str
     return requested
 
 
-def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:
-    # --include-excluded and --exclude-defaults contradict each other: one
-    # clears the excluded-symbol list, the other applies it. The precedence
-    # below would silently let include win, so fail loud instead.
-    if args.include_majors and args.exclude_majors:
-        raise RuntimeError("--include-excluded and --exclude-defaults are mutually exclusive; pass at most one.")
-    if args.exclude_symbols is not None:
-        exclude_symbols = _csv_str(args.exclude_symbols, ())
-    elif args.include_majors:
-        exclude_symbols = ()
-    elif args.exclude_majors:
-        exclude_symbols = DEFAULT_EXCLUDED_SYMBOLS
-    else:
-        exclude_symbols = base.exclude_symbols
-    return UniverseConfig(
-        min_turnover_24h=base.min_turnover_24h if args.min_turnover_24h is None else args.min_turnover_24h,
-        min_age_days=base.min_age_days if args.min_age_days is None else args.min_age_days,
-        max_age_days=base.max_age_days if args.max_age_days is None else args.max_age_days,
-        rank_start=base.rank_start if args.rank_start is None else args.rank_start,
-        rank_end=base.rank_end if args.rank_end is None else args.rank_end,
-        max_symbols=base.max_symbols if args.max_symbols is None else args.max_symbols,
-        exclude_symbols=exclude_symbols,
-    )

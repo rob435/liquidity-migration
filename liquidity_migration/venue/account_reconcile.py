@@ -9,12 +9,23 @@ from typing import Any, Callable, Mapping, Sequence
 
 from liquidity_migration.venue.account_execution_stream import BybitAccountExecutionConsumer
 from liquidity_migration.venue.account_service_bybit import inspect_bybit_order_ownership, require_named_realm
+from liquidity_migration.venue.wedged_command_resolution import (
+    WedgedCommandResolutionRefused,
+    probe_wedged_command,
+    terminalize_wedged_command,
+)
 from liquidity_migration.account.account_contracts import (
     AccountEvent,
     AccountEventType,
     InstrumentRules,
 )
 from liquidity_migration.account.account_kernel import AccountExecutionKernel
+from liquidity_migration.account.wedged_command_watch import (
+    WEDGE_AMBIGUOUS_SUBMISSION,
+    WEDGE_STALLED_WORKING_ORDER,
+    stalled_working_orders,
+    wedged_commands,
+)
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import VenueRealm
@@ -36,6 +47,11 @@ POSITION_HEALTH_MAX_AGE_FLOOR_NS = 15 * 1_000_000_000
 # The watchdog requires a journaled venue fact younger than one minute. A
 # 30-second checkpoint leaves room for one delayed reconciliation cycle.
 VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
+# A wedged command is re-probed at most this often, and at most this many per
+# pass: wedges are rare, and a resting acknowledged order must not turn every
+# reconcile pass into three extra REST reads per order.
+WEDGE_PROBE_INTERVAL_NS = 60 * 1_000_000_000
+WEDGE_PROBES_PER_PASS = 5
 
 
 class AccountReconciliationStaleError(RuntimeError):
@@ -78,6 +94,7 @@ class BybitAccountReconciler:
         clock: Clock | None = None,
         settle_coin: str = "USDT",
         health_max_age_floor_ns: int = POSITION_HEALTH_MAX_AGE_FLOOR_NS,
+        auto_resolve_wedges: bool | None = None,
     ) -> None:
         self.realm = require_named_realm(client, label="account reconciler")
         if int(health_max_age_floor_ns) <= 0:
@@ -89,6 +106,16 @@ class BybitAccountReconciler:
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self.settle_coin = settle_coin
         self.native_protection_manager = native_protection_manager
+        # Demo terminalizes dead commands itself on the CLI's evidence ladder;
+        # mainnet only classifies, so the wedge is visible but the transition
+        # stays an operator act.
+        self.auto_resolve_wedges = (
+            (self.realm is not VenueRealm.MAINNET)
+            if auto_resolve_wedges is None
+            else bool(auto_resolve_wedges)
+        )
+        self._wedge_probe_last_ns: dict[str, int] = {}
+        self._wedge_last_classification: dict[str, str] = {}
         self.consumer = BybitAccountExecutionConsumer(
             kernel=kernel,
             native_protection_manager=native_protection_manager,
@@ -196,6 +223,59 @@ class BybitAccountReconciler:
                         local_receive_ts_ns=self.clock.wall_time_ns(),
                     )
 
+        # A command the venue demonstrably does not hold can only be freed by a
+        # terminal journal transition — no venue row will ever arrive for it.
+        # This pass performs that transition automatically on the CLI's own
+        # evidence ladder (a live order or unreduced fills always refuse). On
+        # mainnet it only classifies, so the wedge is visible in health while
+        # the transition stays an operator act.
+        wedge_now_ns = self.clock.wall_time_ns()
+        post_wedge_orders = list(self.kernel._state_ref().orders.values())
+        open_wedges = (
+            *wedged_commands(post_wedge_orders, now_ns=wedge_now_ns),
+            *stalled_working_orders(post_wedge_orders, now_ns=wedge_now_ns),
+        )
+        wedges_resolved = 0
+        open_wedge_ids = {wedge.command_id for wedge in open_wedges}
+        for stale_id in [key for key in self._wedge_probe_last_ns if key not in open_wedge_ids]:
+            self._wedge_probe_last_ns.pop(stale_id, None)
+            self._wedge_last_classification.pop(stale_id, None)
+        probes_this_pass = 0
+        for wedge in open_wedges:
+            if probes_this_pass >= WEDGE_PROBES_PER_PASS:
+                break
+            last_probe_ns = self._wedge_probe_last_ns.get(wedge.command_id, 0)
+            if last_probe_ns > 0 and wedge_now_ns - last_probe_ns < WEDGE_PROBE_INTERVAL_NS:
+                continue
+            wedged_order = self.kernel._state_ref().orders.get(wedge.command_id)
+            if wedged_order is None:
+                continue
+            probes_this_pass += 1
+            self._wedge_probe_last_ns[wedge.command_id] = wedge_now_ns
+            evidence = probe_wedged_command(
+                client=self.client, command_id=wedge.command_id, symbol=wedged_order.symbol
+            )
+            self._wedge_last_classification[wedge.command_id] = evidence.classification
+            if not self.auto_resolve_wedges:
+                continue
+            try:
+                terminalize_wedged_command(
+                    kernel=self.kernel,
+                    order=wedged_order,
+                    wedge=wedge,
+                    evidence=evidence,
+                    now_ns=wedge_now_ns,
+                    resolved_by="account_reconciler",
+                    authorize_absent=True,
+                )
+            except WedgedCommandResolutionRefused:
+                # live / unreadable / unreduced fills: correct refusals. The
+                # wedge stays in the mismatch list below until evidence clears.
+                continue
+            wedges_resolved += 1
+            self._wedge_probe_last_ns.pop(wedge.command_id, None)
+            self._wedge_last_classification.pop(wedge.command_id, None)
+
         raw_positions = self.client.get_positions(settle_coin=self.settle_coin)
         # Freshness starts when position truth is received, not before the
         # preceding REST recovery: admission must age the venue fact itself.
@@ -237,6 +317,26 @@ class BybitAccountReconciler:
             # An ambiguous exposure-creating submission may land at any time,
             # so the reconstructed quantity cannot anchor a stop plan.
             illegible_symbols.add(str(order.symbol).upper())
+        # A wedge that survived the automatic pass is a real health problem:
+        # its symbol cannot converge until the command terminalizes. The
+        # prefix is deliberately not the symbol — a journal-proven phantom
+        # command must not block same-symbol reductions, only entries.
+        for wedge in (
+            *wedged_commands(post_recovery_state.orders.values(), now_ns=observed_ns),
+            *stalled_working_orders(post_recovery_state.orders.values(), now_ns=observed_ns),
+        ):
+            if wedge.kind == WEDGE_AMBIGUOUS_SUBMISSION and not wedge.reduce_only:
+                continue  # already listed as ambiguous_submission_unresolved
+            if wedge.kind == WEDGE_STALLED_WORKING_ORDER:
+                classification = self._wedge_last_classification.get(wedge.command_id, "")
+                if classification not in ("absent", "terminal"):
+                    # A long-lived resting order is normal; only one whose
+                    # venue side is provably gone is stalled.
+                    continue
+            mismatches.append(
+                f"wedged_command:{wedge.kind}:{wedge.symbol}:"
+                f"command={wedge.command_id}:age_s={wedge.age_ns // 1_000_000_000}"
+            )
         native_protection_breach_only = False
         for symbol, sides in sorted(active_sides.items()):
             if len(sides) > 1:
@@ -345,6 +445,7 @@ class BybitAccountReconciler:
                     "order_rows_observed": order_rows,
                     "position_rows_observed": len(position_rows),
                     "venue_order_ownership": ownership_semantics,
+                    "wedged_commands_resolved": wedges_resolved,
                     "source": f"bybit_{self.realm.value}_rest_reconcile",
                 },
             )

@@ -120,13 +120,109 @@ def test_reset_execute_is_forwarded_without_added_dry_run(tmp_path: Path) -> Non
     assert "--dry-run" not in payload
 
 
-def test_mutating_remote_routes_require_explicit_handshake() -> None:
-    assert _run("deploy", "install").returncode == 2
-    assert _run("deploy", "--execute", "verify").returncode == 2
-    assert _run("deploy", "--execute", "rollout").returncode == 2
-    assert _run("deploy", "activate-mainnet").returncode == 2
-    assert _run("deploy", "--execute", "activate-mainnnet").returncode == 2
-    assert _run("deploy", "--execute", "stop").returncode == 2
+def test_deploy_allowlists_modes_and_no_longer_demands_execute() -> None:
+    """`--execute` was a typing tax, not a gate: the deploy script has its own mode
+    allowlist and every real gate lives on the host. It is still accepted so the
+    documented command lines keep working, but the allowlist is what refuses.
+    """
+
+    # `verify` is `status`, not a deploy mode; the rest are not modes at all.
+    for rejected in (
+        ("deploy", "verify"),
+        ("deploy", "--execute", "verify"),
+        ("deploy", "activate-mainnnet"),
+        ("deploy", "stop"),
+        ("deploy",),
+    ):
+        result = _run(*rejected)
+        assert result.returncode == 2, rejected
+        assert "deploy mode must be" in result.stderr, rejected
+
+
+def _ssh_capture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    capture = tmp_path / "capture"
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
+    ssh.chmod(0o700)
+    return capture, {"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)}
+
+
+def test_wedged_command_passes_its_subcommand_through_untouched(tmp_path: Path) -> None:
+    """The module's own venue-evidence refusal is the guard: `resolve` will not
+    terminalize a command the venue still holds. A second `--execute` word in front of
+    it proved nothing and only made the documented command line longer.
+    """
+
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("wedged-command", "resolve", "--command-id", "abc 123", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( resolve --command-id abc\\ 123 )" in payload
+    assert "wedged_command_resolution" in payload
+    assert "--realm demo" in payload
+    # The demo owner's credentials are loaded exactly as the unit loads them.
+    assert ". /etc/liquidity-migration/bybit-demo.env" in payload
+    assert ". /etc/liquidity-migration/account-execution.env" in payload
+
+    report = _run("wedged-command", "report", env=environment)
+    assert report.returncode == 0, report.stderr
+    assert "REMOTE_ARGS=( report )" in capture.read_text(encoding="utf-8")
+
+
+def test_flatten_passes_through_without_reordering(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run(
+        "flatten", "--execute", "--environment", "demo", env=environment
+    )
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( --execute --environment demo )" in payload
+    assert "flatten_account.sh" in payload
+
+
+def test_venue_accounting_runs_on_the_host_where_the_evidence_is(tmp_path: Path) -> None:
+    """Locally there is neither an account journal nor a credential, so the local exec
+    could only ever fail. LOCAL=1 keeps the old behavior for a checkout that has both.
+    """
+
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("venue-accounting", "--start-time-ms", "17", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "reconcile_bybit_demo_accounting.py" in payload
+    assert "--account-root data/bybit-account-execution" in payload
+    assert "REMOTE_ARGS=( --start-time-ms 17 )" in payload
+    assert ". /etc/liquidity-migration/bybit-demo.env" in payload
+
+
+def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+
+    assert _run("units", env=environment).returncode == 0
+    payload = capture.read_text(encoding="utf-8")
+    assert "systemctl list-units 'liquidity-migration-*'" in payload
+    assert "systemctl list-timers 'liquidity-migration-*'" in payload
+
+    assert _run("logs", "bybit-carry-demo.service", env=environment).returncode == 0
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( liquidity-migration-bybit-carry-demo.service 100 )" in payload
+    assert "journalctl -u" in payload
+
+    assert (
+        _run("logs", "liquidity-migration-account-execution.service", "40", env=environment)
+        .returncode
+        == 0
+    )
+    payload = capture.read_text(encoding="utf-8")
+    # An already-qualified name is not prefixed twice.
+    assert "REMOTE_ARGS=( liquidity-migration-account-execution.service 40 )" in payload
+
+    for verb in ("restart", "stop", "start"):
+        assert _run(verb, "bybit-long-demo.service", env=environment).returncode == 0
+        payload = capture.read_text(encoding="utf-8")
+        assert f'exec systemctl {verb} "${{REMOTE_ARGS[@]}}"' in payload
+        assert "REMOTE_ARGS=( liquidity-migration-bybit-long-demo.service )" in payload
+        assert _run(verb, env=environment).returncode == 2
 
 
 def test_real_money_allowlist_covers_the_arming_subcommands() -> None:
@@ -148,8 +244,12 @@ def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Pa
     dry = _run("real-money", "create-state-roots", env=environment)
     assert dry.returncode == 0, dry.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "MODULE=liquidity_migration.policy.real_money_arming" in payload
-    assert "create-state-roots" in payload
+    # The module name is the first serialized argument of `python -m`.
+    assert (
+        "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming create-state-roots )"
+        in payload
+    )
+    assert 'exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' in payload
     assert "--execute" not in payload
 
     executing = _run("real-money", "create-state-roots", "--execute", env=environment)
@@ -157,28 +257,33 @@ def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Pa
     assert "--execute" in capture.read_text(encoding="utf-8")
 
 
-def test_deploy_forwards_every_staged_mode_after_a_valid_handshake(tmp_path: Path) -> None:
+def _deploy_harness(tmp_path: Path) -> tuple[Path, str, Path, dict[str, str]]:
+    """An isolated checkout plus a stub ssh that captures the remote payload."""
+
     checkout, commit = _isolated_deploy_checkout(tmp_path)
     capture = tmp_path / "capture"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     ssh = bin_dir / "ssh"
-    ssh.write_text(
-        "#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n",
-        encoding="utf-8",
-    )
+    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
     ssh.chmod(0o700)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "CAPTURE": str(capture),
+        "EXPECTED_COMMIT": commit,
+        "GITHUB_TOKEN": "test-token",
+    }
+    return checkout, commit, capture, environment
+
+
+def test_deploy_forwards_every_mode_without_an_execute_handshake(tmp_path: Path) -> None:
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
     for mode in ("install", "activate", "activate-mainnet", "stop-mainnet"):
         result = subprocess.run(
-            ["bash", str(checkout / "scripts/ops.sh"), "deploy", "--execute", mode],
+            ["bash", str(checkout / "scripts/ops.sh"), "deploy", mode],
             cwd=checkout,
-            env={
-                **os.environ,
-                "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "CAPTURE": str(capture),
-                "EXPECTED_COMMIT": commit,
-                "GITHUB_TOKEN": "test-token",
-            },
+            env=environment,
             text=True,
             capture_output=True,
             check=False,
@@ -187,30 +292,179 @@ def test_deploy_forwards_every_staged_mode_after_a_valid_handshake(tmp_path: Pat
         assert f"MODE={mode}" in capture.read_text(encoding="utf-8")
 
 
+def test_deploy_still_accepts_and_discards_a_leading_execute(tmp_path: Path) -> None:
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
+    payloads = []
+    for argv in (["deploy", "--execute", "install"], ["deploy", "install"]):
+        result = subprocess.run(
+            ["bash", str(checkout / "scripts/ops.sh"), *argv],
+            cwd=checkout,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        payloads.append(capture.read_text(encoding="utf-8"))
+    # The compatibility word is consumed, never forwarded as a deploy argument:
+    # the two remote programs are byte-identical.
+    assert payloads[0] == payloads[1]
+    assert "MODE=install" in payloads[0]
+
+
+def test_deploy_forwards_staged_with_its_profile(tmp_path: Path) -> None:
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
+    incomplete = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "staged"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert incomplete.returncode == 2
+    assert "--profile" in incomplete.stderr
+    assert not capture.exists()
+
+    complete = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/ops.sh"),
+            "deploy",
+            "staged",
+            "--profile",
+            "demo-operational",
+        ],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert complete.returncode == 0, complete.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "MODE=staged" in payload
+    assert "DEPLOY_PROFILE=demo-operational" in payload
+
+
+def test_expected_commit_defaults_to_the_known_branch_tip(tmp_path: Path) -> None:
+    """An unset EXPECTED_COMMIT is the common case; it defaults to the remote-tracking
+    tip, or to HEAD when there is none. The host still refuses any commit that is not
+    an ancestor of the branch, so the default cannot deploy an unpushed commit.
+    """
+
+    checkout, commit, capture, environment = _deploy_harness(tmp_path)
+    del environment["EXPECTED_COMMIT"]
+
+    without_remote = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert without_remote.returncode == 0, without_remote.stderr
+    assert f"EXPECTED_COMMIT={commit}" in capture.read_text(encoding="utf-8")
+    assert "EXPECTED_COMMIT_EXPLICIT=0" in capture.read_text(encoding="utf-8")
+    assert "(HEAD)" in without_remote.stderr
+
+    # A remote-tracking ref wins over HEAD.
+    subprocess.run(
+        ["git", "-C", str(checkout), "commit", "-q", "--allow-empty", "-m", "later"],
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test Author",
+            "GIT_AUTHOR_EMAIL": "test@example.invalid",
+            "GIT_COMMITTER_NAME": "Test Author",
+            "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        },
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(checkout), "update-ref", "refs/remotes/origin/main", commit],
+        check=True,
+    )
+    with_remote = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert with_remote.returncode == 0, with_remote.stderr
+    assert f"EXPECTED_COMMIT={commit}" in capture.read_text(encoding="utf-8")
+    assert "(origin/main)" in with_remote.stderr
+
+
+def test_the_demo_rule_refresh_is_reachable_by_flag_and_by_the_old_env_var(
+    tmp_path: Path,
+) -> None:
+    """The refresh places live PostOnly orders (<=200 USDT/symbol), so it stays opt-in;
+    it was only ever reachable through an undocumented environment variable.
+    """
+
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
+    default = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert default.returncode == 0, default.stderr
+    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=0" in capture.read_text(encoding="utf-8")
+
+    by_flag = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install", "--refresh-demo-rules"],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert by_flag.returncode == 0, by_flag.stderr
+    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in capture.read_text(encoding="utf-8")
+
+    by_env = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
+        cwd=checkout,
+        env={**environment, "ROLLOUT_REFRESH_STALE_DEMO_RULES": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert by_env.returncode == 0, by_env.stderr
+    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in capture.read_text(encoding="utf-8")
+
+
+def test_an_explicit_expected_commit_is_still_validated(tmp_path: Path) -> None:
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
+    result = subprocess.run(
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
+        cwd=checkout,
+        env={**environment, "EXPECTED_COMMIT": "not-a-commit"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "EXPECTED_COMMIT must be a full lowercase 40-character commit" in result.stderr
+    assert not capture.exists()
+
+
 def test_rollout_requires_and_serializes_an_explicit_profile(
     tmp_path: Path,
 ) -> None:
-    checkout, commit = _isolated_deploy_checkout(tmp_path)
-    capture = tmp_path / "capture"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    ssh = bin_dir / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
     base = [
         "bash",
         str(checkout / "scripts/ops.sh"),
         "deploy",
-        "--execute",
         "rollout",
     ]
-    environment = {
-        **os.environ,
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "CAPTURE": str(capture),
-        "EXPECTED_COMMIT": commit,
-        "GITHUB_TOKEN": "test-token",
-    }
 
     incomplete = subprocess.run(
         base,
@@ -259,7 +513,7 @@ def test_deploy_rejects_tree_object_before_ssh(tmp_path: Path) -> None:
     ssh.chmod(0o700)
 
     result = subprocess.run(
-        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "--execute", "install"],
+        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
         cwd=checkout,
         env={
             **os.environ,
@@ -336,7 +590,7 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
     """
 
     text = (Path(__file__).resolve().parents[2] / "scripts" / "ops.sh").read_text(encoding="utf-8")
-    for array in ("reset_args", "module_args"):
+    for array in ("reset_args", "remote_args"):
         assert f'"${{{array}[@]}}"' not in text.replace(f'${{{array}[@]+"${{{array}[@]}}"}}', "")
         assert f'${{{array}[@]+"${{{array}[@]}}"}}' in text
 
@@ -366,7 +620,9 @@ def test_authenticated_fetch_keeps_the_github_token_off_argv() -> None:
     deploy = (
         Path(__file__).resolve().parents[2] / "scripts" / "deploy_vps_live.sh"
     ).read_text(encoding="utf-8")
-    fetch = deploy[deploy.index("git_fetch() {") : deploy.index("retire_stale_operational_receipt() {")]
+    fetch = deploy[
+        deploy.index("git_fetch() {") : deploy.index("refresh_stale_demo_rules_if_requested() {")
+    ]
     code = "\n".join(
         line for line in fetch.splitlines() if not line.lstrip().startswith("#")
     )

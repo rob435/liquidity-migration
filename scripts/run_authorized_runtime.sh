@@ -114,7 +114,7 @@ case "$UNIT:$ENTRYPOINT" in
             --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
             --account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env
             --max-cycle-age-min 10
-            --cooldown-min 360
+            --cooldown-min 60
             --telegram
         )
         ;;

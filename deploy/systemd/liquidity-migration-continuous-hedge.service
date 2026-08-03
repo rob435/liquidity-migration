@@ -1,7 +1,9 @@
 [Unit]
 Description=Periodic immutable-prior BTC+ETH target hedge for the continuous demo account route
 Wants=network-online.target
-Requires=liquidity-migration-account-execution.service
+# No Requires= on the owner: the hedge publishes into a durable inbox and
+# already degrades in-process when owner health is dead, so a restarting owner
+# must not stop the hedge pass from being scheduled.
 After=network-online.target liquidity-migration-account-execution.service
 
 [Service]

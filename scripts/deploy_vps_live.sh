@@ -4,29 +4,80 @@ set -euo pipefail
 
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
-DEPLOY_PROFILE=""
-if [ "$MODE" = rollout ]; then
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --profile)
-                [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
-                DEPLOY_PROFILE="$2"
-                shift 2
-                ;;
-            *) echo "unknown $MODE argument: $1" >&2; exit 2 ;;
-        esac
-    done
-    case "$DEPLOY_PROFILE" in
-        demo-operational|operational) ;;
-        *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
-    esac
-elif [ "$#" -ne 0 ]; then
-    echo "usage: deploy_vps_live.sh {install|activate|verify|rollout|activate-mainnet|stop-mainnet}" >&2
-    exit 2
-fi
 case "$MODE" in
-    install|activate|verify|rollout|activate-mainnet|stop-mainnet) ;;
+    install|activate|verify|staged|rollout|activate-mainnet|stop-mainnet) ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
+esac
+
+deploy_usage() {
+    cat >&2 <<'USAGE'
+usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|activate-mainnet|stop-mainnet}
+  --profile demo-operational|operational  required for staged and rollout
+  --stop-first / --no-stop-first          install|activate|staged: stop a running
+                                          fleet instead of refusing. Default: stop
+                                          unless a mainnet sleeve is on.
+  --require-flat                          rollout: gate on a flat demo account
+                                          rather than reporting residuals
+  --refresh-demo-rules                    install|staged: re-probe stale demo
+                                          rules (live PostOnly orders, <=200 USDT
+                                          per symbol)
+USAGE
+    exit 2
+}
+
+DEPLOY_PROFILE=""
+STOP_FIRST=auto
+REQUIRE_FLAT=0
+REFRESH_DEMO_RULES="${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
+
+require_mode() {
+    local flag="$1"
+    shift
+    case " $* " in
+        *" $MODE "*) return 0 ;;
+    esac
+    echo "$flag is not a $MODE argument" >&2
+    deploy_usage
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --profile)
+            require_mode --profile staged rollout
+            [ "$#" -ge 2 ] || { echo "--profile requires a value" >&2; exit 2; }
+            DEPLOY_PROFILE="$2"
+            shift 2
+            ;;
+        --stop-first)
+            require_mode --stop-first install activate staged
+            STOP_FIRST=1
+            shift
+            ;;
+        --no-stop-first)
+            require_mode --no-stop-first install activate staged
+            STOP_FIRST=0
+            shift
+            ;;
+        --require-flat)
+            require_mode --require-flat rollout
+            REQUIRE_FLAT=1
+            shift
+            ;;
+        --refresh-demo-rules)
+            require_mode --refresh-demo-rules install staged
+            REFRESH_DEMO_RULES=1
+            shift
+            ;;
+        *) echo "unknown $MODE argument: $1" >&2; deploy_usage ;;
+    esac
+done
+case "$MODE" in
+    staged|rollout)
+        case "$DEPLOY_PROFILE" in
+            demo-operational|operational) ;;
+            *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
+        esac
+        ;;
 esac
 
 SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
@@ -40,9 +91,13 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
 RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"
 
-if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "EXPECTED_COMMIT must be a full lowercase 40-character commit" >&2
-    exit 2
+EXPECTED_COMMIT_EXPLICIT=0
+if [ -n "$EXPECTED_COMMIT" ]; then
+    EXPECTED_COMMIT_EXPLICIT=1
+    if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "EXPECTED_COMMIT must be a full lowercase 40-character commit" >&2
+        exit 2
+    fi
 fi
 if ! /usr/bin/git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "BRANCH is not a valid Git branch" >&2
@@ -52,7 +107,7 @@ for value in "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" "$RMOM_BOOTSTRAP_RETRY_SECONDS"; 
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "RMOM durations must be positive integers" >&2; exit 2; }
 done
 
-if [[ "$MODE" = install || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
+if [[ "$MODE" = install || "$MODE" = staged || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
@@ -70,6 +125,28 @@ LOCAL_GIT=(
     --work-tree="$LOCAL_REPOSITORY" -c core.fsmonitor=false -c core.filemode=true
     -C "$LOCAL_REPOSITORY"
 )
+# Unset means "the tip this checkout knows about": the remote-tracking branch
+# when it exists, otherwise HEAD. The host still refuses any commit that is not
+# an ancestor of $REMOTE/$BRANCH, so a defaulted value cannot deploy something
+# that never reached the branch.
+if [ "$EXPECTED_COMMIT_EXPLICIT" -eq 0 ]; then
+    EXPECTED_COMMIT_SOURCE="$REMOTE/$BRANCH"
+    EXPECTED_COMMIT="$(
+        "${LOCAL_GIT[@]}" rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH^{commit}" \
+            2>/dev/null || true
+    )"
+    if [ -z "$EXPECTED_COMMIT" ]; then
+        EXPECTED_COMMIT_SOURCE=HEAD
+        EXPECTED_COMMIT="$(
+            "${LOCAL_GIT[@]}" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true
+        )"
+    fi
+    [ -n "$EXPECTED_COMMIT" ] || {
+        echo "cannot resolve a default EXPECTED_COMMIT from $REMOTE/$BRANCH or HEAD" >&2
+        exit 2
+    }
+    echo "EXPECTED_COMMIT defaulted to $EXPECTED_COMMIT ($EXPECTED_COMMIT_SOURCE)" >&2
+fi
 if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" != commit ]; then
     echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
     exit 1
@@ -109,12 +186,14 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'REMOTE=%q\n' "$REMOTE"
     printf 'BRANCH=%q\n' "$BRANCH"
     printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
+    printf 'EXPECTED_COMMIT_EXPLICIT=%q\n' "$EXPECTED_COMMIT_EXPLICIT"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
     printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
-    printf 'ROLLOUT_REFRESH_STALE_DEMO_RULES=%q\n' \
-        "${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
+    printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
+    printf 'REQUIRE_FLAT=%q\n' "$REQUIRE_FLAT"
+    printf 'ROLLOUT_REFRESH_STALE_DEMO_RULES=%q\n' "$REFRESH_DEMO_RULES"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
     printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
@@ -741,13 +820,42 @@ require_clean_head() {
     require_clean_checkout_at "$EXPECTED_COMMIT" "exact-commit operation"
 }
 
-require_quiescent() {
-    command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
-    local rows running
+running_liqmig_units() {
+    local rows
     rows="$(systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain 2>/dev/null)" \
         || fail "cannot inspect liquidity-migration units"
-    running="$(printf '%s\n' "$rows" | awk 'NF >= 3 && $3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}')"
-    [ -z "$running" ] || { printf 'quiesce these units first:\n%s\n' "$running" >&2; exit 1; }
+    printf '%s\n' "$rows" \
+        | awk 'NF >= 3 && $3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}'
+}
+
+# STOP_FIRST=auto resolves to "stop" for a pure demo/paper fleet and to the
+# refusal for a funded one. The sleeve toggles have to be loaded first.
+resolve_stop_first() {
+    [ "$STOP_FIRST" = auto ] || return 0
+    if any_mainnet_sleeve_on; then
+        STOP_FIRST=0
+    else
+        STOP_FIRST=1
+    fi
+}
+
+require_quiescent() {
+    command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
+    local running
+    running="$(running_liqmig_units)"
+    [ -n "$running" ] || return 0
+    if [ "${STOP_FIRST:-0}" != 1 ]; then
+        printf 'quiesce these units first:\n%s\n' "$running" >&2
+        exit 1
+    fi
+    printf 'stop-first: stopping the running fleet\n%s\n' "$running"
+    stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
+    stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
+    running="$(running_liqmig_units)"
+    [ -z "$running" ] || {
+        printf 'units still running after stop-first:\n%s\n' "$running" >&2
+        exit 1
+    }
 }
 
 git_fetch() {
@@ -771,18 +879,6 @@ git_fetch() {
     else
         "${GIT_ENV[@]}" GIT_TERMINAL_PROMPT=0 "${GIT_COMMAND[@]}" "$@"
     fi
-}
-
-retire_stale_operational_receipt() {
-    # Hosts upgraded from an older commit still carry the operational-ready
-    # receipt; no unit consults it, so archive it rather than leave a dead gate.
-    local path=/etc/liquidity-migration/account-execution-operational-ready archive stamp
-    [ -e "$path" ] || [ -L "$path" ] || return 0
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    archive="/var/lib/liquidity-migration/retired-authority/$stamp"
-    install -d -m 0700 "$archive"
-    mv "$path" "$archive/$(basename "$path")"
-    echo "retired stale operational receipt: $archive"
 }
 
 # Rollout sets this itself. A staged `install` completing a failed rollout may
@@ -983,6 +1079,12 @@ PY
 install_mode() {
     local installed_head
     require_checkout
+    # The installed checkout's toggles answer one question here: is a funded
+    # sleeve in play? If it is, --stop-first stays off and a running fleet is
+    # refused rather than stopped.
+    . deploy/lib_sleeves.sh
+    lm_load_sleeve_toggles
+    resolve_stop_first
     require_quiescent
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "install"
@@ -1007,15 +1109,9 @@ install_mode() {
     run_phase install-locked-dependencies \
         "$PYTHON" -m pip install --disable-pip-version-check --no-deps \
         --only-binary=:all: -r requirements.lock
-    run_phase ruff "$PYTHON" -m ruff check liquidity_migration scripts tests
-    run_phase mypy "$PYTHON" -m mypy liquidity_migration
-    run_phase focused-runtime-tests "$PYTHON" -m pytest -q \
-        tests/ops/test_candidate_rule_coverage.py \
-        tests/venue/test_demo_rule_probe.py \
-        tests/scripts/test_deploy_rollout_readiness.py \
-        tests/policy/test_operational_profile.py \
-        tests/strategy/test_strategy_planning.py \
-        tests/scripts/test_runtime_scripts.py
+    # No lint/type/test phase here: CI runs scripts/dev.sh lint+types+test on
+    # every push to main, and the ancestor check above proves this commit is on
+    # main. Re-running them with the fleet stopped only lengthens the outage.
 
     # Bound journald so logs cannot crowd the data roots, and keep at most the
     # newest timestamped backup of the demo credential file.
@@ -1036,7 +1132,6 @@ install_mode() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     require_quiescent
-    retire_stale_operational_receipt
     run_phase refresh-stale-demo-rules refresh_stale_demo_rules_if_requested
 
     lm_load_sleeve_toggles
@@ -1063,9 +1158,11 @@ PY
         if [ "$hedge_open" = 0 ]; then CONTINUOUS_HEDGE_TIMER=off; else CONTINUOUS_HEDGE_TIMER=on; fi
     fi
     export CONTINUOUS_HEDGE_TIMER
+    # The writer is atomic (mktemp + mv), so re-reading what this process just
+    # wrote proves nothing; load_authorization validates the file a *previous*
+    # process wrote, which is the read that can actually disagree.
     lm_write_resolved_sleeve_toggles
     prepare_paper_runtime_boundary
-    lm_verify_resolved_sleeve_toggles
     run_phase verify-paper-runtime-boundary verify_paper_runtime_boundary
     require_clean_head
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
@@ -1083,7 +1180,6 @@ load_authorization() {
         AUTH_PROFILE="$(cat "$PROFILE_MARKER")"
     fi
     [ -n "$AUTH_PROFILE" ] || AUTH_PROFILE=operational
-    AUTH_SHUTDOWN_EXPIRED_DEMO_RULES=0
     case "$AUTH_PROFILE" in demo-operational|operational) ;; *) fail "unsupported profile $AUTH_PROFILE" ;; esac
     if [ "$AUTH_PROFILE" = operational ]; then
         # Pre-install: state roots introduced by the commit being deployed do
@@ -1138,26 +1234,49 @@ unit_off() {
         && ! systemctl is-enabled --quiet "$1" 2>/dev/null
 }
 
-timer_on() { unit_on "$1"; }
-timer_off() { unit_off "$1"; }
-
 any_mainnet_sleeve_on() {
     sleeve_on "${CARRY_MAINNET_SLEEVE:-off}" || sleeve_on "${LONG_MAINNET_SLEEVE:-off}"
 }
 
-expected_downstream_on() {
-    local unit="$1"
-    if unit_on "$unit"; then
+# verify_topology collects every mismatch instead of dying on the first one, so
+# one run tells the operator the whole story.
+VERIFY_UNIT_ROWS=()
+VERIFY_MISMATCHES=()
+
+verify_note() {
+    VERIFY_MISMATCHES+=("$1")
+}
+
+# `verify` is the read-only status command: a live venue probe that cannot
+# answer is reported there and gates nothing. Every other mode still fails.
+verify_report_only() {
+    [ "$MODE" = verify ]
+}
+
+verify_probe() {
+    local label="$1" message="$2"
+    shift 2
+    if "$@"; then
         return 0
     fi
-    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ] \
-        && systemctl is-enabled --quiet "$unit" \
-        && ! systemctl is-active --quiet "$unit"; then
-        printf 'topology-warning unit=%s state=enabled-not-active cause=expired-authority-recovery\n' \
-            "$unit"
+    if verify_report_only; then
+        printf 'verify-warn %s: %s\n' "$label" "$message" >&2
         return 0
     fi
-    return 1
+    verify_note "$message"
+}
+
+verify_unit() {
+    local expectation="$1" unit="$2" message="$3" active enabled
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    VERIFY_UNIT_ROWS+=("$unit|$expectation|${active:-unknown}|${enabled:-unknown}")
+    case "$expectation" in
+        on) if unit_on "$unit"; then return 0; fi ;;
+        off) if unit_off "$unit"; then return 0; fi ;;
+        *) fail "invalid verify expectation: $expectation" ;;
+    esac
+    verify_note "$message"
 }
 
 validate_hedge_model_prior() {
@@ -1212,136 +1331,133 @@ rollout_flat_check() {
 }
 
 verify_topology() {
-    unit_on liquidity-migration-account-execution.service || fail "demo owner is not active and enabled"
+    VERIFY_UNIT_ROWS=()
+    VERIFY_MISMATCHES=()
+
+    verify_unit on liquidity-migration-account-execution.service "demo owner is not active and enabled"
     if [ "$AUTH_PROFILE" = operational ]; then
-        unit_on liquidity-migration-account-paper-execution.service || fail "paper owner is not active and enabled"
+        verify_unit on liquidity-migration-account-paper-execution.service "paper owner is not active and enabled"
     else
-        unit_off liquidity-migration-account-paper-execution.service || fail "paper owner is active under demo-only authorization"
+        verify_unit off liquidity-migration-account-paper-execution.service "paper owner is active under demo-only authorization"
     fi
 
     if sleeve_on "$LONG_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-long-demo.service \
-            || fail "LONG demo producer is not active"
+        verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
     else
-        unit_off liquidity-migration-bybit-long-demo.service || fail "LONG demo producer is not off"
+        verify_unit off liquidity-migration-bybit-long-demo.service "LONG demo producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$LONG_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-long-paper.service \
-            || fail "LONG paper producer is not active"
+        verify_unit on liquidity-migration-bybit-long-paper.service "LONG paper producer is not active"
     else
-        unit_off liquidity-migration-bybit-long-paper.service || fail "LONG paper producer is not off"
+        verify_unit off liquidity-migration-bybit-long-paper.service "LONG paper producer is not off"
     fi
     if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-continuous-demo.service \
-            || fail "continuous demo producer is not active"
+        verify_unit on liquidity-migration-bybit-continuous-demo.service "continuous demo producer is not active"
     else
-        unit_off liquidity-migration-bybit-continuous-demo.service || fail "continuous demo producer is not off"
+        verify_unit off liquidity-migration-bybit-continuous-demo.service "continuous demo producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-continuous-paper.service \
-            || fail "continuous paper producer is not active"
+        verify_unit on liquidity-migration-bybit-continuous-paper.service "continuous paper producer is not active"
     else
-        unit_off liquidity-migration-bybit-continuous-paper.service || fail "continuous paper producer is not off"
+        verify_unit off liquidity-migration-bybit-continuous-paper.service "continuous paper producer is not off"
     fi
     if sleeve_on "$CARRY_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-carry-demo.service \
-            || fail "carry demo producer is not active"
+        verify_unit on liquidity-migration-bybit-carry-demo.service "carry demo producer is not active"
     else
-        unit_off liquidity-migration-bybit-carry-demo.service || fail "carry demo producer is not off"
+        verify_unit off liquidity-migration-bybit-carry-demo.service "carry demo producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CARRY_PAPER_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-carry-paper.service \
-            || fail "carry paper producer is not active"
+        verify_unit on liquidity-migration-bybit-carry-paper.service "carry paper producer is not active"
     else
-        unit_off liquidity-migration-bybit-carry-paper.service || fail "carry paper producer is not off"
+        verify_unit off liquidity-migration-bybit-carry-paper.service "carry paper producer is not off"
     fi
     if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$PAPER_TARGET_MIRROR"; then
-        expected_downstream_on liquidity-migration-paper-target-mirror.service \
-            || fail "paper target mirror is not active"
+        verify_unit on liquidity-migration-paper-target-mirror.service "paper target mirror is not active"
     else
-        unit_off liquidity-migration-paper-target-mirror.service || fail "paper target mirror is not off"
+        verify_unit off liquidity-migration-paper-target-mirror.service "paper target mirror is not off"
     fi
 
     if sleeve_on "$CONTINUOUS_SLEEVE" \
         || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
-        expected_downstream_on liquidity-migration-continuous-rmom-refresh.timer \
-            || fail "RMOM timer is not active"
+        verify_unit on liquidity-migration-continuous-rmom-refresh.timer "RMOM timer is not active"
     else
-        timer_off liquidity-migration-continuous-rmom-refresh.timer || fail "RMOM timer is not off"
+        verify_unit off liquidity-migration-continuous-rmom-refresh.timer "RMOM timer is not off"
     fi
     if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        validate_hedge_model_prior || fail "hedge model prior validation failed"
-        expected_downstream_on liquidity-migration-continuous-hedge.timer \
-            || fail "hedge timer is not active"
+        verify_probe hedge-model-prior "hedge model prior validation failed" \
+            validate_hedge_model_prior
+        verify_unit on liquidity-migration-continuous-hedge.timer "hedge timer is not active"
     else
-        timer_off liquidity-migration-continuous-hedge.timer || fail "hedge timer is not off"
+        verify_unit off liquidity-migration-continuous-hedge.timer "hedge timer is not off"
     fi
     # With no mainnet sleeve on, a running mainnet unit must not hide behind a
     # green demo/paper verification; with one on, the funded fleet is verified
     # exactly like the others.
     if any_mainnet_sleeve_on; then
-        unit_on liquidity-migration-account-execution-mainnet.service \
-            || fail "mainnet owner is not active and enabled"
+        verify_unit on liquidity-migration-account-execution-mainnet.service \
+            "mainnet owner is not active and enabled"
         if sleeve_on "$CARRY_MAINNET_SLEEVE"; then
-            expected_downstream_on liquidity-migration-bybit-carry-mainnet.service \
-                || fail "carry mainnet producer is not active"
+            verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
         else
-            unit_off liquidity-migration-bybit-carry-mainnet.service \
-                || fail "carry mainnet producer is not off"
+            verify_unit off liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not off"
         fi
         if sleeve_on "$LONG_MAINNET_SLEEVE"; then
-            expected_downstream_on liquidity-migration-bybit-long-mainnet.service \
-                || fail "LONG mainnet producer is not active"
+            verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         else
-            unit_off liquidity-migration-bybit-long-mainnet.service \
-                || fail "LONG mainnet producer is not off"
+            verify_unit off liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not off"
         fi
-        timer_on liquidity-migration-mainnet-liveness.timer \
-            || fail "mainnet liveness timer is not active"
+        verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
         # An enabled timer says nothing about the run it fires. A watchdog that
         # fails every fire is the silence it exists to break.
-        ! systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service \
-            || fail "liquidity-migration-mainnet-liveness.service is failed"
+        if systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service; then
+            verify_note "liquidity-migration-mainnet-liveness.service is failed"
+        fi
     else
         for mainnet_unit in \
             liquidity-migration-account-execution-mainnet.service \
             liquidity-migration-bybit-carry-mainnet.service \
             liquidity-migration-bybit-long-mainnet.service \
             liquidity-migration-mainnet-liveness.timer; do
-            unit_off "$mainnet_unit" \
-                || fail "$mainnet_unit is active under demo/paper authorization"
+            verify_unit off "$mainnet_unit" "$mainnet_unit is active under demo/paper authorization"
         done
     fi
-    expected_downstream_on liquidity-migration-demo-liveness.timer \
-        || fail "liveness timer is not active"
+    verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
     for oneshot in \
         liquidity-migration-continuous-rmom-refresh.service \
         liquidity-migration-continuous-hedge.service \
         liquidity-migration-demo-liveness.service; do
         if systemctl is-failed --quiet "$oneshot"; then
-            if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ] \
-                && [ "$(systemctl show "$oneshot" --property=Result --value)" = exit-code ] \
-                && [ "$(systemctl show "$oneshot" --property=ExecMainCode --value)" = 1 ] \
-                && [ "$(systemctl show "$oneshot" --property=ExecMainStatus --value)" = 2 ]; then
-                printf 'topology-warning unit=%s state=failed cause=expired-authority-pre-exec\n' \
-                    "$oneshot"
-            else
-                fail "$oneshot is failed"
-            fi
+            verify_note "$oneshot is failed"
         fi
     done
-    check_demo_order_permissions verify \
-        || fail "demo order permission verification failed"
+    verify_probe demo-order-permissions "demo order permission verification failed" \
+        check_demo_order_permissions verify
+
     # Report the commit the host is actually on, not the one the caller asked
     # about. Echoing EXPECTED_COMMIT made a stale host indistinguishable from a
     # current one in the only line an operator reads.
-    local installed_head
+    local installed_head row
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
+    if [ "$installed_head" != "$EXPECTED_COMMIT" ]; then
+        if [ "${EXPECTED_COMMIT_EXPLICIT:-1}" -eq 0 ] && verify_report_only; then
+            printf 'verify-drift installed=%s expected=%s reason=expected-commit-defaulted\n' \
+                "$installed_head" "$EXPECTED_COMMIT"
+        else
+            verify_note "installed checkout is $installed_head, not the requested $EXPECTED_COMMIT"
+        fi
+    fi
+
+    printf 'verify-units unit|expected|active|enabled\n'
+    for row in ${VERIFY_UNIT_ROWS[@]+"${VERIFY_UNIT_ROWS[@]}"}; do
+        printf '  %s\n' "$row"
+    done
+    if [ "${#VERIFY_MISMATCHES[@]}" -ne 0 ]; then
+        printf 'verify-mismatch %s\n' "${VERIFY_MISMATCHES[@]}" >&2
+        fail "topology verification found ${#VERIFY_MISMATCHES[@]} mismatch(es) on $installed_head"
+    fi
     printf 'verify-ok commit=%s requested=%s profile=%s mainnet_carry=%s mainnet_long=%s\n' \
         "$installed_head" "$EXPECTED_COMMIT" "$AUTH_PROFILE" \
         "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE"
-    [ "$installed_head" = "$EXPECTED_COMMIT" ] \
-        || fail "installed checkout is $installed_head, not the requested $EXPECTED_COMMIT"
 }
 
 start_if() {
@@ -1385,6 +1501,7 @@ seed_rmom() {
 
 activate_mode() {
     load_authorization
+    resolve_stop_first
     require_quiescent
     check_demo_order_permissions deploy \
         || fail "demo order permission deploy check failed"
@@ -1651,6 +1768,43 @@ record_installed_profile() {
     chmod 0644 "$PROFILE_MARKER"
 }
 
+# install + activate in one remote session, without the rollout's flat-account
+# proofs and rollback machinery. The profile marker is written here too: a
+# staged install that skipped it left load_authorization falling back to
+# "operational" whatever the operator asked for.
+staged_mode() {
+    run_strict_phase staged-install install_mode
+    run_strict_phase record-installed-profile record_installed_profile
+    run_strict_phase staged-activate-and-verify activate_mode
+    printf 'staged-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
+}
+
+# A funded fleet keeps the hard gate; a demo/paper fleet gets the same check
+# reported and continues, so rollout (and its rollback) is usable there.
+rollout_flat_required() {
+    if [ "${REQUIRE_FLAT:-0}" -eq 1 ]; then
+        return 0
+    fi
+    any_mainnet_sleeve_on
+}
+
+rollout_flat_phase() {
+    local label="$1" status=0
+    shift
+    if rollout_flat_required; then
+        run_strict_phase "$label" "$@"
+        return 0
+    fi
+    printf 'phase-start name=%s utc=%s\n' "$label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    "$@" || status=$?
+    if [ "$status" -eq 0 ]; then
+        printf 'phase-ok name=%s\n' "$label"
+        return 0
+    fi
+    printf 'rollout-flat-warn phase=%s status=%s: residual demo/paper exposure or open orders; continuing (--require-flat gates instead)\n' \
+        "$label" "$status" >&2
+}
+
 rollout_mode() {
     require_checkout
     ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
@@ -1664,20 +1818,9 @@ rollout_mode() {
     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
     load_authorization
     run_strict_phase current-topology-verification verify_topology
-    run_strict_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
-    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
-        echo "deployment-plan class=exceptional rule_maintenance=full-probe reason=expired"
-    else
-        echo "deployment-plan class=routine rule_maintenance=reuse reason=fresh"
-    fi
+    rollout_flat_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
 
-    if [ "${AUTH_SHUTDOWN_EXPIRED_DEMO_RULES:-0}" -eq 1 ]; then
-        # The old topology cannot restart once its demo-rule evidence expired,
-        # so every failure path from here forces the fleet stopped.
-        ROLLOUT_IRREVERSIBLE=1
-        echo "rollout-recovery-boundary rollback=unavailable reason=expired-demo-rules"
-    fi
     ROLLOUT_STOPPED=1
     trap rollout_cleanup EXIT
     trap 'exit 130' INT
@@ -1692,10 +1835,10 @@ rollout_mode() {
     # only then are owners stopped and venue truth sampled once more.
     run_strict_phase stop-downstream-units \
         stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
-    run_strict_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
+    rollout_flat_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
     run_strict_phase stop-account-owners \
         stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
-    run_strict_phase final-stopped-flat-account-proof rollout_flat_check none
+    rollout_flat_phase final-stopped-flat-account-proof rollout_flat_check none
     require_quiescent
 
     # From checkout mutation onward there is no rollback authority, so any
@@ -1704,7 +1847,7 @@ rollout_mode() {
     ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_strict_phase stopped-install install_mode
     if [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ]; then
-        run_strict_phase post-rule-refresh-flat-account-proof \
+        rollout_flat_phase post-rule-refresh-flat-account-proof \
             rollout_flat_check stopped-maintenance
     fi
     run_strict_phase record-installed-profile record_installed_profile
@@ -1718,6 +1861,7 @@ acquire_maintenance_locks
 case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
+    staged) staged_mode ;;
     activate-mainnet) activate_mainnet_mode ;;
     stop-mainnet) stop_mainnet_mode ;;
     verify) load_authorization; verify_topology ;;

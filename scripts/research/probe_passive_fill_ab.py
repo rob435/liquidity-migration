@@ -8,7 +8,7 @@ metric and sample size are pre-declared in
 the mechanism quickly — only the in-flow A/B grades the flow at signal times.
 
 Operating constraints:
-- Demo credentials only, via ``validate_demo_order_permission``.
+- Demo credentials only, via ``resolve_demo_credentials``.
 - ``DemoAccountMutationLease`` refuses to run beside any other mutator,
   including the account owner. Run with the fleet stopped.
 - Preflight requires a flat account; every attempt closes its own min-notional
@@ -49,7 +49,6 @@ from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     api_key_allows_order_submit,
     resolve_demo_credentials,
-    validate_demo_order_permission,
 )
 from liquidity_migration.marketdata.bybit_market_data import BybitRestRateLimiter  # noqa: E402
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
@@ -336,7 +335,6 @@ def main(argv: list[str] | None = None) -> int:
     if os.path.lexists(output):
         raise SystemExit(f"output already exists; preserve it and choose a new path: {output}")
 
-    validate_demo_order_permission(confirm_demo_orders=True)
     api_key, api_secret = resolve_demo_credentials()
     if not api_key or not api_secret:
         raise SystemExit("BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required")

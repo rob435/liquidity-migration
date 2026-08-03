@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
-from liquidity_migration.core.config import ResearchConfig, UniverseConfig
-from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_tickers
-from liquidity_migration.data.storage import write_dataset
+from liquidity_migration.core.config import UniverseConfig
 from liquidity_migration.core._common import MS_PER_DAY, safe_name
 
 _logger = logging.getLogger(__name__)
@@ -22,47 +16,6 @@ _logger = logging.getLogger(__name__)
 # its normal crypto label and ``innovation`` its crypto innovation-zone label;
 # every other symbolType is outside the strategy domain.
 CRYPTO_LINEAR_SYMBOL_TYPES: tuple[str, ...] = ("", "innovation")
-
-
-def run_discover_universe(
-    data_root: str | Path,
-    *,
-    config: ResearchConfig,
-    universe_config: UniverseConfig | None = None,
-    name: str = "auto",
-    report_dir: str | Path | None = None,
-) -> dict[str, Any]:
-    universe_config = universe_config or config.universe
-    client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
-    instruments = _normalize_instruments(client.get_instruments_info())
-    tickers = _normalize_tickers(client.get_tickers())
-    table = build_current_universe_table(instruments, tickers, universe_config=universe_config)
-    symbols = table["symbol"].to_list() if not table.is_empty() else []
-
-    payload: dict[str, Any] = {
-        "name": name,
-        "config": asdict(universe_config),
-        "rows": table.height,
-        "symbols": symbols,
-        "symbol_csv": ",".join(symbols),
-        "snapshot": datetime.now(tz=UTC).isoformat(),
-        "survivorship_warning": (
-            "This is a current Bybit tradable-universe snapshot. Historical backtests using this symbol list "
-            "still have survivorship bias unless delisted/dead contracts are added from an archive."
-        ),
-        "universe": table.to_dicts(),
-    }
-
-    output_dir = Path(report_dir or Path(data_root) / "reports")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_name(name)
-    (output_dir / f"universe_{safe_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    (output_dir / f"universe_{safe_name}.md").write_text(format_universe_report(payload), encoding="utf-8")
-    (output_dir / f"universe_{safe_name}_symbols.txt").write_text(payload["symbol_csv"] + "\n", encoding="utf-8")
-    if not table.is_empty():
-        table.write_csv(output_dir / f"universe_{safe_name}.csv")
-    write_dataset(table, data_root, "universe_current", partition_by=("snapshot_date",), append=False)
-    return payload
 
 
 def build_current_universe_table(

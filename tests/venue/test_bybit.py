@@ -1187,23 +1187,6 @@ def test_bybit_private_client_rate_limiter_acquires_each_retry(monkeypatch) -> N
     assert limiter.acquires == 2
 
 
-def test_validate_demo_order_permission_blocks_mainnet(monkeypatch) -> None:
-    monkeypatch.setenv("REAL_MONEY", "true")
-    monkeypatch.delenv("DEMO", raising=False)
-    monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
-    with pytest.raises(RuntimeError, match="REAL_MONEY"):
-        bybit.validate_demo_order_permission(confirm_demo_orders=True)
-
-
-def test_validate_demo_order_permission_requires_confirm_flag(monkeypatch) -> None:
-    monkeypatch.delenv("REAL_MONEY", raising=False)
-    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "s")
-    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
-        bybit.validate_demo_order_permission(confirm_demo_orders=False)
-
-
 def test_api_key_allows_order_submit_rejects_read_only_key() -> None:
     allowed, reason = bybit.api_key_allows_order_submit(
         {

@@ -18,17 +18,6 @@ on:
         default: operational
         type: choice
         options: [operational, demo-operational]
-      authorization_reference:
-        description: >-
-          Required owner/task reference for a rollout. Recorded in the dispatch
-          record only; the deploy script takes no such flag.
-        required: false
-        type: string
-      authorize_demo_paper_operation:
-        description: Explicitly authorize bounded demo/paper operation.
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -97,24 +86,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
           DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
-          DEPLOY_AUTHORIZATION_REFERENCE_INPUT: ${{ inputs.authorization_reference }}
-          DEPLOY_OWNER_ACKNOWLEDGED_INPUT: ${{ inputs.authorize_demo_paper_operation }}
         run: |
           set -euo pipefail
           deploy_args=("$DEPLOY_MODE_INPUT")
-          # The assertions below are the operator's confirmation in the GitHub
-          # UI. The deploy script itself accepts only `--profile` on rollout and
-          # rejects any other flag outright.
+          # The deploy script accepts only `--profile` on rollout and rejects
+          # any other flag outright.
           case "$DEPLOY_MODE_INPUT" in
-            rollout)
-              test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = true
-              test -n "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-              deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT")
-              ;;
-            install|activate|verify)
-              test "$DEPLOY_OWNER_ACKNOWLEDGED_INPUT" = false
-              test -z "$DEPLOY_AUTHORIZATION_REFERENCE_INPUT"
-              ;;
+            rollout) deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT") ;;
+            install|activate|verify) ;;
             *) exit 2 ;;
           esac
           EXPECTED_COMMIT="$GITHUB_SHA" \

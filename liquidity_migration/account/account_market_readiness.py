@@ -16,18 +16,37 @@ from liquidity_migration.account.market_capture import SequenceAwareMarketRecord
 REGISTERED_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS = 30.0
 
 
-def require_registered_request_market_warmup_timeout(value: object) -> float:
+def require_registered_request_market_warmup_timeout(
+    value: object,
+    *,
+    enforce_registered_ceiling: bool = True,
+) -> float:
+    """Validate the queue-head warmup timeout.
+
+    Mainnet holds the registered 30-second ceiling. Demo and paper only need a
+    finite positive value, so an operator can widen the warmup budget on a slow
+    or reconnecting link without a code deploy.
+    """
+
     try:
         seconds = float(str(value))
     except (TypeError, ValueError) as exc:
         raise ValueError("request market warmup timeout must be numeric") from exc
-    if not math.isfinite(seconds) or seconds <= 0.0 or seconds > REGISTERED_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:
+    if not math.isfinite(seconds) or seconds <= 0.0:
+        raise ValueError("request market warmup timeout must be finite and positive")
+    if enforce_registered_ceiling and seconds > REGISTERED_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:
         raise ValueError("request market warmup timeout cannot exceed the registered 30 seconds")
     return seconds
 
 
 @dataclass(frozen=True, slots=True)
 class RequestedMarketReadiness:
+    """One evaluation of the queue head against the live books.
+
+    ``timed_out`` says the head has been unservable for longer than the warmup
+    timeout right now. It is a symptom reported for health, not a latch.
+    """
+
     request_id: str
     symbols: tuple[str, ...]
     ready: bool
@@ -39,20 +58,40 @@ class RequestedMarketReadiness:
 class RequestedMarketWarmupGate:
     """Gate the durable queue head on an exact healthy captured L2 book.
 
-    The timeout is latched for the current request, so a late snapshot cannot
-    reopen the owner epoch after the SLA was missed: the request stays pending
-    and owner health stays blocked.
+    Every cycle re-reads the books. While the head's book is absent, gapped,
+    empty, stale, or future-dated the request stays pending and owner health
+    stays blocked; the moment those books are healthy the same head becomes
+    servable again. Past the warmup timeout the detail says how long the head
+    has been unservable, which is loud without costing the owner epoch: a
+    200ms book gap must not require a process restart to recover.
     """
 
     timeout_seconds: float
     _request_id: str = ""
     _started_monotonic: float = 0.0
-    _timed_out: bool = False
-    _waiting: bool = False
-    _terminal_detail: str = ""
 
     def __post_init__(self) -> None:
-        self.timeout_seconds = require_registered_request_market_warmup_timeout(self.timeout_seconds)
+        self.timeout_seconds = require_registered_request_market_warmup_timeout(
+            self.timeout_seconds,
+            enforce_registered_ceiling=False,
+        )
+
+    def _unservable(
+        self,
+        request_id: str,
+        symbols: tuple[str, ...],
+        *,
+        reason: str,
+        elapsed: float,
+        overdue: bool,
+    ) -> RequestedMarketReadiness:
+        detail = reason
+        if overdue:
+            detail += (
+                f"; queue head has been unservable for {elapsed:.1f}s "
+                f"(warmup timeout {self.timeout_seconds:g}s) and remains pending"
+            )
+        return RequestedMarketReadiness(request_id, symbols, False, overdue, detail)
 
     def evaluate(
         self,
@@ -69,39 +108,22 @@ class RequestedMarketWarmupGate:
         if request is None:
             self._request_id = ""
             self._started_monotonic = 0.0
-            self._timed_out = False
-            self._waiting = False
-            self._terminal_detail = ""
             return RequestedMarketReadiness("", (), True, False, "")
 
         if request.request_id != self._request_id:
             self._request_id = request.request_id
             self._started_monotonic = now_monotonic
-            self._timed_out = False
-            self._waiting = False
-            self._terminal_detail = ""
         symbols = tuple(sorted({item.intent.symbol.upper() for item in request.intents}))
-        if self._timed_out:
-            return RequestedMarketReadiness(
-                request.request_id,
-                symbols,
-                False,
-                True,
-                self._terminal_detail,
-            )
+        elapsed = max(now_monotonic - self._started_monotonic, 0.0)
+        overdue = elapsed >= self.timeout_seconds
         missing_rules = sorted(set(symbols) - verified_rule_symbols)
         if missing_rules:
-            self._timed_out = True
-            self._terminal_detail = (
-                "queue head lacks demo-verified rules; owner epoch is closed and "
-                "the request remains pending: " + ", ".join(missing_rules)
-            )
-            return RequestedMarketReadiness(
+            return self._unservable(
                 request.request_id,
                 symbols,
-                False,
-                True,
-                self._terminal_detail,
+                reason="queue head lacks venue-verified rules: " + ", ".join(missing_rules),
+                elapsed=elapsed,
+                overdue=overdue,
             )
 
         issues: list[str] = []
@@ -120,31 +142,14 @@ class RequestedMarketWarmupGate:
             elif age_ns > max_market_age_ns:
                 issues.append(f"{symbol}:stale_book")
 
-        elapsed = max(now_monotonic - self._started_monotonic, 0.0)
-        if elapsed >= self.timeout_seconds and (issues or self._waiting):
-            self._timed_out = True
-            self._terminal_detail = (
-                f"queue-head market warmup timed out after {self.timeout_seconds:g}s; "
-                "request remains pending and owner epoch is closed: " + ", ".join(symbols)
-            )
-        if self._timed_out:
-            return RequestedMarketReadiness(
-                request.request_id,
-                symbols,
-                False,
-                True,
-                self._terminal_detail,
-            )
         if issues:
-            self._waiting = True
-            return RequestedMarketReadiness(
+            return self._unservable(
                 request.request_id,
                 symbols,
-                False,
-                False,
-                "waiting for queue-head market data: " + ", ".join(issues),
+                reason="waiting for queue-head market data: " + ", ".join(issues),
+                elapsed=elapsed,
+                overdue=overdue,
             )
-        self._waiting = False
         return RequestedMarketReadiness(
             request.request_id,
             symbols,

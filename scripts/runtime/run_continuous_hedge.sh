@@ -8,29 +8,11 @@ cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python)"
 
-case "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) demo_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") demo_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_EXECUTION_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
+# The route this hedge publishes onto is EXECUTION_ENVIRONMENT plus its owner
+# roots. The kernel-latch variables only restated what the unit files already
+# hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo)
-        if [[ "$demo_kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$demo_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
+    demo | paper) ;;
     *)
         echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
         exit 2

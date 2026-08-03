@@ -217,20 +217,41 @@ def _unverified_generation_cycle_alert(*, label: str, detail: str) -> Alert:
     )
 
 
-def evaluate_unit_states(
-    unit_states: dict[str, str], *, prior_not_active_timers: set[str] | None = None
-) -> list[Alert]:
-    """Alert on failed services and debounce inactive timers for one interval.
+# require_recent_account_owner_health() prefixes every owner-reported blocked
+# status with this; every other error it raises means the evidence is missing,
+# stale, or from a previous generation.
+_OWNER_BLOCKED_PREFIX = "account owner is blocked:"
 
-    A disabled timer stays silent otherwise; the one-interval debounce avoids
-    escalating a transient deploy transition.
+# `systemctl is-enabled` values that mean "this unit is supposed to be running".
+# `static`, `disabled`, `indirect`, and `linked` are not: a timer-driven oneshot
+# is static and inactive between runs by design.
+_ENABLED_UNIT_STATES = frozenset({"enabled", "enabled-runtime"})
+
+
+def evaluate_unit_states(
+    unit_states: dict[str, str],
+    *,
+    prior_not_active_timers: set[str] | None = None,
+    unit_enabled_states: dict[str, str] | None = None,
+    prior_not_active_services: set[str] | None = None,
+) -> list[Alert]:
+    """Alert on failed units, and on enabled units that are simply not running.
+
+    ``failed`` is only one of the ways a unit stops: a service whose dependency
+    failed is left ENABLED but INACTIVE, with no failure of its own to report.
+    That is the shape the 2026-08-01..03 outage took, and nothing here saw it.
+    Timers and enabled services both debounce one interval before escalating, so
+    a deploy transition does not page. Static and disabled units stay silent —
+    a timer-driven oneshot is inactive between runs by design.
     """
-    prior = prior_not_active_timers or set()
+    prior_timers = prior_not_active_timers or set()
+    prior_services = prior_not_active_services or set()
+    enabled_states = unit_enabled_states or {}
     alerts: list[Alert] = []
     for unit, state in sorted(unit_states.items()):
         if unit.endswith(".timer"):
             if state != "active":
-                persistent = unit in prior
+                persistent = unit in prior_timers
                 alerts.append(
                     Alert(
                         key=f"unit:{unit}",
@@ -255,6 +276,24 @@ def evaluate_unit_states(
                         f"systemd unit {unit} is FAILED. Inspect its journal and "
                         "verify account positions; a timer-driven oneshot may retry "
                         "on its next scheduled activation."
+                    ),
+                )
+            )
+        elif state != "active" and enabled_states.get(unit) in _ENABLED_UNIT_STATES:
+            persistent = unit in prior_services
+            alerts.append(
+                Alert(
+                    key=f"unit:{unit}",
+                    severity=CRITICAL if persistent else WARNING,
+                    message=(
+                        f"systemd unit {unit} is ENABLED but {state.upper()} (not active) — it is "
+                        "not running and reports no failure of its own; a failed dependency or a "
+                        f"manual stop leaves exactly this state. Start it: systemctl start {unit}"
+                        + (
+                            ""
+                            if persistent
+                            else " (debouncing one interval; escalates to CRITICAL if still down next run)"
+                        )
                     ),
                 )
             )
@@ -582,9 +621,11 @@ def _oneshot_run_window_usec(unit: str) -> tuple[int | None, int | None]:
 _RESOLVED_PREFIX = "resolved:"
 # Records inactive timers for the one-interval escalation debounce.
 _PENDING_TIMER_PREFIX = "pending_timer:"
+# Same debounce for an enabled service observed not running.
+_PENDING_SERVICE_PREFIX = "pending_service:"
 # Records last-sent severity so escalation bypasses the cooldown.
 _SEV_PREFIX = "sev:"
-_RESERVED_PREFIXES = (_RESOLVED_PREFIX, _PENDING_TIMER_PREFIX, _SEV_PREFIX)
+_RESERVED_PREFIXES = (_RESOLVED_PREFIX, _PENDING_TIMER_PREFIX, _PENDING_SERVICE_PREFIX, _SEV_PREFIX)
 _SEVERITY_RANK = {WARNING: 1, CRITICAL: 2}
 
 
@@ -649,6 +690,28 @@ def _unit_states(units: list[str]) -> dict[str, str]:
             )
             states[unit] = (out.stdout or out.stderr).strip() or "unknown"
         except Exception:  # noqa: BLE001
+            states[unit] = "unknown"
+    return states
+
+
+def _unit_enabled_states(units: list[str]) -> dict[str, str]:
+    """Read install state, so "not active" can be told apart from "not wanted".
+
+    ``systemctl is-enabled`` exits nonzero for disabled/static units and still
+    prints the state, so the status is ignored and the word is what counts.
+    """
+    states: dict[str, str] = {}
+    for unit in dict.fromkeys(unit for unit in units if unit.endswith(".service")):
+        try:
+            out = subprocess.run(
+                ["systemctl", "is-enabled", unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            reported = (out.stdout or out.stderr).strip()
+            states[unit] = reported.splitlines()[0].strip() if reported else "unknown"
+        except Exception:  # noqa: BLE001 — a watchdog never crashes on a probe
             states[unit] = "unknown"
     return states
 
@@ -1209,14 +1272,19 @@ def gather_account_capture_alerts(
     max_age_minutes: float,
     label: str = "",
     expected_owner_uid: int | None = None,
+    startup_grace_minutes: float = 0.0,
+    unit_runtime: UnitRuntime | None = None,
 ) -> list[Alert]:
     """Detect an owner that is active/restarting but no longer ingesting L2.
 
     The "capture" naming is kept only so existing alert cooldown keys stay
     stable; the checked artifact is a bounded live-market readiness sidecar.
+    An owner inside its startup grace has not subscribed yet; that window is a
+    restart, not an outage.
     """
     suffix = f"_{label}" if label else ""
     owner_label = f"{label} account execution" if label else "account execution"
+    in_startup_grace = _within_startup_grace(unit_runtime, max_age_minutes=startup_grace_minutes)
     try:
         readiness = latest_market_readiness(
             capture_root,
@@ -1227,6 +1295,8 @@ def gather_account_capture_alerts(
             raise RuntimeError("required live-L2 receive timestamp is unavailable")
         newest_ms = oldest_required_ns // 1_000_000
     except (OSError, RuntimeError, ValueError) as exc:
+        if in_startup_grace:
+            return []
         return [
             Alert(
                 key=f"account_capture_missing{suffix}",
@@ -1239,7 +1309,7 @@ def gather_account_capture_alerts(
         ]
     observed_now_ms = _now_ms() if now_ms is None else now_ms
     age_minutes = (observed_now_ms - newest_ms) / 60_000.0
-    if age_minutes > max_age_minutes:
+    if age_minutes > max_age_minutes and not in_startup_grace:
         return [
             Alert(
                 key=f"account_capture_stale{suffix}",
@@ -1358,6 +1428,17 @@ def gather_account_owner_health_alerts(
             # Nonterminal <=30s dynamic-subscription transition; the owner stays
             # blocked and producers still fail closed. A latched warmup timeout
             # raises a different error and still pages.
+            return []
+        if not str(exc).startswith(_OWNER_BLOCKED_PREFIX) and _within_startup_grace(
+            unit_runtime, max_age_minutes=startup_grace_minutes
+        ):
+            # A freshly (re)started owner has not written its first health
+            # projection for this generation yet. Nothing is unprotected in that
+            # window — producers plan entries as blocked and keep publishing
+            # exits — so paging on missing/stale/previous-generation evidence
+            # turns every routine restart into a CRITICAL. An owner that is
+            # alive enough to report BLOCKED still pages: that is evidence, not
+            # the absence of it.
             return []
         return [
             Alert(
@@ -1608,6 +1689,9 @@ def main() -> int:
     # Timer escalation depends on the prior run's inactive set.
     state = _load_state(state_file)
     prior_not_active_timers = {k[len(_PENDING_TIMER_PREFIX) :] for k in state if k.startswith(_PENDING_TIMER_PREFIX)}
+    prior_not_active_services = {
+        k[len(_PENDING_SERVICE_PREFIX) :] for k in state if k.startswith(_PENDING_SERVICE_PREFIX)
+    }
 
     # Disabled sleeves skip cycle checks but keep every other check: turning a
     # sleeve off does not flatten it.
@@ -1617,9 +1701,19 @@ def main() -> int:
     not_active_timers = {u for u, s in unit_states.items() if u.endswith(".timer") and s != "active"}
     owner_states = {unit: unit_states.get(unit, "unknown") for unit in required_account_owner_units}
     non_owner_states = {unit: state for unit, state in unit_states.items() if unit not in required_account_owner_units}
+    # Install state separates "stopped and should not be" from a static oneshot
+    # that is idle between timer activations.
+    unit_enabled_states = _unit_enabled_states(list(non_owner_states))
+    not_active_services = {
+        u
+        for u, s in non_owner_states.items()
+        if u.endswith(".service") and s not in ("active", "failed") and unit_enabled_states.get(u) in _ENABLED_UNIT_STATES
+    }
     alerts = evaluate_unit_states(
         non_owner_states,
         prior_not_active_timers=prior_not_active_timers,
+        unit_enabled_states=unit_enabled_states,
+        prior_not_active_services=prior_not_active_services,
     )
     alerts.extend(
         evaluate_required_account_owner_states(
@@ -1643,6 +1737,10 @@ def main() -> int:
             # Both watchdogs page the same chat; an unlabelled owner alert cannot
             # be told apart from the demo one.
             label="mainnet" if mainnet else "",
+            startup_grace_minutes=args.max_cycle_age_min,
+            unit_runtime=unit_runtime.get(
+                _MAINNET_ACCOUNT_OWNER_UNIT if mainnet else _DEMO_ACCOUNT_OWNER_UNIT
+            ),
         )
     )
     if args.account_scope == "demo-paper" and paper_root_alert is None:
@@ -1652,6 +1750,8 @@ def main() -> int:
                 max_age_minutes=args.max_account_capture_age_min,
                 label="paper",
                 expected_owner_uid=paper_owner_uid,
+                startup_grace_minutes=args.max_cycle_age_min,
+                unit_runtime=unit_runtime.get(_PAPER_ACCOUNT_OWNER_UNIT),
             )
         )
     if mainnet:
@@ -1831,10 +1931,17 @@ def main() -> int:
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
-    # Escalate a timer only after two consecutive inactive observations.
-    new_state = {k: v for k, v in new_state.items() if not k.startswith(_PENDING_TIMER_PREFIX)}
+    # Escalate a timer, or an enabled-but-stopped service, only after two
+    # consecutive inactive observations.
+    new_state = {
+        k: v
+        for k, v in new_state.items()
+        if not k.startswith((_PENDING_TIMER_PREFIX, _PENDING_SERVICE_PREFIX))
+    }
     for unit in not_active_timers:
         new_state[f"{_PENDING_TIMER_PREFIX}{unit}"] = now_ms
+    for unit in not_active_services:
+        new_state[f"{_PENDING_SERVICE_PREFIX}{unit}"] = now_ms
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     telegram_send_failed = False

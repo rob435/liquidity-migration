@@ -76,8 +76,9 @@ before real money is armed.
 2. [`STATE.md`](STATE.md) is the operational snapshot.
 3. [`docs/strategy_program.md`](docs/strategy_program.md) is the current reading
    of the evidence and the only active research queue.
-4. Skills in `.codex/skills/` and `graphify-out/` are navigation aids, never
-   factual authority — verify them against source.
+4. Skills in `.codex/skills/` are navigation aids, never factual authority —
+   verify them against source. (`.claude/skills/` is a symlink to the same
+   tree.)
 
 A "promoted", "closed", or operator-directed label carries no evidentiary weight.
 When sources disagree, read the primary artifact and fix the stale source.

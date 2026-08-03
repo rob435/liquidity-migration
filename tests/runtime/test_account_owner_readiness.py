@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -170,7 +169,7 @@ def test_market_readiness_accepts_only_the_explicit_owner_uid(
         ).symbol
         == "BTCUSDT"
     )
-    with pytest.raises(ValueError, match="private and singly linked"):
+    with pytest.raises(ValueError, match="not the expected owner uid"):
         readiness.latest_market_readiness(
             capture,
             expected_owner_uid=owner_uid + 1,
@@ -329,38 +328,12 @@ def test_readiness_rejects_stale_or_malformed_capture(tmp_path: Path) -> None:
             max_age_ns=2_000_000,
         )
 
-    sidecar = capture / OWNER_CAPTURE_READINESS_FILENAME
+    sidecar = capture / OWNER_MARKET_READINESS_FILENAME
     sidecar.write_text("not-json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid JSON"):
-        readiness.latest_capture_receive_ts_ns(
+        readiness.latest_market_readiness(
             capture,
             expected_invocation_id=CURRENT_INVOCATION_ID,
-        )
-
-
-def test_operational_readiness_never_opens_a_raw_capture_segment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    account, inbox, capture = _ready_roots(
-        tmp_path,
-        capture_receive_ts_ns=NOW_NS - 10_000_000,
-    )
-
-    def should_not_open(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("stale sidecar must fail before segment I/O")
-
-    monkeypatch.setattr(readiness, "_read_referenced_capture_record", should_not_open)
-
-    with pytest.raises(RuntimeError, match="live market is stale"):
-        readiness.require_account_owner_ready(
-            environment="demo",
-            account_root=account,
-            inbox_root=inbox,
-            capture_root=capture,
-            expected_invocation_id=CURRENT_INVOCATION_ID,
-            now_ns=NOW_NS,
-            max_age_ns=2_000_000,
         )
 
 
@@ -376,128 +349,7 @@ def test_standalone_capture_does_not_require_or_publish_owner_sidecar(tmp_path: 
     assert len(list(capture.rglob("segment-*.jsonl"))) == 1
 
 
-def test_capture_generation_filter_validates_expected_invocation_id(tmp_path: Path) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-
-    with pytest.raises(ValueError, match="capture invocation id"):
-        readiness.latest_capture_receive_ts_ns(
-            capture,
-            expected_invocation_id="A1" * 16,
-        )
-
-
-def test_capture_readiness_is_bounded_and_does_not_glob_segments(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-
-    def reject_glob(_self: Path, _pattern: str) -> list[Path]:
-        raise AssertionError("readiness must not enumerate capture segments")
-
-    monkeypatch.setattr(Path, "glob", reject_glob)
-
-    assert readiness.latest_capture_receive_ts_ns(
-        capture,
-        expected_invocation_id=CURRENT_INVOCATION_ID,
-    ) == NOW_NS - 500_000
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "error"),
-    (
-        ("record_sha256", "0" * 64, "record hash"),
-        ("segment_inode", 1, "inode"),
-        ("byte_offset", 1, "record hash|byte range"),
-    ),
-)
-def test_capture_readiness_rejects_tampered_sidecar_target(
-    tmp_path: Path,
-    field: str,
-    value: object,
-    error: str,
-) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-    sidecar_path = capture / OWNER_CAPTURE_READINESS_FILENAME
-    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    payload[field] = value
-    sidecar_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match=error):
-        readiness.latest_capture_receive_ts_ns(
-            capture,
-            expected_invocation_id=CURRENT_INVOCATION_ID,
-        )
-
-
-@pytest.mark.parametrize("escaped", ("../outside.jsonl", "/tmp/outside.jsonl", "a/../../b"))
-def test_capture_readiness_rejects_segment_path_escape(
-    tmp_path: Path,
-    escaped: str,
-) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-    sidecar_path = capture / OWNER_CAPTURE_READINESS_FILENAME
-    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    payload["segment_path"] = escaped
-    sidecar_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="escape|relative"):
-        readiness.latest_capture_receive_ts_ns(
-            capture,
-            expected_invocation_id=CURRENT_INVOCATION_ID,
-        )
-
-
-def test_capture_readiness_refuses_symlinked_referenced_segment(tmp_path: Path) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-    sidecar = json.loads(
-        (capture / OWNER_CAPTURE_READINESS_FILENAME).read_text(encoding="utf-8")
-    )
-    segment = capture / str(sidecar["segment_path"])
-    replacement = segment.with_name("segment-copy.jsonl")
-    replacement.write_bytes(segment.read_bytes())
-    replacement.chmod(0o600)
-    segment.unlink()
-    segment.symlink_to(replacement.name)
-
-    with pytest.raises(ValueError, match="regular non-symlink"):
-        readiness.latest_capture_receive_ts_ns(
-            capture,
-            expected_invocation_id=CURRENT_INVOCATION_ID,
-        )
-
-
-def test_capture_readiness_tolerates_concurrent_append_after_referenced_range(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _account, _inbox, capture = _ready_roots(tmp_path)
-    sidecar = json.loads(
-        (capture / OWNER_CAPTURE_READINESS_FILENAME).read_text(encoding="utf-8")
-    )
-    segment = capture / str(sidecar["segment_path"])
-    real_pread = os.pread
-    appended = False
-
-    def append_then_read(descriptor: int, length: int, offset: int) -> bytes:
-        nonlocal appended
-        if not appended:
-            with segment.open("ab") as handle:
-                handle.write(b'{"concurrent_append":true}\n')
-                handle.flush()
-            appended = True
-        return real_pread(descriptor, length, offset)
-
-    monkeypatch.setattr(readiness.os, "pread", append_then_read)
-
-    assert readiness.latest_capture_receive_ts_ns(
-        capture,
-        expected_invocation_id=CURRENT_INVOCATION_ID,
-    ) == NOW_NS - 500_000
-    assert appended
-
-
-def test_readiness_rejects_wrong_account_identity_and_root_alias(tmp_path: Path) -> None:
+def test_readiness_rejects_wrong_account_identity(tmp_path: Path) -> None:
     account, inbox, capture = _ready_roots(tmp_path)
 
     with pytest.raises(ValueError, match="does not match its environment"):
@@ -508,15 +360,6 @@ def test_readiness_rejects_wrong_account_identity_and_root_alias(tmp_path: Path)
             capture_root=capture,
             expected_invocation_id=CURRENT_INVOCATION_ID,
             expected_account_id="bybit-paper-unified",
-            now_ns=NOW_NS,
-        )
-    with pytest.raises(ValueError, match="must be distinct"):
-        readiness.require_account_owner_ready(
-            environment="demo",
-            account_root=account,
-            inbox_root=inbox,
-            capture_root=account,
-            expected_invocation_id=CURRENT_INVOCATION_ID,
             now_ns=NOW_NS,
         )
 
@@ -557,18 +400,18 @@ def test_capture_root_must_not_be_a_symlink(tmp_path: Path) -> None:
     alias.symlink_to(capture, target_is_directory=True)
 
     with pytest.raises(ValueError, match="non-symlink directory"):
-        readiness.latest_capture_receive_ts_ns(
+        readiness.latest_market_readiness(
             alias,
             expected_invocation_id=CURRENT_INVOCATION_ID,
         )
 
 
+# The demo owner deliberately has no ExecStartPost since 2026-08-03: a failed
+# readiness probe was systemd-killing a live owner that was still draining
+# exits. The gate survives only on the mainnet owner.
 @pytest.mark.parametrize(
     "unit_name",
-    (
-        "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-paper-execution.service",
-    ),
+    ("liquidity-migration-account-execution-mainnet.service",),
 )
 def test_owner_exec_start_post_binds_current_systemd_invocation_in_registered_wrapper(
     unit_name: str,

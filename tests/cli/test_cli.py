@@ -12,12 +12,9 @@ from liquidity_migration.cli.commands import (
     _KNOWN_BYBIT_DATASETS,
     _parse_symbols,
     _resolve_data_root,
-    _universe_config_from_args,
     _validate_datasets,
     build_parser,
 )
-from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS, UniverseConfig
-from liquidity_migration.data.universe import _safe_name as _universe_safe_name
 
 
 def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
@@ -166,18 +163,6 @@ def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     assert replace(CostConfig(), maker_fill_probability=0.60).base_entry_exit_cost_bps < taker.base_entry_exit_cost_bps
 
 
-def test_cli_archive_hourly_kline_default_resumes_written_partitions(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "archive-download-klines-1h",
-        ]
-    )
-
-    assert args.min_existing_bars == 1
-
-
 def test_cli_archive_hourly_api_kline_default_resumes_written_partitions(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
@@ -266,14 +251,6 @@ def _run(monkeypatch, capsys, tmp_path: Path, argv: list[str]) -> str:
     return capsys.readouterr().out
 
 
-def _patch_universe(monkeypatch) -> None:
-    monkeypatch.setattr(
-        cli,
-        "run_discover_universe",
-        lambda *a, **k: {"rows": 3, "symbol_csv": "BTCUSDT,ETHUSDT"},
-    )
-
-
 def _patch_archive(monkeypatch, func_name: str) -> None:
     # The archive handlers print a "rows=/path=" line built from the payload; give
     # them a minimal payload with every key each formatter reads.
@@ -290,22 +267,17 @@ def _patch_archive(monkeypatch, func_name: str) -> None:
     monkeypatch.setattr(cli, func_name, lambda *a, **k: payload)
 
 
-def test_discover_universe_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
-    _patch_universe(monkeypatch)
-    out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "My Universe"])
-    # The slug the writer actually uses on disk:
-    expected_file = f"universe_{_universe_safe_name('My Universe')}.md"
-    assert expected_file == "universe_My-Universe.md"  # guards the slug rule itself
-    assert expected_file in out
-    # The raw-name path must NOT appear.
-    assert "universe_My Universe.md" not in out
+def test_coverage_prints_the_pit_table_without_mutation(monkeypatch, capsys, tmp_path: Path) -> None:
+    """`coverage` is the read-only answer to "is my PIT membership fresh" — no
+    downloader run required to see the table."""
 
-
-def test_discover_universe_normal_name_path_unchanged(monkeypatch, capsys, tmp_path: Path) -> None:
-    # A name that is already a clean slug must print byte-identically to before.
-    _patch_universe(monkeypatch)
-    out = _run(monkeypatch, capsys, tmp_path, ["discover-universe", "--name", "auto"])
-    assert str(tmp_path / "reports" / "universe_auto.md") in out
+    sentinel = object()
+    monkeypatch.setattr(cli, "coverage_status", lambda root: sentinel)
+    monkeypatch.setattr(
+        cli, "format_coverage", lambda status: "COVERAGE-TABLE" if status is sentinel else "WRONG"
+    )
+    out = _run(monkeypatch, capsys, tmp_path, ["coverage"])
+    assert "COVERAGE-TABLE" in out
 
 
 def test_archive_manifest_prints_slugged_path_for_nontrivial_name(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -327,7 +299,6 @@ def test_archive_manifest_normal_name_path_unchanged(monkeypatch, capsys, tmp_pa
 @pytest.mark.parametrize(
     ("command", "func_name", "stem"),
     [
-        ("archive-download-klines-1h", "run_archive_hourly_klines_download", "archive_klines_1h"),
         (
             "archive-download-klines-1h-api",
             "run_archive_hourly_klines_api_download",
@@ -348,7 +319,6 @@ def test_archive_klines_print_slugged_path(
 
 # build_parser() boundary-help and order-submission-default contracts.
 def _subparser_actions(parser, name: str):
-    import argparse
 
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -415,94 +385,8 @@ def test_download_command_defaults_are_known_datasets() -> None:
     assert not (proxy_default - _KNOWN_BINANCE_PROXY_DATASETS)
 
 
-# Contradictory --include-excluded + --exclude-defaults must error.
-def _universe_args(**overrides) -> argparse.Namespace:
-    base = dict(
-        exclude_symbols=None,
-        include_majors=False,
-        exclude_majors=False,
-        min_turnover_24h=None,
-        min_age_days=None,
-        max_age_days=None,
-        rank_start=None,
-        rank_end=None,
-        max_symbols=None,
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def test_universe_config_rejects_contradictory_include_and_exclude() -> None:
-    base = UniverseConfig()
-    with pytest.raises(RuntimeError, match="mutually exclusive"):
-        _universe_config_from_args(base, _universe_args(include_majors=True, exclude_majors=True))
-
-
-def test_universe_config_single_flag_still_resolves() -> None:
-    base = UniverseConfig()
-    inc = _universe_config_from_args(base, _universe_args(include_majors=True))
-    assert inc.exclude_symbols == ()
-    exc = _universe_config_from_args(base, _universe_args(exclude_majors=True))
-    assert exc.exclude_symbols == DEFAULT_EXCLUDED_SYMBOLS
-
-
-def test_discover_universe_parser_rejects_both_exclusion_flags_at_parse() -> None:
-    # The four exclusion flags are a parse-time mutually-exclusive group, so
-    # passing both is an argparse error (SystemExit) before runtime. The runtime
-    # guard in _universe_config_from_args stays for programmatic callers and is
-    # pinned above via _universe_args.
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["discover-universe", "--include-excluded", "--exclude-defaults"])
-
-
 # A single symbol-parsing helper is used by every download branch.
 def test_parse_symbols_strips_and_uppercases() -> None:
     assert _parse_symbols(" btcusdt, ethusdt ,, solusdt ") == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     assert _parse_symbols("") == []
     assert _parse_symbols(None) == []
-
-
-def _parse_discover_universe(args):
-    return build_parser().parse_args(["discover-universe", *args])
-
-
-def test_exclude_defaults_alone_parses() -> None:
-    ns = _parse_discover_universe(["--exclude-defaults"])
-    assert ns.exclude_majors is True
-    assert ns.include_majors is False
-
-
-def test_include_excluded_alone_parses() -> None:
-    ns = _parse_discover_universe(["--include-excluded"])
-    assert ns.include_majors is True
-    assert ns.exclude_majors is False
-
-
-def test_no_exclusion_flags_defaults_false() -> None:
-    ns = _parse_discover_universe([])
-    assert ns.exclude_majors is False
-    assert ns.include_majors is False
-
-
-def test_contradictory_exclude_and_include_is_parse_error() -> None:
-    # A contradictory pair must hard-error rather than silently drop
-    # --exclude-defaults.
-    with pytest.raises(SystemExit) as exc:
-        _parse_discover_universe(["--exclude-defaults", "--include-excluded"])
-    assert exc.value.code == 2
-
-
-def test_exclusion_flags_are_in_a_mutually_exclusive_group() -> None:
-    parser = build_parser()
-    discover_subparser = parser._subparsers._group_actions[0].choices["discover-universe"]
-    target_options = {
-        "--exclude-defaults",
-        "--include-excluded",
-    }
-    for group in discover_subparser._mutually_exclusive_groups:
-        group_options = {opt for action in group._group_actions for opt in action.option_strings}
-        if target_options <= group_options:
-            assert isinstance(group, argparse._MutuallyExclusiveGroup)
-            break
-    else:  # pragma: no cover - defensive
-        pytest.fail("exclusion flags are not in a single mutually-exclusive group")

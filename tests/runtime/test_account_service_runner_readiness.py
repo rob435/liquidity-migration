@@ -17,7 +17,15 @@ from liquidity_migration.account.account_service import (
 from liquidity_migration.account.account_market_readiness import (
     RequestedMarketReadiness,
     RequestedMarketWarmupGate,
+    require_registered_request_market_warmup_timeout,
     run_ready_request_or_converge,
+)
+from liquidity_migration.account.account_owner_health import (
+    require_systemd_invocation_id,
+    validate_systemd_invocation_id,
+)
+from liquidity_migration.policy.account_execution_config import (
+    require_registered_demo_rule_max_age_hours,
 )
 from liquidity_migration.runtime.account_service_runner import (
     account_has_open_exposure,
@@ -139,10 +147,55 @@ def _evaluate(
     )
 
 
-@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, 30.000001])
-def test_warmup_timeout_rejects_non_finite_or_weakened_values(timeout: float) -> None:
-    with pytest.raises(ValueError, match="registered 30 seconds"):
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0])
+def test_warmup_timeout_rejects_non_finite_or_non_positive_values(timeout: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
         RequestedMarketWarmupGate(timeout_seconds=timeout)
+
+
+def test_registered_warmup_ceiling_binds_mainnet_and_not_demo() -> None:
+    """The 30s ceiling is a mainnet startup bound, not an invariant of the gate.
+
+    A demo owner on a slow or reconnecting link must be able to widen its
+    warmup budget with a flag rather than a code deploy.
+    """
+
+    assert require_registered_request_market_warmup_timeout(30.0) == 30.0
+    with pytest.raises(ValueError, match="registered 30 seconds"):
+        require_registered_request_market_warmup_timeout(30.000001)
+    assert (
+        require_registered_request_market_warmup_timeout(
+            120.0,
+            enforce_registered_ceiling=False,
+        )
+        == 120.0
+    )
+    assert RequestedMarketWarmupGate(timeout_seconds=120.0).timeout_seconds == 120.0
+
+
+def test_registered_demo_rule_age_ceiling_binds_mainnet_and_not_demo() -> None:
+    """Same split for the instrument-rule receipt age.
+
+    With a stale receipt and a probe that will not run, a hard ceiling leaves
+    no way to start a demo owner at all.
+    """
+
+    assert require_registered_demo_rule_max_age_hours(168.0) == 168.0
+    with pytest.raises(ValueError, match="registered 168 hours"):
+        require_registered_demo_rule_max_age_hours(168.1)
+    assert (
+        require_registered_demo_rule_max_age_hours(
+            720.0,
+            enforce_registered_ceiling=False,
+        )
+        == 720.0
+    )
+    for rejected in (float("nan"), float("inf"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="finite and positive"):
+            require_registered_demo_rule_max_age_hours(
+                rejected,
+                enforce_registered_ceiling=False,
+            )
 
 
 def test_queue_head_waits_for_every_exact_symbol_while_later_books_warm_in_parallel(
@@ -229,9 +282,16 @@ def test_genuine_wall_clock_regression_keeps_queue_head_blocked(tmp_path: Path) 
     assert "AUSDT:future_book" in readiness.detail
 
 
-def test_warmup_timeout_latches_health_closed_without_consuming_request(
+def test_overdue_warmup_reports_unservable_head_and_recovers_on_a_healthy_book(
     tmp_path: Path,
 ) -> None:
+    """A book gap must cost cycles, not the owner epoch.
+
+    The head stays pending and health stays blocked for as long as its book is
+    unusable, and the detail says how long -- but the same head becomes
+    servable the moment a healthy book arrives, with no process restart.
+    """
+
     inbox = _inbox(tmp_path)
     request = _request(inbox, request_id="head", symbols=("AUSDT",))
     inbox.submit(request)
@@ -239,22 +299,27 @@ def test_warmup_timeout_latches_health_closed_without_consuming_request(
     gate = RequestedMarketWarmupGate(timeout_seconds=5.0)
 
     assert _evaluate(gate, inbox, recorder, now_monotonic=10.0).timed_out is False
-    timed_out = _evaluate(gate, inbox, recorder, now_monotonic=15.0)
-    assert timed_out.ready is False
-    assert timed_out.timed_out is True
-    assert "request remains pending and owner epoch is closed" in timed_out.detail
+    overdue = _evaluate(gate, inbox, recorder, now_monotonic=15.0)
+    assert overdue.ready is False
+    assert overdue.timed_out is True
+    assert "AUSDT:no_snapshot" in overdue.detail
+    assert "unservable for 5.0s" in overdue.detail
+    assert "remains pending" in overdue.detail
 
     recorder.books["AUSDT"] = _book("AUSDT")
-    still_closed = _evaluate(gate, inbox, recorder, now_monotonic=16.0)
-    assert still_closed.ready is False
-    assert still_closed.timed_out is True
+    recovered = _evaluate(gate, inbox, recorder, now_monotonic=16.0)
+    assert recovered.ready is True
+    assert recovered.timed_out is False
+    assert recovered.detail == ""
     assert inbox.peek_next() == request
     assert len(list((inbox.root / "pending").glob("*.json"))) == 1
     assert list((inbox.root / "failed").glob("*.json")) == []
     assert list((inbox.root / "completed").glob("*.json")) == []
 
 
-def test_missing_verified_rule_closes_epoch_immediately_and_latches(tmp_path: Path) -> None:
+def test_missing_verified_rule_blocks_the_head_until_the_rule_is_verified(
+    tmp_path: Path,
+) -> None:
     inbox = _inbox(tmp_path)
     request = _request(inbox, request_id="head", symbols=("AUSDT",))
     inbox.submit(request)
@@ -269,19 +334,17 @@ def test_missing_verified_rule_closes_epoch_immediately_and_latches(tmp_path: Pa
         max_market_age_ns=100,
     )
     assert missing.ready is False
-    assert missing.timed_out is True
-    assert "owner epoch is closed" in missing.detail
+    assert "queue head lacks venue-verified rules: AUSDT" in missing.detail
 
-    still_closed = gate.evaluate(
+    verified = gate.evaluate(
         inbox=inbox,
         recorder=recorder,  # type: ignore[arg-type]
         verified_rule_symbols={"AUSDT"},
         now_monotonic=2.0,
         max_market_age_ns=100,
     )
-    assert still_closed.ready is False
-    assert still_closed.timed_out is True
-    assert still_closed.detail == missing.detail
+    assert verified.ready is True
+    assert verified.detail == ""
     assert inbox.peek_next() == request
 
 
@@ -579,7 +642,13 @@ def test_open_exposure_detection_treats_an_unread_venue_as_flat_only_when_the_jo
 
 
 def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
-    """Each startup check that can strand a live book routes through the degrade path."""
+    """Each startup check that can strand a live book routes through the degrade path.
+
+    The venue-order-ownership check is the one exception, and only off mainnet:
+    an owner that refuses to start cannot cancel the stray order it refused
+    over, and the 2s reconciler runs the same check every cycle and marks
+    health. Its degrade stage is still here for the mainnet branch.
+    """
 
     source = (
         Path(__file__).resolve().parents[2]
@@ -621,15 +690,97 @@ def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
         assert "public_stream.update_symbols(desired)" in source
 
 
-def test_demo_and_paper_validate_registered_startup_bounds_before_owner_identity() -> None:
-    repo = Path(__file__).resolve().parents[2]
-    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
-        source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
-        main = source[source.index("def main(") :]
-        assert main.index("require_registered_demo_rule_max_age_hours(") < main.index("require_systemd_invocation_id()")
-        assert main.index("require_registered_request_market_warmup_timeout(") < main.index(
-            "require_systemd_invocation_id()"
-        )
+def _owner_argv(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "--account-root", str(tmp_path / "account"),
+        "--inbox-root", str(tmp_path / "inbox"),
+        "--capture-root", str(tmp_path / "capture"),
+        "--symbols-file", str(tmp_path / "symbols.json"),
+        "--demo-rules-file", str(tmp_path / "rules.json"),
+        "--risk-policy-file", str(tmp_path / "risk.json"),
+        "--disaster-stop-fraction", "0.25",
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    (
+        ("--max-demo-rule-age-hours", "999", "registered 168 hours"),
+        ("--request-market-warmup-timeout-seconds", "120", "registered 30 seconds"),
+    ),
+)
+def test_mainnet_holds_registered_startup_bounds_before_touching_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+    message: str,
+) -> None:
+    """A weakened bound fails argument parsing, not something later.
+
+    Reaching credentials or the mutation lease first would mean a bad bound is
+    only caught after the owner has started binding real account state.
+    """
+
+    import liquidity_migration.runtime.account_service_runner as runner
+
+    monkeypatch.setenv("REAL_MONEY", "true")
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
+
+    with pytest.raises(SystemExit):
+        runner.main(_owner_argv(tmp_path, "--realm", "mainnet", flag, value))
+
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    (
+        ("--max-demo-rule-age-hours", "999"),
+        ("--request-market-warmup-timeout-seconds", "120"),
+    ),
+)
+def test_demo_accepts_a_widened_startup_bound_and_runs_on_to_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    value: str,
+) -> None:
+    """Demo takes any positive finite bound, so a stale receipt or a slow link
+    is an operator flag away from starting rather than a code deploy."""
+
+    import liquidity_migration.runtime.account_service_runner as runner
+
+    monkeypatch.setenv("REAL_MONEY", "false")
+    for key in ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(RuntimeError, match="BYBIT_DEMO_API_KEY"):
+        runner.main(_owner_argv(tmp_path, "--realm", "demo", flag, value))
+
+
+def test_owner_generation_id_is_required_only_where_systemd_supervises() -> None:
+    """Mainnet must be the owner systemd supervises; demo may be run by hand.
+
+    The synthesized id keeps systemd's exact shape because health and capture
+    projections validate it, and a malformed value stays a fault either way.
+    """
+
+    with pytest.raises(RuntimeError, match="INVOCATION_ID is required"):
+        require_systemd_invocation_id({})
+
+    synthesized = require_systemd_invocation_id({}, require_systemd=False)
+    assert validate_systemd_invocation_id(synthesized) == synthesized
+    assert synthesized != require_systemd_invocation_id({}, require_systemd=False)
+
+    supervised = {"INVOCATION_ID": "ab" * 16}
+    assert require_systemd_invocation_id(supervised) == "ab" * 16
+    assert require_systemd_invocation_id(supervised, require_systemd=False) == "ab" * 16
+    with pytest.raises(RuntimeError, match="hexadecimal"):
+        require_systemd_invocation_id({"INVOCATION_ID": "nope"}, require_systemd=False)
 
 
 def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> None:
@@ -651,7 +802,7 @@ def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> N
         assert len(invocation_keywords) == 1
         assert isinstance(invocation_keywords[0], ast.Name)
         assert invocation_keywords[0].id == "invocation_id"
-        assert "invocation_id = require_systemd_invocation_id()" in source
+        assert "invocation_id = require_systemd_invocation_id(" in source
 
 
 def test_demo_owner_supervises_private_execution_stream_before_admission() -> None:
