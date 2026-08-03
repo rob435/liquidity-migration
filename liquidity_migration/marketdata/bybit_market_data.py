@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from liquidity_migration.marketdata.bybit_errors import BybitDataError, is_rate_limit as _is_rate_limit
+from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate, TickerFrameSampler
 
 try:
     from pybit.unified_trading import HTTP, WebSocket
@@ -475,13 +476,25 @@ class BybitPublicTickerStream:
     # against the same WebSocket — pybit queues multiple subscribe frames
     # on the same connection.
     subscribe_args_per_message: int = 10
+    # One delta per symbol every this many seconds is enough: the cycle reads
+    # the cache once a minute and a REST snapshot replaces the whole cache every
+    # 60 s. 0 disables the sampler.
+    sample_interval_seconds: float = 5.0
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPublicTickerStream")
         _patch_pybit_daemon_ping_timer()
-        self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
+        if self.sample_interval_seconds > 0.0 and _websocket_supports_frame_gate():
+            self._client = _gated_websocket_class()(
+                frame_gate=TickerFrameSampler(min_interval_seconds=self.sample_interval_seconds),
+                testnet=self.testnet,
+                demo=self.demo,
+                channel_type=self.category,
+            )
+        else:
+            self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
 
     def subscribe_tickers(self, symbols: str | list[str], callback: Any) -> None:
         if isinstance(symbols, str):
@@ -492,6 +505,11 @@ class BybitPublicTickerStream:
         for i in range(0, len(symbol_list), chunk):
             slice_ = symbol_list[i : i + chunk]
             self._client.ticker_stream(symbol=slice_, callback=callback)
+
+    def stats(self) -> dict[str, int]:
+        """Frames the sampler saw and dropped before decode; zeros when ungated."""
+        frames_seen, frames_dropped = _frame_gate_stats(self._client)
+        return {"frames_seen": frames_seen, "frames_dropped_pre_decode": frames_dropped}
 
     def close(self) -> None:
         _close_ws_client(self._client)
@@ -600,6 +618,52 @@ def _patch_pybit_daemon_ping_timer() -> None:
 _logger_ws_klines = logging.getLogger("liquidity_migration.venue.bybit.ws_klines")
 
 
+class _FrameGatedWebSocketMixin:
+    """Let a gate reject a raw frame before pybit spends a json.loads on it.
+
+    pybit's ``_on_message`` decodes every frame as its first statement and
+    exposes no earlier hook, so a subclass override is the only seam. Mixed in
+    ahead of the pybit class so ``super()`` reaches pybit's own handler.
+    """
+
+    def _on_message(self, message: Any) -> None:
+        gate = getattr(self, "frame_gate", None)
+        if gate is not None and not gate.accepts(message):
+            return
+        super()._on_message(message)  # type: ignore[misc]
+
+
+_GATED_WEBSOCKET_BASE: Any = None
+_GATED_WEBSOCKET_CLASS: type[Any] | None = None
+
+
+def _websocket_supports_frame_gate() -> bool:
+    """True when the installed pybit still has the decode seam to override."""
+    return WebSocket is not None and hasattr(WebSocket, "_on_message")
+
+
+def _gated_websocket_class() -> type[Any]:
+    """Build (once) the pybit WebSocket subclass that consults a frame gate.
+
+    Cached against the class it was built from, so a test that swaps
+    ``WebSocket`` for a fake does not inherit a subclass of the real one.
+    """
+    global _GATED_WEBSOCKET_BASE, _GATED_WEBSOCKET_CLASS
+    if _GATED_WEBSOCKET_CLASS is not None and _GATED_WEBSOCKET_BASE is WebSocket:
+        return _GATED_WEBSOCKET_CLASS
+
+    class _GatedWebSocket(_FrameGatedWebSocketMixin, WebSocket):
+        def __init__(self, *, frame_gate: Any = None, **kwargs: Any) -> None:
+            # Before the base constructor: pybit's WebSocket.__init__ ends by
+            # connecting, and frames can arrive inside that call.
+            self.frame_gate = frame_gate
+            super().__init__(**kwargs)
+
+    _GATED_WEBSOCKET_BASE = WebSocket
+    _GATED_WEBSOCKET_CLASS = _GatedWebSocket
+    return _GatedWebSocket
+
+
 def _is_already_subscribed_error(exc: BaseException) -> bool:
     """True for pybit's "You have already subscribed to this topic" error.
 
@@ -611,11 +675,22 @@ def _is_already_subscribed_error(exc: BaseException) -> bool:
 
 
 def _default_kline_websocket_factory(*, testnet: bool, demo: bool, channel_type: str) -> Any:
-    """Create a fresh pybit WebSocket client tuned for kline streams."""
+    """Create a fresh pybit WebSocket client tuned for kline streams.
+
+    The client carries a gate that throws away the once-a-second partial-bar
+    frames before they are decoded; only the closed hourly bar is wanted."""
     if WebSocket is None:
         raise RuntimeError("pybit is required for BybitKlineStreamPool")
     _patch_pybit_daemon_ping_timer()
-    return WebSocket(testnet=testnet, demo=demo, channel_type=channel_type)
+    if not _websocket_supports_frame_gate():
+        _logger_ws_klines.warning("pybit exposes no _on_message; kline frames decode ungated")
+        return WebSocket(testnet=testnet, demo=demo, channel_type=channel_type)
+    return _gated_websocket_class()(
+        frame_gate=KlineFrameGate(),
+        testnet=testnet,
+        demo=demo,
+        channel_type=channel_type,
+    )
 
 
 @dataclass(slots=True)
@@ -636,6 +711,15 @@ class _KlineConnectionState:
     # multi-connection reconnect). 0.0 = never attempted, so first reconnect is
     # immediate.
     last_reconnect_monotonic: float = 0.0
+
+    def mark_frame_seen(self) -> None:
+        """Liveness stamp for a frame dropped before decode.
+
+        Only the gate's drop path calls this. A delivered frame is still
+        stamped in the pool callback, and pongs and acks must keep stamping
+        nothing so a quiet venue-side subscription is still detected.
+        """
+        self.last_message_monotonic = time.monotonic()
 
 
 class BybitKlineStreamPool:
@@ -798,6 +882,7 @@ class BybitKlineStreamPool:
             assigned_symbols=set(),
             last_message_monotonic=time.monotonic(),
         )
+        _bind_frame_gate(client, state)
         self._connections.append(state)
         if initial_symbols:
             self._subscribe_to_connection_locked(state, initial_symbols)
@@ -1087,6 +1172,7 @@ class BybitKlineStreamPool:
             reconnect_count=prior_reconnect_count + 1,
             last_reconnect_monotonic=attempt_monotonic,
         )
+        _bind_frame_gate(new_client, new_state)
         try:
             subscribed = self._subscribe_client_chunks(new_state, slice_symbols)
         except Exception as exc:  # noqa: BLE001
@@ -1170,18 +1256,22 @@ class BybitKlineStreamPool:
     def stats(self) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
-            per_conn = [
-                {
-                    "index": state.index,
-                    "topics": len(state.assigned_symbols),
-                    "messages": state.message_count,
-                    "dropped": state.dropped_messages,
-                    "reconnects": state.reconnect_count,
-                    "idle_seconds": round(now - state.last_message_monotonic, 3),
-                    "closed": state.closed,
-                }
-                for state in self._connections
-            ]
+            per_conn = []
+            for state in self._connections:
+                frames_seen, frames_dropped = _frame_gate_stats(state.client)
+                per_conn.append(
+                    {
+                        "index": state.index,
+                        "topics": len(state.assigned_symbols),
+                        "messages": state.message_count,
+                        "dropped": state.dropped_messages,
+                        "reconnects": state.reconnect_count,
+                        "idle_seconds": round(now - state.last_message_monotonic, 3),
+                        "closed": state.closed,
+                        "frames_seen": frames_seen,
+                        "frames_dropped_pre_decode": frames_dropped,
+                    }
+                )
             return {
                 "connections": len(self._connections),
                 "subscribed_symbols": len(self._symbol_to_connection),
@@ -1189,6 +1279,24 @@ class BybitKlineStreamPool:
                 "stale_warnings_total": self._stale_warnings_total,
                 "per_connection": per_conn,
             }
+
+def _bind_frame_gate(client: Any, state: _KlineConnectionState) -> None:
+    """Point a client's frame gate at this connection's liveness clock.
+
+    A no-op for a client without one, which is what the tests' fake factory
+    builds.
+    """
+    gate = getattr(client, "frame_gate", None)
+    if gate is not None:
+        gate.on_dropped_frame = state.mark_frame_seen
+
+
+def _frame_gate_stats(client: Any) -> tuple[int, int]:
+    gate = getattr(client, "frame_gate", None)
+    if gate is None:
+        return 0, 0
+    return int(getattr(gate, "frames_seen", 0)), int(getattr(gate, "frames_dropped", 0))
+
 
 def _symbol_from_kline_topic(topic: str) -> str | None:
     """Extract the symbol component from a kline topic ``kline.60.SYMBOL``."""

@@ -477,15 +477,16 @@ class LongNativeDemoDaemon:
             except Exception as exc:  # noqa: BLE001
                 _logger.debug("kline_stream_manager stats fetch failed: %s", exc)
         if payload is not None:
-            payload.setdefault(
-                "ws_state",
-                {
-                    "ticker_cache": self._ticker_cache.stats(),
-                    "reconciles_total": self._reconciles_total,
-                    "reconcile_errors": self._reconcile_errors,
-                    "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
-                },
-            )
+            ws_state: dict[str, Any] = {
+                "ticker_cache": self._ticker_cache.stats(),
+                "reconciles_total": self._reconciles_total,
+                "reconcile_errors": self._reconcile_errors,
+                "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
+            }
+            stream_stats = getattr(self._ticker_stream, "stats", None)
+            if callable(stream_stats):
+                ws_state["ticker_stream"] = stream_stats()
+            payload.setdefault("ws_state", ws_state)
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)

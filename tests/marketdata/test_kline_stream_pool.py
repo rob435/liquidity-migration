@@ -15,6 +15,7 @@ from liquidity_migration.marketdata.bybit_market_data import (
     BybitKlineStreamPool,
     _symbol_from_kline_topic,
 )
+from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate
 
 
 class _FakeWebSocket:
@@ -642,3 +643,103 @@ def test_callback_thread_safety_concurrent_inject_and_update() -> None:
     pool.close()
     assert not errors, f"thread-safety violation: {errors!r}"
     assert len(received) >= 1
+
+
+# -- pre-decode frame gate ---------------------------------------------------
+
+_UNCONFIRMED_FRAME = (
+    '{"topic":"kline.60.AAA_USDT","data":[{"start":1754200800000,"interval":"60",'
+    '"close":"1.5","confirm":false}],"ts":1754201234567,"type":"snapshot"}'
+)
+_CONFIRMED_FRAME = _UNCONFIRMED_FRAME.replace('"confirm":false', '"confirm":true')
+_SUBSCRIBE_ACK = '{"success":true,"ret_msg":"","conn_id":"c1","req_id":"r1","op":"subscribe"}'
+_CUSTOM_PONG = '{"success":true,"ret_msg":"pong","conn_id":"c1","op":"ping"}'
+
+
+class _GatedFakeWebSocketFactory(_FakeWebSocketFactory):
+    """Fakes that carry a real gate, the way the pybit-backed factory does."""
+
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+        ws = super().__call__(testnet=testnet, demo=demo, channel_type=channel_type)
+        ws.frame_gate = KlineFrameGate()  # type: ignore[attr-defined]
+        return ws
+
+
+def test_dropped_frame_keeps_connection_alive_but_a_quiet_venue_still_reconnects() -> None:
+    """The gate throws away the once-a-second partial bars, so between hourly bars a
+    healthy connection delivers nothing. Its drop path stamps liveness, or the watchdog
+    would rebuild every connection every few minutes. Pongs and acks stamp nothing, so a
+    socket that answers pings while the venue stopped pushing is still caught.
+    """
+    factory = _GatedFakeWebSocketFactory()
+    pool, _ = _build_pool(
+        topics_per_connection=10,
+        stale_warning_seconds=0.1,
+        stale_reconnect_seconds=0.5,
+        factory=factory,
+    )
+    pool.subscribe(["AAA_USDT", "BBB_USDT"], lambda s, b, c: None)
+    try:
+        ws = factory.built[0]
+        gate = ws.frame_gate  # type: ignore[attr-defined]
+        assert gate.on_dropped_frame is not None, "pool did not bind the gate to the connection"
+        state = pool._connections[0]  # type: ignore[attr-defined]
+
+        state.last_message_monotonic = time.monotonic() - 5.0
+        assert gate.accepts(_UNCONFIRMED_FRAME) is False
+        assert pool.check_stale_connections() == 0
+
+        # Same connection, but now only control frames arrive.
+        state.last_message_monotonic = time.monotonic() - 5.0
+        assert gate.accepts(_SUBSCRIBE_ACK) is True
+        assert gate.accepts(_CUSTOM_PONG) is True
+        assert pool.check_stale_connections() == 1
+    finally:
+        pool.close()
+
+
+def test_reconnect_binds_the_gate_to_the_new_connection() -> None:
+    factory = _GatedFakeWebSocketFactory()
+    pool, _ = _build_pool(
+        topics_per_connection=10,
+        stale_warning_seconds=0.1,
+        stale_reconnect_seconds=0.5,
+        factory=factory,
+    )
+    pool.subscribe(["AAA_USDT"], lambda s, b, c: None)
+    try:
+        pool._connections[0].last_message_monotonic = time.monotonic() - 5.0  # type: ignore[attr-defined]
+        assert pool.check_stale_connections() == 1
+        new_ws = factory.built[1]
+        new_state = pool._connections[0]  # type: ignore[attr-defined]
+        assert new_ws.frame_gate.on_dropped_frame is not None  # type: ignore[attr-defined]
+
+        new_state.last_message_monotonic = time.monotonic() - 5.0
+        assert new_ws.frame_gate.accepts(_UNCONFIRMED_FRAME) is False  # type: ignore[attr-defined]
+        assert pool.check_stale_connections() == 0
+    finally:
+        pool.close()
+
+
+def test_stats_report_pre_decode_drops_and_zeros_without_a_gate() -> None:
+    factory = _GatedFakeWebSocketFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AAA_USDT"], lambda s, b, c: None)
+    try:
+        gate = factory.built[0].frame_gate  # type: ignore[attr-defined]
+        assert gate.accepts(_UNCONFIRMED_FRAME) is False
+        assert gate.accepts(_CONFIRMED_FRAME) is True
+        conn = pool.stats()["per_connection"][0]
+        assert conn["frames_seen"] == 2
+        assert conn["frames_dropped_pre_decode"] == 1
+    finally:
+        pool.close()
+
+    ungated, _ = _build_pool(topics_per_connection=10)
+    ungated.subscribe(["AAA_USDT"], lambda s, b, c: None)
+    try:
+        conn = ungated.stats()["per_connection"][0]
+        assert conn["frames_seen"] == 0
+        assert conn["frames_dropped_pre_decode"] == 0
+    finally:
+        ungated.close()
