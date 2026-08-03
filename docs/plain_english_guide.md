@@ -87,16 +87,25 @@ position, scaled by how calm Bitcoin is, 1.5× on weekends, then the whole book
 halved by LONG's own size dial (0.5). Exits: 1.5 typical-daily-swings below
 entry, 4 above, out by 3 days, no re-buy for 7 days.
 
-**A replacement is ready but not switched on** (`LongV12WideStop`). Everything
-above stays; only the get-out line moves. It sits 1.5 typical-daily-swings below
-entry, but "typical" is a two-week average and this strategy only buys coins that
-moved two and a half times their normal amount *today* — so the line is inside the
-noise of the very jump it just bought, and 67 of 294 trades were knocked out by it.
-The new version leaves the line 3 swings away for the first two days, then pulls it
-back to 1.5. Over five years that turns +38.5% into +51.6%, smoothness 1.24 into
-1.49, and the worst dip gets slightly *shallower* (−4.4% to −3.9%). It is better in
-every one of the six years, and it is not one lucky trade — the best 20 trades carry
-62% of the profit instead of 78%.
+**The replacement is switched on since 2026-08-03** (`LongV12WideStop`).
+Everything above stays; only the get-out line moves. The old line sat 1.5
+typical-daily-swings below entry, but "typical" is a two-week average and this
+strategy only buys coins that moved two and a half times their normal amount
+*today* — so the line was inside the noise of the very jump it just bought, and
+67 of 294 trades were knocked out by it. The new version leaves the line 3 swings
+away for the first two days, then pulls it back to 1.5. Over five years that
+turns +38.5% into +51.6%, smoothness 1.24 into 1.49, and the worst dip gets
+slightly *shallower* (−4.4% to −3.9%). It is better in every one of the six
+years, and it is not one lucky trade — the best 20 trades carry 62% of the
+profit instead of 78%.
+
+How the two halves run live: the far line (3 swings) is a standing order at the
+exchange from the moment of entry and never moves. The pulled-back line (1.5
+swings, the "decayed stop", journaled as `decayed_stop_loss`) is checked by our
+own system about once a minute once the position is two days old, and it sells
+at the market price when the price is at or under that line. Trades opened
+under the old version before the switch keep their old lines and simply run off
+(nothing is held longer than 3 days).
 
 ## 5. CONTINUOUS — retired 2026-07-29
 

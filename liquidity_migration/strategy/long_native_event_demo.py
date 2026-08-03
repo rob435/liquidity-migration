@@ -14,9 +14,16 @@ Operating model
   signal_close * (1 - 0.01), OR at the first cycle after the deadline expires
   (fc_sniper_skip_on_no_retrace=false, fall-through). Signals older than 24h
   are dropped as stale.
-- Each entry target carries ATR-derived stop/TP intent (fc_atr_stop_mult=1.5,
-  fc_atr_tp_mult=4.0 of ATR_14d); the account owner owns executable quantity,
-  venue protection, orders, fills, and P&L.
+- Each entry target carries ATR-derived stop/TP intent (fc_atr_stop_mult and
+  fc_atr_tp_mult of ATR_14d, per the selected profile); the account owner owns
+  executable quantity, venue protection, orders, fills, and P&L.
+- v12 (LongV12WideStop) additionally publishes a per-trade stop-decay contract
+  in the entry metadata: after fc_stop_time_decay_hours the producer plans a
+  zero-target exit whenever the live price breaches the decayed level
+  entry_price*(1 - fc_stop_time_decay_atr_mult*atr_14d_pct). The published
+  stop_loss_pct (the wide venue-native stop) is never revised; the decay is a
+  producer-planned exit checked at cycle cadence, one grid-convention step from
+  the research engine's intrabar low.
 - Per-position notional defaults to the 1x research sizing. Levered demo sizing
   is explicit opt-in and is rejected if projected full-book initial margin
   exceeds the configured safety ceiling.
@@ -29,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,7 +90,11 @@ from liquidity_migration.research.backtest.long_native import (
     long_v11a_profile,
 )
 from liquidity_migration.data.storage import exclusive_file_lock, write_dataset
-from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME, long_trade_id
+from liquidity_migration.research.backtest.long_identity import (
+    SUPPORTED_LONG_STRATEGY_IDS,
+    long_profile_display_name,
+    long_trade_id,
+)
 from liquidity_migration.strategy.strategy_planning import (
     account_owner_equity_or_error,
     sleeve_planning_snapshot,
@@ -164,6 +176,12 @@ def _validate_long_demo_config(
     strategy_config: LongNativeConfig | None = None,
 ) -> None:
     strategy = strategy_config or long_v11a_profile()
+    if strategy.execution_strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
+        # The id is a persisted account-journal key; an unregistered value
+        # would open components under an identity nothing else recognizes.
+        raise ValueError(
+            f"unsupported LONG execution_strategy_id: {strategy.execution_strategy_id!r}"
+        )
     if config.lookback_days < 95:
         raise ValueError(
             "lookback_days must be at least 95 so turnover_median_90d "
@@ -419,10 +437,14 @@ def run_long_native_demo_cycle(
         )
         mark_stage("features")
 
+        # Plan across every supported LONG identity, not just the active one:
+        # target keys embed the strategy id, so open components entered under a
+        # prior profile would otherwise lose their exits, capacity accounting,
+        # and cooldown history the moment the deployed profile changed.
         planning = sleeve_planning_snapshot(
             route,
             sleeve=SleeveAdapterKind.LONG,
-            strategy_ids=(strategy_id,),
+            strategy_ids=tuple(sorted(SUPPORTED_LONG_STRATEGY_IDS)),
             journal_cursor=journal_cursor,
         )
         target_publisher = planning.publisher
@@ -434,8 +456,12 @@ def run_long_native_demo_cycle(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
         )
 
-        exit_plans = _plan_time_stop_exits(all_trades, now_ms=cycle_now_ms)
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
+        exit_plans = _plan_time_stop_exits(
+            all_trades,
+            now_ms=cycle_now_ms,
+            price_by_symbol=price_by_symbol,
+        )
         exit_target_intents = _long_exit_target_intents(
             exit_plans,
             all_trades,
@@ -525,7 +551,7 @@ def run_long_native_demo_cycle(
             "sleeve": "long",
             "mode": f"{owner_environment}_target",
             "strategy_id": strategy_id,
-            "strategy_profile": LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
+            "strategy_profile": long_profile_display_name(strategy_id),
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
             "temporarily_ineligible_candidates_json": json.dumps(
                 candidate_reconciliation.temporarily_ineligible_rows()
@@ -559,6 +585,9 @@ def run_long_native_demo_cycle(
             "entry_candidates": entry_candidates,
             "entry_targets_queued": published_entry_intents,
             "exit_candidates": len(exit_plans),
+            "exit_decayed_stop_candidates": sum(
+                1 for plan in exit_plans if plan.get("exit_reason") == "decayed_stop_loss"
+            ),
             "exit_targets_queued": published_exit_intents,
             "target_intents_queued": published_exit_intents + published_entry_intents,
             "account_target_route": True,
@@ -908,6 +937,25 @@ def _select_long_entry_candidates(
                 "take_profit_pct": float(tp_pct),
                 "max_hold_days": int(hold_days),
                 "atr_14d_pct": atr_pct,
+                # v12 stop-decay contract, resolved from the signal-day ATR at
+                # entry time and frozen on the trade: the published wide stop is
+                # never revised, so a later profile change cannot rewrite the
+                # decay of a standing position. Absent for profiles without
+                # decay (v11a), and the exit planner then never applies it.
+                **(
+                    {
+                        "stop_decay_after_ms": exact_duration_ms(
+                            hours=strategy.fc_stop_time_decay_hours
+                        ),
+                        "decayed_stop_loss_pct": (
+                            strategy.fc_stop_time_decay_atr_mult * atr_pct
+                        ),
+                    }
+                    if strategy.fc_stop_time_decay_hours > 0
+                    and strategy.fc_stop_time_decay_atr_mult > 0.0
+                    and atr_pct > 0.0
+                    else {}
+                ),
                 "realized_vol": realized_vol,
                 "position_weight": position_weight,
                 "candidate_score": candidate_score,
@@ -1067,27 +1115,65 @@ def _plan_time_stop_exits(
     all_trades: pl.DataFrame,
     *,
     now_ms: int,
+    price_by_symbol: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return filled LONG components whose time-stop target is due.
+    """Return filled LONG components whose time-stop or decayed-stop is due.
 
     The producer publishes a zero component target. Working-order suppression,
     retries, and venue mutation belong to the account owner.
+
+    The decayed stop is the v12 contract each entry target froze in its own
+    metadata (``stop_decay_after_ms`` + ``decayed_stop_loss_pct``): once the
+    fill is that old, plan an exit whenever the live price is at or below
+    ``entry_price * (1 - decayed_stop_loss_pct)``. Trades without the contract
+    (v11a) are never decay-checked, and the published venue-native stop stays
+    armed either way — a missing live price or fill anchor just defers the
+    check to a later cycle with that wider stop still in place.
     """
     if all_trades.is_empty():
         return []
     open_long = _open_long_trades(all_trades)
     if open_long.is_empty():
         return []
+    prices = price_by_symbol or {}
     plans: list[dict[str, Any]] = []
     for trade in open_long.to_dicts():
         symbol = str(trade.get("symbol", ""))
         if not symbol:
             continue
-        deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
-        if deadline <= 0 or now_ms < deadline:
-            continue
         qty = str(trade.get("qty") or "")
         if not qty or _float(qty) <= 0.0:
+            continue
+        deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
+        if deadline > 0 and now_ms >= deadline:
+            plans.append(
+                {
+                    "trade_id": str(trade["trade_id"]),
+                    "symbol": symbol,
+                    "side": "long",
+                    "qty": qty,
+                    "exit_reason": "time_stop",
+                    "max_hold_deadline_ts_ms": deadline,
+                }
+            )
+            continue
+        decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
+        decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
+        if decay_after_ms <= 0 or not 0.0 < decayed_stop_loss_pct < 1.0:
+            continue
+        entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
+        entry_price = _float(trade.get("entry_price"))
+        if entry_ts_ms <= 0 or entry_price <= 0.0:
+            # No attributable entry fill yet: the decay clock has not started.
+            continue
+        decay_deadline_ts_ms = entry_ts_ms + decay_after_ms
+        if now_ms < decay_deadline_ts_ms:
+            continue
+        live_price = _float(prices.get(symbol))
+        if live_price <= 0.0:
+            continue
+        decayed_stop_price = entry_price * (1.0 - decayed_stop_loss_pct)
+        if live_price > decayed_stop_price:
             continue
         plans.append(
             {
@@ -1095,8 +1181,11 @@ def _plan_time_stop_exits(
                 "symbol": symbol,
                 "side": "long",
                 "qty": qty,
-                "exit_reason": "time_stop",
-                "max_hold_deadline_ts_ms": deadline,
+                "exit_reason": "decayed_stop_loss",
+                "decayed_stop_price": decayed_stop_price,
+                "decayed_stop_loss_pct": decayed_stop_loss_pct,
+                "stop_decay_deadline_ts_ms": decay_deadline_ts_ms,
+                "decision_reference_price": live_price,
             }
         )
     return plans
@@ -1110,21 +1199,58 @@ def _long_exit_target_intents(
     now_ms: int,
     default_leverage: float,
 ) -> list[RequestedIntent]:
-    """Translate strategy exits to replacement zero targets without venue I/O."""
+    """Translate strategy exits to replacement zero targets without venue I/O.
 
-    return exit_target_intents(
-        exits,
-        all_trades,
-        adapter_kind=SleeveAdapterKind.LONG,
-        strategy_id=strategy_id,
-        now_ms=now_ms,
-        default_leverage=default_leverage,
-        source="long_native_target_adapter",
-        default_reason="time_stop",
-        extra_metadata=lambda plan, trade: {
+    Exits are keyed under each trade's OWN persisted strategy id, not the
+    producer's active one: the target key embeds the id, so a zero target
+    published under the wrong identity would open a stray component instead of
+    replacing the standing one. This is what lets a v12 producer drain the
+    v11a components that were open when the profile switched.
+    """
+
+    def _decay_extra(plan: Mapping[str, Any], trade: Mapping[str, Any]) -> dict[str, Any]:
+        extra: dict[str, Any] = {
             "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
-        },
+        }
+        if str(plan.get("exit_reason") or "") == "decayed_stop_loss":
+            extra.update(
+                {
+                    "decayed_stop_price": _float(plan.get("decayed_stop_price")),
+                    "decayed_stop_loss_pct": _float(plan.get("decayed_stop_loss_pct")),
+                    "stop_decay_deadline_ts_ms": int(_float(plan.get("stop_decay_deadline_ts_ms"))),
+                    "decision_reference_price": _float(plan.get("decision_reference_price")),
+                }
+            )
+        return extra
+
+    trade_strategy_by_id = (
+        {
+            str(row.get("trade_id") or ""): str(row.get("strategy_id") or "")
+            for row in all_trades.to_dicts()
+        }
+        if not all_trades.is_empty()
+        else {}
     )
+    plans_by_strategy: dict[str, list[dict[str, Any]]] = {}
+    for plan in exits:
+        owning_strategy = trade_strategy_by_id.get(str(plan.get("trade_id") or "")) or strategy_id
+        plans_by_strategy.setdefault(owning_strategy, []).append(plan)
+    intents: list[RequestedIntent] = []
+    for owning_strategy in sorted(plans_by_strategy):
+        intents.extend(
+            exit_target_intents(
+                plans_by_strategy[owning_strategy],
+                all_trades,
+                adapter_kind=SleeveAdapterKind.LONG,
+                strategy_id=owning_strategy,
+                now_ms=now_ms,
+                default_leverage=default_leverage,
+                source="long_native_target_adapter",
+                default_reason="time_stop",
+                extra_metadata=_decay_extra,
+            )
+        )
+    return intents
 
 
 def _long_entry_target_intents(
@@ -1164,6 +1290,15 @@ def _long_entry_target_intents(
         max_hold_duration_ms = exact_duration_ms(
             days=max_hold_days,
         )
+        stop_decay_after_ms = int(_float(candidate.get("stop_decay_after_ms")))
+        decayed_stop_loss_pct = _float(candidate.get("decayed_stop_loss_pct"))
+        decay_metadata: dict[str, Any] = {}
+        if stop_decay_after_ms > 0 and 0.0 < decayed_stop_loss_pct < 1.0:
+            decay_metadata = {
+                "stop_decay_after_ms": stop_decay_after_ms,
+                "decayed_stop_loss_pct": decayed_stop_loss_pct,
+                "atr_14d_pct": _float(candidate.get("atr_14d_pct")),
+            }
         intents.append(
             component_target_intent(
                 adapter_kind=SleeveAdapterKind.LONG,
@@ -1191,6 +1326,7 @@ def _long_entry_target_intents(
                     "entry_quality_tier": str(candidate.get("entry_quality_tier") or ""),
                     "raw_target_notional_usdt": target_notional,
                     "quantity_authority": "account_kernel_demo_rules",
+                    **decay_metadata,
                 },
             )
         )

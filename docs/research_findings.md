@@ -128,7 +128,8 @@ CONTINUOUS sleeve runs again. `execution_arm` appears only in `passive_execution
 report does not split by arm.
 
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
-`LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; NOT deployed). All ~20 v11a quirks were ablated
+`LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
+2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `STATE.md`). All ~20 v11a quirks were ablated
 one at a time on the real engine — the harness reproduces the stored report to within the eight extra days
 of data (294 trades against 292). Every selectivity filter is load-bearing and loses Sharpe when loosened;
 the stop was not.

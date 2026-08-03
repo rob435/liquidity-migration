@@ -159,6 +159,29 @@ def long_v12_profile() -> LongNativeConfig:
     )
 
 
+# Runtime selector names accepted by the CLI/daemon. Each maps to exactly one
+# registered profile; anything else fails at argument parsing or resolution.
+LONG_STRATEGY_PROFILE_CHOICES = ("v11a", "v12")
+
+
+def resolve_long_strategy_profile(name: str) -> LongNativeConfig:
+    """Resolve a runtime profile selector to its registered LONG config.
+
+    Deliberately strict: an unknown selector raises instead of defaulting, so a
+    typo in deploy wiring cannot silently publish targets under the wrong
+    persisted execution identity.
+    """
+
+    normalized = str(name).strip().lower()
+    if normalized == "v11a":
+        return long_v11a_profile()
+    if normalized == "v12":
+        return long_v12_profile()
+    raise ValueError(
+        f"unknown LONG strategy profile {name!r}; supported: {', '.join(LONG_STRATEGY_PROFILE_CHOICES)}"
+    )
+
+
 def _diagnostic_data_end(exclusive_end: str) -> str | None:
     """Translate the strategy's exclusive end into an inclusive data date."""
 

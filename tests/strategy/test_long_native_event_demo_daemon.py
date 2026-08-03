@@ -296,3 +296,56 @@ def test_run_revalidates_long_route_before_opening_resources(tmp_path: Path) -> 
 
     assert resource_calls == []
     assert daemon._cycle_errors == 0
+
+
+def test_daemon_profile_name_and_cycle_kwargs_follow_strategy_config(
+    tmp_path: Path,
+) -> None:
+    from liquidity_migration.research.backtest.long_native import long_v12_profile
+
+    seen: list[dict] = []
+    daemon = LongNativeDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=str(tmp_path / "inbox"),
+            account_execution_root=str(tmp_path / "account"),
+            ws_klines_enabled=False,
+        ),
+        strategy_config=long_v12_profile(),
+        interval_seconds=0.0,
+        cycle_runner=_stub_long_cycle_runner(seen),
+        clock=VirtualClock(current_wall_ns=1_234_567_890_000),
+    )
+    assert daemon._strategy_profile_name() == "LongV12WideStop"
+
+    daemon._run_one_cycle()
+
+    assert len(seen) == 1
+    passed = seen[0]["kwargs"]["strategy_config"]
+    assert passed.execution_strategy_id == "long_native_v12_wide_stop"
+
+
+def test_daemon_without_strategy_config_keeps_v11a_default(tmp_path: Path) -> None:
+    seen: list[dict] = []
+    daemon = LongNativeDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=str(tmp_path / "inbox"),
+            account_execution_root=str(tmp_path / "account"),
+            ws_klines_enabled=False,
+        ),
+        interval_seconds=0.0,
+        cycle_runner=_stub_long_cycle_runner(seen),
+        clock=VirtualClock(current_wall_ns=1_234_567_890_000),
+    )
+    assert daemon._strategy_profile_name() == "LongV11aDivWeekendVol"
+
+    daemon._run_one_cycle()
+
+    # No override means the cycle runner's own default (the v11a profile);
+    # the kwarg must be absent, not None, for subclass runner signatures.
+    assert "strategy_config" not in seen[0]["kwargs"]

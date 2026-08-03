@@ -16,6 +16,20 @@ SUPPORTED_LONG_STRATEGY_IDS = frozenset(
     {LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID, LONG_V12_WIDE_STOP_STRATEGY_ID}
 )
 
+LONG_PROFILE_NAMES_BY_STRATEGY_ID = {
+    LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID: LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
+    LONG_V12_WIDE_STOP_STRATEGY_ID: LONG_V12_WIDE_STOP_PROFILE_NAME,
+}
+
+
+def long_profile_display_name(strategy_id: str) -> str:
+    """Human-readable profile name for a supported LONG execution identity."""
+
+    name = LONG_PROFILE_NAMES_BY_STRATEGY_ID.get(str(strategy_id))
+    if name is None:
+        raise ValueError(f"unsupported LONG strategy id: {strategy_id!r}")
+    return name
+
 
 def long_trade_id(*, symbol: str, signal_ts_ms: int) -> str:
     normalized_symbol = str(symbol).strip().upper()

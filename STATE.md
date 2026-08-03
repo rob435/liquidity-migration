@@ -19,6 +19,29 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — LONG sleeve switched to `LongV12WideStop` (v12) on demo and
+  paper; mainnet wiring updated, still unarmed. DEPLOY PENDING — this entry
+  gains the receipt when the host confirms.** Owner instruction: "wire v12 into
+  the live systems, paper, demo, live." The registration (2026-08-01,
+  `f04ccdc`) recorded that v12 was not deployable by a profile flip; this
+  change builds that path: entries freeze a per-trade stop-decay contract in
+  their target metadata (`stop_decay_after_ms`, `decayed_stop_loss_pct` =
+  1.5 × signal-day ATR) beside the wide 3×-ATR `stop_loss_pct`, and
+  `_plan_time_stop_exits` publishes a `decayed_stop_loss` zero target when a
+  filled position is past the decay age with live price at or below
+  `entry_fill × (1 − decayed_stop_loss_pct)`. The venue-native wide stop is
+  armed from entry and never revised. Profile selection is explicit end-to-end
+  (`LONG_STRATEGY_PROFILE=v12` in the three LONG units → `--strategy-profile`
+  → `long_v12_profile()`; unknown values fail startup). LONG planning now
+  reads **both** registered identities, so v11a components open at the switch
+  keep exits, capacity, and cooldown history, drain under their own published
+  terms (≤3-day hold), and exit targets stay keyed under each trade's own
+  identity. New entries publish under `long_native_v12_wide_stop`. Owner-side
+  kernel, risk envelope, and sizing are untouched (same signal, same sizing;
+  only stop geometry changed). **Mainnet: wiring only** — the unit names v12
+  but `LONG_MAINNET_SLEEVE=off`, `REAL_MONEY` unset, no credential exists;
+  arming remains the owner's separate act. Change point recorded in
+  `docs/strategy_program.md` §2026-08-03; mechanism in `docs/trading_logic.md`.
 - **2026-07-31 — `flatten` shipped, both books taken to zero, and the fleet
   rolled out at `0506cef` through the guarded `rollout` path.** First rollout
   this fleet has ever completed: it proves the demo account flat three times and

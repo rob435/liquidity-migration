@@ -285,12 +285,14 @@ def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: Resear
 
 
 def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
+    from liquidity_migration.research.backtest.long_native import resolve_long_strategy_profile
     from liquidity_migration.strategy.long_native_event_demo import (
         LongNativeDemoCycleConfig,
         format_long_demo_cycle_summary,
         run_long_native_demo_cycle,
     )
 
+    long_strategy_config = resolve_long_strategy_profile(getattr(args, "strategy_profile", "v11a"))
     candidate_universe_file = getattr(args, "candidate_universe_file", "")
     strategy_target_capture_path = getattr(args, "strategy_target_capture_path", None)
     operational_profile = None
@@ -361,6 +363,7 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             data_root,
             config=config,
             demo_config=long_demo_config,
+            strategy_config=long_strategy_config,
             interval_seconds=args.interval_seconds,
             event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
             strategy_target_capture_path=strategy_target_capture_path,
@@ -374,7 +377,12 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             flush=True,
         )
         return 0
-    payload = run_long_native_demo_cycle(data_root, config=config, demo_config=long_demo_config)
+    payload = run_long_native_demo_cycle(
+        data_root,
+        config=config,
+        demo_config=long_demo_config,
+        strategy_config=long_strategy_config,
+    )
     print(format_long_demo_cycle_summary(payload))
     return 0
 

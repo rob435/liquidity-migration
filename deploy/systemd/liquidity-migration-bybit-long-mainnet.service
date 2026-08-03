@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration LONG MAINNET target producer (LongV11aDivWeekendVol)
+Description=liquidity-migration LONG MAINNET target producer (LongV12WideStop)
 Wants=network-online.target
 Requires=liquidity-migration-account-execution-mainnet.service
 After=network-online.target liquidity-migration-account-execution-mainnet.service
@@ -25,6 +25,9 @@ Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
 Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
+# Same registered profile as demo/paper (change point 2026-08-03). Wiring
+# only: LONG_MAINNET_SLEEVE stays off and arming is the owner's separate act.
+Environment=LONG_STRATEGY_PROFILE=v12
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-mainnet.service main
 Restart=always
 RestartSec=30

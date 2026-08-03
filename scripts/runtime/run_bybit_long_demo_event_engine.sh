@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Long-sleeve (LongV11aDivWeekendVol, v11a uni50 sniper retrace 1%/6h fall-through)
-# target producer. The account owner handles credentials, orders, fills, and
+# Long-sleeve target producer (uni50 sniper retrace 1%/6h fall-through).
+# LONG_STRATEGY_PROFILE selects the registered profile: v11a
+# (LongV11aDivWeekendVol) or v12 (LongV12WideStop, the 3x-ATR stop decayed to
+# 1.5x after 48h). The account owner handles credentials, orders, fills, and
 # Telegram. EXECUTION_ENVIRONMENT is explicit and requires its owner route.
 set -euo pipefail
 
@@ -87,6 +89,16 @@ fi
 # The engine requires at least 95 days for its factor windows.
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-100}"
 WORKERS="${WORKERS:-4}"
+# Registered strategy profile; each value is a distinct persisted execution
+# identity. Unset defaults to v11a; anything else must match a registered name.
+LONG_STRATEGY_PROFILE="${LONG_STRATEGY_PROFILE:-v11a}"
+case "$LONG_STRATEGY_PROFILE" in
+    v11a|v12) ;;
+    *)
+        echo "LONG_STRATEGY_PROFILE must be v11a or v12, got: $LONG_STRATEGY_PROFILE" >&2
+        exit 2
+        ;;
+esac
 OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
 if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
     echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
@@ -120,6 +132,7 @@ if [[ "${TELEGRAM_ENABLED:-0}" != "0" ]]; then
 fi
 
 target_route_args=(
+    --strategy-profile "$LONG_STRATEGY_PROFILE"
     --execution-environment "$EXECUTION_ENVIRONMENT"
     --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
     --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
@@ -140,6 +153,7 @@ if [[ -n "$KLINES_FOLLOW_ROOT" ]]; then
 fi
 echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
+echo "strategy_profile=$LONG_STRATEGY_PROFILE"
 echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1} klines_follow_root=$KLINES_FOLLOW_ROOT"
 echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 

@@ -13,18 +13,19 @@ one-off runners are retired.
   prospective — earlier verdicts stand as recorded. Because it no longer controls
   family-wise error, a survivor needs a reported plateau and a failed placebo
   beside the number.
-- **`LongV12WideStop` is registered (2026-08-01) and is NOT deployed.** The LONG
-  sleeve still publishes v11a. v12 changes exactly one thing — the stop opens to
-  3× ATR and decays back to 1.5× after 48h — after ablating all ~20 v11a quirks on
-  the real engine. Paired daily difference **+0.48 bp/day, t 3.27, n 1927**; total
-  38.5% → 51.6%, daily Sharpe 1.24 → 1.49, worst dip −4.4% → −3.9%, better or equal
-  in all six years, and *less* concentrated (best-20 share 78% → 62%). Detail:
-  `docs/trading_logic.md`. **Deploying it needs a runtime change, not just a profile
-  flip**: the producer publishes `stop_loss_pct` once at entry and cannot revise it, so
-  the 48h tightening requires `_plan_time_stop_exits` extended to fire on a breached
-  decayed stop. The wide initial stop alone (`fc_atr_stop_mult=3.0`, no decay) IS
-  config-only and deployable today, but on its own it is t 1.84 — below the 2.5 bar —
-  and it costs drawdown (−6.6% against v11a's −4.4%). The pair is what clears the bar.
+- **`LongV12WideStop` is registered (2026-08-01) and wired as the LONG sleeve's
+  deployed profile (2026-08-03; deployment receipt in `STATE.md`).** v12 changes
+  exactly one thing — the stop opens to 3× ATR and decays back to 1.5× after 48h —
+  after ablating all ~20 v11a quirks on the real engine. Paired daily difference
+  **+0.48 bp/day, t 3.27, n 1927**; total 38.5% → 51.6%, daily Sharpe 1.24 → 1.49,
+  worst dip −4.4% → −3.9%, better or equal in all six years, and *less* concentrated
+  (best-20 share 78% → 62%). Detail: `docs/trading_logic.md`. The runtime change the
+  registration called for is built: entries freeze a per-trade decay contract in their
+  target metadata and `_plan_time_stop_exits` publishes a `decayed_stop_loss` zero
+  target on a breached decayed stop; the wide half stays a venue-native resting stop.
+  The wide initial stop alone (`fc_atr_stop_mult=3.0`, no decay) is t 1.84 — below the
+  2.5 bar — and costs drawdown (−6.6% against v11a's −4.4%). The pair is what clears
+  the bar, which is why the profile only ships with both halves wired.
   **No config-only cell clears it**: a 12-cell stop × hold sweep (stop 1.5/2/3/4 ×
   hold 1/2/3) tops out at that same t 1.84, and shortening the hold is *not* a
   substitute for the tightening — stop 3× at hold 2d is t −0.28, at hold 1d t −1.78.
@@ -726,6 +727,43 @@ worst dip −24.2%, against CARRY alone at 14.46 / 1.13 / −45.6%. Scaling LONG
 is an envelope decision, not a research one — the Sharpe cost is zero
 (`max_concurrent_positions` 10 → 5 doubles size at 1.24 → 1.27) but the margin is
 real, and the owner declined `notional_multiplier` 1.0 on 2026-07-28 at ~4×.
+
+### 2026-08-03 — LONG v12 wired into the runtime (owner instruction)
+
+**Recorded change point: the LONG sleeve's deployed profile switches v11a → v12**
+("wire v12 into the live systems, paper, demo, live"). No evidence changed — the
+numbers above stand exactly as registered on 2026-08-01 — this entry records the
+runtime mechanism and the live-book switch date.
+
+What was built, closing the registration's stated gap:
+
+- Each v12 entry freezes its own decay contract in the entry target metadata
+  (`stop_decay_after_ms`, `decayed_stop_loss_pct` = 1.5 × signal-day
+  `atr_14d_pct`) next to the wide `stop_loss_pct` (3 × ATR). The published
+  venue-native stop is never revised; a later profile change cannot rewrite the
+  decay terms of a standing position.
+- `_plan_time_stop_exits` now also fires on a breached decayed stop: past the
+  decay age and live price ≤ `entry_fill_price × (1 − decayed_stop_loss_pct)`
+  → zero target, journal reason `decayed_stop_loss`. Checked on the 60s cycle
+  grid against the backtest's hourly intrabar lows; the exit is a market order
+  after the breach is seen (delayed-execution family, same as the entry caveat),
+  with the wide venue stop armed underneath throughout.
+- LONG planning reads **both** registered identities, so v11a components open at
+  the switch keep their exits, capacity accounting, and 7-day cooldown history,
+  and drain under their own published terms within the 3-day max hold. Exit
+  targets are keyed under each trade's own identity (the target key embeds it).
+- Profile selection is explicit end-to-end: `LONG_STRATEGY_PROFILE=v12` in the
+  three LONG unit files (demo, paper, mainnet) → `--strategy-profile` → 
+  `long_v12_profile()`. An unknown selector fails startup instead of defaulting.
+- Mainnet is **wiring only**: `LONG_MAINNET_SLEEVE` stays off, `REAL_MONEY`
+  stays unset, no credential exists. Arming remains the owner's separate act
+  under `docs/real_money.md`.
+
+Forward evidence: the config's rolling clock started at the 2026-08-01
+registration commit; live demo/paper targets under the v12 identity begin at
+this deployment (receipt in `STATE.md`). Live decayed-stop behavior runs the
+60s-grid market-exit case, one convention step from the simulated intrabar
+stop-price fill — the same class of caveat already recorded for entries.
 
 ## What survived the audit
 

@@ -210,20 +210,33 @@ def _add_archive_download_klines_1h_api_parser(subparsers) -> None:
 
 
 def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
-    """CLI for the v11a long sleeve target-production cycle.
+    """CLI for the long sleeve target-production cycle.
 
-    Profile is `LongV11aDivWeekendVol` (v11a uni50 sniper retrace 1%/6h
-    fall-through). Per-position notional defaults to 1x research sizing; levered
-    sizing must be passed explicitly and satisfy the projected initial-margin
-    cap. Desired targets go to the account owner through the configured inbox.
+    `--strategy-profile` selects the registered profile: `v11a`
+    (LongV11aDivWeekendVol) or `v12` (LongV12WideStop; v11a with the stop
+    opened to 3x ATR and decayed back to 1.5x after 48h). Per-position notional
+    defaults to 1x research sizing; levered sizing must be passed explicitly and
+    satisfy the projected initial-margin cap. Desired targets go to the account
+    owner through the configured inbox.
     """
+    from liquidity_migration.research.backtest.long_native import LONG_STRATEGY_PROFILE_CHOICES
     from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
     long_demo = subparsers.add_parser(
         "long-native-event-demo-cycle",
-        help="Run one forward-testing cycle for the v11a long sleeve (LongV11aDivWeekendVol).",
+        help="Run one forward-testing cycle for the long sleeve (profile via --strategy-profile).",
     )
     demo_defaults = LongNativeDemoCycleConfig()
+    long_demo.add_argument(
+        "--strategy-profile",
+        choices=LONG_STRATEGY_PROFILE_CHOICES,
+        default="v11a",
+        help=(
+            "Registered LONG strategy profile. Each maps to its own persisted "
+            "execution identity (journal key); v12 adds the 48h decayed-stop "
+            "exit contract to every entry it publishes."
+        ),
+    )
     long_demo.add_argument(
         "--universe-superset-size",
         type=int,

@@ -27,9 +27,11 @@ republishes demo CARRY targets onto the paper route, so the two books differ onl
 execution; the paper CARRY producer is off because two independent producers raced their
 caches into a TLMUSDT position demo never asked for (−70.73 USDT, 2026-07-29).
 
-## LONG — `LongV11aDivWeekendVol`
+## LONG — `LongV12WideStop`
 
-**Signal.** One profile, `long_v11a_profile()`, on fully closed daily bars:
+**Signal.** Two registered profiles share this signal — `long_v11a_profile()`
+(the deployed profile until 2026-08-03) and `long_v12_profile()` (deployed
+since; they differ only in stop geometry, below) — on fully closed daily bars:
 
 | Filter | Value |
 | --- | --- |
@@ -52,7 +54,7 @@ annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leve
 changes margin only, never quantity. Five new entries per cycle maximum; the producer
 refuses to run if projected full-book initial margin exceeds 50% of equity.
 
-### `LongV12WideStop` — registered 2026-08-01, NOT deployed
+### `LongV12WideStop` — registered 2026-08-01, deployed 2026-08-03
 
 Same signal, same universe, same sizing, same entry. One thing changes: the stop
 starts at **3× the typical daily swing instead of 1.5×**, and tightens back to 1.5×
@@ -78,18 +80,25 @@ Lane-1 evidence: simulated on the data that also chose the rule. The forward rec
 at the registering commit. Its identity `long_native_v12_wide_stop` is separate from v11a's
 because that string is a persisted account-journal key.
 
-**v12 cannot publish yet — flipping the profile is not enough.** The producer sends
-`stop_loss_pct` once, in the entry target's metadata, and the account owner derives the
-resting stop price after the fill; there is no path for the producer to revise it later
-(`_long_entry_target_intents`). Only the *time* stop is re-evaluated per cycle
-(`_plan_time_stop_exits`). So v12's wide initial stop deploys as-is — it is just a bigger
-`stop_loss_pct` — but the 48-hour tightening needs `_plan_time_stop_exits` extended to
-publish a zero target when an open position is past `fc_stop_time_decay_hours` and price
-has breached `entry × (1 − fc_stop_time_decay_atr_mult × atr_14d_pct)`. The producer cycles
-every 60s against the backtest's hourly bars, so that check would be finer-grained than the
-measurement, not coarser. Until it exists, v12 is a research profile only, and the two
-halves of its stop would live in different places: the wide stop owner-side as resting
-protection, the tightening producer-side as an exit target.
+**How v12 publishes (wired 2026-08-03).** The two halves of the stop live in different
+places by design. The wide initial stop is just a bigger `stop_loss_pct` in the entry
+target's metadata — the account owner derives the resting venue-native stop from it after
+the fill, exactly as for v11a, and that resting stop is never revised. The 48-hour
+tightening is producer-side: each entry also freezes its own decay contract in the same
+metadata (`stop_decay_after_ms`, `decayed_stop_loss_pct` = `fc_stop_time_decay_atr_mult ×
+atr_14d_pct` off the signal-day ATR), and `_plan_time_stop_exits` publishes a zero target
+(journal reason `decayed_stop_loss`) whenever a filled position is past the decay age and
+the live price is at or below `entry_fill_price × (1 − decayed_stop_loss_pct)`. Because
+the contract is frozen per trade at entry, a later profile change cannot rewrite the decay
+of a standing position. The producer checks at its 60s cycle grid against the backtest's
+hourly intrabar lows — finer-grained than the measurement — but the *exit* is a market
+order after the breach is seen rather than a resting order at the level, the same
+delayed-execution family as the entry-price caveat above; the venue-native wide stop
+remains armed underneath throughout. Profile selection is `LONG_STRATEGY_PROFILE`
+(`v11a`/`v12`) in the unit environment → `--strategy-profile` on the CLI; the planner
+plans exits across **both** registered identities, so components opened under v11a before
+the switch keep their published stop/TP/hold terms and drain normally (3-day max hold)
+while new entries publish under `long_native_v12_wide_stop`.
 
 There is no separate per-order notional cap. `max_order_notional_pct_equity` is `0.0` in
 [`configs/operational.demo.json`](../configs/operational.demo.json), and 0 means *disabled —

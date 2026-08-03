@@ -378,3 +378,27 @@ def test_v12_widens_the_stop_then_tightens_it_after_two_days(tmp_path: Path) -> 
     assert long_v11a_profile().fc_stop_time_decay_hours == 0
     assert abs(long_v12_profile().fc_stop_time_decay_atr_mult - 1.5) < 1e-12
     assert atr_pct * 3.0 > 0.04 > atr_pct * 1.5
+
+
+def test_resolve_long_strategy_profile_maps_registered_names() -> None:
+    from liquidity_migration.research.backtest.long_native import resolve_long_strategy_profile
+
+    assert resolve_long_strategy_profile("v11a") == long_v11a_profile()
+    assert resolve_long_strategy_profile("v12") == long_v12_profile()
+    # Selector normalization tolerates shell-style noise, nothing more.
+    assert resolve_long_strategy_profile(" V12 ") == long_v12_profile()
+    for invalid in ("", "v13", "wide", None):
+        with pytest.raises(ValueError, match="unknown LONG strategy profile"):
+            resolve_long_strategy_profile(invalid)  # type: ignore[arg-type]
+
+
+def test_long_profile_display_names_stay_pinned_to_identities() -> None:
+    from liquidity_migration.research.backtest.long_identity import (
+        LONG_V12_WIDE_STOP_STRATEGY_ID,
+        long_profile_display_name,
+    )
+
+    assert long_profile_display_name(LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID) == "LongV11aDivWeekendVol"
+    assert long_profile_display_name(LONG_V12_WIDE_STOP_STRATEGY_ID) == "LongV12WideStop"
+    with pytest.raises(ValueError, match="unsupported LONG strategy id"):
+        long_profile_display_name("long_native_v9_retired")

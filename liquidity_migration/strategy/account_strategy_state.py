@@ -1990,6 +1990,11 @@ def _planning_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "take_profit_price",
         "stop_loss_pct",
         "take_profit_pct",
+        # LONG v12 per-trade stop-decay contract, frozen at entry so the exit
+        # planner reads the trade's own terms rather than the active profile's.
+        "stop_decay_after_ms",
+        "decayed_stop_loss_pct",
+        "atr_14d_pct",
         "max_hold_duration_ms",
         "max_hold_hours",
         "signal_ts_ms",

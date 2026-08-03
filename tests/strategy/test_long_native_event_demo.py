@@ -31,8 +31,11 @@ from liquidity_migration.account.account_route import (
     ensure_account_route,
 )
 from liquidity_migration.core.config import ResearchConfig
-from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-from liquidity_migration.research.backtest.long_native import long_v11a_profile
+from liquidity_migration.research.backtest.long_identity import (
+    LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+    LONG_V12_WIDE_STOP_STRATEGY_ID,
+)
+from liquidity_migration.research.backtest.long_native import long_v11a_profile, long_v12_profile
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _count_long_target_reservations,
@@ -1552,3 +1555,290 @@ def test_median_universe_selection_targets_latest_closed_bar_not_future_bar() ->
     assert closed_sel == {"s30": True, "s20": True, "s10": False}  # re-selected on CLOSED bar
     fut = out.filter(pl.col("ts_ms") == future)
     assert all(fut["in_universe"].to_list())  # future bar untouched
+
+
+# --- v12 (LongV12WideStop) decayed-stop wiring --------------------------------
+
+
+def _open_trade_row(
+    *,
+    trade_id: str = "long-ABCUSDT-1",
+    symbol: str = "ABCUSDT",
+    strategy_id: str = LONG_V12_WIDE_STOP_STRATEGY_ID,
+    entry_ts_ms: int | None,
+    entry_price: float | None,
+    with_decay_contract: bool = True,
+    max_hold_deadline_ts_ms: int = 0,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "trade_id": trade_id,
+        "sleeve": "long",
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "side": "long",
+        "status": "open",
+        "qty": "10",
+        "entry_ts_ms": entry_ts_ms,
+        "entry_price": entry_price,
+        "max_hold_deadline_ts_ms": max_hold_deadline_ts_ms,
+    }
+    if with_decay_contract:
+        # v12 with atr_14d_pct=0.05: initial stop 15%, decayed stop 7.5%.
+        row["stop_decay_after_ms"] = 48 * MS_PER_HOUR
+        row["decayed_stop_loss_pct"] = 0.075
+    return row
+
+
+def test_v12_candidates_carry_stop_decay_contract() -> None:
+    strategy = long_v12_profile()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts)
+    candidates, _ = _select_long_entry_candidates(
+        features=features,
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.0},
+        max_new_entries=5,
+    )
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    # Frozen off the signal-day ATR (0.05): wide stop 3x, decayed 1.5x.
+    assert candidate["stop_loss_pct"] == pytest.approx(0.15)
+    assert candidate["decayed_stop_loss_pct"] == pytest.approx(0.075)
+    assert candidate["stop_decay_after_ms"] == 48 * MS_PER_HOUR
+    assert candidate["take_profit_pct"] == pytest.approx(0.20)
+
+
+def test_v11a_candidates_do_not_carry_stop_decay_contract() -> None:
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts)
+    candidates, _ = _select_long_entry_candidates(
+        features=features,
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=long_v11a_profile(),
+        price_by_symbol={"BTCUSDT": 98.0},
+        max_new_entries=5,
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["stop_loss_pct"] == pytest.approx(0.075)
+    assert "stop_decay_after_ms" not in candidates[0]
+    assert "decayed_stop_loss_pct" not in candidates[0]
+
+
+def test_entry_intent_metadata_freezes_decay_contract() -> None:
+    now_ms = 1_700_000_000_000
+    base_candidate = {
+        "trade_id": "long-trade-1",
+        "symbol": "ABCUSDT",
+        "signal_ts_ms": now_ms - 60_000,
+        "entry_reason": "fomo_chase",
+        "position_weight": 0.5,
+        "stop_loss_pct": 0.15,
+        "take_profit_pct": 0.20,
+        "max_hold_days": 3,
+        "atr_14d_pct": 0.05,
+    }
+    demo = LongNativeDemoCycleConfig(entry_leverage=10.0)
+    with_contract = dict(
+        base_candidate,
+        stop_decay_after_ms=48 * MS_PER_HOUR,
+        decayed_stop_loss_pct=0.075,
+    )
+    entries = lnd._long_entry_target_intents(
+        [with_contract],
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.10,
+        price_by_symbol={"ABCUSDT": 2.0},
+        now_ms=now_ms,
+        strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
+    )
+    assert len(entries) == 1
+    metadata = entries[0].intent.metadata
+    assert metadata["stop_decay_after_ms"] == 48 * MS_PER_HOUR
+    assert metadata["decayed_stop_loss_pct"] == pytest.approx(0.075)
+    assert metadata["atr_14d_pct"] == pytest.approx(0.05)
+
+    plain = lnd._long_entry_target_intents(
+        [dict(base_candidate)],
+        demo=demo,
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.10,
+        price_by_symbol={"ABCUSDT": 2.0},
+        now_ms=now_ms,
+        strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+    )
+    assert {"stop_decay_after_ms", "decayed_stop_loss_pct", "atr_14d_pct"}.isdisjoint(
+        plain[0].intent.metadata
+    )
+
+
+def test_planning_metadata_whitelist_round_trips_decay_contract() -> None:
+    from liquidity_migration.strategy.account_strategy_state import _planning_metadata
+
+    surviving = _planning_metadata(
+        {
+            "stop_loss_pct": 0.15,
+            "stop_decay_after_ms": 48 * MS_PER_HOUR,
+            "decayed_stop_loss_pct": 0.075,
+            "atr_14d_pct": 0.05,
+            "unrelated_key": "dropped",
+        }
+    )
+    assert surviving == {
+        "stop_loss_pct": 0.15,
+        "stop_decay_after_ms": 48 * MS_PER_HOUR,
+        "decayed_stop_loss_pct": 0.075,
+        "atr_14d_pct": 0.05,
+    }
+
+
+def test_plan_decayed_stop_fires_only_after_decay_age_and_breach() -> None:
+    now = 2_000_000_000_000
+    entry_price = 100.0
+    aged_entry = now - 50 * MS_PER_HOUR
+    young_entry = now - 47 * MS_PER_HOUR
+    decayed_level = entry_price * (1.0 - 0.075)  # 92.5
+
+    aged_and_breached = pl.DataFrame(
+        [_open_trade_row(entry_ts_ms=aged_entry, entry_price=entry_price)]
+    )
+    plans = _plan_time_stop_exits(
+        aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 92.0}
+    )
+    assert [p["exit_reason"] for p in plans] == ["decayed_stop_loss"]
+    assert plans[0]["decayed_stop_price"] == pytest.approx(decayed_level)
+    assert plans[0]["stop_decay_deadline_ts_ms"] == aged_entry + 48 * MS_PER_HOUR
+    assert plans[0]["decision_reference_price"] == pytest.approx(92.0)
+
+    # At the level exactly: breach (research convention is <=).
+    at_level = _plan_time_stop_exits(
+        aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": decayed_level}
+    )
+    assert [p["exit_reason"] for p in at_level] == ["decayed_stop_loss"]
+
+    # Above the decayed level: no exit.
+    assert (
+        _plan_time_stop_exits(
+            aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 93.0}
+        )
+        == []
+    )
+
+    # Breached but younger than the decay age: no exit.
+    young = pl.DataFrame(
+        [_open_trade_row(entry_ts_ms=young_entry, entry_price=entry_price)]
+    )
+    assert (
+        _plan_time_stop_exits(young, now_ms=now, price_by_symbol={"ABCUSDT": 92.0})
+        == []
+    )
+
+
+def test_plan_decayed_stop_ignores_trades_without_contract() -> None:
+    now = 2_000_000_000_000
+    v11a = pl.DataFrame(
+        [
+            _open_trade_row(
+                strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+                entry_ts_ms=now - 60 * MS_PER_HOUR,
+                entry_price=100.0,
+                with_decay_contract=False,
+                max_hold_deadline_ts_ms=now + 12 * MS_PER_HOUR,
+            )
+        ]
+    )
+    assert (
+        _plan_time_stop_exits(v11a, now_ms=now, price_by_symbol={"ABCUSDT": 50.0})
+        == []
+    )
+
+
+def test_plan_decayed_stop_requires_fill_anchor_and_live_price() -> None:
+    now = 2_000_000_000_000
+    no_anchor = pl.DataFrame(
+        [_open_trade_row(entry_ts_ms=None, entry_price=None)]
+    )
+    assert (
+        _plan_time_stop_exits(no_anchor, now_ms=now, price_by_symbol={"ABCUSDT": 1.0})
+        == []
+    )
+    anchored = pl.DataFrame(
+        [_open_trade_row(entry_ts_ms=now - 50 * MS_PER_HOUR, entry_price=100.0)]
+    )
+    # No live price this cycle: defer, the venue-native stop stays armed.
+    assert _plan_time_stop_exits(anchored, now_ms=now, price_by_symbol={}) == []
+    assert _plan_time_stop_exits(anchored, now_ms=now) == []
+
+
+def test_time_stop_wins_over_decayed_stop() -> None:
+    now = 2_000_000_000_000
+    both_due = pl.DataFrame(
+        [
+            _open_trade_row(
+                entry_ts_ms=now - 80 * MS_PER_HOUR,
+                entry_price=100.0,
+                max_hold_deadline_ts_ms=now - MS_PER_HOUR,
+            )
+        ]
+    )
+    plans = _plan_time_stop_exits(both_due, now_ms=now, price_by_symbol={"ABCUSDT": 50.0})
+    assert [p["exit_reason"] for p in plans] == ["time_stop"]
+
+
+def test_exit_intents_keyed_by_owning_trade_strategy_id() -> None:
+    now = 2_000_000_000_000
+    trades = pl.DataFrame(
+        [
+            _open_trade_row(
+                trade_id="long-OLD-1",
+                symbol="OLDUSDT",
+                strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+                entry_ts_ms=now - 80 * MS_PER_HOUR,
+                entry_price=100.0,
+                with_decay_contract=False,
+                max_hold_deadline_ts_ms=now - MS_PER_HOUR,
+            ),
+            _open_trade_row(
+                trade_id="long-NEW-1",
+                symbol="NEWUSDT",
+                strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
+                entry_ts_ms=now - 50 * MS_PER_HOUR,
+                entry_price=100.0,
+            ),
+        ]
+    )
+    plans = _plan_time_stop_exits(
+        trades, now_ms=now, price_by_symbol={"OLDUSDT": 99.0, "NEWUSDT": 92.0}
+    )
+    assert {p["exit_reason"] for p in plans} == {"time_stop", "decayed_stop_loss"}
+    intents = lnd._long_exit_target_intents(
+        plans,
+        trades,
+        strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
+        now_ms=now,
+        default_leverage=10.0,
+    )
+    keys_by_symbol = {intent.intent.symbol: intent.intent.target_key for intent in intents}
+    # A v11a residue component exits under the v11a identity even though the
+    # producer now runs v12 — the target key must match the standing target.
+    assert LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID in keys_by_symbol["OLDUSDT"]
+    assert LONG_V12_WIDE_STOP_STRATEGY_ID in keys_by_symbol["NEWUSDT"]
+    decayed = [i for i in intents if i.intent.symbol == "NEWUSDT"]
+    assert decayed[0].intent.reason == "decayed_stop_loss"
+    assert decayed[0].intent.metadata["decayed_stop_price"] == pytest.approx(92.5)
+
+
+def test_validate_rejects_unregistered_strategy_identity() -> None:
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root="/tmp/inbox",
+        account_execution_root="/tmp/account",
+    )
+    rogue = replace(long_v12_profile(), execution_strategy_id="long_native_v13_unregistered")
+    with pytest.raises(ValueError, match="unsupported LONG execution_strategy_id"):
+        _validate_long_demo_config(demo, rogue)

@@ -22,7 +22,11 @@ from liquidity_migration.strategy.event_demo_data import top_turnover_kline_univ
 from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager, build_kline_follower
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
-from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
+from liquidity_migration.research.backtest.long_identity import (
+    LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
+    long_profile_display_name,
+)
+from liquidity_migration.research.backtest.long_native import LongNativeConfig
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _validate_long_demo_config,
@@ -53,10 +57,13 @@ def _ensure_default_log_handler() -> None:
     ensure_default_log_handler()
 
 
-def _validate_long_daemon_startup(config: LongNativeDemoCycleConfig) -> None:
+def _validate_long_daemon_startup(
+    config: LongNativeDemoCycleConfig,
+    strategy_config: LongNativeConfig | None = None,
+) -> None:
     """Fail before resources unless LONG has one complete account-target route."""
 
-    _validate_long_demo_config(config)
+    _validate_long_demo_config(config, strategy_config)
     has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
     has_account_execution_root = bool(str(config.account_execution_root or "").strip())
     if not has_account_inbox or not has_account_execution_root:
@@ -77,6 +84,8 @@ class LongNativeDemoDaemon:
     _sleeve_label = "long"
 
     def _strategy_profile_name(self) -> str:
+        if self._strategy_config is not None:
+            return long_profile_display_name(self._strategy_config.execution_strategy_id)
         return LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
 
     def __init__(
@@ -85,6 +94,7 @@ class LongNativeDemoDaemon:
         *,
         config: ResearchConfig,
         demo_config: LongNativeDemoCycleConfig | None = None,
+        strategy_config: LongNativeConfig | None = None,
         interval_seconds: float = 60.0,
         cycle_runner: Callable[..., PublishedTargetCyclePayload] = run_long_native_demo_cycle,
         kline_stream_manager: Any | None = None,
@@ -105,11 +115,14 @@ class LongNativeDemoDaemon:
     ) -> None:
         resolved_demo_config = demo_config or LongNativeDemoCycleConfig()
         long_target_producer = isinstance(resolved_demo_config, LongNativeDemoCycleConfig)
+        # None means the cycle runner's own default (the v11a profile). Only
+        # the LONG producer consumes it; sleeve subclasses leave it unset.
+        self._strategy_config = strategy_config if long_target_producer else None
         if long_target_producer:
             # This must precede every cache, manager, or thread construction.
             # The cycle runner also validates, but it catches cycle exceptions;
             # startup-boundary failures must instead terminate the process.
-            _validate_long_daemon_startup(resolved_demo_config)
+            _validate_long_daemon_startup(resolved_demo_config, self._strategy_config)
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
         self.data_root = Path(data_root).expanduser()
@@ -235,7 +248,7 @@ class LongNativeDemoDaemon:
             # logging, streams, cache seeders, managers, or worker threads.
             if not isinstance(self.demo_config, LongNativeDemoCycleConfig):
                 raise TypeError("LONG daemon config changed to an incompatible type")
-            _validate_long_daemon_startup(self.demo_config)
+            _validate_long_daemon_startup(self.demo_config, self._strategy_config)
         # Same reasoning as EventDemoDaemon.run: attach the package stderr
         # handler before bootstrap so the operator can see progress.
         _ensure_default_log_handler()
@@ -438,6 +451,10 @@ class LongNativeDemoDaemon:
             # the live callback replayable under a VirtualClock.
             "now_ms": event.event_ts_ns // 1_000_000,
         }
+        if self._long_target_producer and self._strategy_config is not None:
+            # Sleeve subclasses run their own cycle runners with different
+            # signatures; only the LONG runner accepts strategy_config.
+            cycle_kwargs["strategy_config"] = self._strategy_config
         try:
             result = self._cycle_runner(
                 self.data_root,
