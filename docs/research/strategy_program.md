@@ -54,6 +54,15 @@ one-off runners are retired.
   the price variance but eats 74% of the funding — neutral Sharpe 0.62 against
   directional 1.24), and **the settlement-window trade needs a zero-latency
   exit** (Sharpe 2.96 at zero lag, −2.14 at one hour).
+- **Settlement-instant timing is closed on the v4 book too (2026-08-03, owner
+  request).** Entering just before the fee to collect it, shorting the post-fee
+  crash (including a cadence-aware exit that never pays funding: −29.6 bp/event,
+  t −4.1, negative in all six eras), and every entry/exit fill delay up to 12h
+  are measured dead — `docs/research/research_findings.md` §2
+  "Settlement-instant timing". One accounting fact survives: the scorer's
+  funding-boundary convention understates carry configs by ~+0.5 bp/day at
+  midnight, 24/24 phases (§4 there). The deployed ~00:20 fill stays as-is
+  (H7: it saves ~42 bp per entry).
 - The publishing profiles are `lane2_carry_hold_v3` (CARRY) and
   `LongV12WideStop` (LONG, since the 2026-08-03 rollout). `continuous_ensemble_v2` at revision
   `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile

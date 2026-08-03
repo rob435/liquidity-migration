@@ -251,6 +251,19 @@ the fingerprint deletes the strategy. Losses are single events, not processes: 9
 loss in one daily candle, 88% hit maximum adverse excursion within 2 days, and conditional on being ≥10%
 underwater after day 1 the remainder averages **+1.26%**.
 
+### Settlement-instant timing — the v4 book and the deep-print population, 2026-08-03
+
+Owner-requested follow-up to the closed sawtooth program
+([archive/2026-08-01-settlement-sawtooth-program.md](archive/2026-08-01-settlement-sawtooth-program.md)):
+can entries be timed around the moment the crowd fee pays? Scratchpad harness reproduced
+registered v4 bit-identically (1,756 days, 22.1939 bp/day) before any arm ran.
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| long just before the fee pays, hold minutes, collect | archive, full 1-minute coverage (662,678 settlements): the price steps down by 1.03× the print in the first minute it pays (97% of the step inside 2 min); net to a long −3.0 to +0.8 bp at every depth | dead by construction — the fee is refunded in the price as it arrives. There is no slow decay to dodge: price is flat into the instant and steps at it |
+| PIT short of the post-fee crash | entry at S+1h (print published at S, fully knowable), holds 1/2/4/6h: **−14.4 to −26.3 bp/event** (t −3.2 to −6.0, n 30.7k); cadence-aware exit at the last close before the next settlement, so the short never pays funding: **−29.6 bp/event, t −4.1** (n 15.9k), negative in all six eras. The lag-0 reference (+13.1, t +5.0) is the ex-dividend step itself and needs a fill at the pre-drop price at the very instant the print publishes | dead at every executable cell. By S+1h the crash is over and the drift runs against the short. Medians are positive (+36 bp at 6h) while means are deeply negative — squeeze skew; do not re-read the median as a lead. Confirms the archived §3 kill with the funding-crossing confound removed |
+| v4 fill delays (uniform +1/2/4/8/12h; entry-only +1/2/4/8h; exit-only +1/2/4/8h) | same decisions and weights, only the execution clock moved; 24-phase sweep: entry-only median −0.26 to −1.27 bp/day (≤9/24 phases positive), exit-only median −0.88 to −1.71 (≤8/24), uniform −0.95 to −5.99 at phase 0 | the registered clock — decide at the settlement close, fill just after — is already the optimum this family offers. The +1h/+4h delays that were free at v1 registration (§4) are **not** free on v4's shape |
+
 ### Financed-longs mechanism ledger
 
 | mechanism | measured | verdict |
@@ -362,6 +375,14 @@ that this research was replacing a broken deployed book was wrong.
   8-offset ensemble, ~1.2 full / ~1.5 bench. The *filters'* improvement is clock-robust, which is why the
   registered experiment is a paired differential. Separately, entry staleness beyond the daily cadence is
   expensive: +1h and +4h delays were free at v1 registration (t 4.19 / 4.82), +24h costs ~40% of mean.
+- **The scorer's funding boundary is conservative at 1h-cadence entries** (measured 2026-08-03). The
+  funding window `(t, t+24]` excludes a settlement whose instant coincides with the entry bar's close, while
+  the price window `close(t) → close(t+24)` contains that settlement's ex-dividend drop; the missed entry
+  print is deep by construction and the exit-boundary print collected instead is shallow. Swapping the window
+  to `[t, t+24)` on v4 is worth **+0.47 bp/day at midnight, +0.44 to +2.57 across all 24 phases (24/24
+  positive, mean paired t 8.8)**, entirely 2025-26 — the 1h-cadence era. Registered carry numbers are
+  understated by roughly this much. The convention stays: it is shared by every registered financed-longs
+  record, and it is not tradable — the live book fills after the instant and has no such boundary.
 - **Terminal-day dodge.** `prepare()`'s forward-return requirement exits every name 24h before its final panel
   bar — an implicit look-ahead worth roughly +0.13 Sharpe that flips 2022's sign. Every financed-longs number
   shares it, so cross-config comparisons stay fair and absolute levels are optimistic by that amount.

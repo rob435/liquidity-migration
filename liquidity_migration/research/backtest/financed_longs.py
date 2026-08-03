@@ -15,8 +15,10 @@ market pays longs while the short side is paying funding.
 Accounting conventions shared with the rest of the research surface:
 
 * Decisions on a fixed 24h grid of hourly-close bars; entry at the decision
-  close (``execution_delay_ms=0`` on top of bar completion). Both books
-  strengthen under +1h/+4h entry delays.
+  close (``execution_delay_ms=0`` on top of bar completion). Entry delays were
+  free at v1 registration but are not on v4 — every fill-delay arm measured
+  2026-08-03 is flat-to-negative (research_findings §2, settlement-instant
+  timing).
 * Funding accrues settlement-exact (``lane2_blend.settlement_exact_funding``).
 * Costs are measured one-way turnover x the measured per-side fee, not a flat
   round trip per period.
