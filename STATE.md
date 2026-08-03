@@ -19,6 +19,26 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — Telegram control buttons deployed (owner request).** Deployed
+  `3a319b3` via `ops.sh deploy rollout`, `rollout-ok` 17:37 UTC, `verify-ok …
+  mainnet=off`, now twelve units in expected states. A new always-on daemon
+  (`liquidity-migration-telegram-controls.service`, the bot's only
+  `getUpdates` consumer) serves buttons in the main chat: `/controls` shows
+  Pause / Resume / Close-all per environment; real-money rows appear only
+  while the mainnet owner is active. Pause = sleeve toggles off in the host
+  override (verbatim copy saved) + resolve + producer units stopped — the
+  owner, protections, and watchdog keep running, and the pause survives
+  reboots and deploys. Close = two-tap confirm (120 s expiry), pause first,
+  then the standard flatten path. Verified end-to-end on the host 17:37–17:38
+  UTC: pause stopped carry+long and left the owner active; resume restored
+  `sleeves.env` **byte-identical** (matching md5) and brought both producers
+  back; watchdog "0 active alert(s)"; startup dropped 2 stale queued updates
+  as designed; the panel message was posted to the main chat. First rollout
+  needed a same-day fix (`3a319b3`): the pre-install verification runs against
+  the outgoing topology, so a unit new in the deployed commit is only checked
+  where its unit file exists. Group chats refuse presses until
+  `TELEGRAM_CONTROL_USER_IDS` is set (docs/notifications.md §Owner control
+  buttons).
 - **2026-08-03 — CARRY promoted to `lane2_carry_hold_v4` (owner override).**
   Deployed `95497d1` via `ops.sh deploy rollout`, `rollout-ok` 17:06 UTC,
   `verify-ok … mainnet=off`, all eleven units in expected states. The change
