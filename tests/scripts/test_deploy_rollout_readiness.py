@@ -98,6 +98,7 @@ def test_readiness_proves_local_health_and_both_bybit_order_surfaces(
         {
             "environment": "demo",
             "max_age_ns": readiness.MAX_EVIDENCE_AGE_NS,
+            "max_venue_fact_age_ns": readiness.MAX_EVIDENCE_AGE_NS,
             "now_ns": now_ns,
             "head_binding": "exact",
         }
@@ -225,7 +226,7 @@ def test_readiness_rejects_stale_evidence_and_non_demo_client(
 ) -> None:
     now_ns = 100_000_000_000
     stale = _snapshot(now_ns)
-    stale.payload["local_receive_ts_ns"] = now_ns - readiness.MAX_EVIDENCE_AGE_NS - 1
+    stale.payload["local_receive_ts_ns"] = now_ns - readiness.MAX_STOPPED_SNAPSHOT_AGE_NS - 1
     monkeypatch.setattr(readiness, "read_account_journal", lambda *_args, **_kwargs: [stale])
     monkeypatch.setattr(
         readiness,
@@ -296,5 +297,110 @@ def test_readiness_fails_closed_on_malformed_bybit_position_size(
             account_root=tmp_path,
             head_binding="none",
             client=_Client(positions=[{"symbol": "BADUSDT", "size": size}]),
+            now_ns=now_ns,
+        )
+
+
+def test_flat_book_between_checkpoints_still_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flat book journals nothing between ten-minute checkpoints."""
+
+    now_ns = 3_000_000_000_000
+    snapshot = _snapshot(now_ns)
+    snapshot.payload["local_receive_ts_ns"] = now_ns - 9 * 60 * 1_000_000_000
+    monkeypatch.setattr(readiness, "read_account_journal", lambda *_args, **_kwargs: [snapshot])
+    monkeypatch.setattr(
+        readiness,
+        "reduce_account_events",
+        lambda _events: AccountState(events_applied=7),
+    )
+
+    result = readiness.require_rollout_readiness(
+        account_root=tmp_path,
+        head_binding="none",
+        client=_Client(),
+        now_ns=now_ns,
+    )
+
+    assert result.journal_sequence == 7
+
+
+def test_stopped_journal_beyond_three_checkpoints_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ns = 3_000_000_000_000
+    snapshot = _snapshot(now_ns)
+    snapshot.payload["local_receive_ts_ns"] = now_ns - 31 * 60 * 1_000_000_000
+    monkeypatch.setattr(readiness, "read_account_journal", lambda *_args, **_kwargs: [snapshot])
+    monkeypatch.setattr(
+        readiness,
+        "reduce_account_events",
+        lambda _events: AccountState(events_applied=7),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="latest venue reconciliation snapshot is not fresh",
+    ):
+        readiness.require_rollout_readiness(
+            account_root=tmp_path,
+            head_binding="none",
+            client=_Client(),
+            now_ns=now_ns,
+        )
+
+
+def test_running_phase_requires_fresh_venue_facts_from_the_owner(tmp_path: Path) -> None:
+    """Fresh health over a wedged venue loop must not clear a running rollout."""
+
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
+    from liquidity_migration.account.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        AccountOwnerHealth,
+        write_account_owner_health,
+    )
+
+    now_ns = 3_000_000_000_000
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo")
+    kernel.record_venue_snapshot(
+        snapshot_key="flat",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=now_ns - 1_000_000,
+        metadata={
+            "venue_order_ownership": {"status": "verified", "unique_orders_observed": 0}
+        },
+    )
+    state = kernel._state_ref()
+    write_account_owner_health(
+        tmp_path,
+        AccountOwnerHealth(
+            owner="account_execution",
+            environment="demo",
+            account_id="demo",
+            status="healthy",
+            observed_ts_ns=now_ns - 1_000_000,
+            loop_sequence=1,
+            journal_sequence=state.events_applied,
+            journal_state_hash=state.rolling_state_hash,
+            equity_usdt=10_000.0,
+            available_margin_usdt=9_000.0,
+            requested_symbols_ready=True,
+            venue_facts_at_ns=now_ns - 90_000_000_000,
+            venue_facts_healthy=True,
+            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="account-owner venue facts are stale"):
+        readiness.require_rollout_readiness(
+            account_root=tmp_path,
+            head_binding="exact",
+            client=_Client(),
             now_ns=now_ns,
         )

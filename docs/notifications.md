@@ -107,7 +107,7 @@ run duration; free disk; and the owner's digest.
 | Threshold | Default | Meaning |
 | --- | --- | --- |
 | `--max-cycle-age-min` | 10 | no producer cycle within this many minutes |
-| `--max-account-health-age-min` | 1 | owner-health or reconciliation projection is older than this |
+| `--max-account-health-age-min` | 1 | owner-health or reconciliation projection is older than this, and how stale the owner's last authenticated exchange read may be |
 | `--max-account-capture-age-min` | 3 | canonical live L2 is older than this |
 | `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
 | `--max-rmom-stale-days` | 2 | residual-momentum gate's newest day |

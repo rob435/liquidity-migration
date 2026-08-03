@@ -466,6 +466,8 @@ def publish_demo_owner_health(
     observed_ts_ns: int,
     loop_sequence: int,
     requested_symbols_ready: bool,
+    venue_facts_at_ns: int,
+    venue_facts_healthy: bool,
     invocation_id: str,
     environment: str = ExecutionEnvironment.DEMO.value,
     last_batch_id: str = "",
@@ -490,6 +492,8 @@ def publish_demo_owner_health(
         equity_usdt=risk_snapshot.equity_usdt,
         available_margin_usdt=risk_snapshot.available_margin_usdt,
         requested_symbols_ready=requested_symbols_ready,
+        venue_facts_at_ns=venue_facts_at_ns,
+        venue_facts_healthy=venue_facts_healthy,
         invocation_id=invocation_id,
         last_batch_id=last_batch_id[:500],
         detail=detail[:1000],
@@ -1080,7 +1084,15 @@ def main(argv: list[str] | None = None) -> int:
                         protection_evaluation_error,
                         f"component protection evaluation failed: {type(exc).__name__}: {exc}",
                     )
-            reconcile_healthy = bool(latest_reconcile_report is not None and latest_reconcile_report.healthy)
+            # From the reconciler, not from this loop's clock: last_report is
+            # only replaced by a pass that actually reached the venue, so a
+            # loop whose REST reads keep failing keeps publishing health while
+            # this timestamp ages out. Startup guarantees a report exists
+            # before the loop is entered (both startup passes raise on
+            # failure).
+            venue_facts_report = reconciler.last_report
+            assert venue_facts_report is not None
+            reconcile_healthy = bool(venue_facts_report.healthy)
             health_status = (
                 AccountOwnerHealthStatus.HEALTHY
                 if (
@@ -1284,6 +1296,8 @@ def main(argv: list[str] | None = None) -> int:
                     observed_ts_ns=time.time_ns(),
                     loop_sequence=loop_sequence,
                     requested_symbols_ready=requested_symbols_ready,
+                    venue_facts_at_ns=venue_facts_report.observed_ts_ns,
+                    venue_facts_healthy=reconcile_healthy,
                     invocation_id=invocation_id,
                     last_batch_id=last_batch_id,
                     detail=health_detail,

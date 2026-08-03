@@ -23,6 +23,9 @@ from liquidity_migration.account.account_owner_health import (  # noqa: E402
     require_recent_account_owner_health,
 )
 from liquidity_migration.core.venue_realm import client_venue_realm  # noqa: E402
+from liquidity_migration.venue.account_reconcile import (  # noqa: E402
+    VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
+)
 from liquidity_migration.venue.bybit import (  # noqa: E402
     BybitPrivateClient,
     resolve_demo_credentials,
@@ -30,6 +33,12 @@ from liquidity_migration.venue.bybit import (  # noqa: E402
 
 
 MAX_EVIDENCE_AGE_NS = 60_000_000_000
+# Three venue-snapshot checkpoint intervals. The journal records venue-fact
+# changes, so a flat book legitimately has no new snapshot between
+# checkpoints; live freshness is proved by owner health for the running
+# phases and by the authenticated venue read at the end of this function for
+# every phase. This bound only rejects a journal that stopped entirely.
+MAX_STOPPED_SNAPSHOT_AGE_NS = 3 * VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS
 QUANTITY_TOLERANCE = 1e-12
 
 
@@ -129,7 +138,7 @@ def require_rollout_readiness(
         )
         age_ns = observed_now_ns - observed_ns
         if head_binding != "stopped-maintenance" and (
-            age_ns < 0 or age_ns > MAX_EVIDENCE_AGE_NS
+            age_ns < 0 or age_ns > MAX_STOPPED_SNAPSHOT_AGE_NS
         ):
             problems.append(
                 f"latest venue reconciliation snapshot is not fresh: age_ns={age_ns}"
@@ -172,6 +181,7 @@ def require_rollout_readiness(
             root,
             environment="demo",
             max_age_ns=MAX_EVIDENCE_AGE_NS,
+            max_venue_fact_age_ns=MAX_EVIDENCE_AGE_NS,
             now_ns=observed_now_ns if now_ns is not None else None,
             head_binding=head_binding,
         )

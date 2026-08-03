@@ -3697,3 +3697,127 @@ def test_validated_names_cache_survives_a_root_reset(tmp_path: Path) -> None:
     head = read_account_journal_head(tmp_path)
     assert head is not None
     assert head.payload.get("snapshot_key") == "reset-fresh"
+
+
+def test_sparse_venue_snapshots_replay_to_the_same_domain_state(tmp_path: Path) -> None:
+    """Ten-minute checkpoints reconstruct the same book as 30-second ones.
+
+    The reducer keeps only the newest snapshot and no production code reads
+    ``state.venue_snapshots``, so dropping heartbeat checkpoints changes the
+    journal's length and its rolling hash but nothing a consumer trades on.
+    """
+
+    def run(root: Path, *, snapshot_every_step: bool) -> account_kernel_module.AccountState:
+        kernel = _kernel(root)
+        driver = KernelExecutionDriver(kernel)
+        snapshot_index = 0
+
+        def checkpoint(always: bool = False) -> None:
+            nonlocal snapshot_index
+            if not (snapshot_every_step or always):
+                return
+            snapshot_index += 1
+            kernel.record_venue_snapshot(
+                snapshot_key=f"snapshot-{snapshot_index}",
+                venue_positions={},
+                reconstructed_positions={},
+                mismatches=(),
+                exchange_ts_ns=0,
+                local_receive_ts_ns=1_000_000_000 + snapshot_index,
+            )
+
+        checkpoint()
+        market = _book().market_ref(input_key="open-book")
+        opened = kernel.submit_targets(
+            batch_id="open",
+            market_inputs=[market],
+            targets=[_target(decision="open-d", key="long/main/BUSDT", sleeve="long", qty=2.0)],
+            risk_snapshot=_snapshot(),
+            risk_policy=_policy(),
+            instrument_rules=_rules(),
+        )
+        checkpoint()
+        driver.execute_batch(opened, market_inputs={"BUSDT": market}, adapter=_twin(name="paper"))
+        checkpoint()
+        kernel.record_protection(
+            protection_key="BUSDT-protection-v1",
+            symbol="BUSDT",
+            status="active",
+            stop_price=9.0,
+            take_profit_price=12.0,
+            exchange_ts_ns=1_030_000_000,
+            local_receive_ts_ns=1_035_000_000,
+            command_id=opened.commands[0].command_id,
+        )
+        checkpoint()
+        close_market = _book().market_ref(input_key="close-book")
+        closing = kernel.submit_targets(
+            batch_id="close",
+            market_inputs=[close_market],
+            targets=[_target(decision="close-d", key="long/main/BUSDT", sleeve="long", qty=0.0)],
+            risk_snapshot=_snapshot(),
+            risk_policy=_policy(),
+            instrument_rules=_rules(),
+        )
+        checkpoint()
+        driver.execute_batch(
+            closing, market_inputs={"BUSDT": close_market}, adapter=_twin(name="paper")
+        )
+        kernel.record_close(
+            close_key="BUSDT-close-1",
+            symbol="BUSDT",
+            reason="take_profit",
+            venue_flat=True,
+            exchange_ts_ns=1_100_000_000,
+            local_receive_ts_ns=1_105_000_000,
+            command_id=closing.commands[0].command_id,
+        )
+        kernel.record_pnl(
+            pnl_key="BUSDT-pnl-1",
+            close_key="BUSDT-close-1",
+            symbol="BUSDT",
+            gross_pnl_usdt=-0.4,
+            fee_usdt=0.022,
+            funding_usdt=0.0,
+            net_pnl_usdt=-0.422,
+            exchange_ts_ns=1_110_000_000,
+            local_receive_ts_ns=1_115_000_000,
+            source="venue_closed_pnl",
+        )
+        # Both books end on a checkpoint, which is what a consumer reads.
+        checkpoint(always=True)
+        return account_kernel_module.reduce_account_events(
+            read_account_journal(root, verify=True)
+        )
+
+    dense = run(tmp_path / "dense", snapshot_every_step=True)
+    sparse = run(tmp_path / "sparse", snapshot_every_step=False)
+
+    assert dense.events_applied > sparse.events_applied
+    assert {symbol: position.signed_qty for symbol, position in dense.positions.items()} == {
+        symbol: position.signed_qty for symbol, position in sparse.positions.items()
+    }
+    assert {symbol: asdict(position) for symbol, position in dense.positions.items()} == {
+        symbol: asdict(position) for symbol, position in sparse.positions.items()
+    }
+    assert dense.aggregate_targets == sparse.aggregate_targets
+    assert sorted(dense.orders) == sorted(sparse.orders)
+
+    def order_rows(state: account_kernel_module.AccountState) -> list[dict[str, object]]:
+        rows = []
+        for key in sorted(state.orders):
+            row = asdict(state.orders[key])
+            # Where an order sits in the journal, not what it is.
+            row.pop("command_sequence")
+            rows.append(row)
+        return rows
+
+    assert order_rows(dense) == order_rows(sparse)
+    assert dense.closes == sparse.closes
+    assert dense.pnl == sparse.pnl
+    # Journal position is the only thing that moved: the chained hash and the
+    # per-order sequence number. Neither is a traded quantity.
+    assert dense.rolling_state_hash != sparse.rolling_state_hash
+    assert [dense.orders[key].command_sequence for key in sorted(dense.orders)] != [
+        sparse.orders[key].command_sequence for key in sorted(sparse.orders)
+    ]

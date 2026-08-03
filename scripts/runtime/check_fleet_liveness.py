@@ -1285,18 +1285,26 @@ def gather_account_capture_alerts(
     return []
 
 
-# The reconciler journals a venue snapshot on semantic change or its 30s
-# heartbeat, and one busy owner iteration can defer the next heartbeat past a
-# 1-minute bound while healthy. Four heartbeat intervals of headroom; a wedged
-# owner still pages via gather_account_owner_health_alerts.
-VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 2.0
+# Sub-minute proof that the owner is still reading the venue comes from
+# venue_facts_at_ns in the owner-health file, checked below. The journal now
+# records venue-fact changes on a ten-minute floor, so this bound only has to
+# catch a journal that stopped receiving venue facts at all: two missed
+# checkpoints plus one 3-minute watchdog interval, rounded up.
+VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
+
+# How old the owner's last authenticated venue observation may be. One minute,
+# the same bound the owner-health projection itself gets, so an owner that is
+# alive but whose venue loop is wedged pages at least as fast as it did when
+# the journal carried this proof.
+VENUE_FACT_AGE_FLOOR_MINUTES = 1.0
 
 # The freshness check needs the newest venue snapshot, not a genesis replay:
 # a full verified read cost ~20s CPU and ~250MB peak at 28.5k segments, every
 # 3 minutes, re-verifying a chain each owner generation already verified at
-# startup. Snapshots heartbeat every 30s, so a window this deep with no
-# snapshot at all means the reconciler is not journaling — which pages.
-ACCOUNT_HEALTH_TAIL_SEGMENTS = 512
+# startup. Deep enough that a ten-minute checkpoint is always inside it unless
+# the journal is taking more than one transaction per second, ~250x the
+# observed non-snapshot rate.
+ACCOUNT_HEALTH_TAIL_SEGMENTS = 1024
 
 
 def gather_account_health_alerts(
@@ -1385,6 +1393,10 @@ def gather_account_owner_health_alerts(
     """Require fresh process, capital, rule-readiness, and status evidence."""
     try:
         max_age_ns = max(1, int(max_age_minutes * 60 * 1_000_000_000))
+        venue_fact_max_age_ns = max(
+            max_age_ns,
+            int(VENUE_FACT_AGE_FLOOR_MINUTES * 60 * 1_000_000_000),
+        )
         # head_binding="allow_behind": liveness needs freshness and healthy
         # status, not the exact-head capital binding sizing consumers require —
         # during active trading the journal normally runs one transaction ahead
@@ -1394,6 +1406,7 @@ def gather_account_owner_health_alerts(
                 account_root,
                 environment=environment,
                 max_age_ns=max_age_ns,
+                max_venue_fact_age_ns=venue_fact_max_age_ns,
                 head_binding="allow_behind",
             )
         else:
@@ -1401,6 +1414,7 @@ def gather_account_owner_health_alerts(
                 account_root,
                 environment=environment,
                 max_age_ns=max_age_ns,
+                max_venue_fact_age_ns=venue_fact_max_age_ns,
                 now_ns=now_ms * 1_000_000,
                 head_binding="allow_behind",
             )
@@ -1426,6 +1440,11 @@ def gather_account_owner_health_alerts(
             headline = (
                 f"The {environment} account owner is blocked: "
                 f"{detail[len(_OWNER_BLOCKED_PREFIX):].strip()[:160]}"
+            )
+        elif detail.startswith("account-owner venue facts are stale"):
+            headline = (
+                f"The {environment} account owner is running but has not read "
+                "the exchange recently — its venue loop may be stuck."
             )
         else:
             headline = f"The {environment} account owner has no fresh proof it is healthy."

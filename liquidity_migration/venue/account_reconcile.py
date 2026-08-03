@@ -44,9 +44,14 @@ FUNDING_HEALTH_MAX_AGE_FLOOR_NS = 30 * 1_000_000_000
 # still failing a wedged reconciler inside the 60s venue-fact liveness bound.
 # Half the funding floor because position truth gates reduction admission.
 POSITION_HEALTH_MAX_AGE_FLOOR_NS = 15 * 1_000_000_000
-# The watchdog requires a journaled venue fact younger than one minute. A
-# 30-second checkpoint leaves room for one delayed reconciliation cycle.
-VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 30 * 1_000_000_000
+# The journal records venue-fact changes; any position, mismatch or
+# order-ownership change below is journaled the moment it happens. This
+# interval is only the floor that keeps an unchanging book visible in the
+# permanent record. Proof that the venue loop actually ran lives in the
+# owner-health file's venue_facts_at_ns, which the watchdog checks at a
+# one-minute bound, so this number no longer sets the liveness contract.
+# Ten minutes: about 144 segments a day on a flat book instead of 2,880.
+VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 10 * 60 * 1_000_000_000
 # A wedged command is re-probed at most this often, and at most this many per
 # pass: wedges are rare, and a resting acknowledged order must not turn every
 # reconcile pass into three extra REST reads per order.

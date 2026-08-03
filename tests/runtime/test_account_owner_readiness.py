@@ -86,6 +86,8 @@ def _ready_roots(
             equity_usdt=10_000.0,
             available_margin_usdt=9_000.0,
             requested_symbols_ready=True,
+            venue_facts_at_ns=health_observed_ts_ns,
+            venue_facts_healthy=True,
             invocation_id=invocation_id,
         ),
     )

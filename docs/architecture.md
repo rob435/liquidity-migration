@@ -125,7 +125,12 @@ market_input_ref -> decision -> target -> risk_decision -> order_command
 
 `ack_observation`, `order_status`, and `venue_snapshot` are supplemental facts — transport
 timing, terminal partial-fill/cancel state, authenticated venue truth — added without
-rewriting earlier events. Positions, fees, funding, P&L, and cross-sleeve aggregates are
+rewriting earlier events. `venue_snapshot` is a change record: the reconciler journals one
+the moment positions, mismatches or order ownership change, and otherwise only on a
+ten-minute floor that keeps an unchanging book visible. Proof that the venue loop is still
+running is therefore not the journal but `venue_facts_at_ns` in the owner-health file,
+which carries the reconciler's own last completed pass and is checked at a one-minute
+bound. Positions, fees, funding, P&L, and cross-sleeve aggregates are
 reconstructed by replay, never read from a mutable projection; read models, health,
 notifications, and reports are consumers.
 
@@ -149,7 +154,10 @@ Three read paths, and they are not interchangeable.
    the transaction filename sequence for continuity (prefix-cached per root), then
    authenticate only the newest segment(s): filename-embedded transaction hash, first/last
    sequence agreement, and every event's shape, sequence, account id, chain link and
-   `event_hash` inside the window. Earlier payloads are unchecked, so neither is full
+   `event_hash` inside the window. The tail window is 1024 segments: deep enough that a
+   ten-minute venue-snapshot checkpoint is always inside it unless the journal is taking
+   more than one transaction per second, about 250x the observed non-snapshot rate.
+   Earlier payloads are unchecked, so neither is full
    integrity verification; they are valid only because every serving owner generation
    reconstructed the whole journal at startup. The watchdog used to full-verify every 3
    minutes instead — 22–28 s CPU and a ~250 MB+ peak per run at 28.5k segments,

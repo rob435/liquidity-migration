@@ -60,6 +60,8 @@ def _health(*, loop_sequence: int = 1) -> AccountOwnerHealth:
         equity_usdt=10_000.0,
         available_margin_usdt=10_000.0,
         requested_symbols_ready=True,
+        venue_facts_at_ns=10_000,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
 
@@ -160,7 +162,10 @@ def test_health_artifact_round_trips_strict_canonical_schema(tmp_path: Path) -> 
         "requested_symbols_ready": True,
         "schema_version": ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION,
         "status": "healthy",
+        "venue_facts_at_ns": 10_000,
+        "venue_facts_healthy": True,
     }
+    assert ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION == 3
 
 
 def test_health_reader_rejects_symbolic_and_hard_link_aliases(tmp_path: Path) -> None:
@@ -189,6 +194,97 @@ def test_reader_rejects_pre_generation_health_schema(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="missing fields: invocation_id"):
         read_account_owner_health(tmp_path)
+
+
+def test_reader_rejects_schema_2_health_without_venue_facts(tmp_path: Path) -> None:
+    """The v2 window is covered by the watchdog's startup grace, not by tolerance."""
+
+    old_payload = _health().to_dict()
+    old_payload["schema_version"] = 2
+    old_payload.pop("venue_facts_at_ns")
+    old_payload.pop("venue_facts_healthy")
+    account_owner_health_path(tmp_path).write_text(json.dumps(old_payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="missing fields: venue_facts_at_ns, venue_facts_healthy",
+    ):
+        read_account_owner_health(tmp_path)
+
+
+def test_venue_fact_bound_fails_a_wedged_venue_loop_behind_fresh_health(
+    tmp_path: Path,
+) -> None:
+    wedged = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "observed_ts_ns": 10_000,
+            "venue_facts_at_ns": 1_000,
+        }
+    )
+    write_account_owner_health(tmp_path, wedged)
+
+    # The file itself is fresh, so today's bound alone still passes.
+    assert require_recent_account_owner_health(
+        tmp_path,
+        environment="demo",
+        max_age_ns=2_000,
+        now_ns=11_000,
+    ) == wedged
+
+    with pytest.raises(RuntimeError, match="account-owner venue facts are stale"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=2_000,
+            max_venue_fact_age_ns=2_000,
+            now_ns=11_000,
+        )
+
+    # Fresh venue facts pass the same bound.
+    assert require_recent_account_owner_health(
+        tmp_path,
+        environment="demo",
+        max_age_ns=2_000,
+        max_venue_fact_age_ns=20_000,
+        now_ns=11_000,
+    ) == wedged
+
+
+def test_venue_fact_bound_rejects_future_dated_and_nonpositive_bounds(
+    tmp_path: Path,
+) -> None:
+    write_account_owner_health(
+        tmp_path,
+        AccountOwnerHealth(**{**_health().to_dict(), "venue_facts_at_ns": 50_000}),
+    )
+
+    with pytest.raises(RuntimeError, match="account-owner venue facts are stale"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=2_000,
+            max_venue_fact_age_ns=2_000,
+            now_ns=11_000,
+        )
+    with pytest.raises(ValueError, match="venue fact age must be positive"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=2_000,
+            max_venue_fact_age_ns=0,
+            now_ns=11_000,
+        )
+
+
+def test_venue_facts_must_be_a_positive_integer_and_a_boolean() -> None:
+    payload = _health().to_dict()
+    with pytest.raises(ValueError, match="venue_facts_at_ns must be positive"):
+        AccountOwnerHealth(**{**payload, "venue_facts_at_ns": 0})
+    with pytest.raises(ValueError, match="venue_facts_at_ns must be positive"):
+        AccountOwnerHealth(**{**payload, "venue_facts_at_ns": 10.0})
+    with pytest.raises(ValueError, match="venue_facts_healthy must be boolean"):
+        AccountOwnerHealth(**{**payload, "venue_facts_healthy": "yes"})
 
 
 @pytest.mark.parametrize(
@@ -227,6 +323,8 @@ def test_demo_publisher_binds_wallet_capital_to_current_kernel_state(tmp_path: P
         observed_ts_ns=31_000,
         loop_sequence=2,
         requested_symbols_ready=True,
+        venue_facts_at_ns=30_500,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         last_batch_id="batch-1",
     )
@@ -308,6 +406,8 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         observed_ts_ns=11_000,
         loop_sequence=1,
         requested_symbols_ready=True,
+        venue_facts_at_ns=10_500,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     kernel.record_venue_snapshot(
@@ -353,6 +453,8 @@ def test_journal_only_health_republish_restores_exact_head_binding(tmp_path: Pat
         observed_ts_ns=13_000,
         loop_sequence=2,
         requested_symbols_ready=True,
+        venue_facts_at_ns=12_500,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     assert rebound.journal_sequence == 2
@@ -925,6 +1027,8 @@ def _behind_by_one_root(tmp_path: Path):
         observed_ts_ns=11_000,
         loop_sequence=1,
         requested_symbols_ready=True,
+        venue_facts_at_ns=10_500,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     kernel.record_venue_snapshot(

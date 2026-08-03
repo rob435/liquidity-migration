@@ -803,9 +803,19 @@ def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> N
         == []
     )
 
+    # Inside the 25-minute stopped-journal floor: a flat book legitimately
+    # journals nothing between ten-minute checkpoints.
+    assert (
+        M.gather_account_health_alerts(
+            account_root=healthy_root,
+            now_ms=now_ms + 20 * MIN,
+            max_age_minutes=1,
+        )
+        == []
+    )
     stale = M.gather_account_health_alerts(
         account_root=healthy_root,
-        now_ms=now_ms + 2 * MIN,
+        now_ms=now_ms + 26 * MIN,
         max_age_minutes=1,
     )
     assert [alert.key for alert in stale] == ["account_health_stale"]
@@ -880,6 +890,8 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
         equity_usdt=10_000.0,
         available_margin_usdt=9_000.0,
         requested_symbols_ready=True,
+        venue_facts_at_ns=(now_ms - 30_000) * 1_000_000,
+        venue_facts_healthy=True,
         invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
     )
     write_account_owner_health(demo_root, health)
@@ -910,6 +922,123 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
     assert [alert.key for alert in wrong_environment] == ["account_owner_health:mainnet"]
 
 
+def _write_owner_health_for(
+    root, *, environment: str, now_ms: int, venue_fact_age_ms: int
+) -> None:
+    from liquidity_migration.account.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        AccountOwnerHealth,
+        write_account_owner_health,
+    )
+
+    write_account_owner_health(
+        root,
+        AccountOwnerHealth(
+            owner="account_execution",
+            environment=environment,
+            account_id="demo",
+            status="healthy",
+            observed_ts_ns=(now_ms - 1_000) * 1_000_000,
+            loop_sequence=1,
+            journal_sequence=0,
+            journal_state_hash="0" * 64,
+            equity_usdt=10_000.0,
+            available_margin_usdt=9_000.0,
+            requested_symbols_ready=True,
+            venue_facts_at_ns=(now_ms - venue_fact_age_ms) * 1_000_000,
+            venue_facts_healthy=True,
+            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        ),
+    )
+
+
+@pytest.mark.parametrize("environment", ("demo", "mainnet"))
+def test_owner_alive_with_a_wedged_venue_loop_pages(tmp_path, environment) -> None:
+    """Health keeps refreshing while the exchange reads stopped landing."""
+
+    now_ms = 1_000 * HOUR
+    root = tmp_path / environment
+    _write_owner_health_for(
+        root, environment=environment, now_ms=now_ms, venue_fact_age_ms=90_000
+    )
+
+    alerts = M.gather_account_owner_health_alerts(
+        account_root=root,
+        environment=environment,
+        now_ms=now_ms,
+        max_age_minutes=1,
+    )
+
+    assert [alert.key for alert in alerts] == [f"account_owner_health:{environment}"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "venue facts are stale" in alerts[0].message
+    assert "has not read the exchange recently" in alerts[0].headline
+
+
+def test_fresh_venue_facts_do_not_page(tmp_path) -> None:
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "demo"
+    _write_owner_health_for(
+        root, environment="demo", now_ms=now_ms, venue_fact_age_ms=30_000
+    )
+
+    assert (
+        M.gather_account_owner_health_alerts(
+            account_root=root,
+            environment="demo",
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )
+
+
+def test_venue_fact_bound_stays_tighter_than_the_journal_snapshot_bound() -> None:
+    """The owner-health proof is what replaced the sub-minute journal bound."""
+
+    assert M.VENUE_FACT_AGE_FLOOR_MINUTES <= 2.0
+    assert M.VENUE_FACT_AGE_FLOOR_MINUTES <= M.VENUE_SNAPSHOT_AGE_FLOOR_MINUTES
+
+
+def test_account_health_tail_window_survives_bursty_non_snapshot_traffic(
+    tmp_path,
+) -> None:
+    """A checkpoint stays inside the window under a burst of ordinary events."""
+
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
+
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "bursty"
+    kernel = AccountExecutionKernel(root, account_id="demo")
+    kernel.record_venue_snapshot(
+        snapshot_key="healthy",
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        exchange_ts_ns=0,
+        local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
+    )
+    for index in range(M.ACCOUNT_HEALTH_TAIL_SEGMENTS - 1):
+        kernel.record_protection(
+            protection_key=f"burst-{index}",
+            symbol="BUSDT",
+            status="synced",
+            stop_price=None,
+            take_profit_price=None,
+            exchange_ts_ns=0,
+            local_receive_ts_ns=(now_ms - 29_000) * 1_000_000 + index,
+        )
+
+    assert (
+        M.gather_account_health_alerts(
+            account_root=root,
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )
+
+
 def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
     from liquidity_migration.account import account_owner_health as owner_health_module
     from liquidity_migration.account.account_owner_health import (
@@ -935,6 +1064,8 @@ def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeyp
             equity_usdt=10_000.0,
             available_margin_usdt=9_000.0,
             requested_symbols_ready=True,
+            venue_facts_at_ns=published_ns,
+            venue_facts_healthy=True,
             invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         ),
     )
@@ -2120,8 +2251,13 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     assert "[CRITICAL]" in out2
 
 
-def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
-    """A 1.4-minute-old journaled snapshot must not page."""
+def test_account_health_floor_absorbs_a_flat_book_between_checkpoints(tmp_path) -> None:
+    """Two missed ten-minute checkpoints must not page; a third must.
+
+    Sub-minute proof that the owner is reading the venue moved to
+    ``venue_facts_at_ns`` in the owner-health file; this bound only catches a
+    journal that stopped receiving venue facts at all.
+    """
     from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
     now_ms = 1_000 * HOUR
@@ -2132,7 +2268,7 @@ def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
         reconstructed_positions={},
         mismatches=(),
         exchange_ts_ns=0,
-        local_receive_ts_ns=(now_ms - 84_000) * 1_000_000,
+        local_receive_ts_ns=(now_ms - 24 * 60_000) * 1_000_000,
     )
     assert (
         M.gather_account_health_alerts(
@@ -2142,6 +2278,12 @@ def test_account_health_floor_absorbs_one_busy_owner_minute(tmp_path) -> None:
         )
         == []
     )
+    stopped = M.gather_account_health_alerts(
+        account_root=root,
+        now_ms=now_ms + 2 * MIN,
+        max_age_minutes=1,
+    )
+    assert [alert.key for alert in stopped] == ["account_health_stale"]
 
 
 def test_disk_space_alert_thresholds(monkeypatch, tmp_path: Path) -> None:

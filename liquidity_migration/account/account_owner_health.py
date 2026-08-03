@@ -30,7 +30,7 @@ from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONM
 
 _logger = logging.getLogger(__name__)
 
-ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 2
+ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION = 3
 ACCOUNT_OWNER_HEALTH_FILENAME = "account_owner_health.json"
 # Fixtures only. Production must pass systemd's real INVOCATION_ID; there is no
 # dataclass default that could hide a missing generation binding.
@@ -182,6 +182,13 @@ class AccountOwnerHealth:
     available_margin_usdt: float
     requested_symbols_ready: bool
     invocation_id: str
+    # When the venue reconcile loop last received authenticated position truth
+    # from the exchange. Copied from the reconciler's own report, never from
+    # the time this file was written: an owner that keeps looping while its
+    # venue reads fail republishes fresh health with this timestamp standing
+    # still, and that is the case the watchdog has to catch.
+    venue_facts_at_ns: int
+    venue_facts_healthy: bool
     last_batch_id: str = ""
     detail: str = ""
     schema_version: int = ACCOUNT_OWNER_HEALTH_SCHEMA_VERSION
@@ -215,6 +222,10 @@ class AccountOwnerHealth:
             raise ValueError("account-owner health available_margin_usdt must be finite and non-negative")
         if not isinstance(self.requested_symbols_ready, bool):
             raise ValueError("account-owner health requested_symbols_ready must be boolean")
+        if type(self.venue_facts_at_ns) is not int or self.venue_facts_at_ns <= 0:
+            raise ValueError("account-owner health venue_facts_at_ns must be positive")
+        if not isinstance(self.venue_facts_healthy, bool):
+            raise ValueError("account-owner health venue_facts_healthy must be boolean")
         validate_systemd_invocation_id(
             self.invocation_id,
             label="account-owner health invocation_id",
@@ -253,6 +264,8 @@ class AccountOwnerHealth:
                 available_margin_usdt=float(payload["available_margin_usdt"]),
                 requested_symbols_ready=payload["requested_symbols_ready"],
                 invocation_id=payload["invocation_id"],
+                venue_facts_at_ns=int(payload["venue_facts_at_ns"]),
+                venue_facts_healthy=payload["venue_facts_healthy"],
                 last_batch_id=str(payload["last_batch_id"]),
                 detail=str(payload["detail"]),
             )
@@ -336,6 +349,7 @@ def require_recent_account_owner_health(
     *,
     environment: str,
     max_age_ns: int,
+    max_venue_fact_age_ns: int | None = None,
     now_ns: int | None = None,
     expected_account_id: str | None = None,
     expected_invocation_id: str | None = None,
@@ -354,6 +368,10 @@ def require_recent_account_owner_health(
     the owner loop, so on-disk health normally lags the head by one transaction
     until the next republish. Staleness stays bounded by ``max_age_ns``, and
     health *ahead* of the journal still fails closed.
+
+    ``max_venue_fact_age_ns`` additionally bounds how old the owner's last
+    authenticated venue observation may be. ``None`` keeps today's behavior:
+    the file's own age is checked, its venue-fact timestamp is not.
     """
 
     if environment not in EXECUTION_ENVIRONMENT_VALUES:
@@ -365,6 +383,8 @@ def require_recent_account_owner_health(
         raise ValueError("head_binding must be 'exact' or 'allow_behind'")
     if max_age_ns <= 0:
         raise ValueError("max account-owner health age must be positive")
+    if max_venue_fact_age_ns is not None and max_venue_fact_age_ns <= 0:
+        raise ValueError("max account-owner venue fact age must be positive")
     if expected_account_id is not None and not expected_account_id:
         raise ValueError("expected account-owner account_id cannot be empty")
     expected_generation = (
@@ -387,6 +407,12 @@ def require_recent_account_owner_health(
         age_ns = observed_now - health.observed_ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
             raise RuntimeError(f"account-owner health is stale: age_ns={age_ns}")
+        if max_venue_fact_age_ns is not None:
+            venue_age_ns = observed_now - health.venue_facts_at_ns
+            if venue_age_ns < 0 or venue_age_ns > max_venue_fact_age_ns:
+                raise RuntimeError(
+                    f"account-owner venue facts are stale: age_ns={venue_age_ns}"
+                )
         if expected_account_id is not None and health.account_id != expected_account_id:
             raise RuntimeError(
                 f"account-owner health account_id is {health.account_id!r}, "

@@ -1111,6 +1111,7 @@ def _write_owner_health(
         environment=environment,
     )
     journal = read_account_journal(account_root, verify=True)
+    observed_ts_ns = time.time_ns() if now_ms is None else now_ms * 1_000_000
     write_account_owner_health(
         account_root,
         AccountOwnerHealth(
@@ -1118,15 +1119,15 @@ def _write_owner_health(
             environment=environment,
             account_id=route.account_id,
             status="healthy",
-            observed_ts_ns=(
-                time.time_ns() if now_ms is None else now_ms * 1_000_000
-            ),
+            observed_ts_ns=observed_ts_ns,
             loop_sequence=1,
             journal_sequence=journal[-1].sequence if journal else 0,
             journal_state_hash=journal[-1].state_hash if journal else "0" * 64,
             equity_usdt=equity_usdt,
             available_margin_usdt=equity_usdt,
             requested_symbols_ready=True,
+            venue_facts_at_ns=observed_ts_ns,
+            venue_facts_healthy=True,
             invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         ),
     )

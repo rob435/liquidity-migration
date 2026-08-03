@@ -982,3 +982,123 @@ def test_periodic_reconciliation_survives_transient_venue_read_failure(
         "periodic account reconciliation failed" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_published_venue_facts_stay_pinned_when_the_venue_loop_wedges(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The proof rides on the reconciler's report, not the publish clock.
+
+    An owner whose REST reads keep failing keeps looping and keeps publishing
+    health. Its ``observed_ts_ns`` advances every publish; ``venue_facts_at_ns``
+    must not, or the watchdog has nothing to catch the wedge with.
+    """
+
+    from liquidity_migration.account.account_kernel import (
+        AccountExecutionKernel,
+        AccountRiskSnapshot,
+    )
+    from liquidity_migration.account.account_owner_health import (
+        TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        AccountOwnerHealthStatus,
+        read_account_owner_health,
+    )
+    from liquidity_migration.runtime.account_service_runner import (
+        publish_demo_owner_health,
+        run_periodic_reconciliation,
+    )
+
+    good_report = AccountReconciliationReport(
+        snapshot_key="snapshot",
+        healthy=True,
+        pending_orders_checked=0,
+        execution_rows_observed=0,
+        order_rows_observed=0,
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=(),
+        observed_ts_ns=5_000,
+    )
+
+    class WedgingReconciler:
+        def __init__(self) -> None:
+            self.last_report: AccountReconciliationReport | None = None
+            self.passes = 0
+
+        def reconcile_once(self) -> AccountReconciliationReport:
+            self.passes += 1
+            if self.passes > 1:
+                raise RuntimeError("Bybit get_positions failed: Server Timeout")
+            self.last_report = good_report
+            return good_report
+
+    class HealthyFundingReconciler:
+        def reconcile_once(self) -> object:
+            return object()
+
+    reconciler = WedgingReconciler()
+    funding = HealthyFundingReconciler()
+    account_root = tmp_path / "account"
+    kernel = AccountExecutionKernel(account_root, account_id="demo-account")
+    snapshot = AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 4_000)
+
+    published_ages: list[tuple[int, int]] = []
+    with caplog.at_level("ERROR", logger="liquidity_migration.runtime.account_service_runner"):
+        for loop_sequence in range(1, 4):
+            run_periodic_reconciliation(
+                reconciler=reconciler,
+                funding_reconciler=funding,
+            )
+            venue_facts_report = reconciler.last_report
+            assert venue_facts_report is not None
+            published = publish_demo_owner_health(
+                kernel=kernel,
+                account_root=account_root,
+                account_id="demo-account",
+                risk_snapshot=snapshot,
+                status=AccountOwnerHealthStatus.HEALTHY,
+                observed_ts_ns=10_000 + loop_sequence,
+                loop_sequence=loop_sequence,
+                requested_symbols_ready=True,
+                venue_facts_at_ns=venue_facts_report.observed_ts_ns,
+                venue_facts_healthy=bool(venue_facts_report.healthy),
+                invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+            )
+            published_ages.append((published.observed_ts_ns, published.venue_facts_at_ns))
+
+    assert reconciler.passes == 3
+    assert [observed for observed, _ in published_ages] == [10_001, 10_002, 10_003]
+    assert {venue for _, venue in published_ages} == {5_000}
+    assert read_account_owner_health(account_root).venue_facts_at_ns == 5_000
+
+
+def test_venue_facts_are_not_part_of_the_owner_health_signature() -> None:
+    """A per-cycle value here would spend a wallet REST call every loop.
+
+    ``owner_health_publish_decision`` derives ``refresh_capital`` from the
+    health signature; the 5s health interval already bounds how stale the
+    published venue-fact timestamp can be.
+    """
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    signature_values = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "health_signature"
+            for target in node.targets
+        )
+    ]
+    assert signature_values
+    for value in signature_values:
+        assert isinstance(value, ast.Tuple)
+        assert "venue_facts" not in ast.unparse(value)
+    # ...and the published field still comes from the reconciler's own report.
+    assert "venue_facts_report = reconciler.last_report" in source
+    assert "venue_facts_at_ns=venue_facts_report.observed_ts_ns," in source

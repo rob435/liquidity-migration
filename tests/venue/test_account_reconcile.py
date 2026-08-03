@@ -821,7 +821,9 @@ def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path)
         clock=clock,
     )
     reconciler.reconcile_once()
-    clock.advance_ns(1)
+    # Well short of the checkpoint floor: the second snapshot can only be the
+    # position change, not the heartbeat coming due.
+    clock.advance_ns(VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS // 2)
     client.venue_positions = [{"symbol": "BUSDT", "side": "Buy", "size": "1"}]
 
     changed = reconciler.reconcile_once()
@@ -834,6 +836,42 @@ def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path)
     assert len(snapshots) == 2
     assert not changed.healthy
     assert list(kernel.state().venue_snapshots) == [changed.snapshot_key]
+
+
+def test_venue_snapshot_events_carry_no_symbol(tmp_path: Path) -> None:
+    """Snapshots are account-wide facts, so their symbol field stays empty.
+
+    ``AccountService._orphan_observed_since_ns`` filters candidate events by
+    ``event.symbol == symbol``, so a venue snapshot never matches that clause.
+    This pins the shape that clause depends on.
+    """
+
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="symbolless", clock=clock)
+
+    class PositionedClient(_NoOpenOrdersClient):
+        demo = True
+        realm = "demo"
+
+        def get_positions(self, **params: object):
+            assert params == {"settle_coin": "USDT"}
+            return [{"symbol": "BUSDT", "side": "Buy", "size": "1"}]
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=PositionedClient(),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.reconcile_once()
+
+    snapshots = [
+        event
+        for event in kernel.journal.events()
+        if event.event_type == "venue_snapshot"
+    ]
+    assert snapshots
+    assert {event.symbol for event in snapshots} == {""}
 
 
 def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Path) -> None:
