@@ -71,7 +71,22 @@ how it got there. That history is in Git.
   and carry's replay-from-scratch discipline (registered-rule semantics; its
   ~40%-core panel rebuild is measured and reported, owner to decide).
   Carry demo `MemoryMax` 1152M→1408M for the in-memory store (mainnet unit
-  mirrored). Full gate green (2763 tests). The main Telegram line now
+  mirrored). Full gate green (2763 tests).
+  **Deployed and measured after** (`a1058e9` + bootstrap-workers plumbing
+  `3b15ba5`, staged install+activate 16:35–16:41 UTC over the live book):
+  watchdog **1.01–1.04 s CPU per run** (was 22–28 s on the aged epoch);
+  carry **~16.4 CPU-s per 60 s cycle** (was ~24) on an exact 60 s cadence
+  (was slipping), **zero REST kline rows on mid-hour cycles** and a single
+  1-bar-per-symbol top-up + funding sweep at each hour boundary; carry's WS
+  store bootstrapped 150 symbols / 296,665 bars in 38.9 s and flushes within
+  seconds of each bar close; carry RSS 823 M under the 1408 M cap, host
+  2.8 G available. Carry's remaining burn is the registered rule's
+  replay-from-scratch panel rebuild (documented above, owner's call).
+  Known pre-existing wart surfaced while verifying (not from this change):
+  on a restart with an intact store, the kline bootstrap re-fetches the
+  window it already holds and logs the run as `failed=N` because zero new
+  inserts count as failure — bounded (~40–50 s per restart), tracked as a
+  follow-up. The main Telegram line now
   carries only the book's story in plain words (digest, fills, closes, stops,
   loss warnings, entry blocks); accounting boilerplate and component
   bookkeeping moved to the owner's service journal. Watchdog pages moved to a
