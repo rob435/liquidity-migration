@@ -326,9 +326,12 @@ and deploy this strategy in its place. The runtime now exists:
 2. **Decision cadence**: once per UTC day at 00:00 close, computed from
    ~00:20 (kline availability lag, same offset as the rmom timer). Diff-based
    idempotent publication; quiet cycles between decisions. Data: 1h klines
-   stream in over WebSocket with REST covering gaps (since 2026-08-03);
-   settled funding history and the hourly sweep stay REST — the venue has no
-   stream for it. Same bars, same close keys; only the transport changed.
+   stream in over WebSocket into an in-memory store that serves the cycle's
+   whole window, with REST covering gaps and restarts (since 2026-08-03; for
+   the first hours a window off-by-one meant the store streamed without
+   serving a single cycle — fixed and verified the same day). Settled funding
+   history and the hourly sweep stay REST — the venue has no stream for it.
+   Same bars, same close keys; only the transport changed.
 3. **Protection**: declared `stop_loss_pct` 0.35 per target (the sl35
    pattern — replaces the 2% account fallback so the funding-normalization
    exit is always the real exit), NO take-profit (the book's right tail is

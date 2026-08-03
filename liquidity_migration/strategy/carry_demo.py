@@ -1178,16 +1178,19 @@ def _build_carry_demo_market_data(
         _logger.warning("carry instruments fetch failed; head-completeness checks degrade: %s", exc)
         launch_times = {}
     start_ms, window_end_open_ms = _kline_window(now_ms, lookback_days=demo.replay_days)
-    # The REST kline pager treats its end bound as EXCLUSIVE (bars are fetched
-    # with opens in [start, end)), so requesting through the CURRENT hour
-    # boundary yields opens through floor(now)-1h — the newest CLOSED bar —
-    # and never the in-progress bar. Close-keyed (see _carry_venue_view), that
-    # newest bar IS the current day's 00:00 decision bar during the 00:xx hour.
-    download_end_ms = window_end_open_ms + HOUR_MS
+    # The shared reader's window is INCLUSIVE over bar OPENS and its end must
+    # be the newest CLOSED bar's open — the same convention LONG passes. The
+    # old +1h here shifted the whole window one bar forward, which made the
+    # WS store's coverage probe unfulfillable (the store bootstrapped, flushed,
+    # and never served a single cycle; observed live 2026-08-03 as
+    # kline_store_rows=0) and asked REST for the in-progress bar. Close-keyed
+    # (see _carry_venue_view), the newest closed bar still IS the current
+    # day's 00:00 decision bar during the 00:xx hour, so decision inputs are
+    # unchanged by the fix.
     klines, kline_stats = _download_recent_1h_klines(
         fetch_symbols,
         start_ms=start_ms,
-        end_ms=download_end_ms,
+        end_ms=window_end_open_ms,
         launch_time_ms_by_symbol=launch_times,
         config=config,
         workers=demo.workers,
@@ -1218,6 +1221,7 @@ def _build_carry_demo_market_data(
         "kline_fetched_rows": int(kline_stats.get("fetched_rows", 0)),
         "kline_output_rows": int(kline_stats.get("output_rows", 0)),
         "kline_fetch_symbols": int(kline_stats.get("fetch_symbols", 0)),
+        "kline_store_rows": int(kline_stats.get("store_rows", 0)),
         "funding_cache_rows": funding.height,
         "funding_max_ts_ms": (
             coerce_int(funding.get_column("funding_ts_ms").max()) if not funding.is_empty() else 0
@@ -1543,7 +1547,9 @@ def run_carry_demo_cycle(
             "kline_fetched_rows": int(build_stats.get("kline_fetched_rows", 0)),
             "kline_output_rows": int(build_stats.get("kline_output_rows", 0)),
             "kline_fetch_symbols": int(build_stats.get("kline_fetch_symbols", 0)),
-            "kline_store_rows": 0,
+            # A real gauge since 2026-08-03; it was a hardcoded 0 before, which
+            # masked the store never serving (the probe defect fixed the same day).
+            "kline_store_rows": int(build_stats.get("kline_store_rows", 0)),
             "funding_swept": bool(build_stats.get("funding_swept", False)),
             "funding_rows_appended": int(build_stats.get("funding_rows_appended", 0)),
             "funding_fetch_failures": int(build_stats.get("funding_fetch_failures", 0)),

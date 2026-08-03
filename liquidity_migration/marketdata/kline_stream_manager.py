@@ -125,6 +125,13 @@ class KlineStreamManager:
             raise ValueError("bootstrap_workers must be positive")
         if self.universe_refresh_interval_seconds < 0.0:
             raise ValueError("universe_refresh_interval_seconds must be non-negative")
+        # The store must retain at least the bootstrap lookback: eviction is
+        # anchored to the NEWEST bar, so a retention shorter than the lookback
+        # evicts the window head as it lands and the reader's full-window
+        # check can never pass for a name older than retention (observed live
+        # 2026-08-03: LONG served 4/120 symbols). +1 day so the head is never
+        # clipped between hourly refreshes.
+        self.retain_days = max(int(self.retain_days), int(self.lookback_days) + 1)
         store_factory = self.store_factory or _default_store_factory
         self._store = store_factory(
             cache_root=self.cache_root,

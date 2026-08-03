@@ -1112,3 +1112,31 @@ def test_refresh_bootstrap_honors_shutdown_promptly(tmp_path) -> None:
     finally:
         manager._refresh_stop.clear()
         manager.stop()
+
+
+def test_store_retention_covers_the_bootstrap_lookback(tmp_path) -> None:
+    # Eviction is anchored to the NEWEST bar, so a store retention shorter
+    # than the manager's lookback evicts the window head as it lands and the
+    # reader's full-window coverage check can never pass for a name older
+    # than retention (observed live 2026-08-03: LONG served 4/120 symbols
+    # with lookback 100d over the old fixed 90d retention). The manager must
+    # raise retention to cover its own lookback, with a one-day margin.
+    class _Dummy:
+        def get_instruments_info(self):
+            return []
+
+        def get_klines(self, *args, **kwargs):
+            return []
+
+        rate_limiter = None
+
+    manager = KlineStreamManager(market_data=_Dummy(), cache_root=tmp_path, lookback_days=100)
+    assert manager.retain_days == 101
+    assert manager.store().stats()["retain_days"] == 101
+
+    # An explicitly wider retention is preserved, never shrunk.
+    wide = KlineStreamManager(
+        market_data=_Dummy(), cache_root=tmp_path, lookback_days=10, retain_days=90
+    )
+    assert wide.retain_days == 90
+    assert wide.store().stats()["retain_days"] == 90

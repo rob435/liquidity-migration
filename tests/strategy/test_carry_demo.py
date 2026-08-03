@@ -21,6 +21,7 @@ import pytest
 import liquidity_migration.strategy.carry_demo as module
 import liquidity_migration.strategy.strategy_planning as planning_module
 from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.marketdata.kline_store import KlineStore
 from liquidity_migration.account.account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     entry_attempt_key,
@@ -70,9 +71,14 @@ def _base_price(symbol: str) -> float:
 
 
 def _synth_klines(symbols: list[str], *, start_ms: int, end_ms: int) -> pl.DataFrame:
-    """Hourly bars with opens in [start, end) — the REST pager's contract."""
+    """Hourly bars with opens in [start, end] — INCLUSIVE, the real reader's
+    contract (store, cache, and REST all treat end as the newest requested
+    bar's open). This shim used to claim and implement an exclusive end; that
+    mirrored the production +1h window bug instead of catching it."""
 
-    opens = pl.DataFrame({"ts_ms": pl.int_range(start_ms, end_ms, MS_PER_HOUR, eager=True)})
+    opens = pl.DataFrame(
+        {"ts_ms": pl.int_range(start_ms, end_ms + MS_PER_HOUR, MS_PER_HOUR, eager=True)}
+    )
     per_symbol = pl.DataFrame(
         {
             "symbol": list(symbols),
@@ -205,8 +211,9 @@ def _patch_planning(
 def _patch_demo_market_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route the heavy kline path through the synthetic generator.
 
-    The shim honours the real downloader's boundary contract (opens in [start, end));
-    the funding cache, venue view, and decision replay all run for real on top of it.
+    The shim honours the real downloader's boundary contract (opens in
+    [start, end], inclusive); the funding cache, venue view, and decision
+    replay all run for real on top of it.
     """
 
     def download(symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
@@ -1004,35 +1011,47 @@ def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
     assert trimmed.height == bars.height - (24 - 3)
 
 
-class _FakeKlineStore:
-    """Full-window in-memory store: the WS plane's happy path."""
+class _CountingKlineStore(KlineStore):
+    """The REAL store with a read counter.
 
-    def __init__(self, symbols: tuple[str, ...]) -> None:
-        self.symbols = symbols
+    A hand-rolled fake here previously answered the coverage probe
+    unconditionally, which hid a live defect: the carry caller passed a window
+    end one bar in the future, the real probe could never pass, and the store
+    never served a cycle (kline_store_rows=0 in production while this test
+    stayed green). Probe semantics must come from the production class.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self.get_klines_calls = 0
-
-    def symbols_with_coverage_through(self, end_ms: int) -> set[str]:
-        return set(self.symbols)
 
     def get_klines(self, symbols: list[str], *, start_ms: int, end_ms: int) -> pl.DataFrame:
         self.get_klines_calls += 1
-        rows = []
-        for symbol in symbols:
-            for ts_ms in range(start_ms, end_ms, MS_PER_HOUR):
-                rows.append(
-                    {
-                        "ts_ms": ts_ms,
-                        "symbol": symbol,
-                        "open": 100.0,
-                        "high": 101.0,
-                        "low": 99.0,
-                        "close": 100.5,
-                        "volume_base": 10.0,
-                        "turnover_quote": 1_000.0,
-                        "source": "ws",
-                    }
-                )
-        return pl.DataFrame(rows).sort(["symbol", "ts_ms"])
+        return super().get_klines(symbols, start_ms=start_ms, end_ms=end_ms)
+
+
+def _bootstrapped_store(
+    symbols: tuple[str, ...], *, newest_open_ms: int, span_days: int
+) -> _CountingKlineStore:
+    store = _CountingKlineStore(cache_root=None, retain_days=span_days + 14, flush_interval_seconds=0.0)
+    first_open_ms = newest_open_ms - span_days * 24 * MS_PER_HOUR
+    for symbol in symbols:
+        store.bootstrap_symbol(
+            symbol,
+            [
+                {
+                    "start": ts_ms,
+                    "open": "100.0",
+                    "high": "101.0",
+                    "low": "99.0",
+                    "close": "100.5",
+                    "volume": "10.0",
+                    "turnover": "1000.0",
+                }
+                for ts_ms in range(first_open_ms, newest_open_ms + MS_PER_HOUR, MS_PER_HOUR)
+            ],
+        )
+    return store
 
 
 class _FakeTickerCache:
@@ -1065,8 +1084,12 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
         {"symbol": symbol, "turnover24h": str(1_000_000.0 * (len(ALL_SYMBOLS) - index) * 24)}
         for index, symbol in enumerate(ALL_SYMBOLS)
     ]
-    store = _FakeKlineStore(ALL_SYMBOLS)
     now_ms = 1_760_000_000_000 - (1_760_000_000_000 % MS_PER_HOUR) + 25 * 60 * 1000
+    # Mid-hour, the newest CLOSED bar's open is floor(now) - 1h. The store
+    # holds exactly the cycle window (45 replay days + margin) ending there —
+    # the live steady state the WS plane maintains.
+    newest_open_ms = now_ms - (now_ms % MS_PER_HOUR) - MS_PER_HOUR
+    store = _bootstrapped_store(ALL_SYMBOLS, newest_open_ms=newest_open_ms, span_days=46)
     config = ResearchConfig()
     demo = _routed_config(tmp_path, replay_days=45, workers=2)
 
@@ -1087,7 +1110,14 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
     assert stats["data_source"] == "ws_store"
     assert store.get_klines_calls == 1
     assert int(stats["kline_fetched_rows"]) == 0
+    # The store served every row; the on-disk cache was never consulted.
+    assert int(stats["kline_store_rows"]) > 0
+    assert int(stats["kline_store_rows"]) == int(stats["kline_output_rows"])
+    assert int(stats["kline_cache_rows"]) == 0
     assert not klines.is_empty()
+    # The served window ends at the newest CLOSED bar's open — the reader's
+    # inclusive bar-open convention. The old +1h end made this unreachable.
+    assert int(klines["ts_ms"].max()) == newest_open_ms
     assert set(klines["symbol"].unique().to_list()) == set(ALL_SYMBOLS)
     # Funding has no stream on the venue: the REST sweep still ran, once per symbol.
     assert sorted({symbol for symbol, _s, _e in market.funding_calls}) == sorted(ALL_SYMBOLS)
