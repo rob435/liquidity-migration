@@ -137,7 +137,10 @@ class AccountNotificationEngine:
             persisted.last_sequence = events[-1].sequence
             new_events: list[AccountEvent] = []
         else:
-            new_events = [event for event in events if event.sequence > persisted.last_sequence]
+            # Verified journal events are sequence-contiguous from 1, so the
+            # events after ``last_sequence`` are exactly the tail slice — an
+            # O(new) read instead of an O(journal age) scan every poll.
+            new_events = list(events[persisted.last_sequence :])
         next_state = AccountNotificationState(
             last_sequence=events[-1].sequence if events else persisted.last_sequence,
             last_hour_bucket=persisted.last_hour_bucket,

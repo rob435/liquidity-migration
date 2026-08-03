@@ -382,6 +382,7 @@ def run_long_native_demo_cycle(
                 candidate_reconciliation,
                 route=route,
                 context="LONG cycle",
+                journal_cursor=journal_cursor,
             )
             universe = universe.filter(
                 pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))

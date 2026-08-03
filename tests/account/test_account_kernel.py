@@ -3598,3 +3598,102 @@ def test_quantity_tolerance_scales_with_the_quantity_being_compared() -> None:
     assert quantity_tolerance(0.0) == 1e-12
     assert quantity_tolerance(1.0) == 1e-12
     assert quantity_tolerance(-1_000_000.0) == pytest.approx(1e-6)
+
+
+def _journal_snapshot(kernel: AccountExecutionKernel, key: str) -> None:
+    kernel.record_venue_snapshot(
+        snapshot_key=key,
+        venue_positions={},
+        reconstructed_positions={},
+        mismatches=[],
+        exchange_ts_ns=1,
+        local_receive_ts_ns=2,
+    )
+
+
+def test_read_recent_account_events_reads_only_the_tail_window(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    for index in range(5):
+        _journal_snapshot(kernel, f"recent-{index}")
+    full = read_account_journal(tmp_path)
+    recent = account_kernel_module.read_recent_account_events(tmp_path, max_segments=2)
+    assert recent is not None
+    assert recent.total_segments == 5
+    assert recent.window_segments == 2
+    assert list(recent.events) == full[-len(recent.events) :]
+    assert recent.events[-1] == full[-1]
+
+
+def test_read_recent_account_events_covers_a_small_journal_whole(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    for index in range(3):
+        _journal_snapshot(kernel, f"whole-{index}")
+    recent = account_kernel_module.read_recent_account_events(tmp_path, max_segments=100)
+    assert recent is not None
+    assert recent.total_segments == recent.window_segments == 3
+    assert list(recent.events) == read_account_journal(tmp_path)
+
+
+def test_read_recent_account_events_empty_journal_is_none(tmp_path: Path) -> None:
+    assert account_kernel_module.read_recent_account_events(tmp_path, max_segments=8) is None
+
+
+def test_read_recent_account_events_rejects_a_tampered_window_segment(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    _journal_snapshot(kernel, "tamper-0")
+    _journal_snapshot(kernel, "tamper-1")
+    latest = sorted(account_transactions_path(tmp_path).glob("*.json"))[-1]
+    latest.write_bytes(latest.read_bytes().replace(b"tamper-1", b"tamper-x"))
+    with pytest.raises(AccountJournalIntegrityError):
+        account_kernel_module.read_recent_account_events(tmp_path, max_segments=2)
+
+
+def test_read_recent_account_events_rejects_a_cross_segment_chain_break(tmp_path: Path) -> None:
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    kernel_a = _kernel(root_a)
+    _journal_snapshot(kernel_a, "chain-a-0")
+    kernel_b = _kernel(root_b)
+    _journal_snapshot(kernel_b, "chain-b-0")
+    _journal_snapshot(kernel_b, "chain-b-1")
+    foreign = sorted(account_transactions_path(root_b).glob("*.json"))[-1]
+    (account_transactions_path(root_a) / foreign.name).write_bytes(foreign.read_bytes())
+    with pytest.raises(AccountJournalIntegrityError, match="hash-chain break"):
+        account_kernel_module.read_recent_account_events(root_a, max_segments=10)
+
+
+def test_validated_names_cache_revalidates_only_the_new_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = _kernel(tmp_path)
+    for index in range(4):
+        _journal_snapshot(kernel, f"cache-{index}")
+    validated_lengths: list[int] = []
+    original = account_kernel_module._contiguous_from
+
+    def observing(names, *, expected_first):  # type: ignore[no-untyped-def]
+        validated_lengths.append(len(tuple(names)))
+        return original(names, expected_first=expected_first)
+
+    monkeypatch.setattr(account_kernel_module, "_contiguous_from", observing)
+    assert read_account_journal_head(tmp_path) is not None
+    assert validated_lengths[-1] == 4
+    _journal_snapshot(kernel, "cache-4")
+    assert read_account_journal_head(tmp_path) is not None
+    assert validated_lengths[-1] == 1
+
+
+def test_validated_names_cache_survives_a_root_reset(tmp_path: Path) -> None:
+    import shutil
+
+    kernel = _kernel(tmp_path)
+    _journal_snapshot(kernel, "reset-0")
+    _journal_snapshot(kernel, "reset-1")
+    assert read_account_journal_head(tmp_path) is not None
+    shutil.rmtree(account_transactions_path(tmp_path))
+    account_journal_path(tmp_path).unlink(missing_ok=True)
+    fresh = _kernel(tmp_path)
+    _journal_snapshot(fresh, "reset-fresh")
+    head = read_account_journal_head(tmp_path)
+    assert head is not None
+    assert head.payload.get("snapshot_key") == "reset-fresh"

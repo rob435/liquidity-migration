@@ -66,6 +66,9 @@ fi
 # hysteresis replay window (engine floor 45d, deployed default 90d).
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-90}"
 WORKERS="${WORKERS:-4}"
+# WS klines are the primary bar source; REST covers gaps. 0 disables the
+# stream and returns to REST-on-cycle.
+WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
 OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
 if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
     echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
@@ -83,6 +86,11 @@ if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
 fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
+fi
+if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
+    target_route_args+=(--ws-klines-enabled)
+else
+    target_route_args+=(--no-ws-klines)
 fi
 echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE"
 exec "$PYTHON_BIN" -m liquidity_migration \

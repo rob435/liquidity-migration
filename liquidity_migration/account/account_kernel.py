@@ -626,6 +626,74 @@ def _stable_transaction_segment_names(
     )
 
 
+# Filename validation is O(#segments) regex work per call, and hot callers
+# (owner-health probes run several times per producer cycle) revalidate an
+# append-only prefix that cannot have changed: a segment's name embeds its
+# transaction hash, so an unchanged name prefix witnesses unchanged files.
+# Cache the validated prefix per root and validate only the new suffix.
+_VALIDATED_NAMES_CACHE: dict[str, tuple[tuple[str, ...], int]] = {}
+_VALIDATED_NAMES_LOCK = threading.Lock()
+_VALIDATED_NAMES_MAX_ROOTS = 8
+
+
+def _contiguous_from(names: Sequence[str], *, expected_first: int) -> int | None:
+    """Validate names continue a 1..N cover; return the next expected first.
+
+    Raises on a malformed or inverted filename; returns ``None`` on a gap so
+    the caller can retry a racy directory scan.
+    """
+
+    for name in names:
+        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
+        if match is None:
+            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
+        first_sequence = int(match.group("first"))
+        last_sequence = int(match.group("last"))
+        if last_sequence < first_sequence:
+            raise AccountJournalIntegrityError(
+                f"account transaction filename has an inverted range: {name}"
+            )
+        if first_sequence != expected_first:
+            return None
+        expected_first = last_sequence + 1
+    return expected_first
+
+
+def _validated_contiguous_names(
+    root: str | Path, *, attempts: int = 4, backoff_seconds: float = 0.01
+) -> list[str]:
+    """Sorted, regex-validated, gap-free segment names, prefix-cached per root.
+
+    Semantics match :func:`_stable_transaction_segment_names`: a transiently
+    racy scan is retried, a persistent hole raises. The cache only skips
+    revalidating names it validated before; every call still lists the
+    directory, so freshness is never cached.
+    """
+
+    key = str(account_transactions_path(root))
+    for attempt in range(attempts):
+        names = _transaction_segment_names(root)
+        with _VALIDATED_NAMES_LOCK:
+            cached = _VALIDATED_NAMES_CACHE.get(key)
+        if cached is not None and len(cached[0]) <= len(names) and tuple(names[: len(cached[0])]) == cached[0]:
+            start_index, expected_first = len(cached[0]), cached[1]
+        else:
+            start_index, expected_first = 0, 1
+        next_first = _contiguous_from(names[start_index:], expected_first=expected_first)
+        if next_first is not None:
+            with _VALIDATED_NAMES_LOCK:
+                if len(_VALIDATED_NAMES_CACHE) >= _VALIDATED_NAMES_MAX_ROOTS and key not in _VALIDATED_NAMES_CACHE:
+                    _VALIDATED_NAMES_CACHE.pop(next(iter(_VALIDATED_NAMES_CACHE)))
+                _VALIDATED_NAMES_CACHE[key] = (tuple(names), next_first)
+            return names
+        if attempt + 1 < attempts:
+            time.sleep(backoff_seconds)
+    raise AccountJournalIntegrityError(
+        "account transaction filenames are not contiguous after "
+        f"{attempts} scans; the journal has a real sequence hole"
+    )
+
+
 def _read_transaction_events(root: str | Path) -> list[AccountEvent] | None:
     directory = account_transactions_path(root)
     paths = sorted(directory.glob("*.json")) if directory.is_dir() else []
@@ -840,6 +908,71 @@ def read_account_journal(root: str | Path, *, verify: bool = True) -> list[Accou
     return []
 
 
+def _verify_recent_transaction_window(directory: Path, names: Sequence[str]) -> list[AccountEvent]:
+    """Read and verify a contiguous tail window of transaction segments.
+
+    Per segment: envelope hash, schema, filename binding (hash prefix and
+    sequence range), every event's shape and hash, and chain links inside and
+    across the window's segments. The chain link into the segment before the
+    window and the state-hash replay from genesis are the full verifier's job.
+    """
+
+    files: list[tuple[str, bytes]] = []
+    for name in names:
+        path = directory / name
+        try:
+            snapshot = read_stable_file(
+                path,
+                label="recent account transaction",
+                reject_empty=True,
+                require_single_link=True,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AccountJournalIntegrityError(f"cannot read account transaction {path}: {exc}") from exc
+        files.append((str(snapshot.path), snapshot.data))
+
+    events: list[AccountEvent] = []
+    previous: AccountEvent | None = None
+    account_id = ""
+    for name, (label, data) in zip(names, files):
+        segment_events = _read_transaction_event_bytes([(label, data)])
+        if not segment_events:  # pragma: no cover - one file always yields events or raises
+            raise AccountJournalIntegrityError(f"account transaction has no events: {label}")
+        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
+        if match is None:  # pragma: no cover - the caller validated the names
+            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
+        try:
+            payload_hash = str(json.loads(data).get("transaction_hash") or "")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover - parsed above
+            raise AccountJournalIntegrityError(f"invalid account transaction {label}: {exc}") from exc
+        if payload_hash[:16] != match.group("hash"):
+            raise AccountJournalIntegrityError(f"account transaction filename hash mismatch: {name}")
+        if segment_events[0].sequence != int(match.group("first")) or segment_events[-1].sequence != int(
+            match.group("last")
+        ):
+            raise AccountJournalIntegrityError(f"account transaction filename sequence mismatch: {name}")
+        for event in segment_events:
+            _validate_event_shape(event)
+            if previous is not None:
+                if event.sequence != previous.sequence + 1:
+                    raise AccountJournalIntegrityError(
+                        f"account sequence gap inside recent window: got {event.sequence}, "
+                        f"expected {previous.sequence + 1}"
+                    )
+                if event.prev_event_hash != previous.event_hash:
+                    raise AccountJournalIntegrityError(
+                        f"account hash-chain break at sequence {event.sequence}"
+                    )
+            if account_id and event.account_id != account_id:
+                raise AccountJournalIntegrityError("account transaction window contains multiple account ids")
+            account_id = event.account_id
+            if event.event_hash != _event_hash(event.to_dict()):
+                raise AccountJournalIntegrityError(f"account event hash mismatch at sequence {event.sequence}")
+            previous = event
+            events.append(event)
+    return events
+
+
 def read_account_journal_head(root: str | Path) -> AccountEvent | None:
     """Read the current immutable head without replaying payload history.
 
@@ -849,14 +982,9 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
     """
 
     directory = account_transactions_path(root)
-    try:
-        with os.scandir(directory) as entries:
-            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
-    except FileNotFoundError:
-        names = []
-    except NotADirectoryError as exc:
-        raise AccountJournalIntegrityError(f"account transaction path is not a directory: {directory}") from exc
-
+    if directory.exists() and not directory.is_dir():
+        raise AccountJournalIntegrityError(f"account transaction path is not a directory: {directory}")
+    names = _validated_contiguous_names(root)
     if not names:
         projection = account_journal_path(root)
         if projection.exists() and projection.stat().st_size > 0:
@@ -865,71 +993,48 @@ def read_account_journal_head(root: str | Path) -> AccountEvent | None:
                 "reset the account root explicitly"
             )
         return None
+    return _verify_recent_transaction_window(directory, names[-1:])[-1]
 
-    expected_first = 1
-    latest_match: re.Match[str] | None = None
-    for name in names:
-        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
-        if match is None:
-            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
-        first_sequence = int(match.group("first"))
-        last_sequence = int(match.group("last"))
-        if first_sequence != expected_first:
-            raise AccountJournalIntegrityError(
-                f"account transaction filename sequence gap: got {first_sequence}, expected {expected_first}"
-            )
-        if last_sequence < first_sequence:
-            raise AccountJournalIntegrityError(f"account transaction filename has an inverted range: {name}")
-        expected_first = last_sequence + 1
-        latest_match = match
 
-    assert latest_match is not None
-    latest_name = names[-1]
-    latest_path = directory / latest_name
-    try:
-        snapshot = read_stable_file(
-            latest_path,
-            label="latest account transaction",
-            reject_empty=True,
-            require_single_link=True,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise AccountJournalIntegrityError(f"cannot read latest account transaction {latest_path}: {exc}") from exc
-    transaction_events = _read_transaction_event_bytes([(str(snapshot.path), snapshot.data)])
-    assert transaction_events is not None
-    try:
-        payload = json.loads(snapshot.data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover - parsed above
-        raise AccountJournalIntegrityError(f"invalid latest account transaction {latest_path}: {exc}") from exc
-    transaction_hash = str(payload.get("transaction_hash") or "")
-    if transaction_hash[:16] != latest_match.group("hash"):
-        raise AccountJournalIntegrityError(f"account transaction filename hash mismatch: {latest_name}")
-    if transaction_events[0].sequence != int(latest_match.group("first")):
-        raise AccountJournalIntegrityError(f"account transaction filename first sequence mismatch: {latest_name}")
-    if transaction_events[-1].sequence != int(latest_match.group("last")):
-        raise AccountJournalIntegrityError(f"account transaction filename last sequence mismatch: {latest_name}")
+@dataclass(frozen=True, slots=True)
+class RecentAccountEvents:
+    """A verified tail window of the account journal."""
 
-    account_id = transaction_events[0].account_id
-    previous: AccountEvent | None = None
-    for expected_sequence, event in enumerate(
-        transaction_events,
-        start=transaction_events[0].sequence,
-    ):
-        _validate_event_shape(event)
-        if event.sequence != expected_sequence:
+    events: tuple[AccountEvent, ...]
+    total_segments: int
+    window_segments: int
+
+
+def read_recent_account_events(root: str | Path, *, max_segments: int) -> RecentAccountEvents | None:
+    """Read and verify only the newest ``max_segments`` transaction segments.
+
+    Cost is O(window), not O(journal age): freshness monitors need the newest
+    venue snapshot, not a genesis replay. Segment envelopes, event hashes, and
+    chain links inside the window are verified; the link into history before
+    the window and the state replay stay the full verifier's and the account
+    owner's startup job. Returns ``None`` for an empty journal.
+    """
+
+    if max_segments < 1:
+        raise ValueError("max_segments must be >= 1")
+    directory = account_transactions_path(root)
+    if directory.exists() and not directory.is_dir():
+        raise AccountJournalIntegrityError(f"account transaction path is not a directory: {directory}")
+    names = _validated_contiguous_names(root)
+    if not names:
+        projection = account_journal_path(root)
+        if projection.exists() and projection.stat().st_size > 0:
             raise AccountJournalIntegrityError(
-                f"account sequence gap inside latest transaction: got {event.sequence}, expected {expected_sequence}"
+                "account journal has events.jsonl but no authoritative transaction segments; "
+                "reset the account root explicitly"
             )
-        if event.account_id != account_id:
-            raise AccountJournalIntegrityError("latest account transaction contains multiple account ids")
-        if previous is not None and event.prev_event_hash != previous.event_hash:
-            raise AccountJournalIntegrityError(
-                f"account hash-chain break inside latest transaction at sequence {event.sequence}"
-            )
-        if event.event_hash != _event_hash(event.to_dict()):
-            raise AccountJournalIntegrityError(f"account event hash mismatch at sequence {event.sequence}")
-        previous = event
-    return transaction_events[-1]
+        return None
+    window = names[-max_segments:]
+    return RecentAccountEvents(
+        events=tuple(_verify_recent_transaction_window(directory, window)),
+        total_segments=len(names),
+        window_segments=len(window),
+    )
 
 
 def read_account_journal_bytes(

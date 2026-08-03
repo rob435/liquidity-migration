@@ -669,8 +669,10 @@ def test_validate_carry_demo_config_rejections(tmp_path: Path) -> None:
         _validate_carry_demo_config(_routed_config(tmp_path, declared_stop_loss_fraction=1.0))
     with pytest.raises(ValueError, match="replay_days"):
         _validate_carry_demo_config(_routed_config(tmp_path, replay_days=30))
-    with pytest.raises(ValueError, match="pure REST"):
-        _validate_carry_demo_config(_routed_config(tmp_path, ws_klines_enabled=True))
+    with pytest.raises(ValueError, match="ws_klines_lookback_days"):
+        _validate_carry_demo_config(
+            _routed_config(tmp_path, ws_klines_enabled=True, ws_klines_lookback_days=45)
+        )
 
     class _WithTelegram(CarryDemoCycleConfig):
         __slots__ = ()
@@ -999,3 +1001,93 @@ def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
     assert int(trimmed.get_column("bar_ts_ms").min()) % day_ms == 0
     # nothing beyond the partial day is lost
     assert trimmed.height == bars.height - (24 - 3)
+
+
+class _FakeKlineStore:
+    """Full-window in-memory store: the WS plane's happy path."""
+
+    def __init__(self, symbols: tuple[str, ...]) -> None:
+        self.symbols = symbols
+        self.get_klines_calls = 0
+
+    def symbols_with_coverage_through(self, end_ms: int) -> set[str]:
+        return set(self.symbols)
+
+    def get_klines(self, symbols: list[str], *, start_ms: int, end_ms: int) -> pl.DataFrame:
+        self.get_klines_calls += 1
+        rows = []
+        for symbol in symbols:
+            for ts_ms in range(start_ms, end_ms, MS_PER_HOUR):
+                rows.append(
+                    {
+                        "ts_ms": ts_ms,
+                        "symbol": symbol,
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.5,
+                        "volume_base": 10.0,
+                        "turnover_quote": 1_000.0,
+                        "source": "ws",
+                    }
+                )
+        return pl.DataFrame(rows).sort(["symbol", "ts_ms"])
+
+
+class _FakeTickerCache:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def is_seeded(self) -> bool:
+        return True
+
+    def is_stale(self, *, stale_seconds: float) -> bool:
+        return False
+
+    def snapshot_list(self, max_age_seconds: float | None = None) -> list[dict[str, Any]]:
+        return list(self.rows)
+
+
+def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from liquidity_migration.strategy.carry_demo import (
+        CarryCycleState,
+        _build_carry_demo_market_data,
+    )
+    import liquidity_migration.strategy.carry_demo as carry_module
+
+    monkeypatch.setattr(carry_module, "_demo_instruments", lambda *args, **kwargs: pl.DataFrame())
+    # tickers_fail=True: a REST ticker call would raise, proving the cache served.
+    market = _FakeCarryMarket(tickers_fail=True)
+    cache_rows = [
+        {"symbol": symbol, "turnover24h": str(1_000_000.0 * (len(ALL_SYMBOLS) - index) * 24)}
+        for index, symbol in enumerate(ALL_SYMBOLS)
+    ]
+    store = _FakeKlineStore(ALL_SYMBOLS)
+    now_ms = 1_760_000_000_000 - (1_760_000_000_000 % MS_PER_HOUR) + 25 * 60 * 1000
+    config = ResearchConfig()
+    demo = _routed_config(tmp_path, replay_days=45, workers=2)
+
+    klines, funding, stats = _build_carry_demo_market_data(
+        root=tmp_path / "carry-root",
+        config=config,
+        demo=demo,
+        market=market,
+        now_ms=now_ms,
+        standing_symbols=set(),
+        state=CarryCycleState(),
+        kline_store=store,
+        ticker_cache=_FakeTickerCache(cache_rows),
+        state_cache_stale_seconds=120.0,
+    )
+
+    assert stats["ticker_source"] == "ws_cache"
+    assert stats["data_source"] == "ws_store"
+    assert store.get_klines_calls == 1
+    assert int(stats["kline_fetched_rows"]) == 0
+    assert not klines.is_empty()
+    assert set(klines["symbol"].unique().to_list()) == set(ALL_SYMBOLS)
+    # Funding has no stream on the venue: the REST sweep still ran, once per symbol.
+    assert sorted({symbol for symbol, _s, _e in market.funding_calls}) == sorted(ALL_SYMBOLS)
+    assert not funding.is_empty()

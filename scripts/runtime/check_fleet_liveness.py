@@ -43,7 +43,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.core._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.account.account_kernel import AccountEventType, read_account_journal  # noqa: E402
+from liquidity_migration.account.account_kernel import AccountEventType, read_recent_account_events  # noqa: E402
 from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
     load_demo_rules,
@@ -59,7 +59,7 @@ from liquidity_migration.strategy.continuous_hedge_manager import (  # noqa: E40
     load_hedge_model_prior,
     require_usable_hedge_model_prior,
 )
-from liquidity_migration.data.storage import read_dataset  # noqa: E402
+from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
     read_strategy_cycle_health,
@@ -860,6 +860,29 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
             pass
 
 
+# Columns each sleeve's checks actually inspect. Projected reads keep the
+# watchdog's cost independent of how wide or old the cycle datasets grow.
+CONTINUOUS_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "mode", "max_rmom_day_ts", "universe_symbols", "kline_store_rows"]
+LONG_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "kline_store_max_ts_ms"]
+CARRY_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "decision_stale", "decision_error"]
+
+
+def _read_cycles_columns(root: Path, cycles_dataset: str, columns: list[str]) -> pl.DataFrame:
+    """Projected, lock-free read of a producer's cycle dataset.
+
+    An observer must not take the producers' write locks (that stalls live
+    cycle writes) or create lock files under roots it only observes, so it
+    reads without the lock and retries once if it straddles a concurrent
+    part replace (a torn read raises).
+    """
+
+    try:
+        return read_dataset_columns(root, cycles_dataset, columns=columns, lock=False)
+    except Exception:  # noqa: BLE001 — one concurrent-writer retry, then report
+        time.sleep(0.1)
+        return read_dataset_columns(root, cycles_dataset, columns=columns, lock=False)
+
+
 def _observe_completed_cycle(
     *,
     root: Path,
@@ -867,6 +890,7 @@ def _observe_completed_cycle(
     runtime: UnitRuntime,
     sleeve: str,
     environment: str,
+    columns: list[str],
 ) -> tuple[CompletedCycleObservation | None, str]:
     """Read the receipt first, then bind it to its durable cycle row.
 
@@ -889,7 +913,7 @@ def _observe_completed_cycle(
             f"completion receipt scope mismatch: {health.sleeve}/{health.environment} != {sleeve}/{environment}"
         )
     try:
-        cycles = read_dataset(root, cycles_dataset)
+        cycles = _read_cycles_columns(root, cycles_dataset, columns)
     except Exception as exc:  # noqa: BLE001 — watchdog reports unreadable evidence
         return None, f"durable cycle output is unreadable: {type(exc).__name__}: {exc}"
     if cycles is None or cycles.is_empty() or "cycle_id" not in cycles.columns or "ts_ms" not in cycles.columns:
@@ -935,6 +959,7 @@ def gather_continuous_alerts(
                 runtime=unit_runtime,
                 sleeve="continuous",
                 environment=environment,
+                columns=CONTINUOUS_CYCLE_COLUMNS,
             )
             if observation is None:
                 if _within_startup_grace(
@@ -948,7 +973,7 @@ def gather_continuous_alerts(
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
         else:
             try:
-                cyc = read_dataset(continuous_root, cycles_dataset)
+                cyc = _read_cycles_columns(continuous_root, cycles_dataset, CONTINUOUS_CYCLE_COLUMNS)
             except Exception:  # noqa: BLE001 — watchdog never crashes
                 cyc = pl.DataFrame()
             if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
@@ -1046,6 +1071,7 @@ def gather_long_alerts(
                 runtime=unit_runtime,
                 sleeve="long",
                 environment=environment,
+                columns=LONG_CYCLE_COLUMNS,
             )
             if observation is None:
                 if _within_startup_grace(
@@ -1059,7 +1085,7 @@ def gather_long_alerts(
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
         else:
             try:
-                cyc = read_dataset(long_root, cycles_dataset)
+                cyc = _read_cycles_columns(long_root, cycles_dataset, LONG_CYCLE_COLUMNS)
             except Exception:  # noqa: BLE001 — watchdog never crashes
                 cyc = pl.DataFrame()
             latest_row = (
@@ -1105,9 +1131,10 @@ def gather_carry_alerts(
 ) -> list[Alert]:
     """Check the CARRY strategy scheduler's cycle heartbeat and decision health.
 
-    Carry has no WS kline plane — market inputs arrive by bounded public REST
-    inside the cycle — so freshness is the cycle heartbeat itself.
-    ``decision_stale`` means the daemon is holding previous targets and pages.
+    Carry streams its klines like LONG with REST as the gap fallback, and the
+    cycle never blocks on the stream — so freshness is the cycle heartbeat
+    itself. ``decision_stale`` means the daemon is holding previous targets
+    and pages.
     """
     if not carry_root.exists():
         return []
@@ -1125,6 +1152,7 @@ def gather_carry_alerts(
                 runtime=unit_runtime,
                 sleeve="carry",
                 environment=environment,
+                columns=CARRY_CYCLE_COLUMNS,
             )
             if observation is None:
                 if _within_startup_grace(
@@ -1138,7 +1166,7 @@ def gather_carry_alerts(
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
         else:
             try:
-                cyc = read_dataset(carry_root, cycles_dataset)
+                cyc = _read_cycles_columns(carry_root, cycles_dataset, CARRY_CYCLE_COLUMNS)
             except Exception:  # noqa: BLE001 — watchdog never crashes
                 cyc = pl.DataFrame()
             latest_row = (
@@ -1263,6 +1291,13 @@ def gather_account_capture_alerts(
 # owner still pages via gather_account_owner_health_alerts.
 VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 2.0
 
+# The freshness check needs the newest venue snapshot, not a genesis replay:
+# a full verified read cost ~20s CPU and ~250MB peak at 28.5k segments, every
+# 3 minutes, re-verifying a chain each owner generation already verified at
+# startup. Snapshots heartbeat every 30s, so a window this deep with no
+# snapshot at all means the reconciler is not journaling — which pages.
+ACCOUNT_HEALTH_TAIL_SEGMENTS = 512
+
 
 def gather_account_health_alerts(
     *,
@@ -1273,7 +1308,7 @@ def gather_account_health_alerts(
     """Require a fresh, healthy venue snapshot from the canonical account journal."""
 
     try:
-        events = read_account_journal(account_root, verify=True)
+        recent = read_recent_account_events(account_root, max_segments=ACCOUNT_HEALTH_TAIL_SEGMENTS)
     except Exception as exc:  # noqa: BLE001 - corrupt authority must page, not crash the watchdog
         return [
             Alert(
@@ -1283,17 +1318,23 @@ def gather_account_health_alerts(
                 headline="The account journal cannot be read.",
             )
         ]
+    events = () if recent is None else recent.events
     snapshots = [event for event in events if event.event_type == AccountEventType.VENUE_SNAPSHOT.value]
     if not snapshots:
+        window_note = (
+            ""
+            if recent is None or recent.total_segments <= recent.window_segments
+            else f" in the newest {recent.window_segments} of {recent.total_segments} transactions"
+        )
         return [
             Alert(
                 key="account_health_missing",
                 severity=CRITICAL,
                 message=(
-                    "canonical account journal has no venue reconciliation health snapshot; "
+                    f"canonical account journal has no venue reconciliation health snapshot{window_note}; "
                     "demo execution health is unproven."
                 ),
-                headline="The account journal has no health snapshot yet — health is unproven.",
+                headline="The account journal has no recent health snapshot — health is unproven.",
             )
         ]
     latest = max(

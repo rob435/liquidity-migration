@@ -1301,7 +1301,7 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
             ws_kline_store_rows=100,
         ),
     )
-    original_read_dataset = M.read_dataset
+    original_read_dataset = M.read_dataset_columns
 
     def read_while_next_cycle_completes(*args, **kwargs):
         captured = original_read_dataset(*args, **kwargs)
@@ -1325,7 +1325,7 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
         )
         return captured
 
-    monkeypatch.setattr(M, "read_dataset", read_while_next_cycle_completes)
+    monkeypatch.setattr(M, "read_dataset_columns", read_while_next_cycle_completes)
 
     assert (
         M.gather_continuous_alerts(
@@ -2295,3 +2295,42 @@ def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, mo
     monkeypatch.setattr("sys.argv", argv)
     assert M.main() == 0  # second consecutive run escalates to CRITICAL
     assert pings == []
+
+
+def test_account_health_reads_a_bounded_tail_window_not_the_whole_journal(tmp_path, monkeypatch) -> None:
+    import liquidity_migration.account.account_kernel as kernel_module
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
+
+    now_ms = 1_000 * HOUR
+    root = tmp_path / "bounded"
+    kernel = AccountExecutionKernel(root, account_id="demo")
+    for index in range(4):
+        kernel.record_venue_snapshot(
+            snapshot_key=f"window-{index}",
+            venue_positions={},
+            reconstructed_positions={},
+            mismatches=(),
+            exchange_ts_ns=0,
+            local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
+        )
+
+    parsed_segments: list[int] = []
+    original = kernel_module._read_transaction_event_bytes
+
+    def counting(files):  # type: ignore[no-untyped-def]
+        rows = tuple(files)
+        parsed_segments.append(len(rows))
+        return original(rows)
+
+    monkeypatch.setattr(kernel_module, "_read_transaction_event_bytes", counting)
+    monkeypatch.setattr(M, "ACCOUNT_HEALTH_TAIL_SEGMENTS", 2)
+
+    assert (
+        M.gather_account_health_alerts(
+            account_root=root,
+            now_ms=now_ms,
+            max_age_minutes=1,
+        )
+        == []
+    )
+    assert sum(parsed_segments) == 2

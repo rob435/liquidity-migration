@@ -446,12 +446,57 @@ def capture_event_from_cycle(
 
 
 class JsonlTargetSchedulingCaptureTape:
-    """Interprocess-safe append-only capture shared by LONG and CONT if configured."""
+    """Interprocess-safe append-only capture shared by LONG and CONT if configured.
+
+    Each writer keeps the verified tail hash, the source-event ids it has seen,
+    and the byte offset its verification reached. An append then validates only
+    the lines other writers added since the previous lock hold (the suffix path
+    :func:`load_target_scheduling_capture_bytes` was built for) instead of
+    re-verifying the whole file every cycle. A shrink means the capture was
+    reset and triggers a cold reload.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
         self.lock_path = self.path.parent / ".locks" / f"{self.path.name}.lock"
-        load_target_scheduling_capture(self.path)
+        self._seen_source_event_ids: set[str] = set()
+        self._tail_hash: str = _CAPTURE_GENESIS_HASH
+        self._validated_bytes: int = 0
+        self._reload_cold()
+
+    def _reload_cold(self) -> None:
+        events, tape_hash = load_target_scheduling_capture(self.path)
+        self._seen_source_event_ids = {row.source_event.event_id for row in events}
+        self._tail_hash = tape_hash
+        try:
+            self._validated_bytes = self.path.stat().st_size
+        except FileNotFoundError:
+            self._validated_bytes = 0
+
+    def _refresh_locked(self) -> None:
+        """Bring memory up to date, verifying only newly appended bytes."""
+
+        try:
+            size = self.path.stat().st_size
+        except FileNotFoundError:
+            self._seen_source_event_ids = set()
+            self._tail_hash = _CAPTURE_GENESIS_HASH
+            self._validated_bytes = 0
+            return
+        if size == self._validated_bytes:
+            return
+        if size < self._validated_bytes:
+            self._reload_cold()
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(self._validated_bytes)
+            appended = handle.read()
+        events, tape_hash = load_target_scheduling_capture_bytes(
+            appended, prior_capture_hash=self._tail_hash
+        )
+        self._seen_source_event_ids.update(row.source_event.event_id for row in events)
+        self._tail_hash = tape_hash
+        self._validated_bytes = size
 
     def append_from_cycle(
         self,
@@ -463,16 +508,19 @@ class JsonlTargetSchedulingCaptureTape:
         capture_event = capture_event_from_cycle(event, payload, sleeve=sleeve)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with exclusive_file_lock(self.lock_path, stale_seconds=600, poll_seconds=0.01):
-            prior_events, prior_hash = load_target_scheduling_capture(self.path)
-            if any(row.source_event.event_id == event.event_id for row in prior_events):
+            self._refresh_locked()
+            if event.event_id in self._seen_source_event_ids:
                 raise ValueError(f"duplicate target scheduling capture event: {event.event_id}")
-            next_hash = _capture_hash(prior_hash, capture_event)
+            next_hash = _capture_hash(self._tail_hash, capture_event)
             record = {
                 "schema_version": CAPTURE_SCHEMA_VERSION,
                 "kind": CAPTURE_KIND,
-                "prior_capture_hash": prior_hash,
+                "prior_capture_hash": self._tail_hash,
                 "capture_hash": next_hash,
                 "capture_event": capture_event.to_dict(),
             }
             _append_private_line(self.path, canonical_json(record) + b"\n")
+            self._seen_source_event_ids.add(event.event_id)
+            self._tail_hash = next_hash
+            self._validated_bytes = self.path.stat().st_size
         return capture_event

@@ -11,11 +11,12 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, Sequence
 
 import polars as pl
 
@@ -90,6 +91,25 @@ def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     return end_ms - exact_duration_ms(days=lookback_days), end_ms
 
 
+def rank_top_turnover_symbols(tickers: Sequence[Mapping[str, Any]], *, top_n: int) -> list[str]:
+    """Top-N active linear USDT-perps by 24h turnover from ticker rows."""
+
+    candidates: list[tuple[float, str]] = []
+    for row in tickers:
+        symbol = str(row.get("symbol") or "")
+        if not symbol or not symbol.endswith("USDT"):
+            continue
+        try:
+            turnover = float(row.get("turnover24h") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if turnover <= 0.0:
+            continue
+        candidates.append((turnover, symbol))
+    candidates.sort(reverse=True)
+    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+
+
 def top_turnover_kline_universe(
     market: BybitMarketData,
     *,
@@ -109,20 +129,7 @@ def top_turnover_kline_universe(
     except Exception as exc:  # noqa: BLE001
         _logger.warning("%s kline universe fetch failed (tickers): %s", label, exc)
         return []
-    candidates: list[tuple[float, str]] = []
-    for row in tickers:
-        symbol = str(row.get("symbol") or "")
-        if not symbol or not symbol.endswith("USDT"):
-            continue
-        try:
-            turnover = float(row.get("turnover24h") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if turnover <= 0.0:
-            continue
-        candidates.append((turnover, symbol))
-    candidates.sort(reverse=True)
-    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+    return rank_top_turnover_symbols(tickers, top_n=top_n)
 
 
 def _utc_now_ms() -> int:
@@ -941,20 +948,26 @@ def _fetch_recent_1h_klines(
             rows.extend(fetch_with_client(client, symbol, window))
         return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
 
-    # One rate limiter shared across worker threads: each builds its own
-    # BybitMarketData but routes _get() through this, keeping the process under
-    # Bybit's public REST budget (~120 req/5s per IP per category).
+    # One rate limiter shared across worker threads: each worker reuses ONE
+    # BybitMarketData (one TLS session) for its whole lifetime — a client per
+    # symbol was a TLS handshake per symbol per burst — and routes _get()
+    # through this, keeping the process under Bybit's public REST budget
+    # (~120 req/5s per IP per category).
     shared_limiter = BybitRestRateLimiter(
         max_requests=_demo_rest_rate_limit_per_second(),
         per_seconds=1.0,
     )
+    worker_state = threading.local()
 
     def fetch_symbol(symbol: str) -> list[dict[str, Any]]:
-        local_client = BybitMarketData(
-            category=config.exchange.category,
-            testnet=config.exchange.testnet,
-            rate_limiter=shared_limiter,
-        )
+        local_client = getattr(worker_state, "client", None)
+        if local_client is None:
+            local_client = BybitMarketData(
+                category=config.exchange.category,
+                testnet=config.exchange.testnet,
+                rate_limiter=shared_limiter,
+            )
+            worker_state.client = local_client
         return fetch_with_client(local_client, symbol, fetch_ranges[symbol])
 
     max_workers = max(1, min(workers, len(fetch_ranges)))

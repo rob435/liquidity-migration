@@ -118,7 +118,7 @@ def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
     """
     expected = {
         "liquidity-migration-bybit-long-demo.service": ("1024M", "384M"),
-        "liquidity-migration-bybit-carry-demo.service": ("1152M", "384M"),
+        "liquidity-migration-bybit-carry-demo.service": ("1408M", "384M"),
     }
     for unit, (maximum, swap) in expected.items():
         fragment = _unit(unit)
@@ -451,8 +451,9 @@ def test_demo_strategy_units_use_one_validated_operational_profile() -> None:
     carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
     for environment in (long_demo, continuous_demo, carry_demo):
         assert set(environment).isdisjoint(sizing_keys)
-    # Carry has no WS kline plane.
-    assert carry_demo["WS_KLINES_ENABLED"] == "0"
+    # Carry streams its klines like LONG; REST is the gap/funding fallback.
+    assert carry_demo["WS_KLINES_ENABLED"] == "1"
+    assert carry_demo["WS_KLINES_BOOTSTRAP_WORKERS"] == "2"
     long_runner = _read("scripts/runtime/run_bybit_long_demo_event_engine.sh")
     continuous_runner = _read("scripts/runtime/run_bybit_continuous_demo_event_engine.sh")
     hedge_runner = _read("scripts/runtime/run_continuous_hedge.sh")

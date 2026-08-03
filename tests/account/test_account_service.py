@@ -22,7 +22,9 @@ from liquidity_migration.account.account_route import AccountRoute, ensure_accou
 from liquidity_migration.account.account_service import (
     AccountExecutionService,
     AccountIntentInbox,
+    AccountServiceReceipt,
     AccountTargetRequest,
+    CompletedRequestCursor,
     RequestedIntent,
     SleeveAdapterKind,
     StaleEntryRequestExpired,
@@ -2921,3 +2923,75 @@ def test_exit_request_failure_never_retires_terminally(
 
     assert len(list((inbox.root / "pending").glob("*.json"))) == 1
     assert list((inbox.root / "failed").glob("*.json")) == []
+
+
+def _submit_and_complete(inbox: AccountIntentInbox, route: AccountRoute, *, request_id: str) -> AccountTargetRequest:
+    request = _request(
+        route,
+        request_id=request_id,
+        batch_id=request_id,
+        kind=SleeveAdapterKind.CONTINUOUS,
+        notional=-20.0,
+    )
+    inbox.submit(request)
+    claimed = inbox.claim_next()
+    assert claimed is not None
+    path, _claimed_request = claimed
+    inbox.complete(
+        path,
+        AccountServiceReceipt(
+            request_id=request.request_id,
+            request_hash=request.content_hash(),
+            batch_id=request.batch_id,
+            accepted=True,
+            rejection_keys=(),
+            command_ids=(),
+            execution_event_ids=(),
+            final_state_hash="",
+        ),
+    )
+    return request
+
+
+def test_new_completed_requests_parses_each_completed_file_once(tmp_path: Path, monkeypatch) -> None:
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    cursor = CompletedRequestCursor()
+    _submit_and_complete(inbox, route, request_id="inc-1")
+
+    parses: list[str] = []
+    original = AccountIntentInbox._parse_completed_request_locked
+
+    def counting(self, path):  # type: ignore[no-untyped-def]
+        parses.append(path.name)
+        return original(self, path)
+
+    monkeypatch.setattr(AccountIntentInbox, "_parse_completed_request_locked", counting)
+
+    first = inbox.new_completed_requests(cursor)
+    assert [request.request_id for request, _receipt in first] == ["inc-1"]
+    assert inbox.new_completed_requests(cursor) == ()
+    assert parses == [inbox._filename("inc-1")]
+
+    _submit_and_complete(inbox, route, request_id="inc-2")
+    second = inbox.new_completed_requests(cursor)
+    assert [request.request_id for request, _receipt in second] == ["inc-2"]
+    assert parses == [inbox._filename("inc-1"), inbox._filename("inc-2")]
+    assert cursor.generation == 0
+
+
+def test_new_completed_requests_restarts_after_an_epoch_reset(tmp_path: Path) -> None:
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    cursor = CompletedRequestCursor()
+    _submit_and_complete(inbox, route, request_id="reset-1")
+    assert len(inbox.new_completed_requests(cursor)) == 1
+
+    for path in (inbox.root / "completed").glob("*.json"):
+        path.unlink()
+    assert inbox.new_completed_requests(cursor) == ()
+    assert cursor.generation == 1
+
+    _submit_and_complete(inbox, route, request_id="reset-2")
+    rows = inbox.new_completed_requests(cursor)
+    assert [request.request_id for request, _receipt in rows] == ["reset-2"]

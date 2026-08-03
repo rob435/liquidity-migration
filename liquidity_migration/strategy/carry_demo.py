@@ -28,6 +28,7 @@ import dataclasses
 import json
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,8 +52,9 @@ from liquidity_migration.strategy.event_demo_data import (
     _download_recent_1h_klines,
     _kline_window,
     _launch_time_ms_by_symbol,
+    _resolve_ticker_snapshot,
     _utc_now_ms,
-    top_turnover_kline_universe,
+    rank_top_turnover_symbols,
 )
 from liquidity_migration.account.execution_environment import (
     ExecutionEnvironment,
@@ -393,10 +395,13 @@ class CarryDemoCycleConfig:
     # --- data build ---
     replay_days: int = REPLAY_DAYS
     workers: int = 4
-    # --- base-daemon field surface (inert here: carry runs pure REST) ---
-    ws_klines_enabled: bool = False
+    # --- WS kline plane (streams primary, REST as tail fallback) ---
+    # The store must span the cycle's whole kline window (``replay_days`` plus
+    # the download margin) or the shared reader never takes its fast path and
+    # every cycle falls back to the on-disk cache scan.
+    ws_klines_enabled: bool = True
     ws_klines_bootstrap_workers: int = 16
-    ws_klines_lookback_days: int = 45
+    ws_klines_lookback_days: int = REPLAY_DAYS + 2
     ws_klines_universe_refresh_seconds: float = 3600.0
     ws_klines_topics_per_connection: int = 180
     ws_klines_stale_warning_seconds: float = 60.0
@@ -438,11 +443,12 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
         raise ValueError(f"replay_days must be >= {MIN_REPLAY_DAYS} (engine floor)")
     if config.workers < 1:
         raise ValueError("workers must be >= 1")
-    if config.ws_klines_enabled:
-        # The cycle deliberately ignores any WS kline store (its decision bars
-        # are close-keyed against the REST/window contract below); an enabled
-        # pool would burn memory and sockets feeding data nobody reads.
-        raise ValueError("carry runs pure REST; ws_klines_enabled must remain False")
+    if config.ws_klines_enabled and config.ws_klines_lookback_days < config.replay_days + 1:
+        # A store narrower than the cycle window means the reader's fast path
+        # can never engage and every cycle silently pays the slow disk scan.
+        raise ValueError(
+            "ws_klines_lookback_days must cover replay_days + 1 when the WS kline plane is on"
+        )
 
 
 def carry_cycles_dataset(config: CarryDemoCycleConfig) -> str:
@@ -974,6 +980,7 @@ def _refresh_carry_funding_cache(
     now_ms: int,
     replay_days: int,
     state: CarryCycleState,
+    workers: int = 1,
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Maintain the on-disk settled-print cache and return the full frame.
 
@@ -1007,16 +1014,13 @@ def _refresh_carry_funding_cache(
             .iter_rows(named=True)
         }
     cold_start_ms = int(now_ms) - (int(replay_days) + FUNDING_LOOKBACK_DAYS) * DAY_MS
-    fresh_rows: list[dict[str, Any]] = []
-    failed_symbols: list[str] = []
-    for symbol in symbols:
+
+    def _fetch_symbol(symbol: str) -> list[dict[str, Any]] | None:
         last_ts = last_by_symbol.get(symbol)
         fetch_start = (last_ts - HOUR_MS) if last_ts is not None else cold_start_ms
-        rows: list[dict[str, Any]] | None = None
         for attempt in range(2):
             try:
-                rows = market.get_funding_history(symbol, fetch_start, int(now_ms))
-                break
+                return market.get_funding_history(symbol, fetch_start, int(now_ms))
             except Exception as exc:  # noqa: BLE001 - loud, retried once, never cycle-fatal
                 if attempt == 0:
                     _logger.warning(
@@ -1029,9 +1033,30 @@ def _refresh_carry_funding_cache(
                         symbol,
                         exc,
                     )
+        return None
+
+    # The venue publishes settled funding only over REST, so the hourly sweep
+    # is a bounded REST burst; a small worker pool shortens it. One shared
+    # client is safe (the WS bootstrap pool shares one the same way) and the
+    # results fold in `symbols` order so the output is order-deterministic.
+    rows_by_symbol: dict[str, list[dict[str, Any]] | None] = {}
+    pool_workers = max(1, min(int(workers), 8, len(symbols) or 1))
+    if pool_workers > 1:
+        with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+            for symbol, rows in zip(symbols, pool.map(_fetch_symbol, symbols)):
+                rows_by_symbol[symbol] = rows
+    else:
+        for symbol in symbols:
+            rows_by_symbol[symbol] = _fetch_symbol(symbol)
+
+    fresh_rows: list[dict[str, Any]] = []
+    failed_symbols: list[str] = []
+    for symbol in symbols:
+        rows = rows_by_symbol[symbol]
         if rows is None:
             failed_symbols.append(symbol)
             continue
+        last_ts = last_by_symbol.get(symbol)
         floor_ts = last_ts if last_ts is not None else cold_start_ms - 1
         for row in rows:
             try:
@@ -1105,12 +1130,26 @@ def _build_carry_demo_market_data(
     now_ms: int,
     standing_symbols: set[str],
     state: CarryCycleState,
+    kline_store: Any | None = None,
+    ticker_cache: Any | None = None,
+    state_cache_stale_seconds: float = 120.0,
 ) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
-    """Demo (leader) data path: REST klines + the incremental funding cache."""
+    """Carry data path: WS kline store and ticker cache first, REST fallback.
 
-    top_symbols = top_turnover_kline_universe(
-        market, top_n=CARRY_FETCH_UNIVERSE_TOP_N, label="carry"
-    )
+    Settled funding history has no stream on the venue, so the hourly funding
+    sweep stays REST by necessity.
+    """
+
+    try:
+        ticker_rows, ticker_source = _resolve_ticker_snapshot(
+            market,
+            ticker_cache=ticker_cache,
+            state_cache_stale_seconds=state_cache_stale_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade to standing symbols, as the REST-only path did
+        _logger.warning("carry ticker snapshot failed; universe degrades to standing symbols: %s", exc)
+        ticker_rows, ticker_source = [], "unavailable"
+    top_symbols = rank_top_turnover_symbols(ticker_rows, top_n=CARRY_FETCH_UNIVERSE_TOP_N)
     fetch_symbols, candidate_skipped = _candidate_filtered_universe(
         top_symbols,
         candidate_universe_file=demo.candidate_universe_file,
@@ -1144,7 +1183,7 @@ def _build_carry_demo_market_data(
         workers=demo.workers,
         market_client=market,
         cache_root=root,
-        kline_store=None,
+        kline_store=kline_store,
     )
     funding, funding_stats = _refresh_carry_funding_cache(
         root,
@@ -1153,9 +1192,16 @@ def _build_carry_demo_market_data(
         now_ms=now_ms,
         replay_days=demo.replay_days,
         state=state,
+        workers=demo.workers,
+    )
+    kline_source = (
+        "ws_store"
+        if int(kline_stats.get("store_rows", 0)) > 0 and int(kline_stats.get("fetched_rows", 0)) == 0
+        else "rest"
     )
     stats: dict[str, Any] = {
-        "data_source": "rest",
+        "data_source": kline_source,
+        "ticker_source": ticker_source,
         "universe_fetched": len(fetch_symbols),
         "candidate_skipped_symbols": candidate_skipped,
         "kline_cache_rows": int(kline_stats.get("cache_rows", 0)),
@@ -1220,13 +1266,14 @@ def run_carry_demo_cycle(
     or decision failure publishes nothing and never flattens, while
     ``decision_error``/``decision_stale`` make the outage loud.
 
-    ``kline_store`` and ``ticker_cache`` are accepted because the shared base
-    daemon passes them to every cycle runner; carry ignores both -- its decision
-    bars are close-keyed against the REST window contract and its intents carry
-    notionals, not prices.
+    ``kline_store`` serves the cycle's close-keyed 1h bars from the daemon's
+    WS plane (identical bar content to the REST window contract, pushed
+    instead of pulled); ``ticker_cache`` serves the turnover-ranked fetch
+    universe. REST remains the fallback for either when the stream is cold or
+    stale, and the sole source for settled funding history, which no stream
+    carries.
     """
 
-    del kline_store, ticker_cache, state_cache_stale_seconds  # base-daemon surface; unused by design
     demo = demo_config or CarryDemoCycleConfig()
     _validate_carry_demo_config(demo)
     environment = execution_environment(demo.execution_environment).value
@@ -1285,6 +1332,9 @@ def run_carry_demo_cycle(
                 now_ms=cycle_now_ms,
                 standing_symbols=standing_symbols,
                 state=state,
+                kline_store=kline_store,
+                ticker_cache=ticker_cache,
+                state_cache_stale_seconds=state_cache_stale_seconds,
             )
             window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
             view = _carry_venue_view(

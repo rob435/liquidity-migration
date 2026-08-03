@@ -20,7 +20,10 @@ from liquidity_migration.account.account_kernel import (
     read_account_journal,
     reduce_account_events,
 )
-from liquidity_migration.account.account_intent_client import completed_expired_entry_attempt_keys
+from liquidity_migration.account.account_intent_client import (
+    CompletedEntryAttemptCursor,
+    completed_expired_entry_attempt_keys,
+)
 from liquidity_migration.account.account_service import AccountIntentInbox
 from liquidity_migration.research.backtest.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
 from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
@@ -157,6 +160,7 @@ def terminal_entry_attempt_keys(
     strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
     inbox: AccountIntentInbox | None = None,
     account_events: Sequence[AccountEvent] | None = None,
+    completed_cursor: CompletedEntryAttemptCursor | None = None,
 ) -> frozenset[str]:
     """Return exact attempts terminal by account risk or service expiry."""
 
@@ -176,6 +180,7 @@ def terminal_entry_attempt_keys(
         inbox,
         sleeve=sleeve,
         strategy_ids=tuple(strategy_ids),
+        cursor=completed_cursor,
     )
 
 @dataclass(frozen=True, slots=True)

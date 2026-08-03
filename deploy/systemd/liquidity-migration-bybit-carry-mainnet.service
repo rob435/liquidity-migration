@@ -21,8 +21,10 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2
-# Carry has no WS kline plane; market data arrives via bounded public REST.
-Environment=WS_KLINES_ENABLED=0
+# WS klines are the primary bar source; REST covers gaps and the hourly
+# funding sweep.
+Environment=WS_KLINES_ENABLED=1
+Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
@@ -40,8 +42,8 @@ ProtectSystem=full
 ProtectHome=false
 UMask=0027
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=768M
-MemoryMax=896M
+MemoryHigh=1152M
+MemoryMax=1408M
 MemorySwapMax=384M
 
 [Install]

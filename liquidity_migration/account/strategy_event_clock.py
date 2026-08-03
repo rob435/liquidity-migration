@@ -172,7 +172,10 @@ class JsonlStrategyEventTape:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._events, self._tape_hash = load_strategy_event_tape(self.path)
+        loaded, self._tape_hash = load_strategy_event_tape(self.path)
+        # A list appends in O(1); the tuple rebuild made every append O(tape
+        # age), quadratic over a long-lived daemon.
+        self._events: list[StrategyEvent] = list(loaded)
 
     @property
     def tape_hash(self) -> str:
@@ -180,7 +183,7 @@ class JsonlStrategyEventTape:
 
     @property
     def prior_events(self) -> tuple[StrategyEvent, ...]:
-        return self._events
+        return tuple(self._events)
 
     def append(self, event: StrategyEvent) -> str:
         prior_hash = self._tape_hash
@@ -192,7 +195,7 @@ class JsonlStrategyEventTape:
             "event": event.to_dict(),
         }
         _append_private_line(self.path, canonical_json(record) + b"\n")
-        self._events = (*self._events, event)
+        self._events.append(event)
         self._tape_hash = tape_hash
         return tape_hash
 

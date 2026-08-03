@@ -1222,12 +1222,22 @@ def require_scheduled_retirements_flat(
     route: object,
     context: str,
     tolerance: float = 1e-12,
+    journal_cursor: object | None = None,
 ) -> None:
-    """Fail closed if a retired entry symbol has any account or queue exposure."""
+    """Fail closed if a retired entry symbol has any account or queue exposure.
+
+    A per-cycle caller passes its resumable ``journal_cursor`` so the account
+    state comes from an incremental verified read; without one the check pays
+    a full cold journal read, which is fine for CLI and offline callers.
+    """
 
     if not reconciliation.scheduled_retirements:
         return
-    from liquidity_migration.account.account_kernel import read_account_journal, reduce_account_events  # noqa: PLC0415
+    from liquidity_migration.account.account_kernel import (  # noqa: PLC0415
+        AccountJournalCursor,
+        read_account_journal,
+        reduce_account_events,
+    )
     from liquidity_migration.account.account_service import AccountIntentInbox  # noqa: PLC0415
 
     account_path = getattr(route, "account_path", None)
@@ -1245,7 +1255,10 @@ def require_scheduled_retirements_flat(
             and abs(float(item.intent.signed_notional_usdt)) > tolerance
         }
     )
-    state = reduce_account_events(read_account_journal(account_path, verify=True))
+    if isinstance(journal_cursor, AccountJournalCursor):
+        state = journal_cursor.read(account_path).state
+    else:
+        state = reduce_account_events(read_account_journal(account_path, verify=True))
     problems: dict[str, list[str]] = {symbol: [] for symbol in retired}
     for symbol in sorted(retired):
         position = state.positions.get(symbol)

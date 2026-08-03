@@ -475,3 +475,65 @@ def test_completion_health_never_precedes_evidence_and_cannot_invalidate_it(
         len(load_strategy_event_decision_tape(projection_failure_root / "strategy_event_decision_tape.jsonl")[0]) == 1
     )
     assert not strategy_cycle_health_path(projection_failure_root).exists()
+
+
+def test_capture_append_validates_only_appended_bytes(tmp_path: Path, monkeypatch) -> None:
+    import liquidity_migration.strategy.strategy_target_replay as replay_module
+
+    route = _route(tmp_path)
+    capture_path = tmp_path / "incremental-capture.jsonl"
+    tape = JsonlTargetSchedulingCaptureTape(capture_path)
+
+    cold_loads: list[str] = []
+    suffix_loads: list[int] = []
+    original_cold = replay_module.load_target_scheduling_capture
+    original_bytes = replay_module.load_target_scheduling_capture_bytes
+
+    def counting_cold(path):  # type: ignore[no-untyped-def]
+        cold_loads.append(str(path))
+        return original_cold(path)
+
+    def counting_bytes(data, **kwargs):  # type: ignore[no-untyped-def]
+        suffix_loads.append(len(data))
+        return original_bytes(data, **kwargs)
+
+    monkeypatch.setattr(replay_module, "load_target_scheduling_capture", counting_cold)
+    monkeypatch.setattr(replay_module, "load_target_scheduling_capture_bytes", counting_bytes)
+
+    for sequence in range(1, 4):
+        tape.append_from_cycle(_event(sequence), _published_cycle(route, with_entry=False), sleeve="long")
+
+    # A lone writer never re-reads its own appends: no cold reload, no suffix read.
+    assert cold_loads == []
+    assert suffix_loads == []
+
+
+def test_capture_second_writer_verifies_only_the_foreign_suffix(tmp_path: Path) -> None:
+    route = _route(tmp_path)
+    capture_path = tmp_path / "two-writer-capture.jsonl"
+    writer_a = JsonlTargetSchedulingCaptureTape(capture_path)
+    writer_a.append_from_cycle(_event(1), _published_cycle(route, with_entry=False), sleeve="long")
+
+    writer_b = JsonlTargetSchedulingCaptureTape(capture_path)
+    writer_b.append_from_cycle(_event(2), _published_cycle(route, with_entry=False), sleeve="long")
+
+    # A refreshes across B's append and chains correctly.
+    writer_a.append_from_cycle(_event(3), _published_cycle(route, with_entry=False), sleeve="long")
+    with pytest.raises(ValueError, match="duplicate"):
+        writer_b.append_from_cycle(_event(1), _published_cycle(route, with_entry=False), sleeve="long")
+
+    loaded, _chain_hash = load_target_scheduling_capture(capture_path)
+    assert [row.source_event.source_sequence for row in loaded] == [1, 2, 3]
+
+
+def test_capture_reset_triggers_a_cold_reload(tmp_path: Path) -> None:
+    route = _route(tmp_path)
+    capture_path = tmp_path / "reset-capture.jsonl"
+    tape = JsonlTargetSchedulingCaptureTape(capture_path)
+    tape.append_from_cycle(_event(1), _published_cycle(route, with_entry=False), sleeve="long")
+
+    capture_path.write_bytes(b"")
+    tape.append_from_cycle(_event(2), _published_cycle(route, with_entry=False), sleeve="long")
+
+    loaded, _chain_hash = load_target_scheduling_capture(capture_path)
+    assert [row.source_event.source_sequence for row in loaded] == [2]

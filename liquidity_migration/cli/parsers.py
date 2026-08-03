@@ -409,8 +409,22 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         "--workers",
         type=int,
         default=d.workers,
-        help="Kline REST workers (used only when no shared market client is injected).",
+        help="Worker pool for the hourly funding sweep and kline REST fallback.",
     )
+    carry_ws = p.add_mutually_exclusive_group()
+    carry_ws.add_argument(
+        "--ws-klines-enabled",
+        dest="ws_klines_enabled",
+        action="store_true",
+        help="Stream 1h klines over WebSocket (default); REST covers only gaps.",
+    )
+    carry_ws.add_argument(
+        "--no-ws-klines",
+        dest="ws_klines_enabled",
+        action="store_false",
+        help="Disable the WS kline plane and fetch klines by REST each cycle.",
+    )
+    p.set_defaults(ws_klines_enabled=d.ws_klines_enabled)
     p.add_argument(
         "--risk-policy-file",
         required=True,

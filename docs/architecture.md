@@ -133,9 +133,10 @@ Three read paths, and they are not interchangeable.
 
 1. **Full verified read** — `read_account_journal(..., verify=True)` or
    `verify_account_journal(...)`. Sanctioned callers: `account_strategy_state.py`,
-   `account_candidate_universe.py`, owner startup
-   (`AccountJournal._events_ref`, which is what makes the head read valid below), and the
-   audit/report tools `scripts/runtime/check_fleet_liveness.py`,
+   `account_candidate_universe.py` (offline callers only; per-cycle callers pass their
+   cursor), owner startup
+   (`AccountJournal._events_ref`, which is what makes the head and tail reads valid below),
+   and the audit/report tools
    `scripts/vps/check_deploy_rollout_readiness.py`, `scripts/research/build_trade_diagnostics.py`,
    `scripts/research/build_execution_cost_report.py`. `account_venue_accounting.py` verifies the
    same way over a captured byte snapshot via `read_account_journal_bytes`.
@@ -143,14 +144,16 @@ Three read paths, and they are not interchangeable.
    segments added since the last call, cold-reads on any prefix mismatch. Never put a bare
    `read_account_journal` in a per-cycle path: at 28.5k segments a full read cost ~20 s CPU
    and ~250 MB peak, per call.
-3. **Head read** — `read_account_journal_head` (`account_kernel.py:843`), on the
-   owner-health hot path. It scans the transaction filename sequence for continuity, then
-   authenticates only the latest segment (filename-embedded transaction hash, first/last
-   sequence agreement, and every event's shape, sequence, account id, local chain link and
-   `event_hash` inside that one segment). Earlier payloads are unchecked, so it is **not**
-   full integrity verification; it is valid only because every serving owner generation
-   reconstructed the whole journal at startup, and it does not replace the independent
-   liveness audit (`check_fleet_liveness.py` does both).
+3. **Head and tail reads** — `read_account_journal_head` (owner-health hot path) and
+   `read_recent_account_events` (the liveness watchdog's venue-snapshot check). Both scan
+   the transaction filename sequence for continuity (prefix-cached per root), then
+   authenticate only the newest segment(s): filename-embedded transaction hash, first/last
+   sequence agreement, and every event's shape, sequence, account id, chain link and
+   `event_hash` inside the window. Earlier payloads are unchecked, so neither is full
+   integrity verification; they are valid only because every serving owner generation
+   reconstructed the whole journal at startup. The watchdog used to full-verify every 3
+   minutes instead — 22–28 s CPU and a ~250 MB+ peak per run at 28.5k segments,
+   re-verifying a chain the owner had already verified, and the cost grew with epoch age.
 
 `require_recent_account_owner_health` matches the head's sequence, account id and state
 hash against a fresh health artifact, retrying a health/head/health triplet.
@@ -483,9 +486,10 @@ Filesystem modes: demo and credential env files and `sleeves.resolved.env` root-
 `0600`. Deploy fails on any mode mismatch. Env parsing refuses duplicate keys, shell
 syntax, aliases, nested roots, and unknown real-money spellings.
 
-Each demo target producer owns one bounded public kline store; carry has no WS kline plane
-and fetches by bounded public REST inside the cycle. Missing bars retain the public REST
-fallback with no second bulk collector or WS bootstrap. The demo credential file is read by
+Each demo target producer owns one bounded public kline store fed by its own WS stream
+(LONG top-120 by turnover, carry top-150 spanning its replay window). Missing or lagging
+bars retain the public REST fallback; settled funding history has no stream on the venue,
+so carry's hourly funding sweep stays REST by necessity. The demo credential file is read by
 `check_demo_order_permissions`, which loads it into the process environment, runs
 `scripts/maintain/check_bybit_order_permissions.py` and unsets the keys again; `activate` runs it in
 `deploy` context and `verify` re-runs it in `verify` context, so order permission is

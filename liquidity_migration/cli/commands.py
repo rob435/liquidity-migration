@@ -466,6 +466,9 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         operational_profile_sha256=operational_profile.source_sha256,
         replay_days=args.replay_days,
         workers=args.workers,
+        ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
+        # The store must span the cycle window whatever --replay-days says.
+        ws_klines_lookback_days=int(args.replay_days) + 2,
     )
     if getattr(args, "daemon", False):
         from liquidity_migration.strategy.carry_demo_daemon import CarryDemoDaemon

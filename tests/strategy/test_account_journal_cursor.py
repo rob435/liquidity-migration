@@ -320,3 +320,76 @@ def test_subclass_cycle_kwargs_keep_the_base_cursor() -> None:
 
     assert merged["journal_cursor"] is sentinel
     assert merged["panel_cache"] is daemon._panel_cache  # type: ignore[attr-defined]
+
+
+def test_planning_cursor_memoizes_projection_and_trades_until_a_new_event(tmp_path: Path) -> None:
+    from liquidity_migration.account.account_service import SleeveAdapterKind
+    from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
+
+    kernel = _journal(tmp_path)
+    cursor = new_planning_journal_cursor()
+
+    digest = cursor.read(tmp_path)
+    projection_first = cursor.memoized_projection(digest)
+    trades_first = cursor.memoized_trades(
+        tmp_path,
+        digest=digest,
+        projection=projection_first,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+
+    digest_same = cursor.read(tmp_path)
+    assert cursor.memoized_projection(digest_same) is projection_first
+    assert (
+        cursor.memoized_trades(
+            tmp_path,
+            digest=digest_same,
+            projection=projection_first,
+            sleeve=SleeveAdapterKind.CARRY,
+            strategy_ids=("carry-v1",),
+        )
+        is trades_first
+    )
+
+    _submit(kernel, "batch-memo-invalidate", 9.0)
+    digest_new = cursor.read(tmp_path)
+    projection_new = cursor.memoized_projection(digest_new)
+    assert projection_new is not projection_first
+    # digest.state aliases the cursor's live fold (documented on
+    # AccountJournalDigest); the immutable events tuple is what distinguishes
+    # the two projections.
+    assert len(projection_new.events) > len(projection_first.events)
+    trades_new = cursor.memoized_trades(
+        tmp_path,
+        digest=digest_new,
+        projection=projection_new,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+    assert trades_new is not trades_first
+
+
+def test_planning_cursor_trades_memo_is_scope_keyed(tmp_path: Path) -> None:
+    from liquidity_migration.account.account_service import SleeveAdapterKind
+    from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
+
+    _journal(tmp_path)
+    cursor = new_planning_journal_cursor()
+    digest = cursor.read(tmp_path)
+    projection = cursor.memoized_projection(digest)
+    carry_trades = cursor.memoized_trades(
+        tmp_path,
+        digest=digest,
+        projection=projection,
+        sleeve=SleeveAdapterKind.CARRY,
+        strategy_ids=("carry-v1",),
+    )
+    long_trades = cursor.memoized_trades(
+        tmp_path,
+        digest=digest,
+        projection=projection,
+        sleeve=SleeveAdapterKind.LONG,
+        strategy_ids=("long-v1",),
+    )
+    assert long_trades is not carry_trades

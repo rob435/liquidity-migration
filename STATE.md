@@ -19,8 +19,42 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
-- **2026-08-03 — Telegram rework deployed and the demo book reset to a clean
-  slate (owner order), both in one window.** The main Telegram line now
+- **2026-08-03 — Latency/efficiency program (owner priority): WebSocket-first
+  market data, incremental hot-path state, watchdog slimmed.** Measured
+  before-numbers on the aged epoch, same day: the watchdog burned 22–28 s CPU
+  (peak 61 s, 430 MB) per 3-minute run re-verifying the whole journal chain;
+  carry burned ~24 CPU-seconds per 60 s cycle (~40% of a core, REST-only,
+  plus a full-universe ticker stream whose data the cycle discarded); the
+  fresh-epoch watchdog floor is ~1.0 s. Changes, all deployed together:
+  (1) **Carry now streams its 1h klines** like LONG — own `KlineStreamManager`
+  (top-150 by turnover, store spans the 90-day replay window + 2), REST only
+  for gaps; the ticker stream it already paid for now serves its universe
+  ranking through the shared cache; the hourly settled-funding sweep stays
+  REST (the venue has no stream for it) but runs on a worker pool with one
+  persistent session instead of a fresh TLS handshake per cycle. Same bars,
+  same close keys, same daily decision on the same 60 s grid — only the
+  transport and cost changed (change point for forward grading all the same).
+  (2) **Watchdog reads a bounded tail** (`read_recent_account_events`, newest
+  512 transactions) instead of a genesis replay, reads producer cycle datasets
+  column-projected and lock-free (it no longer takes the producers' write
+  locks or plants lock files in observed roots), and runs at `Nice=10` so the
+  observer stops preempting the sleeves. Target: ~1 s per run regardless of
+  epoch age.
+  (3) **Remaining O(journal-age) folds fixed**: per-cycle projection and trade
+  rows are memoized on the digest head (rebuilt only when a new journal event
+  arrives), the inbox's `completed/` directory is read through a resumable
+  cursor (was: re-parse every completed request ever, every cycle, under the
+  inbox lock), the retirement-flatness check reuses the cycle's cursor instead of a
+  cold full read, the shared target-capture tape verifies only appended bytes
+  (was: re-parse the whole file per cycle under the interprocess lock), the
+  notification poll takes a tail slice instead of scanning all events every
+  second, event tapes append O(1), and journal filename validation is
+  prefix-cached. Deliberately NOT changed: the owner reconcile's per-2 s
+  events copy (a view would race the funding index; the copy is milliseconds)
+  and carry's replay-from-scratch discipline (registered-rule semantics; its
+  ~40%-core panel rebuild is measured and reported, owner to decide).
+  Carry demo `MemoryMax` 1152M→1408M for the in-memory store (mainnet unit
+  mirrored). Full gate green (2763 tests). The main Telegram line now
   carries only the book's story in plain words (digest, fills, closes, stops,
   loss warnings, entry blocks); accounting boilerplate and component
   bookkeeping moved to the owner's service journal. Watchdog pages moved to a

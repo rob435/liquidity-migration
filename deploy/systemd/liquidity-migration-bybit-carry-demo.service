@@ -25,8 +25,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2
-# Carry has no WS kline plane; market data arrives via bounded public REST.
-Environment=WS_KLINES_ENABLED=0
+# WS klines are the primary bar source (store spans the replay window); REST
+# covers gaps and the hourly funding sweep. Bootstrap worker pin matches LONG:
+# the one-time ~92-day backfill must not saturate the box at boot.
+Environment=WS_KLINES_ENABLED=1
+Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
@@ -48,8 +51,9 @@ ReadWritePaths=/opt/liquidity-migration
 # throttling, swapped pages, slow cycles entering on stale prices). The
 # producer restarts clean off the journal cursor, so MemoryMax fails loud
 # instead of degrading silently. Sized after the paper retirement freed
-# ~740 MiB on the 3.7 GiB host; observed working set ~830M.
-MemoryMax=1152M
+# ~740 MiB on the 3.7 GiB host; observed working set ~830M, plus headroom
+# for the in-memory WS kline store (~92d x 150 symbols) added 2026-08-03.
+MemoryMax=1408M
 MemorySwapMax=384M
 
 [Install]

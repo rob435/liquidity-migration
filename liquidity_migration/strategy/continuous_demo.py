@@ -2354,6 +2354,7 @@ def run_continuous_demo_cycle(
                 candidate_reconciliation,
                 route=account_route,
                 context="CONT cycle",
+                journal_cursor=journal_cursor,
             )
 
         equity_usdt, account_owner_health_error = account_owner_equity_or_error(

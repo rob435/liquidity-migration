@@ -1,13 +1,14 @@
 """CARRY account-target producer daemon.
 
 Thin subclass of :class:`LongNativeDemoDaemon`: it reuses the public ticker
-cache, lifecycle, evidence-capture, and graceful-shutdown plumbing and swaps in
-the carry cycle runner. Two deliberate divergences from the other sleeves:
+cache, WS kline plane, lifecycle, evidence-capture, and graceful-shutdown
+plumbing and swaps in the carry cycle runner. Two deliberate divergences from
+the other sleeves:
 
 * PURE TIMER cadence (``event_driven_cycle=False``). The decision is daily and
   publication is a diff against the standing book, so a confirmed-bar wake has
-  nothing to accelerate; ``ws_klines_enabled`` is validated False, so the base
-  never starts a kline manager and the loop runs a fixed 60-second grid.
+  nothing to accelerate; the WS kline store still feeds each cycle's bars so
+  the fixed 60-second grid stops paying a REST burst.
 * A daemon-owned :class:`CarryCycleState` is threaded into every cycle as an
   operational hint (funding-sweep throttle, decision-staleness clock), never
   decision state: each cycle replays the registered rule from scratch.
@@ -21,7 +22,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
+from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.strategy.carry_demo import (
+    CARRY_FETCH_UNIVERSE_TOP_N,
     CARRY_PROFILE_NAME,
     CarryCycleState,
     CarryDemoCycleConfig,
@@ -30,6 +34,7 @@ from liquidity_migration.strategy.carry_demo import (
     run_carry_demo_cycle,
 )
 from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
 from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
@@ -46,6 +51,34 @@ def _validate_carry_daemon_startup(config: CarryDemoCycleConfig) -> None:
     """
 
     _validate_carry_demo_config(config)
+
+
+def _default_carry_kline_stream_manager_factory(
+    config: ResearchConfig,
+    demo_config: CarryDemoCycleConfig,
+    cache_root: Path,
+) -> KlineStreamManager:
+    """Carry's WS kline plane: same manager as LONG, carry's fetch universe."""
+
+    market = BybitMarketData(
+        category=config.exchange.category,
+        testnet=config.exchange.testnet,
+    )
+
+    def universe_fetcher(m: BybitMarketData = market) -> list[str]:
+        return top_turnover_kline_universe(m, top_n=CARRY_FETCH_UNIVERSE_TOP_N, label="carry")
+
+    return KlineStreamManager(
+        market_data=market,
+        cache_root=cache_root,
+        lookback_days=demo_config.ws_klines_lookback_days,
+        bootstrap_workers=demo_config.ws_klines_bootstrap_workers,
+        universe_refresh_interval_seconds=demo_config.ws_klines_universe_refresh_seconds,
+        topics_per_connection=demo_config.ws_klines_topics_per_connection,
+        stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
+        stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
+        universe_fetcher=universe_fetcher,
+    )
 
 
 class CarryDemoDaemon(LongNativeDemoDaemon):
@@ -70,8 +103,10 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
         resolved = demo_config or CarryDemoCycleConfig()
         # This must precede every cache, manager, or thread construction.
         _validate_carry_daemon_startup(resolved)
-        # The base touches only fields shared by the LONG and CARRY configs,
-        # and never builds a kline manager while ws_klines_enabled is False.
+        # The base touches only fields shared by the LONG and CARRY configs;
+        # with ws_klines_enabled it builds a kline manager from the factory
+        # below (carry's top-N universe, not LONG's).
+        kwargs.setdefault("kline_stream_manager_factory", _default_carry_kline_stream_manager_factory)
         super().__init__(
             data_root,
             config=config,
@@ -82,6 +117,12 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
             **kwargs,
         )
         self._carry_cycle_state = CarryCycleState()
+        # One REST session for the daemon's cycles instead of a fresh TLS
+        # handshake per cycle. Used only from the cycle loop thread.
+        self._cycle_market_client = BybitMarketData(
+            category=config.exchange.category,
+            testnet=config.exchange.testnet,
+        )
 
     def run(self) -> dict[str, Any]:
         # Defense in depth if a caller replaces demo_config after construction.
@@ -93,7 +134,10 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
         # REPLACES the base kwargs rather than extending: CARRY's cycle runner
         # takes no ``journal_cursor`` -- its cursor lives in the cycle state.
-        return {"cycle_state": self._carry_cycle_state}
+        return {
+            "cycle_state": self._carry_cycle_state,
+            "market_client": self._cycle_market_client,
+        }
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         # CARRY payloads are flat; the inherited formatter expects a nested

@@ -30,11 +30,13 @@ from liquidity_migration.account.account_owner_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
 )
-from liquidity_migration.account.account_kernel import AccountJournalCursor
+from liquidity_migration.account.account_intent_client import CompletedEntryAttemptCursor
+from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
 from liquidity_migration.account.account_route import AccountRoute
 from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
 from liquidity_migration.strategy.account_strategy_state import (
     PROJECTION_EVENT_TYPES,
+    CanonicalAccountProjection,
     canonical_account_projection,
     canonical_account_projection_from_digest,
     canonical_strategy_trade_rows,
@@ -93,7 +95,63 @@ class SleevePlanningSnapshot:
     terminal_entry_attempts: frozenset[str]
 
 
-def new_planning_journal_cursor() -> AccountJournalCursor:
+class PlanningJournalCursor(AccountJournalCursor):
+    """Journal cursor plus memos for the journal-pure planning read models.
+
+    The canonical projection and trade rows are pure functions of the digest
+    (and the sleeve scope), so on the many cycles where no new journal event
+    arrived they would be rebuilt from identical inputs to identical values.
+    Memo keys bind to the digest's head hash and fold count; any new event
+    invalidates them. ``completed_attempts`` incrementally projects the
+    inbox's expired entry attempts the same way. One cursor belongs to one
+    daemon; not thread-safe.
+    """
+
+    __slots__ = ("_projection_memo", "_trades_memo", "completed_attempts")
+
+    def __init__(self) -> None:
+        super().__init__(retain_event_types=PROJECTION_EVENT_TYPES)
+        self._projection_memo: tuple[tuple[str, int], CanonicalAccountProjection] | None = None
+        self._trades_memo: tuple[tuple[str, int, str, tuple[str, ...]], pl.DataFrame] | None = None
+        self.completed_attempts = CompletedEntryAttemptCursor()
+
+    def memoized_projection(self, digest: AccountJournalDigest) -> CanonicalAccountProjection:
+        key = (digest.head_event_hash, digest.events_folded)
+        if self._projection_memo is not None and self._projection_memo[0] == key:
+            return self._projection_memo[1]
+        projection = canonical_account_projection_from_digest(digest)
+        self._projection_memo = (key, projection)
+        self._trades_memo = None
+        return projection
+
+    def memoized_trades(
+        self,
+        account_root: Path,
+        *,
+        digest: AccountJournalDigest,
+        projection: CanonicalAccountProjection,
+        sleeve: SleeveAdapterKind,
+        strategy_ids: tuple[str, ...] | list[str] | set[str],
+    ) -> pl.DataFrame:
+        key = (
+            digest.head_event_hash,
+            digest.events_folded,
+            sleeve.value,
+            tuple(sorted(str(value) for value in strategy_ids)),
+        )
+        if self._trades_memo is not None and self._trades_memo[0] == key:
+            return self._trades_memo[1]
+        trades = canonical_strategy_trade_rows(
+            account_root,
+            sleeve=sleeve.value,
+            strategy_ids=strategy_ids,
+            account_projection=projection,
+        )
+        self._trades_memo = (key, trades)
+        return trades
+
+
+def new_planning_journal_cursor() -> PlanningJournalCursor:
     """A cycle runner's resumable reader for :func:`sleeve_planning_snapshot`.
 
     Retains only the event types the canonical read models inspect; every other
@@ -102,7 +160,7 @@ def new_planning_journal_cursor() -> AccountJournalCursor:
     between roots or threads is not supported.
     """
 
-    return AccountJournalCursor(retain_event_types=PROJECTION_EVENT_TYPES)
+    return PlanningJournalCursor()
 
 
 def sleeve_planning_snapshot(
@@ -129,24 +187,41 @@ def sleeve_planning_snapshot(
     publisher = AccountTargetPublisher(route)
     unresolved = unresolved_target_snapshot(publisher.inbox, sleeve=sleeve)
     account_root: Path = route.account_path
+    completed_cursor = None
     if journal_cursor is None:
         projection = canonical_account_projection(account_root)
-    else:
-        projection = canonical_account_projection_from_digest(
-            journal_cursor.read(account_root)
+        canonical_trades = canonical_strategy_trade_rows(
+            account_root,
+            sleeve=sleeve.value,
+            strategy_ids=strategy_ids,
+            account_projection=projection,
         )
-    canonical_trades = canonical_strategy_trade_rows(
-        account_root,
-        sleeve=sleeve.value,
-        strategy_ids=strategy_ids,
-        account_projection=projection,
-    )
+    elif isinstance(journal_cursor, PlanningJournalCursor):
+        digest = journal_cursor.read(account_root)
+        projection = journal_cursor.memoized_projection(digest)
+        canonical_trades = journal_cursor.memoized_trades(
+            account_root,
+            digest=digest,
+            projection=projection,
+            sleeve=sleeve,
+            strategy_ids=strategy_ids,
+        )
+        completed_cursor = journal_cursor.completed_attempts
+    else:
+        projection = canonical_account_projection_from_digest(journal_cursor.read(account_root))
+        canonical_trades = canonical_strategy_trade_rows(
+            account_root,
+            sleeve=sleeve.value,
+            strategy_ids=strategy_ids,
+            account_projection=projection,
+        )
     terminal_attempts = terminal_entry_attempt_keys(
         account_root,
         sleeve=sleeve.value,
         strategy_ids=strategy_ids,
         inbox=publisher.inbox,
         account_events=projection.events,
+        completed_cursor=completed_cursor,
     )
     return SleevePlanningSnapshot(
         publisher=publisher,

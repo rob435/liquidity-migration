@@ -707,7 +707,10 @@ class LongNativeDemoDaemon:
 
     def _start_kline_stream_manager(self) -> None:
         if not self.demo_config.ws_klines_enabled:
-            _logger.info("ws_klines_enabled=False; long daemon stays on REST-on-cycle kline fallback")
+            _logger.info(
+                "ws_klines_enabled=False; %s daemon stays on REST-on-cycle kline fallback",
+                self._sleeve_label,
+            )
             return
         if self._kline_stream_manager is not None:
             try:

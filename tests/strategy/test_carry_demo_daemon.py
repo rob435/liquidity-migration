@@ -55,8 +55,9 @@ def test_constructs_as_one_pure_timer_target_planner(tmp_path: Path) -> None:
 
     assert daemon._cycle_runner is run_carry_demo_cycle
     assert daemon.interval_seconds == 60.0
-    # Daily decision + diff publication: there is no confirmed-bar event to
-    # react to (no WS kline pool exists), so the loop is a pure timer grid.
+    # Daily decision + diff publication: a confirmed-bar wake accelerates
+    # nothing, so the loop stays a pure timer grid even with the WS kline
+    # plane feeding each cycle's bars.
     assert daemon._event_driven_cycle is False
     assert daemon._seed_thread is None
     assert daemon._reconcile_thread is None
@@ -100,7 +101,7 @@ def test_cycle_receives_only_public_state_and_the_carry_cycle_state(
         "reactivity_stats",
     }.isdisjoint(kwargs)
     assert {"ticker_cache", "kline_store", "state_cache_stale_seconds"} <= set(kwargs)
-    assert kwargs["kline_store"] is None  # pure REST: no WS kline manager exists
+    assert kwargs["kline_store"] is None  # manager starts in run(); a bare cycle has no store
     assert isinstance(kwargs["cycle_state"], CarryCycleState)
     assert kwargs["cycle_state"] is daemon._carry_cycle_state
     assert daemon._cycles_run == 1
@@ -149,12 +150,29 @@ def test_invalid_startup_fails_before_any_resource_construction(
     assert resource_calls == []
 
 
-def test_startup_rejects_ws_pool(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="pure REST"):
+def test_startup_selects_the_carry_kline_plane_and_bounds_its_lookback(tmp_path: Path) -> None:
+    from liquidity_migration.strategy.carry_demo_daemon import (
+        _default_carry_kline_stream_manager_factory,
+    )
+
+    daemon = CarryDemoDaemon(
+        tmp_path / "carry",
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_target_config(tmp_path, ws_klines_enabled=True),
+    )
+    # Carry's own factory (top-N carry universe), not LONG's 120-name one.
+    assert daemon._kline_stream_manager_factory is _default_carry_kline_stream_manager_factory
+    # One persistent REST session is threaded into every cycle.
+    assert daemon._extra_cycle_kwargs()["market_client"] is daemon._cycle_market_client
+
+    # A store narrower than the replay window must fail loudly at startup.
+    with pytest.raises(ValueError, match="ws_klines_lookback_days"):
         CarryDemoDaemon(
-            tmp_path / "carry",
+            tmp_path / "carry-short",
             config=ResearchConfig(data_root=tmp_path),
-            demo_config=_target_config(tmp_path, ws_klines_enabled=True),
+            demo_config=_target_config(
+                tmp_path, ws_klines_enabled=True, ws_klines_lookback_days=45
+            ),
         )
 
 

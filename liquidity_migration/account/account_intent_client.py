@@ -15,7 +15,9 @@ from typing import Mapping, Sequence
 
 from liquidity_migration.account.account_service import (
     AccountIntentInbox,
+    AccountServiceReceipt,
     AccountTargetRequest,
+    CompletedRequestCursor,
     RequestedIntent,
     SleeveAdapterKind,
 )
@@ -207,19 +209,19 @@ def unresolved_target_snapshot(
     )
 
 
-def completed_expired_entry_attempt_keys(
-    inbox: AccountIntentInbox,
+def _expired_entry_attempt_keys(
+    rows: Sequence[tuple[AccountTargetRequest, AccountServiceReceipt]],
     *,
     sleeve: SleeveAdapterKind | str,
     strategy_ids: Sequence[str] = (),
-) -> frozenset[str]:
-    """Project terminal entry attempts from verified service-expiry receipts."""
+) -> set[str]:
+    """Terminal entry-attempt keys carried by these completed rows."""
 
     normalized_sleeve = SleeveAdapterKind(sleeve).value
     prefix = f"{normalized_sleeve}/"
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     attempts: set[str] = set()
-    for request, receipt in inbox.completed_requests():
+    for request, receipt in rows:
         if receipt.disposition != "expired":
             continue
         if receipt.accepted or not any(key.startswith("account-service:entry-") for key in receipt.rejection_keys):
@@ -244,7 +246,64 @@ def completed_expired_entry_attempt_keys(
                 raise RuntimeError(f"expired entry request {request.request_id!r} has invalid attempt identity")
             if any(rejection.endswith(f":{observed}") for rejection in receipt.rejection_keys):
                 attempts.add(observed)
-    return frozenset(attempts)
+    return attempts
+
+
+class CompletedEntryAttemptCursor:
+    """Incremental expired-entry-attempt projection over one inbox scope.
+
+    Wraps a :class:`CompletedRequestCursor` and accumulates only the projected
+    keys, so a per-cycle caller pays O(newly completed requests) instead of
+    re-parsing every completed request ever. The scope (sleeve, strategy ids)
+    pins on first use because the accumulated keys are only valid for it. An
+    inbox epoch reset (signalled by the inner cursor's generation) drops the
+    accumulated keys. One cursor belongs to one daemon; not thread-safe.
+    """
+
+    __slots__ = ("_inbox_cursor", "_keys", "_generation", "_scope")
+
+    def __init__(self) -> None:
+        self._inbox_cursor = CompletedRequestCursor()
+        self._keys: set[str] = set()
+        self._generation: int = 0
+        self._scope: tuple[str, tuple[str, ...]] | None = None
+
+    def update(
+        self,
+        inbox: AccountIntentInbox,
+        *,
+        sleeve: SleeveAdapterKind | str,
+        strategy_ids: Sequence[str] = (),
+    ) -> frozenset[str]:
+        scope = (SleeveAdapterKind(sleeve).value, tuple(sorted(str(value) for value in strategy_ids)))
+        if self._scope is None:
+            self._scope = scope
+        elif self._scope != scope:
+            raise ValueError("a CompletedEntryAttemptCursor serves exactly one (sleeve, strategy_ids) scope")
+        rows = inbox.new_completed_requests(self._inbox_cursor)
+        if self._inbox_cursor.generation != self._generation:
+            self._generation = self._inbox_cursor.generation
+            self._keys = set()
+        self._keys |= _expired_entry_attempt_keys(rows, sleeve=sleeve, strategy_ids=strategy_ids)
+        return frozenset(self._keys)
+
+
+def completed_expired_entry_attempt_keys(
+    inbox: AccountIntentInbox,
+    *,
+    sleeve: SleeveAdapterKind | str,
+    strategy_ids: Sequence[str] = (),
+    cursor: CompletedEntryAttemptCursor | None = None,
+) -> frozenset[str]:
+    """Project terminal entry attempts from verified service-expiry receipts.
+
+    With a ``cursor`` only newly completed requests are parsed; without one
+    the projection re-reads the whole ``completed/`` directory.
+    """
+
+    if cursor is not None:
+        return cursor.update(inbox, sleeve=sleeve, strategy_ids=strategy_ids)
+    return frozenset(_expired_entry_attempt_keys(inbox.completed_requests(), sleeve=sleeve, strategy_ids=strategy_ids))
 
 
 def publish_exit_first_target_requests(

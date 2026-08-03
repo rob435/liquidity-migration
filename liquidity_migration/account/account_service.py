@@ -442,6 +442,22 @@ def _require_verified_account_route(
     return verified
 
 
+class CompletedRequestCursor:
+    """Resumable position over an inbox's write-once ``completed/`` directory.
+
+    Holds only filenames already parsed plus a ``generation`` that increments
+    when the directory shrank (an epoch reset), telling consumers to drop any
+    state they derived from earlier rows. One cursor belongs to one daemon;
+    not thread-safe.
+    """
+
+    __slots__ = ("seen_names", "generation")
+
+    def __init__(self) -> None:
+        self.seen_names: set[str] = set()
+        self.generation: int = 0
+
+
 class AccountIntentInbox:
     """Filesystem queue with atomic claim and explicit crash recovery."""
 
@@ -677,55 +693,89 @@ class AccountIntentInbox:
                         raise RuntimeError(f"unreadable unresolved account target request {path.name!r}") from exc
             return tuple(requests)
 
+    def _parse_completed_request_locked(self, path: Path) -> tuple[AccountTargetRequest, AccountServiceReceipt]:
+        """Parse and identity-validate one completed request under the inbox lock."""
+
+        try:
+            payload = json.loads(path.read_bytes())
+            request_payload = payload.get("request")
+            receipt_payload = payload.get("receipt")
+            if not isinstance(request_payload, Mapping) or not isinstance(receipt_payload, Mapping):
+                raise ValueError("missing request or receipt")
+            request = self._request_from_payload(request_payload)
+            receipt = AccountServiceReceipt(
+                request_id=str(receipt_payload.get("request_id") or ""),
+                request_hash=str(receipt_payload.get("request_hash") or ""),
+                batch_id=str(receipt_payload.get("batch_id") or ""),
+                accepted=bool(receipt_payload.get("accepted")),
+                rejection_keys=tuple(str(value) for value in receipt_payload.get("rejection_keys") or ()),
+                command_ids=tuple(str(value) for value in receipt_payload.get("command_ids") or ()),
+                execution_event_ids=tuple(
+                    str(value) for value in receipt_payload.get("execution_event_ids") or ()
+                ),
+                final_state_hash=str(receipt_payload.get("final_state_hash") or ""),
+                disposition=str(receipt_payload.get("disposition") or "processed"),
+                superseded_by_request_id=str(receipt_payload.get("superseded_by_request_id") or ""),
+                superseded_by_request_ids=tuple(
+                    str(value) for value in receipt_payload.get("superseded_by_request_ids") or ()
+                ),
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"unreadable completed account target request {path.name!r}") from exc
+        if (
+            path.name != self._filename(request.request_id)
+            or receipt.request_id != request.request_id
+            or receipt.batch_id != request.batch_id
+            or receipt.request_hash != request.content_hash()
+        ):
+            raise RuntimeError(
+                f"completed account target request {path.name!r} failed request/receipt identity validation"
+            )
+        self._read_arrival_sequence_locked(
+            filename=path.name,
+            request=request,
+        )
+        return request, receipt
+
     def completed_requests(
         self,
     ) -> tuple[tuple[AccountTargetRequest, AccountServiceReceipt], ...]:
         """Return verified immutable completed requests and their receipts."""
 
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
-            rows: list[tuple[AccountTargetRequest, AccountServiceReceipt]] = []
-            for path in sorted((self.root / "completed").glob("*.json")):
-                try:
-                    payload = json.loads(path.read_bytes())
-                    request_payload = payload.get("request")
-                    receipt_payload = payload.get("receipt")
-                    if not isinstance(request_payload, Mapping) or not isinstance(receipt_payload, Mapping):
-                        raise ValueError("missing request or receipt")
-                    request = self._request_from_payload(request_payload)
-                    receipt = AccountServiceReceipt(
-                        request_id=str(receipt_payload.get("request_id") or ""),
-                        request_hash=str(receipt_payload.get("request_hash") or ""),
-                        batch_id=str(receipt_payload.get("batch_id") or ""),
-                        accepted=bool(receipt_payload.get("accepted")),
-                        rejection_keys=tuple(str(value) for value in receipt_payload.get("rejection_keys") or ()),
-                        command_ids=tuple(str(value) for value in receipt_payload.get("command_ids") or ()),
-                        execution_event_ids=tuple(
-                            str(value) for value in receipt_payload.get("execution_event_ids") or ()
-                        ),
-                        final_state_hash=str(receipt_payload.get("final_state_hash") or ""),
-                        disposition=str(receipt_payload.get("disposition") or "processed"),
-                        superseded_by_request_id=str(receipt_payload.get("superseded_by_request_id") or ""),
-                        superseded_by_request_ids=tuple(
-                            str(value) for value in receipt_payload.get("superseded_by_request_ids") or ()
-                        ),
-                    )
-                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise RuntimeError(f"unreadable completed account target request {path.name!r}") from exc
-                if (
-                    path.name != self._filename(request.request_id)
-                    or receipt.request_id != request.request_id
-                    or receipt.batch_id != request.batch_id
-                    or receipt.request_hash != request.content_hash()
-                ):
-                    raise RuntimeError(
-                        f"completed account target request {path.name!r} failed request/receipt identity validation"
-                    )
-                self._read_arrival_sequence_locked(
-                    filename=path.name,
-                    request=request,
-                )
-                rows.append((request, receipt))
-            return tuple(rows)
+            return tuple(
+                self._parse_completed_request_locked(path)
+                for path in sorted((self.root / "completed").glob("*.json"))
+            )
+
+    def new_completed_requests(
+        self, cursor: "CompletedRequestCursor"
+    ) -> tuple[tuple[AccountTargetRequest, AccountServiceReceipt], ...]:
+        """Completed rows ``cursor`` has not seen yet, oldest name first.
+
+        ``completed/`` files are write-once (:meth:`complete` writes each name
+        at most once; only an epoch reset removes them), so a name, once
+        parsed, never needs re-parsing — which keeps a per-cycle caller at
+        O(new requests) instead of O(all requests ever). A previously seen
+        name that vanished means the root was reset: the cursor restarts, its
+        ``generation`` increments so consumers drop derived state, and every
+        current row is returned as new. Seen names commit only after every new
+        row parsed cleanly, so a failed pass re-serves the same rows.
+        """
+
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            directory = self.root / "completed"
+            with os.scandir(directory) as entries:
+                names = {entry.name for entry in entries if entry.name.endswith(".json")}
+            if not cursor.seen_names <= names:
+                cursor.seen_names = set()
+                cursor.generation += 1
+            parsed = [
+                (name, self._parse_completed_request_locked(directory / name))
+                for name in sorted(names - cursor.seen_names)
+            ]
+            cursor.seen_names.update(name for name, _ in parsed)
+            return tuple(row for _, row in parsed)
 
     def submit(self, request: AccountTargetRequest) -> Path:
         request.require_route(self.route)
