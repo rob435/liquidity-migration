@@ -940,38 +940,18 @@ RESTART_COMPLETE=0
 FAILURE_RECOVERY_ALLOWED=1
 MANIFEST_DIR=""
 DEMO_ACCOUNT_LEASE_HELD=0
-DEMO_ACCOUNT_LEASE_RECEIPT=()
 
 acquire_demo_account_lease() {
-  local helper_output lease_device lease_inode lease_uid lease_gid lease_mount_id
-  local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
+  local rc
 
-  helper_output="$(
-    "$PYTHON" -m liquidity_migration.account.account_owner_lease \
-      prepare "$DEMO_ACCOUNT_LEASE_PATH"
-  )" || die "cannot prepare canonical demo-account lease safely"
-  [[ "$helper_output" != *$'\n'* ]] \
-    || die "demo-account lease helper returned multiline identity metadata"
-  IFS=$'\t' read -r \
-    lease_device lease_inode lease_uid lease_gid lease_mount_id \
-    parent_device parent_inode parent_uid parent_gid parent_mount_id extra \
-    <<< "$helper_output"
-  [[ -z "$extra" ]] || die "demo-account lease helper returned extra identity metadata"
-  DEMO_ACCOUNT_LEASE_RECEIPT=(
-    "$lease_device" "$lease_inode" "$lease_uid" "$lease_gid" "$lease_mount_id"
-    "$parent_device" "$parent_inode" "$parent_uid" "$parent_gid" "$parent_mount_id"
-  )
-  for value in "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}"; do
-    [[ "$value" =~ ^[0-9]+$ ]] \
-      || die "demo-account lease helper returned invalid identity metadata"
-  done
+  install -d -m 0700 "${DEMO_ACCOUNT_LEASE_PATH%/*}" \
+    || die "cannot create the canonical demo-account lease directory"
   if ! { exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"; }; then
     die "cannot open canonical demo-account lease without truncation: $DEMO_ACCOUNT_LEASE_PATH"
   fi
 
   if "$PYTHON" -m liquidity_migration.account.account_owner_lease acquire-inherited \
-    8 "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
-    demo ledger_reset; then
+    8 "$DEMO_ACCOUNT_LEASE_PATH" demo ledger_reset; then
     DEMO_ACCOUNT_LEASE_HELD=1
     echo "  canonical demo-account lease acquired for flatness/archive/reset: $DEMO_ACCOUNT_LEASE_PATH"
     return 0
@@ -1343,49 +1323,23 @@ FAILURE_RECOVERY_ALLOWED=0
 echo
 echo "Removing only archived generated projections and epoch telemetry ..."
 "$PYTHON" - \
-  "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
+  "$DEMO_ACCOUNT_LEASE_PATH" \
   -- "${ACCOUNT_STATE_TARGETS[@]}" <<'PY'
-from pathlib import Path
 import sys
 
 from liquidity_migration.ops.account_epoch_reset import (
     clear_account_epoch_roots_preserving_locks,
 )
 from liquidity_migration.account.account_owner_lease import (
-    PreparedAccountOwnerLease,
     revalidate_inherited_account_owner_lease,
 )
 
 
-def parse_receipt(arguments: list[str], offset: int) -> tuple[PreparedAccountOwnerLease, int]:
-    path = Path(arguments[offset])
-    values = [int(value, 10) for value in arguments[offset + 1 : offset + 11]]
-    if len(values) != 10:
-        raise SystemExit("account-owner lease receipt is incomplete before epoch clear")
-    return (
-        PreparedAccountOwnerLease(
-            path=path,
-            device=values[0],
-            inode=values[1],
-            uid=values[2],
-            gid=values[3],
-            mount_id=values[4],
-            parent_device=values[5],
-            parent_inode=values[6],
-            parent_uid=values[7],
-            parent_gid=values[8],
-            parent_mount_id=values[9],
-        ),
-        offset + 11,
-    )
+if len(sys.argv) < 3 or sys.argv[2] != "--":
+    raise SystemExit("account-owner lease path boundary is invalid before epoch clear")
+revalidate_inherited_account_owner_lease(8, sys.argv[1])
 
-
-demo_receipt, offset = parse_receipt(sys.argv, 1)
-if offset >= len(sys.argv) or sys.argv[offset] != "--":
-    raise SystemExit("account-owner lease receipt boundary is invalid before epoch clear")
-revalidate_inherited_account_owner_lease(8, demo_receipt)
-
-results = clear_account_epoch_roots_preserving_locks(sys.argv[offset + 1 :])
+results = clear_account_epoch_roots_preserving_locks(sys.argv[3:])
 for result in results:
     print(
         f"  cleared {result.root} removed_entries={result.removed_entries} "

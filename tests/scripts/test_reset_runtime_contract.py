@@ -76,19 +76,15 @@ def test_reset_holds_process_and_account_leases_across_archive() -> None:
     assert "failure recovery" in text
 
 
-def test_reset_prepares_and_opens_the_account_lease_without_path_truncation() -> None:
+def test_reset_opens_the_account_lease_without_path_truncation() -> None:
     text = _text()
     demo = text[text.index("acquire_demo_account_lease()") : text.index("release_demo_account_lease()")]
-    prepare = demo.index("account_owner_lease")
-    nontruncating_open = demo.index('exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"', prepare)
+    nontruncating_open = demo.index('exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"')
     acquire = demo.index("acquire-inherited", nontruncating_open)
-    assert prepare < nontruncating_open < acquire
+    assert nontruncating_open < acquire
+    assert "install -d -m 0700" in demo[:nontruncating_open]
     assert "mkdir -p" not in demo
     assert 'exec 8>"' not in demo
-    assert "multiline identity metadata" in demo
-    assert "lease_mount_id" in demo
-    assert "parent_mount_id" in demo
-    assert "ACCOUNT_LEASE_RECEIPT" in demo
 
 
 def test_reset_and_deploy_share_host_maintenance_lock_with_legacy_bridge() -> None:
@@ -238,14 +234,12 @@ def test_reset_clears_account_epochs_in_place_without_retiring_lock_inodes() -> 
 def test_reset_revalidates_the_held_owner_lease_in_clear_process() -> None:
     text = _text()
     clear_process = text[text.index('"$PYTHON" - \\\n  "$DEMO_ACCOUNT_LEASE_PATH"') :]
-    demo_check = clear_process.index("revalidate_inherited_account_owner_lease(8, demo_receipt)")
+    demo_check = clear_process.index("revalidate_inherited_account_owner_lease(8, sys.argv[1])")
     helper_call = clear_process.index(
-        "clear_account_epoch_roots_preserving_locks(sys.argv[offset + 1 :])"
+        "clear_account_epoch_roots_preserving_locks(sys.argv[3:])"
     )
 
     assert demo_check < helper_call
-    assert '"${DEMO_ACCOUNT_LEASE_RECEIPT[@]}"' in clear_process[:demo_check]
-    assert "parent_mount_id=values[9]" in clear_process[:demo_check]
 
 
 def test_reset_restores_private_ownership_and_only_shares_public_demo_inputs() -> None:
