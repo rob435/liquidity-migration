@@ -395,6 +395,13 @@ def _atomic_replace(path: Path, data: bytes) -> None:
             if written <= 0:
                 raise OSError("account service write made no progress")
             offset += written
+        # A privileged writer publishing into a tree owned by someone else
+        # hands the inode to that owner before it becomes visible, the same
+        # rule the lock namespace uses. A root-owned 0600 file in a
+        # service-user inbox is unreadable by the process that must claim it.
+        if os.geteuid() == 0:
+            parent = os.stat(path.parent)
+            os.fchown(fd, parent.st_uid, parent.st_gid)
         os.fsync(fd)
     finally:
         os.close(fd)

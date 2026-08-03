@@ -2553,6 +2553,104 @@ def test_provider_rechecks_entry_age_after_non_exposure_preparation(
     assert client.order_calls == 0
 
 
+def test_sibling_latency_spends_the_shared_batch_age_budget(tmp_path: Path) -> None:
+    # 2026-08-01 wedge: every slice of a chunked entry batch shares one journal
+    # timestamp, each submitted slice burns real venue latency, and a budget
+    # sized for one round trip refused every later slice forever. The default
+    # budget must absorb whole-batch latency; a tight budget must still refuse
+    # without spending an attempt.
+    assert (
+        BybitDemoExecutionAdapter.__init__.__kwdefaults__[
+            "max_unsubmitted_exposure_age_ns"
+        ]
+        == 120_000_000_000
+    )
+
+    def _chunked(kernel: AccountExecutionKernel):
+        market = _market()
+        result = kernel.submit_targets(
+            batch_id="sibling-latency-entry",
+            market_inputs=[market],
+            targets=[
+                _target(
+                    decision="sibling-latency-entry",
+                    key="long/sibling-latency/BUSDT",
+                    sleeve="long",
+                    qty=3.0,
+                )
+            ],
+            risk_snapshot=_snapshot(),
+            risk_policy=_policy(),
+            instrument_rules=_rules(tick_size=0.1, max_order_qty=1.0),
+            native_protection_policy=NativeDisasterProtectionPolicy(0.2),
+        )
+        assert len(result.commands) == 3
+        assert len({command.created_ts_ns for command in result.commands}) == 1
+        return market, result
+
+    class SlowVenueProvider:
+        name = "slow_venue_provider"
+        submission_outcome_can_be_ambiguous = True
+
+        def __init__(
+            self,
+            kernel: AccountExecutionKernel,
+            *,
+            max_unsubmitted_exposure_age_ns: int,
+            per_submit_ns: int,
+        ) -> None:
+            self.kernel = kernel
+            self.max_unsubmitted_exposure_age_ns = max_unsubmitted_exposure_age_ns
+            self.per_submit_ns = per_submit_ns
+            self.submit_calls = 0
+
+        def submit(self, command: OrderCommand, market_input: MarketInputRef):
+            self.submit_calls += 1
+            assert isinstance(self.kernel.clock, VirtualClock)
+            self.kernel.clock.advance_ns(self.per_submit_ns)
+            return (
+                ExecutionObservation(
+                    observation_type="ack",
+                    command_id=command.command_id,
+                    exchange_ts_ns=market_input.exchange_ts_ns,
+                    local_receive_ts_ns=market_input.local_receive_ts_ns,
+                    accepted=True,
+                ),
+            )
+
+    kernel = _kernel(tmp_path / "wide")
+    market, result = _chunked(kernel)
+    adapter = SlowVenueProvider(
+        kernel,
+        max_unsubmitted_exposure_age_ns=120_000_000_000,
+        per_submit_ns=50_000_000_000,
+    )
+    KernelExecutionDriver(kernel).execute_batch(
+        result,
+        market_inputs={"BUSDT": market},
+        adapter=adapter,
+    )
+    assert adapter.submit_calls == 3
+
+    wedged = _kernel(tmp_path / "tight")
+    market, result = _chunked(wedged)
+    tight = SlowVenueProvider(
+        wedged,
+        max_unsubmitted_exposure_age_ns=5_000_000_000,
+        per_submit_ns=6_000_000_000,
+    )
+    with pytest.raises(StaleUnsubmittedExposureCommand, match="stale exposure"):
+        KernelExecutionDriver(wedged).execute_batch(
+            result,
+            market_inputs={"BUSDT": market},
+            adapter=tight,
+        )
+    assert tight.submit_calls == 1
+    state = wedged.state()
+    assert state.orders[result.commands[0].command_id].submission_attempts == 1
+    assert state.orders[result.commands[1].command_id].submission_attempts == 0
+
+
 def test_provider_submission_validation_precedes_attempt_and_definite_reject_is_terminal(
     tmp_path: Path,
 ) -> None:

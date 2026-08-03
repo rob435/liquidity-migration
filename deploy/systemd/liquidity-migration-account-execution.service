@@ -31,8 +31,8 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-MemoryHigh=384M
-MemoryMax=512M
+MemoryHigh=768M
+MemoryMax=1024M
 MemorySwapMax=256M
 
 [Install]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -419,6 +420,48 @@ def test_durable_service_is_single_venue_owner_across_sequential_sleeve_requests
     assert service.kernel.state().aggregate_targets["BUSDT"] == pytest.approx(-1.0)
     assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(-1.0)
     assert adapter.submit_calls == 2
+
+
+def test_privileged_inbox_writes_hand_inodes_to_the_directory_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A root mirror publishing into the paper user's inbox must not leave
+    # root-owned 0600 files: on 2026-08-01 that poisoned the arrival sequence
+    # and the paper owner crash-looped on it for two days.
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    inbox.submit(
+        _request(
+            route,
+            request_id="ownership-seed",
+            batch_id="ownership-seed",
+            kind=SleeveAdapterKind.LONG,
+            notional=10.0,
+        )
+    )
+
+    recorded: list[tuple[int, int]] = []
+    real_fchown = os.fchown
+
+    def _recording_fchown(fd: int, uid: int, gid: int) -> None:
+        recorded.append((uid, gid))
+        real_fchown(fd, uid, gid)
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fchown", _recording_fchown)
+    inbox.submit(
+        _request(
+            route,
+            request_id="ownership-probe",
+            batch_id="ownership-probe",
+            kind=SleeveAdapterKind.LONG,
+            notional=10.0,
+        )
+    )
+    owner = os.stat(tmp_path / "inbox")
+    # Arrival counter, arrival sidecar, and the request body all hand off.
+    assert len(recorded) == 3
+    assert set(recorded) == {(owner.st_uid, owner.st_gid)}
 
 
 def test_component_exit_stages_opposing_aggregate_to_flat_before_convergence(

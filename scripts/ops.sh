@@ -154,6 +154,36 @@ REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
 
+remote_wedged_command() {
+  # The module's --account-root/--account-id/--realm are main-parser options
+  # and must precede the subcommand; the wrapper owns them so the operator
+  # passes only the subcommand and its flags. probe/resolve read venue truth,
+  # so the demo-owner credentials are loaded exactly as the unit loads them.
+  local -a module_args=("$@")
+  local arg
+  {
+    printf 'REPO_DIR=%q\n' "$REPO_DIR"
+    printf 'MODULE_ARGS=('
+    for arg in ${module_args[@]+"${module_args[@]}"}; do
+      printf ' %q' "$arg"
+    done
+    printf ' )\n'
+    cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+cd "$REPO_DIR"
+set -a
+. /etc/liquidity-migration/bybit-demo.env
+. /etc/liquidity-migration/account-execution.env
+set +a
+exec .venv/bin/python -m liquidity_migration.venue.wedged_command_resolution \
+  --account-root data/bybit-account-execution \
+  --account-id bybit-demo-unified \
+  --realm demo \
+  "${MODULE_ARGS[@]}"
+REMOTE_SCRIPT
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
+}
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -217,7 +247,8 @@ case "$command" in
   wedged-command)
     # B15b. `report` and `probe` read only. `resolve` writes one journal
     # transition and never resends an order; it refuses outright when the
-    # venue still holds the order or cannot be read.
+    # venue still holds the order or cannot be read. The wrapper owns the
+    # account root/id/realm (the demo book) and the demo credentials.
     if [[ "${1:-}" == "--execute" ]]; then
       shift
       [[ "${1:-}" == "resolve" ]] \
@@ -225,7 +256,7 @@ case "$command" in
     elif [[ "${1:-}" == "resolve" ]]; then
       die_usage "wedged-command resolve writes a journal transition; prefix it with --execute"
     fi
-    remote_python_module liquidity_migration.venue.wedged_command_resolution "$@"
+    remote_wedged_command "$@"
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest "$@"

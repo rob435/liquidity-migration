@@ -90,7 +90,11 @@ class BybitDemoExecutionAdapter:
         client: Any,
         *,
         clock: Clock | None = None,
-        max_unsubmitted_exposure_age_ns: int = 5_000_000_000,
+        # Anchored to the batch journal instant shared by every sibling
+        # command, so the budget has to absorb whole-batch venue latency
+        # (leverage + create + stop verification per earlier sibling), not one
+        # round trip. 5s wedged a nine-slice entry batch on 2026-08-01.
+        max_unsubmitted_exposure_age_ns: int = 120_000_000_000,
         entry_stop_verifier: EntryStopVerifier | None = None,
     ) -> None:
         # Realm-agnostic: the order path is identical in both realms, and the

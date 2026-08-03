@@ -15,7 +15,7 @@ fleet's start/stop modes are below; what arming a funded account requires before
 | `research-refresh {plan,run,reconcile}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
 | `reset [ARGS]` | Demo/paper ledger reset. Preview unless `--execute`. |
 | `venue-accounting --account-root R --start-time-ms N --output PATH` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Read-only. |
-| `wedged-command {report,probe}`, `--execute resolve` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. |
+| `wedged-command {report,probe}`, `--execute resolve` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the demo account root/id/realm and loads the owner's credentials on the host, so the operator passes only the subcommand and its flags. |
 | `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
 | `test [PYTEST_ARGS]` | Local pytest. |
 | `deploy --execute {install,activate,rollout,activate-mainnet,stop-mainnet}` | Staged deploy, guarded rollout, or the funded-fleet start/stop. |

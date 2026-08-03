@@ -576,6 +576,16 @@ def main(argv: list[str] | None = None) -> int:
         default=30.0,
         help="Latch owner health blocked if the durable queue head lacks healthy fresh L2.",
     )
+    parser.add_argument(
+        "--max-unsubmitted-exposure-age-seconds",
+        type=float,
+        default=120.0,
+        help=(
+            "Refuse a never-attempted exposure-increasing command older than this. "
+            "Command age is anchored to the shared batch journal instant, so the "
+            "budget must cover whole-batch venue latency, not one round trip."
+        ),
+    )
     parser.add_argument("--idle-seconds", type=float, default=0.1)
     parser.add_argument("--confirm-demo-orders", action="store_true")
     parser.add_argument("--telegram", action="store_true")
@@ -604,6 +614,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.health_interval_seconds <= 0.0:
         parser.error("--health-interval-seconds must be positive")
+    if (
+        not math.isfinite(args.max_unsubmitted_exposure_age_seconds)
+        or args.max_unsubmitted_exposure_age_seconds <= 0.0
+    ):
+        parser.error("--max-unsubmitted-exposure-age-seconds must be positive and finite")
     if not math.isfinite(args.continuous_cycle_max_age_minutes) or args.continuous_cycle_max_age_minutes <= 0.0:
         parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
@@ -861,6 +876,9 @@ def main(argv: list[str] | None = None) -> int:
             # Read position truth back at the create boundary instead of
             # trusting atomic arming until the next reconcile.
             entry_stop_verifier=native_protection.verify_entry_attached_stop,
+            max_unsubmitted_exposure_age_ns=int(
+                args.max_unsubmitted_exposure_age_seconds * 1_000_000_000
+            ),
         ),
         native_protection_policy=native_protection_policy,
         required_rules_environment=realm.value,

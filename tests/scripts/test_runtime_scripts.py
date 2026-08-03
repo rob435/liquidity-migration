@@ -129,7 +129,10 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
 
 def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> None:
     expected = {
-        "liquidity-migration-account-execution.service": ("384M", "512M", "256M"),
+        # The demo owner was throttled at its old 384M high during the
+        # 2026-08-03 recovery (peak 384.2M, 27M swapped) while being the one
+        # unit that must never stall; it now gets at least the producers' room.
+        "liquidity-migration-account-execution.service": ("768M", "1024M", "256M"),
         "liquidity-migration-account-paper-execution.service": ("256M", "384M", "256M"),
         "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
         "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),

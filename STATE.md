@@ -19,6 +19,36 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — Two-day fleet outage root-caused and repaired; both Telegram
+  channels delivering again.** One busy minute (2026-08-01 00:20 UTC) broke
+  both books independently. Demo: a LONG entry batch chunked 1000XECUSDT into
+  nine slices sharing one journal timestamp; the first slices each spent ~4s
+  in venue stop verification, the 5-second unsubmitted-exposure budget then
+  refused every later slice forever, and the queue-head request retried every
+  ~10s for two days while start-post readiness never passed. Paper: the target
+  mirror (root) left `arrival_counter.json` and three arrival sidecars
+  root-owned 0600 inside the paper-owned inbox on its first production
+  publish, and the paper owner crash-looped on "unreadable arrival sequence".
+  The 2026-08-02 06:37 unattended-upgrades userspace restart then left every
+  producer down (`Requires=` on owners that never came back), which is what
+  the watchdog's 12 standing alerts were reporting. Repair: thirteen
+  never-submitted commands terminalized through `wedged-command` on
+  per-command venue probes (all absent, zero fills, zero venue orders); paper
+  roots re-owned with `reset_path_safety normalize-paper`. Change points
+  deployed with this entry: the unsubmitted-exposure age is anchored to the
+  shared batch journal instant, so the default budget is now 120s and the
+  owner takes `--max-unsubmitted-exposure-age-seconds`
+  (`bybit_execution_adapter.py`, was a hard-coded 5s); the account inbox
+  writer hands every inode — request body, arrival sidecar, arrival counter —
+  to the inbox owner when running privileged (`_atomic_replace`), replacing
+  the mirror's one-file chown hook; `scripts/ops.sh wedged-command` now owns
+  the account root/id/realm and sources the demo credentials remotely
+  (probe/resolve could previously not run through it at all); demo owner
+  memory raised to high 768M / max 1024M after it ran throttled at its old
+  384M ceiling through the recovery. BANKUSDT's two working exits and the
+  demo/paper agreement warnings are expected to clear as the books converge
+  under fresh producer targets.
+
 - **2026-08-03 — LONG sleeve switched to `LongV12WideStop` (v12) on demo and
   paper; mainnet wiring updated, still unarmed. DEPLOY PENDING — this entry
   gains the receipt when the host confirms.** Owner instruction: "wire v12 into

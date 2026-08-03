@@ -268,32 +268,6 @@ class PaperTargetMirror:
         os.replace(tmp, self.cursor_path)
         self._cursor = cursor
 
-    def _hand_to_inbox_owner(self, path: Path) -> None:
-        """Give a queued file the inbox's own ownership.
-
-        The mirror is privileged and the owner is not, so a root-written 0600
-        file would be invisible to the process that has to claim it. Ownership
-        comes from the destination directory rather than a configured uid.
-        """
-
-        try:
-            target = os.stat(self.inbox.root)
-        except OSError as exc:  # pragma: no cover - inbox is created at startup
-            raise PaperTargetMirrorError("paper inbox root is unreadable") from exc
-        try:
-            current = os.stat(path)
-        except FileNotFoundError:
-            return
-        if (current.st_uid, current.st_gid) == (target.st_uid, target.st_gid):
-            return
-        try:
-            os.chown(path, target.st_uid, target.st_gid)
-        except PermissionError as exc:
-            raise PaperTargetMirrorError(
-                "paper mirror cannot hand queued intents to the inbox owner; "
-                "it must run privileged or as the inbox user"
-            ) from exc
-
     def poll(self, *, scale: float = 1.0) -> PaperTargetMirrorReport:
         try:
             # lstat first: read_stable_file turns a missing path into a generic
@@ -345,9 +319,12 @@ class PaperTargetMirror:
                 # Demo never executed it, so paper must not either.
                 skipped += 1
                 continue
+            # The inbox writer itself hands every inode (request body, arrival
+            # sidecar, arrival counter) to the inbox owner when running
+            # privileged, so a root mirror publishes files the paper owner
+            # can read.
             request = mirror_request(captured.request, route=self.route, scale=scale)
-            path = self.inbox.submit(request)
-            self._hand_to_inbox_owner(path)
+            self.inbox.submit(request)
             mirrored += 1
         self._store_cursor(_MirrorCursor(offset=len(data), capture_hash=chain_hash))
         if mirrored:
