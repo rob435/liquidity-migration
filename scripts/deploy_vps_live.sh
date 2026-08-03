@@ -96,8 +96,6 @@ REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
-RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"
 
 EXPECTED_COMMIT_EXPLICIT=0
 if [ -n "$EXPECTED_COMMIT" ]; then
@@ -111,9 +109,6 @@ if ! /usr/bin/git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "BRANCH is not a valid Git branch" >&2
     exit 2
 fi
-for value in "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS" "$RMOM_BOOTSTRAP_RETRY_SECONDS"; do
-    [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "RMOM durations must be positive integers" >&2; exit 2; }
-done
 
 if [[ "$MODE" = install || "$MODE" = staged || "$MODE" = rollout ]] && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
@@ -196,8 +191,6 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
     printf 'EXPECTED_COMMIT_EXPLICIT=%q\n' "$EXPECTED_COMMIT_EXPLICIT"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
-    printf 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS=%q\n' "$RMOM_BOOTSTRAP_TIMEOUT_SECONDS"
-    printf 'RMOM_BOOTSTRAP_RETRY_SECONDS=%q\n' "$RMOM_BOOTSTRAP_RETRY_SECONDS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
     printf 'REQUIRE_FLAT=%q\n' "$REQUIRE_FLAT"
@@ -383,7 +376,6 @@ PROFILE_MARKER=/etc/liquidity-migration/profile
 RETIRED_PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
 RETIRED_PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
-CONTINUOUS_DEMO_ROOT=/opt/liquidity-migration/data/bybit-continuous-demo-event
 CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
 
 retire_paper_host_config() {
@@ -522,16 +514,14 @@ PY
     demo_tree_preflight_phase() {
         "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
             --anchor "$REPO_DIR/data" \
-            --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
-            --root "$CARRY_DEMO_ROOT" \
-            --continuous-root "$CONTINUOUS_DEMO_ROOT"
+            --root "$LONG_DEMO_ROOT" \
+            --root "$CARRY_DEMO_ROOT"
     }
     demo_tree_normalize_phase() {
         "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
             --anchor "$REPO_DIR/data" \
-            --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
+            --root "$LONG_DEMO_ROOT" \
             --root "$CARRY_DEMO_ROOT" \
-            --continuous-root "$CONTINUOUS_DEMO_ROOT" \
             --uid "$root_uid" --gid "$root_gid" --create-missing
     }
 
@@ -937,29 +927,6 @@ install_mode() {
     run_phase refresh-stale-demo-rules refresh_stale_demo_rules_if_requested
 
     lm_load_sleeve_toggles
-    if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        CONTINUOUS_HEDGE_TIMER=on
-    else
-        lm_load_private_systemd_environment "$PYTHON" \
-            /etc/liquidity-migration/account-execution.env ACCOUNT_EXECUTION_ROOT
-        hedge_open="$(ACCOUNT_ROOT="$ACCOUNT_EXECUTION_ROOT" "$PYTHON" - <<'PY' 2>/dev/null || echo unknown
-import os
-from pathlib import Path
-from liquidity_migration.account.account_service import SleeveAdapterKind
-from liquidity_migration.strategy.account_strategy_state import canonical_strategy_trade_rows
-
-try:
-    rows = canonical_strategy_trade_rows(
-        Path(os.environ["ACCOUNT_ROOT"]), sleeve=SleeveAdapterKind.HEDGE.value
-    )
-    print(int((rows["status"] == "open").sum()) if not rows.is_empty() else 0)
-except Exception:
-    print("unknown")
-PY
-)"
-        if [ "$hedge_open" = 0 ]; then CONTINUOUS_HEDGE_TIMER=off; else CONTINUOUS_HEDGE_TIMER=on; fi
-    fi
-    export CONTINUOUS_HEDGE_TIMER
     # The writer is atomic (mktemp + mv), so re-reading what this process just
     # wrote proves nothing; load_authorization validates the file a *previous*
     # process wrote, which is the read that can actually disagree.
@@ -995,17 +962,17 @@ load_authorization() {
     fi
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/sleeves.resolved.env \
-        LONG_SLEEVE CONTINUOUS_SLEEVE CARRY_SLEEVE \
-        CONTINUOUS_HEDGE_TIMER \
+        LONG_SLEEVE CARRY_SLEEVE \
+        CONTINUOUS_SLEEVE CONTINUOUS_HEDGE_TIMER \
         CONTINUOUS_PAPER_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR
-    # The three retired paper keys are loaded solely for the retirement
-    # rollout's pre-install stage: there the host checkout still sources the
-    # PREVIOUS commit's lib_sleeves.sh, whose resolved-toggle verifier greps
-    # those keys against these variables. Nothing below reads them, and a
-    # post-retirement resolved file simply leaves them unset. The mainnet
-    # sleeve keys were retired 2026-08-03 (REAL_MONEY is the arming switch);
-    # a stale resolved file may still carry them, and the loader simply does
-    # not ask for them.
+    # The retired keys (paper trio, and since 2026-08-03 the continuous pair)
+    # are loaded solely for a retirement rollout's pre-install stage: there
+    # the host checkout still sources the PREVIOUS commit's lib_sleeves.sh,
+    # whose resolved-toggle verifier greps those keys against these
+    # variables. Nothing below reads them, and a post-retirement resolved
+    # file simply leaves them unset. The mainnet sleeve keys were retired
+    # 2026-08-03 (REAL_MONEY is the arming switch); a stale resolved file may
+    # still carry them, and the loader simply does not ask for them.
     # A resolved file written by a pre-carry install lacks the carry keys;
     # absent means never deployed, i.e. off. Bridges only the rollout that
     # introduces them — the post-install verifier requires them present.
@@ -1013,8 +980,7 @@ load_authorization() {
         echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
         CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
     fi
-    for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CARRY_SLEEVE" \
-        "$CONTINUOUS_HEDGE_TIMER"; do
+    for value in "$LONG_SLEEVE" "$CARRY_SLEEVE"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
     lm_verify_resolved_sleeve_toggles
@@ -1097,12 +1063,6 @@ verify_unit() {
     verify_note "$message"
 }
 
-validate_hedge_model_prior() {
-    "$PYTHON" scripts/runtime/run_continuous_hedge.py \
-        --execution-environment demo \
-        --validate-model-prior-only
-}
-
 check_demo_order_permissions() {
     local context="$1" status=0
     unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
@@ -1159,28 +1119,10 @@ verify_topology() {
     else
         verify_unit off liquidity-migration-bybit-long-demo.service "LONG demo producer is not off"
     fi
-    if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        verify_unit on liquidity-migration-bybit-continuous-demo.service "continuous demo producer is not active"
-    else
-        verify_unit off liquidity-migration-bybit-continuous-demo.service "continuous demo producer is not off"
-    fi
     if sleeve_on "$CARRY_SLEEVE"; then
         verify_unit on liquidity-migration-bybit-carry-demo.service "carry demo producer is not active"
     else
         verify_unit off liquidity-migration-bybit-carry-demo.service "carry demo producer is not off"
-    fi
-
-    if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        verify_unit on liquidity-migration-continuous-rmom-refresh.timer "RMOM timer is not active"
-    else
-        verify_unit off liquidity-migration-continuous-rmom-refresh.timer "RMOM timer is not off"
-    fi
-    if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        verify_probe hedge-model-prior "hedge model prior validation failed" \
-            validate_hedge_model_prior
-        verify_unit on liquidity-migration-continuous-hedge.timer "hedge timer is not active"
-    else
-        verify_unit off liquidity-migration-continuous-hedge.timer "hedge timer is not off"
     fi
     # Disarmed, a running mainnet unit must not hide behind a green demo
     # verification; armed, the funded fleet is verified exactly like the
@@ -1214,8 +1156,6 @@ verify_topology() {
         verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
     fi
     for oneshot in \
-        liquidity-migration-continuous-rmom-refresh.service \
-        liquidity-migration-continuous-hedge.service \
         liquidity-migration-demo-liveness.service; do
         if systemctl is-failed --quiet "$oneshot"; then
             verify_note "$oneshot is failed"
@@ -1262,43 +1202,12 @@ start_if() {
     fi
 }
 
-seed_rmom() {
-    local deadline gate_path ok
-    gate_path=data/bybit-continuous-demo-event/residual_momentum.parquet
-
-    # Reset preserves this artifact, and the daily timer owns recomputation, so
-    # a valid gate is reused rather than rebuilt (~1 min) on every deployment.
-    # A failed prior refresh still forces the repair path.
-    if ! systemctl is-failed --quiet liquidity-migration-continuous-rmom-refresh.service \
-        && "$PYTHON" scripts/research/check_residual_momentum_gate.py --path "$gate_path"; then
-        echo "rmom-bootstrap path=reuse reason=current-valid-gate"
-        return 0
-    fi
-    echo "rmom-bootstrap path=refresh reason=missing-stale-invalid-or-failed-unit"
-    deadline=$(( $(date +%s) + RMOM_BOOTSTRAP_TIMEOUT_SECONDS ))
-    while true; do
-        ok=1
-        systemctl reset-failed liquidity-migration-continuous-rmom-refresh.service 2>/dev/null || true
-        systemctl start liquidity-migration-continuous-rmom-refresh.service || ok=0
-        if sleeve_on "$CONTINUOUS_SLEEVE"; then
-            "$PYTHON" scripts/research/check_residual_momentum_gate.py \
-                --path "$gate_path" || ok=0
-        fi
-        [ "$ok" -eq 0 ] || return 0
-        [ "$(date +%s)" -lt "$deadline" ] || fail "RMOM bootstrap timed out"
-        sleep "$RMOM_BOOTSTRAP_RETRY_SECONDS"
-    done
-}
-
 activate_mode() {
     load_authorization
     resolve_stop_first
     require_quiescent
     check_demo_order_permissions deploy \
         || fail "demo order permission deploy check failed"
-    if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        validate_hedge_model_prior || fail "hedge model prior validation failed"
-    fi
 
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
@@ -1307,16 +1216,8 @@ activate_mode() {
     systemctl start liquidity-migration-account-execution.service
 
     start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
-    start_if "$CONTINUOUS_SLEEVE" liquidity-migration-bybit-continuous-demo.service
     start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
 
-    if sleeve_on "$CONTINUOUS_SLEEVE"; then
-        run_phase seed-residual-momentum seed_rmom
-        systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
-    fi
-    if sleeve_on "$CONTINUOUS_HEDGE_TIMER"; then
-        systemctl enable --now liquidity-migration-continuous-hedge.timer
-    fi
     systemctl enable --now liquidity-migration-demo-liveness.timer
     systemctl enable --now liquidity-migration-telegram-controls.service
     if mainnet_armed; then
@@ -1392,25 +1293,27 @@ stop_mainnet_mode() {
 ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-demo-liveness.timer
     liquidity-migration-mainnet-liveness.timer
-    liquidity-migration-continuous-hedge.timer
-    liquidity-migration-continuous-rmom-refresh.timer
     liquidity-migration-bybit-long-demo.service
     liquidity-migration-bybit-long-mainnet.service
-    liquidity-migration-bybit-continuous-demo.service
     liquidity-migration-bybit-carry-demo.service
     liquidity-migration-bybit-carry-mainnet.service
-    liquidity-migration-continuous-hedge.service
-    liquidity-migration-continuous-rmom-refresh.service
     liquidity-migration-demo-liveness.service
     liquidity-migration-mainnet-liveness.service
     liquidity-migration-telegram-controls.service
-    # Paper fleet, retired 2026-08-03. Kept in the stop list so the rollout
-    # that carries the retirement quiesces a host still running them; the
-    # manifest install then removes the unit files for good.
+    # Retired fleets stay in the stop list so the rollout that carries each
+    # retirement quiesces a host still running them; the manifest install
+    # then removes the unit files for good. Paper retired 2026-08-03; the
+    # continuous units left the deploy set 2026-08-03 (sleeve retired
+    # 2026-07-29).
     liquidity-migration-bybit-long-paper.service
     liquidity-migration-bybit-continuous-paper.service
     liquidity-migration-bybit-carry-paper.service
     liquidity-migration-paper-target-mirror.service
+    liquidity-migration-continuous-hedge.timer
+    liquidity-migration-continuous-rmom-refresh.timer
+    liquidity-migration-bybit-continuous-demo.service
+    liquidity-migration-continuous-hedge.service
+    liquidity-migration-continuous-rmom-refresh.service
 )
 # Owners stop last and start first: every mainnet producer declares
 # Requires=/After= on the mainnet owner. The retired paper owner stays here

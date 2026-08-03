@@ -53,14 +53,11 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
         WRAPPER,
         ROOT / "scripts" / "runtime" / "run_account_execution_service.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_long_demo_event_engine.sh",
-        ROOT / "scripts" / "runtime" / "run_bybit_continuous_demo_event_engine.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_carry_demo_event_engine.sh",
-        ROOT / "scripts" / "runtime" / "run_continuous_hedge.sh",
-        ROOT / "scripts" / "runtime" / "run_continuous_rmom_refresh.sh",
         ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh",
     ]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
-    for path in scripts[:6] + scripts[8:]:
+    for path in scripts:
         assert path.stat().st_mode & stat.S_IXUSR
     assert (ROOT / "scripts" / "vps" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
 
@@ -125,10 +122,6 @@ def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
         assert "MemoryHigh=" not in fragment, unit
         assert f"MemoryMax={maximum}" in fragment
         assert f"MemorySwapMax={swap}" in fragment
-    fragment = _unit("liquidity-migration-bybit-continuous-demo.service")
-    assert "MemoryHigh=768M" in fragment
-    assert "MemoryMax=896M" in fragment
-    assert "MemorySwapMax=384M" in fragment
 
 
 def test_demo_owner_is_bounded_but_never_reclaim_throttled() -> None:
@@ -165,9 +158,7 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
     # never_taken_down_with_it for why.
     ordered_only = {
         "liquidity-migration-bybit-long-demo.service": demo_owner,
-        "liquidity-migration-bybit-continuous-demo.service": demo_owner,
         "liquidity-migration-bybit-carry-demo.service": demo_owner,
-        "liquidity-migration-continuous-hedge.service": demo_owner,
     }
     pairs = {
         "liquidity-migration-bybit-long-mainnet.service": mainnet_owner,
@@ -191,8 +182,7 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
             assert stripped in unset, (producer, stripped)
     for runner in (
         "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
-        "scripts/runtime/run_continuous_hedge.sh",
+        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
     ):
         text = _read(runner)
         assert "place_order" not in text
@@ -219,7 +209,6 @@ def test_demo_producers_are_ordered_after_the_owner_but_never_taken_down_with_it
     owner = "liquidity-migration-account-execution.service"
     for producer in (
         "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-carry-demo.service",
     ):
         directives = [line for line in _unit(producer).splitlines() if not line.startswith("#")]
@@ -229,13 +218,6 @@ def test_demo_producers_are_ordered_after_the_owner_but_never_taken_down_with_it
         # A producer draining a cycle must not hold a restart for three minutes.
         assert "TimeoutStopSec=90" in directives, producer
         assert "TimeoutStopSec=180" not in directives, producer
-
-    # The hedge publishes into a durable inbox and already degrades in-process on
-    # dead-owner health; it declares no lifecycle dependency on the owner at all.
-    hedge = [line for line in _unit("liquidity-migration-continuous-hedge.service").splitlines() if not line.startswith("#")]
-    assert not [line for line in hedge if line.startswith("Requires=")]
-    assert f"Wants={owner}" not in hedge
-    assert owner in next(line for line in hedge if line.startswith("After="))
 
 
 def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -> None:
@@ -322,14 +304,12 @@ def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
     """Two tri-state parsers with eight accepted spellings each, plus an
     EXECUTION_ENVIRONMENT x latch consistency matrix, only re-derived values the unit
     files hard-code. The demo Telegram refusals were the same shape and were a latent
-    fleet-wide start failure: the two runners that had them would exit 2 on a variable
-    the third ignores, and no runner passes --telegram either way.
+    fleet-wide start failure: a runner that had them would exit 2 on a variable another
+    runner ignored, and no runner passes --telegram either way.
     """
     for runner in (
         "scripts/runtime/run_bybit_long_demo_event_engine.sh",
         "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
-        "scripts/runtime/run_continuous_hedge.sh",
     ):
         text = _read(runner)
         assert "ACCOUNT_PAPER_KERNEL_REQUIRED" not in text, runner
@@ -342,21 +322,11 @@ def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
         assert "case \"${EXECUTION_ENVIRONMENT:-}\" in" in text, runner
         assert "    demo) ;;" in text, runner
         assert "EXECUTION_ENVIRONMENT must be explicitly set" in text, runner
-    for runner in (
-        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_continuous_demo_event_engine.sh",
-    ):
-        text = _read(runner)
         assert (
             'if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then' in text
         ), runner
-    # Both mainnet-capable producer runners keep their strip verification verbatim.
-    for runner in (
-        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
-    ):
-        text = _read(runner)
+        # Both surviving runners are mainnet-capable and keep their strip
+        # verification verbatim.
         mainnet_arm = text[text.index("    mainnet)") : text.index("\n    *)\n        echo \"EXECUTION_ENVIRONMENT")]
         assert "A target producer must not receive venue credentials." in mainnet_arm, runner
         assert "A target producer must not receive REAL_MONEY; it submits no orders." in mainnet_arm, runner
@@ -450,21 +420,23 @@ def test_demo_strategy_units_use_one_validated_operational_profile() -> None:
         "BTC_TREND_GATE",
         "PER_POSITION_NOTIONAL_PCT_EQUITY",
     )
-    continuous_demo = _environment("liquidity-migration-bybit-continuous-demo.service")
     carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
-    for environment in (long_demo, continuous_demo, carry_demo):
+    for environment in (long_demo, carry_demo):
         assert set(environment).isdisjoint(sizing_keys)
     # Carry streams its klines like LONG; REST is the gap/funding fallback.
     assert carry_demo["WS_KLINES_ENABLED"] == "1"
     assert carry_demo["WS_KLINES_BOOTSTRAP_WORKERS"] == "2"
     long_runner = _read("scripts/runtime/run_bybit_long_demo_event_engine.sh")
-    continuous_runner = _read("scripts/runtime/run_bybit_continuous_demo_event_engine.sh")
-    hedge_runner = _read("scripts/runtime/run_continuous_hedge.sh")
-    for runner in (long_runner, continuous_runner, hedge_runner):
+    carry_runner = _read("scripts/runtime/run_bybit_carry_demo_event_engine.sh")
+    # Both runners take the one shared profile from ACCOUNT_RISK_POLICY_FILE and
+    # hand it to the workload; the flag name each engine reads differs.
+    for runner, flag in (
+        (long_runner, '--operational-profile-file'),
+        (carry_runner, '--risk-policy-file'),
+    ):
         assert 'ACCOUNT_RISK_POLICY_FILE' in runner
-        assert '--operational-profile-file' in runner
+        assert flag in runner
     assert long_demo["EXECUTION_ENVIRONMENT"] == "demo"
-    assert continuous_demo["EXECUTION_ENVIRONMENT"] == "demo"
     assert carry_demo["EXECUTION_ENVIRONMENT"] == "demo"
 
 
@@ -514,7 +486,6 @@ def test_install_prepares_the_demo_runtime_config_with_bounded_tree_normalizatio
     assert boundary.index("demo-tree-preflight") < boundary.index("demo-tree-normalize")
     assert "--create-missing" in boundary
     assert "chown -R" not in boundary
-    assert "--continuous-root" in boundary
     # The retired paper host config is removed, never re-provisioned.
     assert "retire_paper_host_config" in boundary
     retired = text[text.index("RETIRED_PAPER_CONFIG_DIR=") : text.index("prepare_demo_runtime_config()")]
@@ -535,7 +506,6 @@ def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it(
     text = _read(DEPLOY)
     activate = text[text.index("activate_mode()") : text.index('case "$MODE" in', text.index("activate_mode()"))]
     assert activate.index("load_authorization") < activate.index("systemctl start")
-    assert activate.index("validate_hedge_model_prior") < activate.index("systemctl start")
     assert activate.index("account-execution.service") < activate.index("bybit-long-demo.service")
     for forbidden in ("git fetch", "git checkout", "pip install", "lm_write_resolved", "sed -i"):
         assert forbidden not in activate
@@ -609,8 +579,6 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
 
 def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> None:
     text = _read(DEPLOY)
-    assert 'RMOM_BOOTSTRAP_TIMEOUT_SECONDS="${RMOM_BOOTSTRAP_TIMEOUT_SECONDS:-300}"' in text
-    assert 'RMOM_BOOTSTRAP_RETRY_SECONDS="${RMOM_BOOTSTRAP_RETRY_SECONDS:-10}"' in text
     assert "phase-start name=%s" in text
     assert "phase-ok name=%s elapsed_seconds=%s" in text
     assert "phase-group-start name=%s" in text
@@ -620,17 +588,8 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
         "install-locked-dependencies",
         "demo-tree-preflight",
         "demo-tree-normalize",
-        "seed-residual-momentum",
     ):
         assert phase in text
-
-    seed = text[text.index("seed_rmom()") : text.index("activate_mode()")]
-    gate_check = 'scripts/research/check_residual_momentum_gate.py --path "$gate_path"'
-    assert seed.index(gate_check) < seed.index("while true")
-    assert seed.index("systemctl is-failed --quiet") < seed.index(gate_check)
-    assert 'rmom-bootstrap path=reuse reason=current-valid-gate' in seed
-    assert 'rmom-bootstrap path=refresh reason=missing-stale-invalid-or-failed-unit' in seed
-    assert seed.count("systemctl start liquidity-migration-continuous-rmom-refresh.service") == 1
 
 
 def test_parallel_phase_group_waits_for_both_and_returns_the_failed_member() -> None:
@@ -663,71 +622,6 @@ printf 'captured-status=%s\n' "$status"
     assert "phase-group-failed name=test-group" in combined
     assert "left_status=7 right_status=0" in combined
     assert "captured-status=7" in combined
-
-
-def test_rmom_seed_reuses_valid_gate_but_repairs_a_failed_refresh_unit() -> None:
-    text = _read(DEPLOY)
-    seed = text[text.index("seed_rmom()") : text.index("activate_mode()")]
-    harness = r'''
-set -u
-PYTHON=fake_python
-RMOM_BOOTSTRAP_TIMEOUT_SECONDS=5
-RMOM_BOOTSTRAP_RETRY_SECONDS=1
-CONTINUOUS_SLEEVE=on
-AUTH_PROFILE=operational
-fail() { echo "fail:$*"; return 99; }
-sleeve_on() { [ "$1" = on ]; }
-fake_python() { echo gate-checked; return 0; }
-'''
-
-    reuse = subprocess.run(
-        [
-            "bash",
-            "-c",
-            harness
-            + r'''
-systemctl() {
-    if [ "$1" = is-failed ]; then return 1; fi
-    echo "unexpected-systemctl:$*"
-    return 0
-}
-'''
-            + seed
-            + "\nseed_rmom\n",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "rmom-bootstrap path=reuse" in reuse.stdout
-    assert "unexpected-systemctl" not in reuse.stdout
-
-    repair = subprocess.run(
-        [
-            "bash",
-            "-c",
-            harness
-            + r'''
-systemctl() {
-    case "$1" in
-        is-failed) return 0 ;;
-        reset-failed) echo reset-failed ;;
-        start) echo refresh-started ;;
-    esac
-    return 0
-}
-'''
-            + seed
-            + "\nseed_rmom\n",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "rmom-bootstrap path=refresh" in repair.stdout
-    assert "reset-failed" in repair.stdout
-    assert "refresh-started" in repair.stdout
-    assert "gate-checked" in repair.stdout
 
 
 def test_deploy_permission_probe_uses_only_bound_demo_credentials() -> None:
@@ -769,17 +663,17 @@ def test_resolved_sleeves_are_atomically_generated_then_root_bound() -> None:
     lib = _read("deploy/lib_sleeves.sh")
     writer = lib[lib.index("lm_write_resolved_sleeve_toggles()") : lib.index("lm_verify_resolved_sleeve_toggles()")]
     assert "chmod 0600" in writer
-    assert "CONTINUOUS_HEDGE_TIMER" in writer
+    assert 'mv "$_lr_tmp" "$LM_RESOLVED_SLEEVES_ENV"' in writer
     deploy = _read(DEPLOY)
     assert "chown root:root /etc/liquidity-migration/sleeves.resolved.env" in deploy
     assert "chmod 0600 /etc/liquidity-migration/sleeves.resolved.env" in deploy
-    rmom = _read("scripts/runtime/run_continuous_rmom_refresh.sh")
-    assert "lm_load_sleeve_toggles" not in rmom
-    assert "CONTINUOUS_SLEEVE is required" in rmom
-    assert "CONTINUOUS_PAPER_DATA_ROOT" not in rmom
-    assert rmom.count("precompute_residual_momentum.py") == 1
-    rmom_unit = _unit("liquidity-migration-continuous-rmom-refresh.service")
-    assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in rmom_unit
+    # Every producer that reads a toggle reads the resolved file, never the
+    # repo's own sleeves.env.
+    for unit in (
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-carry-demo.service",
+    ):
+        assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in _unit(unit), unit
 
 
 def test_workflow_runs_ci_on_push_and_only_manual_guarded_vps_modes() -> None:
@@ -967,21 +861,16 @@ def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> Non
     text = _read(DEPLOY)
     for gate in (
         'check_demo_order_permissions deploy \\\n        || fail',
-        'validate_hedge_model_prior || fail',
         '--confirm-demo-probe \\\n            || fail',
     ):
         assert gate in text, gate
-    # Inside verify_topology the same two probes route through verify_probe,
-    # which records a mismatch (fatal at the end of any mode but read-only
-    # `verify`) rather than swallowing a nonzero status.
+    # Inside verify_topology the venue probe routes through verify_probe, which
+    # records a mismatch (fatal at the end of any mode but read-only `verify`)
+    # rather than swallowing a nonzero status.
     verify = text[text.index("verify_topology()") : text.index("start_if()")]
     assert (
         'verify_probe demo-order-permissions "demo order permission verification failed" \\\n'
         "        check_demo_order_permissions verify" in verify
-    )
-    assert (
-        'verify_probe hedge-model-prior "hedge model prior validation failed" \\\n'
-        "            validate_hedge_model_prior" in verify
     )
     probe = text[text.index("verify_probe() {") : text.index("verify_unit() {")]
     assert "verify_note" in probe
@@ -1015,17 +904,12 @@ def test_oneshot_units_have_explicit_start_timeouts_and_memory_bounds() -> None:
     expected = {
         "liquidity-migration-demo-liveness.service": 120,
         "liquidity-migration-mainnet-liveness.service": 120,
-        "liquidity-migration-continuous-hedge.service": 300,
-        "liquidity-migration-continuous-rmom-refresh.service": 900,
     }
     for name, seconds in expected.items():
         unit = _unit(name)
         assert "Type=oneshot" in unit
         assert f"TimeoutStartSec={seconds}" in unit
         assert "MemoryMax=" in unit
-    rmom = _unit("liquidity-migration-continuous-rmom-refresh.service")
-    assert "MemoryHigh=1G" in rmom
-    assert "MemoryMax=1536M" in rmom
 
 
 def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> None:
@@ -1082,11 +966,11 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         '    case "$*" in *preflight*) return "$PREFLIGHT_STATUS" ;; esac\n'
         "    return 0\n"
         "}\n"
-        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + library[library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")]
         + text[
             text.index("# The single arming switch") : text.index("# verify_topology collects")
         ]
-        + text[text.index("start_if() {") : text.index("seed_rmom()")]
+        + text[text.index("start_if() {") : text.index("activate_mode()")]
         + text[
             text.index("MAINNET_OWNER_UNIT=") : text.index("ROLLOUT_DOWNSTREAM_UNITS=(")
         ]
@@ -1271,9 +1155,7 @@ def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
     generated = set(re.findall(r"printf '([A-Z_]+)=%s", writer))
     assert generated == {
         "LONG_SLEEVE",
-        "CONTINUOUS_SLEEVE",
         "CARRY_SLEEVE",
-        "CONTINUOUS_HEDGE_TIMER",
     }
 
     text = _read(DEPLOY)
@@ -1412,8 +1294,7 @@ def _verify_harness(
         "PYTHON=fake_python\n"
         "EXPECTED_COMMIT=abc123\n"
         "EXPECTED_COMMIT_EXPLICIT=1\n"
-        "LONG_SLEEVE=off\nCONTINUOUS_SLEEVE=off\nCARRY_SLEEVE=off\n"
-        "CONTINUOUS_HEDGE_TIMER=off\n"
+        "LONG_SLEEVE=off\nCARRY_SLEEVE=off\n"
         'mainnet_armed() { [ "${MAINNET_ARMED_STATE:-off}" = armed ]; }\n'
         f"ACTIVE_UNITS={active!r}\nENABLED_UNITS={enabled!r}\nFAILED_UNITS={failed!r}\n"
         f"PERMISSIONS_STATUS={permissions_status}\n"
@@ -1439,7 +1320,7 @@ def _verify_harness(
         "    esac\n"
         "    return 0\n"
         "}\n"
-        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + library[library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")]
         + text[text.index("unit_on() {") : text.index("check_demo_order_permissions() {")]
         + text[text.index("verify_topology()") : text.index("start_if()")]
     )
@@ -1484,7 +1365,7 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
                 "activate",
                 "",
                 "",
-                failed="liquidity-migration-continuous-hedge.service",
+                failed="liquidity-migration-demo-liveness.service",
                 permissions_status=1,
             )
             + "\nverify_topology\n",
@@ -1498,7 +1379,7 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
         "verify-mismatch demo owner is not active and enabled",
         "verify-mismatch liveness timer is not active",
         "verify-mismatch telegram controls daemon is not active",
-        "verify-mismatch liquidity-migration-continuous-hedge.service is failed",
+        "verify-mismatch liquidity-migration-demo-liveness.service is failed",
         "verify-mismatch demo order permission verification failed",
     ):
         assert finding in combined, finding
@@ -1601,7 +1482,7 @@ def _quiescence_harness(tmp_path: Path, stop_first: str, mainnet: str) -> str:
         "    esac\n"
         "    return 0\n"
         "}\n"
-        + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
+        + library[library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")]
         + text[text.index("# The single arming switch") : text.index("# verify_topology collects")]
         + text[text.index("running_liqmig_units() {") : text.index("git_fetch() {")]
         + text[
@@ -1727,7 +1608,7 @@ def test_rollout_gates_on_a_flat_account_for_a_funded_fleet_and_reports_for_a_de
             f"REQUIRE_FLAT={require_flat}\n"
             + text[text.index("fail() {") : text.index("run_phase_pair() {")]
             + library[
-                library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")
+                library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")
             ]
             + text[
                 text.index("# The single arming switch") : text.index("# verify_topology collects")

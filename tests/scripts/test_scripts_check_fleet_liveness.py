@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,21 +60,6 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
         label="demo",
     )
     assert future is not None and "future-dated" in future.message
-
-
-def test_rmom_staleness_empty_fresh_and_stale() -> None:
-    DAY = 24 * HOUR
-    now = 1_000 * DAY
-    # empty gate (no rmom row) -> CRITICAL silent-blackout
-    empty = M.evaluate_rmom_staleness(max_rmom_day_ts=0, now_ms=now, max_stale_days=2, label="cont")
-    assert empty is not None and empty.severity == M.CRITICAL and "EMPTY" in empty.message
-    # today's row (a few hours ago) -> fresh, no alert
-    assert M.evaluate_rmom_staleness(max_rmom_day_ts=now - 3 * HOUR, now_ms=now, max_stale_days=2, label="cont") is None
-    # yesterday's row -> within the 2-day window, no alert (refresh ran on time)
-    assert M.evaluate_rmom_staleness(max_rmom_day_ts=now - 1 * DAY, now_ms=now, max_stale_days=2, label="cont") is None
-    # 3 days stale -> CRITICAL (refresh failed; live decile silently empties)
-    stale = M.evaluate_rmom_staleness(max_rmom_day_ts=now - 3 * DAY, now_ms=now, max_stale_days=2, label="cont")
-    assert stale is not None and stale.severity == M.CRITICAL and "STALE" in stale.message
 
 
 def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
@@ -158,14 +142,14 @@ def test_static_and_disabled_services_stay_silent_while_inactive() -> None:
     running" turns inactive into an alert.
     """
     states = {
-        "hedge.service": "inactive",
+        "oneshot.service": "inactive",
         "retired.service": "inactive",
         "runtime.service": "inactive",
         "unknowable.service": "inactive",
         "healthy.service": "active",
     }
     enabled = {
-        "hedge.service": "static",
+        "oneshot.service": "static",
         "retired.service": "disabled",
         "runtime.service": "enabled-runtime",
         "unknowable.service": "unknown",
@@ -237,7 +221,7 @@ def test_unit_runtime_metadata_uses_systemd_generation_and_boottime(
 
 def test_unit_states_timers_alert_on_not_active() -> None:
     """A stopped or disabled TIMER reports 'inactive', never 'failed', so failed-only
-    alerting leaves a dead hedge timer invisible. Timers must be 'active' (waiting).
+    alerting leaves a dead timer invisible. Timers must be 'active' (waiting).
     """
     states = {
         "good.timer": "active",
@@ -269,29 +253,6 @@ def test_required_account_owners_must_be_active() -> None:
         )
         == []
     )
-
-
-def test_hedge_model_prior_liveness_checks_integrity_not_age(tmp_path) -> None:
-    now_ms = int(datetime(2026, 7, 16, tzinfo=UTC).timestamp() * 1000)
-    shipped = REPO_ROOT / "deploy" / "hedge_warmstart" / "bybit_warmstart.csv"
-
-    assert M.gather_hedge_model_prior_alerts(model_prior_path=shipped, now_ms=now_ms) == []
-
-    missing = M.gather_hedge_model_prior_alerts(
-        model_prior_path=tmp_path / "missing.csv",
-        now_ms=now_ms,
-    )
-    assert len(missing) == 1
-    assert missing[0].key == "hedge_model_prior_invalid"
-    assert missing[0].severity == M.WARNING
-    assert "fail closed" in missing[0].message
-
-    critical = M.gather_hedge_model_prior_alerts(
-        model_prior_path=tmp_path / "missing.csv",
-        now_ms=now_ms,
-        book_nonflat=True,
-    )
-    assert critical[0].severity == M.CRITICAL
 
 
 def test_ws_staleness_threshold() -> None:
@@ -735,44 +696,6 @@ def test_owner_health_startup_grace_covers_absent_evidence_but_never_a_blocked_o
     assert inside_grace[0].severity == M.CRITICAL
 
 
-def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    root = tmp_path / "bybit-continuous-demo-event"
-    root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "ledger-reset",
-                    "ts_ms": now,
-                    "mode": "ledger_reset_boundary",
-                }
-            ]
-        ),
-        root,
-        "continuous_fade_demo_cycles",
-        partition_by=(),
-    )
-    args = argparse.Namespace(
-        max_cycle_age_min=10,
-        max_rmom_stale_days=2.0,
-    )
-
-    alerts = M.gather_continuous_alerts(
-        continuous_root=root,
-        now_ms=now,
-        args=args,
-    )
-
-    assert [alert.key for alert in alerts] == [f"liveness:{root.name}"]
-
-
 def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:
     from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
@@ -1183,75 +1106,15 @@ def test_demo_account_alerts_coalesce_only_the_dependent_owner_echo() -> None:
     assert M.coalesce_demo_account_alerts([], [dependent]) == [dependent]
 
 
-def test_gather_continuous_alerts_warns_on_empty_inputs(tmp_path) -> None:
-    """A zero universe/store remains a strategy-input failure."""
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6, max_rmom_stale_days=2.0)
-    root = tmp_path / "bybit-continuous-demo-event"
-    root.mkdir()
-    # Fresh cycle + fresh rmom, but EMPTY universe and EMPTY kline store -> silent-zero-signal.
-    write_dataset(
-        pl.DataFrame(
-            [{"cycle_id": "c1", "ts_ms": now, "max_rmom_day_ts": now, "universe_symbols": 0, "kline_store_rows": 0}]
-        ),
-        root,
-        "continuous_fade_demo_cycles",
-        partition_by=(),
-    )
-    keys = {a.key for a in M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)}
-    assert "continuous_universe_empty:bybit-continuous-demo-event" in keys
-    assert "continuous_kline_store_empty:bybit-continuous-demo-event" in keys
-
-    assert (
-        M.gather_continuous_alerts(
-            continuous_root=root,
-            now_ms=now,
-            args=args,
-            cycle_checks=False,
-        )
-        == []
-    )
-
-
-def test_gather_continuous_healthy_inputs_are_clean(tmp_path) -> None:
-    import polars as pl
-
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
-    now = 10_000_000
-    root = tmp_path / "bybit-continuous-demo-event"
-    root.mkdir()
-
-    from liquidity_migration.data.storage import write_dataset
-
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "c1",
-                    "ts_ms": now,
-                    "max_rmom_day_ts": now,
-                    "universe_symbols": 10,
-                    "kline_store_rows": 100,
-                }
-            ]
-        ),
-        root,
-        "continuous_fade_demo_cycles",
-        partition_by=(),
-    )
-    alerts = M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)
-    assert alerts == []
-
-
-def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alarm(
+def test_current_generation_completion_outranks_a_newer_in_flight_cycle_row(
     tmp_path,
 ) -> None:
+    """Liveness comes from the receipt's completion time bound to its own cycle row.
+
+    A newer output may be durable while its capture/outcome append is still in
+    flight; taking the tail row instead of the receipt's row would read a cycle
+    nothing has finished yet as the proof the daemon is alive.
+    """
     import polars as pl
 
     from liquidity_migration.data.storage import write_dataset
@@ -1261,7 +1124,7 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
     )
 
     now = 1_000 * HOUR
-    root = tmp_path / "bybit-continuous-demo-event"
+    root = tmp_path / "bybit-carry-demo-event"
     root.mkdir()
     completed_cycle_ts = now - 20 * MIN
     write_dataset(
@@ -1270,32 +1133,25 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
                 {
                     "cycle_id": "completed",
                     "ts_ms": completed_cycle_ts,
-                    "max_rmom_day_ts": now,
-                    "universe_symbols": 10,
-                    # This is cycle coverage at its causal start, not the
-                    # manager's store size after the seven-minute cold cycle.
-                    "kline_store_rows": 0,
+                    "decision_stale": False,
+                    "decision_error": "",
                 },
                 {
-                    # A newer output may be durable while its capture/outcome
-                    # append is still in flight. It must not outrank the last
-                    # fully evidenced completion receipt.
                     "cycle_id": "evidence-in-flight",
                     "ts_ms": now - MIN,
-                    "max_rmom_day_ts": 0,
-                    "universe_symbols": 0,
-                    "kline_store_rows": 0,
+                    "decision_stale": True,
+                    "decision_error": "half-written",
                 },
             ]
         ),
         root,
-        "continuous_fade_demo_cycles",
+        "carry_hold_demo_cycles",
         partition_by=(),
     )
     write_strategy_cycle_health(
         root,
         StrategyCycleHealth(
-            sleeve="continuous",
+            sleeve="carry",
             environment="demo",
             cycle_id="completed",
             cycle_ts_ms=completed_cycle_ts,
@@ -1305,16 +1161,18 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
         ),
     )
 
-    alerts = M.gather_continuous_alerts(
-        continuous_root=root,
+    alerts = M.gather_carry_alerts(
+        carry_root=root,
         now_ms=now,
-        args=SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2),
+        args=SimpleNamespace(max_cycle_age_min=10),
         unit_runtime=M.UnitRuntime(
             invocation_id=CURRENT_INVOCATION_ID,
             active_age_minutes=20.0,
         ),
     )
 
+    # The 20-minute-old cycle row is inside the window because the receipt says
+    # it completed a minute ago, and the in-flight row's staleness is not read.
     assert alerts == []
 
 
@@ -1333,7 +1191,7 @@ def test_current_generation_completion_time_is_sampled_after_receipt_read(
     outer_now = 1_000 * HOUR
     completed_ms = outer_now + 6_000
     cycle_ts = outer_now - MIN
-    root = tmp_path / "bybit-continuous-demo-event"
+    root = tmp_path / "bybit-carry-demo-event"
     root.mkdir()
     write_dataset(
         pl.DataFrame(
@@ -1341,20 +1199,19 @@ def test_current_generation_completion_time_is_sampled_after_receipt_read(
                 {
                     "cycle_id": "completed-during-watchdog-run",
                     "ts_ms": cycle_ts,
-                    "max_rmom_day_ts": outer_now,
-                    "universe_symbols": 10,
-                    "kline_store_rows": 100,
+                    "decision_stale": False,
+                    "decision_error": "",
                 }
             ]
         ),
         root,
-        "continuous_fade_demo_cycles",
+        "carry_hold_demo_cycles",
         partition_by=(),
     )
     write_strategy_cycle_health(
         root,
         StrategyCycleHealth(
-            sleeve="continuous",
+            sleeve="carry",
             environment="demo",
             cycle_id="completed-during-watchdog-run",
             cycle_ts_ms=cycle_ts,
@@ -1367,20 +1224,20 @@ def test_current_generation_completion_time_is_sampled_after_receipt_read(
         invocation_id=CURRENT_INVOCATION_ID,
         active_age_minutes=20.0,
     )
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
+    args = SimpleNamespace(max_cycle_age_min=10)
     monkeypatch.setattr(M, "_now_ms", lambda: completed_ms + 1)
 
     assert (
-        M.gather_continuous_alerts(
-            continuous_root=root,
+        M.gather_carry_alerts(
+            carry_root=root,
             args=args,
             unit_runtime=runtime,
         )
         == []
     )
 
-    stale_outer_sample = M.gather_continuous_alerts(
-        continuous_root=root,
+    stale_outer_sample = M.gather_carry_alerts(
+        carry_root=root,
         now_ms=outer_now,
         args=args,
         unit_runtime=runtime,
@@ -1404,26 +1261,25 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
     now = 1_000 * HOUR
     old_cycle_ts = now - 2 * MIN
     new_cycle_ts = now - MIN
-    root = tmp_path / "bybit-continuous-demo-event"
+    root = tmp_path / "bybit-carry-demo-event"
     root.mkdir()
     old_row = {
         "cycle_id": "already-completed",
         "ts_ms": old_cycle_ts,
-        "max_rmom_day_ts": now,
-        "universe_symbols": 10,
-        "kline_store_rows": 100,
+        "decision_stale": False,
+        "decision_error": "",
     }
     new_row = {**old_row, "cycle_id": "concurrent-completion", "ts_ms": new_cycle_ts}
     write_dataset(
         pl.DataFrame([old_row]),
         root,
-        "continuous_fade_demo_cycles",
+        "carry_hold_demo_cycles",
         partition_by=(),
     )
     write_strategy_cycle_health(
         root,
         StrategyCycleHealth(
-            sleeve="continuous",
+            sleeve="carry",
             environment="demo",
             cycle_id="already-completed",
             cycle_ts_ms=old_cycle_ts,
@@ -1439,13 +1295,13 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
         write_dataset(
             pl.DataFrame([old_row, new_row]),
             root,
-            "continuous_fade_demo_cycles",
+            "carry_hold_demo_cycles",
             partition_by=(),
         )
         write_strategy_cycle_health(
             root,
             StrategyCycleHealth(
-                sleeve="continuous",
+                sleeve="carry",
                 environment="demo",
                 cycle_id="concurrent-completion",
                 cycle_ts_ms=new_cycle_ts,
@@ -1459,10 +1315,10 @@ def test_completion_receipt_is_observed_before_cycle_dataset(
     monkeypatch.setattr(M, "read_dataset_columns", read_while_next_cycle_completes)
 
     assert (
-        M.gather_continuous_alerts(
-            continuous_root=root,
+        M.gather_carry_alerts(
+            carry_root=root,
             now_ms=now,
-            args=SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2),
+            args=SimpleNamespace(max_cycle_age_min=10),
             unit_runtime=M.UnitRuntime(
                 invocation_id=CURRENT_INVOCATION_ID,
                 active_age_minutes=20.0,
@@ -1478,7 +1334,7 @@ def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> N
     from liquidity_migration.data.storage import write_dataset
 
     now = 1_000 * HOUR
-    root = tmp_path / "bybit-continuous-demo-event"
+    root = tmp_path / "bybit-carry-demo-event"
     root.mkdir()
     write_dataset(
         pl.DataFrame(
@@ -1486,21 +1342,20 @@ def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> N
                 {
                     "cycle_id": "prior-generation",
                     "ts_ms": now - 60 * MIN,
-                    "max_rmom_day_ts": now,
-                    "universe_symbols": 10,
-                    "kline_store_rows": 100,
+                    "decision_stale": False,
+                    "decision_error": "",
                 }
             ]
         ),
         root,
-        "continuous_fade_demo_cycles",
+        "carry_hold_demo_cycles",
         partition_by=(),
     )
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
+    args = SimpleNamespace(max_cycle_age_min=10)
 
     assert (
-        M.gather_continuous_alerts(
-            continuous_root=root,
+        M.gather_carry_alerts(
+            carry_root=root,
             now_ms=now,
             args=args,
             unit_runtime=M.UnitRuntime(
@@ -1511,8 +1366,8 @@ def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> N
         == []
     )
 
-    expired = M.gather_continuous_alerts(
-        continuous_root=root,
+    expired = M.gather_carry_alerts(
+        carry_root=root,
         now_ms=now,
         args=args,
         unit_runtime=M.UnitRuntime(
@@ -1608,14 +1463,12 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     so a missing sleeves.env can never resurrect an order-submitting sleeve.
     """
     for off in ("off", "OFF", "false", "0", "no"):
-        monkeypatch.setenv("CONTINUOUS_SLEEVE", off)
-        assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False, off
+        monkeypatch.setenv("CARRY_SLEEVE", off)
+        assert M._sleeve_on("CARRY_SLEEVE", default="off") is False, off
     for on in ("on", "ON", "1", "true", "yes"):
-        monkeypatch.setenv("CONTINUOUS_SLEEVE", on)
-        assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is True, on
+        monkeypatch.setenv("CARRY_SLEEVE", on)
+        assert M._sleeve_on("CARRY_SLEEVE", default="off") is True, on
     # Unset -> fail-safe default OFF for every sleeve.
-    monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
-    assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False
     monkeypatch.delenv("LONG_SLEEVE", raising=False)
     assert M._sleeve_on("LONG_SLEEVE") is False
     monkeypatch.delenv("CARRY_SLEEVE", raising=False)
@@ -1624,16 +1477,12 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
 
 def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     monkeypatch.setenv("CARRY_SLEEVE", "on")
 
     units = M._default_units_for_toggles()
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-continuous-demo.service" in units
-    assert "liquidity-migration-continuous-hedge.timer" in units
-    assert "liquidity-migration-continuous-hedge.service" in units
     assert "liquidity-migration-bybit-carry-demo.service" in units
 
     monkeypatch.setenv("CARRY_SLEEVE", "off")
@@ -1651,7 +1500,7 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
     captured_runtime_units: list[str] = []
     _stub_account_authority(monkeypatch)
     monkeypatch.setenv("LONG_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CARRY_SLEEVE", "on")
     monkeypatch.setattr(
         M,
         "_unit_states",
@@ -1671,8 +1520,6 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
             "demo",
             "--unit",
             "operator-extra.timer",
-            "--continuous-root",
-            "",
             "--long-root",
             "",
             "--state-file",
@@ -1681,24 +1528,23 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
     )
 
     assert M.main() == 0
-    assert M._CONTINUOUS_DEMO_UNIT in captured_runtime_units
+    assert M._CARRY_DEMO_UNIT in captured_runtime_units
 
 
 def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> None:
     monkeypatch.delenv("ACCOUNT_EXECUTION_KERNEL_REQUIRED", raising=False)
     monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CARRY_SLEEVE", "on")
 
     units = M._default_units_for_toggles()
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-continuous-demo.service" in units
+    assert "liquidity-migration-bybit-carry-demo.service" in units
 
 
 def test_demo_account_scope_returns_the_toggle_derived_demo_units(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     monkeypatch.setenv("CARRY_SLEEVE", "on")
 
     units = M._default_units_for_scope("demo")
@@ -1707,11 +1553,9 @@ def test_demo_account_scope_returns_the_toggle_derived_demo_units(monkeypatch) -
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert M._MAINNET_ACCOUNT_OWNER_UNIT not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-bybit-carry-demo.service" in units
-    assert "liquidity-migration-continuous-rmom-refresh.timer" in units
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-    assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))
+    monkeypatch.setenv("CARRY_SLEEVE", "off")
+    assert "liquidity-migration-bybit-carry-demo.service" not in (M._default_units_for_scope("demo"))
 
 
 def test_account_scope_defaults_from_bound_environment(monkeypatch) -> None:
@@ -1733,7 +1577,7 @@ def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) 
     inventory is unconditional and no demo unit may leak in.
     """
 
-    for toggle in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CARRY_SLEEVE"):
+    for toggle in ("LONG_SLEEVE", "CARRY_SLEEVE"):
         monkeypatch.setenv(toggle, "on")
 
     units = M._default_units_for_scope("mainnet")
@@ -1750,15 +1594,12 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     calls: list[tuple[str, str]] = []
     monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "on")
     monkeypatch.setenv("LONG_MAINNET_SLEEVE", "on")
-    # On so the demo hedge-prior block is reachable and its skip is load-bearing.
-    monkeypatch.setenv("CONTINUOUS_HEDGE_TIMER", "on")
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
     for name, label in (
         ("gather_account_health_alerts", "reconciliation"),
         ("gather_demo_rule_alerts", "demo_rules"),
-        ("gather_hedge_model_prior_alerts", "hedge_prior"),
     ):
         monkeypatch.setattr(M, name, lambda _label=label, **_kwargs: calls.append((_label, "")) or [])
     # Each gather also reports the root it was handed: a mainnet-labelled call
@@ -1770,7 +1611,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     )
     for name, root_kwarg in (
         ("gather_account_owner_health_alerts", "account_root"),
-        ("gather_continuous_alerts", "continuous_root"),
         ("gather_carry_alerts", "carry_root"),
         ("gather_long_alerts", "long_root"),
     ):
@@ -1845,19 +1685,6 @@ def test_mainnet_scope_cooldowns_cannot_collide_with_the_demo_watchdog(tmp_path,
     assert not (cache / "liveness_watchdog.json").exists()
 
 
-def test_hedge_lifecycle_monitored_during_continuous_off_winddown(monkeypatch) -> None:
-    monkeypatch.setenv("LONG_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_HEDGE_TIMER", "on")
-
-    units = M._default_units_for_toggles()
-
-    assert "liquidity-migration-bybit-continuous-demo.service" not in units
-    assert "liquidity-migration-continuous-hedge.timer" in units
-    assert "liquidity-migration-continuous-hedge.service" in units
-
-
 def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, capsys) -> None:
     """``send_telegram_message`` returns False without raising when the TELEGRAM_* env is
     missing or the API answers non-2xx. An undelivered alert must not advance its
@@ -1879,8 +1706,6 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
         [
             "check_fleet_liveness.py",
             "--telegram",
-            "--continuous-root",
-            "",
             "--long-root",
             "",
             "--state-file",
@@ -1912,8 +1737,6 @@ def _run_both_roots_skipped(monkeypatch) -> None:
         "sys.argv",
         [
             "check_fleet_liveness.py",
-            "--continuous-root",
-            "",
             "--long-root",
             "",
         ],
@@ -1953,8 +1776,6 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
         "sys.argv",
         [
             "check_fleet_liveness.py",
-            "--continuous-root",
-            "",
             "--long-root",
             "",
             "--state-file",
@@ -1965,65 +1786,39 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
     assert explicit.exists()
 
 
-def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -> None:
-    """When ``--continuous-root`` IS provided the state file still defaults to
-    ``<continuous-root>/.cache/liveness_watchdog.json``: the fallback's repo anchoring
-    must not perturb the populated-root case.
+def test_a_populated_sleeve_root_does_not_drive_the_state_dir(tmp_path, monkeypatch) -> None:
+    """A sleeve root never decides where the cooldown state lives any more.
+
+    The state file used to sit under the first sleeve root that was set, which
+    kept recreating a retired sleeve's directory just to hold it. Repo data is
+    the one anchor now, whether or not a sleeve root is given.
     """
-    croot = tmp_path / "bybit-continuous-demo-event"
-    croot.mkdir()
+    sandbox_repo = tmp_path / "repo"
+    sandbox_repo.mkdir()
+    carry_root = tmp_path / "bybit-carry-demo-event"
+    carry_root.mkdir()
     _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_REPO_ROOT", sandbox_repo)
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         "sys.argv",
         [
             "check_fleet_liveness.py",
-            "--continuous-root",
-            str(croot),
+            "--carry-root",
+            str(carry_root),
             "--long-root",
             "",
         ],
     )
     assert M.main() == 0
-    assert (croot / ".cache" / "liveness_watchdog.json").exists()
+    assert (sandbox_repo / "data" / ".cache" / "liveness_watchdog.json").exists()
+    assert not (carry_root / ".cache").exists()
 
 
 # --------------------------------------------------------------------------- #
 # Watchdog / kill-switch / telegram alerting
 # --------------------------------------------------------------------------- #
-def test_rmom_timer_not_monitored_when_continuous_off(monkeypatch) -> None:
-    """With the continuous sleeve off (the documented LONG-only kill switch) the deploy
-    disables the rmom-refresh timer, so the watchdog must not monitor it or it pages
-    CRITICAL forever on a timer the deploy intentionally disabled.
-    """
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-
-    units = M._default_units_for_toggles()
-
-    # The rmom-refresh service/timer must be ABSENT when the continuous sleeve is off.
-    for u in (
-        "liquidity-migration-continuous-rmom-refresh.service",
-        "liquidity-migration-continuous-rmom-refresh.timer",
-    ):
-        assert u not in units, u
-    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    # Long sleeve units still present.
-    assert "liquidity-migration-bybit-long-demo.service" in units
-
-
-def test_continuous_rmom_refresh_on_predicate(monkeypatch) -> None:
-    """The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
-    exactly: true iff the CONTINUOUS sleeve is on."""
-    for value, expected in (("off", False), ("on", True)):
-        monkeypatch.setenv("CONTINUOUS_SLEEVE", value)
-        assert M._continuous_rmom_refresh_on() is expected, value
-    # Unset -> fail-safe off.
-    monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
-    assert M._continuous_rmom_refresh_on() is False
-
-
 def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     """A manual or cron invocation from another CWD must not silently disable a safety
     gather: every default root resolves against the repo dir, not the relative working
@@ -2032,12 +1827,10 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     parser = M.build_arg_parser()
     args = parser.parse_args([])
     for attr in (
-        "continuous_root",
         "long_root",
         "carry_root",
         "carry_mainnet_root",
         "long_mainnet_root",
-        "hedge_model_prior",
         "account_root",
         "account_capture_root",
     ):
@@ -2050,7 +1843,6 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
 
 def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     roots = {
-        "CONTINUOUS_DEMO_DATA_ROOT": "/fresh/continuous-demo",
         "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
         "CARRY_DEMO_DATA_ROOT": "/fresh/carry-demo",
         "ACCOUNT_EXECUTION_ROOT": "/fresh/demo-account",
@@ -2061,7 +1853,6 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
 
     args = M.build_arg_parser().parse_args([])
 
-    assert args.continuous_root == roots["CONTINUOUS_DEMO_DATA_ROOT"]
     assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
     assert args.carry_root == roots["CARRY_DEMO_DATA_ROOT"]
     assert args.account_root == roots["ACCOUNT_EXECUTION_ROOT"]
@@ -2156,8 +1947,6 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--continuous-root",
-        "",
         "--long-root",
         "",
         "--state-file",
@@ -2200,8 +1989,6 @@ def test_main_routes_alerts_and_cleared_notes_to_the_alerts_channel(tmp_path, mo
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--continuous-root",
-        "",
         "--long-root",
         "",
         "--state-file",
@@ -2232,8 +2019,6 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--continuous-root",
-        "",
         "--long-root",
         "",
         "--state-file",
@@ -2333,53 +2118,10 @@ def test_notification_delivery_staleness(tmp_path: Path) -> None:
     assert corrupt is not None and "unreadable" in corrupt.message
 
 
-def test_oneshot_runtime_alert() -> None:
-    assert (
-        M.evaluate_oneshot_runtime(
-            unit="hedge.service",
-            max_seconds=180.0,
-            start_monotonic_usec=None,
-            exit_monotonic_usec=None,
-        )
-        is None
-    )
-    # Currently running (exit stamp older than start): no alert.
-    assert (
-        M.evaluate_oneshot_runtime(
-            unit="hedge.service",
-            max_seconds=180.0,
-            start_monotonic_usec=2_000_000,
-            exit_monotonic_usec=1_000_000,
-        )
-        is None
-    )
-    # Completed within bound.
-    assert (
-        M.evaluate_oneshot_runtime(
-            unit="hedge.service",
-            max_seconds=180.0,
-            start_monotonic_usec=1_000_000,
-            exit_monotonic_usec=1_000_000 + 90_000_000,
-        )
-        is None
-    )
-    slow = M.evaluate_oneshot_runtime(
-        unit="hedge.service",
-        max_seconds=180.0,
-        start_monotonic_usec=1_000_000,
-        exit_monotonic_usec=1_000_000 + 240_000_000,
-    )
-    assert slow is not None
-    assert slow.severity == M.WARNING
-    assert "240s" in slow.message
-
-
 def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
     return [
         "check_fleet_liveness.py",
         "--telegram",
-        "--continuous-root",
-        "",
         "--long-root",
         "",
         "--state-file",

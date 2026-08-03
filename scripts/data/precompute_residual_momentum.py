@@ -209,9 +209,9 @@ def _assert_append_overlap_matches(
             "this raise fire once per root — confirm the recorded change point, then "
             "rerun with --full-rewrite; (b) no definition change means the SOURCE "
             "residuals moved under a stable row, which is drift to investigate before "
-            "rewriting anything. The deployed daily refresh is unaffected either way: "
-            "run_continuous_rmom_refresh.sh already passes --full-rewrite because live "
-            "roots are rolling stores, not stable archives."
+            "rewriting anything. A deployed daily refresh, if one is ever "
+            "reinstated, should pass --full-rewrite because live roots are "
+            "rolling stores, not stable archives."
         )
     return joined.height
 

@@ -16,9 +16,6 @@ unit shapes.
 | `liquidity-migration-account-execution.service` | Sole Bybit demo order, fill, position, funding, protection, journal, and health owner |
 | `liquidity-migration-bybit-long-demo.service` | LONG target producer |
 | `liquidity-migration-bybit-carry-demo.service` | CARRY target producer |
-| `liquidity-migration-bybit-continuous-demo.service` | CONTINUOUS component-target producer |
-| `liquidity-migration-continuous-hedge.service` | Demo-only hedge target publisher |
-| `liquidity-migration-continuous-rmom-refresh.service` | Residual-momentum refresh |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume/market-close) — the sole `getUpdates` consumer |
 | `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |

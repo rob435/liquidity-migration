@@ -16,7 +16,7 @@ shell now only pins PATH and execs this module. Safe defaults are unchanged:
 * only initially-active daemons/timers are restarted and verified, unless
   ``--leave-stopped`` is selected for a controlled evidence cutover
 * configs, locks, reports, signal files, market-data caches, and the
-  continuous account-equity high-water risk state are preserved
+  account-equity high-water risk state are preserved
 """
 
 from __future__ import annotations
@@ -68,7 +68,6 @@ from liquidity_migration.policy.systemd_environment import (
 _LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _STRATEGY_ROOTS = (
     "data/bybit-long-demo-event",
-    "data/bybit-continuous-demo-event",
     "data/bybit-carry-demo-event",
 )
 _SLEEVE_LEDGER_TARGETS = {
@@ -77,12 +76,6 @@ _SLEEVE_LEDGER_TARGETS = {
         "data/bybit-long-demo-event/strategy_event_tape.jsonl",
         "data/bybit-long-demo-event/strategy_event_decision_tape.jsonl",
         "data/bybit-long-demo-event/strategy_target_scheduling_capture.jsonl",
-    ),
-    "continuous": (
-        "data/bybit-continuous-demo-event/continuous_fade_demo_cycles",
-        "data/bybit-continuous-demo-event/strategy_event_tape.jsonl",
-        "data/bybit-continuous-demo-event/strategy_event_decision_tape.jsonl",
-        "data/bybit-continuous-demo-event/strategy_target_scheduling_capture.jsonl",
     ),
     "carry": (
         "data/bybit-carry-demo-event/carry_hold_demo_cycles",
@@ -93,23 +86,17 @@ _SLEEVE_LEDGER_TARGETS = {
 }
 _SLEEVE_ROOTS = {
     "long": ("data/bybit-long-demo-event",),
-    "continuous": ("data/bybit-continuous-demo-event",),
     "carry": ("data/bybit-carry-demo-event",),
 }
-_SLEEVE_ORDER = ("long", "continuous", "carry")
+_SLEEVE_ORDER = ("long", "carry")
 
 # The account is shared, so every target producer and both account owners must
 # be quiesced even for a one-sleeve reset. Producers stop before owners; this
 # prevents new targets from being queued while their sole consumer is down.
 STOP_UNITS = (
     "liquidity-migration-demo-liveness.timer",
-    "liquidity-migration-continuous-hedge.timer",
-    "liquidity-migration-continuous-rmom-refresh.timer",
     "liquidity-migration-bybit-long-demo.service",
-    "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-carry-demo.service",
-    "liquidity-migration-continuous-hedge.service",
-    "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
     "liquidity-migration-account-execution.service",
 )
@@ -117,17 +104,12 @@ STOP_UNITS = (
 # credential file selected by --env-file (after symlink/path resolution).
 ACCOUNT_BOUND_UNITS = ("liquidity-migration-account-execution.service",)
 NON_RESTARTABLE_ONESHOTS = (
-    "liquidity-migration-continuous-hedge.service",
-    "liquidity-migration-continuous-rmom-refresh.service",
     "liquidity-migration-demo-liveness.service",
 )
 OWNER_RESTART_UNITS = ("liquidity-migration-account-execution.service",)
 DOWNSTREAM_RESTART_UNITS = (
     "liquidity-migration-bybit-long-demo.service",
-    "liquidity-migration-bybit-continuous-demo.service",
     "liquidity-migration-bybit-carry-demo.service",
-    "liquidity-migration-continuous-rmom-refresh.timer",
-    "liquidity-migration-continuous-hedge.timer",
     "liquidity-migration-demo-liveness.timer",
 )
 RESTART_UNITS = OWNER_RESTART_UNITS + DOWNSTREAM_RESTART_UNITS
@@ -188,7 +170,7 @@ Options:
   --leave-stopped           execute the reset but leave every managed unit stopped;
                             required before explicit demo-owner staging
   --dry-run                 explicit preview (the default)
-  --sleeves LIST            all (default), long, continuous, carry, or comma-separated list
+  --sleeves LIST            all (default), long, carry, or comma-separated list
   --archive-dir DIR         archive destination (default: data/_archive)
   --label LABEL             optional safe suffix added after the UTC timestamp
   --include-reports         also archive/reset reports/ in selected roots
@@ -197,9 +179,6 @@ Options:
   --account-env-file FILE   demo owner route env (default: /etc/liquidity-migration/account-execution.env)
   --settle-seconds N        wait before restart verification (default: 3; max: 60)
   -h, --help                show this help
-
-After a continuous reset it writes a fresh demo cycle heartbeat recording the
-venue-verified flat boundary.
 
 The account-owner root, intent inbox, raw capture, and strategy telemetry are
 archived in full before a fresh epoch is created; the reset additionally
@@ -309,7 +288,7 @@ def parse_sleeves(raw: str) -> tuple[str, ...]:
         else:
             print(f"unknown sleeve: {token}", file=sys.stderr)
             print(
-                "expected: all, long, continuous, carry, or a comma-separated combination",
+                "expected: all, long, carry, or a comma-separated combination",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -729,35 +708,6 @@ def verify_demo_account_flat() -> None:
             "demo account is not flat; close positions and cancel orders first"
         )
     print("  demo-account-flat-ok positions=0 open_orders=0")
-
-
-def write_reset_boundary_heartbeat(stamp: str, archive_path: str) -> None:
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-    row = {
-        "cycle_id": f"ledger-reset-{stamp}-demo",
-        "ts_ms": now_ms,
-        "mode": "ledger_reset_boundary",
-        "environment": "demo",
-        "entries_executed": 0,
-        "exits_executed": 0,
-        "open_trades_before": 0,
-        "open_trades_after": 0,
-        "reset_archive": archive_path,
-        "reason": "verified_flat_ledger_reset",
-        "account_flat_verified": True,
-        "flatness_basis": "bybit_demo_positions_and_open_orders",
-    }
-    write_dataset(
-        pl.DataFrame([row]),
-        Path("data/bybit-continuous-demo-event"),
-        "continuous_fade_demo_cycles",
-        append=True,
-    )
-    print("  reset-boundary-heartbeat-ok demo_venue_flat=1")
 
 
 @dataclass
@@ -1226,7 +1176,6 @@ def run_reset(argv: Sequence[str], *, repository: Path | None = None) -> int:
             preflight_demo_runtime_roots(
                 data_anchor,
                 [repository / root for root in _STRATEGY_ROOTS],
-                continuous_root=repository / "data/bybit-continuous-demo-event",
             )
         except (OSError, RuntimeError, ValueError) as exc:
             _die(f"demo runtime descriptor/mount preflight failed before owner lease ({exc})")
@@ -1342,14 +1291,6 @@ def run_reset(argv: Sequence[str], *, repository: Path | None = None) -> int:
             except (OSError, RuntimeError, ValueError) as exc:
                 _die(f"descriptor-rooted generated-target removal failed ({exc})")
 
-        # Seed the continuous cycle stream with the verified reset boundary so
-        # liveness monitoring has an explicit new-epoch fact before the
-        # producer restarts.
-        if "continuous" in plan.selected_sleeves:
-            print()
-            print("Writing the post-reset demo-flat boundary heartbeat ...")
-            write_reset_boundary_heartbeat(stamp, str(archive.path))
-
         # Reset runs as root while every writer is stopped. Restore the private
         # account trees and the demo-cache boundary through held descriptors.
         try:
@@ -1367,7 +1308,6 @@ def run_reset(argv: Sequence[str], *, repository: Path | None = None) -> int:
                 [repository / root for root in _STRATEGY_ROOTS],
                 uid=0,
                 gid=0,
-                continuous_root=repository / "data/bybit-continuous-demo-event",
             )
         except (OSError, RuntimeError, ValueError) as exc:
             _die(f"descriptor-rooted shared demo cache normalization failed ({exc})")

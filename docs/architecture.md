@@ -13,8 +13,7 @@ never submit, adopt, repair, or close an order.
 | --- | --- | --- |
 | Account owner, demo | `account-execution` | Yes — sole Bybit demo mutator |
 | Account owner, mainnet | `account-execution-mainnet` | Yes, once the owner arms it |
-| Target producers | `bybit-{long,carry}-{demo,mainnet}`, `bybit-continuous-demo` | No |
-| Hedge / RMOM | `continuous-hedge`, `continuous-rmom-refresh` (+ timers) | No |
+| Target producers | `bybit-{long,carry}-{demo,mainnet}` | No |
 | Liveness | `demo-liveness`, `mainnet-liveness` (+ timers) | No credential, no ordering dependency on the owner it watches |
 
 ```text

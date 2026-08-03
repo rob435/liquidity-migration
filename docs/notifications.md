@@ -29,7 +29,7 @@ send returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABL
 | `demo-liveness` | on | watchdog alerts, demo scope | alerts |
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
-| every producer, hedge, rmom | off or unset | nothing | — |
+| every producer | off or unset | nothing | — |
 
 Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem,
 not its own.
@@ -101,8 +101,7 @@ What it checks: systemd unit states — including a service that is enabled but 
 active (the dependency-failure shape of the Aug 1–3 outage; debounced one interval,
 then CRITICAL); account-owner health and readiness freshness; live-L2 capture
 freshness; per-sleeve producer cycle age; the frozen demo-rule receipt's
-remaining life; residual-momentum signal staleness; the committed hedge model prior; oneshot
-run duration; free disk; and the owner's digest.
+remaining life; free disk; and the owner's digest.
 
 | Threshold | Default | Meaning |
 | --- | --- | --- |
@@ -110,8 +109,6 @@ run duration; free disk; and the owner's digest.
 | `--max-account-health-age-min` | 1 | owner-health or reconciliation projection is older than this, and how stale the owner's last authenticated exchange read may be |
 | `--max-account-capture-age-min` | 3 | canonical live L2 is older than this |
 | `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
-| `--max-rmom-stale-days` | 2 | residual-momentum gate's newest day |
-| `--max-oneshot-run-seconds` | 180 | a completed periodic oneshot ran longer than this |
 | `--cooldown-min` | 30 | re-alert interval; **deployed as 60 for both demo and mainnet** |
 
 ### How an alert behaves

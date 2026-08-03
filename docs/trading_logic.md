@@ -186,7 +186,11 @@ double-count fix, the corrected carry-hold benchmark Sharpe is **1.21 (t 2.31)**
 Detail: [`carry_hold.md`](research/carry_hold.md),
 [`research_findings.md`](research/research_findings.md).
 
-## CONTINUOUS — `continuous_ensemble_v2` (off)
+## CONTINUOUS — `continuous_ensemble_v2` (retired)
+
+The sleeve was retired 2026-07-29 and its systemd units and runtime launchers
+left the deploy set on 2026-08-03. The strategy and research modules described
+below remain in the repo, and the registered config still scores in research.
 
 **Read the numbers from the profile resolver, not the dataclass.**
 `apply_continuous_demo_profile()` (`continuous_demo.py:1604`) is the resolution function
@@ -299,7 +303,12 @@ hedge with its regime. It does not reproduce the live accepted-decision BTC-risk
 account risk admission, venue rules, fills, or reconciliation. A data root named
 `full_pit` establishes nothing about membership ([`data.md`](data.md)).
 
-## Hedge (off with CONTINUOUS)
+## Hedge (retired with CONTINUOUS)
+
+The hedge's runtime — its systemd timer and launcher — left the deploy set on
+2026-08-03 with the continuous units, after the host's hedge book was verified
+flat. The model code (`continuous_hedge_manager.py`) and its committed prior
+stay for research.
 
 Small long BTC and ETH positions sized to the CONTINUOUS short book's causal rolling beta:
 90-day window, 60-observation minimum, 2.0 per-leg cap, 5 bps modeled cost, 30%
@@ -322,8 +331,8 @@ Every published hedge target carries the model-prior provenance stamp — eight 
 and `model_prior_evidence_scope` =
 `sizing_only_not_current_calibration_or_performance_evidence` — the field that forbids
 citing the prior as calibration or performance evidence. A refresh changes
-`model_prior_artifact_sha256`. The stamp is spliced into each target's intent metadata
-(`scripts/runtime/run_continuous_hedge.py:114-117`) and the runner status JSON (`:451`). Missing,
+`model_prior_artifact_sha256`. The stamp was spliced into each target's intent metadata by the retired
+runner. Missing,
 malformed, future-dated or estimator-inadequate prior data fails closed. Prior age is
 informational, not a freshness gate; coefficient drift remains a stated limitation. The
 demo hedge sizes current BTC/ETH targets from live canonical CONTINUOUS gross exposure,

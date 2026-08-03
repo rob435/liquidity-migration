@@ -35,8 +35,8 @@ override the defaults; `LOCAL=1` runs `real-money` and `venue-accounting` agains
 checkout. `EXPECTED_COMMIT` is optional: left unset it defaults to `$REMOTE/$BRANCH`
 (`origin/main`) and falls back to local `HEAD`, printing which it chose. Set explicitly it
 must still be a full lowercase 40-character commit and is still validated. Deploy also
-reads `BRANCH` (default `main`), `REPO_URL`, `REMOTE`, `SSH_OPTS`, `GITHUB_TOKEN` (falls
-back to `gh auth token`) and the two `RMOM_BOOTSTRAP_*` durations. Deploy, activate, verify
+reads `BRANCH` (default `main`), `REPO_URL`, `REMOTE`, `SSH_OPTS`, and `GITHUB_TOKEN`
+(falls back to `gh auth token`). Deploy, activate, verify
 and an executing reset share `/run/liquidity-migration/maintenance.lock`; a collision fails
 before reading or mutating anything.
 
@@ -62,16 +62,14 @@ scripts/ops.sh deploy activate
 mainnet sleeve on, or with `--no-stop-first`, it refuses instead and names the units to
 quiesce. It checks out the exact commit from `$REMOTE/$BRANCH`, installs
 `requirements.lock` with `--no-deps`, installs the unit manifest, disables every project
-unit, removes unknown `liquidity-migration-*` units, resolves the hedge timer, writes
+unit, removes unknown `liquidity-migration-*` units, writes
 `/etc/liquidity-migration/sleeves.resolved.env` and normalizes the demo runtime trees.
 Prints `install-ok commit=<sha> units_started=0`. It runs no linter and no test suite —
 CI on `main` is the test gate, not the stopped window on the host.
 
 **activate** reads `/etc/liquidity-migration/profile` (defaulting to `operational` when
-absent), checks demo-key order permission, validates the hedge model prior when the hedge
-timer is on, starts owners before producers, seeds residual momentum and enables the RMOM
-timer when a CONTINUOUS sleeve is on, enables the liveness timer, then verifies. It
-auto-stops on the same terms as `install`.
+absent), checks demo-key order permission, starts owners before producers, enables the
+liveness timer, then verifies. It auto-stops on the same terms as `install`.
 
 **staged** is `install`, the profile marker, and `activate` in one command, so it needs
 `--profile operational`. `install` alone does not write the marker.
@@ -80,8 +78,8 @@ auto-stops on the same terms as `install`.
 timers match the profile and resolved toggles; no failed oneshot; every installed unit file
 byte-identical to the checkout's manifest with no drop-ins. It collects **every** mismatch
 rather than dying on the first, prints a `verify-units unit|expected|active|enabled` table,
-then the `verify-mismatch` lines. The demo order-permission probe and the hedge model prior
-are reported here and gate nothing (`verify-warn ...`); both are still fatal in `activate`.
+then the `verify-mismatch` lines. The demo order-permission probe is reported here and
+gates nothing (`verify-warn ...`); it is still fatal in `activate`.
 With no explicit `EXPECTED_COMMIT`, a host on a different commit is reported as
 `verify-drift installed=... expected=...` rather than failed. The mainnet half is
 conditional on the resolved toggles: with both mainnet sleeves off, the mainnet owner, both
@@ -366,7 +364,7 @@ flat on its own. Flatten reports them and waits.
 
 | Profile | Runs |
 | --- | --- |
-| `operational` | The demo owner, the demo producers its toggles allow, hedge/RMOM timers, liveness. The only profile; `demo-operational` is rejected with a message naming its retirement, and a host marker still reading it self-heals on the next rollout. |
+| `operational` | The demo owner, the demo producers its toggles allow, liveness. The only profile; `demo-operational` is rejected with a message naming its retirement, and a host marker still reading it self-heals on the next rollout. |
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling; the host file
 `/etc/liquidity-migration/sleeves.env` may only narrow `on` to `off`.
@@ -375,16 +373,15 @@ flat on its own. Flatten reports them and waits.
 | --- | --- |
 | `LONG_SLEEVE` | `bybit-long-demo` |
 | `CARRY_SLEEVE` | `bybit-carry-demo` |
-| `CONTINUOUS_SLEEVE` | `bybit-continuous-demo`; forces the hedge timer on |
 
 Which are on right now is in the file itself, not here. The mainnet units have
 no sleeve toggle: `REAL_MONEY=true` in the host's `bybit-mainnet.env` is the
 single arming switch (see *Real money* above), and it brings up the mainnet
 owner, both producers, and the liveness timer together.
 
-The retired paper toggles (`CONTINUOUS_PAPER_SLEEVE`, `CARRY_PAPER_SLEEVE`,
-`PAPER_TARGET_MIRROR`) are ignored with a warning if a stale host override still
-carries them.
+The retired toggles (`CONTINUOUS_SLEEVE`, `CONTINUOUS_HEDGE_TIMER`,
+`CONTINUOUS_PAPER_SLEEVE`, `CARRY_PAPER_SLEEVE`, `PAPER_TARGET_MIRROR`) are
+ignored with a warning if a stale host override still carries them.
 
 Turning a sleeve off stops new targets; it does not flatten an existing target or venue
 position — the last targets stay standing in the journal, which is why a sleeve-off fleet
@@ -406,7 +403,7 @@ scripts/ops.sh reset --sleeves all                       # preview (default)
 scripts/ops.sh reset --execute --leave-stopped --sleeves all --label planned-reset
 ```
 
-Also `--sleeves long|continuous|carry|all`, `--archive-dir DIR` (default `data/_archive`),
+Also `--sleeves long|carry|all`, `--archive-dir DIR` (default `data/_archive`),
 `--include-reports`, `--include-caches`, `--settle-seconds N`, `--env-file`,
 `--account-env-file`.
 

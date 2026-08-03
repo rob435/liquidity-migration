@@ -49,18 +49,9 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-bybit-long-mainnet.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_long_demo_event_engine.sh)
         ;;
-    liquidity-migration-bybit-continuous-demo.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_continuous_demo_event_engine.sh)
-        ;;
     liquidity-migration-bybit-carry-demo.service:main | \
     liquidity-migration-bybit-carry-mainnet.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_carry_demo_event_engine.sh)
-        ;;
-    liquidity-migration-continuous-hedge.service:main)
-        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/runtime/run_continuous_hedge.sh)
-        ;;
-    liquidity-migration-continuous-rmom-refresh.service:main)
-        COMMAND=(/bin/bash /opt/liquidity-migration/scripts/runtime/run_continuous_rmom_refresh.sh)
         ;;
     liquidity-migration-telegram-controls.service:main)
         COMMAND=(

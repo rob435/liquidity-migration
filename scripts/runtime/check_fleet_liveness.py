@@ -54,11 +54,6 @@ from liquidity_migration.account.account_owner_health import (  # noqa: E402
     validate_systemd_invocation_id,
 )
 from liquidity_migration.runtime.account_owner_readiness import latest_market_readiness  # noqa: E402
-from liquidity_migration.strategy.continuous_hedge_manager import (  # noqa: E402
-    HEDGE_MODEL_PRIOR_KIND,
-    load_hedge_model_prior,
-    require_usable_hedge_model_prior,
-)
 from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
@@ -85,7 +80,6 @@ _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
 _ACCOUNT_SCOPES = ("demo", "mainnet")
 _LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
 _LONG_MAINNET_UNIT = "liquidity-migration-bybit-long-mainnet.service"
-_CONTINUOUS_DEMO_UNIT = "liquidity-migration-bybit-continuous-demo.service"
 _CARRY_DEMO_UNIT = "liquidity-migration-bybit-carry-demo.service"
 _CARRY_MAINNET_UNIT = "liquidity-migration-bybit-carry-mainnet.service"
 def _default_root(rel: str) -> str:
@@ -96,11 +90,6 @@ def _default_root(rel: str) -> str:
 def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
     """Read a sleeve toggle, failing safe to the supplied default."""
     return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
-
-
-def _continuous_rmom_refresh_on() -> bool:
-    """Match the deploy predicate: the CONTINUOUS sleeve needs RMOM refresh."""
-    return _sleeve_on("CONTINUOUS_SLEEVE", default="off")
 
 
 @dataclass(frozen=True)
@@ -312,28 +301,6 @@ def evaluate_required_account_owner_states(
     return alerts
 
 
-def gather_hedge_model_prior_alerts(*, model_prior_path: Path, now_ms: int, book_nonflat: bool = False) -> list[Alert]:
-    """Check prior integrity, not wall-clock freshness (the prior is immutable)."""
-    try:
-        require_usable_hedge_model_prior(
-            load_hedge_model_prior(model_prior_path),
-            as_of_date=datetime.fromtimestamp(now_ms / 1000, tz=UTC).date(),
-        )
-    except (OSError, ValueError) as exc:
-        return [
-            Alert(
-                key="hedge_model_prior_invalid",
-                severity=CRITICAL if book_nonflat else WARNING,
-                message=(
-                    f"continuous hedge {HEDGE_MODEL_PRIOR_KIND} is unusable: {str(exc)[:300]}. "
-                    "The armed hedge will fail closed until the commit-owned artifact is repaired."
-                ),
-                headline="The hedge model file is unusable — hedging will refuse to run.",
-            )
-        ]
-    return []
-
-
 def evaluate_ws_staleness(
     *, store_max_ts_ms: int | None, now_ms: int, max_lag_hours: float, label: str
 ) -> Alert | None:
@@ -351,42 +318,6 @@ def evaluate_ws_staleness(
             headline=(
                 f"{_plain_name(label)}: live price feed stalled — newest bar {lag_h:.1f}h old "
                 "(a fallback source still covers it)."
-            ),
-        )
-    return None
-
-
-def evaluate_rmom_staleness(*, max_rmom_day_ts: int, now_ms: int, max_stale_days: float, label: str) -> Alert | None:
-    """Alert when the continuous rmom gate is missing or older than ``max_stale_days``.
-
-    Without today's row in residual_momentum.parquet the decile join's
-    ``is_not_null`` filter empties the whole cross-section — a silent zero-signal
-    blackout that reads as a quiet market (live_d9_symbols=0, rmom_present=True).
-    """
-    if not max_rmom_day_ts:
-        return Alert(
-            key=f"rmom:{label}",
-            severity=CRITICAL,
-            message=(
-                f"{label}: rmom signal gate EMPTY (max_rmom_day_ts=0) — the live decile drops every "
-                f"symbol (silent zero-signal blackout). Rebuild residual_momentum.parquet "
-                f"(precompute_residual_momentum.py) and check the continuous-rmom-refresh timer."
-            ),
-            headline=f"{_plain_name(label)}: the momentum signal file is empty — the sleeve sees no candidates.",
-        )
-    stale_days = (now_ms - max_rmom_day_ts) / 86_400_000.0
-    if stale_days > max_stale_days:
-        return Alert(
-            key=f"rmom:{label}",
-            severity=CRITICAL,
-            message=(
-                f"{label}: rmom signal gate STALE — newest residual_momentum day {stale_days:.1f}d old "
-                f"(> {max_stale_days:.0f}d). The live decile silently empties; the continuous-rmom-refresh "
-                f"timer likely failed — rebuild residual_momentum.parquet."
-            ),
-            headline=(
-                f"{_plain_name(label)}: the momentum signal file is {stale_days:.1f} days old — "
-                "the sleeve is going blind."
             ),
         )
     return None
@@ -559,66 +490,6 @@ def evaluate_notification_delivery(
     )
 
 
-def evaluate_oneshot_runtime(
-    *,
-    unit: str,
-    max_seconds: float,
-    start_monotonic_usec: int | None,
-    exit_monotonic_usec: int | None,
-) -> Alert | None:
-    """Warn when a periodic oneshot's completed run consumed too much wall time."""
-    if not start_monotonic_usec or not exit_monotonic_usec:
-        return None
-    if exit_monotonic_usec <= start_monotonic_usec:
-        return None  # currently running, or stale ordering
-    duration_seconds = (exit_monotonic_usec - start_monotonic_usec) / 1e6
-    if duration_seconds <= max_seconds:
-        return None
-    return Alert(
-        key=f"oneshot_runtime:{unit}",
-        severity=WARNING,
-        message=(
-            f"{unit} last run took {duration_seconds:.0f}s "
-            f"(bound {max_seconds:.0f}s); on a saturated host it can overrun "
-            "its own cadence and starve the fleet"
-        ),
-        headline=(
-            f"The {_plain_name(unit)} job took {duration_seconds:.0f}s — "
-            "slow enough to clog its own schedule."
-        ),
-    )
-
-
-def _oneshot_run_window_usec(unit: str) -> tuple[int | None, int | None]:
-    try:
-        proc = subprocess.run(
-            [
-                "systemctl",
-                "show",
-                unit,
-                "-p",
-                "ExecMainStartTimestampMonotonic",
-                "-p",
-                "ExecMainExitTimestampMonotonic",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-    values: dict[str, int] = {}
-    for line in proc.stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and value.strip().isdigit():
-            values[key.strip()] = int(value.strip())
-    return (
-        values.get("ExecMainStartTimestampMonotonic"),
-        values.get("ExecMainExitTimestampMonotonic"),
-    )
-
-
 # Pending resolved-note retries must not share alert cooldown keys.
 _RESOLVED_PREFIX = "resolved:"
 # Records inactive timers for the one-interval escalation debounce.
@@ -778,32 +649,6 @@ def _default_units_for_toggles() -> list[str]:
     units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
     if _sleeve_on("LONG_SLEEVE"):
         units.append(_LONG_DEMO_UNIT)
-    if _continuous_rmom_refresh_on():
-        units.extend(
-            [
-                # Same predicate the deploy uses, so a timer disabled in
-                # sleeves.env is never paged on.
-                "liquidity-migration-continuous-rmom-refresh.service",
-                "liquidity-migration-continuous-rmom-refresh.timer",
-            ]
-        )
-    if _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
-        units.extend(
-            [
-                _CONTINUOUS_DEMO_UNIT,
-                "liquidity-migration-continuous-hedge.timer",
-                # The service too: a failed oneshot leaves the timer
-                # active/waiting, so only the service reports "failed".
-                "liquidity-migration-continuous-hedge.service",
-            ]
-        )
-    elif _sleeve_on("CONTINUOUS_HEDGE_TIMER", default="off"):
-        units.extend(
-            [
-                "liquidity-migration-continuous-hedge.timer",
-                "liquidity-migration-continuous-hedge.service",
-            ]
-        )
     if _sleeve_on("CARRY_SLEEVE"):
         units.append(_CARRY_DEMO_UNIT)
     return units
@@ -862,7 +707,6 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
 
 # Columns each sleeve's checks actually inspect. Projected reads keep the
 # watchdog's cost independent of how wide or old the cycle datasets grow.
-CONTINUOUS_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "mode", "max_rmom_day_ts", "universe_symbols", "kline_store_rows"]
 LONG_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "kline_store_max_ts_ms"]
 CARRY_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "decision_stale", "decision_error"]
 
@@ -925,123 +769,6 @@ def _observe_completed_cycle(
         health=health,
         row=matching.tail(1).to_dicts()[0],
     ), ""
-
-
-def gather_continuous_alerts(
-    *,
-    continuous_root: Path,
-    now_ms: int | None = None,
-    args: argparse.Namespace,
-    cycles_dataset: str = "continuous_fade_demo_cycles",
-    cycle_checks: bool = True,
-    environment: str = "demo",
-    unit_runtime: UnitRuntime | None = None,
-) -> list[Alert]:
-    """Check the continuous strategy scheduler and its causal signal inputs.
-
-    Execution, positions, reconciliation, and protection belong to the account
-    owner and are checked elsewhere.
-    """
-    if not continuous_root.exists():
-        return []
-    label = continuous_root.name
-    alerts: list[Alert] = []
-    if cycle_checks:
-        observation: CompletedCycleObservation | None = None
-        row: dict[str, Any] | None
-        liveness_ts_ms: int | None
-        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
-        if generation_bound:
-            assert unit_runtime is not None
-            observation, detail = _observe_completed_cycle(
-                root=continuous_root,
-                cycles_dataset=cycles_dataset,
-                runtime=unit_runtime,
-                sleeve="continuous",
-                environment=environment,
-                columns=CONTINUOUS_CYCLE_COLUMNS,
-            )
-            if observation is None:
-                if _within_startup_grace(
-                    unit_runtime,
-                    max_age_minutes=args.max_cycle_age_min,
-                ):
-                    return alerts
-                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
-                return alerts
-            row = observation.row
-            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
-        else:
-            try:
-                cyc = _read_cycles_columns(continuous_root, cycles_dataset, CONTINUOUS_CYCLE_COLUMNS)
-            except Exception:  # noqa: BLE001 — watchdog never crashes
-                cyc = pl.DataFrame()
-            if cyc is not None and not cyc.is_empty() and "mode" in cyc.columns:
-                cyc = cyc.filter(pl.col("mode").fill_null("") != "ledger_reset_boundary")
-            latest_row = (
-                cyc.sort("ts_ms").tail(1).to_dicts()[0]
-                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
-                else None
-            )
-            row = latest_row
-            liveness_ts_ms = (
-                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
-            )
-        observed_now_ms = _now_ms() if now_ms is None else now_ms
-        live = evaluate_cycle_liveness(
-            latest_cycle_ts_ms=liveness_ts_ms,
-            now_ms=observed_now_ms,
-            max_age_minutes=args.max_cycle_age_min,
-            label=label,
-        )
-        if live:
-            alerts.append(live)
-        if row is not None:
-            rmom_alert = evaluate_rmom_staleness(
-                max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0),
-                now_ms=observed_now_ms,
-                max_stale_days=args.max_rmom_stale_days,
-                label=label,
-            )
-            if rmom_alert:
-                alerts.append(rmom_alert)
-            # An empty universe or kline input masquerades as a quiet market.
-            universe_n = row.get("universe_symbols")
-            if universe_n is not None and int(universe_n) == 0:
-                alerts.append(
-                    Alert(
-                        key=f"continuous_universe_empty:{label}",
-                        severity=WARNING,
-                        message=f"{label}: continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
-                        headline=f"{_plain_name(label)}: no tradable symbols were found this cycle.",
-                    )
-                )
-            kline_rows = (
-                observation.health.ws_kline_store_rows
-                if observation is not None and observation.health.ws_kline_store_rows is not None
-                else row.get("kline_store_rows")
-            )
-            if kline_rows is not None and int(kline_rows) == 0:
-                detail = (
-                    "current WS kline store is EMPTY"
-                    if observation is not None
-                    else "latest cycle used zero WS kline rows"
-                )
-                alerts.append(
-                    Alert(
-                        key=f"continuous_kline_store_empty:{label}",
-                        severity=WARNING,
-                        message=(
-                            f"{label}: continuous sleeve {detail} (rows=0); "
-                            "public REST fallback may be carrying the cycle."
-                        ),
-                        headline=(
-                            f"{_plain_name(label)}: the live price store is empty — "
-                            "running on fallback data."
-                        ),
-                    )
-                )
-    return alerts
 
 
 def gather_long_alerts(
@@ -1512,11 +1239,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
     # Roots stay strings so the empty-string skip sentinel does not become Path('.').
     p.add_argument(
-        "--continuous-root",
-        default=os.environ.get("CONTINUOUS_DEMO_DATA_ROOT") or _default_root("data/bybit-continuous-demo-event"),
-        help="continuous-fade sleeve root for cycle/input freshness ('' to skip)",
-    )
-    p.add_argument(
         "--long-root",
         default=os.environ.get("LONG_DEMO_DATA_ROOT") or _default_root("data/bybit-long-demo-event"),
         help="long-native sleeve root for cycle/input freshness ('' to skip)",
@@ -1563,17 +1285,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="critical alert if owner or demo reconciliation health is older than this",
     )
-    p.add_argument(
-        "--hedge-model-prior",
-        default=_default_root("deploy/hedge_warmstart/bybit_warmstart.csv"),
-        help="commit-owned immutable hedge model prior; validated while the hedge timer is on ('' to skip)",
-    )
-    p.add_argument(
-        "--max-rmom-stale-days",
-        type=float,
-        default=2.0,
-        help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)",
-    )
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument(
         "--heartbeat-url",
@@ -1590,18 +1301,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
         help="demo owner's committed notification state; alerts when the hourly digest stalls ('' to skip)",
     )
-    p.add_argument(
-        "--max-oneshot-run-seconds",
-        type=float,
-        default=180.0,
-        help="warn when a monitored periodic oneshot's completed run exceeds this wall time",
-    )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
         "--state-file",
         type=Path,
         default=None,
-        help="cooldown state file (default: <continuous-root>/.cache/liveness_watchdog.json; per-scope for mainnet)",
+        help="cooldown state file (default: <repo>/data/.cache/liveness_watchdog.json; per-scope for mainnet)",
     )
     return p
 
@@ -1622,14 +1327,15 @@ def main() -> int:
             ]
         )
     )
-    continuous_root = Path(args.continuous_root) if str(args.continuous_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
     carry_mainnet_root = Path(args.carry_mainnet_root) if str(args.carry_mainnet_root).strip() else None
     long_mainnet_root = Path(args.long_mainnet_root) if str(args.long_mainnet_root).strip() else None
-    # Keep cooldown state stable even when both sleeve roots are skipped, and
-    # off the demo watchdog's file: the two scopes share no alert keys.
-    _state_root = (_REPO_ROOT / "data") if mainnet else (continuous_root or long_root or (_REPO_ROOT / "data"))
+    # Repo-data anchoring for both scopes: the state file used to live under
+    # the first sleeve root, which meant a retired sleeve's directory kept
+    # being recreated just to hold it. The two scopes still share no alert
+    # keys, so they keep separate file names.
+    _state_root = _REPO_ROOT / "data"
     _state_name = "liveness_watchdog_mainnet.json" if mainnet else "liveness_watchdog.json"
     state_file = args.state_file or (_state_root / ".cache" / _state_name)
     now_ms = _now_ms()
@@ -1717,24 +1423,6 @@ def main() -> int:
                 demo_owner_alerts,
             )
         )
-    if not mainnet and continuous_root is not None:
-        alerts.extend(
-            gather_continuous_alerts(
-                continuous_root=continuous_root,
-                args=args,
-                cycle_checks=_sleeve_on("CONTINUOUS_SLEEVE", default="off"),
-                environment="demo",
-                unit_runtime=unit_runtime.get(_CONTINUOUS_DEMO_UNIT),
-            )
-        )
-    hedge_model_prior = Path(args.hedge_model_prior) if str(args.hedge_model_prior).strip() else None
-    if not mainnet and hedge_model_prior is not None and _sleeve_on("CONTINUOUS_HEDGE_TIMER", default="off"):
-        alerts.extend(
-            gather_hedge_model_prior_alerts(
-                model_prior_path=hedge_model_prior,
-                now_ms=now_ms,
-            )
-        )
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(
@@ -1785,17 +1473,6 @@ def main() -> int:
         )
         if digest_alert is not None:
             alerts.append(digest_alert)
-    hedge_service = "liquidity-migration-continuous-hedge.service"
-    if hedge_service in units:
-        start_usec, exit_usec = _oneshot_run_window_usec(hedge_service)
-        runtime_alert = evaluate_oneshot_runtime(
-            unit=hedge_service,
-            max_seconds=args.max_oneshot_run_seconds,
-            start_monotonic_usec=start_usec,
-            exit_monotonic_usec=exit_usec,
-        )
-        if runtime_alert is not None:
-            alerts.append(runtime_alert)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )

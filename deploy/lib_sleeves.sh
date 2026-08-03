@@ -10,15 +10,13 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 
 # These units keep their whole workload argv in run_authorized_runtime.sh, so a
 # drop-in or alternate fragment cannot replace it after the commit is reviewed.
-LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-continuous-hedge.service liquidity-migration-continuous-rmom-refresh.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service"
+LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
     _LM_PARSED_LONG_PRESENT=0
-    _LM_PARSED_CONTINUOUS_PRESENT=0
     _LM_PARSED_CARRY_PRESENT=0
     _LM_PARSED_LONG=""
-    _LM_PARSED_CONTINUOUS=""
     _LM_PARSED_CARRY=""
     _lpe_line_number=0
     while IFS= read -r _lpe_line || [ -n "$_lpe_line" ]; do
@@ -51,14 +49,6 @@ lm_parse_sleeve_environment() {
                 _LM_PARSED_LONG_PRESENT=1
                 _LM_PARSED_LONG="$_lpe_value"
                 ;;
-            CONTINUOUS_SLEEVE)
-                [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] || {
-                    echo "duplicate CONTINUOUS_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
-                    return 1
-                }
-                _LM_PARSED_CONTINUOUS_PRESENT=1
-                _LM_PARSED_CONTINUOUS="$_lpe_value"
-                ;;
             CARRY_SLEEVE)
                 [ "$_LM_PARSED_CARRY_PRESENT" -eq 0 ] || {
                     echo "duplicate CARRY_SLEEVE at $_lpe_file:$_lpe_line_number" >&2
@@ -67,12 +57,14 @@ lm_parse_sleeve_environment() {
                 _LM_PARSED_CARRY_PRESENT=1
                 _LM_PARSED_CARRY="$_lpe_value"
                 ;;
-            CONTINUOUS_PAPER_SLEEVE|CARRY_PAPER_SLEEVE|PAPER_TARGET_MIRROR|CARRY_MAINNET_SLEEVE|LONG_MAINNET_SLEEVE)
+            CONTINUOUS_SLEEVE|CONTINUOUS_HEDGE_TIMER|CONTINUOUS_PAPER_SLEEVE|CARRY_PAPER_SLEEVE|PAPER_TARGET_MIRROR|CARRY_MAINNET_SLEEVE|LONG_MAINNET_SLEEVE)
                 # Paper trading was retired 2026-08-03; the mainnet sleeve
                 # toggles were retired the same day when REAL_MONEY in
                 # /etc/liquidity-migration/bybit-mainnet.env became the single
-                # arming switch. A stale host override may still carry these
-                # keys; they toggle nothing and must not brick the deploy.
+                # arming switch; the continuous sleeve's units left the deploy
+                # set on 2026-08-03 too (sleeve retired 2026-07-29). A stale
+                # host override may still carry these keys; they toggle
+                # nothing and must not brick the deploy.
                 echo "retired sleeve toggle ignored at $_lpe_file:$_lpe_line_number: $_lpe_key" >&2
                 ;;
             *)
@@ -88,30 +80,23 @@ lm_parse_sleeve_environment() {
 # dir comes from this file's location, so the caller's CWD is irrelevant.
 lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    unset LONG_SLEEVE CONTINUOUS_SLEEVE CARRY_SLEEVE 2>/dev/null || true
+    unset LONG_SLEEVE CARRY_SLEEVE 2>/dev/null || true
     if [ -f "$_lm_dir/sleeves.env" ]; then
         lm_parse_sleeve_environment "$_lm_dir/sleeves.env"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
-        [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] \
-            || CONTINUOUS_SLEEVE="$_LM_PARSED_CONTINUOUS"
         [ "$_LM_PARSED_CARRY_PRESENT" -eq 0 ] || CARRY_SLEEVE="$_LM_PARSED_CARRY"
     fi
     _lm_repo_long="${LONG_SLEEVE:-off}"
-    _lm_repo_continuous="${CONTINUOUS_SLEEVE:-off}"
     _lm_repo_carry="${CARRY_SLEEVE:-off}"
     if [ -f "$LM_HOST_SLEEVES_ENV" ]; then
         lm_parse_sleeve_environment "$LM_HOST_SLEEVES_ENV"
         [ "$_LM_PARSED_LONG_PRESENT" -eq 0 ] || LONG_SLEEVE="$_LM_PARSED_LONG"
-        [ "$_LM_PARSED_CONTINUOUS_PRESENT" -eq 0 ] \
-            || CONTINUOUS_SLEEVE="$_LM_PARSED_CONTINUOUS"
         [ "$_LM_PARSED_CARRY_PRESENT" -eq 0 ] || CARRY_SLEEVE="$_LM_PARSED_CARRY"
     fi
     if ! sleeve_on "$_lm_repo_long"; then LONG_SLEEVE=off; fi
-    if ! sleeve_on "$_lm_repo_continuous"; then CONTINUOUS_SLEEVE=off; fi
     if ! sleeve_on "$_lm_repo_carry"; then CARRY_SLEEVE=off; fi
     # Missing toggles fail safe to off; a missing config cannot resurrect a sleeve.
     : "${LONG_SLEEVE:=off}"
-    : "${CONTINUOUS_SLEEVE:=off}"
     : "${CARRY_SLEEVE:=off}"
 }
 
@@ -124,10 +109,6 @@ sleeve_on() {
     esac
 }
 
-continuous_rmom_refresh_on() {
-    sleeve_on "${CONTINUOUS_SLEEVE:-off}"
-}
-
 lm_write_resolved_sleeve_toggles() {
     _lr_dir="$(dirname "$LM_RESOLVED_SLEEVES_ENV")"
     mkdir -p "$_lr_dir"
@@ -136,11 +117,7 @@ lm_write_resolved_sleeve_toggles() {
         echo "# Generated by deploy/lib_sleeves.sh. Do not edit by hand."
         echo "# Host overrides may only turn repo-on sleeves off; repo-off is a hard ceiling."
         printf 'LONG_SLEEVE=%s\n' "${LONG_SLEEVE:-off}"
-        printf 'CONTINUOUS_SLEEVE=%s\n' "${CONTINUOUS_SLEEVE:-off}"
         printf 'CARRY_SLEEVE=%s\n' "${CARRY_SLEEVE:-off}"
-        if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then
-            printf 'CONTINUOUS_HEDGE_TIMER=%s\n' "$CONTINUOUS_HEDGE_TIMER"
-        fi
     } > "$_lr_tmp"
     chmod 0600 "$_lr_tmp"
     mv "$_lr_tmp" "$LM_RESOLVED_SLEEVES_ENV"
@@ -155,20 +132,10 @@ lm_verify_resolved_sleeve_toggles() {
         echo "verify failed: resolved LONG_SLEEVE does not match loaded toggle" >&2
         return 1
     }
-    grep -Fx "CONTINUOUS_SLEEVE=${CONTINUOUS_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
-        echo "verify failed: resolved CONTINUOUS_SLEEVE does not match loaded toggle" >&2
-        return 1
-    }
     grep -Fx "CARRY_SLEEVE=${CARRY_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
         echo "verify failed: resolved CARRY_SLEEVE does not match loaded toggle" >&2
         return 1
     }
-    if [ -n "${CONTINUOUS_HEDGE_TIMER:-}" ]; then
-        grep -Fx "CONTINUOUS_HEDGE_TIMER=$CONTINUOUS_HEDGE_TIMER" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
-            echo "verify failed: resolved CONTINUOUS_HEDGE_TIMER does not match computed hedge state" >&2
-            return 1
-        }
-    fi
 }
 
 lm_expected_systemd_units() {

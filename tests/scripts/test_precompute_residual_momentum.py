@@ -496,11 +496,3 @@ def test_append_overlap_verify_catches_a_changed_signal_definition() -> None:
     # The message must distinguish a deliberate definition change from source drift.
     assert "--full-rewrite" in message
     assert "DELIBERATE" in message
-    assert "run_continuous_rmom_refresh.sh" in message
-
-
-def test_deployed_rmom_refresh_uses_full_rewrite() -> None:
-    """Pins the reason M21 cannot break the operational path."""
-
-    script = (REPO / "scripts" / "runtime" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
-    assert "--full-rewrite" in script

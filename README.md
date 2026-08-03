@@ -9,7 +9,6 @@ Bybit.
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
 | CARRY | `lane2_carry_hold_v4` | `CARRY_SLEEVE` |
-| CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE` |
 | LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
@@ -28,8 +27,8 @@ its journals. What each sleeve trades is in
 | [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
-| [`data/`](data) | per-sleeve event stores and reconciliation captures |
-| [`reports/`](reports) | research-run outputs |
+| `data/` | per-sleeve event stores and reconciliation captures (runtime, not tracked) |
+| `reports/` | research-run outputs (runtime, not tracked) |
 | [`tests/`](tests) | executable contracts |
 | `.codex/skills/` | task runbooks; `.claude/skills/` is a mechanical mirror |
 

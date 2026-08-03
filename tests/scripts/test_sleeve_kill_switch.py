@@ -88,7 +88,6 @@ def test_loaded_toggles_match_committed_sleeve_state(tmp_path: Path) -> None:
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = on
-        test "$CONTINUOUS_SLEEVE" = off
         test "$CARRY_SLEEVE" = on
         echo "TOGGLES_OK"
     """)
@@ -103,12 +102,10 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
     (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
     (lib_dir / "sleeves.env").write_text(
         "LONG_SLEEVE=off\n"
-        "CONTINUOUS_SLEEVE=off\n"
         "CARRY_SLEEVE=off\n"
     )
     host_env.write_text(
         "LONG_SLEEVE=on\n"
-        "CONTINUOUS_SLEEVE=on\n"
         "CARRY_SLEEVE=on\n"
     )
     script = textwrap.dedent(f"""
@@ -117,12 +114,10 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = off
-        test "$CONTINUOUS_SLEEVE" = off
         test "$CARRY_SLEEVE" = off
         lm_write_resolved_sleeve_toggles
         lm_verify_resolved_sleeve_toggles
         grep -Fx LONG_SLEEVE=off "{resolved_env}"
-        grep -Fx CONTINUOUS_SLEEVE=off "{resolved_env}"
         grep -Fx CARRY_SLEEVE=off "{resolved_env}"
         ! grep -q MAINNET "{resolved_env}"
     """)
@@ -137,18 +132,16 @@ def test_host_override_keeps_repo_on_sleeve_on_when_host_on(tmp_path: Path) -> N
     (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
     (lib_dir / "sleeves.env").write_text(
         "LONG_SLEEVE=on\n"
-        "CONTINUOUS_SLEEVE=on\n"
         "CARRY_SLEEVE=on\n"
     )
-    host_env.write_text("LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=off\n")
+    host_env.write_text("LONG_SLEEVE=on\nCARRY_SLEEVE=off\n")
     script = textwrap.dedent(f"""
         set -euo pipefail
         export LM_HOST_SLEEVES_ENV="{host_env}"
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = on
-        test "$CONTINUOUS_SLEEVE" = off
-        test "$CARRY_SLEEVE" = on
+        test "$CARRY_SLEEVE" = off
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
@@ -164,7 +157,7 @@ def test_host_override_is_parsed_as_data_not_shell_source(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     (lib_dir / "sleeves.env").write_text(
-        "LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=on\nCARRY_SLEEVE=on\n",
+        "LONG_SLEEVE=on\nCARRY_SLEEVE=on\n",
         encoding="utf-8",
     )
     host_env.write_text(
@@ -203,11 +196,10 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     script = textwrap.dedent(f"""
         set -euo pipefail
         export LM_HOST_SLEEVES_ENV="{host_env}"
-        unset LONG_SLEEVE CONTINUOUS_SLEEVE CARRY_SLEEVE 2>/dev/null || true
+        unset LONG_SLEEVE CARRY_SLEEVE 2>/dev/null || true
         . "{lib_dir}/lib_sleeves.sh"
         lm_load_sleeve_toggles
         test "$LONG_SLEEVE" = off
-        test "$CONTINUOUS_SLEEVE" = off
         test "$CARRY_SLEEVE" = off
         echo "FALLBACK_OK"
     """)
@@ -216,15 +208,14 @@ def test_lib_fallback_defaults_every_sleeve_off(tmp_path: Path) -> None:
     assert "FALLBACK_OK" in proc.stdout
 
 
-def test_committed_sleeves_env_continuous_retired() -> None:
-    # The committed file is the source of truth. CONTINUOUS is retired
-    # permanently, and the 2026-08-03 paper retirement leaves no paper toggles.
-    # Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no
-    # inline comment).
+def test_committed_sleeves_env_carries_only_live_toggles() -> None:
+    # The committed file is the source of truth. The retired sleeves
+    # (CONTINUOUS, paper) have no rows at all — their keys are tolerated in a
+    # stale host override, never committed here. Each line must be
+    # systemd-EnvironmentFile-safe (plain KEY=value, no inline comment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
         "LONG_SLEEVE": "on",
-        "CONTINUOUS_SLEEVE": "off",
         "CARRY_SLEEVE": "on",
         # Real money has no toggle here: REAL_MONEY in the host credential
         # file is the single arming switch, so a git commit can never arm.

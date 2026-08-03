@@ -216,9 +216,9 @@ def test_account_roots_must_be_disjoint_from_each_other_and_strategy_roots(
 
 
 def test_sleeve_selection_is_canonical_and_rejects_unknowns() -> None:
-    assert parse_sleeves("all") == ("long", "continuous", "carry")
+    assert parse_sleeves("all") == ("long", "carry")
     assert parse_sleeves("carry,long") == ("long", "carry")
-    assert parse_sleeves("CONTINUOUS") == ("continuous",)
+    assert parse_sleeves("CARRY") == ("carry",)
     with pytest.raises(SystemExit) as excinfo:
         parse_sleeves("margin")
     assert excinfo.value.code == 2
@@ -283,7 +283,6 @@ def test_stop_order_quiesces_producers_before_the_account_owner() -> None:
     assert STOP_UNITS[-1] == owner
     for producer in (
         "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-carry-demo.service",
     ):
         assert STOP_UNITS.index(producer) < STOP_UNITS.index(owner)
