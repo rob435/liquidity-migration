@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit carry-hold MAINNET target producer (lane2_carry_hold_v3)
+Description=liquidity-migration Bybit carry-hold MAINNET target producer (lane2_carry_hold_v4)
 Wants=network-online.target
 Requires=liquidity-migration-account-execution-mainnet.service
 After=network-online.target liquidity-migration-account-execution-mainnet.service

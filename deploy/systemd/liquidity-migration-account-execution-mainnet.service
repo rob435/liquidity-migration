@@ -24,6 +24,11 @@ ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidi
 # exposure, so Restart=always is a recovery path, not a crash loop.
 Restart=always
 RestartSec=2
+# The default limiter (5 starts / 10s) would latch the owner failed after five
+# fast transient failures (a venue blip on the startup permission probe); a
+# latched real-money owner leaves exposure unsupervised — the exact outcome
+# Restart=always exists to prevent. No limiter, matching the demo owner.
+StartLimitIntervalSec=0
 TimeoutStartSec=240
 KillMode=control-group
 TimeoutStopSec=180

@@ -262,6 +262,9 @@ def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -
     ) in mainnet
     assert "TimeoutStartSec=240" in mainnet
     assert "RestartSec=2" in mainnet
+    # Same no-limiter reasoning as the demo owner: the default limiter would
+    # latch the real-money owner failed after five fast transient failures.
+    assert "StartLimitIntervalSec=0" in mainnet
 
 
 def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:

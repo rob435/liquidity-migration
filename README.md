@@ -8,7 +8,7 @@ Bybit.
 | Sleeve | Profile | Toggle |
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
-| CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE` |
+| CARRY | `lane2_carry_hold_v4` | `CARRY_SLEEVE` |
 | CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE` |
 | LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 

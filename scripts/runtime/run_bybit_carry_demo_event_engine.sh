@@ -10,7 +10,7 @@
 #
 # EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. Sizing
 # comes from the shared operational profile (ACCOUNT_RISK_POLICY_FILE); the rule
-# is configs/lane2_carry_hold_v3.json.
+# is configs/lane2_carry_hold_v4.json.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

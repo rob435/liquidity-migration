@@ -5,7 +5,7 @@ LONG runs from ``long_native.long_v11a_profile``.
 CONTINUOUS is reconstructed from the continuous entry book
 (`continuous_ensemble_v2`, code-defined TP12 components, 2f hedge, BTC-vol
 regime) via the continuous refresh runner.
-CARRY renders the registered research config ``configs/lane2_carry_hold_v3.json``
+CARRY renders the registered research config ``configs/lane2_carry_hold_v4.json``
 through the same --research-config path (cross-venue panel, settlement-exact
 scorer). That is the registered research shape, not a demo daemon replay.
 
@@ -180,7 +180,7 @@ def _run_carry(
 ) -> dict[str, Any]:
     """Render the CARRY sleeve's registered research shape.
 
-    The carry runtime replays ``configs/lane2_carry_hold_v3.json``, so its
+    The carry runtime replays ``configs/lane2_carry_hold_v4.json``, so its
     standard curve is that same config through the --research-config path. It
     reads the cross-venue panel, not the demo cycle record.
     """
@@ -328,7 +328,7 @@ def main() -> int:
         default="long",
         help=(
             "Comma list: long, continuous, carry. 'carry' renders the registered "
-            "research config (lane2_carry_hold_v3) from the cross-venue panel — "
+            "research config (lane2_carry_hold_v4) from the cross-venue panel — "
             "a research-shape simulation, not a daemon replay."
         ),
     )
