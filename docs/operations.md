@@ -74,6 +74,12 @@ liveness timer, then verifies. It auto-stops on the same terms as `install`.
 **staged** is `install`, the profile marker, and `activate` in one command, so it needs
 `--profile operational`. `install` alone does not write the marker.
 
+**The owner's one-click:** `scripts/deploy_everything.command` (double-click in Finder,
+or run it like any script) is `deploy staged --profile operational --stop-first` with the
+target commit printed first and a note when local main is ahead of GitHub. `--stop-first`
+stops the funded units too, and activation starts them back whenever `REAL_MONEY` is
+armed — clicking it is the whole redeploy decision, prompts included: none.
+
 **verify** (`ops.sh status`) is the read-only report. It asserts owners, producers and
 timers match the profile and resolved toggles; no failed oneshot; every installed unit file
 byte-identical to the checkout's manifest with no drop-ins. It collects **every** mismatch
