@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Phase 1 re-screen: the mechanisms that survived something, priced honestly.
 
-One pass, not a sweep (`docs/research_findings.md` §3). Every cell is reported;
+One pass, not a sweep (`docs/research/research_findings.md` §3). Every cell is reported;
 a survivor must clear the program bar, **t = 2.5** since 2026-07-31
-(`docs/governance.md` §2). Both thresholds are printed: the retired family-wise
+(`docs/research/governance.md` §2). Both thresholds are printed: the retired family-wise
 3.25 is kept alongside so this screen's historical verdicts stay readable rather
 than being silently restated at the looser bar.
 
@@ -51,7 +51,7 @@ from liquidity_migration.research.panels.cross_section import (  # noqa: E402
 )
 from liquidity_migration.research.panels.lane2_blend import HOUR_MS, BlendConfig, prepare  # noqa: E402
 
-#: The program significance bar. Owned by ``docs/governance.md`` §2, which is the
+#: The program significance bar. Owned by ``docs/research/governance.md`` §2, which is the
 #: authority; this constant follows it. Lowered from a family-wise Bonferroni
 #: 3.25 to a fixed 2.5 on 2026-07-31 by owner decision — the bar no longer
 #: controls family-wise error, so a survivor needs a plateau and a failed placebo
@@ -390,7 +390,7 @@ def main() -> int:
     ungated = len([c for c in cells if not c.gated])
     print(f"\nGATE 1: {len(survivors)} of {ungated} cells clear the t >= {PROGRAM_T} bar "
           f"({len(legacy)} would have cleared the retired {LEGACY_BONFERRONI_T}). A survivor at "
-          f"this bar still needs a plateau and a failed placebo; see docs/governance.md 2.")
+          f"this bar still needs a plateau and a failed placebo; see docs/research/governance.md 2.")
 
     print("\n\n2A - CROSS-VENUE REPLICATION (sign agreement and effect ratio)")
     print("=" * 100)

@@ -7,8 +7,7 @@ and [`long_native.py`](../liquidity_migration/research/backtest/long_native.py),
 [`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py),
 [`continuous_demo.py`](../liquidity_migration/strategy/continuous_demo.py) and
 [`continuous_profile.py`](../liquidity_migration/research/backtest/continuous_profile.py),
-[`continuous_hedge_manager.py`](../liquidity_migration/strategy/continuous_hedge_manager.py). Plain
-English: [`plain_english_guide.md`](plain_english_guide.md).
+[`continuous_hedge_manager.py`](../liquidity_migration/strategy/continuous_hedge_manager.py).
 
 ## On today
 
@@ -139,7 +138,7 @@ taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
 > Lane-2 research registration accruing a forward record, and switching the
 > sleeve to it is a separate owner act through the normal deploy flow with a
 > recorded change point. Nothing in v4 changed v3 — a regression test pins that.
-> See [`carry_hold.md`](carry_hold.md) §0.1.
+> See [`carry_hold.md`](research/carry_hold.md) §0.1.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
@@ -177,8 +176,8 @@ midnight is the best cell. The three v3 filters were chosen in-sample in the rev
 registered them; the paired forward differential against v2 grades them. After the funding
 double-count fix, the corrected carry-hold benchmark Sharpe is **1.21 (t 2.31)** — it does
 **not** beat the CONTINUOUS benchmark; the superseded 2.57 / t 4.87 figures are wrong.
-Detail: [`carry_hold.md`](carry_hold.md),
-[`research_findings.md`](research_findings.md).
+Detail: [`carry_hold.md`](research/carry_hold.md),
+[`research_findings.md`](research/research_findings.md).
 
 ## CONTINUOUS — `continuous_ensemble_v2` (off)
 
@@ -420,7 +419,7 @@ Bybit's demo realm rejects orders its own published
 minimum with bounded probe orders (≤200 USDT, 100 bps away) and caches it per symbol; entry
 dust skips key off that. A component below 4× that minimum is quantization-distorted, so a
 day where such components carry >20% of gross exposure measures plumbing rather than
-economics ([`research_findings.md`](research_findings.md)).
+economics ([`research_findings.md`](research/research_findings.md)).
 
 Grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
 [`real_money.md`](real_money.md).

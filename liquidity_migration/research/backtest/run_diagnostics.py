@@ -9,7 +9,7 @@ Each :class:`RunWarning` carries
 
 Any ``tainted``-severity warning means the result is survivorship or look-ahead
 biased and must not be cited as clean. The failure taxonomy lives in
-``docs/backtesting_errors_we_never_repeat.md``. Data-gap warnings (funding,
+``docs/research/backtesting_errors_we_never_repeat.md``. Data-gap warnings (funding,
 clipped window) are ``warn``/``info``: the run is produced and the gap named.
 """
 from __future__ import annotations

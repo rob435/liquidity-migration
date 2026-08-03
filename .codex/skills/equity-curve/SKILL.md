@@ -73,7 +73,7 @@ State:
 - reconstruction gaps versus runtime;
 - modeled versus presentation leverage;
 - which data shaped the result and which graded it, and the justified
-  conclusion, under `docs/governance.md`.
+  conclusion, under `docs/research/governance.md`.
 
 Ad hoc plots are allowed for diagnostics only when they are visually DISTINCT
 from the standard layout, clearly labelled non-standard, and never compared as

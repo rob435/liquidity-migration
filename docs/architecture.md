@@ -529,7 +529,7 @@ launcher), `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 Producer-side strategy modules (`long_native*`, `continuous_*`, `carry_demo*`,
 `financed_longs.py`, `lane2_blend.py`) are documented with the research they implement:
 [`trading_logic.md`](trading_logic.md),
-[`strategy_program.md`](strategy_program.md). Data roots, PIT rules, and clock domains:
+[`strategy_program.md`](research/strategy_program.md). Data roots, PIT rules, and clock domains:
 [`data.md`](data.md).
 
 `requirements.lock` is the exact CI (`.github/workflows/vps-deploy.yml:51`) and deploy

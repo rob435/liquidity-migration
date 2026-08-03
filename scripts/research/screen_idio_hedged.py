@@ -24,7 +24,7 @@ The hedge is rebalanced daily and charged on the change in its own notional,
 charged on its measured turnover exactly as in the unhedged screen, so the two
 are compared on one cost basis.
 
-DECLARED KILL CONDITION (``docs/archive/2026-07-30-idio-charts.md``): if the
+DECLARED KILL CONDITION (``docs/research/archive/2026-07-30-idio-charts.md``): if the
 hedged book's net Sharpe does not exceed the unhedged book's at the same cost
 basis, the idio-chart programme is closed for this repository.
 
@@ -193,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     res = pl.DataFrame(rows)
     wins = int(res.filter(pl.col("delta_sharpe") > 0).height)
-    t_crit = PROGRAM_T  # docs/governance.md 2; retired family-wise was bonferroni_t(92)
+    t_crit = PROGRAM_T  # docs/research/governance.md 2; retired family-wise was bonferroni_t(92)
     print("\n" + "=" * 92)
     print(f"hedging improves net Sharpe in {wins}/{res.height} cells")
     print(f"  median delta = {res['delta_sharpe'].median():+.3f}   "

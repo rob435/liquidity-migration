@@ -162,7 +162,7 @@ how it got there. That history is in Git.
   only stop geometry changed). **Mainnet: wiring only** — the unit names v12
   but `LONG_MAINNET_SLEEVE=off`, `REAL_MONEY` unset, no credential exists;
   arming remains the owner's separate act. Change point recorded in
-  `docs/strategy_program.md` §2026-08-03; mechanism in `docs/trading_logic.md`.
+  `docs/research/strategy_program.md` §2026-08-03; mechanism in `docs/trading_logic.md`.
 - **2026-07-31 — `flatten` shipped, both books taken to zero, and the fleet
   rolled out at `0506cef` through the guarded `rollout` path.** First rollout
   this fleet has ever completed: it proves the demo account flat three times and
@@ -219,10 +219,10 @@ how it got there. That history is in Git.
   its own capital v4 vs v3 is +1.07 bp/day at t 0.47 (not significant); at v3's
   average capital it is +10.76 at t 3.23, and at that leverage its worst dip is
   *worse* (33.5% vs 28.7%). Sharpe 1.41 → 1.64 (scale-free); MAR 3.08 → 4.14 at v4's own capital, 4.67 at v3's (MAR is not scale-free). 76.2% of the curve's log growth is 2025-26.
-  Detail: [`docs/carry_hold.md`](docs/carry_hold.md) §0.1.
+  Detail: [`docs/research/carry_hold.md`](docs/research/carry_hold.md) §0.1.
 - **2026-07-31 — the program significance bar is now t ≥ 2.5**, owner decision,
   replacing the family-wise ≈3.25/3.58. Authority is
-  [`docs/governance.md`](docs/governance.md) §2; `screen_phase1.py` and
+  [`docs/research/governance.md`](docs/research/governance.md) §2; `screen_phase1.py` and
   `screen_idio_charts.py` follow it and still print the retired threshold beside
   it. Prospective: verdicts recorded before this date stand as written. It
   admits roughly one false positive across the program's ~45 screened mechanisms
@@ -246,7 +246,7 @@ how it got there. That history is in Git.
   125-module package moved into eleven subpackages
   (`liquidity_migration/README.md`), `scripts/` grouped by who runs it
   (`scripts/README.md`), `tests/` mirrored onto the package, and the dated
-  research runs archived under `docs/archive/`. **No systemd unit file
+  research runs archived under `docs/research/archive/`. **No systemd unit file
   changed** — no `.service` names a Python module; all 19 Exec lines invoke
   `scripts/run_authorized_runtime.sh`. What did change is committed shell that
   ships with the checkout: the ten `-m liquidity_migration.<pkg>.<module>`
@@ -433,7 +433,7 @@ how it got there. That history is in Git.
     rollout re-freezes and re-probes demo rules when the installed
     artifact is unreadable by the target code
     (`demo-rule-maintenance-plan path=refreeze`).
-  - Known sharp edges recorded at deployment (`docs/carry_hold.md` §7.6):
+  - Known sharp edges recorded at deployment (`docs/research/carry_hold.md` §7.6):
     per-symbol-stable entry-attempt keys mean one terminal kernel-side
     rejection suppresses that symbol's entries until addressed (producer
     avoids the self-inflicted cases; kernel-side attempt versioning
@@ -461,7 +461,7 @@ how it got there. That history is in Git.
   CONTINUOUS crowding now counts on the engine's base (strictly more
   crowd-skips, never fewer), Lane-2 financed-longs scoring reproduces its
   registered table, and residual momentum uses the registered calendar
-  window** — see `docs/strategy_program.md` "2026-07-27 — recorded change
+  window** — see `docs/research/strategy_program.md` "2026-07-27 — recorded change
   points". The rollout's own phase gates are no longer fail-open: a failing
   pip/ruff/mypy/pytest phase now aborts instead of reporting `rollout-ok`.
 - Prior installed commit: `13754d0be` (8-commit batch
@@ -495,7 +495,7 @@ how it got there. That history is in Git.
   declared stop 35%, weight 1.0, settled-funding admission floor 0.0 with
   counted/journaled unknown-admits). Honest same-window render of the
   deployed shape: +11.06% / maxDD −1.84% / Sharpe 1.45 / MAR 1.80 — see the
-  `docs/strategy_program.md` promotion note for the reconciliation against
+  `docs/research/strategy_program.md` promotion note for the reconciliation against
   the redesign table. Kernel strategy identities and config hashes shifted
   for all CONTINUOUS configs; the cycle-status funnel schema is v2.
 - **Deployment mechanics receipt (2026-07-26):** the guarded `rollout`
@@ -601,7 +601,7 @@ the current receipt is `demo-rules-20260727T133929Z`, expiring ~2026-08-03.
 2026-07-27 (DEPLOYED ~18:26 UTC, Actions run 30293398218): the repo-wide
 audit remediation (all 53 findings). Three items are change points rather than
 refactors and were owner-approved before landing; the full statements are in
-`docs/strategy_program.md` under "2026-07-27 — recorded change points":
+`docs/research/strategy_program.md` under "2026-07-27 — recorded change points":
 **CONTINUOUS crowding now counts on the engine's base** (funding-admitted fresh
 entrants, before the age gate), which can only skip more entries than the
 current live shape, never fewer — expect fewer entries in hours where a young
@@ -691,7 +691,7 @@ and verification receipts still exist on disk and on the VPS, but nothing in thi
 checkout reads, validates, or can reproduce them.
 
 What remains is the plain rolling record, which is what the Progressive Evidence
-Model in `docs/governance.md` actually calls for: each committed config is graded
+Model in `docs/research/governance.md` actually calls for: each committed config is graded
 on the run of days it predates, continuously, with recorded change points. There
 is no ceremony, no waiting window, and no separate registration artifact — the
 commit is the registration.
@@ -735,8 +735,8 @@ rolling record opens it on its own.**
 Research-only: Strategy Overhaul V2 closed with no qualifying thesis and did not
 touch its reserved holdout; its diagnostic portfolios are model-based and
 negative after costs/funding. The consolidated research conclusion and successor
-direction are in `docs/strategy_program.md`; current anomaly evidence is in
-`docs/archive/2026-07-24-anomaly-research.md`. Retired receipts remain in Git history.
+direction are in `docs/research/strategy_program.md`; current anomaly evidence is in
+`docs/research/archive/2026-07-24-anomaly-research.md`. Retired receipts remain in Git history.
 
 ## Known benign alert shapes
 
@@ -769,11 +769,11 @@ every item here is operational, not strategy.
 | ~~Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45~~ | **Closed by the 2026-08-03 paper retirement**: the paper owner no longer runs, so the wedged reservation is inert history in a journal nothing reads |
 | Reported P&L is provisional | 166 of 187 `pnl` events carry `funding_status=pending_venue_reconciliation`; every figure is fill-reconstructed, not venue-confirmed. No closed-loop accounting check yet, which real money needs |
 | Sizing was not clamped to the capital reference in the deployed build | The clamp shipped in `cdb6e61` (`policy/equity_anchored_envelope.py`, present on the host). The pre-deploy observation stands as history — live sizing anchored at 255,357.40 against a 250,000 reference (+2.14%) — and that it now binds at runtime is unobserved until the next resize |
-| Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/carry_hold.md` |
-| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/carry_hold.md` §7.5 states it rather than treating it as settled |
+| Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
+| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |
 
 Audit reports are not kept as standing files. Their findings live in the topic
-docs — `docs/research_findings.md`, `docs/architecture.md`, `docs/data.md`,
+docs — `docs/research/research_findings.md`, `docs/architecture.md`, `docs/data.md`,
 `docs/trading_logic.md`, `docs/notifications.md` — and in Git history.
 
 ## Recovery archive

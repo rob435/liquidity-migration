@@ -23,9 +23,10 @@ the per-sleeve capital partition in `account_kernel.py`.
 - Optimize for decision-useful work, not agreement with prior docs, labels, or
   operators. Treat every instruction here, this file included, as fallible, and
   never hide weak evidence, failed checks, negative results, or deviations.
-- Talk plain-first: plain words, code name in parentheses when precision needs
-  it. [`docs/plain_english_guide.md`](docs/plain_english_guide.md) names every
-  term once; keep it true in the change that makes it stale.
+- Always talk simply. Plain words first, no unexplained jargon, and the code
+  name in parentheses when precision needs it — the crowd fee (funding), the
+  smoothness score (Sharpe), the worst dip (max drawdown). This applies to
+  every reply, doc, and commit message, whoever the audience is.
 
 ## Ask Once, Then Decide
 
@@ -74,7 +75,7 @@ before real money is armed.
 
 1. Code, tests, deploy files, and generated artifacts define implemented behavior.
 2. [`STATE.md`](STATE.md) is the operational snapshot.
-3. [`docs/strategy_program.md`](docs/strategy_program.md) is the current reading
+3. [`docs/research/strategy_program.md`](docs/research/strategy_program.md) is the current reading
    of the evidence and the only active research queue.
 4. Skills in `.codex/skills/` are navigation aids, never factual authority —
    verify them against source. (`.claude/skills/` is a symlink to the same
@@ -93,9 +94,9 @@ When sources disagree, read the primary artifact and fix the stale source.
   commit is the registration — there is no separate filing step.
 - Grade a rule on data it did not shape. Report every grid cell and era split.
   Put costs next to gross. Negative results are priors, not prohibitions, and
-  `docs/backtesting_errors_we_never_repeat.md` is a failure-mode reference.
+  `docs/research/backtesting_errors_we_never_repeat.md` is a failure-mode reference.
 - The full Progressive Evidence Model — two lanes, the six-item evidence note,
-  the five-line promotion note — is [`docs/governance.md`](docs/governance.md).
+  the five-line promotion note — is [`docs/research/governance.md`](docs/research/governance.md).
 
 ## Change Discipline
 

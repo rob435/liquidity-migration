@@ -13,7 +13,7 @@ Conventions, fixed here so every read means the same thing:
   direction rather than silently flipping a sign to flatter a result.
 * Returns passed in should already include every economic leg the trade has —
   for a funding-sorted signal, price alone has the wrong sign (see
-  ``docs/research_findings.md``).
+  ``docs/research/research_findings.md``).
 * ``summary`` reports the tail statistics this repository cares about, not just
   a Sharpe: loss concentration in the worst 1% and max drawdown, because the
   book being replaced failed on tail shape rather than on mean.
@@ -41,11 +41,11 @@ DEFAULT_CUT = 0.10
 #: journal, 7.78 bp/side notional-weighted (median 11.00, range 5.50-11.00) =>
 #: a 15.56 bp round trip. The distribution sits on Bybit's taker tiers, so fills
 #: price as taker, not maker. Replaces the older 4.00 bp maker assumption; see
-#: ``docs/research_findings.md`` §16.1 for the per-surface audit.
+#: ``docs/research/research_findings.md`` §16.1 for the per-surface audit.
 MEASURED_ROUND_TRIP_BP = 15.56
 
 #: Round trip a perfect passive book would pay: 2.70 bp/side implied at a 100%
-#: passive fill rate (``docs/research_findings.md``). A floor, not an achieved
+#: passive fill rate (``docs/research/research_findings.md``). A floor, not an achieved
 #: cost.
 PASSIVE_FLOOR_ROUND_TRIP_BP = 5.40
 

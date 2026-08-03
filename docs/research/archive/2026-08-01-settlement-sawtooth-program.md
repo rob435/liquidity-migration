@@ -1,5 +1,8 @@
 # The settlement sawtooth — mechanism dossier and research program
 
+*Archived 2026-08-03 from `docs/settlement_sawtooth_program.md`; paths
+inside reflect the pre-2026-08-03 docs layout.*
+
 **Status: CLOSED 2026-08-01.** A deep funding print marks a coin in a violent
 spot rally whose perpetual sits at a discount, and at the settlement instant the
 perp steps down by the fee — slope **1.0340** on 365,691 settlements, with the
@@ -397,7 +400,7 @@ returns and the engine compounds a 24h return; the gap is −4.65 bp/book-day
 for the level. The gap does not move the conclusion — funding +24.57 against a
 −19.72 giveback is far outside it — but any restatement should carry it.
 
-**Consequence, for the owner to accept or decline:** [`docs/carry_hold.md`](carry_hold.md)
+**Consequence, for the owner to accept or decline:** [`docs/carry_hold.md`](../carry_hold.md)
 and `lane2_carry_hold_v4`'s `claim` describe the mechanism as crowded shorts
 paying longs. On this evidence that describes a cash flow returned at the moment
 it is paid. The honest mechanism is *drift and pre-print run-up in names whose
@@ -899,11 +902,11 @@ was there. All Lane-1, all on seen data; nothing registered, nothing deployed,
 no config touched. The §1 measurement was reproduced before anything was built
 on it.
 
-Related: [`docs/carry_hold.md`](carry_hold.md),
-[`docs/research_findings.md`](research_findings.md),
-[`docs/governance.md`](governance.md),
-[`docs/backtesting_errors_we_never_repeat.md`](backtesting_errors_we_never_repeat.md),
-[`docs/archive/2026-07-31-trend-filters-and-persistence.md`](archive/2026-07-31-trend-filters-and-persistence.md).
+Related: [`docs/carry_hold.md`](../carry_hold.md),
+[`docs/research_findings.md`](../research_findings.md),
+[`docs/governance.md`](../governance.md),
+[`docs/backtesting_errors_we_never_repeat.md`](../backtesting_errors_we_never_repeat.md),
+[`docs/archive/2026-07-31-trend-filters-and-persistence.md`](2026-07-31-trend-filters-and-persistence.md).
 
 ---
 

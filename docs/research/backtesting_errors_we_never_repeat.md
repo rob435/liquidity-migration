@@ -2,7 +2,7 @@
 
 A review taxonomy: use it to find ways a result can be wrong, not as a universal
 recipe or a source of permanent metric thresholds. The governing evidence policy
-is `docs/governance.md`. The filename is kept because code, tests, and old
+is `docs/research/governance.md`. The filename is kept because code, tests, and old
 receipts link to it.
 
 The first eleven items came from a 2022 public thread by macrocephalopod; the
@@ -150,7 +150,7 @@ rest from this repository's own failures.
     of simple returns does not compound — and wrong as the thing a book is
     graded on, because a trader earns the arithmetic return. Keep the two series
     separate and name them so they cannot be swapped
-    (`docs/archive/2026-07-30-idio-charts.md` §4.3).
+    (`docs/research/archive/2026-07-30-idio-charts.md` §4.3).
 
 35. **Cost models that assume full rebalance.** Charging a round trip per period
     to a slow signal overstates its cost by the reciprocal of its turnover and
@@ -191,5 +191,5 @@ For the active repository:
 - Preserve every forward epoch and change point even when operational ledgers are
   reset; otherwise later evidence is selected on survival.
 
-Use the short evidence note (`docs/governance.md` §4) and the validity rules
+Use the short evidence note (`docs/research/governance.md` §4) and the validity rules
 there to decide what a specific artifact can support.

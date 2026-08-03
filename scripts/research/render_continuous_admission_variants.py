@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CONTINUOUS admission-variant research renders.
 
-Reproduction and forward scorer for `docs/research_findings.md`. Runs component
+Reproduction and forward scorer for `docs/research/research_findings.md`. Runs component
 variants of the deployed single funding-gated cell through the real engine
 (`run_continuous_equity_component`, existing config fields only) and renders
 hedged books through the deployed overlay stack imported from

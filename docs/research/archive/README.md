@@ -16,12 +16,14 @@ Come here for the full tables and the reasoning behind a specific number.
 | [2026-07-28 carry-hold quant review](2026-07-28-carry-hold-quant-review.md) | Six falsifiable theses against `lane2_carry_hold_v1` on the corrected settlement-exact scorer; registered v2 |
 | [2026-07-30 idio charts](2026-07-30-idio-charts.md) | Do chart signals work better on idiosyncratic price paths than raw ones? |
 | [2026-07-31 trend filters and persistence](2026-07-31-trend-filters-and-persistence.md) | Does excluding downtrending coins pay? No — a screen pays only where entry is unselective. Closed two of the four untested doors, and found crowding persistence, which works as a **size** and not a screen. Registered v4 |
+| [2026-08-01 settlement sawtooth program](2026-08-01-settlement-sawtooth-program.md) | The price pattern around funding payments. CLOSED: the step is arbitrage-free by construction and every trade tried there is dead; two durable bounds (unhedgeable price leg, zero-latency exit) survive it |
+| [2026-08-03 strategy program change log](2026-08-03-strategy-program-change-log.md) | Dated change points 2026-07-26..2026-08-03 and the 2026-07-25 phase record, decanted verbatim so the active program file stays small |
 
 ## What is not here
 
 Superseded audits, preregistration receipts, roadmaps, and redesign notes were
 removed rather than archived — they are recoverable from Git history, and a
 note that cites one names the commit that deleted it. Nothing in this directory
-carries operational authority: for live state read [`STATE.md`](../../STATE.md),
-and for the active research queue read
-[`docs/strategy_program.md`](../strategy_program.md).
+carries operational authority: for live state read
+[`STATE.md`](../../../STATE.md), and for the active research queue read
+[`docs/research/strategy_program.md`](../strategy_program.md).

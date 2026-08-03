@@ -1,7 +1,7 @@
 # Carry-hold — strategy document
 
 The owner-selected lead strategy from the 2026-07-26 financed-longs program
-(`docs/archive/2026-07-26-financed-longs.md`). This document is the single
+(`docs/research/archive/2026-07-26-financed-longs.md`). This document is the single
 reference for what carry-hold is, why it works, what it has been tested
 against, how it should be run, and what would kill it. Registered config:
 `configs/lane2_carry_hold_v1.json` (commit `6584b00` + correction `7f2e0a7`);
@@ -21,7 +21,7 @@ pins that v4 moved nothing in them.)*
 
 The registration-era scorer **charged every 8h/4h/2h funding settlement
 twice** (float-epsilon age bug; fixed 2026-07-28 with regression tests —
-full statement in `docs/archive/2026-07-26-financed-longs.md` §0). Trades,
+full statement in `docs/research/archive/2026-07-26-financed-longs.md` §0). Trades,
 entries, exits, price legs, and costs are unchanged; the funding P&L leg was
 inflated. Corrected, on the benchmark window: **Sharpe 1.21 raw / 1.05 vt vs
 the benchmark's 1.84** — carry-hold **no longer beats the deployed sleeve on
@@ -40,7 +40,7 @@ per-print −10/−3 bp thresholds mean different daily carry per symbol.
 tested and refuted in the 2026-07-28 quant review (the variant collapses;
 per-print acuteness is load-bearing).
 
-**2026-07-28 quant review** (`docs/archive/2026-07-28-carry-hold-quant-review.md`):
+**2026-07-28 quant review** (`docs/research/archive/2026-07-28-carry-hold-quant-review.md`):
 
 - The §5 validation battery's **Binance replication is withdrawn** — on the
   corrected scorer it is t 0.4 / Sharpe 0.18. The doubled funding leg was
@@ -143,7 +143,7 @@ it holds size distribution and gross constant. Null persistence fails open and
 never fires on this book (0 of 3,314 held name-days), so it is not a listing-age
 screen.
 
-**The program bar is now t ≥ 2.5** (`docs/governance.md` §2, owner decision
+**The program bar is now t ≥ 2.5** (`docs/research/governance.md` §2, owner decision
 2026-07-31), replacing the family-wise ≈3.25/3.58. It is prospective: verdicts
 recorded before that date stand as written. The bar no longer controls
 family-wise error, so a plateau and a failed placebo now carry the weight the
@@ -263,7 +263,7 @@ grind-downs where shorts are not paying.
    Bonferroni threshold then in force. **Both halves of that sentence are
    superseded.** The t is withdrawn by the §0 funding correction — v1's citable
    figure is t 2.31 — and the threshold was replaced on 2026-07-31 by a fixed
-   t ≥ 2.5 (`docs/governance.md` §2). v1 clears the current bar on the corrected
+   t ≥ 2.5 (`docs/research/governance.md` §2). v1 clears the current bar on the corrected
    number; it did not clear the one in force when it was registered.
 8. **Funding-sign accounting** is covered by unit tests
    (`tests/research/backtest/test_financed_longs.py`): a long receives negative funding

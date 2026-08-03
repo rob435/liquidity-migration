@@ -72,7 +72,7 @@ threshold used to:
   reason.
 
 **It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
-`docs/archive/` entries quoting 3.25 or 3.58 are accurate history and are not
+`docs/research/archive/` entries quoting 3.25 or 3.58 are accurate history and are not
 restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
 promoted — it is eligible to be re-examined, and the re-examination is a new
 registration.
@@ -113,7 +113,7 @@ A decision-influencing result travels with a short evidence note:
 
 Grids report all cells, results split by era halves (a pooled number that
 hides decay is a wrong answer), and forgone upside is reported next to
-avoided cost. `docs/backtesting_errors_we_never_repeat.md` remains the
+avoided cost. `docs/research/backtesting_errors_we_never_repeat.md` remains the
 failure-mode reference — lessons, not law.
 
 ## 5. Mechanics — how to actually commit work into the record

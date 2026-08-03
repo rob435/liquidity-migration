@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
 
     family = PRIOR_MECHANISMS + CROSS_SECTIONAL_CELLS + NEW_CELLS
     t_crit = PROGRAM_T
-    print(f"bar |t| > {t_crit:.2f} (docs/governance.md 2). Retired family-wise threshold for "
+    print(f"bar |t| > {t_crit:.2f} (docs/research/governance.md 2). Retired family-wise threshold for "
           f"{PRIOR_MECHANISMS} prior + {CROSS_SECTIONAL_CELLS} cross-sectional "
           f"+ {NEW_CELLS} directional = {family} was {bonferroni_t(family):.2f}\n")
     print("DIRECTIONAL single-name book: pos = sign(60d z-score of the feature),")

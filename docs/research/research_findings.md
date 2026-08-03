@@ -1,9 +1,9 @@
 # Research findings
 
 The durable record of what this repository's strategy research established, replacing six dated documents.
-Current interpretation: [docs/strategy_program.md](strategy_program.md). Evidence rules:
-[AGENTS.md](../AGENTS.md). Failure taxonomy: [docs/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
-Data tiers, roots, and PIT membership: [docs/data.md](data.md).
+Current interpretation: [docs/research/strategy_program.md](strategy_program.md). Evidence rules:
+[AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
+Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
 **Reading these numbers.** All screening figures are Lane-1 selection on seen data and grade nothing. Any
 pre-2026-07-28 figure whose funding leg came through the cross-venue panel is non-citable unless re-derived
@@ -27,11 +27,11 @@ liquidation risk with a named counterparty, which is why the easy construction w
 
 | registered config | bp/day | t | Sharpe full / bench | max DD | turnover |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| [carry_hold_v4](../configs/lane2_carry_hold_v4.json) | 22.19 | 3.61 | 1.64 / **1.88** | −24.5% | 0.119 |
-| [carry_hold_v1](../configs/lane2_carry_hold_v1.json) | 18.0 | 2.31 | 1.02 / **1.21** | −60.0% | 0.271 |
-| [carry_hold_v2](../configs/lane2_carry_hold_v2.json) | 16.7 | 2.47 | 1.09 / 1.35 | −48.6% | 0.198 |
-| [carry_hold_v3](../configs/lane2_carry_hold_v3.json) | 19.83 | 3.13 | 1.38 / 1.71 | −28.7% | 0.156 |
-| [funding_spread_v1](../configs/lane2_funding_spread_v1.json) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
+| [carry_hold_v4](../../configs/lane2_carry_hold_v4.json) | 22.19 | 3.61 | 1.64 / **1.88** | −24.5% | 0.119 |
+| [carry_hold_v1](../../configs/lane2_carry_hold_v1.json) | 18.0 | 2.31 | 1.02 / **1.21** | −60.0% | 0.271 |
+| [carry_hold_v2](../../configs/lane2_carry_hold_v2.json) | 16.7 | 2.47 | 1.09 / 1.35 | −48.6% | 0.198 |
+| [carry_hold_v3](../../configs/lane2_carry_hold_v3.json) | 19.83 | 3.13 | 1.38 / 1.71 | −28.7% | 0.156 |
+| [funding_spread_v1](../../configs/lane2_funding_spread_v1.json) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
 
 - **v4 is scored over 1,756 days, not 1,894** — it does not trade early-2021, so its row above is not
   directly comparable with v1–v3's. On the shared spine v3 reads 21.12 bp/day and Sharpe 1.41. v4's own-capital
@@ -65,14 +65,14 @@ liquidation risk with a named counterparty, which is why the easy construction w
 earlier drafts: continuation +39.55 bp/day (Sharpe 1.20) vs reversal −40.73 (−1.23). Best-behaved real signal
 found, never cleared: +30.48 bp/day t 2.10 Bybit vs +13.64 t 0.99 Binance (ratio 0.45, outside the [0.5, 2.0]
 kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
-[lane2_premium_momentum_blend_v1](../configs/lane2_premium_momentum_blend_v1.json), whose premium leg is dead.
+[lane2_premium_momentum_blend_v1](../../configs/lane2_premium_momentum_blend_v1.json), whose premium leg is dead.
 
 **CONTINUOUS** was retired from the forward routes by owner override 2026-07-29 (`CONTINUOUS_SLEEVE=off`);
 no kill criterion tripped, so the frozen journal is a retirement artifact, not
 a dead run. Citable baseline for the shipped shape: **+11.06% / max DD −1.84% / Sharpe 1.45 / MAR 1.80**, 655
 trades, 2023-03-13 → 2026-07-16. Five load-bearing parameters, all in
-[continuous_profile.py](../liquidity_migration/research/backtest/continuous_profile.py) and
-[continuous_events.py](../liquidity_migration/research/backtest/continuous_events.py): trigger `turn3_pop3`, age 240d,
+[continuous_profile.py](../../liquidity_migration/research/backtest/continuous_profile.py) and
+[continuous_events.py](../../liquidity_migration/research/backtest/continuous_events.py): trigger `turn3_pop3`, age 240d,
 settled-funding floor 0.0, crowd-2, hold 24h, plus the BTC uptrend gate and BTC+ETH hedge.
 
 - **The gate is half the strategy and the funding floor is an economic boundary, not a searched threshold.**
@@ -114,7 +114,7 @@ limit at the touch with a bounded chase-and-timeout fallback reaches ≥ 60% pas
 all-in cost by ≥ 10 bp/side against market-IOC, without degrading signal capture (fills inside the same
 decision hour). Any read beyond mechanics needs ≥ 100 **fills** per arm — not the standalone demo probe's
 ≥ 100 **attempts** per arm (`REGISTERED_MIN_ATTEMPTS_PER_ARM` in
-[passive_fill_probe.py](../liquidity_migration/research/execution/passive_fill_probe.py), a separate instrument with its own
+[passive_fill_probe.py](../../liquidity_migration/research/execution/passive_fill_probe.py), a separate instrument with its own
 40% fill-rate kill); the two are easily confused. Kill rule: stop early if arm B's missed-fill opportunity
 cost exceeds its measured cost saving over any 50-entry window, where **missed-fill opportunity cost** is the
 signal P&L of entries whose passive order never filled, measured at the decision-hour close.
@@ -124,7 +124,7 @@ signal P&L of entries whose passive order never filled, measured at the decision
 already off on both routes when the paper fleet itself was retired 2026-08-03, with the sample stuck at 2/8
 fills. The measured numbers above (5.40 bp passive floor, 15.56 bp taker round trip) stand; grading the flow
 would need a new in-flow experiment on a live sleeve.
-[execution_cost_model.py](../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
+[execution_cost_model.py](../../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
 report does not split by arm.
 
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
@@ -141,14 +141,14 @@ then tightening back to 1.5× is worth **+0.48 bp/day, t 3.27, n 1927**.
 | LONG profile | trades | total | daily Sharpe | worst dip | MAR | stop / target / time exits |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `LongV11aDivWeekendVol` (deployed) | 292 | +40.7% | 1.28 | −4.11% | 1.72 | 66 / 36 / 190 |
-| [`LongV12WideStop`](../liquidity_migration/research/backtest/long_native.py) | 293 | **+52.2%** | **1.50** | **−3.32%** | **2.50** | 50 / 39 / 204 |
+| [`LongV12WideStop`](../../liquidity_migration/research/backtest/long_native.py) | 293 | **+52.2%** | **1.50** | **−3.32%** | **2.50** | 50 / 39 / 204 |
 
 Better or equal in all six calendar years (2022 flips −0.9% → +0.8%) and *less* concentrated than v11a
 (best-20 trades carry 62% of P&L against 78%), on flat gross (0.027 → 0.028) so it is not leverage.
 **Deploying it needs a runtime change, not a profile flip**: the producer publishes `stop_loss_pct` once in
 the entry-target metadata and cannot revise it, so the 48h tightening needs `_plan_time_stop_exits` extended
 to fire on a breached decayed stop. The wide initial stop alone is config-only but t 1.84, below the bar.
-Detail and the promotion note: [`trading_logic.md`](trading_logic.md), [`strategy_program.md`](strategy_program.md).
+Detail and the promotion note: [`trading_logic.md`](../trading_logic.md), [`strategy_program.md`](strategy_program.md).
 
 **CARRY and LONG are the two-sleeve book because they are opposite sides of one crowd.** Daily book returns
 correlate **+0.012** across all 24 decision clocks (+0.002 to +0.024), and they hold the same symbol on the
@@ -285,7 +285,7 @@ underwater after day 1 the remainder averages **+1.26%**.
 hour after a settlement it reads 0.9999999999999999, not 1.0 — so the old `age < 1.0` predicate matched two
 bars per 8h/4h/2h settlement and charged every such print **twice**; 1h-interval symbols escaped because the
 next print overwrote the epsilon bar. Now an age-reset test, `(age < 0.5) | (age < age.shift(1).over("symbol"))`,
-in [financed_longs.py](../liquidity_migration/research/backtest/financed_longs.py) and mirrored in `lane2_blend.py`, with
+in [financed_longs.py](../../liquidity_migration/research/backtest/financed_longs.py) and mirrored in `lane2_blend.py`, with
 regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
 decisions read funding *levels*. Only funding P&L inflated, ~×1.5–2 blended and worst where funding was deepest.
 
@@ -335,7 +335,7 @@ that this research was replacing a broken deployed book was wrong.
   own thesis and a long study for it. Never use OI availability as a filter in a return study. The panel's
   rising OI coverage (0.857 → 0.980, 2021→2026) is a bias gradient, not improving quality.
 - **`open_interest_value` is not a value** — byte-for-byte identical to `open_interest` across the dataset,
-  i.e. contract units. Dropped in [cross_venue_panel.py](../liquidity_migration/research/panels/cross_venue_panel.py) with
+  i.e. contract units. Dropped in [cross_venue_panel.py](../../liquidity_migration/research/panels/cross_venue_panel.py) with
   the reason inline; still latent in `daily_feature_panel.py`, which prefers it for `oi_delta_7d` and
   `oi_to_adv` (neither has a consumer outside that module). Derive notional as `open_interest × mark_close`.
 - **`funding_event_kind` exists on only 2 of 2,024 Bybit funding partitions** (added 2026-07-16). Filtering on
@@ -436,8 +436,8 @@ that this research was replacing a broken deployed book was wrong.
   depth ladder it is the strongest carry result the program has: 16 of 16 shape cells positive at t 1.87–2.77,
   and the combined v4 differential is +10.76 bp/day (t 3.23) at v3's capital. Replacing the depth ladder rather
   than multiplying it gives +0.16 to +1.89, all t < 1 — the composition is the result. Registered as
-  [lane2_carry_hold_v4](../configs/lane2_carry_hold_v4.json); full run note in
-  [docs/archive/2026-07-31-trend-filters-and-persistence.md](archive/2026-07-31-trend-filters-and-persistence.md).
+  [lane2_carry_hold_v4](../../configs/lane2_carry_hold_v4.json); full run note in
+  [docs/research/archive/2026-07-31-trend-filters-and-persistence.md](archive/2026-07-31-trend-filters-and-persistence.md).
 - **Missing datasets, ranked.** (1) A liquidation feed — its purpose changed: it is the input that would let
   the one durable premium be *sized and survived*, not a squeeze predictor, and external cascade work records
   a hazard no backtest here models, that venues activate auto-deleveraging and can force-close a winning short.
@@ -453,7 +453,7 @@ that this research was replacing a broken deployed book was wrong.
   mechanism, one portfolio construction layer, one execution layer, parameters set by economics. Sizing and
   the BTC hedge remain per-sleeve.
 - **The bar is t ≥ 2.5 as of 2026-07-31**, owner decision, authority
-  [docs/governance.md](governance.md) §2. It replaces the family-wise ≈3.25/3.58 and is prospective — pre-2026-07-31
+  [docs/research/governance.md](governance.md) §2. It replaces the family-wise ≈3.25/3.58 and is prospective — pre-2026-07-31
   verdicts stand as recorded and are not restated. It also closes a defect the program had open against itself:
   the ~44-mechanism denominator behind the old threshold was never enumerable in the tree or in git history, so
   every number derived from it rested on an unverifiable count. A fixed bar does not. What it costs: t 2.5 is

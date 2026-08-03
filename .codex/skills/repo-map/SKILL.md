@@ -18,9 +18,9 @@ Start from the source that owns the question:
 
 - Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
   environment/config.
-- Evidence policy: `AGENTS.md` for the standing rules, `docs/governance.md` for
+- Evidence policy: `AGENTS.md` for the standing rules, `docs/research/governance.md` for
   the Progressive Evidence Model itself.
-- Research decisions and queue: `docs/strategy_program.md` and raw run
+- Research decisions and queue: `docs/research/strategy_program.md` and raw run
   artifacts.
 - Active profile contract: `docs/trading_logic.md`, then the strategy
   modules, target producers, account owner, and deploy overrides it cites.

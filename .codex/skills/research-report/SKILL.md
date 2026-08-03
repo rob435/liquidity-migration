@@ -1,18 +1,18 @@
 ---
 name: research-report
-description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence rules in docs/governance.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
+description: Read, validate, compare, and label research or backtest reports and their raw artifacts in this quant repository. Use when extracting metrics, interpreting a run, comparing controls or venues, checking OOS and split claims, or deciding what conclusion the evidence supports. Apply the evidence rules in docs/research/governance.md: state which data shaped vs graded the result, keep the evidence physics, and write the short evidence note rather than a fixed metric checklist or historical promotion gate.
 ---
 
 # Interpret research reports
 
-Read `docs/governance.md`, then inspect the report and its referenced raw
+Read `docs/research/governance.md`, then inspect the report and its referenced raw
 artifacts directly. A helper summary or attractive chart is not a substitute for
 the ledger, event rows, config, or data identity behind the claim.
 
 ## Establish context
 
 - Identify the exact claim, the decision it informs, which lane it belongs to,
-  and the commit that registers it (`docs/governance.md` §5 — the commit is the
+  and the commit that registers it (`docs/research/governance.md` §5 — the commit is the
   registration; there is no separate filing).
 - Locate Markdown/JSON summaries, ledgers/event rows, equity/accounting outputs,
   configs, manifests, and logs under the run root.
@@ -42,7 +42,7 @@ metrics merely because an older template listed them.
 
 ## Write the conclusion
 
-Produce the evidence card from `docs/governance.md`:
+Produce the evidence card from `docs/research/governance.md`:
 
 - claim;
 - validity: valid, limited, or invalid;

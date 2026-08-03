@@ -35,7 +35,7 @@ Known source defect — read this before using ``by_open_interest``:
     alts are exactly where short exposure pays. Use funding and premium as the
     primary crowding measurements; treat OI as corroboration on the survivor
     cohort, and replicate any OI-conditioned result funding-only on the full
-    population before believing it. Detail in ``docs/research_findings.md`` §4.
+    population before believing it. Detail in ``docs/research/research_findings.md`` §4.
 
 The builder resolves its symbol universe by canonical identity
 (`symbol_codec`), rejects within-venue partition collisions instead of

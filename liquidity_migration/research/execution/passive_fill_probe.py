@@ -5,7 +5,7 @@ passive floor is 5.40 bp. Whether that floor is reachable is an execution
 question, and this probe manufactures a powered sample in hours by placing its
 own min-notional orders. The in-flow A/B instrument (arm B, retired with the
 paper fleet 2026-08-03 at 2/8 fills; thresholds in
-``docs/research_findings.md`` §1) accrued too slowly to grade. Probe attempts
+``docs/research/research_findings.md`` §1) accrued too slowly to grade. Probe attempts
 sample ordinary market states while CONTINUOUS entries sample pumps, so a probe
 result bounds the mechanism; only an in-flow experiment grades the flow.
 

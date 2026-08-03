@@ -37,7 +37,7 @@ from liquidity_migration.research.backtest.continuous_events import compute_cont
 
 ACTIVE_COMPONENTS = (
     # Single turn3_pop3 cell with the settled-funding >= 0 admission
-    # (docs/research_findings.md).
+    # (docs/research/research_findings.md).
     ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
 )
 STRATEGY_ID = "continuous_fade_v2"

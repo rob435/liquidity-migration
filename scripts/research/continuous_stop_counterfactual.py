@@ -12,7 +12,7 @@ a squeeze. Tight-stop numbers are therefore ceilings.
 
 Purpose: choose the declared ``stop_loss_pct`` so the deployed exit rule and the
 backtest model the same book — a wide native backstop plus the strategy's own
-TP/max-hold exits. Method and caveats: docs/research_findings.md.
+TP/max-hold exits. Method and caveats: docs/research/research_findings.md.
 
 Usage:
   python scripts/research/continuous_stop_counterfactual.py \

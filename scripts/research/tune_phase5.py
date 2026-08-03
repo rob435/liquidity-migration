@@ -20,7 +20,7 @@ parameter.
 
 Costs are charged at each cell's own *measured* turnover, because strictness
 changes turnover and a fixed charge would bias the curve toward whichever end
-churns less. Details in `docs/research_findings.md`.
+churns less. Details in `docs/research/research_findings.md`.
 """
 
 from __future__ import annotations

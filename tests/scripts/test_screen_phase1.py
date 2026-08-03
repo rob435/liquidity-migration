@@ -32,7 +32,7 @@ HOUR_MS = 3_600_000
 
 class TestBonferroniThreshold:
     def test_threshold_is_the_corrected_one_not_two(self) -> None:
-        """docs/governance.md 2 owns the bar; the constant follows it."""
+        """docs/research/governance.md 2 owns the bar; the constant follows it."""
         assert screen_phase1.PROGRAM_T == pytest.approx(2.5)
         assert screen_phase1.LEGACY_BONFERRONI_T == pytest.approx(3.25)
 

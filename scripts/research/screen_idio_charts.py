@@ -57,7 +57,7 @@ ALL_SOURCES = ("raw", "rawlag", "idio", "iz")
 TARGETS = ("fwd_ret_1d", "resid_fwd")
 
 
-#: The program bar, owned by ``docs/governance.md`` §2. Since 2026-07-31 the
+#: The program bar, owned by ``docs/research/governance.md`` §2. Since 2026-07-31 the
 #: screens are judged against a fixed 2.5 rather than a family-wise threshold
 #: derived from ``PRIOR_MECHANISMS`` — that denominator was never enumerable, a
 #: defect the strategy program had open against itself. :func:`bonferroni_t` is
@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     legacy = bonferroni_t(family)
     print(f"pre-declared grid: {len(CHART_FEATURES)} features x {len(ALL_SOURCES)} sources "
           f"x {len(TARGETS)} targets = {n_cells} cells")
-    print(f"bar |t| > {t_crit:.2f} (docs/governance.md 2). Retired family-wise threshold "
+    print(f"bar |t| > {t_crit:.2f} (docs/research/governance.md 2). Retired family-wise threshold "
           f"for {PRIOR_MECHANISMS} prior + {n_cells} new = {family} was {legacy:.2f}\n")
 
     results = run(

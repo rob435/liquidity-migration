@@ -47,26 +47,25 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | Doc | Covers |
 | --- | --- |
 | [STATE.md](STATE.md) | last recorded operating state and next action |
-| [docs/plain_english_guide.md](docs/plain_english_guide.md) | the whole system without jargon — start here |
 | [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
 | [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the hourly digest, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
 | [docs/architecture.md](docs/architecture.md) | producers, account owner, journals, how a target becomes an order |
 | [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
-| [docs/carry_hold.md](docs/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |
+| [docs/research/carry_hold.md](docs/research/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |
 | [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |
-| [docs/research_findings.md](docs/research_findings.md) | what the evidence supports, including the negative results |
-| [docs/research_theses.md](docs/research_theses.md) | ideas that work and still are not run, and what disqualifies each |
-| [docs/governance.md](docs/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
-| [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
-| [docs/strategy_program.md](docs/strategy_program.md) | active research queue |
-| [docs/settlement_sawtooth_program.md](docs/settlement_sawtooth_program.md) | the price pattern around funding payments, and why the carry book cannot be hedged |
+| [docs/research/research_findings.md](docs/research/research_findings.md) | what the evidence supports, including the negative results |
+| [docs/research/strategy_program.md](docs/research/strategy_program.md) §Theses | ideas that work and still are not run, and what disqualifies each |
+| [docs/research/governance.md](docs/research/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
+| [docs/research/backtesting_errors_we_never_repeat.md](docs/research/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
+| [docs/research/strategy_program.md](docs/research/strategy_program.md) | active research queue |
+| [docs/research/archive/2026-08-01-settlement-sawtooth-program.md](docs/research/archive/2026-08-01-settlement-sawtooth-program.md) | the price pattern around funding payments, and why the carry book cannot be hedged |
 | [liquidity_migration/README.md](liquidity_migration/README.md) | which subpackage owns a module, and what may import what |
 | [scripts/README.md](scripts/README.md) | which script to run, and who runs it |
 | [docs/real_money.md](docs/real_money.md) | the funded-account envelope, the owner's arming runbook, and what is still unproven |
-| [docs/archive/](docs/archive/README.md) | dated research runs — the underlying tables behind a number |
+| [docs/research/archive/](docs/research/archive/README.md) | dated research runs — the underlying tables behind a number |
 
 Registered configs cite the archived runs by section;
-`docs/research_findings.md` is the durable summary.
+`docs/research/research_findings.md` is the durable summary.
 
 ## Standing rules
 

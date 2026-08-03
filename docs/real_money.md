@@ -5,7 +5,6 @@ envelope scaled to observed wallet equity.
 
 `REAL_MONEY` is unset, no mainnet credential exists, and no mainnet unit has
 started. Arming is the owner's own act, step by step under *Arming* below.
-Plain-language version: [`docs/plain_english_guide.md`](plain_english_guide.md).
 
 ## The envelope
 
@@ -242,8 +241,8 @@ Bybit demo prices are real; its fills are not.
 CARRY (`lane2_carry_hold_v3`) runs on demo; LONG's forward record is
 demo-only. `carry_hold`'s benchmark Sharpe is **1.21 (t 2.31)** and does not
 beat the CONTINUOUS benchmark; the superseded 2.57 / t 4.87 figures were
-double-counted funding ([`carry_hold.md`](carry_hold.md),
-[`../AGENTS.md`](../AGENTS.md), [`strategy_program.md`](strategy_program.md)).
+double-counted funding ([`carry_hold.md`](research/carry_hold.md),
+[`../AGENTS.md`](../AGENTS.md), [`strategy_program.md`](research/strategy_program.md)).
 
 ### Measured on the demo account, 2026-07-30
 

@@ -12,7 +12,7 @@ from liquidity_migration.research.backtest.continuous_regime import ACTIVE_BTCVO
 CONTINUOUS_PROFILE_ID = "continuous_ensemble_v2"
 # single_fund0: one turn3_pop3 cell plus a settled-funding >= 0 admission
 # ("only fade pumps whose longs are paying"), the V3 shape in
-# docs/research_findings.md. sl35 is the declared 35% component stop.
+# docs/research/research_findings.md. sl35 is the declared 35% component stop.
 CONTINUOUS_PROFILE_REVISION = "active_single_fund0_tp12_sl35_v1"
 CONTINUOUS_HISTORY_START_DATE = "2023-04-01"
 CONTINUOUS_EQUITY_EVIDENCE_LABEL = "exploratory_historical_equity"

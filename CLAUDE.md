@@ -5,12 +5,17 @@ Bybit.
 
 @AGENTS.md
 
+CLAUDE.md is navigation and commands. AGENTS.md, imported above and read by
+non-Claude agents too, is conduct — including the rule that everything is said
+simply, without jargon.
+
 ## Read by purpose
+
+**The system** — what runs and how to run it:
 
 | Question | File |
 | --- | --- |
 | What is running right now | [STATE.md](STATE.md) |
-| The system without jargon | [docs/plain_english_guide.md](docs/plain_english_guide.md) |
 | Which subpackage owns a module, and what may import what | [liquidity_migration/README.md](liquidity_migration/README.md) |
 | Which script to run, and who runs it | [scripts/README.md](scripts/README.md) |
 | Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |
@@ -19,20 +24,20 @@ Bybit.
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |
 | Data roots, timestamps, point-in-time membership, refresh | [docs/data.md](docs/data.md) |
 | The funded account: envelope, arming runbook, what is unproven | [docs/real_money.md](docs/real_money.md) |
-| What the evidence supports, including the negative results | [docs/research_findings.md](docs/research_findings.md) |
-| Ideas that work and still are not run, and what disqualifies each | [docs/research_theses.md](docs/research_theses.md) |
-| How evidence is graded, registered, and promoted | [docs/governance.md](docs/governance.md) |
-| Backtest failure modes we do not repeat | [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) |
-| The lead strategy in full | [docs/carry_hold.md](docs/carry_hold.md) |
-| Active research queue | [docs/strategy_program.md](docs/strategy_program.md) |
-| The price pattern around funding payments, and why the carry book cannot be hedged | [docs/settlement_sawtooth_program.md](docs/settlement_sawtooth_program.md) |
-| Everything else | [README.md](README.md) |
 
-Dated research runs live in [`docs/archive/`](docs/archive/README.md) — the
-underlying tables behind a number. `docs/research_findings.md` is the durable
-summary; in-flight work is recorded in `STATE.md`.
+**The evidence** — research, all under `docs/research/`:
 
-Derive live state from those files; never copy sleeve status or thresholds here.
+| Question | File |
+| --- | --- |
+| Active queue, current truth, and the measured-but-unrun theses | [strategy_program.md](docs/research/strategy_program.md) |
+| What the evidence supports, including the negative results | [research_findings.md](docs/research/research_findings.md) |
+| How evidence is graded, registered, and promoted | [governance.md](docs/research/governance.md) |
+| Backtest failure modes we do not repeat | [backtesting_errors_we_never_repeat.md](docs/research/backtesting_errors_we_never_repeat.md) |
+| The lead strategy in full | [carry_hold.md](docs/research/carry_hold.md) |
+| Dated receipts and closed programs (the tables behind a number) | [archive/](docs/research/archive/README.md) |
+
+Everything else: [README.md](README.md). Derive live state from these files;
+never copy sleeve status or thresholds here.
 
 ## Commands
 
