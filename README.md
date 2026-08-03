@@ -1,20 +1,22 @@
 # liquidity-migration
 
-Research and demo/paper execution for crypto-perpetual strategies, primarily on
+Research and demo execution for crypto-perpetual strategies, primarily on
 Bybit.
 
 ## Sleeves
 
-| Sleeve | Profile | `deploy/sleeves.env` |
+| Sleeve | Profile | Toggle |
 | --- | --- | --- |
-| LONG | `LongV12WideStop` | `LONG_SLEEVE=on` — switched from `LongV11aDivWeekendVol` 2026-08-03; standing v11a positions drain under their published terms ([detail](docs/trading_logic.md)) |
-| CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE=on` |
-| CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE=off` — retired 2026-07-29 by owner override |
-| paper target mirror | republishes the demo fleet's targets onto the paper route | `PAPER_TARGET_MIRROR=on` |
+| LONG | `LongV12WideStop` | `LONG_SLEEVE` |
+| CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE` |
+| CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE` |
+| LONG / CARRY, real money | as above | `LONG_MAINNET_SLEEVE`, `CARRY_MAINNET_SLEEVE` |
 
-Paper sleeves for CONTINUOUS and CARRY, and both mainnet sleeves, are off.
-`deploy/sleeves.env` is a ceiling: a host override can turn an enabled sleeve
-off, never on.
+Which toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not here.
+That file is a ceiling: a host override can turn an enabled sleeve off, never on.
+Demo is the only practice book — the paper fleet was retired and nothing reads
+its journals. What each sleeve trades is in
+[`docs/trading_logic.md`](docs/trading_logic.md).
 
 ## Layout
 
@@ -53,9 +55,13 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [docs/carry_hold.md](docs/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |
 | [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |
 | [docs/research_findings.md](docs/research_findings.md) | what the evidence supports, including the negative results |
+| [docs/research_theses.md](docs/research_theses.md) | ideas that work and still are not run, and what disqualifies each |
 | [docs/governance.md](docs/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
 | [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
 | [docs/strategy_program.md](docs/strategy_program.md) | active research queue |
+| [docs/settlement_sawtooth_program.md](docs/settlement_sawtooth_program.md) | the price pattern around funding payments, and why the carry book cannot be hedged |
+| [liquidity_migration/README.md](liquidity_migration/README.md) | which subpackage owns a module, and what may import what |
+| [scripts/README.md](scripts/README.md) | which script to run, and who runs it |
 | [docs/real_money.md](docs/real_money.md) | the funded-account envelope, the owner's arming runbook, and what is still unproven |
 | [docs/archive/](docs/archive/README.md) | dated research runs — the underlying tables behind a number |
 

@@ -13,9 +13,7 @@ never submit, adopt, repair, or close an order.
 | --- | --- | --- |
 | Account owner, demo | `account-execution` | Yes — sole Bybit demo mutator |
 | Account owner, mainnet | `account-execution-mainnet` | Yes, once the owner arms it |
-| Account owner, paper | `account-paper-execution` | No venue exists; modeled fills only |
-| Target producers | `bybit-{long,carry}-{demo,paper,mainnet}`, `bybit-continuous-{demo,paper}` | No |
-| Target mirror | `paper-target-mirror` | No — republishes demo targets at the configured mirror scale |
+| Target producers | `bybit-{long,carry}-{demo,mainnet}`, `bybit-continuous-demo` | No |
 | Hedge / RMOM | `continuous-hedge`, `continuous-rmom-refresh` (+ timers) | No |
 | Liveness | `demo-liveness`, `mainnet-liveness` (+ timers) | No credential, no ordering dependency on the owner it watches |
 
@@ -26,23 +24,21 @@ market data -> strategy target -> durable inbox -> account kernel
 ```
 
 `submission_attempt` is emitted only on the `ambiguous_provider` branch
-(`execution_adapters.py:803`); the modeled twin takes the direct `submit_effect` path
-(`:817-820`) and emits none, so a paper journal holds zero of them and a demo-vs-paper join
-keyed on that type finds a path that never emits one, not missing data.
+(`execution_adapters.py`); the modeled twin (historical replay, and the retired paper
+owner's journals) takes the direct `submit_effect` path and emits none, so a join keyed on
+that type finds a path that never emits one, not missing data.
 
 One owner per account, held by a persistent lease
 ([`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py)): demo's is the
-authenticated Bybit user-wide capability under `/run/lock/liquidity-migration`, paper's is
-local to its account root. An owner derives its route without touching the filesystem,
-takes the lease, then creates the paired account/inbox manifests
+authenticated Bybit user-wide capability under `/run/lock/liquidity-migration`. An owner
+derives its route without touching the filesystem, takes the lease, then creates the paired
+account/inbox manifests
 ([`account_route.py`](../liquidity_migration/account/account_route.py)), so a losing owner cannot
-initialize routes before discovering the active one. Both owners pin and revalidate the
-same single-link inode plus parent and leaf mount identities for the lease lifetime
-(`account_owner_lease.py:315,426,464,518,748-753`); the paper owner alone passes
-`allow_private_parent_mount_boundary=True` (`account_paper_runner.py:274`) to accept one
-intentional private-parent mount boundary created by systemd `ReadWritePaths` — `False`
-everywhere else, so adding a `ReadWritePaths` entry to a demo unit breaks lease
-acquisition. Route mismatch still fails closed after acquisition.
+initialize routes before discovering the active one. Owners pin and revalidate the
+same single-link inode plus parent and leaf mount identities for the lease lifetime;
+`allow_private_parent_mount_boundary` stays `False`, so adding a `ReadWritePaths` entry to
+an owner unit breaks lease acquisition. Route mismatch still fails closed after
+acquisition.
 The inbox (`AccountIntentInbox` in
 [`account_service.py`](../liquidity_migration/account/account_service.py)) is a filesystem queue —
 `pending/processing/completed/failed/arrival`, atomic claim, durable arrival sequence — that
@@ -55,26 +51,18 @@ retires terminally to `failed/` (`StaleEntryRequestExpired`) instead of retrying
 decision forever — the 2026-08-01 outage loop. Exits never expire; a batch with attempted
 commands keeps resuming past expiry so possibly-live venue state reconciles.
 
-**Target mirror.** Mirrored intents carry `mirror_source_request_id`,
-`mirror_source_environment` and `mirror_scale`; `batch_id`, `target_key` and
-`created_ts_ns` are preserved so the two fleets join without a correlation table
-(`paper_target_mirror.py:126-129`), and `demo_paper_agreement.py:157-161` normalizes
-quantities by `mirror_scale` and rejects a non-positive one. Scale is a runtime mode, not a
-constant: `PAPER_MIRROR_SCALE_MODE` (`run_authorized_runtime.sh:76`) → `--scale-mode`,
-`SCALE_MODES = ("verbatim", "equity_ratio")`, default `verbatim`
-(`paper_target_mirror_runner.py:27,92`). Verbatim (1.0) is the only setting under which a
-difference between the two books is attributable to execution; `equity_ratio` sizes paper
-at its own account size — right for a capacity question, wrong for a fill-model one. Only
-notional-valued metadata keys scale (`:46-48`), and the dedup key is scale-independent
-(`:89-90`) so a restart mid-tape cannot republish at whatever scale is current. The unit
-runs `User=root` because the demo capture tape is `0600 root:root` and the paper owner is
-unprivileged; queued files are chowned to the inbox's *own* uid/gid, read from the
-destination directory (`paper_target_mirror.py:239-255`). The demo tape's mode is unchanged
-— do not widen it.
+**Retired paper route (2026-08-03).** A credential-free paper twin — its own owner with
+modeled fills, per-sleeve paper producers, and later a target mirror that republished demo
+targets verbatim — ran beside demo until 2026-08-03 and was removed whole: it produced
+routing evidence only (`integration_only_uncalibrated`), its one live research use was
+dormant, and it generated a disproportionate share of operational incidents. Journals under
+the old paper roots remain on disk as history; intents in them carry
+`mirror_source_request_id` / `mirror_source_environment` / `mirror_scale` metadata from the
+mirror era.
 
 ## The account journal
 
-Event-sourced, and the accounting authority for demo, paper, mainnet, and historical
+Event-sourced, and the accounting authority for demo, mainnet, and historical
 replay. Implementation: [`account_kernel.py`](../liquidity_migration/account/account_kernel.py).
 
 ```text
@@ -145,7 +133,7 @@ Three read paths, and they are not interchangeable.
 
 1. **Full verified read** — `read_account_journal(..., verify=True)` or
    `verify_account_journal(...)`. Sanctioned callers: `account_strategy_state.py`,
-   `three_way_reconciliation.py`, `account_candidate_universe.py`, owner startup
+   `account_candidate_universe.py`, owner startup
    (`AccountJournal._events_ref`, which is what makes the head read valid below), and the
    audit/report tools `scripts/runtime/check_fleet_liveness.py`,
    `scripts/vps/check_deploy_rollout_readiness.py`, `scripts/research/build_trade_diagnostics.py`,
@@ -278,6 +266,16 @@ positive authentication, or positive subscription acknowledgements for **both** 
 also fail closed. Any failed or unconfirmed condition blocks owner health and new exposure
 immediately.
 
+**Wedged commands.** A command the venue demonstrably does not hold can only be freed by a
+terminal journal transition, and on demo the reconciler performs that transition itself on
+the same evidence ladder as the `wedged-command` CLI — a live order or unreduced fills
+always refuse it (`account_reconcile.py:224-268`; mainnet only classifies, leaving the
+transition an operator act). Anything that survives the automatic pass is listed in health
+as a `wedged_command:<kind>:<symbol>:...` mismatch (`:337`), which blocks new entries on
+that symbol without ever blocking its reductions. Each open wedge is probed at most once a
+minute and at most five per pass (`WEDGE_PROBE_INTERVAL_NS`, `WEDGE_PROBES_PER_PASS`,
+`:53-54`), so a newly wedged command is probed on the first pass that sees it.
+
 **Private stream.** Readiness is probed every owner-loop iteration and again at
 exposure-increasing admission. After `ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` (default 180;
 `.env.example:87`, `scripts/runtime/run_account_execution_service.sh:19` →
@@ -318,8 +316,11 @@ hand-close dust on the venue.
 **Submission freshness and ambiguity.** An exposure-increasing command with zero prior
 submission attempts is refused as `StaleUnsubmittedExposureCommand` when
 `command.created_ts_ns <= 0`, `now_ns < command.created_ts_ns`, or `now_ns −
-command.created_ts_ns > max_unsubmitted_exposure_age_ns` (default `5_000_000_000`,
-`bybit_execution_adapter.py:88`). It is checked twice — before `prepare_submission` /
+command.created_ts_ns > max_unsubmitted_exposure_age_ns` (default `120_000_000_000` —
+120 s — `bybit_execution_adapter.py:97`, set by the owner's
+`--max-unsubmitted-exposure-age-seconds`, `account_service_runner.py:589`). The budget must
+cover whole-batch venue latency rather than one round trip, because command age is anchored
+to the shared batch journal instant. It is checked twice — before `prepare_submission` /
 leverage negotiation (`execution_adapters.py:747-764`) and again at the order-create
 boundary (`:787-800`), because preparation is itself a provider round trip. Exactly one
 thread may claim the first exposure-increasing attempt: the journal transaction in
@@ -347,9 +348,9 @@ separately journaled funding, offline venue closed-P&L cross-checking, and unall
 account-netted component reductions — not an online finalizer, so a digest number is
 reconstructed, never venue-final. The CONTINUOUS BTC gate and entry-funnel line comes from
 a separate receipt-bound projection shown only when `CONTINUOUS_CYCLE_ROOT` is configured;
-it is deliberately unset on both owner units
-(`deploy/systemd/liquidity-migration-account-execution.service:17`,
-`...-paper-execution.service:17`, pinned by `tests/scripts/test_runtime_scripts.py:319,821,982`) so
+it is deliberately unset on the owner unit
+(`deploy/systemd/liquidity-migration-account-execution.service`, pinned by
+`tests/scripts/test_runtime_scripts.py`) so
 a retired sleeve leaves no permanently `STALE` line. Re-promotion must set the root
 explicitly.
 
@@ -361,7 +362,7 @@ The descriptor-rooted preflight
 symlinked parent components, multiply-linked regular files (`st_nlink != 1`), special files
 (anything not directory, regular, or symlink), and mount-boundary crossings — including
 same-device bind mounts, detected by Linux mount id rather than `st_dev`. Leaf symlinks are
-rejected only under the strict/paper preflight (`preflight_reset_targets(...,
+rejected only under the strict account preflight (`preflight_reset_targets(...,
 reject_symlinks=True)`). Epoch roots must be pairwise disjoint and disjoint from every
 strategy root. A symlinked or bind-mounted data root is not a supported layout.
 
@@ -378,7 +379,7 @@ What survives is mechanical, not curated: every file whose name ends in `.lock`,
 everything under a top-level `.locks/` namespace, is preserved by inode, and any directory
 containing one is not removed. These are the persistent owner, route, journal, inbox and
 dataset lock inodes — synchronization infrastructure, not carried-forward account state, so
-preserving them leaks nothing across the boundary; both leases are held across the
+preserving them leaks nothing across the boundary; the account lease is held across the
 destructive boundary precisely because the inodes persist.
 
 Archive creation and the final pre-clear check bind the recovery artifact to one
@@ -386,15 +387,8 @@ exclusively created inode (`O_CREAT|O_EXCL`, mode 0600) plus an exclusively crea
 `<archive>.sha256` sidecar, and revalidation matches the expected inode as well as the
 digest — not a reopened predictable path.
 
-Paper reset retires its own deterministic epoch explicitly and never borrows the demo
-flatness claim; the demo venue-flat proof gates only the demo half
-(`scripts/maintain/reset_demo_paper_ledgers.sh:67-74`). The post-reset paper heartbeat records
-`paper_boundary=archived_deterministic_epoch_not_carried_forward`, and the fresh paper
-epoch's flatness basis is `fresh_empty_deterministic_epoch`.
-
 Residual risk, stated honestly: reset is a fail-closed epoch transition, not an atomic
-transaction across the six account roots (demo and paper × account root, intent inbox, raw
-capture). The archive *output* is descriptor-bound, but the tar *input* walk is
+transaction across the account roots (account root, intent inbox, raw capture). The archive *output* is descriptor-bound, but the tar *input* walk is
 pathname-based under the stopped-fleet and owner-lease boundary; a non-cooperating writer
 arriving after the final identity check is outside what descriptor validation can exclude.
 Once the first unlink happens, an I/O error or unmanaged writer can leave a partial clear,
@@ -403,27 +397,28 @@ and the reset then leaves all managed units stopped rather than claiming rollbac
 ## Realms and credentials
 
 `ExecutionEnvironment` answers *which owner a producer publishes to*; `VenueRealm` answers
-*which venue a private credential authenticates against*. Separate types on purpose:
-`paper` is an owner with no venue at all.
+*which venue a private credential authenticates against*. Separate types on purpose (the
+distinction predates the paper retirement: the retired paper environment was an owner with
+no venue at all).
 
-| | demo | paper | mainnet |
-| --- | --- | --- | --- |
-| Realm | `demo` | none | `mainnet` |
-| REST host | `api-demo.bybit.com` | — | `api.bybit.com` |
-| Credentials | `BYBIT_DEMO_API_KEY/_SECRET` | none | `BYBIT_REAL_API_KEY/_SECRET` |
-| Account ID | `bybit-demo-unified` | `bybit-paper-unified` | `bybit-mainnet-unified` |
-| Env files | `bybit-demo.env`, `account-execution.env`, `sleeves.resolved.env` | `account-paper-execution.env`, `sleeves.resolved.env` | `bybit-mainnet.env`, `account-execution-mainnet.env` |
-| Unit user | root | `liquidity-migration-paper` | root |
-| Instrument rules | `demo_rule_probe`, empirical | mirrored demo rules | `get_instruments_info`, read-only |
-| Candidate universe | `freeze_account_candidate_universe.py --realm demo` | mirrored demo artifact | same script, `--realm mainnet` |
+| | demo | mainnet |
+| --- | --- | --- |
+| Realm | `demo` | `mainnet` |
+| REST host | `api-demo.bybit.com` | `api.bybit.com` |
+| Credentials | `BYBIT_DEMO_API_KEY/_SECRET` | `BYBIT_REAL_API_KEY/_SECRET` |
+| Account ID | `bybit-demo-unified` | `bybit-mainnet-unified` |
+| Env files | `bybit-demo.env`, `account-execution.env`, `sleeves.resolved.env` | `bybit-mainnet.env`, `account-execution-mainnet.env` |
+| Unit user | root | root |
+| Instrument rules | `demo_rule_probe`, empirical | `get_instruments_info`, read-only |
+| Candidate universe | `freeze_account_candidate_universe.py --realm demo` | same script, `--realm mainnet` |
 
 `--realm` is required on both freezers with no default, the artifact records the realm it
 was read from, and a loader refuses an artifact stamped with any other one. Every
 remaining fallback lands on `demo`; mainnet requires someone to type it *and* `REAL_MONEY`
 armed on top. Producers inherit only
 the public/route values they need and explicitly unset private API, mainnet, `REAL_MONEY`,
-and Telegram variables. Paper units pin `REAL_MONEY=false` and reject inherited exchange
-credentials. Env files are strict `KEY=VALUE` data, parsed and never sourced as shell.
+and Telegram variables. Env files are strict `KEY=VALUE` data, parsed and never sourced as
+shell.
 
 [`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) submits and cancels real
 PostOnly orders on demo to find the empirically accepted minimum notional: the demo realm
@@ -431,91 +426,29 @@ rejects some orders its own `minNotionalValue` says it should accept. It refuses
 but demo; mainnet takes the declared `minNotionalValue` at face value and labels the source
 `venue_declared`.
 
-The paper execution twin is commit-owned, not calibrated: 5.5 bps taker fee, 2.0 bps
-residual adverse slippage, a walk of the visible depth-50 decision book, partial fills by
-book level, zero modeled latency, and rejection of exposure-increasing decisions older than
-250 ms. Every modeled ACK, fill, status, owner-health record **and the runner name** is
-tagged `integration_only_uncalibrated`. Strict reduce-only paper commands bypass the
-passive experiment and may use the exact captured decision book while it is inside the
-owner's five-second market-freshness contract (`reduce_only_max_decision_age_ns =
-DEFAULT_MAX_MARKET_AGE_NS = 5_000_000_000`, `account_paper_runner.py:362`,
-`account_service.py:64`); older or future books still reject, and the value is validated as
-never below the entry limit (`passive_execution.py:118-120`). The modeled ACK records the
-effective age, the limit, and the policy source `paper_owner_market_freshness` (`:147-150`),
-so this safety-liveness allowance cannot be mistaken for entry-model calibration.
-
-[`scripts/research/measure_execution_twin_error.py`](../scripts/research/measure_execution_twin_error.py)
-`--demo-account-root R --paper-account-root R2 [--demo-account-id ID] [--paper-account-id
-ID] [--json]` is the measurement that would let the twin leave `integration_only_uncalibrated`
-scope. It reports `optimism_bps = sign(qty) * (demo_vwap − paper_vwap) / demo_vwap *
-10_000` (`execution_twin_calibration.py:163`); positive means the model filled better than
-the venue — the sign that turns a paper edge into a live loss. Matching is on
-`(batch_id, symbol)` and works only because the paper fleet mirrors demo targets and
-carries `batch_id` unchanged. Partial fills are aggregated to the price the whole order
-achieved before comparison: the twin partitions one order across up to fifty book levels
-while the venue reports one execution, so a per-fill comparison measures the partition
-policy, not the model. The harness reports `matched_pairs` beside every statistic and
-refuses a mean over an empty sample (`:54, :66, :200-205`). The current sample is **zero
-matched pairs** — the two fleets have never executed the same decision, which is why the
-twin has never been calibrated. A sample becomes possible only once the target mirror runs.
-
-**Paper equity** is marked from the paper journal
-([`paper_account_equity.py`](../liquidity_migration/runtime/paper_account_equity.py):5-8):
-
-```text
-equity = starting_capital
-       + SUM_positions (realized_from_fills_usdt - fees_from_fills_usdt)
-       + SUM_pnl_rows  funding_usdt
-       + SUM_positions signed_qty * (mark - average_price)
-```
-
-`--equity-usdt` is therefore the *opening balance*, not the reported equity. Two accounting
-rules the formula depends on (`:10-26`): fill P&L comes from `PositionState`, never from the
-`pnl` rows, because those rows derive their gross from exactly these counters and summing
-both double-counts every close; funding is summed over *all* `pnl` sources rather than an
-allow-list, so a source added later is picked up rather than silently dropped. Fees are
-subtracted in full, including those already paid on a still-open position. A non-flat
-position without a fresh mark makes the provider raise, which `AccountExecutionService`
-turns into "no new exposure" — the intended exit-only degradation, not a crash — while
-reduction previews degrade to a recorded `snapshot_error` and still converge.
-
-Marked equity is load-bearing, not cosmetic: the carry resize test compares `weight ×
-sizing_equity` against a notional stamped at acceptance, so with a constant equity both
-sides freeze the moment a position opens. Paper published 0 resizes across 1,776 live
-cycles while demo published 366 — arithmetic, not a threshold. Simplifying paper equity
-back to a constant silently re-breaks resizing with no error.
-
-Paper accrues perpetual funding separately: it holds no venue client at all, so no venue
-funding reconciler runs for it, and the kernel's fill-reconstruction path writes
-`funding_usdt = 0.0` for the twin under `funding_status = "modeled_separately"`
-(`account_kernel.py:3108`; the demo value in the same expression is
-`pending_venue_reconciliation`). Modelled rows carry `source = "paper_modeled_funding"`
-(`PAPER_MODELED_FUNDING_SOURCE`, `paper_funding_accrual.py:41`), distinct from a venue
-owner's observed `source = "venue_funding_settlement"` (`account_reconcile.py:622`).
-Summing funding across demo and paper without filtering on `source` mixes a model with an
-observation.
-
-There is no paper hedge unit — the continuous hedge route is demo-only, so paper CONTINUOUS
-exercises the component execution path but is not hedged-portfolio parity.
+The modeled execution twin (`MarketOrderExecutionTwin`) survives for historical replay:
+commit-owned, not calibrated — 5.5 bps taker fee, 2.0 bps residual adverse slippage, a walk
+of the visible decision book, partial fills by book level, zero modeled latency — with
+every modeled observation tagged `integration_only_uncalibrated`. The retired paper owner
+ran this twin live; its journals (modeled fills, `paper_modeled_funding` rows, marked
+equity) remain on disk under that tag and must never be summed with venue-observed demo
+rows without filtering on `source`. The twin was never calibrated against demo fills: the
+measurement needed the mirror era to produce matched pairs, and the sample was still zero
+when the fleet retired.
 
 ## Units, profile, sleeves
 
 A unit names only `UNIT:ENTRYPOINT`;
 [`scripts/run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh) maps that pair
 to one complete command line and `exec`s it. Callers cannot append argv. The installed
-profile — `demo-operational` or `operational` — is a plain marker at
-`/etc/liquidity-migration/profile`, written at install and read back by verify.
-`demo-operational` authorizes the demo owner, every demo producer its toggles allow
-(LONG, CARRY, CONTINUOUS), demo hedge/RMOM and demo liveness, with paper disabled —
-`CONTINUOUS_PAPER_SLEEVE` and `CARRY_PAPER_SLEEVE` are refused outright
-(`deploy_vps_live.sh:1121-1126`) and liveness scope is `demo`; `operational` authorizes both
-owners, allowed demo/paper producers and the target mirror, hedge/RMOM and `demo-paper`
-liveness. Liveness scope is `ACCOUNT_LIVENESS_SCOPE` →
-`check_fleet_liveness.py --account-scope`, choices `_ACCOUNT_SCOPES = ("demo",
-"demo-paper", "mainnet")` (`:83`). The script defaults to `demo-paper` (`:1415`), but
-`run_authorized_runtime.sh:111,122` uses `${ACCOUNT_LIVENESS_SCOPE:?...}` and hard-fails
-the liveness unit when it is unset; `liquidity-migration-mainnet-liveness.service:25` pins
-`mainnet`. Deploy modes: `install | activate | verify | rollout | activate-mainnet |
+profile is a plain marker at `/etc/liquidity-migration/profile`, written at rollout and
+read back by verify; since the 2026-08-03 paper retirement one profile remains —
+`operational`: the demo owner, every demo producer its toggles allow, hedge/RMOM, demo
+liveness (`demo-operational` was "operational minus paper" and is rejected by name; an old
+marker self-heals on the next rollout). Liveness scope is hardcoded in the committed argv:
+`check_fleet_liveness.py --account-scope demo` for the demo watchdog and
+`--account-scope mainnet` for the mainnet one, choices `_ACCOUNT_SCOPES = ("demo",
+"mainnet")`. Deploy modes: `install | activate | verify | rollout | activate-mainnet |
 stop-mainnet`.
 Activation starts owners before producers; shutdown stops producers before owners.
 `activate` and `activate-mainnet` both reach the funded fleet through
@@ -524,64 +457,39 @@ preflight to pass before it starts anything; with both mainnet toggles off, `ver
 instead asserts the whole mainnet half inactive.
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling — a host override
-may turn a repo-enabled sleeve off but cannot resurrect a disabled one. Today `LONG_SLEEVE`,
-`CARRY_SLEEVE`, and `PAPER_TARGET_MIRROR` are on; `CONTINUOUS_SLEEVE`,
-`CONTINUOUS_PAPER_SLEEVE`, `CARRY_PAPER_SLEEVE`, `CARRY_MAINNET_SLEEVE`, and
-`LONG_MAINNET_SLEEVE` are off. Turning a sleeve off stops target publication; it does not
+may turn a repo-enabled sleeve off but cannot resurrect a disabled one. Which sleeves are
+on is in that file, not here. The retired paper toggles are ignored with a warning if a
+stale host override still carries them. Turning a sleeve off stops target publication; it does not
 cancel, close, or zero prior state. Flattening means publishing zero targets through the
 owner and waiting for fills.
 
-Operator routes ([`scripts/ops.sh`](../scripts/ops.sh)): `status`, `equity`,
-`research-refresh`, `reset`, `venue-accounting`, `wedged-command`,
-`real-money {preflight|render-profile|create-state-roots}`, `test`,
-`deploy --execute {install|activate|rollout|activate-mainnet|stop-mainnet}`.
+Operator routes all run through [`scripts/ops.sh`](../scripts/ops.sh); the current verb set
+and every deploy mode are tabulated in [`operations.md`](operations.md).
 
-**Host layout the install asserts.** Both operational profiles require
+**Host layout the install asserts.** The deploy requires
 `ACCOUNT_RAW_MARKET_PERSISTENCE=0`; owners still maintain live sequence-aware L2, bounded
 readiness, exact decision books, journals, reconciliation and protection, they simply do
 not append every public frame. The runner refuses to start unless the variable is
 explicitly `0` or `1` — "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1"
-(`scripts/runtime/run_account_execution_service.sh:90-94`,
-`scripts/runtime/run_account_paper_execution_service.sh:44-48`); `.env.example:85` deliberately
-ships it empty and `deploy_vps_live.sh:525` sets `"0"`.
+(`scripts/runtime/run_account_execution_service.sh`); `.env.example` deliberately
+ships it empty and the deploy sets `"0"`.
 
-Deployment derives one authorization-bound scheduling-capture tape per environment:
-`<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl` for demo and
-`<ACCOUNT_PAPER_CAPTURE_ROOT>/strategy-targets.jsonl` for paper. LONG and CONTINUOUS share
-that tape within an environment through a locked, hash-chained writer — it is not one tape
+Deployment derives one authorization-bound scheduling-capture tape:
+`<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl`. LONG and CONTINUOUS share
+that tape through a locked, hash-chained writer — it is not one tape
 per producer. Older per-producer fallback tapes remain preserved as pre-boundary history
 and are not silently merged into a prospective epoch.
 
-Filesystem modes: demo and credential env files root-owned `0600`; the paper route env and
-`sleeves.resolved.env` root-owned `0640` for the dedicated non-login
-`liquidity-migration-paper` group (`deploy_vps_live.sh:559-561`); paper candidate, rule and
-risk inputs are byte-exact mirrors owned by that runtime user at `0600` (`:451-455`), copied
-from the demo-bound source the install just proved covered (`build_candidate_rule_coverage`,
-`:952`). Deploy fails on any mode mismatch. Env parsing refuses duplicate keys, shell syntax,
-aliases, nested roots, and unknown real-money spellings.
+Filesystem modes: demo and credential env files and `sleeves.resolved.env` root-owned
+`0600`. Deploy fails on any mode mismatch. Env parsing refuses duplicate keys, shell
+syntax, aliases, nested roots, and unknown real-money spellings.
 
-The paper environment file `/etc/liquidity-migration/account-paper-execution.env` carries
-`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`, seeded from `bybit-demo.env` at provisioning
-when absent (`deploy_vps_live.sh:507-519`) — venue credentials remain forbidden there. The
-paper owner therefore emits its own digests and lifecycle alerts under the heading `Bybit
-paper` (`account_paper_runner.py:427`) versus the demo owner's default `Bybit demo`
-(`account_notifications.py:86,463,556`).
-
-Each demo target producer owns one bounded public kline store. Its paper counterpart keeps
-a distinct strategy root and may only traverse `<DEMO_ROOT>/.cache/ws_klines` and read the
-leader's snapshot `<DEMO_ROOT>/.cache/ws_klines/store.parquet` for each of
-`LONG_DEMO_ROOT`, `CONTINUOUS_DEMO_ROOT`, `CARRY_DEMO_ROOT`; CONTINUOUS additionally reads
-the leader's single `<CONTINUOUS_DEMO_ROOT>/residual_momentum.parquet`. Install asserts the
-paper runtime **cannot** write any demo market root and cannot write
-`$REPO_DIR/liquidity_migration` (`scripts/deploy_vps_live.sh:645-670`); paper units mount
-repository code read-only. Do not "fix" a permission by widening a demo root — the install
-checks that boundary. Carry has no WS kline plane and follows the demo market plane
-read-only via `CARRY_MARKET_FOLLOW_ROOT`. Missing bars retain the public REST fallback with
-no second bulk collector or WS bootstrap. Paper runtime verification reopens only the
-paper/non-secret files. The demo credential file is read by `check_demo_order_permissions`
-(`deploy_vps_live.sh:1169-1178`), which loads it into the process environment, runs
+Each demo target producer owns one bounded public kline store; carry has no WS kline plane
+and fetches by bounded public REST inside the cycle. Missing bars retain the public REST
+fallback with no second bulk collector or WS bootstrap. The demo credential file is read by
+`check_demo_order_permissions`, which loads it into the process environment, runs
 `scripts/maintain/check_bybit_order_permissions.py` and unsets the keys again; `activate` runs it in
-`deploy` context and `verify` re-runs it in `verify` context (`:1333`), so order permission is
+`deploy` context and `verify` re-runs it in `verify` context, so order permission is
 re-checked live rather than being bound once.
 
 ## Subsystem map
@@ -597,17 +505,17 @@ launcher), `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 | --- | --- | --- |
 | [`account_kernel.py`](../liquidity_migration/account/account_kernel.py), [`account_contracts.py`](../liquidity_migration/account/account_contracts.py) | Journal storage, reducer, event/risk contracts, pre-trade gate, command emission | `test_account_kernel.py`, `test_account_journal_cursor.py`, `test_account_risk_reduction.py`, `test_sleeve_capital_partition.py` |
 | [`account_service.py`](../liquidity_migration/account/account_service.py) | Inbox queue, owner loop, crash-safe request replay | `test_account_service.py` |
-| [`account_service_runner.py`](../liquidity_migration/runtime/account_service_runner.py), [`account_paper_runner.py`](../liquidity_migration/runtime/account_paper_runner.py) | Owner processes, realm wiring, paper twin config | `test_account_service_runner_readiness.py`, `test_account_owner_health.py`, `test_paper_account_equity.py` |
+| [`account_service_runner.py`](../liquidity_migration/runtime/account_service_runner.py) | Owner process, realm wiring | `test_account_service_runner_readiness.py`, `test_account_owner_health.py` |
 | [`account_service_bybit.py`](../liquidity_migration/venue/account_service_bybit.py), [`bybit_execution_adapter.py`](../liquidity_migration/venue/bybit_execution_adapter.py), [`account_execution_stream.py`](../liquidity_migration/venue/account_execution_stream.py) | Bybit providers, order submission, private WS | `test_account_service_bybit.py`, `test_account_execution_stream.py` |
-| [`execution_adapters.py`](../liquidity_migration/account/execution_adapters.py) | Deterministic modeled execution twin | `test_passive_execution.py` |
-| [`account_intent_client.py`](../liquidity_migration/account/account_intent_client.py), [`strategy_targets.py`](../liquidity_migration/account/strategy_targets.py), [`paper_target_mirror.py`](../liquidity_migration/runtime/paper_target_mirror.py) | Write-only producer boundary; demo-to-paper republication | `test_account_intent_client.py`, `test_strategy_targets.py`, `test_paper_target_mirror.py` |
+| [`execution_adapters.py`](../liquidity_migration/account/execution_adapters.py) | Deterministic modeled execution twin (historical replay) | `test_account_service_bybit.py` |
+| [`account_intent_client.py`](../liquidity_migration/account/account_intent_client.py), [`strategy_targets.py`](../liquidity_migration/account/strategy_targets.py) | Write-only producer boundary | `test_account_intent_client.py`, `test_strategy_targets.py` |
 | [`strategy_planning.py`](../liquidity_migration/strategy/strategy_planning.py) | Shared cross-sleeve suppression invariant: read owner health for equity, snapshot planning state, suppress intents duplicating unresolved durable work, retry terminally rejected attempts, avoid same-cycle exit collisions — shared so it cannot drift between sleeves | `test_strategy_planning.py` |
 | [`strategy_runtime.py`](../liquidity_migration/account/strategy_runtime.py) | The rule that sleeve code may compute signals and desired notionals but never call a venue client, mutate a ledger, or reserve margin; converts all sleeve intents together into one atomic kernel batch | no dedicated file — covered by `test_account_kernel.py`, `test_account_service.py`, `test_account_risk_reduction.py`, `test_protection_engine.py`, `test_account_service_runner_readiness.py` |
 | [`strategy_funnel.py`](../liquidity_migration/account/strategy_funnel.py) | **Observer-only** diagnostic serialization of LONG/CONTINUOUS source gates and separated future-path labels; callers compute gates from causal state and pass immutable row snapshots, and writer failure is reported without becoming an admission gate (`:138`). Entry point `scripts/data/build_candidate_tape.py` | `test_strategy_funnel.py`, `test_candidate_tape.py` |
 | [`historical_account_replay.py`](../liquidity_migration/research/backtest/historical_account_replay.py) | Historical-replay accounting path | `test_historical_account_replay.py` |
 | [`bybit_market_data.py`](../liquidity_migration/marketdata/bybit_market_data.py) | Venue market-data boundary | `test_bybit_market_data_boundary.py` |
-| [`cli.py`](../liquidity_migration/cli/commands.py), [`cli_parsers.py`](../liquidity_migration/cli/parsers.py), [`config.py`](../liquidity_migration/core/config.py), [`storage.py`](../liquidity_migration/data/storage.py), [`ingestion.py`](../liquidity_migration/data/ingestion.py), [`downloaders.py`](../liquidity_migration/data/downloaders.py), [`archive.py`](../liquidity_migration/data/archive.py) / [`archive_manifest.py`](../liquidity_migration/data/archive_manifest.py), venue download modules | `python -m liquidity_migration` CLI and the research-data domain | `test_cli.py`, `test_config.py`, `test_ingestion.py`, `test_storage.py`, `test_storage_since_date.py`, `test_downloaders.py`, `test_archive.py`, `test_archive_manifest.py` |
-| [`three_way_reconciliation.py`](../liquidity_migration/research/execution/three_way_reconciliation.py) (behind `research-refresh reconcile`), `scripts/research/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_three_way_reconciliation.py`, `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
+| [`cli/commands.py`](../liquidity_migration/cli/commands.py), [`cli/parsers.py`](../liquidity_migration/cli/parsers.py), [`config.py`](../liquidity_migration/core/config.py), [`storage.py`](../liquidity_migration/data/storage.py), [`ingestion.py`](../liquidity_migration/data/ingestion.py), [`downloaders.py`](../liquidity_migration/data/downloaders.py), [`archive.py`](../liquidity_migration/data/archive.py) / [`archive_manifest.py`](../liquidity_migration/data/archive_manifest.py), venue download modules | `python -m liquidity_migration` CLI and the research-data domain | `test_cli.py`, `test_config.py`, `test_ingestion.py`, `test_storage.py`, `test_storage_since_date.py`, `test_downloaders.py`, `test_archive.py`, `test_archive_manifest.py` |
+| `scripts/research/equity_curves.sh` / `.py` (behind `ops.sh equity`) | Research integrity and reporting | `test_equity_curves_runner.py`, `test_scripts_equity_curves.py` |
 | [`account_route.py`](../liquidity_migration/account/account_route.py), [`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py) | Root identity; one owner per account | `test_account_route.py`, `test_account_owner_lease.py` |
 | [`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py), [`account_venue_accounting.py`](../liquidity_migration/research/execution/account_venue_accounting.py), [`account_strategy_state.py`](../liquidity_migration/strategy/account_strategy_state.py) | REST recovery, venue truth, accounting rows, sleeve planning read model | `test_account_reconcile.py`, `test_account_funding_reconcile.py`, `test_account_venue_accounting.py`, `test_account_strategy_state.py` |
 | [`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py), [`operational_profile.py`](../liquidity_migration/policy/operational_profile.py) | Capital reference and derived caps | `test_equity_anchored_envelope.py`, `test_operational_profile.py` |
@@ -805,8 +713,8 @@ column. Multiple testing: Bailey et al., *Backtest Overfitting in Financial Mark
 ## Evidence boundary and working rules
 
 Demo observes real venue order lifecycle, latency, fees, and funding for its exact epoch.
-Paper validates the software path against its declared model and supports no
-execution-quality or performance claim. LONG's forward record is demo-only. `carry_hold`'s
+The retired paper route validated the software path against its declared model and supports
+no execution-quality or performance claim. LONG's forward record is demo-only. `carry_hold`'s
 corrected benchmark Sharpe is 1.21 (t 2.31) — it does not beat the CONTINUOUS benchmark. A
 venue-accounting receipt proves only its named journal/venue interval. Grading:
 [`../AGENTS.md`](../AGENTS.md).

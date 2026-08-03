@@ -9,7 +9,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RESET_SCRIPT = ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"
+RESET_SCRIPT = ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh"
 
 
 def _function_source(name: str) -> str:
@@ -79,7 +79,6 @@ FAILURE_RECOVERY_ALLOWED=0
 LEAVE_STOPPED=0
 MANIFEST_DIR=""
 DEMO_ACCOUNT_LEASE_HELD=0
-PAPER_ACCOUNT_LEASE_HELD=0
 was_active() {{
   local needle="$1" unit
   for unit in "${{ACTIVE_BEFORE[@]}}"; do
@@ -87,7 +86,6 @@ was_active() {{
   done
   return 1
 }}
-release_paper_account_lease() {{ PAPER_ACCOUNT_LEASE_HELD=0; }}
 release_demo_account_lease() {{ DEMO_ACCOUNT_LEASE_HELD=0; }}
 {functions}
 trap cleanup EXIT

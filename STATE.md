@@ -19,6 +19,28 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — paper trading retired whole (owner instruction). DEPLOY
+  PENDING — rides the next fleet deploy (agreed with the concurrent
+  recovery/defriction session, which drives it); this entry gains the receipt
+  when the host confirms the paper units are gone.** One
+  deliberate removal: the paper owner, all three paper producers, the target
+  mirror, the paper sleeves.env toggles, the `demo-operational` deploy profile,
+  the demo-paper watchdog scope, paper Telegram, `PAPER_EQUITY_USDT`
+  provisioning, the follower market-data mode, and the docs web. Demo (real
+  venue, simulated fills) is the only practice book; mainnet is unchanged
+  (wired, off). The next deploy's manifest install removes the five paper
+  units from the host (`lm_cleanup_unknown_liqmig_units`), deletes the
+  deploy-generated `/etc/liquidity-migration/account-paper-execution*` config,
+  and normalizes `sleeves.resolved.env` to root-only. Paper journals and state
+  roots stay on disk as history; nothing reads or routes to them, which also
+  closes the TLMUSDT wedge and the demo/paper agreement warnings as
+  operational concerns. A stale host `sleeves.env` carrying the retired
+  toggles is warned about and ignored, not fatal. Rationale (assessment
+  2026-08-03): paper was `integration_only_uncalibrated` routing evidence with
+  zero performance weight, its one live research use (the passive-exec A/B)
+  was dormant at 2/8 fills behind a retired sleeve, the real-money path never
+  referenced it, and it produced a disproportionate share of the month's
+  incidents.
 - **2026-08-03 — Two-day fleet outage root-caused and repaired; both Telegram
   channels delivering again.** One busy minute (2026-08-01 00:20 UTC) broke
   both books independently. Demo: a LONG entry batch chunked 1000XECUSDT into
@@ -45,9 +67,9 @@ how it got there. That history is in Git.
   the account root/id/realm and sources the demo credentials remotely
   (probe/resolve could previously not run through it at all); demo owner
   memory raised to high 768M / max 1024M after it ran throttled at its old
-  384M ceiling through the recovery. BANKUSDT's two working exits and the
-  demo/paper agreement warnings are expected to clear as the books converge
-  under fresh producer targets.
+  384M ceiling through the recovery. BANKUSDT's two working exits were expected
+  to clear as the books converged; the demo/paper agreement warnings became
+  moot with the same-day paper retirement.
 
 - **2026-08-03 — stale entry requests now retire terminally (owner-approved
   follow-up to the outage).** The Aug-1 loop's request half: a failed entry
@@ -63,10 +85,13 @@ how it got there. That history is in Git.
   the owner's convergence toward a stale *accepted* target while producers
   are down — that is a liveness-coupled trading halt needing owner design,
   re-surfaced in the session report.
-- **2026-08-03 — LONG sleeve switched to `LongV12WideStop` (v12) on demo and
-  paper; mainnet wiring updated, still unarmed. DEPLOY PENDING — this entry
-  gains the receipt when the host confirms.** Owner instruction: "wire v12 into
-  the live systems, paper, demo, live." The registration (2026-08-01,
+- **2026-08-03 — LONG sleeve switched to `LongV12WideStop` (v12) on demo;
+  mainnet wiring updated, still unarmed. Receipt: live since the recovery
+  activation at `6df3329` (~09:34 UTC, verify-ok, fleet green — reported by
+  the recovery-deploy session; `6df3329` contains `4a4da11` v12 and `5af6bda`
+  expiry).** Owner instruction: "wire v12 into
+  the live systems, paper, demo, live" (the paper leg was overtaken hours
+  later by the same-day paper retirement above). The registration (2026-08-01,
   `f04ccdc`) recorded that v12 was not deployable by a profile flip; this
   change builds that path: entries freeze a per-trade stop-decay contract in
   their target metadata (`stop_decay_after_ms`, `decayed_stop_loss_pct` =
@@ -75,7 +100,7 @@ how it got there. That history is in Git.
   filled position is past the decay age with live price at or below
   `entry_fill × (1 − decayed_stop_loss_pct)`. The venue-native wide stop is
   armed from entry and never revised. Profile selection is explicit end-to-end
-  (`LONG_STRATEGY_PROFILE=v12` in the three LONG units → `--strategy-profile`
+  (`LONG_STRATEGY_PROFILE=v12` in the LONG units → `--strategy-profile`
   → `long_v12_profile()`; unknown values fail startup). LONG planning now
   reads **both** registered identities, so v11a components open at the switch
   keep exits, capacity, and cooldown history, drain under their own published
@@ -552,21 +577,19 @@ projection. The new revision's forward evidence run restarts at `1fe0e48`.
 
 ## Topology
 
-Six persistent services plus one active timer (2026-07-29; the hedge and
-residual-momentum timers remain installed but disabled with the retired
-CONTINUOUS sleeve, and the CONTINUOUS producer units are installed-but-off):
+Since the 2026-08-03 paper retirement (pending its deploy receipt above): three
+persistent services plus one active timer — the demo owner, the LONG and CARRY
+demo producers, and the demo liveness timer. The hedge and residual-momentum
+timers remain installed but disabled with the retired CONTINUOUS sleeve, and
+the CONTINUOUS producer unit is installed-but-off. The mainnet owner, mainnet
+producers, and mainnet liveness timer are installed and off.
 
 | Kind | Units |
 | --- | --- |
-| Account owners | demo, isolated-paper |
-| Target producers | demo/paper × LONG/CARRY |
-| Timers | demo-paper liveness (active); continuous hedge + rmom refresh (off) |
+| Account owner | demo |
+| Target producers | demo × LONG/CARRY |
+| Timers | demo liveness (active); continuous hedge + rmom refresh (off) |
 
-- Paper runs as the non-login `liquidity-migration-paper` user with private
-  state, no demo/mainnet credentials, and byte-identical isolated candidate,
-  rule, and risk inputs. Paper is explicitly `integration_only_uncalibrated`:
-  its cycles are routing/lifecycle evidence, not performance or fill-quality
-  evidence.
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
 
@@ -591,10 +614,10 @@ strict operational profile; independent systemd sizing variables were removed.
 - **Rollout requires a locally and directly venue-flat account.** No
   flatten/cancel bypass is authorized. A failed verification is not permission to
   hand-start a partial fleet.
-- **Demo rule receipts expire at a strict 168 hours.** An expired receipt blocks
-  activation and makes rollback unavailable; rollout re-probes stale rules once
-  the fleet is stopped and flat. The watchdog warns during the final 24 hours but
-  cannot place orders or refresh authority.
+- **Demo rule receipt freshness is a side effect of deploying, not a deadline.**
+  A rollout past half the age bound re-probes; only mainnet holds the registered
+  168-hour ceiling, while demo takes any positive `--max-demo-rule-age-hours`.
+  The watchdog warns in the final 24 hours but refreshes nothing itself.
 - **Unknown safety-critical state fails closed.**
 - Three CONTINUOUS candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
   venue `deliveryTime=1784538000000`. They are recorded prospectively in private
@@ -602,8 +625,8 @@ strict operational profile; independent systemd sizing variables were removed.
   targets, orders, and inbox exposure are all flat.
 - Push remains CI-only. The manual GitHub workflow exposes four of the six deploy
   modes — `rollout`, `install`, `activate`, `verify` — with explicit profile, task
-  reference and demo/paper authorization inputs
-  (`.github/workflows/vps-deploy.yml:14-30`). There is no `recover` mode and no
+  reference and demo authorization inputs
+  (`.github/workflows/vps-deploy.yml`). There is no `recover` mode and no
   reset-receipt input; both were removed with the receipts. The two mainnet modes
   are deliberately absent from CI ([`docs/operations.md`](docs/operations.md)).
 
@@ -638,18 +661,11 @@ independent reasons, both measured:
    of the same three symbols while their published notionals agree to 0.005%.
    This does not self-heal; it clears when the book is next rebuilt.
 
-Reason (1) is closed in the working tree by the target mirror (one fleet
-decides, both execute). Reason (2) needs either a flatten of both books or an
-accepted basis difference — **an owner decision, because it mutates live state,
-and it is not taken here.**
-
-Also deployed in `cdb6e61`: paper equity is marked from its own
-journal instead of the constant 250,000 it reported for its whole life
-(measured effect: paper published **0** resizes across 1,776 cycles against
-demo's 366, which was arithmetic and not a threshold), paper accrues modelled
-funding from public rates (it previously accrued **none**, on a sleeve whose
-entire return is funding), and a demo↔paper agreement check runs in the
-liveness watchdog.
+Reason (1) was closed by the target mirror (one fleet decides, both execute);
+reason (2) was closed by the 2026-07-31 flatten of both books. The whole
+comparison lane ended with the 2026-08-03 paper retirement — the cross-fleet
+invalidation above stands as the reason no pre-2026-07-31 demo-vs-paper number
+may ever be quoted, and no post-retirement one exists.
 
 ## Evidence boundary
 
@@ -673,8 +689,7 @@ direction are in `docs/strategy_program.md`; current anomaly evidence is in
 ## Known benign alert shapes
 
 Each was diagnosed to a root cause and fixed. Listed so an operator does not
-re-diagnose a page that has already been explained; detail is in the linked
-audit.
+re-diagnose a page that has already been explained.
 
 | Alert shape | Diagnosed cause |
 | --- | --- |
@@ -689,7 +704,8 @@ audit.
 
 ## Open operational defects
 
-Carried forward from the 2026-07-30 demo/paper reconciliation. Decision logic is
+Carried forward from the 2026-07-30 demo/paper reconciliation (a lane that
+ended with the paper retirement; the demo findings stand). Decision logic is
 verified faithful — an independent replay reproduces the live book exactly — so
 every item here is operational, not strategy.
 
@@ -698,7 +714,7 @@ every item here is operational, not strategy.
 | Remediation for the journal re-projection, paper funding snapshot, per-bar decision freeze, and stranded zero-quantity reservations | **Deployed** in `cdb6e61`. The cursor is 138× faster on the steady-state planning read at 3.3× lower peak memory, outputs identical on the real journal |
 | ~~Paper CARRY has no target source~~ | **Resolved 2026-07-31 in `0506cef`**, and the diagnosis recorded here was wrong: it was never a filesystem boundary problem. The runner called `ensure_account_route`, an owner-side initializer that requires the manifests to belong to the running process; the mirror is not an owner. It now uses `require_account_route` with the paper owner's uid named explicitly. The unit is active and both books started flat. `CARRY_PAPER_SLEEVE` remains **not** the fallback: it reinstates the raced read it was retired for |
 | The LONG demo producer is SIGKILLed by every stop | It drains its current cycle on SIGTERM, but a cycle runs ~180–350s against the unit's 180s `TimeoutStopSec`, so systemd kills it and the unit ends `failed`. Harmless for a deploy (`require_quiescent` accepts `failed`, and targets publish atomically), but it means no LONG stop is ever graceful |
-| Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45 | Needs an operator. Clearing it is a state mutation on a live fleet; the route is `scripts/ops.sh wedged-command`, deployed in `cdb6e61` and now reachable |
+| ~~Paper `TLMUSDT` reservation, wedged since 2026-07-29 03:45~~ | **Closed by the 2026-08-03 paper retirement**: the paper owner no longer runs, so the wedged reservation is inert history in a journal nothing reads |
 | Reported P&L is provisional | 166 of 187 `pnl` events carry `funding_status=pending_venue_reconciliation`; every figure is fill-reconstructed, not venue-confirmed. No closed-loop accounting check yet, which real money needs |
 | Sizing was not clamped to the capital reference in the deployed build | The clamp shipped in `cdb6e61` (`policy/equity_anchored_envelope.py`, present on the host). The pre-deploy observation stands as history — live sizing anchored at 255,357.40 against a 250,000 reference (+2.14%) — and that it now binds at runtime is unobserved until the next resize |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/carry_hold.md` |

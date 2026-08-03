@@ -219,7 +219,7 @@ def test_run_drains_one_cycle_and_tears_down_public_resources_in_order(
     ("config_kwargs", "message"),
     [
         ({}, "execution_environment"),
-        ({"execution_environment": "demo"}, "operational demo/paper mode requires"),
+        ({"execution_environment": "demo"}, "operational target mode requires"),
         (
             {"execution_environment": "demo", "account_intent_inbox_root": "inbox"},
             "must be configured together",

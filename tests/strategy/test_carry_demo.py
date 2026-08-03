@@ -1,4 +1,4 @@
-"""Target-only decision contract for the CARRY demo and paper producer: close-keyed venue
+"""Target-only decision contract for the CARRY demo producer: close-keyed venue
 view, fail-closed data guards, diff-based target planner, account-owner publication.
 
 The integration tests replay the registered rule (``decide_book`` over
@@ -44,7 +44,7 @@ from liquidity_migration.strategy.carry_demo import (
     run_carry_demo_cycle,
 )
 from liquidity_migration.core.config import ResearchConfig
-from liquidity_migration.data.storage import read_dataset, write_dataset
+from liquidity_migration.data.storage import read_dataset
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 # A day boundary far from any real calendar edge; divisible by 8h so the synth
@@ -137,7 +137,7 @@ class _FakeCarryMarket:
 
 def _route(tmp_path: Path, *, environment: str = "demo") -> AccountRoute:
     return ensure_account_route(
-        account_id=("bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"),
+        account_id=("bybit-demo-unified" if environment == "demo" else "bybit-mainnet-unified"),
         environment=environment,
         account_root=tmp_path / "account",
         inbox_root=tmp_path / "inbox",
@@ -663,7 +663,7 @@ def test_validate_carry_demo_config_rejections(tmp_path: Path) -> None:
                 account_intent_inbox_root=str(tmp_path / "inbox-only"),
             )
         )
-    with pytest.raises(ValueError, match="operational demo/paper mode requires"):
+    with pytest.raises(ValueError, match="operational target mode requires"):
         _validate_carry_demo_config(CarryDemoCycleConfig(execution_environment="demo"))
     with pytest.raises(ValueError, match="declared_stop_loss_fraction"):
         _validate_carry_demo_config(_routed_config(tmp_path, declared_stop_loss_fraction=1.0))
@@ -689,7 +689,7 @@ def test_validate_carry_demo_config_rejections(tmp_path: Path) -> None:
         )
 
     _validate_carry_demo_config(_routed_config(tmp_path))
-    _validate_carry_demo_config(_routed_config(tmp_path, environment="paper"))
+    _validate_carry_demo_config(_routed_config(tmp_path, environment="mainnet"))
 
 
 def test_run_cycle_publishes_exit_first_diff_and_is_idempotent(
@@ -825,83 +825,6 @@ def test_run_cycle_blocks_entries_but_exits_when_owner_health_unavailable(
     assert payload["exit_targets_queued"] == 1  # risk-reducing exits still flow
     assert payload["entry_targets_queued"] == 0
     assert payload["resize_targets_queued"] == 0
-
-
-def test_paper_follower_reads_leader_and_fails_closed_on_stale_leader(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _route(tmp_path / "route", environment="paper")
-    _patch_planning(monkeypatch, standing=pl.DataFrame())
-    leader = tmp_path / "leader"
-    window_start_open = D0 - MS_PER_HOUR - 90 * MS_PER_DAY
-    klines = _synth_klines(list(ALL_SYMBOLS), start_ms=window_start_open, end_ms=D0)
-    compact_dir = leader / ".cache" / "event_demo_klines_1h"
-    compact_dir.mkdir(parents=True)
-    klines.write_parquet(compact_dir / "latest_window.parquet")
-    funding_rows = [
-        {
-            "symbol": symbol,
-            "funding_ts_ms": int(row["fundingRateTimestamp"]),
-            "funding_rate": float(row["fundingRate"]),
-        }
-        for symbol in ALL_SYMBOLS
-        for row in _funding_rows(symbol, window_start_open - 2 * MS_PER_DAY, D0 + 1)
-    ]
-    write_dataset(
-        pl.DataFrame(funding_rows),
-        leader,
-        CARRY_FUNDING_DATASET,
-        partition_by=("symbol",),
-    )
-    demo_config = _routed_config(
-        tmp_path / "route",
-        environment="paper",
-        market_follow_root=str(leader),
-    )
-
-    payload = run_carry_demo_cycle(
-        tmp_path / "paper-producer",
-        config=ResearchConfig(),
-        demo_config=demo_config,
-        now_ms=NOW_MS,
-    )
-
-    assert payload["data_source"] == "follower"
-    assert payload["decision_error"] is None
-    assert payload["desired_book_size"] == 3
-    # Nothing standing on the paper book yet: all three desired names enter.
-    assert payload["entry_targets_queued"] == 3
-    assert payload["exit_targets_queued"] == 0
-
-    # A leader whose newest kline close is older than the freshness gate must
-    # be treated exactly like a demo data failure: hold, do not decide.
-    stale = run_carry_demo_cycle(
-        tmp_path / "paper-producer-stale",
-        config=ResearchConfig(),
-        demo_config=demo_config,
-        now_ms=NOW_MS + 3 * MS_PER_DAY,
-    )
-    assert stale["decision_error"] and "stale" in stale["decision_error"]
-    assert stale["target_intents_queued"] == 0
-
-
-def test_run_cycle_refuses_circular_self_follow(tmp_path: Path) -> None:
-    _route(tmp_path / "route", environment="paper")
-    own_root = tmp_path / "producer"
-    own_root.mkdir()
-
-    with pytest.raises(ValueError, match="circular self-follow"):
-        run_carry_demo_cycle(
-            own_root,
-            config=ResearchConfig(),
-            demo_config=_routed_config(
-                tmp_path / "route",
-                environment="paper",
-                market_follow_root=str(own_root),
-            ),
-            now_ms=NOW_MS,
-        )
 
 
 def test_cycle_state_throttles_funding_sweep_to_hour_boundaries(
@@ -1076,77 +999,3 @@ def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:
     assert int(trimmed.get_column("bar_ts_ms").min()) % day_ms == 0
     # nothing beyond the partial day is lost
     assert trimmed.height == bars.height - (24 - 3)
-
-
-class TestFundingFollowSnapshot:
-    """The follower must never decide on a half-written leader sweep.
-
-    The leader writes funding as a per-symbol partitioned dataset under an exclusive
-    lock the follower cannot take (it has no write access to the leader's root), and
-    a partitioned write lands one symbol at a time. The single-file snapshot is
-    replaced by rename, which is atomic.
-    """
-
-    def _funding(self, rate: float) -> pl.DataFrame:
-        return pl.DataFrame(
-            {
-                "symbol": ["AUSDT", "BUSDT"],
-                "funding_ts_ms": [D0, D0],
-                "funding_rate": [rate, rate],
-            }
-        )
-
-    def test_follower_prefers_the_atomic_snapshot(self, tmp_path: Path) -> None:
-        leader = tmp_path / "leader"
-        leader.mkdir()
-        # The partitioned dataset carries the OLD sweep; the snapshot the NEW one.
-        write_dataset(self._funding(-0.001), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
-        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
-
-        read = module._read_leader_funding(leader)
-
-        assert sorted(read.get_column("funding_rate").to_list()) == [-0.009, -0.009]
-
-    def test_a_digest_mismatch_falls_back_instead_of_deciding_on_torn_bytes(
-        self, tmp_path: Path
-    ) -> None:
-        leader = tmp_path / "leader"
-        leader.mkdir()
-        write_dataset(self._funding(-0.001), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
-        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
-        parquet_path, _metadata_path = module._funding_follow_snapshot_paths(leader)
-        parquet_path.write_bytes(b"truncated")
-
-        read = module._read_leader_funding(leader)
-
-        assert sorted(read.get_column("funding_rate").to_list()) == [-0.001, -0.001]
-
-    def test_a_missing_snapshot_falls_back_to_the_partitioned_dataset(
-        self, tmp_path: Path
-    ) -> None:
-        leader = tmp_path / "leader"
-        leader.mkdir()
-        write_dataset(self._funding(-0.004), leader, CARRY_FUNDING_DATASET, partition_by=("symbol",))
-
-        read = module._read_leader_funding(leader)
-
-        assert sorted(read.get_column("funding_rate").to_list()) == [-0.004, -0.004]
-
-    def test_a_failed_snapshot_write_leaves_the_previous_one_intact(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        leader = tmp_path / "leader"
-        leader.mkdir()
-        module._write_funding_follow_snapshot(leader, self._funding(-0.009))
-
-        def boom(*_args: Any, **_kwargs: Any) -> None:
-            raise OSError("disk full")
-
-        monkeypatch.setattr(pl.DataFrame, "write_parquet", boom)
-        # Never fatal: a follower with a stale-but-whole snapshot is safe; a
-        # follower with a torn one is not.
-        module._write_funding_follow_snapshot(leader, self._funding(-0.002))
-        monkeypatch.undo()
-
-        read = module._read_leader_funding(leader)
-        assert sorted(read.get_column("funding_rate").to_list()) == [-0.009, -0.009]

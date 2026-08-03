@@ -7,7 +7,7 @@ Covers:
   AND falls through after deadline expires
 - Cooldown prevents same-symbol re-entry within cooldown_days
 - Time-stop exit plans publish zero component targets
-- Demo and paper cycles publish only through the account owner inbox
+- Demo cycles publish only through the account owner inbox
 """
 
 from __future__ import annotations
@@ -1081,7 +1081,7 @@ def _ensure_owner_route(
     *,
     environment: str,
 ) -> AccountRoute:
-    account_id = "bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"
+    account_id = "bybit-demo-unified" if environment == "demo" else "bybit-mainnet-unified"
     return ensure_account_route(
         account_id=account_id,
         environment=environment,
@@ -1422,35 +1422,6 @@ def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
     assert payload["cycle"]["entry_targets_queued"] == 0
     assert payload["cycle"]["terminal_entry_attempt_suppressions"] == 1
     assert list((inbox_root / "pending").glob("*.json")) == []
-
-
-def test_paper_cycle_uses_account_inbox_and_never_writes_idealized_fill(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
-    inbox = tmp_path / "paper-inbox"
-    account_root = tmp_path / "paper-account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="paper",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(
-        account_root,
-        inbox,
-        environment="paper",
-        equity_usdt=7_654.0,
-    )
-
-    payload = _run_cycle(tmp_path / "long-paper", demo)
-
-    assert payload["cycle"]["account_target_route"] is True
-    assert payload["cycle"]["entry_targets_queued"] == 1
-    assert payload["cycle"]["equity_usdt"] == pytest.approx(7_654.0)
-    assert payload["cycle"]["account_state_source"] == "account_owner_health:paper"
-    assert "entries_executed" not in payload["cycle"]
-    assert len(list((inbox / "pending").glob("*.json"))) == 1
 
 
 def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:

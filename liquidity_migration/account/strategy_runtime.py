@@ -163,7 +163,7 @@ class AccountCycleResult:
 
 
 class AccountKernelRuntime:
-    """The only operational path shared by historical, paper, and demo."""
+    """The only operational path shared by historical replay and the live environments."""
 
     def __init__(self, kernel: AccountExecutionKernel) -> None:
         self.kernel = kernel

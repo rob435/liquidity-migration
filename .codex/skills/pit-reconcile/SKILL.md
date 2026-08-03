@@ -14,7 +14,7 @@ scripts/ops.sh venue-accounting --help
 python -m liquidity_migration --help
 ```
 
-These are demo/paper or research tools. They never authorize real money.
+These are demo or research tools. They never authorize real money.
 
 ## Account evidence
 
@@ -42,14 +42,9 @@ reconciliation events, immutable venue identifiers, and authenticated venue
 snapshot. Preserve contradictory facts and stop unsafe writers. Do not repair
 the headline by editing projections or resetting before flatness is proved.
 
-The combined backtest/demo/paper structural comparison is
-`scripts/ops.sh research-refresh reconcile --run-dir ... --demo-account-root ...
---paper-account-root ...`, over frozen account snapshots, on the grain
-`(sleeve, component, symbol, causal signal_ts_ms)`. Its own `claim_scope` limits it
-to accepted entry-key structural agreement: execution quality, fill attribution,
-account P&L, backtest performance and runtime parity stay separate claims
-(`docs/data.md`, Refresh). A request for model-versus-forward *performance*
-agreement still needs a newly declared claim and its own artifacts.
+The combined backtest/demo/paper structural comparison was removed with the
+paper fleet on 2026-08-03; use `venue-accounting` receipts and the journal
+tools for demo-vs-backtest questions.
 
 ## PIT evidence
 

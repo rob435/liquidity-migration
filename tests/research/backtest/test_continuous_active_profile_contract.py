@@ -176,7 +176,7 @@ def test_only_active_profile_resolves_exact_component_decisions(
     assert profile.ensemble_components == ACTIVE_COMPONENTS
     assert sum(component[4] for component in profile.ensemble_components) == pytest.approx(1.0)
     _validate_continuous_demo_config(_routed_profile(tmp_path / "demo", environment="demo"))
-    _validate_continuous_demo_config(_routed_profile(tmp_path / "paper", environment="paper"))
+    _validate_continuous_demo_config(_routed_profile(tmp_path / "mainnet", environment="mainnet"))
     with pytest.raises(ValueError, match="unknown continuous strategy_profile"):
         _validate_continuous_demo_config(
             ContinuousDemoCycleConfig(
@@ -188,12 +188,12 @@ def test_only_active_profile_resolves_exact_component_decisions(
         )
 
 
-def test_runtime_validation_requires_explicit_demo_or_paper_target_route(
+def test_runtime_validation_requires_explicit_demo_target_route(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(ValueError, match="execution_environment"):
         _validate_continuous_demo_config(_active_profile())
-    with pytest.raises(ValueError, match="operational demo/paper mode requires"):
+    with pytest.raises(ValueError, match="operational demo mode requires"):
         _validate_continuous_demo_config(
             apply_continuous_demo_profile(
                 ContinuousDemoCycleConfig(

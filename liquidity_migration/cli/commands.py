@@ -308,7 +308,6 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         candidate_universe_file=candidate_universe_file,
         data_name=args.data_name,
         ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
-        klines_follow_root=getattr(args, "klines_follow_root", ""),
         ws_klines_bootstrap_workers=getattr(
             args, "ws_klines_bootstrap_workers", _long_ws_defaults.ws_klines_bootstrap_workers
         ),
@@ -373,7 +372,6 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
         lookback_days=args.lookback_days,
         workers=args.workers,
         max_active=(continuous_settings.max_active if continuous_settings else args.max_active),
-        klines_follow_root=args.klines_follow_root,
         max_new_entries_per_cycle=(
             continuous_settings.max_new_entries_per_cycle
             if continuous_settings
@@ -453,7 +451,6 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
-        market_follow_root=getattr(args, "market_follow_root", ""),
         notional_multiplier=carry_settings.notional_multiplier,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,

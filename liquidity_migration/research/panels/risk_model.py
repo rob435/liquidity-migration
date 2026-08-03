@@ -158,7 +158,7 @@ def build_factor_panel(
 
     ``klines_dataset`` overrides the autodetected kline store name. Autodetect
     only distinguishes the Bybit/Binance funding-dir conventions and always
-    returns ``klines_1h``, but the live demo/paper roots store WS-driven klines
+    returns ``klines_1h``, but the live demo roots store WS-driven klines
     under ``event_demo_klines_1h``, so the offline rmom refresh must pass the
     real store name or both reads return zero rows.
     """

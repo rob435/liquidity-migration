@@ -671,9 +671,6 @@ class KlineStore:
     def last_recovery_failed(self) -> bool:
         """True when the last ``recover_from_disk`` returned 0 because the read
         or validation failed, rather than because there was nothing to recover.
-
-        The follower needs the distinction: a failed read must be retried on the
-        next poll, not treated as a consumed snapshot generation.
         """
 
         return self._last_recovery_failed

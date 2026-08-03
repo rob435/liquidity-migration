@@ -39,26 +39,20 @@ TEST_ACCOUNT_OWNER_INVOCATION_ID = "00000000000000000000000000000001"
 TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 ACCOUNT_OWNER_HEALTH_BIND_ATTEMPTS = 3
 QUEUE_HEAD_MARKET_WARMUP_DETAIL_PREFIX = "waiting for queue-head market data:"
-# The paper twin prefixes health details with a scope annotation that is not a
-# blocking reason. Strip it before classifying the first real reason, or a
-# bounded warmup transition pages CRITICAL and self-resolves minutes later.
-_HEALTH_DETAIL_ANNOTATION_PREFIXES = ("execution_model_scope=",)
-
-
 def first_blocking_health_reason(detail: str) -> str:
-    """Return the health detail without its leading non-blocking annotations."""
+    """Return the health detail's first real blocking reason.
+
+    The retired paper twin prefixed details with an ``execution_model_scope=``
+    annotation; strip it so a historical projection still classifies correctly.
+    """
 
     remaining = str(detail).strip()
-    while True:
-        for annotation in _HEALTH_DETAIL_ANNOTATION_PREFIXES:
-            if remaining.startswith(annotation):
-                head, separator, tail = remaining.partition(";")
-                if not separator:
-                    return ""
-                remaining = tail.strip()
-                break
-        else:
-            return remaining
+    while remaining.startswith("execution_model_scope="):
+        head, separator, tail = remaining.partition(";")
+        if not separator:
+            return ""
+        remaining = tail.strip()
+    return remaining
 
 
 class AccountOwnerHealthStatus(StrEnum):

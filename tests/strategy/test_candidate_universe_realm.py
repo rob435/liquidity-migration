@@ -141,8 +141,9 @@ def test_no_producer_loads_a_candidate_universe_at_the_default_realm() -> None:
 def test_candidate_universe_realm_maps_every_environment() -> None:
     assert candidate_universe_realm("demo") is VenueRealm.DEMO
     assert candidate_universe_realm("mainnet") is VenueRealm.MAINNET
-    # Paper is the demo owner's credential-free twin and reads its artifact.
-    assert candidate_universe_realm("paper") is VenueRealm.DEMO
+    # The retired paper twin is no longer a parseable environment.
+    with pytest.raises(ValueError, match="execution_environment"):
+        candidate_universe_realm("paper")
     with pytest.raises(ValueError, match="execution_environment"):
         candidate_universe_realm("")
 
@@ -208,13 +209,12 @@ def test_carry_producer_reads_the_artifact_of_its_own_environment(tmp_path: Path
         realm=candidate_universe_realm("mainnet"),
         standing_symbols=set(),
     ) == (["AAAUSDT"], 1)
-    for environment in ("demo", "paper"):
-        assert _candidate_filtered_universe(
-            ["AAAUSDT", "ZZZUSDT"],
-            candidate_universe_file=str(demo),
-            realm=candidate_universe_realm(environment),
-            standing_symbols=set(),
-        ) == (["AAAUSDT"], 1)
+    assert _candidate_filtered_universe(
+        ["AAAUSDT", "ZZZUSDT"],
+        candidate_universe_file=str(demo),
+        realm=candidate_universe_realm("demo"),
+        standing_symbols=set(),
+    ) == (["AAAUSDT"], 1)
     with pytest.raises(ValueError, match="is for realm 'demo', not 'mainnet'"):
         _candidate_filtered_universe(
             ["AAAUSDT"],

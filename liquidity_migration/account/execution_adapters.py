@@ -1,6 +1,6 @@
 """Execution ports for the account kernel and a deterministic market-order twin.
 
-Historical and paper runs use :class:`MarketOrderExecutionTwin`. Demo uses the
+Historical replay uses :class:`MarketOrderExecutionTwin`. Demo uses the
 same :class:`KernelExecutionDriver` with the adapter in
 ``bybit_execution_adapter``; private venue dependencies stay out of this shared
 replay module. Private WebSocket executions normalize into the same observations.
@@ -306,7 +306,7 @@ def _market_input_validation_error(
 
 
 class MarketOrderExecutionTwin:
-    """Deterministic market-order book walker for historical and paper modes."""
+    """Deterministic market-order book walker for historical replay."""
 
     def __init__(
         self,

@@ -1,4 +1,4 @@
-"""Public market-data plane shared by demo and paper target producers.
+"""Public market-data plane for the demo target producers.
 
 LONG and CONTINUOUS use these helpers in both environments; the selected
 account owner is a separate route.

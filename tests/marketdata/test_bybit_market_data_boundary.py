@@ -35,7 +35,6 @@ PUBLIC_PROCESS_MODULES = (
 )
 NEUTRAL_ACCOUNT_MODULES = (
     "liquidity_migration.policy.account_execution_config",
-    "liquidity_migration.runtime.account_paper_runner",
 )
 
 
@@ -113,7 +112,7 @@ def test_public_and_target_modules_do_not_transitively_load_private_execution(mo
 
 
 @pytest.mark.parametrize("module", NEUTRAL_ACCOUNT_MODULES)
-def test_paper_and_shared_config_do_not_load_demo_owner(module: str) -> None:
+def test_shared_config_does_not_load_demo_owner(module: str) -> None:
     forbidden = (
         "liquidity_migration.venue.bybit",
         "liquidity_migration.venue.bybit_execution_adapter",

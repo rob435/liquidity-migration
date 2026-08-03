@@ -7,7 +7,7 @@ CONTINUOUS is reconstructed from the continuous entry book
 regime) via the continuous refresh runner.
 CARRY renders the registered research config ``configs/lane2_carry_hold_v3.json``
 through the same --research-config path (cross-venue panel, settlement-exact
-scorer). That is the registered research shape, not a demo/paper daemon replay.
+scorer). That is the registered research shape, not a demo daemon replay.
 
     bash scripts/research/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/research/equity_curves.sh --sleeves continuous # retired-from-publication profile
@@ -182,7 +182,7 @@ def _run_carry(
 
     The carry runtime replays ``configs/lane2_carry_hold_v3.json``, so its
     standard curve is that same config through the --research-config path. It
-    reads the cross-venue panel, not the demo/paper cycle record.
+    reads the cross-venue panel, not the demo cycle record.
     """
     from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH
     from liquidity_migration.research.backtest.financed_longs import research_equity_chart
@@ -377,7 +377,7 @@ def main() -> int:
         help=(
             "RESEARCH RENDER ONLY (T-A ablation): render the continuous sleeve with the "
             "BTC uptrend entry gate off. Requires an explicit --out; never touches the "
-            "runtime demo/paper producers or the hedge service."
+            "runtime demo producers or the hedge service."
         ),
     )
     # Default --years to a sentinel so an unset window preserves the active

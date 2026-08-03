@@ -1,4 +1,4 @@
-"""Descriptor-rooted validation and mutation for demo/paper reset paths.
+"""Descriptor-rooted validation and mutation for account/demo reset paths.
 
 The reset script runs while writers are stopped, but it still treats every
 pathname below the data root as untrusted.  This module plans a complete batch
@@ -36,7 +36,7 @@ class ResetTargetRemoval:
 
 
 @dataclass(frozen=True, slots=True)
-class PaperRootNormalization:
+class PrivateRootNormalization:
     path: Path
     existed: bool
     root_created: bool
@@ -695,11 +695,11 @@ def remove_reset_targets(
 def _open_regular_for_mutation(context: _ApplyContext, planned: _Entry) -> int:
     parent_fd, name, current = context.validate_entry(planned)
     if not stat.S_ISREG(current.st_mode):
-        raise RuntimeError(f"paper runtime file changed before normalization: {planned.path}")
+        raise RuntimeError(f"private runtime file changed before normalization: {planned.path}")
     try:
         descriptor = os.open(name, _regular_open_flags(), dir_fd=parent_fd)
     except OSError as exc:
-        raise RuntimeError(f"paper runtime file changed before normalization: {planned.path}") from exc
+        raise RuntimeError(f"private runtime file changed before normalization: {planned.path}") from exc
     try:
         opened = os.fstat(descriptor)
         mount_id = _mount_id_for_fd(descriptor)
@@ -710,7 +710,7 @@ def _open_regular_for_mutation(context: _ApplyContext, planned: _Entry) -> int:
             or mount_id != planned.mount_id
             or mount_id != context.plan.anchor_entry.mount_id
         ):
-            raise RuntimeError(f"paper runtime file changed before normalization: {planned.path}")
+            raise RuntimeError(f"private runtime file changed before normalization: {planned.path}")
     except BaseException:
         os.close(descriptor)
         raise
@@ -772,7 +772,7 @@ def _normalize_planned_regular(
             or stat.S_IMODE(before.st_mode) != planned.mode
             or before.st_nlink != 1
         ):
-            raise RuntimeError(f"paper runtime file metadata changed before normalization: {planned.path}")
+            raise RuntimeError(f"private runtime file metadata changed before normalization: {planned.path}")
         changed = True
         permissions_changed = _set_descriptor_permissions(
             descriptor,
@@ -791,14 +791,14 @@ def _normalize_planned_regular(
             or current.st_gid != gid
             or stat.S_IMODE(current.st_mode) != mode
         ):
-            raise RuntimeError(f"paper runtime file changed during normalization: {planned.path}")
+            raise RuntimeError(f"private runtime file changed during normalization: {planned.path}")
     except BaseException:
         if changed:
             try:
                 _restore_descriptor_permissions(descriptor, planned)
             except OSError as restore_exc:
                 raise RuntimeError(
-                    f"paper runtime file changed and original permissions could not be restored: {planned.path}"
+                    f"private runtime file changed and original permissions could not be restored: {planned.path}"
                 ) from restore_exc
         raise
     finally:
@@ -842,27 +842,27 @@ def _normalize_planned_directory(
         rebound = context.directory_fd(planned.relative_parts)
         current = os.fstat(rebound)
         if current.st_uid != uid or current.st_gid != gid or stat.S_IMODE(current.st_mode) != mode:
-            raise RuntimeError(f"paper runtime directory changed during normalization: {planned.path}")
+            raise RuntimeError(f"private runtime directory changed during normalization: {planned.path}")
     except BaseException:
         if changed:
             try:
                 _restore_descriptor_permissions(descriptor, original)
             except OSError as restore_exc:
                 raise RuntimeError(
-                    f"paper runtime directory changed and original permissions could not be restored: {planned.path}"
+                    f"private runtime directory changed and original permissions could not be restored: {planned.path}"
                 ) from restore_exc
         raise
 
 
-def normalize_paper_runtime_roots(
+def normalize_private_runtime_roots(
     anchor: str | Path,
     roots: Iterable[str | Path],
     *,
     uid: int,
     gid: int,
     create_missing: bool = False,
-) -> tuple[PaperRootNormalization, ...]:
-    """Normalize complete paper trees without pathname-following chown/find.
+) -> tuple[PrivateRootNormalization, ...]:
+    """Normalize complete private trees without pathname-following chown/find.
 
     Every existing root is preflighted before the first mkdir, chown, or chmod.
     Symlinks, special files, multiply-linked files, and mount boundaries fail
@@ -871,16 +871,16 @@ def normalize_paper_runtime_roots(
     Each resulting root receives a private ``.locks`` directory.
     """
     if uid < 0 or gid < 0:
-        raise ValueError("paper runtime uid and gid must be non-negative")
+        raise ValueError("private runtime uid and gid must be non-negative")
     plan = _build_inspection_plan(anchor, roots, allow_overlaps=False)
-    _validate_paper_plan(plan)
+    _validate_private_plan(plan)
     if create_missing:
         for target in plan.targets:
             if (
                 not target.exists
                 and (len(target.relative_parts) != 1 or target.missing_at != target.relative_parts)
             ):
-                raise ValueError(f"only missing direct-child paper roots may be created: {target.path}")
+                raise ValueError(f"only missing direct-child private roots may be created: {target.path}")
     context = _ApplyContext(plan)
     created_locks: set[tuple[str, ...]] = set()
     created_lock_entries: dict[tuple[str, ...], _Entry] = {}
@@ -913,7 +913,7 @@ def normalize_paper_runtime_roots(
                     lock_fd = os.open(".locks", _directory_open_flags(), dir_fd=root_fd)
                 except OSError as exc:
                     raise RuntimeError(
-                        f"paper lock namespace changed before creation: {target.path / '.locks'}"
+                        f"private lock namespace changed before creation: {target.path / '.locks'}"
                     ) from exc
                 try:
                     opened = os.fstat(lock_fd)
@@ -927,7 +927,7 @@ def normalize_paper_runtime_roots(
                         or mount_id != plan.anchor_entry.mount_id
                     ):
                         raise RuntimeError(
-                            f"paper lock namespace changed during creation: {target.path / '.locks'}"
+                            f"private lock namespace changed during creation: {target.path / '.locks'}"
                         )
                     _set_descriptor_permissions(
                         lock_fd,
@@ -945,7 +945,7 @@ def normalize_paper_runtime_roots(
                         or stat.S_IMODE(rebound.st_mode) != 0o700
                     ):
                         raise RuntimeError(
-                            f"paper lock namespace changed during normalization: {target.path / '.locks'}"
+                            f"private lock namespace changed during normalization: {target.path / '.locks'}"
                         )
                     os.fsync(lock_fd)
                     os.fsync(root_fd)
@@ -1002,7 +1002,7 @@ def normalize_paper_runtime_roots(
                 mode=0o700,
             )
         context._validate_anchor()
-        _verify_normalized_paper_tree(
+        _verify_normalized_private_tree(
             plan,
             created_entries={**created_root_entries, **created_lock_entries},
             uid=uid,
@@ -1016,11 +1016,11 @@ def normalize_paper_runtime_roots(
                 pass
         context.close()
 
-    results: list[PaperRootNormalization] = []
+    results: list[PrivateRootNormalization] = []
     for target in plan.targets:
         prefix = target.relative_parts
         results.append(
-            PaperRootNormalization(
+            PrivateRootNormalization(
                 path=target.path,
                 existed=target.exists,
                 root_created=target.relative_parts in created_root_entries,
@@ -1040,30 +1040,30 @@ def normalize_paper_runtime_roots(
     return tuple(results)
 
 
-def _validate_paper_plan(plan: _InspectionPlan) -> None:
+def _validate_private_plan(plan: _InspectionPlan) -> None:
     entries_by_parts = {entry.relative_parts: entry for entry in plan.entries}
     for target in plan.targets:
         if not target.exists:
             continue
         root_entry = entries_by_parts[target.relative_parts]
         if root_entry.file_type != stat.S_IFDIR:
-            raise ValueError(f"paper runtime root must be a real directory: {target.path}")
+            raise ValueError(f"private runtime root must be a real directory: {target.path}")
         lock_parts = (*target.relative_parts, ".locks")
         lock_entry = entries_by_parts.get(lock_parts)
         if lock_entry is not None and lock_entry.file_type != stat.S_IFDIR:
-            raise ValueError(f"paper lock namespace must be a real directory: {target.path / '.locks'}")
+            raise ValueError(f"private lock namespace must be a real directory: {target.path / '.locks'}")
     for entry in plan.entries:
         if entry.file_type == stat.S_IFLNK:
-            raise ValueError(f"paper runtime tree contains a symlink: {entry.path}")
+            raise ValueError(f"private runtime tree contains a symlink: {entry.path}")
 
 
-def preflight_paper_runtime_roots(
+def preflight_private_runtime_roots(
     anchor: str | Path,
     roots: Iterable[str | Path],
 ) -> tuple[ResetTargetInspection, ...]:
-    """Apply the complete-tree paper policy without changing ownership or modes."""
+    """Apply the complete-tree private policy without changing ownership or modes."""
     plan = _build_inspection_plan(anchor, roots, allow_overlaps=False)
-    _validate_paper_plan(plan)
+    _validate_private_plan(plan)
     return tuple(
         ResetTargetInspection(
             path=target.path,
@@ -1077,7 +1077,7 @@ def preflight_paper_runtime_roots(
     )
 
 
-def _verify_normalized_paper_tree(
+def _verify_normalized_private_tree(
     original: _InspectionPlan,
     *,
     created_entries: dict[tuple[str, ...], _Entry],
@@ -1089,22 +1089,22 @@ def _verify_normalized_paper_tree(
         (target.path for target in original.targets),
         allow_overlaps=False,
     )
-    _validate_paper_plan(final)
+    _validate_private_plan(final)
     expected = {entry.relative_parts: entry for entry in original.entries}
     expected.update(created_entries)
     actual = {entry.relative_parts: entry for entry in final.entries}
     if set(actual) != set(expected):
-        raise RuntimeError("paper runtime tree entries changed during normalization")
+        raise RuntimeError("private runtime tree entries changed during normalization")
     for parts, entry in actual.items():
         planned = expected[parts]
         if (
             (entry.device, entry.inode, entry.file_type, entry.mount_id)
             != (planned.device, planned.inode, planned.file_type, planned.mount_id)
         ):
-            raise RuntimeError(f"paper runtime entry changed during normalization: {entry.path}")
+            raise RuntimeError(f"private runtime entry changed during normalization: {entry.path}")
         expected_mode = 0o700 if entry.file_type == stat.S_IFDIR else 0o600
         if entry.uid != uid or entry.gid != gid or entry.mode != expected_mode:
-            raise RuntimeError(f"paper runtime permissions changed during normalization: {entry.path}")
+            raise RuntimeError(f"private runtime permissions changed during normalization: {entry.path}")
 
 
 def _continuous_target_path(
@@ -1529,12 +1529,12 @@ def _parser() -> argparse.ArgumentParser:
     preflight.add_argument("--target", action="append", default=[])
     preflight.add_argument("--reject-symlinks", action="store_true")
 
-    preflight_paper = subparsers.add_parser(
-        "preflight-paper",
-        help="validate complete private paper trees before archive creation",
+    preflight_private = subparsers.add_parser(
+        "preflight-private",
+        help="validate complete private private trees before archive creation",
     )
-    preflight_paper.add_argument("--anchor", required=True)
-    preflight_paper.add_argument("--root", action="append", default=[])
+    preflight_private.add_argument("--anchor", required=True)
+    preflight_private.add_argument("--root", action="append", default=[])
 
     preflight_demo = subparsers.add_parser(
         "preflight-demo",
@@ -1548,7 +1548,7 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--anchor", required=True)
     remove.add_argument("--target", action="append", default=[])
 
-    normalize = subparsers.add_parser("normalize-paper", help="normalize private paper runtime trees")
+    normalize = subparsers.add_parser("normalize-private", help="normalize private private runtime trees")
     normalize.add_argument("--anchor", required=True)
     normalize.add_argument("--root", action="append", default=[])
     normalize.add_argument("--uid", required=True, type=int)
@@ -1580,11 +1580,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"preflight path={inspection.path} exists={int(inspection.exists)} "
                     f"entries={inspection.entries}"
                 )
-        elif args.command == "preflight-paper":
-            inspected = preflight_paper_runtime_roots(args.anchor, args.root)
+        elif args.command == "preflight-private":
+            inspected = preflight_private_runtime_roots(args.anchor, args.root)
             for inspection in inspected:
                 print(
-                    f"preflight-paper path={inspection.path} exists={int(inspection.exists)} "
+                    f"preflight-private path={inspection.path} exists={int(inspection.exists)} "
                     f"entries={inspection.entries}"
                 )
         elif args.command == "preflight-demo":
@@ -1605,21 +1605,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"removed path={removal.path} existed={int(removal.existed)} "
                     f"entries={removal.removed_entries}"
                 )
-        elif args.command == "normalize-paper":
-            normalized = normalize_paper_runtime_roots(
+        elif args.command == "normalize-private":
+            normalized = normalize_private_runtime_roots(
                 args.anchor,
                 args.root,
                 uid=args.uid,
                 gid=args.gid,
                 create_missing=args.create_missing,
             )
-            for paper_normalization in normalized:
+            for private_normalization in normalized:
                 print(
-                    f"normalized path={paper_normalization.path} existed={int(paper_normalization.existed)} "
-                    f"root_created={int(paper_normalization.root_created)} "
-                    f"directories={paper_normalization.normalized_directories} "
-                    f"files={paper_normalization.normalized_files} "
-                    f"lock_created={int(paper_normalization.lock_directory_created)}"
+                    f"normalized path={private_normalization.path} existed={int(private_normalization.existed)} "
+                    f"root_created={int(private_normalization.root_created)} "
+                    f"directories={private_normalization.normalized_directories} "
+                    f"files={private_normalization.normalized_files} "
+                    f"lock_created={int(private_normalization.lock_directory_created)}"
                 )
         else:
             normalized_demo = normalize_demo_runtime_roots(

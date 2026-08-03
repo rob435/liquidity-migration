@@ -19,7 +19,6 @@ from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, By
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
-from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager, build_kline_follower
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
 from liquidity_migration.research.backtest.long_identity import (
@@ -839,26 +838,13 @@ def _default_long_kline_stream_manager_factory(
     )
 
 
-def _follower_long_kline_stream_manager_factory(
-    config: ResearchConfig,
-    demo_config: LongNativeDemoCycleConfig,
-    cache_root: Path,
-) -> FollowerKlineStreamManager:
-    del config
-    return build_kline_follower(
-        leader_root=demo_config.klines_follow_root,
-        follower_root=cache_root,
-    )
-
-
 def _select_long_kline_stream_manager_factory(
     demo_config: LongNativeDemoCycleConfig,
     explicit: Callable[..., Any] | None,
 ) -> Callable[..., Any]:
+    del demo_config
     if explicit is not None:
         return explicit
-    if demo_config.klines_follow_root:
-        return _follower_long_kline_stream_manager_factory
     return _default_long_kline_stream_manager_factory
 
 

@@ -20,7 +20,6 @@ from liquidity_migration.policy.account_execution_config import load_demo_rules,
 from liquidity_migration.venue.account_service_bybit import (
     BybitAccountSnapshotProvider,
     CapturedBybitMarketProvider,
-    CapturedPaperExecutionAdapter,
     VerifiedBybitDemoRulesProvider,
     inspect_bybit_order_ownership,
     instrument_rules_from_bybit_row,
@@ -36,10 +35,6 @@ from liquidity_migration.runtime.account_service_runner import (
 )
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.venue.venue_protection import BybitNativeProtectionManager
-from liquidity_migration.runtime.account_paper_runner import (
-    PAPER_EXECUTION_BOOK_DEPTH,
-    PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG,
-)
 from liquidity_migration.core.deterministic_runtime import VirtualClock
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.venue_realm import VenueRealm
@@ -128,61 +123,6 @@ def test_captured_market_provider_links_decision_to_raw_book_record(tmp_path: Pa
     recorder.close()
 
 
-def test_paper_adapter_executes_against_exact_captured_decision_book(tmp_path: Path) -> None:
-    clock = VirtualClock(current_wall_ns=1_800_000_000_010_000_000, current_monotonic_ns=0)
-    recorder = SequenceAwareMarketRecorder(tmp_path, config=_capture_config(), clock=clock)
-    recorder.on_message(
-        {
-            "topic": "orderbook.50.BUSDT",
-            "type": "snapshot",
-            "ts": 1_800_000_000_000,
-            "cts": 1_799_999_999_999,
-            "data": {"s": "BUSDT", "b": [["10", "2"]], "a": [["10.1", "3"]], "u": 1, "seq": 1},
-        },
-        local_receive_ts_ns=1_800_000_000_005_000_000,
-    )
-    provider = CapturedBybitMarketProvider(recorder)
-    market = provider.current(["BUSDT"], batch_id="paper-1")["BUSDT"]
-    rules = {"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)}
-    twin = MarketOrderExecutionTwin(
-        books={},
-        instrument_rules=rules,
-        config=ExecutionTwinConfig(0.0, LatencyProfile(1, 1, 1), 10),
-    )
-    adapter = CapturedPaperExecutionAdapter(market_provider=provider, twin=twin)
-
-    observations = list(
-        adapter.submit(
-            OrderCommand(
-                command_id="cmd-1",
-                batch_id="paper-1",
-                symbol="BUSDT",
-                side="Buy",
-                qty=1.0,
-                signed_qty=1.0,
-                reduce_only=False,
-                reference_price=market.reference_price,
-                target_signed_qty=1.0,
-                chunk_index=0,
-                chunk_count=1,
-                created_ts_ns=market.local_receive_ts_ns,
-            ),
-            market,
-        )
-    )
-
-    assert observations[0].observation_type == ExecutionObservationType.ACK
-    assert observations[1].observation_type == ExecutionObservationType.FILL
-    assert observations[1].price == 10.1
-    assert adapter.name == "paper_integration_only_uncalibrated"
-    assert all(
-        observation.metadata["execution_model_scope"]
-        == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
-        for observation in observations
-    )
-    recorder.close()
-
-
 def _valid_execution_book(*, symbol: str = "BUSDT") -> L2BookSnapshot:
     return L2BookSnapshot(
         symbol=symbol,
@@ -234,6 +174,8 @@ def _execution_twin(book: L2BookSnapshot) -> MarketOrderExecutionTwin:
         ("Sell", [10.0, 9.9]),
     ],
 )
+
+
 def test_execution_twin_walks_valid_book_for_buy_and_sell(
     side: str,
     expected_prices: list[float],
@@ -395,17 +337,6 @@ def test_execution_twin_rejects_unusable_market_reference(
     assert rejection.metadata["execution_model_scope"] == (
         INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
     )
-
-
-def test_paper_execution_model_is_commit_owned_and_explicitly_uncalibrated() -> None:
-    config = PAPER_INTEGRATION_EXECUTION_TWIN_CONFIG
-
-    assert config.fee_bps == 5.5
-    assert config.residual_adverse_slippage_bps == 2.0
-    assert config.visible_book_depth == PAPER_EXECUTION_BOOK_DEPTH == 50
-    assert config.max_decision_age_ns == 250_000_000
-    assert config.latency == LatencyProfile(0, 0, 0)
-    assert config.model_scope == INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE
 
 
 class _WalletClient:

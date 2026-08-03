@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One thin operator-facing router for the surviving demo/paper and research operations.
+# One thin operator-facing router for the surviving demo and research operations.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,7 +38,7 @@ Operator commands:
                                zero exposure; reads only
   flatten --execute --environment ENV [ARGS...]
                                publish the zero targets and wait for the owner
-                               to converge. ENV is demo|paper|mainnet and has no
+                               to converge. ENV is demo|mainnet and has no
                                default. Stop the producing sleeve first, or it
                                can republish while this converges.
   venue-accounting [ARGS...]   reconcile demo accounting on the host; LOCAL=1
@@ -136,7 +136,7 @@ remote_reset() {
   fi
 
   remote_exec 'cd "$REPO_DIR"
-exec bash scripts/maintain/reset_demo_paper_ledgers.sh "${REMOTE_ARGS[@]}"' \
+exec bash scripts/maintain/reset_demo_ledgers.sh "${REMOTE_ARGS[@]}"' \
     ${reset_args[@]+"${reset_args[@]}"}
 }
 

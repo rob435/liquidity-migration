@@ -263,9 +263,9 @@ def build_venue_accounting_receipt(
 ) -> dict[str, Any]:
     """Build a self-hashed, source-bound accounting reconciliation.
 
-    ``three_way_reconciliation`` reads ``environment`` off the receipt to decide
-    which fleet the evidence belongs to, so a wrong label routes it to the
-    wrong account.
+    Downstream readers take ``environment`` off the receipt to decide which
+    fleet the evidence belongs to, so a wrong label routes it to the wrong
+    account.
     """
 
     selected_environment = execution_environment(environment).value

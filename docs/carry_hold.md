@@ -308,11 +308,12 @@ grind-downs where shorts are not paying.
 
 ## 7. Implementation path — BUILT AND DEPLOYED 2026-07-29 (owner override)
 
-The owner ordered on 2026-07-28/29: retire CONTINUOUS from demo and paper
+The owner ordered on 2026-07-28/29: retire CONTINUOUS from the forward routes
 and deploy this strategy in its place. The runtime now exists:
 
 1. **Sleeve**: `carry` — target producer `liquidity_migration/strategy/carry_demo.py`
-   (+ `carry_demo_daemon.py`), demo + paper units, publishing absolute
+   (+ `carry_demo_daemon.py`), demo unit (a paper twin existed until the
+   2026-08-03 paper retirement), publishing absolute
    component targets through the normal account-kernel inbox. The deployed
    decision logic is NOT a reimplementation: the producer calls the exact
    registered-scorer functions (`financed_longs.carry_hold_weights`) on the
@@ -321,8 +322,7 @@ and deploy this strategy in its place. The runtime now exists:
 2. **Decision cadence**: once per UTC day at 00:00 close, computed from
    ~00:20 (kline availability lag, same offset as the rmom timer). Diff-based
    idempotent publication; quiet cycles between decisions. Data: pure REST
-   (settled funding history + 1h klines, kline-derived turnover ranking);
-   paper follows the demo market-data plane read-only.
+   (settled funding history + 1h klines, kline-derived turnover ranking).
 3. **Protection**: declared `stop_loss_pct` 0.35 per target (the sl35
    pattern — replaces the 2% account fallback so the funding-normalization
    exit is always the real exit), NO take-profit (the book's right tail is

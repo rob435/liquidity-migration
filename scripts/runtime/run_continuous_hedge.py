@@ -5,7 +5,7 @@ prior and canonical account state. Dry-run (the default) prints the decision;
 ``--execute`` publishes an absolute target batch to the account owner. This
 process never calls the venue private API and writes no sleeve-local ledger.
 
-The CLI requires an explicit demo/paper route. The historical prior is not
+The CLI requires the explicit demo route. The historical prior is not
 extended with live returns and its age is not a freshness signal; missing,
 malformed, future-dated, or estimator-inadequate prior data fails closed.
 
@@ -278,7 +278,7 @@ def main() -> int:
     ap.add_argument(
         "--execution-environment",
         required=True,
-        choices=("demo", "paper"),
+        choices=("demo",),
         help="bound account-owner environment; there is no implicit default",
     )
     ap.add_argument("--primary-root", default="data/bybit-continuous-demo-event")

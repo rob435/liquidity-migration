@@ -209,17 +209,17 @@ def test_cli_binance_proxy_parses_defaults(tmp_path: Path) -> None:
     assert "mark_price_1h" in args.datasets
 
 
-def test_cli_long_native_explicit_paper_environment_propagates(tmp_path: Path) -> None:
+def test_cli_long_native_explicit_mainnet_environment_propagates(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "long-native-event-demo-cycle",
             "--execution-environment",
-            "paper",
+            "mainnet",
         ]
     )
-    assert args.execution_environment == "paper"
+    assert args.execution_environment == "mainnet"
 
 
 def test_cli_long_native_requires_explicit_environment(tmp_path: Path) -> None:
@@ -242,7 +242,7 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# discover-universe / archive-* must print the slugified on-disk report path,
+# archive-* commands must print the slugified on-disk report path,
 # not the raw ``--name``.
 # --------------------------------------------------------------------------- #
 def _run(monkeypatch, capsys, tmp_path: Path, argv: list[str]) -> str:

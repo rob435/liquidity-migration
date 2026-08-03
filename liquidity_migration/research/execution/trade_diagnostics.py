@@ -2,7 +2,7 @@
 
 The account journal and exact decision-book contexts remain authoritative. This
 module creates one deterministic analytical row per venue command; it does not
-mutate an account root, infer missing fees/marks, or turn paper observations
+mutate an account root, infer missing fees/marks, or turn forward observations
 into calibrated execution evidence.
 """
 
@@ -1405,7 +1405,6 @@ def build_trade_diagnostic_manifest(
         "study_mode": "diagnostic_only",
         "explicit_non_conclusions": [
             "no alpha conclusion",
-            "no paper calibration conclusion",
             "no strategy promotion or sizing conclusion",
             "no deployment or real-money authorization",
             "post-fill conclusions require the reported horizon-specific coverage",

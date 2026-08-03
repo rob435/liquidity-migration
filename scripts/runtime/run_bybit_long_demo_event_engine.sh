@@ -19,8 +19,12 @@ fi
 # roots. The kernel-latch variables only restated what the unit files already
 # hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo | paper) ;;
+    demo) ;;
     mainnet)
+        if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=mainnet requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
+            exit 2
+        fi
         # The unit strips these; fail loudly if the strip ever misses.
         if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
             echo "A target producer must not receive venue credentials." >&2
@@ -35,7 +39,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         esac
         ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo, paper, or mainnet." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or mainnet." >&2
         exit 2
         ;;
 esac
@@ -70,7 +74,6 @@ if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; the
     exit 2
 fi
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
-KLINES_FOLLOW_ROOT="${KLINES_FOLLOW_ROOT:-}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
 WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-100}"
 WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
@@ -104,17 +107,10 @@ fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
-if [[ -n "$KLINES_FOLLOW_ROOT" ]]; then
-    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
-        exit 2
-    fi
-    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
-fi
 echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$LONG_STRATEGY_PROFILE"
-echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1} klines_follow_root=$KLINES_FOLLOW_ROOT"
+echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1}"
 echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 
 mkdir -p "$DATA_ROOT/.locks"

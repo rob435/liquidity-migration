@@ -35,7 +35,7 @@ def require_registered_demo_rule_max_age_hours(
 ) -> float:
     """Validate the instrument-rule receipt age bound.
 
-    Mainnet holds the registered 168-hour ceiling. Demo and paper only need a
+    Mainnet holds the registered 168-hour ceiling. Demo only needs a
     finite positive value: with a stale receipt and a probe that will not run,
     a hard ceiling leaves no way to start the owner short of a code deploy.
     """

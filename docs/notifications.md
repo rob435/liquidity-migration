@@ -11,11 +11,10 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | Unit | Telegram | Sends |
 | --- | --- | --- |
 | `account-execution` (demo owner) | on | digest + event notices |
-| `account-paper-execution` | on | digest + event notices, paper book |
 | `account-execution-mainnet` | on | digest + event notices, funded book |
-| `demo-liveness` | on | watchdog alerts, demo/paper scope |
+| `demo-liveness` | on | watchdog alerts, demo scope |
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope |
-| every producer, hedge, rmom, target-mirror | off or unset | nothing |
+| every producer, hedge, rmom | off or unset | nothing |
 
 Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem,
 not its own.
@@ -41,31 +40,22 @@ never arrived — which is what the watchdog reads.
 ## The liveness watchdog
 
 [`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per timer fire,
-every 3 minutes. The demo timer's first pass is 1 minute after it arms, the mainnet timer's is 10;
-cold-start noise is absorbed by a per-unit startup grace inside the watchdog rather than by staying
-blind. `--account-scope` selects `demo`, `demo-paper`, or `mainnet`; the mainnet scope runs only the
-mainnet owner and producers against roots disjoint from demo and paper.
+every 3 minutes — the first run lands one minute after the timer is enabled, so a
+recovery is graded almost immediately. `--account-scope` selects `demo` or
+`mainnet`; the mainnet scope runs only the mainnet owner and producers against roots disjoint
+from demo. A unit restart opens a per-check startup grace (owner-health, capture,
+and cycle-age checks all honor it), so routine restarts do not page.
 
 It **always exits 0**. A watchdog that crash-loops is a watchdog that is off, so a failure to verify
 degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120` sits under the
 3-minute timer so a hung run goes `failed` rather than silently never re-firing.
 
-What it checks: systemd unit states; account-owner health and readiness freshness; live-L2 capture
-freshness; per-sleeve producer cycle age; demo/paper book agreement; the frozen demo-rule receipt's
+What it checks: systemd unit states — including a service that is enabled but not
+active (the dependency-failure shape of the Aug 1–3 outage; debounced one interval,
+then CRITICAL); account-owner health and readiness freshness; live-L2 capture
+freshness; per-sleeve producer cycle age; the frozen demo-rule receipt's
 remaining life; residual-momentum signal staleness; the committed hedge model prior; oneshot
 run duration; free disk; and the owner's digest.
-
-On unit states it pages for a `failed` unit, a timer that is not active, and a service that
-`systemctl is-enabled` calls enabled while `is-active` says it is not running. That last one is the
-shape the 2026-08-01..03 outage took — a producer whose owner dependency failed is left stopped with
-no failure of its own — and failed-only alerting saw nothing for two days. Static and disabled units
-stay silent: a timer-driven oneshot is idle between runs by design. Timers and enabled services both
-warn on the first observation and escalate to CRITICAL on the second consecutive one.
-
-A restarting account owner has no fresh health projection or L2 readiness for a moment. Inside a
-unit's startup grace — a known current systemd generation, younger than `--max-cycle-age-min` — the
-missing-evidence pages are suppressed. An owner alive enough to report *blocked* still pages: that
-is evidence, not the absence of it.
 
 | Threshold | Default | Meaning |
 | --- | --- | --- |
@@ -99,8 +89,9 @@ without a URL a total host loss is silent. **No URL is provisioned by default.**
   the owner is alive.
 - Digest stopped, no watchdog alert → check `TELEGRAM_*` on the watchdog unit; both channels share
   the same credentials and a bad token silences both at once.
-- Alert storm after a restart → the cold-start grace is 10 minutes and cycle-age alerts fire at 10;
-  a slow bootstrap can overlap. It resolves itself, and the resolved notes will say so.
+- Alert storm after a restart → the per-check startup grace should absorb it; if a
+  slow bootstrap overlaps the cycle-age bound it resolves itself, and the resolved
+  notes will say so.
 - Mainnet pages come from the Telegram pair inside `/etc/liquidity-migration/bybit-mainnet.env`;
   the watchdog unit strips the API keys and `REAL_MONEY` straight back out, so it can page but holds
   no trading authority.

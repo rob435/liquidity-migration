@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One command for append-first market refresh, current features, standard
-# backtests, and optional demo/paper/backtest reconciliation.
+# One command for append-first market refresh, current features, and standard
+# backtests.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

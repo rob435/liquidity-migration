@@ -2,8 +2,7 @@
 # Continuous-fade demo sleeve — sub-hourly target producer.
 #
 # Whether it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE).
-# The paper service uses the same runner with EXECUTION_ENVIRONMENT=paper. The
-# account owners handle execution and fills.
+# The account owner handles execution and fills.
 #
 # The daemon wakes every INTERVAL_SECONDS, but active continuous_ensemble_v2
 # entries come from confirmed-bar +1h membership, not intra-hour live deciles.
@@ -26,9 +25,9 @@ fi
 # roots. The kernel-latch variables only restated what the unit files already
 # hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo | paper) ;;
+    demo) ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo." >&2
         exit 2
         ;;
 esac
@@ -64,19 +63,7 @@ fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
-# KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
-# snapshot (+rmom gate) read-only instead of running a second WS pool, giving
-# one market-data plane per box. Empty = this sleeve runs its own pool.
-if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
-    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        # A follower never writes the snapshot, so self-following freezes its
-        # kline store permanently.
-        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
-        exit 2
-    fi
-    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
-fi
-echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
+echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

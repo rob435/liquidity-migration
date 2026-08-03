@@ -92,14 +92,14 @@ still outstanding. `LOCAL=1` runs it against this checkout instead of the VPS.
 4. **Copy the route file.**
    [`deploy/account-execution-mainnet.env.template`](../deploy/account-execution-mainnet.env.template)
    to `/etc/liquidity-migration/account-execution-mainnet.env`, root-owned `0600`.
-   Its roots are disjoint from demo and paper.
+   Its roots are disjoint from demo.
 5. **Create the state roots** from the route file just copied:
    ```bash
    scripts/ops.sh real-money create-state-roots            # lists what it would create
    scripts/ops.sh real-money create-state-roots --execute  # creates them, mode 0700
    ```
    It refuses a relative root, a root that is not a directory, and any root at or
-   inside a directory the demo or paper owner env declares.
+   inside a directory the demo owner env declares.
 6. **Render the profile** (`D=/etc/liquidity-migration/account-execution-mainnet`):
    ```bash
    scripts/ops.sh real-money render-profile --execute --output $D/risk-policy.json
@@ -238,8 +238,8 @@ remains between the repo and live trading is the owner's own acts —
 
 ## Record
 
-Bybit demo prices are real; its fills are not, and paper fills are modelled
-locally. CARRY (`lane2_carry_hold_v3`) runs on demo; LONG's forward record is
+Bybit demo prices are real; its fills are not.
+CARRY (`lane2_carry_hold_v3`) runs on demo; LONG's forward record is
 demo-only. `carry_hold`'s benchmark Sharpe is **1.21 (t 2.31)** and does not
 beat the CONTINUOUS benchmark; the superseded 2.57 / t 4.87 figures were
 double-counted funding ([`carry_hold.md`](carry_hold.md),

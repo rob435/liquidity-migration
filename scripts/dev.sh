@@ -20,7 +20,7 @@ Usage: scripts/dev.sh <command> [arguments]
 
 Non-operational developer commands:
   doctor [--json] [--strict-lock]
-                         inspect Git, Python, dependency, skill, and map state
+                         inspect Git, Python, dependency, and skill-link state
   lint [RUFF_ARGS...]    run Ruff over package, scripts, and tests
   types [MYPY_ARGS...]   run package and supported developer-script mypy
   test [PYTEST_ARGS...]  run pytest (-q by default)
@@ -45,8 +45,6 @@ MYPY_TARGETS=(
   scripts/research/build_trade_diagnostics.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
-  scripts/maintain/check_demo_paper_agreement.py
-  scripts/research/measure_execution_twin_error.py
 )
 
 command="${1:-help}"

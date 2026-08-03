@@ -46,12 +46,6 @@ def _validate_carry_daemon_startup(config: CarryDemoCycleConfig) -> None:
     """
 
     _validate_carry_demo_config(config)
-    follow_root = str(config.market_follow_root or "").strip()
-    if follow_root and str(config.klines_follow_root or "").strip():
-        raise ValueError(
-            "market_follow_root already shares the leader's market data; "
-            "klines_follow_root must stay empty for the carry sleeve"
-        )
 
 
 class CarryDemoDaemon(LongNativeDemoDaemon):
@@ -76,16 +70,6 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
         resolved = demo_config or CarryDemoCycleConfig()
         # This must precede every cache, manager, or thread construction.
         _validate_carry_daemon_startup(resolved)
-        follow_root = str(resolved.market_follow_root or "").strip()
-        if follow_root and Path(follow_root).expanduser().resolve() == Path(
-            data_root
-        ).expanduser().resolve():
-            # A follower never writes the leader caches, so following your own
-            # root reads a snapshot nobody updates.
-            raise ValueError(
-                "market_follow_root must not equal the sleeve's own data root "
-                "(circular self-follow)"
-            )
         # The base touches only fields shared by the LONG and CARRY configs,
         # and never builds a kline manager while ws_klines_enabled is False.
         super().__init__(

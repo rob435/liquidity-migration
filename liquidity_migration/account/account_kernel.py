@@ -9,7 +9,7 @@ The canonical control-plane order is::
     MarketInputRef -> Decision -> Target -> RiskDecision -> OrderCommand
       -> Ack -> Fill -> Protection -> Close -> P&L
 
-The environment (historical, paper, demo) is absent from domain state; it
+The environment (historical, demo, mainnet) is absent from domain state; it
 belongs to an execution adapter, which keeps pre-execution hashes comparable
 across environments.
 """

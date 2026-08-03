@@ -84,7 +84,7 @@ class ContinuousCycleStatus:
         if type(self.cycle_ts_ms) is not int or self.cycle_ts_ms <= 0:
             raise ValueError("cycle_ts_ms must be a positive integer")
         if self.environment not in EXECUTION_ENVIRONMENT_VALUES:
-            raise ValueError("environment must be exactly 'demo' or 'paper'")
+            raise ValueError("environment must be a registered execution environment")
         if self.btc_trend_gate not in {"off", "uptrend", "downtrend"}:
             raise ValueError("btc_trend_gate must be off, uptrend, or downtrend")
         if type(self.btc_trend_gate_allows_entry) is not bool:
@@ -335,7 +335,7 @@ class ContinuousCycleStatusReader:
         max_age_minutes: float = 15.0,
     ) -> None:
         if environment not in EXECUTION_ENVIRONMENT_VALUES:
-            raise ValueError("CONTINUOUS status environment must be demo or paper")
+            raise ValueError("CONTINUOUS status environment must be a registered execution environment")
         if not math.isfinite(max_age_minutes) or max_age_minutes <= 0.0:
             raise ValueError("CONTINUOUS status max age must be positive and finite")
         self.root = Path(root).expanduser()

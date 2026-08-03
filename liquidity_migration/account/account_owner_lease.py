@@ -737,8 +737,7 @@ def revalidate_inherited_account_owner_lease(
 class AccountOwnerLease:
     """Kernel-enforced advisory lock held for a local owner's entire lifetime.
 
-    Path-based, which suits the paper account whose identity is its local
-    route. Venue mutation requires the credential-bound subclass below.
+    Path-based; venue mutation requires the credential-bound subclass below.
     """
 
     def __init__(

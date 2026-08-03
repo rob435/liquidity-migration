@@ -25,13 +25,9 @@ are byte-identical to the registered ones.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import io
 import json
 import logging
 import math
-import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,7 +48,6 @@ from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import (
     _demo_instruments,
-    _demo_kline_compact_cache_paths,
     _download_recent_1h_klines,
     _kline_window,
     _launch_time_ms_by_symbol,
@@ -216,7 +211,6 @@ CARRY_STRATEGY_ID = "carry_hold_v3"
 CARRY_COMPONENT_ID = "carry_hold"
 CARRY_PROFILE_NAME = "carry_hold_v3_live_v1"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
-CARRY_PAPER_CYCLES_DATASET = "carry_hold_paper_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
 
@@ -245,9 +239,6 @@ DECISION_STALE_MS = 30 * HOUR_MS
 #: window opens (same convention as ``cross_venue_panel.FUNDING_LOOKBACK_DAYS``)
 #: so the earliest bars never show a spurious coverage gap.
 FUNDING_LOOKBACK_DAYS = 2
-#: Paper freshness: the follower refuses to decide on a leader kline cache
-#: whose newest bar CLOSE is older than this (one dead leader day + margin).
-PAPER_KLINE_FRESHNESS_MS = 26 * HOUR_MS
 #: Resize dead-band. A resize is a round trip at a measured ~15.6bp, so the
 #: band sits where the tracking error it buys is worth the spread it spends:
 #: closing a 5% notional gap costs ~0.8bp of the position, closing a 0.1% gap
@@ -372,7 +363,7 @@ class CarryCycleState:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class CarryDemoCycleConfig:
-    """CARRY demo/paper target-producer configuration.
+    """CARRY demo/mainnet target-producer configuration.
 
     Sizing fields (``notional_multiplier``, ``entry_leverage``,
     ``declared_stop_loss_fraction``, ``max_new_entries_per_cycle``) are injected
@@ -387,9 +378,6 @@ class CarryDemoCycleConfig:
     account_intent_inbox_root: str | None = None
     account_execution_root: str | None = None
     candidate_universe_file: str = ""
-    #: Paper follower mode: read the leader (demo) root's kline and funding
-    #: caches read-only instead of fetching from REST. Empty = demo REST path.
-    market_follow_root: str = ""
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
     entry_leverage: float = 2.0
@@ -407,7 +395,6 @@ class CarryDemoCycleConfig:
     workers: int = 4
     # --- base-daemon field surface (inert here: carry runs pure REST) ---
     ws_klines_enabled: bool = False
-    klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 45
     ws_klines_universe_refresh_seconds: float = 3600.0
@@ -419,7 +406,7 @@ class CarryDemoCycleConfig:
 def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
     """Validate target routing and sizing before any shared resource opens.
 
-    Producers are target-only: demo and paper both require their canonical
+    Producers are target-only: every environment requires its canonical
     account-owner route, and sleeve-side Telegram stays retired.
     """
 
@@ -432,7 +419,7 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
         )
     if not has_account_inbox:
         raise ValueError(
-            "operational demo/paper mode requires account_intent_inbox_root and "
+            "operational target mode requires account_intent_inbox_root and "
             "account_execution_root; direct sleeve order authority is retired"
         )
     if bool(getattr(config, "telegram", False)):
@@ -461,12 +448,11 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
 def carry_cycles_dataset(config: CarryDemoCycleConfig) -> str:
     """Cycle-heartbeat dataset for this planner's environment.
 
-    Named per environment, not per "is it paper": a cycle written into the wrong
-    dataset would later be read as the wrong environment's evidence.
+    Named per environment: a cycle written into the wrong dataset would later
+    be read as the wrong environment's evidence.
     """
 
     return {
-        ExecutionEnvironment.PAPER: CARRY_PAPER_CYCLES_DATASET,
         ExecutionEnvironment.MAINNET: CARRY_MAINNET_CYCLES_DATASET,
     }.get(execution_environment(config.execution_environment), CARRY_CYCLES_DATASET)
 
@@ -1082,97 +1068,7 @@ def _refresh_carry_funding_cache(
         if not fresh.is_empty()
         else cached
     )
-    if not fresh.is_empty():
-        _write_funding_follow_snapshot(root, combined)
     return combined, stats
-
-
-def _funding_follow_snapshot_paths(cache_root: Path) -> tuple[Path, Path]:
-    root = Path(cache_root).expanduser() / ".cache" / CARRY_FUNDING_DATASET
-    return root / "latest_funding.parquet", root / "latest_funding.json"
-
-
-def _write_funding_follow_snapshot(root: Path, funding: pl.DataFrame) -> None:
-    """Publish the swept funding series as ONE atomically replaced file.
-
-    The follower has no write access to the leader's root and so cannot take its
-    dataset lock; it reads ``lock=False``. That is safe for a single
-    rename-replaced file and unsafe for the per-symbol partitioned dataset,
-    where a sweep lands one symbol's part at a time and a concurrent read can
-    see some symbols' new settlements and not others.
-
-    A rename is atomic, so a reader gets the whole previous sweep or the whole
-    new one. The sidecar carries the parquet digest so a truncated file is
-    detectable; a failed write leaves the previous snapshot in place. Mirrors
-    ``_write_demo_kline_compact_cache``.
-    """
-
-    if funding.is_empty():
-        return
-    parquet_path, metadata_path = _funding_follow_snapshot_paths(root)
-    try:
-        parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        stamp = f"{os.getpid()}.{time.time_ns()}"
-        temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{stamp}.tmp")
-        temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{stamp}.tmp")
-        try:
-            funding.write_parquet(temp_parquet)
-            digest = hashlib.sha256(temp_parquet.read_bytes()).hexdigest()
-            temp_metadata.write_text(
-                json.dumps(
-                    {
-                        "rows": int(funding.height),
-                        "symbols": int(funding.get_column("symbol").n_unique()),
-                        "max_funding_ts_ms": coerce_int(
-                            funding.get_column("funding_ts_ms").max()
-                        ),
-                        "parquet_sha256": digest,
-                    },
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
-            # Parquet first: new metadata must never name unreadable bytes.
-            temp_parquet.replace(parquet_path)
-            temp_metadata.replace(metadata_path)
-        finally:
-            temp_parquet.unlink(missing_ok=True)
-            temp_metadata.unlink(missing_ok=True)
-    except (OSError, pl.exceptions.PolarsError) as exc:
-        # Never fatal: the leader does not read this file and a follower
-        # without it falls back to the partitioned dataset.
-        _logger.warning("carry funding follow-snapshot write failed: %s", exc)
-
-
-def _read_leader_funding(follow_root: Path) -> pl.DataFrame:
-    """Read the leader's funding series, preferring its atomic snapshot.
-
-    Falls back to the partitioned dataset when the snapshot is missing, torn,
-    or digest-mismatched — which is what a cold leader looks like before its
-    first sweep.  The fallback carries the torn-read risk the snapshot exists
-    to remove, so it is reported, not silent.
-    """
-
-    parquet_path, metadata_path = _funding_follow_snapshot_paths(follow_root)
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        expected = str(metadata.get("parquet_sha256") or "")
-        raw = parquet_path.read_bytes()
-        if expected and hashlib.sha256(raw).hexdigest() == expected:
-            snapshot = pl.read_parquet(io.BytesIO(raw))
-            if not snapshot.is_empty() and {
-                "symbol",
-                "funding_ts_ms",
-                "funding_rate",
-            } <= set(snapshot.columns):
-                return snapshot
-    except (OSError, json.JSONDecodeError, ValueError, pl.exceptions.PolarsError):
-        pass
-    _logger.warning(
-        "carry follower fell back to the leader's partitioned funding dataset; "
-        "this read is not isolated from an in-flight sweep"
-    )
-    return read_dataset(follow_root, CARRY_FUNDING_DATASET, lock=False)
 
 
 def _candidate_filtered_universe(
@@ -1275,86 +1171,6 @@ def _build_carry_demo_market_data(
     return klines, funding, stats
 
 
-def _read_leader_klines(follow_root: Path) -> pl.DataFrame:
-    """Read the leader's kline cache without touching REST.
-
-    The leader's compact single-file window (atomically replaced on every
-    leader write) is preferred because reading the date x symbol partitioned
-    dataset means globbing ~10k part files every 60s; the partitioned dataset
-    remains the fallback whenever the compact file is missing or torn. The
-    follower's freshness gate decides whether whatever was read is usable.
-    """
-
-    compact_path, _metadata_path = _demo_kline_compact_cache_paths(follow_root)
-    try:
-        compact = pl.read_parquet(compact_path)
-        if not compact.is_empty() and {"ts_ms", "symbol", "close", "turnover_quote"} <= set(
-            compact.columns
-        ):
-            return compact
-    except (OSError, pl.exceptions.PolarsError):
-        pass
-    # lock=False: the sandboxed follower cannot create lock files under the
-    # leader's root. A rename-straddled read raises and the next cycle retries.
-    return read_dataset(follow_root, "event_demo_klines_1h", lock=False)
-
-
-def _read_follower_market_data(
-    follow_root: Path,
-    *,
-    demo: CarryDemoCycleConfig,
-    now_ms: int,
-    standing_symbols: set[str],
-) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
-    """Paper (follower) data path: leader-root reads only, no REST.
-
-    The paper shadow shares the demo sleeve's market-data plane so both books
-    decide on identical inputs. Staleness fails closed: a dead leader holds the
-    follower's standing book, exactly like a demo data failure.
-    """
-
-    klines = _read_leader_klines(follow_root)
-    if klines.is_empty():
-        raise CarrySleeveError(f"leader kline cache under {follow_root} is empty")
-    newest_close_ms = coerce_int(klines.get_column("ts_ms").max()) + HOUR_MS
-    if now_ms - newest_close_ms > PAPER_KLINE_FRESHNESS_MS:
-        raise CarrySleeveError(
-            f"leader klines are stale: newest close {(now_ms - newest_close_ms) / HOUR_MS:.1f}h "
-            f"old (> {PAPER_KLINE_FRESHNESS_MS / HOUR_MS:.0f}h); holding the standing book"
-        )
-    fetched_symbols = klines.get_column("symbol").n_unique()
-    candidate_skipped = 0
-    if demo.candidate_universe_file:
-        allowed = set(
-            load_candidate_universe(
-                demo.candidate_universe_file,
-                realm=candidate_universe_realm(demo.execution_environment),
-            ).symbols
-        ) | set(standing_symbols)
-        before = fetched_symbols
-        klines = klines.filter(pl.col("symbol").is_in(sorted(allowed)))
-        candidate_skipped = before - klines.get_column("symbol").n_unique()
-    funding = _normalized_funding_events(_read_leader_funding(follow_root))
-    if funding.is_empty():
-        raise CarrySleeveError(f"leader funding cache under {follow_root} is empty")
-    stats: dict[str, Any] = {
-        "data_source": "follower",
-        "universe_fetched": int(fetched_symbols),
-        "candidate_skipped_symbols": int(candidate_skipped),
-        "kline_cache_rows": klines.height,
-        "kline_fetched_rows": 0,
-        "kline_output_rows": klines.height,
-        "kline_fetch_symbols": 0,
-        "funding_swept": False,
-        "funding_rows_appended": 0,
-        "funding_fetch_failures": 0,
-        "funding_failed_symbols": "",
-        "funding_cache_rows": funding.height,
-        "funding_max_ts_ms": coerce_int(funding.get_column("funding_ts_ms").max()),
-    }
-    return klines, funding, stats
-
-
 def _last_successful_decision_ts_ms(root: Path, *, cycles_dataset: str) -> int | None:
     """Newest decision day this root ever decided without error.
 
@@ -1415,13 +1231,6 @@ def run_carry_demo_cycle(
     _validate_carry_demo_config(demo)
     environment = execution_environment(demo.execution_environment).value
     root = Path(data_root).expanduser()
-    follow_root = (
-        Path(demo.market_follow_root).expanduser() if str(demo.market_follow_root).strip() else None
-    )
-    if follow_root is not None and follow_root.resolve() == root.resolve():
-        raise ValueError(
-            "market_follow_root must not equal the sleeve's own data root (circular self-follow)"
-        )
     account_route = require_account_route(
         account_id=account_id_for_environment(environment),
         environment=environment,
@@ -1464,27 +1273,19 @@ def run_carry_demo_cycle(
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
         try:
-            if follow_root is None:
-                market = market_client or BybitMarketData(
-                    category=config.exchange.category,
-                    testnet=config.exchange.testnet,
-                )
-                klines, funding, build_stats = _build_carry_demo_market_data(
-                    root=root,
-                    config=config,
-                    demo=demo,
-                    market=market,
-                    now_ms=cycle_now_ms,
-                    standing_symbols=standing_symbols,
-                    state=state,
-                )
-            else:
-                klines, funding, build_stats = _read_follower_market_data(
-                    follow_root,
-                    demo=demo,
-                    now_ms=cycle_now_ms,
-                    standing_symbols=standing_symbols,
-                )
+            market = market_client or BybitMarketData(
+                category=config.exchange.category,
+                testnet=config.exchange.testnet,
+            )
+            klines, funding, build_stats = _build_carry_demo_market_data(
+                root=root,
+                config=config,
+                demo=demo,
+                market=market,
+                now_ms=cycle_now_ms,
+                standing_symbols=standing_symbols,
+                state=state,
+            )
             window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
             view = _carry_venue_view(
                 klines,
@@ -1638,8 +1439,6 @@ def run_carry_demo_cycle(
             "entry_leverage": demo.entry_leverage,
             "declared_stop_loss_fraction": demo.declared_stop_loss_fraction,
             "max_new_entries_per_cycle": demo.max_new_entries_per_cycle,
-            "market_follow_root": demo.market_follow_root,
-            "data_source": str(build_stats.get("data_source", "")),
             "decision_ts_ms": decision_ts_ms,
             "decision_error": decision_error,
             "decision_stale": decision_stale,

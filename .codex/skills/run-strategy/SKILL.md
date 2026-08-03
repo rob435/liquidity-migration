@@ -1,6 +1,6 @@
 ---
 name: run-strategy
-description: Construct and run current liquidity_migration CLI, data, audit, and demo/paper operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
+description: Construct and run current liquidity_migration CLI, data, audit, and demo operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
 ---
 
 # Run repository commands safely
@@ -29,9 +29,10 @@ Do not maintain a static package-subcommand list.
 ## Canonical wrappers
 
 - Deployment/account state: `scripts/ops.sh status`.
-- Deploy: `scripts/ops.sh deploy --execute {install,activate,rollout,
-  activate-mainnet,stop-mainnet}`. Staged install leaves the fleet stopped;
-  `rollout` requires a venue-flat account. There is no `recover` mode and no
+- Deploy: `scripts/ops.sh deploy {install,activate,staged,rollout,
+  activate-mainnet,stop-mainnet}`. `staged` installs and activates in one
+  command; `rollout`'s venue-flat proof is advisory on a no-mainnet fleet.
+  There is no `recover` mode and no
   operational-authority receipt — both were removed on 2026-07-31.
 - Mainnet arming state (read-only): `scripts/ops.sh real-money preflight`.
 - Wedged order commands: `scripts/ops.sh wedged-command`.
@@ -39,7 +40,7 @@ Do not maintain a static package-subcommand list.
   `pit-reconcile`.
 - Ledger reset: `scripts/ops.sh reset`, dry-run unless `--execute`.
 - Equity curves: `scripts/ops.sh equity`; apply `equity-curve`.
-- Tests: `scripts/ops.sh test`.
+- Tests: `scripts/dev.sh test` (local only; not an operator route).
 - Data builds: use the per-venue builders or current package command help.
 
 ## Forward safety

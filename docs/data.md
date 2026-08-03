@@ -41,19 +41,21 @@ survivorship hole it closes.
 - The `bybit_render_1m` and `binance_vision_alt` plans and their fetchers were removed 2026-07-21. Do not recreate them from old documents. **This has already misled one research pass**: the 2026-08-01 settlement-sawtooth closure was written against `~/SHARED_DATA/bybit_render_1m/klines_1m` and cited its pre-removal validation receipt, and none of those numbers were reproducible (`docs/settlement_sawtooth_program.md`, provenance correction).
 - `bybit/klines_1m` is the supported 1-minute root, added 2026-08-01 by [`scripts/data/download_bybit_klines_1m.py`](../scripts/data/download_bybit_klines_1m.py). Same `date=/symbol=/part.parquet` layout and same schema as `klines_1h`, fetched through `BybitMarketData.get_klines(..., "1", ...)` with `category=linear` — the same client path the 1h builder uses. Resumable at (symbol, date) and flushed every 14 days, so an interrupted run keeps what it has. It is a dataset *inside* `bybit_full_pit`, not a revival of the retired plan above. Bybit's v5 endpoint serves 1-minute klines back to at least 2021-06 (verified 2026-08-01).
 
-## Coverage census, 2026-07-31
+## Coverage census
 
-Counted 2026-07-31. A directory existing is not a panel, and a partition count of zero is not an
-empty dataset — some roots are keyed by symbol. Recount before designing a claim.
+A directory existing is not a panel, and a partition count of zero is not an empty dataset —
+some roots are keyed by symbol. The tiers below are the durable shape of each root; for the
+current spans, symbol counts and day counts, run
+`python -m liquidity_migration --data-root ROOT coverage`. Recount before designing a claim.
 
-| Tier | Datasets | Reality |
+| Tier | Datasets | Shape, and how it misleads |
 | --- | --- | --- |
-| A — deep, both venues | `bybit/{klines_1h,funding,premium_index_1h,mark_price_1h,index_price_1h,archive_trade_manifest}`; `binance/{klines_1h,archive_trade_manifest}`, `binance_usdm_funding`, `binance_usdm_{premium_index,mark_price,index_price}_1h` | Bybit 2021-01-01 → 2026-07-27, 2034 days, 955 symbols. Binance 2019-09/2020-01 → 2026-07-27, 2400–2513 days, 823–828 symbols. 741 symbols common to both kline roots. |
-| B — deep, Bybit only | `bybit/open_interest` | 2021-01-01 → 2026-07-27, 2034 days, 694 symbols. |
-| C — wide, shallow, Binance only | `binance_usdm_open_interest`, `binance_usdm_taker_flow_1h` | 679 symbols but only 78–80 days, from 2026-04-27. |
-| D — **not a panel** | `bybit/taker_flow_5m`, `bybit/tick_ohlc_1m` | 2023-03-29 → 2026-05-24, 401 symbols, **median 11 days each** (1–78). Event windows; no cross-sectional flow or microstructure study can be built on them. `tick_ohlc_1m` holds 5,648 parquet files over 814 date partitions — a non-recursive `*.parquet` glob against the `date=/symbol=/` layout returns zero and has been misread as "empty" (2026-07-31). Count recursively. |
-| F — 1-minute klines, **in progress** | `bybit/klines_1m` | Added 2026-08-01. First run: the 568 symbols carrying a deep top-100 funding print, each over its own panel lifetime, 448,628 symbol-days, ordered by deep-print count so a partial root is still usable (top 100 symbols = 61.9% of deep prints, top 300 = 93.5%). Unlike Tier D this is a real panel where it is filled. Check `find <root>/klines_1m -name part.parquet \| wc -l` against the target before assuming full coverage. |
-| E — per-symbol layout, not date-partitioned | `bybit/positioning_lsr` (66 files, 1.2 MB), `binance_usdm_metrics_5m` (373, 36 MB), `binance/klines_5m` (686, 3.1 GB) | These hold real data. They are keyed by symbol, not `date=`, so a partition-name count reports zero. Count files, not partitions. |
+| A — deep, both venues | `bybit/{klines_1h,funding,premium_index_1h,mark_price_1h,index_price_1h,archive_trade_manifest}`; `binance/{klines_1h,archive_trade_manifest}`, `binance_usdm_funding`, `binance_usdm_{premium_index,mark_price,index_price}_1h` | Real cross-sectional panels back to 2021 (Bybit) and 2019–2020 (Binance). Only a subset of symbols is common to both kline roots, so a cross-venue study is bounded by the intersection, not by either venue. |
+| B — deep, Bybit only | `bybit/open_interest` | A real panel, but Bybit-only, so it cannot carry a cross-venue claim. |
+| C — wide, shallow, Binance only | `binance_usdm_open_interest`, `binance_usdm_taker_flow_1h` | Many symbols, very few days. Wide enough to look like a panel in a symbol count and far too short for anything with a lookback. |
+| D — **not a panel** | `bybit/taker_flow_5m`, `bybit/tick_ohlc_1m` | Event windows: a few hundred symbols holding a median of days apiece, not a continuous history. No cross-sectional flow or microstructure study can be built on them. A non-recursive `*.parquet` glob against the `date=/symbol=/` layout returns zero and has been misread as "empty" — count recursively. |
+| F — 1-minute klines | `bybit/klines_1m` | A real panel where it is filled, built symbol-by-symbol in deep-funding-print order so a partial root is still usable. Fill is the thing to check: compare `find <root>/klines_1m -name part.parquet \| wc -l` against the intended symbol set before assuming full coverage. |
+| E — per-symbol layout, not date-partitioned | `bybit/positioning_lsr`, `binance_usdm_metrics_5m`, `binance/klines_5m` | These hold real data. They are keyed by symbol, not `date=`, so a partition-name count reports zero. Count files, not partitions. |
 
 ## Timestamps
 
@@ -124,8 +126,8 @@ reference price (`protection_engine.py:123-151`);
 account owner's venue-native entry stop is the other plane and is anchored to the decision
 reference price, because it is armed in the same `place_order` call as the entry and no fill exists
 yet ([`architecture.md`](architecture.md), *Venue-native protection*). Four
-distinct legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in paper, a
-submit-time idealization; the planning/target-acceptance clock now exposed as `entry_target_ts_ms`
+distinct legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in retired
+paper roots, a submit-time idealization; the planning/target-acceptance clock now exposed as `entry_target_ts_ms`
 (which may precede a fill); and the 2026-05-25 WAVESUSDT rows from a retired path that decoded an
 order-link signal timestamp into that field — making the position look hours older than the venue fill.
 Do not merge those rows with current projections unlabelled.
@@ -195,17 +197,33 @@ working, not the gate leaking.
 freshly downloaded root can carry stale membership and hard-reject recent signals with
 `pit_membership_fail`. `download-data` emits the PIT coverage table itself and, when the manifest is
 stale, prints a WARNING block carrying the exact remediation command and the `--refresh-manifest`
-alternative (`_download_manifest_staleness_lines`, `cli.py:44` → `coverage_status`/`format_coverage` in
+alternative (`_download_manifest_staleness_lines`, `cli/commands.py:40` →
+`coverage_status`/`format_coverage` in
 [`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py); reads `date=` partition names only, no
 parquet, no network). That output also reports manifest end, kline end, latest signal day, margin in
 days, manifest-vs-kline lag, and up to five per-symbol lag examples — the fastest way to tell whole-root
-staleness from a handful of newly listed symbols. There is no standalone coverage subcommand; scroll
-back for it. The remediation:
+staleness from a handful of newly listed symbols.
+
+The same table is available on its own, without downloading anything:
+
+```bash
+python -m liquidity_migration --data-root ROOT coverage
+```
+
+`coverage` reads `date=` partition directory names only — no parquet, no network, no
+mutation — so it is the cheap way to ask what a root actually holds.
+
+The remediation:
 
 ```bash
 python -m liquidity_migration --data-root ROOT archive-manifest --start YYYY-MM-DD --end YYYY-MM-DD
 python -m liquidity_migration.data.binance_vision validate-manifest --data-root ROOT
 ```
+
+The printed `--start` is one week behind the latest signal day. Passing `--refresh-manifest`
+to `download-data` refreshes **that same one-week window**, not a full-epoch rescan, so the
+three routes — the printed remediation, the flag, and a hand-run `archive-manifest` over the
+same span — do the same work.
 
 `validate-manifest` fails on missing kline coverage (≥20 hourly bars per symbol-day) without deleting
 membership rows. `filter-manifest` conforms a manifest to observed klines and is correct only where
@@ -290,69 +308,25 @@ overwriting (`:887-969`). Reusing a `--run-id` skips only a step whose exact com
 succeeded and whose artifact still exists; changed windows, roots, source commits, or configuration are
 refused under an existing ID.
 
-**Three-way reconciliation.** Either inline — `plan` and `run` both accept
-`--demo-account-root` / `--paper-account-root`, which must be supplied together (`demo and paper
-account roots must be supplied together`), and a `run` given neither records
-`reconcile.demo_paper_backtest / skipped_no_account_snapshots` in the event ledger rather than failing
-(`:1114-1126, :1238-1244`) — or attached afterwards:
-
-```bash
-research-refresh reconcile --run-dir ... --demo-account-root ... --paper-account-root ... \
-  [--account-snapshot-commit <40-hex>]
-```
-
-The snapshots are frozen copies the operator makes; the tool does not copy a live account root while
-writers are active. It verifies each journal before reading (`read_account_journal(..., verify=True)`
-plus `verify_account_journal`) and stores the receipt in the report's `source_identity`
-(`three_way_reconciliation.py:302-306, :577, :587`). `--account-snapshot-commit` is optional and
-recorded in `source_identity` alongside `code_commit` and `code_identity_status`; a non-40-lowercase-hex
-value raises. Without it the tool falls back to commit strings scavenged from journal payloads, and if
-that is ambiguous the report is stamped `unverified` with the warning `demo/paper code identity is not
-proven by the supplied account snapshots` (`:523-541`). The run manifest's own `code_commit` must be 40
-characters or `reconcile` refuses outright.
-
-Comparison is on the grain `(sleeve, active component, symbol, causal signal_ts_ms)`. CONTINUOUS runtime
-component tags are mapped to their code-defined names first — `p3`→`turn3p3`, `p4p3`→`turn4p3`,
-`p4p5`→`turn4p5` (`_CONTINUOUS_COMPONENT_ALIASES`, `:39-46, :160-177`); an unmappable tag becomes
-`unknown:<raw>` and raises the warning `unmapped live continuous component identities`. So a journal
-`p4p3` against a backtest `turn4p3` is already reconciled — not a disagreement.
-
-The report keeps three distinct states per key, not one: `demo_proposed`/`paper_proposed` (target
-published), `demo_accepted`/`paper_accepted` (risk decision accepted), and
-`demo_execution_states`/`paper_execution_states` (account-level net-symbol command/fill state), plus
-`backtest_modeled`. The headline `three_way_overlap` and `three_way_exact` counts are computed on the
-**accepted** sets only, so a proposed-but-risk-rejected key is not a demo/paper disagreement. Execution
-states are one of `proposal_without_risk_decision`, `risk_rejected`, `accepted_batch_symbol_filled`,
-`accepted_target_command_rejected`, `accepted_target_commanded_without_fill`,
-`accepted_target_no_net_command` (`:246-258`).
-
-Agreement supports a structural entry-key claim and nothing else. The report's own `claim_scope`
-(`:610-613`) reads "accepted entry-key structural agreement only; execution quality, fill attribution,
-account PnL, backtest performance, and runtime parity remain separate" — **runtime parity** is the most
-tempting over-claim, because the demo/paper execution-state columns sit right there. The markdown
-footer adds that the columns "must not be read as separately attributable component fills"
-(`:716-718`). `reconciliation/` is immutable in the same sense as the run summary:
-`three_way_reconciliation.json`, `three_way_reconciliation.md` and `entry_agreement.csv` are written
-idempotently, and re-running with different evidence raises `immutable reconciliation artifact changed`
-rather than overwriting (`:724-730, :775-777`) — choose a new `--reconcile-out`.
+**Three-way reconciliation (retired).** The demo/paper/backtest reconciliation tool and the
+`research-refresh reconcile` subcommand were removed with the paper fleet; the reconciliation
+reports produced while it ran remain under their dated run directories.
 
 ## Operational roots
 
-Exact VPS paths come from the host env files, not from this document:
-`/etc/liquidity-migration/account-execution.env` and
-`/etc/liquidity-migration/account-paper-execution.env`. Each route names its own
+Exact VPS paths come from the host env file, not from this document:
+`/etc/liquidity-migration/account-execution.env`. The route names its own
 `ACCOUNT_EXECUTION_ROOT` (canonical journal), `ACCOUNT_INTENT_INBOX_ROOT` (target inbox) and
-`ACCOUNT_CAPTURE_ROOT` / `ACCOUNT_PAPER_CAPTURE_ROOT` (market capture); demo and paper roots are
-absolute, **real**, **owner-controlled**, pairwise-disjoint and non-nested. Real and owner-controlled
-are code-enforced, not stylistic: `reset_path_safety.py:1050` ("paper runtime root must be a real
-directory"), `:1054` (paper lock namespace), `:1057` ("paper runtime tree contains a symlink"), and
-`:1134` / `:1142` / `:1145` for the demo root, each demo route leaf and the demo lock namespace, plus
-the uid/gid/mode rebinding at `:732-844`. A symlinked account root or a convenience bind mount is not a
-legal layout. The paper mirror additionally reads
-`DEMO_ACCOUNT_EXECUTION_ROOT` and `DEMO_ACCOUNT_CAPTURE_ROOT`. The demo account owner alone mutates
-Bybit; the paper owner alone advances the deterministic paper account. Their journals own lifecycle
-and accounting state, and Parquet views are rebuildable projections. Strategy `DATA_ROOT` directories
-hold signal inputs, caches and cycle telemetry — not position or P&L authority.
+`ACCOUNT_CAPTURE_ROOT` (market capture); account roots are absolute, **real**,
+**owner-controlled**, pairwise-disjoint and non-nested. Real and owner-controlled are
+code-enforced, not stylistic: `reset_path_safety.py` ("private runtime root must be a real
+directory", the private lock namespace, "private runtime tree contains a symlink") and the demo
+root/leaf/lock-namespace checks, plus the uid/gid/mode rebinding. A symlinked account root or a
+convenience bind mount is not a legal layout. The demo account owner alone mutates Bybit. Its
+journal owns lifecycle and accounting state, and Parquet views are rebuildable projections.
+Strategy `DATA_ROOT` directories hold signal inputs, caches and cycle telemetry — not position or
+P&L authority. (The retired paper route's roots and journals remain on disk as history; nothing
+routes to them.)
 
 Dataset and account roots use persistent `flock(2)` leaves: ownership is the kernel lock on the open
 file description, not the file's contents, and release or crash recovery never unlinks the leaf. Never
@@ -374,18 +348,15 @@ by two `_validate_lock_fd_path` calls); multiply-linked leaves are reconciled by
 `_recover_internal_lock_alias` (`:439-463`). The mode change is the migration, not corruption — do not
 hand-clean them.
 
-Paper `.locks` directories and leaves are owned by `liquidity-migration-paper`, mode `0700`. Deployment
-pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-paper` / `normalize-demo`
-(`scripts/deploy_vps_live.sh:584-607`; `reset_path_safety.py:908-955` does `os.mkdir(".locks", 0o700,
-dir_fd=root_fd)` and rebinds/validates owner), and `deploy_vps_live.sh:642-643` then verifies the paper
-user can write `$root/.locks`. Reset restores the same boundary before restarting paper services. At
-runtime root may *observe* an owner-controlled lock but a non-root user may only use its own
-(`_lock_owner_allowed`, `storage.py:273-276`); when euid 0 is the first reader of a paper-owned root,
-`_ensure_lock_directory` fchowns/fchmods the directory to the *data root's* owner and 0700
-(`:308-356`). The lock directory — real, not group/world-writable — is the ownership authority for its
-leaves, and a leaf whose uid does not match its directory is rejected: "lock path owner must match its
-lock directory" (`:377-378`). Creating a root-owned `.locks` under a paper root wedges every paper
-service.
+`.locks` directories and leaves are owned by the data root's owner, mode `0700`. Deployment
+pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-private` /
+`normalize-demo` (`os.mkdir(".locks", 0o700, dir_fd=root_fd)` with owner rebinding/validation).
+Reset restores the same boundary before restarting services. At runtime root may *observe* an
+owner-controlled lock but a non-root user may only use its own (`_lock_owner_allowed`); when euid 0
+is the first reader of a root owned by another identity, `_ensure_lock_directory` fchowns/fchmods
+the directory to the *data root's* owner and 0700. The lock directory — real, not
+group/world-writable — is the ownership authority for its leaves, and a leaf whose uid does not
+match its directory is rejected: "lock path owner must match its lock directory".
 
 Host-maintenance and account-owner leases follow the same persistent-inode rule: parent namespaces and
 leaves are opened with no-follow descriptors and checked for single-link ownership and mount identity;
@@ -394,7 +365,7 @@ as inherited file descriptors plus (device, inode) metadata rather than paths, a
 acquisition — account-lease metadata is written only after the inherited descriptor still matches the
 prepared path **and** holds the kernel flock (`account_owner_lease.py:535-645`,
 `revalidate_inherited_account_owner_lease` at `:647-727`; canonical demo lease directory
-`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_paper_ledgers.sh:145-172`, where the host
+`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_ledgers.sh`, where the host
 maintenance lock dir is the different path `/run/liquidity-migration`). Simplifying that handoff to a
 plain path breaks the revalidation.
 

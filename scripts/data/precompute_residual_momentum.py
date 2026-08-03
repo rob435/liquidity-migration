@@ -9,7 +9,7 @@ For each symbol on the daily grid:
 reads day ``D`` at ``D 00:00 UTC``, so ``D-3`` is the newest computable term.
 The join uses the same trading-day convention, ``date(ts_ms - 1ms)``.
 
-The active profile keeps the lowest residual-momentum quartile. Demo/paper
+The active profile keeps the lowest residual-momentum quartile. Demo
 consumers exact-join today's row, so the exclusive ``--end`` defaults to
 tomorrow UTC to emit it; a stale table would suppress the whole cross-section.
 Treat changes to this timing or target as new research.

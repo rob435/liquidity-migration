@@ -292,14 +292,6 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         help="Use the REST-on-cycle kline fallback instead of the WS kline manager.",
     )
     long_demo.set_defaults(ws_klines_enabled=demo_defaults.ws_klines_enabled)
-    long_demo.add_argument(
-        "--klines-follow-root",
-        default=demo_defaults.klines_follow_root,
-        help=(
-            "Follow another producer root's flushed kline snapshot read-only "
-            "instead of bootstrapping a second WS pool."
-        ),
-    )
     long_demo.add_argument("--ws-klines-bootstrap-workers", type=int, default=demo_defaults.ws_klines_bootstrap_workers)
     long_demo.add_argument("--ws-klines-lookback-days", type=int, default=demo_defaults.ws_klines_lookback_days)
     long_demo.add_argument(
@@ -332,13 +324,6 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         default=4,
         help="Cycle worker threads. Direct CLI default matches the wrapper; systemd pins 2 on the VPS.",
     )
-    p.add_argument(
-        "--klines-follow-root",
-        default=d.klines_follow_root,
-        help="Follow this root's flushed WS kline snapshot (+rmom gate) READ-ONLY instead of "
-        "running a second WS pool — for a paper shadow co-located with the demo sleeve. "
-        "Empty (default) = run this sleeve's own pool.",
-    )
     p.add_argument("--max-active", type=int, default=d.max_active)
     p.add_argument("--max-new-entries-per-cycle", type=int, default=d.max_new_entries_per_cycle)
     p.add_argument(
@@ -369,7 +354,7 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--execution-environment",
         required=True,
-        choices=("demo", "paper"),
+        choices=("demo",),
         help="Select exactly one account target owner; producers never submit orders.",
     )
     p.add_argument(
@@ -438,8 +423,6 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     p.add_argument(
         "--execution-environment",
         required=True,
-        # CARRY and LONG share the partitioned envelope; CONTINUOUS is retired
-        # and its choices stay demo|paper.
         choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )
@@ -457,15 +440,6 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         "--candidate-universe-file",
         default="",
         help="Optional frozen operational candidate-universe artifact.",
-    )
-    p.add_argument(
-        "--market-follow-root",
-        default="",
-        help=(
-            "Paper follower mode: read this leader (demo) root's kline and "
-            "carry_funding_events caches READ-ONLY instead of fetching from "
-            "REST. Empty (default) = demo REST path."
-        ),
     )
     p.add_argument(
         "--daemon",

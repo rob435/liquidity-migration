@@ -208,7 +208,7 @@ class TargetSchedulingCaptureEvent:
             raise ValueError("target scheduling capture lacks a StrategyEvent")
         environment = _strict_text(self.source_environment, label="capture source environment")
         if environment not in EXECUTION_ENVIRONMENT_VALUES:
-            raise ValueError("capture source environment must be demo or paper")
+            raise ValueError("capture source environment must be a registered execution environment")
         if self.sleeve not in _SLEEVES:
             raise ValueError("capture sleeve must be long, continuous, or carry")
         _strict_text(self.strategy_profile, label="capture strategy profile")

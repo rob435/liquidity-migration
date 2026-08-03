@@ -105,7 +105,7 @@ def _ready_roots(
     return account, inbox, capture
 
 
-@pytest.mark.parametrize("environment", ["demo", "paper"])
+@pytest.mark.parametrize("environment", ["demo", "mainnet"])
 def test_require_owner_ready_binds_route_health_journal_and_capture(
     tmp_path: Path,
     environment: str,
@@ -359,7 +359,7 @@ def test_readiness_rejects_wrong_account_identity(tmp_path: Path) -> None:
             inbox_root=inbox,
             capture_root=capture,
             expected_invocation_id=CURRENT_INVOCATION_ID,
-            expected_account_id="bybit-paper-unified",
+            expected_account_id="bybit-mainnet-unified",
             now_ns=NOW_NS,
         )
 

@@ -483,8 +483,8 @@ def test_clear_then_route_rebind_preserves_every_mutex_inode(tmp_path: Path) -> 
     account_root = tmp_path / "account"
     inbox_root = tmp_path / "inbox"
     original_route = ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=account_root,
         inbox_root=inbox_root,
     )
@@ -504,8 +504,8 @@ def test_clear_then_route_rebind_preserves_every_mutex_inode(tmp_path: Path) -> 
 
     clear_account_epoch_roots_preserving_locks((account_root, inbox_root))
     rebound = ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=account_root,
         inbox_root=inbox_root,
     )
@@ -513,8 +513,8 @@ def test_clear_then_route_rebind_preserves_every_mutex_inode(tmp_path: Path) -> 
     assert rebound == original_route
     assert (
         require_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=account_root,
             inbox_root=inbox_root,
         )

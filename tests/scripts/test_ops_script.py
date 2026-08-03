@@ -100,7 +100,7 @@ def test_reset_defaults_to_remote_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
     assert "--dry-run" in payload
-    assert "reset_demo_paper_ledgers.sh" in payload
+    assert "reset_demo_ledgers.sh" in payload
     assert "--scope long" in payload
 
 
@@ -333,7 +333,7 @@ def test_deploy_forwards_staged_with_its_profile(tmp_path: Path) -> None:
             "deploy",
             "staged",
             "--profile",
-            "demo-operational",
+            "operational",
         ],
         cwd=checkout,
         env=environment,
@@ -344,7 +344,7 @@ def test_deploy_forwards_staged_with_its_profile(tmp_path: Path) -> None:
     assert complete.returncode == 0, complete.stderr
     payload = capture.read_text(encoding="utf-8")
     assert "MODE=staged" in payload
-    assert "DEPLOY_PROFILE=demo-operational" in payload
+    assert "DEPLOY_PROFILE=operational" in payload
 
 
 def test_expected_commit_defaults_to_the_known_branch_tip(tmp_path: Path) -> None:

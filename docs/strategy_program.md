@@ -64,10 +64,11 @@ one-off runners are retired.
   dormant. All of these are runtime configurations, not validated alpha claims;
   `deploy/sleeves.env` and `STATE.md` are the authority for what publishes.
 - No researched replacement currently qualifies for implementation.
-- The paper passive-execution experiment is **dormant, not accruing**: arm
-  eligibility requires `sleeve == "continuous"` and CONTINUOUS is off on both
-  routes, so no fill has reached either arm since 2026-07-29
-  (`docs/research_findings.md` §1). The forward stream is the rolling record
+- The in-flow passive-execution experiment is **retired**: it lived on the
+  paper owner (retired 2026-08-03) with arm eligibility requiring
+  `sleeve == "continuous"`, and the sample froze at 2 of 8 fills when
+  CONTINUOUS went off 2026-07-29 (`docs/research_findings.md` §1). The forward
+  stream is the rolling record
   under `docs/governance.md`.
 - The account-kernel remediation was independent of this research reset and
   deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
@@ -154,8 +155,9 @@ one-off runners are retired.
     model = profile. Undeployed until the normal rollout; the first live
     `stop_loss` exits are the deployment check.
   - **Passive execution has a fast instrument beside the registered slow one.**
-    The 2026-07-20 in-flow paper A/B remains the grader; §16.3's scale finding
-    explains why it accrues slowly. `scripts/research/probe_passive_fill_ab.py` (protocol
+    The 2026-07-20 in-flow A/B (retired with the paper fleet at 2/8 fills)
+    would have been the grader; §16.3's scale finding explains why it accrued
+    too slowly to survive. `scripts/research/probe_passive_fill_ab.py` (protocol
     in `liquidity_migration/research/execution/passive_fill_probe.py`, ITT accounting, written kill
     criteria) bounds the mechanism in hours — it answers whether the 5.40 bp
     passive floor is mechanically reachable, and only that. Blocked on demo
@@ -753,17 +755,36 @@ What was built, closing the registration's stated gap:
   and drain under their own published terms within the 3-day max hold. Exit
   targets are keyed under each trade's own identity (the target key embeds it).
 - Profile selection is explicit end-to-end: `LONG_STRATEGY_PROFILE=v12` in the
-  three LONG unit files (demo, paper, mainnet) → `--strategy-profile` → 
-  `long_v12_profile()`. An unknown selector fails startup instead of defaulting.
+  LONG unit files (demo and mainnet; a paper unit existed until the same-day
+  paper retirement) → `--strategy-profile` → `long_v12_profile()`. An unknown
+  selector fails startup instead of defaulting.
 - Mainnet is **wiring only**: `LONG_MAINNET_SLEEVE` stays off, `REAL_MONEY`
   stays unset, no credential exists. Arming remains the owner's separate act
   under `docs/real_money.md`.
 
 Forward evidence: the config's rolling clock started at the 2026-08-01
-registration commit; live demo/paper targets under the v12 identity begin at
+registration commit; live demo targets under the v12 identity begin at
 this deployment (receipt in `STATE.md`). Live decayed-stop behavior runs the
 60s-grid market-exit case, one convention step from the simulated intrabar
 stop-price fill — the same class of caveat already recorded for entries.
+
+### 2026-08-03 — paper trading retired (owner instruction)
+
+**Recorded change point: the paper fleet is removed** — paper owner, LONG/CARRY/
+CONTINUOUS paper producers, the target mirror, their sleeves.env toggles, the
+`demo-operational` deploy profile, the demo-paper watchdog scope, paper Telegram,
+`PAPER_EQUITY_USDT` provisioning, and the follower market-data mode the paper
+producers rode. Demo (real venue, simulated fills) is the only practice book;
+the mainnet route is unchanged (wired, off).
+
+No evidence changed: paper was `integration_only_uncalibrated` — routing
+evidence, never fill or performance evidence — so no forward record is
+truncated by this. Its journals stay on disk as history; nothing reads them.
+The in-flow passive-execution A/B (arm B) retires with it at 2/8 fills; the
+probe instrument and the measured 5.40 bp floor stand. Old host state
+(`account-paper-execution.env`, the paper config mirror) is removed by the
+deploy that carries this change; the paper runtime user stays if present,
+inert.
 
 ## What survived the audit
 
@@ -773,7 +794,7 @@ stop-price fill — the same class of caveat already recorded for entries.
 | Historical sleeve curves | Some historical curves are positive, but LONG is materially dependent on a small take-profit tail and CONTINUOUS does not have complete live-runtime reconstruction. | Keep as descriptive controls, not promotion evidence. |
 | Breadth study | CONTINUOUS increased from about 6.55 to 7.30 bets per open day, but per-bet volatility was about 1,000 bp and average dependence about 0.21. A 25 bp effect would need roughly 5.6 years at that information rate. | Breadth alone is not a research direction. Fix quantization only as an execution-validity issue. |
 | Young-listing lifecycle | The 2021-24 unconditional short effect reversed in 2025-26. A day-0 long was negative or flat. The required listing-week 1-minute cost data had zero symbol/date overlap with the 27,398-row event panel. | Retire calendar-age rules and the proposed T-L v2. |
-| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The paper maker-first A/B was accruing toward 100 fills per arm; it has been dormant since CONTINUOUS retired on 2026-07-29 and stands at 2 of 8 (`docs/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
+| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The in-flow maker-first A/B froze at 2 of 8 fills when CONTINUOUS retired 2026-07-29 and was itself retired with the paper fleet 2026-08-03 (`docs/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
 | Cross-venue follow-ups merged 2026-07-21 | A Bybit turnover-collapse listing short looked strong by era (+247/+246/+510 bp at day 2) but failed in every Binance era (-415/-41/-290 bp). Hedged extreme-funding carry was negative across every declared arm on both venues. Naive pump-event longs were negative in 23 of 24 venue/era cells; D9 and BTC-uptrend short-path differences were only about +26 to +62 bp and uncertain. | Preserve venue divergence, the post-2025 negative-funding explosion, and the small D9/uptrend directional effect as anomaly leads. Retire the fixed admission bars, bulk reports, and one-off runners. |
 | Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | These are priced, regime-dependent insurance diagnostics—not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
 
@@ -972,7 +993,7 @@ records. The existing LONG/CONTINUOUS sleeves remain controls and are not
 modified to help a challenger.
 
 Promotion requires the five-line note in `docs/governance.md`, a recorded
-change point, stable paper execution, and an explicit replacement/migration
+change point, stable demo execution, and an explicit replacement/migration
 diff. Promotion means demo only. Mainnet still requires a separate owner
 instruction naming the deployment and risk boundary.
 
@@ -983,7 +1004,7 @@ Price-independent funding/premium carry, cross-sectional transfer, execution
 reversion, regime-conditioned sleeve redesign, or a mechanism not anticipated
 here may be better. Revisit an old family only with a new mechanism, new data,
 or a corrected defect—not another threshold sweep wearing a new name. True
-cross-exchange execution is a new capability and stays simulation/paper-only
+cross-exchange execution is a new capability and stays simulation-only
 until both legs, atomic failure handling, collateral fragmentation,
 liquidation, transfer, and venue-outage risk are modeled and deliberately
 authorized.
@@ -1164,13 +1185,11 @@ evidence trail.
       registered 2026-07-27, evidence
       `docs/archive/2026-07-27-continuous-ladder-mechanism.md` §5 — the 2025-carried
       era profile is the thing the forward record must test).
-- [ ] Read the paper passive-execution A/B for realised maker-fill probability
-      (target was 100 fills per arm). This is the last unmeasured cost input and
-      needs VPS data. **Blocked, not pending:** arm eligibility is
-      `sleeve == "continuous"` (`passive_execution.py:140`) and CONTINUOUS is off
-      on both routes, so the sample is frozen at 2 fills of 8 attempts and will
-      not move until a CONTINUOUS sleeve runs again. Reading it needs either that
-      or a re-scoped arm.
+- [ ] Measure realised maker-fill probability in flow (target was 100 fills
+      per arm; the retired paper-owner A/B froze at 2 of 8). This is the last
+      unmeasured cost input. **Blocked, not pending:** it now needs a
+      re-scoped in-flow arm on a live sleeve, or acceptance of the
+      probe-only bound (`probe_passive_fill_ab.py`).
 - [ ] Orthogonalise `basis` against `premium_diff` — they are one family and
       should not be double-counted.
 

@@ -70,7 +70,7 @@ class LongNativeConfig:
     """The sole supported LONG strategy: FC-v11a div/weekend/vol.
 
     This is deliberately not a research parameter surface. Fields remain only
-    when the active demo/paper runtime or standard equity runner consumes them.
+    when the active demo runtime or standard equity runner consumes them.
     """
 
     execution_strategy_id: str = LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID

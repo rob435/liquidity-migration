@@ -67,8 +67,8 @@ found, never cleared: +30.48 bp/day t 2.10 Bybit vs +13.64 t 0.99 Binance (ratio
 kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
 [lane2_premium_momentum_blend_v1](../configs/lane2_premium_momentum_blend_v1.json), whose premium leg is dead.
 
-**CONTINUOUS** was retired from demo and paper by owner override 2026-07-29 (`CONTINUOUS_SLEEVE=off`,
-`CONTINUOUS_PAPER_SLEEVE=off`); no kill criterion tripped, so the frozen journal is a retirement artifact, not
+**CONTINUOUS** was retired from the forward routes by owner override 2026-07-29 (`CONTINUOUS_SLEEVE=off`);
+no kill criterion tripped, so the frozen journal is a retirement artifact, not
 a dead run. Citable baseline for the shipped shape: **+11.06% / max DD −1.84% / Sharpe 1.45 / MAR 1.80**, 655
 trades, 2023-03-13 → 2026-07-16. Five load-bearing parameters, all in
 [continuous_profile.py](../liquidity_migration/research/backtest/continuous_profile.py) and
@@ -105,7 +105,7 @@ passive fill rate is the binding constraint — arm B chases at 4.80 bp/side aga
 fills 2 of 8, implying 2.70 bp/side; raising the fill rate 25% → 80% moves a book 14.43 → 23.47 bp/day. The
 passive floor is 5.40 bp round trip, so 4 bp was never reachable, and arm B's strict-crossing model grants no
 queue credit, so measured rates are lower bounds
-([passive_execution.py](../liquidity_migration/runtime/passive_execution.py)). Capacity is small: v3's held names have
+(the retired paper owner's `passive_execution.py`, removed 2026-08-03). Capacity is small: v3's held names have
 median $33M trailing-24h turnover ($3.2M at p05), and p95 entry participation crosses 1% at a ~$1.1M book and
 5% at ~$5.5M post-2025.
 
@@ -119,11 +119,11 @@ decision hour). Any read beyond mechanics needs ≥ 100 **fills** per arm — no
 cost exceeds its measured cost saving over any 50-entry window, where **missed-fill opportunity cost** is the
 signal P&L of entries whose passive order never filled, measured at the decision-hour close.
 
-**The A/B is dormant, not live.** `passive_execution.py:140` makes an entry arm-eligible only when
-`sleeve == "continuous"`, and CONTINUOUS is off on both routes (`CONTINUOUS_SLEEVE=off`,
-`CONTINUOUS_PAPER_SLEEVE=off`, retired 2026-07-29); paper's carry book now arrives through
-`PAPER_TARGET_MIRROR=on`, which republishes the demo fleet's targets. No fills accrue to either arm until a
-CONTINUOUS sleeve runs again. `execution_arm` appears only in `passive_execution.py` and its test —
+**The A/B is retired, not graded.** The in-flow instrument (arm B in the retired paper owner's
+`passive_execution.py`) made an entry arm-eligible only when `sleeve == "continuous"`, and CONTINUOUS was
+already off on both routes when the paper fleet itself was retired 2026-08-03, with the sample stuck at 2/8
+fills. The measured numbers above (5.40 bp passive floor, 15.56 bp taker round trip) stand; grading the flow
+would need a new in-flow experiment on a live sleeve.
 [execution_cost_model.py](../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
 report does not split by arm.
 
@@ -464,6 +464,7 @@ that this research was replacing a broken deployed book was wrong.
   then-current t ≥ 3.25 and the strongest cell was the designated dead control. Gates here were tuned on Sharpe
   and are therefore mis-set for producing evidence, because loosening a filter buys sample: the momentum BTC
   gate at > 0.00 gives n 952, t 2.50, Sharpe 1.55, while > −0.05 gives n 1,247, **t 2.78**, Sharpe 1.50.
-- Registered experiment definitions live in code, not prose — passive A/B arm parameters in
-  [passive_execution.py](../liquidity_migration/runtime/passive_execution.py). Its read thresholds, sample target and
-  kill rule are not in code and are recorded in §1, with the reason the arm currently accrues nothing.
+- Registered experiment definitions live in code, not prose — the passive A/B arm parameters
+  lived in the retired paper owner's `passive_execution.py` (removed 2026-08-03 with the fleet;
+  in Git history). Its read thresholds, sample target and kill rule are recorded in §1, with
+  the reason the arm never finished accruing.

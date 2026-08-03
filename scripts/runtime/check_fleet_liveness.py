@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Account-kernel and strategy-input liveness watchdog for the deployed fleets.
 
-Scope is ``demo``, ``demo-paper``, or ``mainnet``. Within it the checker requires
-every account owner, live-L2 readiness sidecar, owner-health projection, and
-strategy input, plus a recent healthy canonical venue snapshot. Strategy-daemon
-cycle and input checks live here because an execution owner cannot detect a hung
-signal scheduler or an empty/stale signal source. The ``mainnet`` scope is
-disjoint from the demo/paper roots and runs only its own owner and producers.
+Scope is ``demo`` or ``mainnet``. Within it the checker requires the account
+owner, live-L2 readiness sidecar, owner-health projection, and strategy input,
+plus a recent healthy canonical venue snapshot. Strategy-daemon cycle and input
+checks live here because an execution owner cannot detect a hung signal
+scheduler or an empty/stale signal source. The ``mainnet`` scope is disjoint
+from the demo roots and runs only its own owner and producers.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
@@ -23,10 +23,8 @@ an alert.
 from __future__ import annotations
 
 import argparse
-import grp
 import json
 import os
-import pwd
 import subprocess
 import sys
 import time
@@ -48,10 +46,6 @@ from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
     load_demo_rules,
 )
-from liquidity_migration.ops.demo_paper_agreement import (  # noqa: E402
-    DEFAULT_RELATIVE_TOLERANCE,
-    evaluate_demo_paper_agreement,
-)
 from liquidity_migration.account.account_owner_health import (  # noqa: E402
     AccountOwnerMarketWarmupPending,
     require_recent_account_owner_health,
@@ -68,7 +62,6 @@ from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
     read_strategy_cycle_health,
 )
-from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes  # noqa: E402
 from liquidity_migration.ops.telegram import send_telegram_message  # noqa: E402
 
 # Severity order for message framing only.
@@ -77,54 +70,17 @@ WARNING = "WARNING"
 DEMO_RULE_MAINTENANCE_WARNING_HOURS = 24.0
 
 _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
-_PAPER_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-paper-execution.service"
 _MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution-mainnet.service"
-_REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT, _PAPER_ACCOUNT_OWNER_UNIT)
-_ACCOUNT_SCOPES = ("demo", "demo-paper", "mainnet")
-_PAPER_RUNTIME_USER = "liquidity-migration-paper"
-_PAPER_RUNTIME_GROUP = "liquidity-migration-paper"
+_REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
+_ACCOUNT_SCOPES = ("demo", "mainnet")
 _LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
-_LONG_PAPER_UNIT = "liquidity-migration-bybit-long-paper.service"
 _LONG_MAINNET_UNIT = "liquidity-migration-bybit-long-mainnet.service"
 _CONTINUOUS_DEMO_UNIT = "liquidity-migration-bybit-continuous-demo.service"
-_CONTINUOUS_PAPER_UNIT = "liquidity-migration-bybit-continuous-paper.service"
 _CARRY_DEMO_UNIT = "liquidity-migration-bybit-carry-demo.service"
-_CARRY_PAPER_UNIT = "liquidity-migration-bybit-carry-paper.service"
 _CARRY_MAINNET_UNIT = "liquidity-migration-bybit-carry-mainnet.service"
-_PAPER_TARGET_MIRROR_UNIT = "liquidity-migration-paper-target-mirror.service"
 def _default_root(rel: str) -> str:
     """Anchor a default data root at the repo dir, not the CWD."""
     return str(_REPO_ROOT / rel)
-
-
-def _paper_roots_from_environment(path: str | Path) -> tuple[Path, Path]:
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        raise ValueError("paper owner environment path must be absolute")
-    snapshot = read_stable_file(
-        candidate,
-        label="paper owner environment",
-        reject_empty=True,
-        require_mode=0o640,
-        require_owner=True,
-    )
-    try:
-        paper_gid = grp.getgrnam(_PAPER_RUNTIME_GROUP).gr_gid
-    except KeyError as exc:
-        raise ValueError(f"paper runtime group is not provisioned: {_PAPER_RUNTIME_GROUP}") from exc
-    if snapshot.metadata.st_gid != paper_gid:
-        raise ValueError("paper owner environment has the wrong runtime group")
-    values = parse_systemd_environment_bytes(
-        snapshot.data,
-        label=f"paper owner environment {snapshot.path}",
-    )
-    roots = (
-        Path(values.get("ACCOUNT_EXECUTION_ROOT", "")).expanduser(),
-        Path(values.get("ACCOUNT_PAPER_CAPTURE_ROOT", "")).expanduser(),
-    )
-    if any(not root.is_absolute() for root in roots):
-        raise ValueError("paper owner environment requires absolute account and capture roots")
-    return roots
 
 
 def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
@@ -133,8 +89,8 @@ def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
 
 
 def _continuous_rmom_refresh_on() -> bool:
-    """Match the deploy predicate: either CONTINUOUS sleeve needs RMOM refresh."""
-    return _sleeve_on("CONTINUOUS_SLEEVE", default="off") or _sleeve_on("CONTINUOUS_PAPER_SLEEVE", default="off")
+    """Match the deploy predicate: the CONTINUOUS sleeve needs RMOM refresh."""
+    return _sleeve_on("CONTINUOUS_SLEEVE", default="off")
 
 
 @dataclass(frozen=True)
@@ -475,16 +431,6 @@ def gather_demo_rule_alerts(
     return [] if alert is None else [alert]
 
 
-def _long_paper_sleeve_on() -> bool:
-    """Paper LONG monitoring toggle, defaulting to the demo LONG toggle.
-
-    The deployed sleeve contract has no LONG_PAPER_SLEEVE yet, so without this
-    fallback a demo-off toggle would drop the running paper LONG producer from
-    cycle monitoring.
-    """
-    return _sleeve_on("LONG_PAPER_SLEEVE", default=os.environ.get("LONG_SLEEVE", "off"))
-
-
 def evaluate_disk_space(
     *,
     path: str,
@@ -776,8 +722,6 @@ def _default_units_for_toggles() -> list[str]:
     units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
     if _sleeve_on("LONG_SLEEVE"):
         units.append(_LONG_DEMO_UNIT)
-    if _long_paper_sleeve_on():
-        units.append(_LONG_PAPER_UNIT)
     if _continuous_rmom_refresh_on():
         units.extend(
             [
@@ -804,79 +748,16 @@ def _default_units_for_toggles() -> list[str]:
                 "liquidity-migration-continuous-hedge.service",
             ]
         )
-    if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
-        units.append(_CONTINUOUS_PAPER_UNIT)
     if _sleeve_on("CARRY_SLEEVE"):
         units.append(_CARRY_DEMO_UNIT)
-    if _sleeve_on("CARRY_PAPER_SLEEVE"):
-        units.append(_CARRY_PAPER_UNIT)
-    if _sleeve_on("PAPER_TARGET_MIRROR"):
-        units.append(_PAPER_TARGET_MIRROR_UNIT)
     return units
-
-
-def gather_demo_paper_agreement_alerts(
-    *,
-    demo_capture_root: Path,
-    paper_capture_root: Path,
-    demo_account_root: Path | None,
-    paper_account_root: Path | None,
-    sleeves: tuple[str, ...],
-    relative_tolerance: float,
-) -> list[Alert]:
-    """Alert when the two fleets stop wanting, or holding, the same book.
-
-    Every other check grades one environment at a time, so a divergence between
-    them is invisible unless compared directly.
-    """
-    if not demo_capture_root.exists() or not paper_capture_root.exists():
-        return []
-    try:
-        report = evaluate_demo_paper_agreement(
-            demo_tape=demo_capture_root / "strategy-targets.jsonl",
-            paper_tape=paper_capture_root / "strategy-targets.jsonl",
-            sleeves=sleeves,
-            relative_tolerance=relative_tolerance,
-            demo_account_root=demo_account_root,
-            paper_account_root=paper_account_root,
-        )
-    except Exception as exc:  # noqa: BLE001 - a watchdog degrades to an alert
-        return [
-            Alert(
-                key="demo-paper-agreement-unavailable",
-                severity="WARN",
-                message=f"demo/paper agreement check failed: {type(exc).__name__}: {exc}",
-            )
-        ]
-    if report.agree:
-        return []
-    severity = "WARN" if report.unreadable else "CRIT"
-    # One key per disagreeing symbol so a new divergence pages immediately
-    # instead of hiding under a persisting one's cooldown.
-    if report.unreadable:
-        return [
-            Alert(
-                key="demo-paper-agreement-unavailable",
-                severity=severity,
-                message=f"demo/paper agreement unverifiable: {report.unreadable}",
-            )
-        ]
-    return [
-        Alert(
-            key=f"demo-paper-agreement:{item.kind}:{item.target_key}",
-            severity=severity,
-            message=f"demo/paper books disagree: {item.describe()}",
-        )
-        for item in report.disagreements
-    ]
 
 
 def _default_units_for_scope(account_scope: str) -> list[str]:
     """Narrow the toggle-derived unit inventory to the authorized owners.
 
-    ``demo-paper`` keeps the full inventory; ``demo`` drops every paper
-    owner/producer and the shared RMOM refresh when only paper needed it;
-    ``mainnet`` shares no unit with either and is built from its own toggles.
+    ``demo`` monitors the demo owner and its toggled producers; ``mainnet``
+    shares no unit with it and is built from its own toggles.
     """
     if account_scope not in _ACCOUNT_SCOPES:
         raise ValueError(f"unsupported account liveness scope: {account_scope}")
@@ -887,24 +768,7 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
         if _sleeve_on("LONG_MAINNET_SLEEVE"):
             mainnet_units.append(_LONG_MAINNET_UNIT)
         return mainnet_units
-    units = _default_units_for_toggles()
-    if account_scope == "demo-paper":
-        return units
-    paper_units = {
-        _PAPER_ACCOUNT_OWNER_UNIT,
-        _LONG_PAPER_UNIT,
-        _CONTINUOUS_PAPER_UNIT,
-        _CARRY_PAPER_UNIT,
-        _PAPER_TARGET_MIRROR_UNIT,
-    }
-    if not _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
-        paper_units.update(
-            {
-                "liquidity-migration-continuous-rmom-refresh.service",
-                "liquidity-migration-continuous-rmom-refresh.timer",
-            }
-        )
-    return [unit for unit in units if unit not in paper_units]
+    return _default_units_for_toggles()
 
 
 def _ping_heartbeat(url: str) -> None:
@@ -1488,15 +1352,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--unit",
         action="append",
         default=None,
-        help="systemd unit(s) to liveness-check (repeatable). Defaults to the core demo/paper units.",
+        help="systemd unit(s) to liveness-check (repeatable). Defaults to the scope's core units.",
     )
     p.add_argument(
         "--account-scope",
         choices=_ACCOUNT_SCOPES,
-        default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or "demo-paper",
+        default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or "demo",
         help=(
-            "require the demo owner/runtime only, both demo and paper, or the "
-            "mainnet owner/runtime alone (default: environment or demo-paper)"
+            "require the demo owner/runtime or the mainnet owner/runtime "
+            "(default: environment or demo)"
         ),
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
@@ -1508,29 +1372,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="continuous-fade sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
-        "--continuous-paper-root",
-        default=os.environ.get("CONTINUOUS_PAPER_DATA_ROOT") or _default_root("data/bybit-continuous-paper-event"),
-        help="continuous-fade paper root for cycle/input freshness ('' to skip)",
-    )
-    p.add_argument(
         "--long-root",
         default=os.environ.get("LONG_DEMO_DATA_ROOT") or _default_root("data/bybit-long-demo-event"),
         help="long-native sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
-        "--long-paper-root",
-        default=os.environ.get("LONG_PAPER_DATA_ROOT") or _default_root("data/bybit-long-paper-event"),
-        help="long-native paper sleeve root for cycle/input freshness ('' to skip)",
-    )
-    p.add_argument(
         "--carry-root",
         default=os.environ.get("CARRY_DEMO_DATA_ROOT") or _default_root("data/bybit-carry-demo-event"),
         help="carry-hold sleeve root for cycle/decision freshness ('' to skip)",
-    )
-    p.add_argument(
-        "--carry-paper-root",
-        default=os.environ.get("CARRY_PAPER_DATA_ROOT") or _default_root("data/bybit-carry-paper-event"),
-        help="carry-hold paper root for cycle/decision freshness ('' to skip)",
     )
     p.add_argument(
         "--carry-mainnet-root",
@@ -1548,16 +1397,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="canonical demo account journal root for reconciliation health",
     )
     p.add_argument(
-        "--account-paper-root",
-        default=os.environ.get("ACCOUNT_PAPER_EXECUTION_ROOT") or _default_root("data/bybit-account-paper"),
-        help="canonical paper account root for owner-health evidence",
-    )
-    p.add_argument(
-        "--account-paper-environment-file",
-        default=os.environ.get("ACCOUNT_PAPER_EXECUTION_ENV_FILE") or "",
-        help="private paper-owner EnvironmentFile whose bound roots override paper root arguments",
-    )
-    p.add_argument(
         "--account-capture-root",
         default=os.environ.get("ACCOUNT_CAPTURE_ROOT") or _default_root("data/bybit-account-market-capture"),
         help="demo account-owner market/readiness and decision-context root",
@@ -1566,12 +1405,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--demo-rules-file",
         default=os.environ.get("ACCOUNT_DEMO_RULES_FILE") or "",
         help="bound empirical demo-rule receipt; warns during its final 24 hours ('' to skip)",
-    )
-    p.add_argument(
-        "--account-paper-capture-root",
-        default=os.environ.get("ACCOUNT_PAPER_CAPTURE_ROOT")
-        or _default_root("data/bybit-account-paper-market-capture"),
-        help="paper account-owner market/readiness and decision-context root",
     )
     p.add_argument(
         "--max-account-capture-age-min",
@@ -1618,15 +1451,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=180.0,
         help="warn when a monitored periodic oneshot's completed run exceeds this wall time",
     )
-    p.add_argument(
-        "--agreement-relative-tolerance",
-        type=float,
-        default=DEFAULT_RELATIVE_TOLERANCE,
-        help=(
-            "how far the demo and paper books may differ before alerting; the "
-            "slack exists for a deliberately scaled mirror"
-        ),
-    )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
         "--state-file",
@@ -1641,10 +1465,9 @@ def main() -> int:
     args = build_arg_parser().parse_args()
 
     mainnet = args.account_scope == "mainnet"
-    required_account_owner_units = {
-        "demo": (_DEMO_ACCOUNT_OWNER_UNIT,),
-        "mainnet": (_MAINNET_ACCOUNT_OWNER_UNIT,),
-    }.get(args.account_scope, _REQUIRED_ACCOUNT_OWNER_UNITS)
+    required_account_owner_units = (
+        (_MAINNET_ACCOUNT_OWNER_UNIT,) if mainnet else _REQUIRED_ACCOUNT_OWNER_UNITS
+    )
 
     units = list(
         dict.fromkeys(
@@ -1655,30 +1478,10 @@ def main() -> int:
         )
     )
     continuous_root = Path(args.continuous_root) if str(args.continuous_root).strip() else None
-    continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
-    long_paper_root = Path(args.long_paper_root) if str(args.long_paper_root).strip() else None
     carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
-    carry_paper_root = Path(args.carry_paper_root) if str(args.carry_paper_root).strip() else None
     carry_mainnet_root = Path(args.carry_mainnet_root) if str(args.carry_mainnet_root).strip() else None
     long_mainnet_root = Path(args.long_mainnet_root) if str(args.long_mainnet_root).strip() else None
-    paper_account_root = Path(args.account_paper_root)
-    paper_capture_root = Path(args.account_paper_capture_root)
-    paper_owner_uid: int | None = None
-    paper_root_alert: Alert | None = None
-    if args.account_scope == "demo-paper":
-        try:
-            paper_owner_uid = pwd.getpwnam(_PAPER_RUNTIME_USER).pw_uid
-            if str(args.account_paper_environment_file).strip():
-                paper_account_root, paper_capture_root = _paper_roots_from_environment(
-                    args.account_paper_environment_file
-                )
-        except (KeyError, OSError, RuntimeError, ValueError) as exc:
-            paper_root_alert = Alert(
-                key="paper_account_environment_invalid",
-                severity=CRITICAL,
-                message=f"paper owner identity/environment roots are unavailable: {type(exc).__name__}: {str(exc)[:400]}",
-            )
     # Keep cooldown state stable even when both sleeve roots are skipped, and
     # off the demo watchdog's file: the two scopes share no alert keys.
     _state_root = (_REPO_ROOT / "data") if mainnet else (continuous_root or long_root or (_REPO_ROOT / "data"))
@@ -1728,8 +1531,6 @@ def main() -> int:
                 now_ns=now_ms * 1_000_000,
             )
         )
-    if paper_root_alert is not None:
-        alerts.append(paper_root_alert)
     alerts.extend(
         gather_account_capture_alerts(
             capture_root=Path(args.account_capture_root),
@@ -1743,17 +1544,6 @@ def main() -> int:
             ),
         )
     )
-    if args.account_scope == "demo-paper" and paper_root_alert is None:
-        alerts.extend(
-            gather_account_capture_alerts(
-                capture_root=paper_capture_root,
-                max_age_minutes=args.max_account_capture_age_min,
-                label="paper",
-                expected_owner_uid=paper_owner_uid,
-                startup_grace_minutes=args.max_cycle_age_min,
-                unit_runtime=unit_runtime.get(_PAPER_ACCOUNT_OWNER_UNIT),
-            )
-        )
     if mainnet:
         alerts.extend(
             gather_account_owner_health_alerts(
@@ -1782,16 +1572,6 @@ def main() -> int:
                 demo_owner_alerts,
             )
         )
-    if args.account_scope == "demo-paper" and paper_root_alert is None:
-        alerts.extend(
-            gather_account_owner_health_alerts(
-                account_root=paper_account_root,
-                environment="paper",
-                max_age_minutes=args.max_account_health_age_min,
-                startup_grace_minutes=args.max_cycle_age_min,
-                unit_runtime=unit_runtime.get(_PAPER_ACCOUNT_OWNER_UNIT),
-            )
-        )
     if not mainnet and continuous_root is not None:
         alerts.extend(
             gather_continuous_alerts(
@@ -1810,20 +1590,6 @@ def main() -> int:
                 now_ms=now_ms,
             )
         )
-    if (
-        args.account_scope == "demo-paper"
-        and continuous_paper_root is not None
-        and _sleeve_on("CONTINUOUS_PAPER_SLEEVE")
-    ):
-        alerts.extend(
-            gather_continuous_alerts(
-                continuous_root=continuous_paper_root,
-                args=args,
-                cycles_dataset="continuous_fade_paper_cycles",
-                environment="paper",
-                unit_runtime=unit_runtime.get(_CONTINUOUS_PAPER_UNIT),
-            )
-        )
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(
@@ -1834,16 +1600,6 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_LONG_DEMO_UNIT),
             )
         )
-    if args.account_scope == "demo-paper" and long_paper_root is not None and _long_paper_sleeve_on():
-        alerts.extend(
-            gather_long_alerts(
-                long_root=long_paper_root,
-                args=args,
-                cycles_dataset="long_native_paper_cycles",
-                environment="paper",
-                unit_runtime=unit_runtime.get(_LONG_PAPER_UNIT),
-            )
-        )
     if not mainnet and carry_root is not None:
         alerts.extend(
             gather_carry_alerts(
@@ -1852,20 +1608,6 @@ def main() -> int:
                 cycle_checks=_sleeve_on("CARRY_SLEEVE"),
                 environment="demo",
                 unit_runtime=unit_runtime.get(_CARRY_DEMO_UNIT),
-            )
-        )
-    if (
-        args.account_scope == "demo-paper"
-        and carry_paper_root is not None
-        and _sleeve_on("CARRY_PAPER_SLEEVE")
-    ):
-        alerts.extend(
-            gather_carry_alerts(
-                carry_root=carry_paper_root,
-                args=args,
-                cycles_dataset="carry_hold_paper_cycles",
-                environment="paper",
-                unit_runtime=unit_runtime.get(_CARRY_PAPER_UNIT),
             )
         )
     if mainnet and carry_mainnet_root is not None and _sleeve_on("CARRY_MAINNET_SLEEVE"):
@@ -1888,25 +1630,6 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_LONG_MAINNET_UNIT),
             )
         )
-    if args.account_scope == "demo-paper":
-        # Scoped to sleeves running on both sides, so a demo-only sleeve is not
-        # reported as a permanent disagreement.
-        agreement_sleeves = tuple(
-            sleeve
-            for sleeve, toggle in (("carry", "CARRY_SLEEVE"), ("long", "LONG_SLEEVE"))
-            if _sleeve_on(toggle)
-        )
-        if agreement_sleeves:
-            alerts.extend(
-                gather_demo_paper_agreement_alerts(
-                    demo_capture_root=Path(args.account_capture_root),
-                    paper_capture_root=paper_capture_root,
-                    demo_account_root=Path(args.account_root),
-                    paper_account_root=paper_account_root,
-                    sleeves=agreement_sleeves,
-                    relative_tolerance=args.agreement_relative_tolerance,
-                )
-            )
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))
     if disk_alert is not None:
         alerts.append(disk_alert)

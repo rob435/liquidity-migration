@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Periodic BTC+ETH hedge target for one explicit demo or paper account route.
+# Periodic BTC+ETH hedge target for the explicit demo account route.
 # HEDGE_ACTION defaults to dry-run; only HEDGE_ACTION=execute publishes targets
 # to the owner inbox.
 set -euo pipefail
@@ -12,9 +12,9 @@ PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 # roots. The kernel-latch variables only restated what the unit files already
 # hard-code, so they are no longer re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
-    demo | paper) ;;
+    demo) ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo." >&2
         exit 2
         ;;
 esac

@@ -22,7 +22,6 @@ EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
-Environment=ACCOUNT_LIVENESS_SCOPE=mainnet
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true

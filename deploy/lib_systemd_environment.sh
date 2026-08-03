@@ -5,22 +5,18 @@
 # as NUL-delimited pairs. No value is evaluated or passed through argv.
 
 _lm_load_systemd_environment() {
-    if [ "$#" -lt 4 ]; then
-        echo "usage: _lm_load_systemd_environment PYTHON FILE GROUP_OR_EMPTY KEY [KEY ...]" >&2
+    if [ "$#" -lt 3 ]; then
+        echo "usage: _lm_load_systemd_environment PYTHON FILE KEY [KEY ...]" >&2
         return 2
     fi
     local _lse_python="$1"
     local _lse_file="$2"
-    local _lse_group="$3"
-    shift 3
+    shift 2
     local -a _lse_names=("$@")
     local -a _lse_command=(
         "$_lse_python" -m liquidity_migration.policy.systemd_environment
         --path "$_lse_file"
     )
-    if [ -n "$_lse_group" ]; then
-        _lse_command+=(--group-name "$_lse_group")
-    fi
     local _lse_name _lse_key _lse_value _lse_fd _lse_pid
     local _lse_error=""
     local _lse_stream_failed=0
@@ -90,16 +86,5 @@ lm_load_private_systemd_environment() {
     fi
     local _lse_python="$1" _lse_file="$2"
     shift 2
-    _lm_load_systemd_environment "$_lse_python" "$_lse_file" "" "$@"
-}
-
-lm_load_group_systemd_environment() {
-    if [ "$#" -lt 4 ]; then
-        echo "usage: lm_load_group_systemd_environment PYTHON FILE GROUP KEY [KEY ...]" >&2
-        return 2
-    fi
-    local _lse_python="$1" _lse_file="$2" _lse_group="$3"
-    shift 3
-    _lm_load_systemd_environment \
-        "$_lse_python" "$_lse_file" "$_lse_group" "$@"
+    _lm_load_systemd_environment "$_lse_python" "$_lse_file" "$@"
 }

@@ -74,7 +74,7 @@ sleeve to it is a separate decision nobody has made.
 It takes no profit target. A few big squeezes pay for many small losers;
 roughly 6 trades in 10 lose.
 
-## 4. LONG — the breakout buyer (`LongV11aDivWeekendVol`)
+## 4. LONG — the breakout buyer (`LongV12WideStop`)
 
 Top-50 coins by 90-day turnover, 30 days minimum history, today among the 10
 most traded; Bitcoin and Ethereum both above their 30-day average; a jump of at
@@ -84,20 +84,20 @@ for a 1% dip and buys that, or buys at the six-hour deadline.
 
 Ten slots of about 10% each, shrunk for jumpy coins, capped at 30% per
 position, scaled by how calm Bitcoin is, 1.5× on weekends, then the whole book
-halved by LONG's own size dial (0.5). Exits: 1.5 typical-daily-swings below
-entry, 4 above, out by 3 days, no re-buy for 7 days.
+halved by LONG's own size dial (0.5). Exits: the get-out line starts 3
+typical-daily-swings below entry and pulls in to 1.5 once the position is two
+days old; take the profit 4 swings above; out by 3 days either way; no re-buy
+in the same coin for 7 days.
 
-**The replacement is switched on since 2026-08-03** (`LongV12WideStop`).
-Everything above stays; only the get-out line moves. The old line sat 1.5
-typical-daily-swings below entry, but "typical" is a two-week average and this
-strategy only buys coins that moved two and a half times their normal amount
-*today* — so the line was inside the noise of the very jump it just bought, and
-67 of 294 trades were knocked out by it. The new version leaves the line 3 swings
-away for the first two days, then pulls it back to 1.5. Over five years that
-turns +38.5% into +51.6%, smoothness 1.24 into 1.49, and the worst dip gets
-slightly *shallower* (−4.4% to −3.9%). It is better in every one of the six
-years, and it is not one lucky trade — the best 20 trades carry 62% of the
-profit instead of 78%.
+Why the line starts wide: "typical" is a two-week average, and this strategy
+only buys coins that moved two and a half times their normal amount *today*, so
+a line set from the average sits inside the noise of the very jump it just
+bought. At the old 1.5 setting, 67 of 294 trades were knocked out by it. Giving
+the trade room through that first move, and taking the room back once it has had
+two days and gone nowhere, turns +38.5% into +51.6% over five years, smoothness
+1.24 into 1.49, and the worst dip gets slightly *shallower* (−4.4% to −3.9%). It
+is better in every one of the six years, and it is not one lucky trade — the best
+20 trades carry 62% of the profit instead of 78%.
 
 How the two halves run live: the far line (3 swings) is a standing order at the
 exchange from the moment of entry and never moves. The pulled-back line (1.5
@@ -115,28 +115,21 @@ own rules — its last honest simulation was healthy but modest (+11.06%, worst
 dip −1.84%, smoothness 1.45). Its code, its Bitcoin trend check, and its
 Bitcoin/Ethereum hedge job are all dormant. Restarting it is a fresh decision.
 
-## 6. Demo, paper, real money
+## 6. Demo and real money
 
 | Name | Exchange | Money | Credentials | What it proves |
 | --- | --- | --- | --- | --- |
 | **demo** | real Bybit demo realm | none | yes, demo-only | real order handling, fees, crowd fees, outages |
-| **paper twin** | none | none | none | the software plumbing, and only that |
 | **real money** | Bybit mainnet | yours | none held here | nothing yet — never used |
 
-The paper twin is being changed so it no longer decides for itself: it
-republishes demo's targets verbatim (`paper-target-mirror`) and only executes
-them. Two producers reading the same files seconds apart disagreed 6% of the
-time — once opening and closing a TLMUSDT position demo never asked for, for
-−70.73 USDT. One fleet decides, both execute, so every remaining difference
-between the two books is execution and nothing else.
-
-The same change fixes two things the twin got wrong: its account balance was a
-fixed number, so it could never resize a position (0 resizes in 1,776 cycles
-against demo's 366), and it was never charged the crowd fees it was supposedly
-collecting.
-
-**None of this is live yet** — written and tested, not deployed. Until it is,
-the twin still runs its own producer with a frozen balance.
+There used to be a third book: the **paper twin**, a copy of the system with no
+exchange behind it, invented fills, and a fixed pretend balance. It was retired
+on 2026-08-03. It never produced evidence anyone graded — its fills were made
+up — and it caused a disproportionate share of the outages: it once opened a
+TLMUSDT position demo never asked for (−70.73 USDT), it could never resize a
+position (0 resizes in 1,776 cycles against demo's 366), and it was never
+charged the crowd fees it was supposedly
+collecting. Old paper journals stay on disk as history; nothing reads them.
 
 Arming real money is your act alone. The mainnet sleeves are off in the
 repository, which a host edit cannot reverse. The steps are now commands rather
@@ -188,8 +181,11 @@ What stands between the account and a bad day:
 
 ## 8. Deploying, and the correctness pieces
 
-Deploying is: install the code stopped, activate, verify — or run the guarded
-`rollout` when the account is flat ([`docs/operations.md`](operations.md)). What
+Deploying is one command — install the code stopped, activate, verify — and it
+stops whatever is running for you first ([`docs/operations.md`](operations.md)).
+The guarded `rollout` is the careful alternative: on demo it now reports leftover
+positions and carries on, and only on the real-money account does it stop dead
+until the book is empty. What
 each service runs is fixed in one file
 ([`scripts/run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh)): a
 unit names a job, the script owns the whole command line, nothing can append to
@@ -203,6 +199,16 @@ constant cross-check against the exchange
 ([`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py)), and the
 checks that run before anything deletes a directory
 ([`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py)).
+
+That cross-check is also what makes a **stuck order command** a non-event on the
+practice account. Sometimes we ask the exchange for an order and never learn what
+happened to it — the request neither fills nor comes back — and the coin it names
+is frozen until someone settles the question. On demo nobody has to: every couple
+of seconds the system re-reads the exchange's own records, and once a command has
+been stuck for five minutes it closes out the ones the exchange provably does not
+hold, usually within seconds of that. If there is a live order or a fill it has
+not accounted for, it refuses and leaves the thing alone. On the real-money
+account the check still spots it and says so, but a person does the closing out.
 
 **Standing rule:** no new safety features, guards, or gates on an agent's own
 initiative. Propose them; you decide.
