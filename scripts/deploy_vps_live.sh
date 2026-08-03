@@ -1015,7 +1015,11 @@ mainnet_armed() {
             chmod 600 "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
             MAINNET_ARMED_STATE="$(
                 unset REAL_MONEY
-                lm_load_private_systemd_environment "$PYTHON" \
+                # Early install stages read the switch before PYTHON is
+                # assigned; the checkout's interpreter is the one default
+                # that is always right on the host.
+                lm_load_private_systemd_environment \
+                    "${PYTHON:-${REPO_DIR:-/opt/liquidity-migration}/.venv/bin/python}" \
                     "$MAINNET_CREDENTIAL_ENV" REAL_MONEY || exit 3
                 case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
                     1|true|yes|on) echo armed ;;
