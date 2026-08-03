@@ -20,6 +20,7 @@ unit shapes.
 | `liquidity-migration-continuous-hedge.service` | Demo-only hedge target publisher |
 | `liquidity-migration-continuous-rmom-refresh.service` | Residual-momentum refresh |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
+| `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume/market-close) — the sole `getUpdates` consumer |
 | `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |
 | `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
@@ -47,6 +48,11 @@ No unit can take the fleet down with it.
   `Wants`/`After` for network readiness. The mainnet observer loads
   `bybit-mainnet.env` for the Telegram credentials only and unsets both
   API-key pairs and `REAL_MONEY`.
+- **The control panel** (`telegram-controls`) likewise has no edge to the
+  fleet it controls: it must keep serving buttons while the units it pauses,
+  resumes, or flattens are stopped. It holds Telegram credentials only — the
+  API-key pairs and `REAL_MONEY` are unset — and acts through `systemctl`, the
+  sleeve override + resolve library, and the flatten path.
 
 ## Owner unit shapes
 

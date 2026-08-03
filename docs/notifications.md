@@ -1,8 +1,10 @@
 # Notifications and alerting
 
-Two message senders, two chat lines. The account owner reports what the book did; the liveness
-watchdog reports that the fleet is still running. They watch each other — the watchdog alerts when
-the owner's digest stops arriving, and the owner is the only thing that reports a fill.
+Two message senders, two chat lines, plus one listener. The account owner reports what the book
+did; the liveness watchdog reports that the fleet is still running. They watch each other — the
+watchdog alerts when the owner's digest stops arriving, and the owner is the only thing that
+reports a fill. The listener is the control panel (§Owner control buttons): the one component that
+reads the chat instead of writing to it.
 
 **The main line** (`TELEGRAM_CHAT_ID`) carries only the book's story: the hourly digest, fills,
 closes, stop events, loss warnings, entry blocks. **The alerts line** (`TELEGRAM_ALERT_CHAT_ID`)
@@ -26,10 +28,41 @@ send returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABL
 | `account-execution-mainnet` | on | digest + event notices, funded book | main |
 | `demo-liveness` | on | watchdog alerts, demo scope | alerts |
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
+| `telegram-controls` | on | control panel + action results; **also listens** | main |
 | every producer, hedge, rmom | off or unset | nothing | — |
 
 Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem,
 not its own.
+
+## Owner control buttons
+
+[`telegram_controls.py`](../liquidity_migration/ops/telegram_controls.py), an always-on daemon
+(`liquidity-migration-telegram-controls.service`) and the only consumer of the bot's incoming
+updates — nothing else may poll `getUpdates` on this token. Send `/controls` in the main chat to
+get the buttons; `/status` for a plain fleet summary.
+
+- **⏸ Pause trading** — stops new decisions. Writes the sleeve toggles off in the host override
+  (`/etc/liquidity-migration/sleeves.env`, keeping a verbatim copy of what was there), regenerates
+  the resolved toggles with the deploy's own library, and stops the producer units. The account
+  owner, its protections, and the watchdog keep running; open positions stay open. Because this is
+  the designed host narrowing, the pause survives reboots **and deploys**, and the watchdog reads
+  it as deliberate rather than paging "producer down".
+- **▶️ Resume trading** — restores the saved override verbatim (a manual narrowing you had made by
+  hand survives the round trip), re-resolves, and starts whichever producers resolve on.
+- **🚨 Close ALL positions** — two taps: the button, then a confirmation that expires after 120
+  seconds. Pauses first so a producer cannot republish, then market-closes the whole book through
+  the account owner's own flatten path (every close is an ordinary reduce-only command; crumbs
+  below the venue minimum are reported, not retried forever). Trading stays paused afterwards
+  until you press Resume.
+
+Real-money rows appear only while the mainnet owner unit is active — i.e. after your own arming
+act. Pausing mainnet stops its two producer units directly (mainnet has no sleeve toggles).
+
+Who may press: only the configured main chat is read at all, and a press must come from the chat's
+own private-chat owner. If the main chat is a group, set `TELEGRAM_CONTROL_USER_IDS` (comma-
+separated numeric user ids) in the host env file — with no allow-list, every press in a group is
+refused. Presses queued while the daemon was down are dropped at startup, so a stale button can
+never fire late; if the bot did not react, press again.
 
 ## The owner's digest
 

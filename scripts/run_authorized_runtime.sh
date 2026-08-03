@@ -62,6 +62,12 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-continuous-rmom-refresh.service:main)
         COMMAND=(/bin/bash /opt/liquidity-migration/scripts/runtime/run_continuous_rmom_refresh.sh)
         ;;
+    liquidity-migration-telegram-controls.service:main)
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            -m liquidity_migration.ops.telegram_controls
+        )
+        ;;
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python

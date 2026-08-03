@@ -345,6 +345,11 @@ satisfy a rollout, which wants the whole account flat.
 can publish a new nonzero target while it is converging. It detects that and says so rather
 than fighting it.
 
+The same close is available from your phone: the Telegram control buttons (`/controls` in the
+main chat) pause the producers first and then run exactly this flatten path, with a two-tap
+confirmation ([`notifications.md`](notifications.md) §Owner control buttons). Pause/resume from
+the buttons uses the host sleeve override, so it survives reboots and deploys until resumed.
+
 Terminal states, which are also the exit codes:
 
 | Status | Exit | Means |

@@ -1206,6 +1206,7 @@ verify_topology() {
         done
     fi
     verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
+    verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
     for oneshot in \
         liquidity-migration-continuous-rmom-refresh.service \
         liquidity-migration-continuous-hedge.service \
@@ -1311,6 +1312,7 @@ activate_mode() {
         systemctl enable --now liquidity-migration-continuous-hedge.timer
     fi
     systemctl enable --now liquidity-migration-demo-liveness.timer
+    systemctl enable --now liquidity-migration-telegram-controls.service
     if mainnet_armed; then
         start_mainnet_fleet
     fi
@@ -1395,6 +1397,7 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-continuous-rmom-refresh.service
     liquidity-migration-demo-liveness.service
     liquidity-migration-mainnet-liveness.service
+    liquidity-migration-telegram-controls.service
     # Paper fleet, retired 2026-08-03. Kept in the stop list so the rollout
     # that carries the retirement quiesces a host still running them; the
     # manifest install then removes the unit files for good.

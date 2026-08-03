@@ -1,0 +1,35 @@
+[Unit]
+Description=liquidity-migration Telegram owner controls (pause/resume/market-close buttons)
+Wants=network-online.target
+# No Requires= on the owner or producers: the control panel must keep working
+# when the fleet it controls is stopped — that is exactly when it is needed.
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-telegram-controls.service main
+Restart=always
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+# /etc/liquidity-migration: pause writes the sleeve override and the resolved
+# toggle file through the same deploy library the rollout uses.
+ReadWritePaths=/opt/liquidity-migration /etc/liquidity-migration
+MemoryMax=256M
+# An operator surface must not preempt the producers (Nice=5) or owners (-5).
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

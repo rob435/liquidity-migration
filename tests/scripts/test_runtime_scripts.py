@@ -1444,7 +1444,8 @@ def _verify_harness(
 
 _VERIFY_GREEN = (
     "liquidity-migration-account-execution.service "
-    "liquidity-migration-demo-liveness.timer"
+    "liquidity-migration-demo-liveness.timer "
+    "liquidity-migration-telegram-controls.service"
 )
 
 
@@ -1469,8 +1470,9 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
     )
     assert "verify-mismatch" not in combined
 
-    # Owner down, liveness timer down, one failed oneshot, and the venue probe
-    # refusing: four independent findings from a single run.
+    # Owner down, liveness timer down, controls daemon down, one failed
+    # oneshot, and the venue probe refusing: five independent findings from a
+    # single run.
     broken = subprocess.run(
         [
             "bash",
@@ -1492,11 +1494,12 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
     for finding in (
         "verify-mismatch demo owner is not active and enabled",
         "verify-mismatch liveness timer is not active",
+        "verify-mismatch telegram controls daemon is not active",
         "verify-mismatch liquidity-migration-continuous-hedge.service is failed",
         "verify-mismatch demo order permission verification failed",
     ):
         assert finding in combined, finding
-    assert "found 4 mismatch(es)" in combined
+    assert "found 5 mismatch(es)" in combined
     assert "verify-ok" not in combined
     # The table is printed before the verdict, so it survives the failure.
     assert combined.index("verify-units") < combined.index("fail:topology verification")
