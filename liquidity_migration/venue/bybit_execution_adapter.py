@@ -14,6 +14,7 @@ from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.execution_adapters import ExecutionObservation, ExecutionObservationType
+from liquidity_migration.venue.entry_quote_manager import EntryQuoteManager
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a protection import cycle
     from typing import Protocol
@@ -96,6 +97,7 @@ class BybitDemoExecutionAdapter:
         # round trip. 5s wedged a nine-slice entry batch on 2026-08-01.
         max_unsubmitted_exposure_age_ns: int = 120_000_000_000,
         entry_stop_verifier: EntryStopVerifier | None = None,
+        entry_quotes: EntryQuoteManager | None = None,
     ) -> None:
         # Realm-agnostic: the order path is identical in both realms, and the
         # arming decision belongs to credential resolution, which requires
@@ -113,6 +115,9 @@ class BybitDemoExecutionAdapter:
         # Atomic arming is a Bybit behaviour, not something this system owns.
         # Without a verifier the create is simply trusted.
         self.entry_stop_verifier = entry_stop_verifier
+        # With a manager, exposure-increasing entries rest at the touch first;
+        # every gate inside plan_entry_quote falls back to the market order.
+        self.entry_quotes = entry_quotes
 
     @staticmethod
     def _entry_protection_metadata(command: OrderCommand) -> dict[str, Any]:
@@ -229,20 +234,61 @@ class BybitDemoExecutionAdapter:
                 )
         return ()
 
+    def _entry_quote_price(
+        self,
+        command: OrderCommand,
+        market_input: MarketInputRef,
+    ) -> str | None:
+        """Near-touch limit price for an entry, or None for the market path."""
+
+        if self.entry_quotes is None or command.reduce_only:
+            return None
+        try:
+            return self.entry_quotes.plan_entry_quote(
+                symbol=command.symbol,
+                is_buy=command.signed_qty > 0.0,
+                bid=market_input.bid_price,
+                ask=market_input.ask_price,
+            )
+        except Exception:  # noqa: BLE001 - quoting must never block an entry
+            return None
+
     def submit_prepared(
         self,
         command: OrderCommand,
-        _market_input: MarketInputRef,
+        market_input: MarketInputRef,
     ) -> Iterable[ExecutionObservation]:
         """Perform only the exposure-capable order-create effect."""
 
         entry_protection_metadata = self._entry_protection_metadata(command)
         params = self._order_params(command)
+        quote_price = self._entry_quote_price(command, market_input)
+        execution_style = "market"
+        if quote_price is not None:
+            params.update(
+                {
+                    "orderType": "Limit",
+                    "price": quote_price,
+                    "timeInForce": "GTC",
+                }
+            )
+            execution_style = "resting_quote"
         # Measures the create-order request only; leverage negotiation sits
         # outside request/ack RTT but inside command-decision-to-socket delay.
         send_ts_ns = self.clock.wall_time_ns()
         try:
-            result = self.client.place_order(**params)
+            try:
+                result = self.client.place_order(**params)
+            except BybitRequestRejected:
+                if quote_price is None:
+                    raise
+                # A clean venue reject of the limit create leaves no order
+                # under this link id, so the market order the fleet always
+                # sent is still available and still protected.
+                quote_price = None
+                execution_style = "market_after_quote_reject"
+                params = self._order_params(command)
+                result = self.client.place_order(**params)
         except BybitRequestRejected as exc:
             local_ack_ts_ns = self.clock.wall_time_ns()
             return (
@@ -259,6 +305,7 @@ class BybitDemoExecutionAdapter:
                         "error_type": type(exc).__name__,
                         "error": str(exc)[:500],
                         "requested_leverage": command.leverage,
+                        "execution_style": execution_style,
                         **entry_protection_metadata,
                     },
                 ),
@@ -275,7 +322,37 @@ class BybitDemoExecutionAdapter:
             exchange_ack_ts_ns = int(float(exchange_ack_ms) * 1_000_000)
         except (TypeError, ValueError):
             exchange_ack_ts_ns = 0
-        verification = self._verify_entry_attached_stop(command)
+        if quote_price is not None:
+            # The stop attaches when the resting order fills; the manager runs
+            # the same verifier at that moment, and reconciliation still owns
+            # the fallback proof, exactly as it does for a repaired stop.
+            verification = "deferred_resting_quote"
+            if self.entry_quotes is not None and not idempotent_existing_order:
+                self.entry_quotes.register(
+                    command_id=command.command_id,
+                    symbol=command.symbol,
+                    is_buy=command.signed_qty > 0.0,
+                    price=float(quote_price),
+                )
+        else:
+            verification = self._verify_entry_attached_stop(command)
+        metadata: dict[str, Any] = {
+            "local_socket_send_ts_ns": send_ts_ns,
+            "exchange_ack_ts_status": "observed" if exchange_ack_ts_ns else "unavailable",
+            "exchange_ack_ts_source": (
+                "bybit_v5_response_envelope_time" if exchange_ack_ts_ns else "unavailable"
+            ),
+            "idempotent_existing_order": idempotent_existing_order,
+            "requested_leverage": command.leverage,
+            "entry_attached_stop_verification": verification,
+            "execution_style": execution_style,
+            **entry_protection_metadata,
+        }
+        if quote_price is not None:
+            metadata["entry_quote_price"] = quote_price
+            metadata["entry_quote_window_seconds"] = (
+                self.entry_quotes.config.window_seconds if self.entry_quotes is not None else 0.0
+            )
         return (
             ExecutionObservation(
                 observation_type=ExecutionObservationType.ACK,
@@ -284,17 +361,7 @@ class BybitDemoExecutionAdapter:
                 local_receive_ts_ns=local_ack_ts_ns,
                 accepted=True,
                 venue_order_id=str(result.get("orderId") or ""),
-                metadata={
-                    "local_socket_send_ts_ns": send_ts_ns,
-                    "exchange_ack_ts_status": "observed" if exchange_ack_ts_ns else "unavailable",
-                    "exchange_ack_ts_source": (
-                        "bybit_v5_response_envelope_time" if exchange_ack_ts_ns else "unavailable"
-                    ),
-                    "idempotent_existing_order": idempotent_existing_order,
-                    "requested_leverage": command.leverage,
-                    "entry_attached_stop_verification": verification,
-                    **entry_protection_metadata,
-                },
+                metadata=metadata,
             ),
         )
 

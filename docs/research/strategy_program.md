@@ -8,6 +8,23 @@ one-off runners are retired.
 
 ## Current truth
 
+- **Entries stopped crossing the spread (2026-08-04, owner instruction; the
+  basic recipe from the overnight quote lab).** Both account owners now place
+  an exposure-increasing entry as a GTC limit resting at the touch, chase a
+  touch that moves away every 15s, and at 120s amend the price through the far
+  touch so the remainder fills as a taker at a bounded price; a remainder the
+  cross cannot clear within 20s is cancelled and the owner's convergence
+  machinery re-plans it. Exits, resizes, and native stops are unchanged
+  (taker). The numbers are the overnight lab's measured arm, not a guess:
+  seg00 (Buy, reprice 15s, timeout 120s, 34 symbols, n=1,586 attempts) filled
+  **70.4%** passively, median time-to-fill 41.6s, clean all-in cost median
+  **1.9 bp/side** against the fleet's measured 7.78 bp taker basis
+  (`docs/research/research_findings.md` §1). **This is an execution change
+  point for both sleeves' forward records**: entry fills should turn
+  maker-heavy and entry prices move from crossing to the touch. Change point =
+  this commit; deploy receipt in `STATE.md`. The full per-arm model fit from
+  the complete overnight run (Sell side + the other four arms) remains the
+  morning task and may retune the recipe.
 - **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
   authority `docs/research/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
   prospective — earlier verdicts stand as recorded. Because it no longer controls

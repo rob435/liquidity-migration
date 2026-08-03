@@ -127,6 +127,20 @@ would need a new in-flow experiment on a live sleeve.
 [execution_cost_model.py](../../liquidity_migration/research/execution/execution_cost_model.py) has no arm grouping, so the cost
 report does not split by arm.
 
+**The quote lab measured the mechanism with real orders (2026-08-03 overnight, registered `b7ecca4`).**
+On a second, separate demo account, the first completed arm (Buy, reprice 15s, timeout 120s, 34 symbols,
+75 minutes, n=1,586 attempts) reached a **70.4% passive fill rate** (1,097 fills; 16.8% rejected
+would-cross, 12.3% timed out), median time-to-fill 41.6s, clean intention-to-treat all-in cost **mean 5.15 /
+median 1.91 bp/side** against the 7.78 bp taker basis. Fills accrue roughly linearly through the window
+(39% of attempts by 60s, 63% by 120s), so the window length is set by runtime tolerance, not by the fill
+curve flattening. Caveats recorded at registration: probe attempts sample ordinary moments, not the fleet's
+entry moments, and quoting loses on tight-spread books — which is why the shipped entry path gates on at
+least two ticks and ~1 bp of quoted spread. **Shipped 2026-08-04**: both account owners now rest entries at
+the touch on exactly this arm's recipe with a bounded cross at the deadline (change point in
+`strategy_program.md`); entry fills journal `is_maker` per fill, so the live maker share accrues as
+receipts from the first night. The remaining overnight segments (Sell side, chase 4/0, reprice 30/10,
+timeout 180/60) are the morning fit that may retune the recipe.
+
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
 `LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
 2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `STATE.md`). All ~20 v11a quirks were ablated

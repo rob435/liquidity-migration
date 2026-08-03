@@ -1189,3 +1189,44 @@ def test_annotation_only_detail_is_not_treated_as_warmup(tmp_path: Path) -> None
             now_ns=11_000,
         )
     assert not isinstance(blocked_error.value, AccountOwnerMarketWarmupPending)
+
+
+def test_resting_quote_item_is_healthy_inside_its_window() -> None:
+    """A working order that is a tracked resting entry quote inside its window
+    does not trip the convergence grace; past the window it pages as before."""
+
+    def item(resting_quote_active: bool) -> AccountConvergenceItem:
+        return AccountConvergenceItem(
+            symbol="LAUSDT",
+            generation="generation",
+            target_signed_qty=100.0,
+            position_signed_qty=0.0,
+            working_signed_qty=100.0,
+            working_order_count=1,
+            projected_signed_qty=100.0,
+            residual_signed_qty=0.0,
+            desired_since_ns=1,
+            age_ns=95_000_000_000,
+            retry_attempts=0,
+            retry_limit=3,
+            next_retry_ts_ns=None,
+            retryable=False,
+            exhausted=False,
+            reduce_only=False,
+            status="working",
+            resting_quote_active=resting_quote_active,
+        )
+
+    grace_ns = 30_000_000_000
+    quoted = AccountConvergenceReport(96_000_000_000, grace_ns, (item(True),))
+    assert quoted.healthy
+    quoted.require_healthy()
+
+    expired = AccountConvergenceReport(96_000_000_000, grace_ns, (item(False),))
+    assert not expired.healthy
+    try:
+        expired.require_healthy()
+    except RuntimeError as exc:
+        assert "LAUSDT:working" in str(exc)
+    else:  # pragma: no cover - the raise is the point
+        raise AssertionError("expired resting quote must trip convergence health")

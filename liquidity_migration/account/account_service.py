@@ -18,7 +18,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from liquidity_migration.account.account_contracts import (
     AccountEventType,
@@ -354,6 +354,11 @@ class AccountConvergenceItem:
     # qty, or below min notional for an increase). As converged as venue
     # granularity allows; retrying could only exhaust and page.
     venue_minimum_dust: bool = False
+    # True while the symbol's working order is a resting entry quote still
+    # inside its declared window: an intentional, bounded delay, not a stall.
+    # Once the quote's window (plus its cross grace) passes, this goes false
+    # and the item ages against the normal grace like any other.
+    resting_quote_active: bool = False
 
     @property
     def retry_budget_label(self) -> str:
@@ -375,7 +380,10 @@ class AccountConvergenceReport:
     @property
     def healthy(self) -> bool:
         return all(
-            item.venue_minimum_dust or (not item.exhausted and item.age_ns < self.grace_ns) for item in self.items
+            item.venue_minimum_dust
+            or item.resting_quote_active
+            or (not item.exhausted and item.age_ns < self.grace_ns)
+            for item in self.items
         )
 
     def require_healthy(self) -> None:
@@ -384,7 +392,9 @@ class AccountConvergenceReport:
         overdue = [
             item
             for item in self.items
-            if not item.venue_minimum_dust and (item.exhausted or item.age_ns >= self.grace_ns)
+            if not item.venue_minimum_dust
+            and not item.resting_quote_active
+            and (item.exhausted or item.age_ns >= self.grace_ns)
         ]
         detail = ", ".join(
             f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
@@ -1249,6 +1259,7 @@ class AccountExecutionService:
         convergence_retry_backoff_cap_ns: int = DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS,
         max_convergence_retries: int = 3,
         inbox_retry_budget_ns: int = 600_000_000_000,
+        resting_entry_quotes: Callable[[str], bool] | None = None,
     ) -> None:
         self.route = _require_verified_account_route(route)
         kernel_root = str(kernel.journal.root.expanduser().resolve(strict=False))
@@ -1281,6 +1292,10 @@ class AccountExecutionService:
         if int(inbox_retry_budget_ns) <= 0:
             raise ValueError("inbox retry budget must be positive")
         self.inbox_retry_budget_ns = int(inbox_retry_budget_ns)
+        # Symbol -> "is a resting entry quote still inside its window" probe,
+        # answered by the entry quote manager. None means entries are market
+        # orders and every working order ages against the normal grace.
+        self.resting_entry_quotes = resting_entry_quotes
         # First monotonic instant each inbox file started failing, cleared on
         # success or retirement. The 2026-08-01 outage was a head request
         # bouncing pending<->claimed every ~2s for two days: a request that
@@ -1810,6 +1825,11 @@ class AccountExecutionService:
                         retry_anchor_ns = retry_wall_ts_ns
 
             no_working = working_order_count == 0
+            resting_quote_active = bool(
+                not no_working
+                and self.resting_entry_quotes is not None
+                and self.resting_entry_quotes(symbol)
+            )
             residual_pending = abs(residual) > tolerance
             can_rebuild = bool(target_rows)
             reduce_only = abs(target_qty) + tolerance < abs(position_qty) and target_qty * position_qty >= -tolerance
@@ -1899,6 +1919,7 @@ class AccountExecutionService:
                 reduce_only=reduce_only,
                 status=status,
                 venue_minimum_dust=venue_minimum_dust,
+                resting_quote_active=resting_quote_active,
             )
             plans.append(
                 _ConvergencePlan(

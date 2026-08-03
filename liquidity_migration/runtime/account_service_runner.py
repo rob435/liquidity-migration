@@ -81,7 +81,9 @@ from liquidity_migration.venue.bybit import (
     api_key_allows_order_submit,
     resolve_private_credentials,
 )
+from liquidity_migration.core.deterministic_runtime import SystemClock
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
+from liquidity_migration.venue.entry_quote_manager import EntryQuoteConfig, EntryQuoteManager
 from liquidity_migration.account.market_capture import (
     BybitRawPublicMarketStream,
     MarketCaptureConfig,
@@ -599,6 +601,17 @@ def main(argv: list[str] | None = None) -> int:
             "budget must cover whole-batch venue latency, not one round trip."
         ),
     )
+    parser.add_argument(
+        "--entry-quote-window-seconds",
+        type=float,
+        default=120.0,
+        help=(
+            "Rest exposure-increasing entries as a limit order at the touch for "
+            "up to this long before crossing the spread (0 disables and every "
+            "entry is a market order again). The 120s default is the arm the "
+            "2026-08-03 overnight quote lab measured at a 70%% passive fill rate."
+        ),
+    )
     parser.add_argument("--idle-seconds", type=float, default=0.1)
     parser.add_argument(
         "--confirm-demo-orders",
@@ -639,6 +652,8 @@ def main(argv: list[str] | None = None) -> int:
         or args.max_unsubmitted_exposure_age_seconds <= 0.0
     ):
         parser.error("--max-unsubmitted-exposure-age-seconds must be positive and finite")
+    if not math.isfinite(args.entry_quote_window_seconds) or args.entry_quote_window_seconds < 0.0:
+        parser.error("--entry-quote-window-seconds must be zero or a positive finite number")
     if not math.isfinite(args.continuous_cycle_max_age_minutes) or args.continuous_cycle_max_age_minutes <= 0.0:
         parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
@@ -900,6 +915,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     snapshot_provider = BybitAccountSnapshotProvider(private_client)
+    entry_quotes = (
+        EntryQuoteManager(
+            private_client,
+            config=EntryQuoteConfig(window_seconds=args.entry_quote_window_seconds),
+            instrument_rules=rules,
+            kernel=kernel,
+            clock=SystemClock(),
+            entry_stop_verifier=native_protection.verify_entry_attached_stop,
+        )
+        if args.entry_quote_window_seconds > 0.0
+        else None
+    )
     service = AccountExecutionService(
         route=route,
         kernel=kernel,
@@ -915,6 +942,10 @@ def main(argv: list[str] | None = None) -> int:
             max_unsubmitted_exposure_age_ns=int(
                 args.max_unsubmitted_exposure_age_seconds * 1_000_000_000
             ),
+            entry_quotes=entry_quotes,
+        ),
+        resting_entry_quotes=(
+            entry_quotes.symbol_has_active_quote if entry_quotes is not None else None
         ),
         native_protection_policy=native_protection_policy,
         required_rules_environment=realm.value,
@@ -1002,6 +1033,11 @@ def main(argv: list[str] | None = None) -> int:
                     if funding_report is not None and not funding_report.healthy:
                         _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
+            if entry_quotes is not None:
+                # Advance resting entry quotes on the loop cadence: reprice
+                # toward a moved touch, cross at the window deadline, verify
+                # the attached stop on fill. Never raises.
+                entry_quotes.advance()
             private_stream_status = private_stream_supervisor.check(now_monotonic=now)
             if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
                 current_state = kernel._state_ref()

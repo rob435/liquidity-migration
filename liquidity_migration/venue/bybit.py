@@ -318,6 +318,22 @@ class BybitPrivateClient:
         payload = self._call("cancel_order", category=self.category, symbol=symbol, orderLinkId=order_link_id)
         return payload.get("result", {})
 
+    def amend_order(self, *, symbol: str, order_link_id: str, price: str) -> dict[str, Any]:
+        """Reprice a working order in place, keeping its id and queue identity.
+
+        Single-shot on purpose: a blind retry could reprice an order that
+        filled between attempts, and the caller re-reads order state on any
+        rejection anyway.
+        """
+        payload = self._call_once(
+            "amend_order",
+            category=self.category,
+            symbol=symbol,
+            orderLinkId=order_link_id,
+            price=price,
+        )
+        return payload.get("result", {})
+
     def get_open_orders(
         self,
         *,

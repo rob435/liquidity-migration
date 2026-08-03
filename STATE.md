@@ -19,6 +19,28 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (early) — Entries rest at the touch instead of crossing the
+  spread (owner instruction, first funded night; money landed in the Unified
+  Trading account the same hour).** Both account owners now create an
+  exposure-increasing entry as a GTC limit at the touch (same single order per
+  command, same `orderLinkId`, stop attached at create), and the owner loop
+  advances it: reprice toward a moved touch every 15s, amend through the far
+  touch at the 120s window end (a taker fill at a bounded price, unlike a
+  market order), cancel an uncleared remainder after 20s and let convergence
+  re-plan it, verify the attached stop at fill instead of at create
+  (`entry_quote_manager.py`; `--entry-quote-window-seconds`, 0 restores
+  market orders). Exits, resizes, and venue-native stops stay market-path.
+  Thin spread (< 2 ticks or < 1 bp), missing tick rules, or any venue reject
+  of the limit create falls back to the market order. The convergence health
+  grace reads an in-window resting quote as intentional
+  (`resting_quote_active`); past its window it ages and pages exactly as
+  before. Recipe = the overnight quote lab's first completed arm, measured
+  the same night (70.4% passive fill, n=1,586, median fill 41.6s, median
+  all-in 1.9 bp vs 7.78 taker — `docs/research/research_findings.md` §1);
+  the full overnight fit may retune it in the morning. Change point recorded
+  in `docs/research/strategy_program.md`. Deploy: requires the owner's own
+  stop/activate of the funded units (platform rule: Claude never starts
+  them) — receipt to follow that act.
 - **2026-08-03 (late) — Arming path collapsed to two owner acts (operator
   override), and the quote lab ships.** The nine-step real-money runbook is
   now: write `/etc/liquidity-migration/bybit-mainnet.env` by hand (key,
