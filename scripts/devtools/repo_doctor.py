@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -153,6 +154,32 @@ def _git_output(repository: Path, *arguments: str, allow_failure: bool = False) 
     return completed.stdout.rstrip("\r\n")
 
 
+_SECOND_WRITER_WINDOW_SECONDS = 600.0
+
+
+def _recently_modified(repository: Path, changes: Sequence[str], now: float) -> list[str]:
+    """Dirty paths whose mtime is inside the second-writer window.
+
+    A dirty file touched in the last few minutes may belong to another agent
+    session editing the same checkout — the failure mode is staging someone
+    else's half-done work with a broad ``git add``.
+    """
+
+    fresh: list[str] = []
+    for line in changes:
+        path_field = line[3:]
+        if " -> " in path_field:
+            path_field = path_field.split(" -> ", 1)[1]
+        path = repository / path_field.strip().strip('"')
+        try:
+            age = now - path.stat().st_mtime
+        except OSError:
+            continue
+        if 0 <= age <= _SECOND_WRITER_WINDOW_SECONDS:
+            fresh.append(path_field.strip())
+    return fresh
+
+
 def git_report(repository: Path) -> dict[str, Any]:
     executable = shutil.which("git")
     if executable is None:
@@ -171,6 +198,7 @@ def git_report(repository: Path) -> dict[str, Any]:
         "head": head,
         "change_count": len(changes),
         "changes": changes,
+        "recently_modified": _recently_modified(repository, changes, time.time()),
     }
 
 
@@ -226,6 +254,13 @@ def format_human(report: Mapping[str, Any]) -> str:
         lines.append(f"[error] git: {git['error']}")
     else:
         lines.append(f"[info] git {git['branch']}@{git['head']}: {git['change_count']} worktree change(s)")
+        fresh = git.get("recently_modified", [])
+        if fresh:
+            lines.append(
+                f"[warn] {len(fresh)} dirty file(s) modified in the last 10 minutes — "
+                "a second writer may be active in this checkout; do not stage their work:"
+            )
+            lines.extend(f"  {name}" for name in fresh)
     if lock["status"] == "error":
         lines.append(f"[error] dependency lock: {lock['error']}")
     elif lock["status"] == "matched":
