@@ -49,6 +49,20 @@ how it got there. That history is in Git.
   demo/paper agreement warnings are expected to clear as the books converge
   under fresh producer targets.
 
+- **2026-08-03 — stale entry requests now retire terminally (owner-approved
+  follow-up to the outage).** The Aug-1 loop's request half: a failed entry
+  request whose every intent is past its own `signal_valid_until_ms` AND whose
+  failure is the never-attempted stale-command refusal now moves to `failed/`
+  (`StaleEntryRequestExpired`, original cause chained) instead of bouncing
+  pending↔failed forever. Exits never expire; attempted batches still resume
+  past expiry so possibly-live venue state reconciles (the crash-resume
+  contract is pinned by test); never-attempted commands the batch journaled
+  remain `ops.sh wedged-command` scope, named in the failure record. Surfaced
+  and explicitly approved ("nothing expires a stale pending inbox request —
+  do it"). **The adjacent control is deliberately NOT built**: nothing bounds
+  the owner's convergence toward a stale *accepted* target while producers
+  are down — that is a liveness-coupled trading halt needing owner design,
+  re-surfaced in the session report.
 - **2026-08-03 — LONG sleeve switched to `LongV12WideStop` (v12) on demo and
   paper; mainnet wiring updated, still unarmed. DEPLOY PENDING — this entry
   gains the receipt when the host confirms.** Owner instruction: "wire v12 into

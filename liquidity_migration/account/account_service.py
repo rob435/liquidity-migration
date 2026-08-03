@@ -40,6 +40,7 @@ from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.core.deterministic_serialization import canonical_json, json_safe
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.account.entry_attempts import entry_signal_expiry_rejection
+from liquidity_migration.account.execution_adapters import StaleUnsubmittedExposureCommand
 from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONMENT_VALUES
 from liquidity_migration.account.market_capture import MarketCaptureError
 from liquidity_migration.data.storage import exclusive_file_lock
@@ -77,6 +78,15 @@ _REQUEST_FIELDS = frozenset(
 )
 _REQUESTED_INTENT_FIELDS = frozenset({"adapter_kind", "intent"})
 _SLEEVE_TARGET_INTENT_FIELDS = frozenset(SleeveTargetIntent.__dataclass_fields__)
+
+
+class StaleEntryRequestExpired(RuntimeError):
+    """A failed entry request whose every signal validity has lapsed.
+
+    Raised (and recorded in ``failed/``) instead of releasing the request back
+    to pending: re-queueing it can only ever act on dead decisions. The owner
+    stays up; the next pass services a clean queue head.
+    """
 
 
 class SleeveAdapterKind(StrEnum):
@@ -2110,6 +2120,41 @@ class AccountExecutionService:
         batch_id = f"account-convergence/{plan.item.symbol}/{plan.item.generation}/{attempt:04d}"
         return self._submit_convergence_plan(plan, batch_id=batch_id, attempt=attempt)
 
+    def _entry_request_retry_expired(self, request: AccountTargetRequest) -> bool:
+        """Return whether re-queueing a failed request can no longer help.
+
+        True only when every intent in the request is an exposure-increasing
+        entry past its own ``signal_valid_until_ms``: retrying such a request
+        can never produce a timely entry, so its processing failure is final.
+        Anything else — an exit (zero target), a resize revision, a still-valid
+        entry, or metadata this owner cannot classify — keeps today's
+        release-to-pending semantics. Exits deliberately never expire.
+
+        The caller additionally scopes this to failures that ARE the
+        never-attempted stale-command refusal: a batch whose commands were
+        already attempted must keep resuming past expiry so possibly-live
+        venue state reconciles instead of stranding.
+        """
+
+        now_ms = self.clock.wall_time_ns() // 1_000_000
+        saw_expired_entry = False
+        for item in request.intents:
+            intent = item.intent
+            if float(intent.signed_notional_usdt) == 0.0:
+                return False
+            rejection = entry_signal_expiry_rejection(
+                decision_key=intent.decision_key,
+                target_key=intent.target_key,
+                signed_notional_usdt=intent.signed_notional_usdt,
+                metadata=intent.metadata,
+                now_ms=now_ms,
+            )
+            if rejection == "account-service:entry-signal-expired":
+                saw_expired_entry = True
+                continue
+            return False
+        return saw_expired_entry
+
     def run_once(
         self,
         inbox: AccountIntentInbox,
@@ -2196,8 +2241,26 @@ class AccountExecutionService:
         try:
             receipt = self.handle(request)
         except Exception as exc:
+            terminal: StaleEntryRequestExpired | None = None
             if permanent_failure:
                 inbox.fail(path, error=exc)
+            elif isinstance(exc, StaleUnsubmittedExposureCommand) and self._entry_request_retry_expired(request):
+                # The 2026-08-01 outage: a committed entry batch bounced
+                # pending<->failed for two days, partially re-executing a stale
+                # decision on every owner restart. Once every entry in the
+                # request is past its own declared signal validity, the retry
+                # loop can only ever act on dead decisions — retire the request
+                # terminally instead. Never-attempted commands the batch may
+                # have journaled stay for `ops.sh wedged-command` to
+                # terminalize on venue evidence; already-attempted commands
+                # reconcile through the normal position/order truth paths.
+                terminal = StaleEntryRequestExpired(
+                    "entry request retired: every entry signal in "
+                    f"request={request.request_id} batch={request.batch_id} is past "
+                    "its declared signal_valid_until_ms; processing failure is "
+                    f"final ({type(exc).__name__}: {exc})"
+                )
+                inbox.fail(path, error=terminal)
             else:
                 inbox.release(path)
             # A failing queue head must not starve convergence: reduce-only
@@ -2207,6 +2270,8 @@ class AccountExecutionService:
                 self.converge_once()
             except Exception:  # noqa: BLE001 - reported via the raised head failure
                 pass
+            if terminal is not None:
+                raise terminal from exc
             raise
         inbox.complete(path, receipt)
         return receipt

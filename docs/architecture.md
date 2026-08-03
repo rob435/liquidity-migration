@@ -47,7 +47,13 @@ The inbox (`AccountIntentInbox` in
 [`account_service.py`](../liquidity_migration/account/account_service.py)) is a filesystem queue —
 `pending/processing/completed/failed/arrival`, atomic claim, durable arrival sequence — that
 coalesces later replacements and carries component revisions, so an older entry cannot
-reopen a component after a newer zero target.
+reopen a component after a newer zero target. A failed request normally releases back to
+`pending/` for retry, with one owner-approved exception (2026-08-03): when the failure is
+the never-attempted stale-command refusal (`StaleUnsubmittedExposureCommand`) and every
+entry intent in the request is past its own declared `signal_valid_until_ms`, the request
+retires terminally to `failed/` (`StaleEntryRequestExpired`) instead of retrying a dead
+decision forever — the 2026-08-01 outage loop. Exits never expire; a batch with attempted
+commands keeps resuming past expiry so possibly-live venue state reconciles.
 
 **Target mirror.** Mirrored intents carry `mirror_source_request_id`,
 `mirror_source_environment` and `mirror_scale`; `batch_id`, `target_key` and

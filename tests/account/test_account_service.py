@@ -25,7 +25,9 @@ from liquidity_migration.account.account_service import (
     AccountTargetRequest,
     RequestedIntent,
     SleeveAdapterKind,
+    StaleEntryRequestExpired,
 )
+from liquidity_migration.account.execution_adapters import StaleUnsubmittedExposureCommand
 from liquidity_migration.account.account_intent_client import completed_expired_entry_attempt_keys
 from liquidity_migration.strategy.account_strategy_state import (
     canonical_strategy_trade_rows,
@@ -2768,3 +2770,120 @@ def test_expressible_residual_still_retries_and_can_exhaust(tmp_path: Path) -> N
     assert abs(item.residual_signed_qty) == pytest.approx(0.1)
     assert not item.venue_minimum_dust
     assert item.status in {"retry_due", "retry_backoff"}
+
+
+# --- terminal retirement of expired entry requests (2026-08-01 outage) --------
+
+
+def _submit_entry_request(
+    tmp_path: Path,
+    inbox: AccountIntentInbox,
+    *,
+    signal_valid_until_ms: int,
+    notional: float = 20.0,
+) -> str:
+    target_key = "long/long-v1/signal-retire/BUSDT"
+    metadata: dict[str, object] = {}
+    if notional != 0.0:
+        metadata = {
+            "entry_attempt_key": f"entry-attempt/{target_key}",
+            "signal_ts_ms": 500,
+            "signal_valid_until_ms": signal_valid_until_ms,
+        }
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="retire-1",
+            batch_id="retire-1",
+            kind=SleeveAdapterKind.LONG,
+            notional=notional,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1000/entry/signal-retire",
+            metadata=metadata,
+        )
+    )
+    return target_key
+
+
+def _stale_command_raiser(request: AccountTargetRequest) -> None:
+    raise StaleUnsubmittedExposureCommand(
+        "refusing to submit a stale exposure-increasing command: command=test"
+    )
+
+
+def test_stale_command_failure_with_expired_entries_retires_request_terminally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = _inbox(tmp_path)
+    _submit_entry_request(tmp_path, inbox, signal_valid_until_ms=1_000)
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    service = _service(tmp_path / "account", CountingTwin(), clock=clock)
+    monkeypatch.setattr(service, "handle", _stale_command_raiser)
+
+    with pytest.raises(StaleEntryRequestExpired, match="entry request retired"):
+        service.run_once(inbox)
+
+    assert list((inbox.root / "pending").glob("*.json")) == []
+    assert list((inbox.root / "processing").glob("*.json")) == []
+    failed = list((inbox.root / "failed").glob("*.json"))
+    assert len(failed) == 1
+    payload = json.loads(failed[0].read_bytes())
+    assert payload["error_type"] == "StaleEntryRequestExpired"
+    # The record names both the expiry rule and the original refusal.
+    assert "signal_valid_until_ms" in payload["error"]
+    assert "StaleUnsubmittedExposureCommand" in payload["error"]
+
+
+def test_stale_command_failure_with_valid_signal_releases_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = _inbox(tmp_path)
+    _submit_entry_request(tmp_path, inbox, signal_valid_until_ms=3_000)
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    service = _service(tmp_path / "account", CountingTwin(), clock=clock)
+    monkeypatch.setattr(service, "handle", _stale_command_raiser)
+
+    with pytest.raises(StaleUnsubmittedExposureCommand):
+        service.run_once(inbox)
+
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+    assert list((inbox.root / "failed").glob("*.json")) == []
+
+
+def test_non_stale_failure_with_expired_entries_still_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-execution must keep resuming even past signal expiry: the
+    batch may hold attempted commands whose venue state has to reconcile."""
+
+    inbox = _inbox(tmp_path)
+    _submit_entry_request(tmp_path, inbox, signal_valid_until_ms=1_000)
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    service = _service(tmp_path / "account", CountingTwin(), clock=clock)
+
+    def _crash(request: AccountTargetRequest) -> None:
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(service, "handle", _crash)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_once(inbox)
+
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+    assert list((inbox.root / "failed").glob("*.json")) == []
+
+
+def test_exit_request_failure_never_retires_terminally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = _inbox(tmp_path)
+    _submit_entry_request(tmp_path, inbox, signal_valid_until_ms=1_000, notional=0.0)
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
+    service = _service(tmp_path / "account", CountingTwin(), clock=clock)
+    monkeypatch.setattr(service, "handle", _stale_command_raiser)
+
+    with pytest.raises(StaleUnsubmittedExposureCommand):
+        service.run_once(inbox)
+
+    assert len(list((inbox.root / "pending").glob("*.json"))) == 1
+    assert list((inbox.root / "failed").glob("*.json")) == []

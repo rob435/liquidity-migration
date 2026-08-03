@@ -64,7 +64,11 @@ from liquidity_migration.account.account_owner_health import (
     write_account_owner_health,
 )
 from liquidity_migration.account.account_owner_lease import DemoAccountIdentity, DemoAccountMutationLease
-from liquidity_migration.account.account_service import AccountExecutionService, AccountIntentInbox
+from liquidity_migration.account.account_service import (
+    AccountExecutionService,
+    AccountIntentInbox,
+    StaleEntryRequestExpired,
+)
 from liquidity_migration.venue.account_service_bybit import (
     BybitAccountSnapshotProvider,
     CapturedBybitMarketProvider,
@@ -1127,7 +1131,12 @@ def main(argv: list[str] | None = None) -> int:
                 failure_signature = f"{type(exc).__name__}: {exc}"[:500]
                 if failure_signature != last_request_failure_signature:
                     last_request_failure_signature = failure_signature
-                    _logger.exception("account request failed and was returned to pending")
+                    if isinstance(exc, StaleEntryRequestExpired):
+                        _logger.exception(
+                            "account request retired to failed/ (every entry signal expired)"
+                        )
+                    else:
+                        _logger.exception("account request failed and was returned to pending")
                 else:
                     _logger.error(
                         "account request failed again (traceback suppressed, unchanged cause): %s",

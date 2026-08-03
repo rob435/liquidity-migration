@@ -41,6 +41,7 @@ from liquidity_migration.account.account_service import (
     DEFAULT_MAX_MARKET_AGE_NS,
     AccountExecutionService,
     AccountIntentInbox,
+    StaleEntryRequestExpired,
 )
 from liquidity_migration.venue.account_service_bybit import (
     CapturedBybitMarketProvider,
@@ -557,7 +558,12 @@ def main(argv: list[str] | None = None) -> int:
                     readiness=market_readiness,
                 )
             except Exception as exc:  # noqa: BLE001 - durable request returns to pending
-                _logger.exception("paper account request failed and was returned to pending")
+                if isinstance(exc, StaleEntryRequestExpired):
+                    _logger.exception(
+                        "paper account request retired to failed/ (every entry signal expired)"
+                    )
+                else:
+                    _logger.exception("paper account request failed and was returned to pending")
                 health_status = AccountOwnerHealthStatus.BLOCKED
                 health_detail = f"{type(exc).__name__}: {exc}"
                 retry_delay = 0.5
