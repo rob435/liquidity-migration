@@ -19,6 +19,45 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — the de-friction purge deployed: every non-critical operator
+  ritual removed (owner instruction), live at `6d366fe` since 12:11 UTC in one
+  rollout together with the paper retirement and the memory retune below.**
+  What changed operationally: a wedged order command now terminalizes itself
+  on demo — the account owner's ~2s reconcile pass probes any command past
+  the 300s wedge bound and resolves it on the same venue-evidence ladder the
+  CLI uses (live orders and unreduced fills always refuse; mainnet only
+  surfaces the wedge in health, the transition stays an operator act). An
+  inbox head request retries at most 10 minutes before retiring to `failed/`.
+  `wedged-command` lost its intent-typing flags (`--operator`/`--reason`
+  optional, never-submitted needs no absent authorization, `resolve --all`
+  sweeps). The demo owner unit lost the ExecStartPost readiness gate and
+  MemoryHigh; producers went `Requires=`→`Wants=`; the hedge lost its owner
+  edge; the watchdog first fires 1 minute after enable, cooldown 60, alerts
+  on enabled-but-inactive units, and honors a per-check startup grace.
+  Deploy is one command (`ops.sh deploy staged|rollout`, EXPECTED_COMMIT
+  optional, auto-stop on a no-mainnet fleet, venue-flat proof advisory off
+  mainnet, no stopped-window lint/tests — CI on main is the gate). Registered
+  startup ceilings (demo-rule age, warmup timeout, INVOCATION_ID, stray-order
+  gate) bind mainnet only. Mainnet gates and the four capital controls are
+  unchanged (the producer wrappers' kernel guard survives as a direct env
+  read). **Deploy receipt:** `rollout-ok commit=6d366fe profile=operational`;
+  verify table all-expected (demo owner + LONG + CARRY + demo-liveness on,
+  CONTINUOUS off, all four mainnet units off); **zero paper unit files on the
+  host**, `/etc/liquidity-migration/account-paper-execution*` removed,
+  `sleeves.resolved.env` 0600 root:root, the designed "retired sleeve toggle
+  ignored: CONTINUOUS_PAPER_SLEEVE" warning observed once; memory shape live
+  (owner MemoryHigh=infinity MemoryMax=1G MemorySwapMax=384M RestartSec=5;
+  carry Max=1152M, long Max=1024M, both MemoryHigh-free; vm.swappiness=20);
+  demo rules re-probed in-rollout (509 symbols, refresh-due-past-half-life);
+  owner digest delivered 12:12 UTC; first post-deploy watchdog run 12:16 UTC:
+  **"0 active alert(s)"** after sending resolved notes for the last two
+  demo-paper agreement warnings. Deliberately not done (flagged, not lost):
+  symbol-scoped entry gating, the owner-lease provenance chain, persistent
+  `stop-mainnet`, the mainnet owner's own MemoryHigh=384M throttle (owner
+  decisions), and the pre-push hook's git-fixture tests corrupting the real
+  repo when run from a linked worktree (repaired same day; hermeticity fix is
+  a spawned task — until it lands, push only from the primary checkout).
+
 - **2026-08-03 — demo fleet memory retune (owner-approved), spending the
   ~740 MiB the paper retirement frees on the same 3.7 GiB host. Rides the
   same deploy as the retirement below.** Measured before the change: carry
@@ -32,10 +71,10 @@ how it got there. That history is in Git.
   tightens the journald cap 1G→500M. Re-enabling CONTINUOUS requires a fleet
   re-budget (noted in the rmom-refresh unit).
 
-- **2026-08-03 — paper trading retired whole (owner instruction). DEPLOY
-  PENDING — rides the next fleet deploy (agreed with the concurrent
-  recovery/defriction session, which drives it); this entry gains the receipt
-  when the host confirms the paper units are gone.** One
+- **2026-08-03 — paper trading retired whole (owner instruction). Deployed
+  12:11 UTC in the combined rollout; the host receipt (zero paper units,
+  `/etc` paper config removed, resolved sleeves root-only) is in the purge
+  entry above.** One
   deliberate removal: the paper owner, all three paper producers, the target
   mirror, the paper sleeves.env toggles, the `demo-operational` deploy profile,
   the demo-paper watchdog scope, paper Telegram, `PAPER_EQUITY_USDT`
