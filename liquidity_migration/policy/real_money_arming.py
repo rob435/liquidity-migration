@@ -574,13 +574,22 @@ def _render(args: argparse.Namespace) -> int:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    # The document's internal render scale is not owner-facing: every cap is a
+    # ratio of live wallet equity at runtime, so the summary speaks in ratios.
+    # An absolute here reads like a capital decision and is not one.
     summary: dict[str, Any] = {
         "output": str(output),
         "dials": source,
-        "capital_reference_usdt": profile.capital_reference_usdt,
-        "tracks_equity": profile.capital_reference.tracks_equity,
-        "sleeve_shares": {
-            limit.sleeve: limit.max_gross_notional_usdt
+        "capital_reference": (
+            "tracks wallet equity"
+            if profile.capital_reference.tracks_equity
+            else f"fixed {profile.capital_reference_usdt:g} USDT"
+        ),
+        "gross_multiple_of_equity": (
+            profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt
+        ),
+        "sleeve_shares_of_equity": {
+            limit.sleeve: limit.max_gross_notional_usdt / profile.capital_reference_usdt
             for limit in profile.account_risk.sleeve_limits
         },
     }
