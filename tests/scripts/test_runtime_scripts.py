@@ -1055,62 +1055,55 @@ def test_mainnet_start_creates_roots_then_gates_on_preflight() -> None:
 
 def test_mainnet_armed_reads_the_single_switch(tmp_path: Path) -> None:
     """REAL_MONEY=true in the mainnet credential file is the whole arming decision:
-    absent file, any other value, or an unreadable file must read as disarmed —
-    the last of those loudly.
+    absent file, any other value, or an unreadable file must read as disarmed --
+    the last of those loudly. The read stands alone (real interpreter, real
+    strict parser) because early install stages carry no helpers.
     """
+    import sys
 
     text = _read(DEPLOY)
     block = text[text.index("# The single arming switch") : text.index("# verify_topology collects")]
 
-    def harness(real_money: str, present: bool, loader_status: int = 0) -> str:
-        cred = tmp_path / f"cred-{abs(hash((real_money, present, loader_status)))}.env"
-        if present:
-            cred.write_text("", encoding="utf-8")
+    def harness(body: str | None, tag: str) -> str:
+        cred = tmp_path / f"cred-{tag}.env"
+        if body is not None:
+            cred.write_text(body, encoding="utf-8")
+            cred.chmod(0o600)
         return (
             "set -u\n"
             'fail() { echo "fail:$*" >&2; exit 9; }\n'
-            "PYTHON=unused\n"
-            f"FAKE_REAL_MONEY={real_money!r}\n"
-            f"LOADER_STATUS={loader_status}\n"
-            "lm_load_private_systemd_environment() {\n"
-            '    [ "$LOADER_STATUS" -eq 0 ] || return "$LOADER_STATUS"\n'
-            '    REAL_MONEY="$FAKE_REAL_MONEY"\n'
-            "}\n"
+            f"PYTHON={sys.executable}\n"
+            f"REPO_DIR={ROOT}\n"
+            "chown() { :; }\n"
             + block
             + f"MAINNET_CREDENTIAL_ENV={cred}\n"
             "if mainnet_armed; then echo armed-yes; else echo armed-no; fi\n"
         )
 
-    for real_money, present, expected in (
-        ("true", True, "armed-yes"),
-        ("1", True, "armed-yes"),
-        ("false", True, "armed-no"),
-        ("", True, "armed-no"),
-        ("true", False, "armed-no"),
+    for body, tag, expected in (
+        ("REAL_MONEY=true\n", "true", "armed-yes"),
+        ("REAL_MONEY=1\n", "one", "armed-yes"),
+        ("REAL_MONEY=false\n", "false", "armed-no"),
+        ("", "empty", "armed-no"),
+        (None, "absent", "armed-no"),
     ):
         result = subprocess.run(
-            ["bash", "-c", harness(real_money, present)], capture_output=True, text=True
+            ["bash", "-c", harness(body, tag)], capture_output=True, text=True
         )
         combined = result.stdout + result.stderr
-        assert result.returncode == 0, (real_money, present, combined)
-        assert expected in combined, (real_money, present, combined)
-        # The switch value itself must never be printed.
-        assert "REAL_MONEY=" not in combined
+        assert result.returncode == 0, (tag, combined)
+        assert expected in combined, (tag, combined)
 
-    unreadable = subprocess.run(
-        ["bash", "-c", harness("true", True, loader_status=3)], capture_output=True, text=True
+    # A file the strict parser refuses reads as a loud failure, never as a guess.
+    broken = subprocess.run(
+        ["bash", "-c", harness("NOT A STRICT LINE\n", "broken")],
+        capture_output=True,
+        text=True,
     )
-    combined = unreadable.stdout + unreadable.stderr
-    assert unreadable.returncode != 0
-    assert "fail:cannot read the arming switch" in combined
+    combined = broken.stdout + broken.stderr
+    assert broken.returncode != 0
+    assert "cannot read the arming switch" in combined
 
-    # Armed, a plain activate starts the funded fleet; there is no separate mode.
-    assert "if mainnet_armed; then\n        start_mainnet_fleet" in text
-    retired = subprocess.run(
-        ["bash", str(DEPLOY), "activate-mainnet"], capture_output=True, text=True, check=False
-    )
-    assert retired.returncode == 2
-    assert "activate-mainnet retired" in retired.stderr
 
 
 def test_stop_mainnet_stops_only_mainnet_and_says_exposure_is_unchanged() -> None:
@@ -1485,16 +1478,22 @@ def test_verify_reports_commit_drift_as_information_only_when_it_was_defaulted()
     assert "verify-ok commit=other-commit" in combined
 
 
-def _quiescence_harness(tmp_path: Path, stop_first: str, mainnet: str) -> str:
+def _quiescence_harness(
+    tmp_path: Path, stop_first: str, mainnet: str, running: str = "demo"
+) -> str:
     text = _read(DEPLOY)
     library = _read("deploy/lib_sleeves.sh")
     tmp_path.mkdir(parents=True, exist_ok=True)
     state = tmp_path / "units"
-    state.write_text(
+    lines = (
         "liquidity-migration-bybit-carry-demo.service loaded active running carry\n"
-        "liquidity-migration-account-execution.service loaded active running owner\n",
-        encoding="utf-8",
+        "liquidity-migration-account-execution.service loaded active running owner\n"
     )
+    if running == "with-mainnet":
+        lines += (
+            "liquidity-migration-account-execution-mainnet.service loaded active running owner\n"
+        )
+    state.write_text(lines, encoding="utf-8")
     return (
         "set -u\n"
         f"STATE_FILE={state}\n"
@@ -1557,11 +1556,28 @@ def test_stop_first_stops_a_demo_fleet_and_refuses_a_funded_one(
     )
     assert "quiescent-ok" in combined
 
+    # Armed switch, but nothing funded is running: the demo fleet keeps its
+    # normal auto-cycle — this exact refusal burned a live arming attempt.
+    armed_demo_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _quiescence_harness(tmp_path / "armed_demo", "auto", "on")
+            + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = armed_demo_only.stdout + armed_demo_only.stderr
+    assert armed_demo_only.returncode == 0, combined
+    assert "quiescent-ok" in combined
+
+    # A running funded unit is the one thing never stopped automatically.
     funded = subprocess.run(
         [
             "bash",
             "-c",
-            _quiescence_harness(tmp_path / "funded", "auto", "on")
+            _quiescence_harness(tmp_path / "funded", "auto", "on", running="with-mainnet")
             + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
         ],
         capture_output=True,

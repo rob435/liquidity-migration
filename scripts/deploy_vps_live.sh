@@ -618,11 +618,13 @@ running_liqmig_units() {
         | awk 'NF >= 3 && $3 != "inactive" && $3 != "failed" {print $1 " (" $3 ")"}'
 }
 
-# STOP_FIRST=auto resolves to "stop" for a pure demo fleet and to the
-# refusal for a funded one.
+# STOP_FIRST=auto resolves to "stop" unless a funded unit is actually
+# running: bouncing a live mainnet owner mid-order is the one stop that is
+# never automatic. An armed switch with nothing funded running keeps the
+# demo fleet's normal auto-cycle.
 resolve_stop_first() {
     [ "$STOP_FIRST" = auto ] || return 0
-    if mainnet_armed; then
+    if mainnet_armed && running_liqmig_units | grep -q -- '-mainnet'; then
         STOP_FIRST=0
     else
         STOP_FIRST=1
