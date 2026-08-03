@@ -26,9 +26,13 @@ how it got there. That history is in Git.
   bookkeeping moved to the owner's service journal. Watchdog pages moved to a
   second chat line — `TELEGRAM_ALERT_CHAT_ID`, same bot, plain one-line
   headline plus a stable `ref <key>` to hand to Claude; full technical detail
-  stays on the watchdog's journald. The var is empty on the host, so alerts
-  still fall back to the main chat until the owner creates the alerts group
-  (`docs/notifications.md` has the 3-step setup). Deployed at `4152d3b`:
+  stays on the watchdog's journald. Wired live the same afternoon: the owner
+  created the "liquidity-migration" Telegram group with the existing bot, and
+  `TELEGRAM_ALERT_CHAT_ID=-5503250433` is set in the host's
+  `bybit-demo.env` (delivery test-confirmed; the watchdog re-reads env every
+  3-min fire, no restart needed). A separate
+  `@liquidity_migration_alerts_bot` exists but is parked — using it would
+  need per-channel token support and a deploy. Deployed at `4152d3b`:
   `rollout-ok commit=4152d3b profile=operational` 14:37 UTC, book proved flat
   at every rollout phase. Immediately after, the **clean-slate ledger reset**
   ran as the first production use of the Python reset tool (`3f52edd`): all
