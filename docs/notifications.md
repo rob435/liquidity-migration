@@ -11,11 +11,10 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | Unit | Telegram | Sends |
 | --- | --- | --- |
 | `account-execution` (demo owner) | on | digest + event notices |
-| `account-paper-execution` | on | digest + event notices, paper book |
 | `account-execution-mainnet` | on | digest + event notices, funded book |
-| `demo-liveness` | on | watchdog alerts, demo/paper scope |
+| `demo-liveness` | on | watchdog alerts, demo scope |
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope |
-| every producer, hedge, rmom, target-mirror | off or unset | nothing |
+| every producer, hedge, rmom | off or unset | nothing |
 
 Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem,
 not its own.
@@ -41,16 +40,16 @@ never arrived — which is what the watchdog reads.
 ## The liveness watchdog
 
 [`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per timer fire,
-every 3 minutes after a 10-minute cold-start grace. `--account-scope` selects `demo`, `demo-paper`,
-or `mainnet`; the mainnet scope runs only the mainnet owner and producers against roots disjoint
-from demo and paper.
+every 3 minutes after a 10-minute cold-start grace. `--account-scope` selects `demo` or
+`mainnet`; the mainnet scope runs only the mainnet owner and producers against roots disjoint
+from demo.
 
 It **always exits 0**. A watchdog that crash-loops is a watchdog that is off, so a failure to verify
 degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120` sits under the
 3-minute timer so a hung run goes `failed` rather than silently never re-firing.
 
 What it checks: systemd unit states; account-owner health and readiness freshness; live-L2 capture
-freshness; per-sleeve producer cycle age; demo/paper book agreement; the frozen demo-rule receipt's
+freshness; per-sleeve producer cycle age; the frozen demo-rule receipt's
 remaining life; residual-momentum signal staleness; the committed hedge model prior; oneshot
 run duration; free disk; and the owner's digest.
 

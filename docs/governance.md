@@ -154,5 +154,5 @@ never a prerequisite.
 Mainnet, `REAL_MONEY`, and live credentials require a separate, narrow owner
 instruction naming the deployment, capital/risk limits, controls, and expiry.
 No rolling record, green report, or repository authority opens that door.
-Demo and paper are the default operating surfaces, and capital-preservation
+Demo is the default operating surface, and capital-preservation
 controls are never traded away for velocity.

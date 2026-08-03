@@ -115,28 +115,21 @@ own rules — its last honest simulation was healthy but modest (+11.06%, worst
 dip −1.84%, smoothness 1.45). Its code, its Bitcoin trend check, and its
 Bitcoin/Ethereum hedge job are all dormant. Restarting it is a fresh decision.
 
-## 6. Demo, paper, real money
+## 6. Demo and real money
 
 | Name | Exchange | Money | Credentials | What it proves |
 | --- | --- | --- | --- | --- |
 | **demo** | real Bybit demo realm | none | yes, demo-only | real order handling, fees, crowd fees, outages |
-| **paper twin** | none | none | none | the software plumbing, and only that |
 | **real money** | Bybit mainnet | yours | none held here | nothing yet — never used |
 
-The paper twin is being changed so it no longer decides for itself: it
-republishes demo's targets verbatim (`paper-target-mirror`) and only executes
-them. Two producers reading the same files seconds apart disagreed 6% of the
-time — once opening and closing a TLMUSDT position demo never asked for, for
-−70.73 USDT. One fleet decides, both execute, so every remaining difference
-between the two books is execution and nothing else.
-
-The same change fixes two things the twin got wrong: its account balance was a
-fixed number, so it could never resize a position (0 resizes in 1,776 cycles
-against demo's 366), and it was never charged the crowd fees it was supposedly
-collecting.
-
-**None of this is live yet** — written and tested, not deployed. Until it is,
-the twin still runs its own producer with a frozen balance.
+There used to be a third book: the **paper twin**, a copy of the system with no
+exchange behind it, invented fills, and a fixed pretend balance. It was retired
+on 2026-08-03. It never produced evidence anyone graded — its fills were made
+up — and it caused a disproportionate share of the outages: it once opened a
+TLMUSDT position demo never asked for (−70.73 USDT), it could never resize a
+position (0 resizes in 1,776 cycles against demo's 366), and it was never
+charged the crowd fees it was supposedly
+collecting. Old paper journals stay on disk as history; nothing reads them.
 
 Arming real money is your act alone. The mainnet sleeves are off in the
 repository, which a host edit cannot reverse. The steps are now commands rather

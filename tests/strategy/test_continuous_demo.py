@@ -1,4 +1,4 @@
-"""Target-only decision contract for the CONTINUOUS demo and paper producer: signal
+"""Target-only decision contract for the CONTINUOUS demo producer: signal
 construction, admission, deterministic target planning, and the account-owner
 publication boundary.
 """
@@ -161,7 +161,7 @@ def _dispersed_synth(
 
 def _route(tmp_path: Path, *, environment: str = "demo") -> AccountRoute:
     return ensure_account_route(
-        account_id=("bybit-demo-unified" if environment == "demo" else "bybit-paper-unified"),
+        account_id=("bybit-demo-unified" if environment == "demo" else "bybit-mainnet-unified"),
         environment=environment,
         account_root=tmp_path / "account",
         inbox_root=tmp_path / "inbox",
@@ -1653,9 +1653,7 @@ def test_profile_resolves_only_the_active_target_contract() -> None:
         ("p3", "turn3_pop3", 240, 0.12, 1.0, 0.35, 0.0),
     )
     assert continuous_managed_strategy_ids(config) == ("continuous_fade_v2",)
-    assert (
-        continuous_strategy_id(ContinuousDemoCycleConfig(execution_environment="paper")) == "continuous_fade_v2_paper"
-    )
+    assert continuous_strategy_id(config) == "continuous_fade_v2"
 
 
 def test_runtime_validation_requires_exactly_one_target_environment_and_route(
@@ -1665,7 +1663,7 @@ def test_runtime_validation_requires_exactly_one_target_environment_and_route(
         _validate_continuous_demo_config(ContinuousDemoCycleConfig())
     with pytest.raises(ValueError, match="execution_environment"):
         _validate_continuous_demo_config(_routed_config(tmp_path / "invalid", environment="live"))
-    with pytest.raises(ValueError, match="operational demo/paper mode requires"):
+    with pytest.raises(ValueError, match="operational demo mode requires"):
         _validate_continuous_demo_config(ContinuousDemoCycleConfig(execution_environment="demo"))
     with pytest.raises(ValueError, match="configured together"):
         _validate_continuous_demo_config(
@@ -1676,7 +1674,7 @@ def test_runtime_validation_requires_exactly_one_target_environment_and_route(
         )
 
     _validate_continuous_demo_config(_routed_config(tmp_path / "demo"))
-    _validate_continuous_demo_config(_routed_config(tmp_path / "paper", environment="paper"))
+    _validate_continuous_demo_config(_routed_config(tmp_path / "mainnet", environment="mainnet"))
 
 
 def test_runtime_validation_rejects_retired_profile_and_invalid_signal_timing(
@@ -1713,12 +1711,10 @@ def test_notional_multiplier_scales_exposure_and_is_validated(tmp_path: Path) ->
             _validate_continuous_demo_config(_routed_config(tmp_path / str(bad), notional_multiplier=bad))
 
 
-def test_cycles_datasets_keep_demo_and_paper_telemetry_separate() -> None:
+def test_cycles_dataset_is_the_single_demo_telemetry_stream() -> None:
     demo = continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="demo"))
-    paper = continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="paper"))
 
     assert demo == "continuous_fade_demo_cycles"
-    assert paper == "continuous_fade_paper_cycles"
 
 
 @pytest.mark.parametrize(

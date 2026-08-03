@@ -47,7 +47,7 @@ class StrategyCycleHealth:
         if type(self.sleeve) is not str or self.sleeve not in {"long", "continuous", "carry"}:
             raise ValueError("strategy-cycle health sleeve must be 'long', 'continuous', or 'carry'")
         if type(self.environment) is not str or self.environment not in EXECUTION_ENVIRONMENT_VALUES:
-            raise ValueError("strategy-cycle health environment must be 'demo' or 'paper'")
+            raise ValueError("strategy-cycle health environment must be a registered execution environment")
         if type(self.cycle_id) is not str or not self.cycle_id or len(self.cycle_id) > 500:
             raise ValueError("strategy-cycle health cycle_id must be 1..500 characters")
         if type(self.cycle_ts_ms) is not int or self.cycle_ts_ms <= 0:

@@ -95,7 +95,7 @@ rest from this repository's own failures.
     disclosure, and reconstructable source artifacts is presentation, not
     decision evidence.
 
-24. **Unreconciled forward drift.** Paper/demo/mainnet behavior must be compared
+24. **Unreconciled forward drift.** Demo/mainnet behavior must be compared
     with the intended model: expected orders, submissions, fills, misses,
     slippage, costs, exits, and PnL. Unexplained drift limits both execution and
     performance conclusions.
@@ -184,7 +184,7 @@ For the active repository:
 - Verify the precise manifest provenance in `docs/data.md` (Point-in-time
   membership); archive-observed membership and current-listing-derived tail
   coverage are not the same fact.
-- Treat demo/paper reconciliation as execution evidence, not as alpha or OOS
+- Treat demo reconciliation as execution evidence, not as alpha or OOS
   proof.
 - Inspect funding and alternative-data coverage per run. Root names and old
   coverage receipts do not establish current completeness.

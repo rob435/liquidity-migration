@@ -110,7 +110,6 @@ def test_continuous_cycle_datasets_registered_and_roundtrip(tmp_path: Path) -> N
 
     datasets = {
         continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="demo")),
-        continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="paper")),
     }
     for dataset in datasets:
         assert dataset in DATASETS

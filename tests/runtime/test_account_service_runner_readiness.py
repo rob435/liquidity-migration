@@ -610,48 +610,45 @@ def test_runner_degrades_every_exposure_bearing_startup_check() -> None:
     assert "startup_degradations.clear()" in source
 
 
-def test_demo_and_paper_owners_share_the_strict_expected_head_gate() -> None:
+def test_the_owner_runner_keeps_the_strict_expected_head_gate() -> None:
     repo = Path(__file__).resolve().parents[2]
-    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
-        source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
-        assert "RequestedMarketWarmupGate" in source
-        assert "run_ready_request_or_converge(" in source
-        assert "operational_market_symbols(" in source
-        assert "public_stream.start(live_symbols)" in source
-        assert "public_stream.update_symbols(desired)" in source
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
+    assert "RequestedMarketWarmupGate" in source
+    assert "run_ready_request_or_converge(" in source
+    assert "operational_market_symbols(" in source
+    assert "public_stream.start(live_symbols)" in source
+    assert "public_stream.update_symbols(desired)" in source
 
 
-def test_demo_and_paper_validate_registered_startup_bounds_before_owner_identity() -> None:
+def test_the_owner_runner_validates_registered_startup_bounds_before_owner_identity() -> None:
     repo = Path(__file__).resolve().parents[2]
-    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
-        source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
-        main = source[source.index("def main(") :]
-        assert main.index("require_registered_demo_rule_max_age_hours(") < main.index("require_systemd_invocation_id()")
-        assert main.index("require_registered_request_market_warmup_timeout(") < main.index(
-            "require_systemd_invocation_id()"
-        )
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
+    main = source[source.index("def main(") :]
+    assert main.index("require_registered_demo_rule_max_age_hours(") < main.index("require_systemd_invocation_id()")
+    assert main.index("require_registered_request_market_warmup_timeout(") < main.index(
+        "require_systemd_invocation_id()"
+    )
 
 
-def test_demo_and_paper_owner_recorders_bind_validated_systemd_invocation() -> None:
+def test_the_owner_recorder_binds_validated_systemd_invocation() -> None:
     repo = Path(__file__).resolve().parents[2]
-    for filename in ("runtime/account_service_runner.py", "runtime/account_paper_runner.py"):
-        source = (repo / "liquidity_migration" / filename).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        recorder_calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "SequenceAwareMarketRecorder"
-        ]
-        assert len(recorder_calls) == 1
-        invocation_keywords = [
-            keyword.value for keyword in recorder_calls[0].keywords if keyword.arg == "owner_invocation_id"
-        ]
-        assert len(invocation_keywords) == 1
-        assert isinstance(invocation_keywords[0], ast.Name)
-        assert invocation_keywords[0].id == "invocation_id"
-        assert "invocation_id = require_systemd_invocation_id()" in source
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    recorder_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "SequenceAwareMarketRecorder"
+    ]
+    assert len(recorder_calls) == 1
+    invocation_keywords = [
+        keyword.value for keyword in recorder_calls[0].keywords if keyword.arg == "owner_invocation_id"
+    ]
+    assert len(invocation_keywords) == 1
+    assert isinstance(invocation_keywords[0], ast.Name)
+    assert invocation_keywords[0].id == "invocation_id"
+    assert "invocation_id = require_systemd_invocation_id()" in source
 
 
 def test_demo_owner_supervises_private_execution_stream_before_admission() -> None:

@@ -639,7 +639,7 @@ def write_continuous_equity_report(
                 "confirmatory experiment."
             ),
             (
-                "OOS window: none for this run. Forward demo/paper data supports only separately scoped "
+                "OOS window: none for this run. Forward demo data supports only separately scoped "
                 "claims whose profile, clock, and stopping rule were fixed before observation."
             ),
             "",
@@ -963,7 +963,7 @@ def main() -> int:
         help=(
             "RESEARCH RENDER ONLY (T-A ablation): run the continuous components with "
             "btc_trend_gate='off'. Requires an isolated --output-root; never affects "
-            "the runtime demo/paper producers or the hedge service."
+            "the runtime demo producers or the hedge service."
         ),
     )
     args = parser.parse_args()

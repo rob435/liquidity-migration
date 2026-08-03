@@ -1,6 +1,6 @@
 ---
 name: run-strategy
-description: Construct and run current liquidity_migration CLI, data, audit, and demo/paper operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
+description: Construct and run current liquidity_migration CLI, data, audit, and demo operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
 ---
 
 # Run repository commands safely

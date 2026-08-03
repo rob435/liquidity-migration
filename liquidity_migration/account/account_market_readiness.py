@@ -1,4 +1,4 @@
-"""Strict queue-head market-data readiness shared by demo and paper owners."""
+"""Strict queue-head market-data readiness for the account owners."""
 
 from __future__ import annotations
 

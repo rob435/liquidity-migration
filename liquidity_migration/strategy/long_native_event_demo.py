@@ -151,9 +151,6 @@ class LongNativeDemoCycleConfig:
     # Daemon builds a KlineStreamManager to feed an in-memory store. The long
     # sleeve's universe is small, but the 90-day bootstrap is worth paying once.
     ws_klines_enabled: bool = True
-    # A co-located paper producer follows the demo producer's flushed snapshot
-    # read-only, avoiding a second 120-symbol, 100-day bootstrap and WS pool.
-    klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 100  # ls-4: lockstep with lookback_days
     ws_klines_universe_refresh_seconds: float = 3600.0
@@ -166,7 +163,6 @@ def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
     # Named per environment so a later reader cannot mistake one environment's
     # cycles for another's.
     return {
-        ExecutionEnvironment.PAPER: "long_native_paper_cycles",
         ExecutionEnvironment.MAINNET: "long_native_mainnet_cycles",
     }.get(execution_environment(config.execution_environment), "long_native_demo_cycles")
 
@@ -224,7 +220,7 @@ def _validate_long_demo_config(
         raise ValueError("account_intent_inbox_root and account_execution_root must be configured together")
     if not has_account_inbox:
         raise ValueError(
-            "operational demo/paper mode requires account_intent_inbox_root and "
+            "operational target mode requires account_intent_inbox_root and "
             "account_execution_root; direct sleeve order authority is retired"
         )
 

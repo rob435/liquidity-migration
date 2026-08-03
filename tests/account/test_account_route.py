@@ -37,11 +37,9 @@ def _rewrite_canonical(path: Path, payload: dict[str, object]) -> None:
     path.write_bytes(canonical_json(payload) + b"\n")
 
 
-@pytest.mark.parametrize("runner_name", ["demo", "paper"])
 def test_owner_acquires_lease_before_route_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    runner_name: str,
 ) -> None:
     monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
     monkeypatch.setenv("REAL_MONEY", "false")
@@ -56,105 +54,56 @@ def test_owner_acquires_lease_before_route_initialization(
     inbox_root = tmp_path / "inbox"
     calls: list[str] = []
 
-    if runner_name == "demo":
-        import liquidity_migration.runtime.account_service_runner as runner
+    import liquidity_migration.runtime.account_service_runner as runner
 
-        argv = [
-            "--account-root",
-            str(account_root),
-            "--inbox-root",
-            str(inbox_root),
-            "--capture-root",
-            str(tmp_path / "capture"),
-            "--symbols-file",
-            str(tmp_path / "symbols.json"),
-            "--demo-rules-file",
-            str(tmp_path / "rules.json"),
-            "--risk-policy-file",
-            str(tmp_path / "risk.json"),
-            "--disaster-stop-fraction",
-            "0.25",
-        ]
+    argv = [
+        "--account-root",
+        str(account_root),
+        "--inbox-root",
+        str(inbox_root),
+        "--capture-root",
+        str(tmp_path / "capture"),
+        "--symbols-file",
+        str(tmp_path / "symbols.json"),
+        "--demo-rules-file",
+        str(tmp_path / "rules.json"),
+        "--risk-policy-file",
+        str(tmp_path / "risk.json"),
+        "--disaster-stop-fraction",
+        "0.25",
+    ]
 
-        class FakeDemoLease:
-            def __init__(self, _identity: object) -> None:
-                calls.append("lease-created")
+    class FakeDemoLease:
+        def __init__(self, _identity: object) -> None:
+            calls.append("lease-created")
 
-            def acquire(self) -> None:
-                assert not account_root.exists()
-                assert not inbox_root.exists()
-                calls.append("lease-acquired")
+        def acquire(self) -> None:
+            assert not account_root.exists()
+            assert not inbox_root.exists()
+            calls.append("lease-acquired")
 
-            def close(self) -> None:
-                calls.append("lease-closed")
+        def close(self) -> None:
+            calls.append("lease-closed")
 
-        monkeypatch.setattr(runner, "validate_private_order_permission", lambda **_kwargs: None)
-        monkeypatch.setattr(
-            runner, "resolve_private_credentials", lambda **_kwargs: ("demo-key", "demo-secret")
-        )
-        monkeypatch.setattr(runner, "BybitPrivateClient", lambda **_kwargs: object())
-        monkeypatch.setattr(
-            runner,
-            "require_order_submit_permission",
-            lambda _client: {"apiKey": "demo-key", "userID": "123"},
-        )
-        monkeypatch.setattr(runner, "DemoAccountMutationLease", FakeDemoLease)
-        later_resources = (
-            "load_demo_rules",
-            "AccountExecutionKernel",
-            "SequenceAwareMarketRecorder",
-            "BybitRawPublicMarketStream",
-            "AccountExecutionService",
-            "AccountIntentInbox",
-        )
-    else:
-        import liquidity_migration.runtime.account_paper_runner as runner
-
-        argv = [
-            "--account-root",
-            str(account_root),
-            "--inbox-root",
-            str(inbox_root),
-            "--capture-root",
-            str(tmp_path / "capture"),
-            "--symbols-file",
-            str(tmp_path / "symbols.json"),
-            "--demo-rules-file",
-            str(tmp_path / "rules.json"),
-            "--risk-policy-file",
-            str(tmp_path / "risk.json"),
-            "--equity-usdt",
-            "10000",
-        ]
-
-        class FakePaperLease:
-            def __init__(
-                self,
-                path: Path,
-                *,
-                allow_private_parent_mount_boundary: bool = False,
-            ) -> None:
-                assert path == account_root.resolve() / "account_execution_owner.lock"
-                assert allow_private_parent_mount_boundary is True
-                calls.append("lease-created")
-
-            def acquire(self) -> None:
-                assert not account_root.exists()
-                assert not inbox_root.exists()
-                calls.append("lease-acquired")
-
-            def close(self) -> None:
-                calls.append("lease-closed")
-
-        monkeypatch.setattr(runner, "AccountOwnerLease", FakePaperLease)
-        later_resources = (
-            "load_demo_rules",
-            "AccountExecutionKernel",
-            "SequenceAwareMarketRecorder",
-            "BybitRawPublicMarketStream",
-            "AccountExecutionService",
-            "AccountIntentInbox",
-        )
+    monkeypatch.setattr(runner, "validate_private_order_permission", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        runner, "resolve_private_credentials", lambda **_kwargs: ("demo-key", "demo-secret")
+    )
+    monkeypatch.setattr(runner, "BybitPrivateClient", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        runner,
+        "require_order_submit_permission",
+        lambda _client: {"apiKey": "demo-key", "userID": "123"},
+    )
+    monkeypatch.setattr(runner, "DemoAccountMutationLease", FakeDemoLease)
+    later_resources = (
+        "load_demo_rules",
+        "AccountExecutionKernel",
+        "SequenceAwareMarketRecorder",
+        "BybitRawPublicMarketStream",
+        "AccountExecutionService",
+        "AccountIntentInbox",
+    )
 
     actual_derive = runner.derive_account_route
 
@@ -190,41 +139,6 @@ def test_owner_acquires_lease_before_route_initialization(
     ]
     assert not account_root.exists()
     assert not inbox_root.exists()
-
-
-def test_paper_owner_rejects_private_credentials_before_route_or_resources(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import liquidity_migration.runtime.account_paper_runner as runner
-
-    monkeypatch.setenv("INVOCATION_ID", "ab" * 16)
-    monkeypatch.setenv("REAL_MONEY", "false")
-    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "must-not-cross-paper-boundary")
-    monkeypatch.setattr(
-        runner,
-        "ensure_account_route",
-        lambda **_kwargs: pytest.fail("paper route opened before credential rejection"),
-    )
-    argv = [
-        "--account-root",
-        str(tmp_path / "account"),
-        "--inbox-root",
-        str(tmp_path / "inbox"),
-        "--capture-root",
-        str(tmp_path / "capture"),
-        "--symbols-file",
-        str(tmp_path / "symbols.json"),
-        "--demo-rules-file",
-        str(tmp_path / "rules.json"),
-        "--risk-policy-file",
-        str(tmp_path / "risk.json"),
-        "--equity-usdt",
-        "10000",
-    ]
-
-    with pytest.raises(RuntimeError, match="paper owner received private exchange credentials"):
-        runner.main(argv)
 
 
 def test_owner_initializes_deterministic_canonical_mirrors_and_reader_validates(
@@ -281,8 +195,8 @@ def test_privileged_observer_binds_route_read_to_explicit_owner_uid(
     account_root = tmp_path / "account"
     inbox_root = tmp_path / "inbox"
     route = ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=account_root,
         inbox_root=inbox_root,
     )
@@ -290,8 +204,8 @@ def test_privileged_observer_binds_route_read_to_explicit_owner_uid(
 
     assert (
         require_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=account_root,
             inbox_root=inbox_root,
             expected_owner_uid=manifest_uid,
@@ -300,8 +214,8 @@ def test_privileged_observer_binds_route_read_to_explicit_owner_uid(
     )
     with pytest.raises(AccountRouteIntegrityError, match="expected"):
         require_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=account_root,
             inbox_root=inbox_root,
             expected_owner_uid=manifest_uid + 1,
@@ -406,15 +320,15 @@ def test_unbound_persistent_lock_skeleton_is_safe_to_initialize(tmp_path: Path) 
     identities = {path: (path.stat().st_dev, path.stat().st_ino) for path in lock_paths}
 
     route = ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=account_root,
         inbox_root=inbox_root,
     )
 
     assert require_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=account_root,
         inbox_root=inbox_root,
     ) == route
@@ -448,8 +362,8 @@ def test_unbound_unsafe_lock_leaf_still_requires_cutover(
         match=r"account_journal/journal\.lock.*explicit route cutover",
     ):
         ensure_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=account_root,
             inbox_root=inbox_root,
         )
@@ -461,8 +375,8 @@ def test_producer_validation_is_read_only_when_route_is_missing(tmp_path: Path) 
 
     with pytest.raises(AccountRouteMissingError, match="manifest is missing"):
         require_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=account_root,
             inbox_root=inbox_root,
         )
@@ -598,8 +512,8 @@ def test_cross_wired_valid_manifests_are_rejected_without_rewrite(
         inbox_root=inbox_a,
     )
     ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-mainnet-unified",
+        environment="mainnet",
         account_root=account_b,
         inbox_root=inbox_b,
     )
@@ -622,7 +536,7 @@ def test_cross_wired_valid_manifests_are_rejected_without_rewrite(
     ("account_id", "environment"),
     [
         ("another-demo-account", "demo"),
-        ("bybit-demo-unified", "paper"),
+        ("bybit-demo-unified", "mainnet"),
     ],
 )
 def test_account_or_environment_change_is_rejected(
@@ -792,8 +706,8 @@ def test_resolved_symlink_roots_have_one_identity(tmp_path: Path) -> None:
     linked_inbox.symlink_to(real_inbox, target_is_directory=True)
 
     route = ensure_account_route(
-        account_id="bybit-paper-unified",
-        environment="paper",
+        account_id="bybit-demo-unified",
+        environment="demo",
         account_root=linked_account,
         inbox_root=linked_inbox,
     )
@@ -802,8 +716,8 @@ def test_resolved_symlink_roots_have_one_identity(tmp_path: Path) -> None:
     assert route.inbox_root == str(real_inbox.resolve())
     assert (
         require_account_route(
-            account_id="bybit-paper-unified",
-            environment="paper",
+            account_id="bybit-demo-unified",
+            environment="demo",
             account_root=real_account,
             inbox_root=real_inbox,
         )

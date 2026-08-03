@@ -524,7 +524,6 @@ def _no_installed_realm_envs(tmp_path: Path, monkeypatch) -> None:
     from liquidity_migration.policy import real_money_arming
 
     monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", tmp_path / "absent-demo.env")
-    monkeypatch.setattr(real_money_arming, "PAPER_OWNER_ENV", tmp_path / "absent-paper.env")
 
 
 def _owner_env_with_roots(tmp_path: Path, roots: Path, **overrides: str) -> Path:
@@ -693,33 +692,6 @@ def test_create_state_roots_refuses_a_root_under_the_demo_root(
     # An absent demo env file is not an error: a workstation dry run still works.
     monkeypatch.setattr(real_money_arming, "DEMO_OWNER_ENV", tmp_path / "absent.env")
     assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 0
-
-
-def test_create_state_roots_refuses_a_root_under_the_paper_root(
-    tmp_path: Path, capsys, monkeypatch
-) -> None:
-    """Paper roots live in their own env file; checking only the demo one misses them."""
-
-    from liquidity_migration.policy import real_money_arming
-    from liquidity_migration.policy.real_money_arming import main
-
-    paper_root = tmp_path / "paper"
-    paper_env = _env_file(
-        tmp_path,
-        "account-paper-execution.env",
-        f"ACCOUNT_EXECUTION_ROOT={paper_root}\n"
-        f"ACCOUNT_PAPER_CAPTURE_ROOT={tmp_path / 'paper-capture'}\n",
-    )
-    monkeypatch.setattr(real_money_arming, "PAPER_OWNER_ENV", paper_env)
-
-    owner = _owner_env_with_roots(
-        tmp_path, tmp_path / "state", ACCOUNT_CAPTURE_ROOT=str(paper_root / "capture-mainnet")
-    )
-    assert main(["create-state-roots", "--owner-env", str(owner), "--execute"]) == 2
-    err = capsys.readouterr().err
-    assert "is at or inside" in err and "account-paper-execution.env" in err
-    assert not paper_root.exists()
-    assert not (tmp_path / "state").exists()
 
 
 def test_create_state_roots_resolves_before_comparing_realms(

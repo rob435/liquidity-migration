@@ -100,7 +100,7 @@ def test_reset_defaults_to_remote_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
     assert "--dry-run" in payload
-    assert "reset_demo_paper_ledgers.sh" in payload
+    assert "reset_demo_ledgers.sh" in payload
     assert "--scope long" in payload
 
 

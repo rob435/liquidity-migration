@@ -12,7 +12,7 @@ import liquidity_migration.strategy.long_native_event_demo_daemon as base_daemon
 from liquidity_migration.account.account_intent_client import ExitFirstPublication
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.strategy.carry_demo import CarryCycleState, CarryDemoCycleConfig, run_carry_demo_cycle
-from liquidity_migration.strategy.carry_demo_daemon import CarryDemoDaemon, _validate_carry_daemon_startup
+from liquidity_migration.strategy.carry_demo_daemon import CarryDemoDaemon
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.account.execution_environment import account_id_for_environment
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
@@ -149,28 +149,12 @@ def test_invalid_startup_fails_before_any_resource_construction(
     assert resource_calls == []
 
 
-def test_startup_rejects_ws_pool_and_circular_self_follow(tmp_path: Path) -> None:
+def test_startup_rejects_ws_pool(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="pure REST"):
         CarryDemoDaemon(
             tmp_path / "carry",
             config=ResearchConfig(data_root=tmp_path),
             demo_config=_target_config(tmp_path, ws_klines_enabled=True),
-        )
-    with pytest.raises(ValueError, match="circular self-follow"):
-        CarryDemoDaemon(
-            tmp_path / "carry",
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=_target_config(
-                tmp_path, market_follow_root=str(tmp_path / "carry")
-            ),
-        )
-    with pytest.raises(ValueError, match="klines_follow_root"):
-        _validate_carry_daemon_startup(
-            _target_config(
-                tmp_path,
-                market_follow_root=str(tmp_path / "leader"),
-                klines_follow_root=str(tmp_path / "leader"),
-            )
         )
 
 

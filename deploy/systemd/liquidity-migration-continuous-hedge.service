@@ -15,7 +15,6 @@ EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
-Environment=ACCOUNT_PAPER_KERNEL_REQUIRED=0
 Environment=EXECUTION_ENVIRONMENT=demo
 Environment=TELEGRAM_ENABLED=0
 Environment=PYTHONDONTWRITEBYTECODE=1

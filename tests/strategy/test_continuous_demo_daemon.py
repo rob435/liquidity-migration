@@ -20,10 +20,8 @@ from liquidity_migration.strategy.continuous_demo import (
 )
 from liquidity_migration.strategy.continuous_demo_daemon import (
     ContinuousDemoDaemon,
-    _follower_continuous_kline_stream_manager_factory,
     _select_kline_stream_manager_factory,
 )
-from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager
 from liquidity_migration.account.execution_environment import account_id_for_environment
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
@@ -195,9 +193,7 @@ def test_run_revalidates_target_route_before_opening_resources(
     assert resource_calls == []
 
 
-def test_follower_and_explicit_public_kline_factories_remain_available(
-    tmp_path: Path,
-) -> None:
+def test_explicit_public_kline_factory_still_wins(tmp_path: Path) -> None:
     explicit = object()
     assert (
         _select_kline_stream_manager_factory(
@@ -206,22 +202,10 @@ def test_follower_and_explicit_public_kline_factories_remain_available(
         )
         is explicit
     )
-
-    leader = tmp_path / "leader"
-    config = _target_config(
-        tmp_path,
-        klines_follow_root=str(leader),
-        ws_klines_enabled=True,
+    assert (
+        _select_kline_stream_manager_factory(_target_config(tmp_path), None)
+        is not explicit
     )
-    selected = _select_kline_stream_manager_factory(config, None)
-    assert selected is _follower_continuous_kline_stream_manager_factory
-    manager = selected(
-        ResearchConfig(data_root=tmp_path),
-        config,
-        tmp_path / "follower",
-    )
-    assert isinstance(manager, FollowerKlineStreamManager)
-    assert manager.stats()["leader_root"] == str(leader)
 
 
 def test_continuous_summary_formatter_remains_selected(tmp_path: Path) -> None:

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Carry-hold demo sleeve — daily-decision target producer on a 60s diff loop.
 #
-# Whether it runs is toggled per-sleeve in deploy/sleeves.env. The paper service
-# uses the same runner with EXECUTION_ENVIRONMENT=paper and MARKET_FOLLOW_ROOT
-# pointed at the demo root, reading the leader's kline + carry_funding_events
-# caches instead of REST. The account owners handle execution and fills.
+# Whether it runs is toggled per-sleeve in deploy/sleeves.env. The account
+# owner handles execution and fills.
 #
 # The daemon wakes every INTERVAL_SECONDS, but the decision is DAILY: computed
 # for the current 00:00 UTC boundary once klines allow (00:20); every other
@@ -40,34 +38,16 @@ if [[ "$kernel_required" == "1" ]]; then
         exit 2
     fi
 fi
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$paper_kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
+        if [[ "$kernel_required" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=demo requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
         ;;
     mainnet)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
+        if [[ "$kernel_required" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=mainnet requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
         # The unit strips these; fail loudly if the strip ever misses.
@@ -84,7 +64,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         esac
         ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo, paper, or mainnet." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or mainnet." >&2
         exit 2
         ;;
 esac
@@ -122,20 +102,7 @@ fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
-# MARKET_FOLLOW_ROOT: the paper shadow reads the demo root's kline and settled-
-# funding caches read-only instead of running a second REST plane, giving one
-# market-data plane per box and identical decision inputs. Empty = this sleeve
-# fetches its own data (the demo leader).
-if [[ -n "${MARKET_FOLLOW_ROOT:-}" ]]; then
-    if [[ "$MARKET_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        # A follower never writes the caches, so self-following freezes its
-        # market view permanently.
-        echo "MARKET_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
-        exit 2
-    fi
-    target_route_args+=(--market-follow-root "$MARKET_FOLLOW_ROOT")
-fi
-echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE market_follow_root=${MARKET_FOLLOW_ROOT:-}"
+echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

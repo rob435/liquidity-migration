@@ -2,8 +2,7 @@
 # Continuous-fade demo sleeve — sub-hourly target producer.
 #
 # Whether it runs is toggled per-sleeve in deploy/sleeves.env (CONTINUOUS_SLEEVE).
-# The paper service uses the same runner with EXECUTION_ENVIRONMENT=paper. The
-# account owners handle execution and fills.
+# The account owner handles execution and fills.
 #
 # The daemon wakes every INTERVAL_SECONDS, but active continuous_ensemble_v2
 # entries come from confirmed-bar +1h membership, not intra-hour live deciles.
@@ -33,33 +32,15 @@ if [[ "$kernel_required" == "1" ]]; then
         exit 2
     fi
 fi
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$paper_kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
+        if [[ "$kernel_required" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=demo requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
         ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or paper." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo." >&2
         exit 2
         ;;
 esac
@@ -95,19 +76,7 @@ fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
-# KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
-# snapshot (+rmom gate) read-only instead of running a second WS pool, giving
-# one market-data plane per box. Empty = this sleeve runs its own pool.
-if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
-    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        # A follower never writes the snapshot, so self-following freezes its
-        # kline store permanently.
-        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
-        exit 2
-    fi
-    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
-fi
-echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
+echo "continuous target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

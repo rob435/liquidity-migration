@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import grp
 import re
 import shlex
 import sys
@@ -74,35 +73,6 @@ def load_private_systemd_environment(path: str | Path) -> dict[str, str]:
     )
 
 
-def load_group_systemd_environment(
-    path: str | Path,
-    *,
-    group_name: str,
-) -> dict[str, str]:
-    """Read one owner-controlled 0640 EnvironmentFile for a named runtime group."""
-
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        raise ValueError("group systemd environment path must be absolute")
-    try:
-        expected_gid = grp.getgrnam(group_name).gr_gid
-    except KeyError as exc:
-        raise ValueError(f"systemd environment group is not provisioned: {group_name}") from exc
-    snapshot = read_stable_file(
-        candidate,
-        label="group systemd environment",
-        reject_empty=True,
-        require_mode=0o640,
-        require_owner=True,
-    )
-    if snapshot.metadata.st_gid != expected_gid:
-        raise ValueError("group systemd environment has the wrong group")
-    return parse_systemd_environment_bytes(
-        snapshot.data,
-        label=f"group systemd environment {snapshot.path}",
-    )
-
-
 def selected_environment_payload(
     values: Mapping[str, str],
     *,
@@ -132,18 +102,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", required=True)
     parser.add_argument("--name", action="append", required=True)
-    parser.add_argument("--group-name")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        values = (
-            load_group_systemd_environment(args.path, group_name=args.group_name)
-            if args.group_name
-            else load_private_systemd_environment(args.path)
-        )
+        values = load_private_systemd_environment(args.path)
         payload = selected_environment_payload(values, names=args.name)
         written = sys.stdout.buffer.write(payload)
         if written != len(payload):
@@ -161,7 +126,6 @@ if __name__ == "__main__":
 
 __all__ = [
     "load_private_systemd_environment",
-    "load_group_systemd_environment",
     "parse_systemd_environment_bytes",
     "selected_environment_payload",
 ]

@@ -36,7 +36,7 @@ def component_target_intent(
     """Build one replacement target with the repository's sole key grammar.
 
     Signal selection and sizing remain strategy responsibilities. This helper
-    makes their resulting component identity identical in historical, paper,
+    makes their resulting component identity identical in historical,
     and demo for identical inputs.
     """
 

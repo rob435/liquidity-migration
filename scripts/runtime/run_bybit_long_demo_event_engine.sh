@@ -26,34 +26,16 @@ if [[ "$kernel_required" == "1" ]]; then
         exit 2
     fi
 fi
-case "${ACCOUNT_PAPER_KERNEL_REQUIRED:-0}" in
-    1|true|TRUE|yes|YES|on|ON) paper_kernel_required=1 ;;
-    0|false|FALSE|no|NO|off|OFF|"") paper_kernel_required=0 ;;
-    *) echo "Invalid ACCOUNT_PAPER_KERNEL_REQUIRED value." >&2; exit 2 ;;
-esac
-if [[ "$paper_kernel_required" == "1" ]]; then
-    if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-        echo "Paper kernel latch requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-        exit 2
-    fi
-fi
-
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=demo requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
-        ;;
-    paper)
-        if [[ "$paper_kernel_required" != "1" || "$kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=paper requires only ACCOUNT_PAPER_KERNEL_REQUIRED=1." >&2
+        if [[ "$kernel_required" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=demo requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
         ;;
     mainnet)
-        if [[ "$kernel_required" != "1" || "$paper_kernel_required" != "0" ]]; then
-            echo "EXECUTION_ENVIRONMENT=mainnet requires only ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
+        if [[ "$kernel_required" != "1" ]]; then
+            echo "EXECUTION_ENVIRONMENT=mainnet requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
             exit 2
         fi
         # The unit strips these; fail loudly if the strip ever misses.
@@ -70,7 +52,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         esac
         ;;
     *)
-        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo, paper, or mainnet." >&2
+        echo "EXECUTION_ENVIRONMENT must be explicitly set to demo or mainnet." >&2
         exit 2
         ;;
 esac
@@ -105,7 +87,6 @@ if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; the
     exit 2
 fi
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
-KLINES_FOLLOW_ROOT="${KLINES_FOLLOW_ROOT:-}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
 WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-100}"
 WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
@@ -144,17 +125,10 @@ fi
 if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
     target_route_args+=(--candidate-universe-file "$CANDIDATE_UNIVERSE_FILE")
 fi
-if [[ -n "$KLINES_FOLLOW_ROOT" ]]; then
-    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
-        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
-        exit 2
-    fi
-    target_route_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
-fi
 echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$LONG_STRATEGY_PROFILE"
-echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1} klines_follow_root=$KLINES_FOLLOW_ROOT"
+echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1}"
 echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 
 mkdir -p "$DATA_ROOT/.locks"

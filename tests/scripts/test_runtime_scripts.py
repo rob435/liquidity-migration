@@ -52,24 +52,17 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
         DEPLOY,
         WRAPPER,
         ROOT / "scripts" / "runtime" / "run_account_execution_service.sh",
-        ROOT / "scripts" / "runtime" / "run_account_paper_execution_service.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_long_demo_event_engine.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_continuous_demo_event_engine.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_carry_demo_event_engine.sh",
         ROOT / "scripts" / "runtime" / "run_continuous_hedge.sh",
         ROOT / "scripts" / "runtime" / "run_continuous_rmom_refresh.sh",
-        ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh",
+        ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh",
     ]
     subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
-    for path in scripts[:7] + scripts[9:]:
+    for path in scripts[:6] + scripts[8:]:
         assert path.stat().st_mode & stat.S_IXUSR
     assert (ROOT / "scripts" / "vps" / "check_deploy_rollout_readiness.py").stat().st_mode & stat.S_IXUSR
-    paper_runner = _read("scripts/runtime/run_account_paper_execution_service.sh")
-    assert "CALIBRATION" not in paper_runner
-    assert "--latency-quantile" not in paper_runner
-    assert "--slippage-quantile" not in paper_runner
-    assert "/etc/liquidity-migration/account-execution/demo-rules.json" not in paper_runner
-    assert "/etc/liquidity-migration/account-paper-execution/demo-rules.json" in paper_runner
 
 
 def test_authorized_wrapper_owns_every_runtime_argv() -> None:
@@ -81,11 +74,10 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
         assert f"run_authorized_runtime.sh {unit} main" in fragment
     for owner in (
         "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-account-execution-mainnet.service",
     ):
         assert f"{owner}:readiness" in wrapper
         assert f"run_authorized_runtime.sh {owner} readiness" in _unit(owner)
-    assert "--account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env" in wrapper
 
 
 def test_only_demo_owner_inherits_demo_credentials() -> None:
@@ -111,35 +103,17 @@ def test_only_demo_owner_inherits_demo_credentials() -> None:
         )
         assert "BYBIT_REAL_API_KEY" in unset, unit
         assert "BYBIT_REAL_API_SECRET" in unset, unit
-    for unit in (
-        "liquidity-migration-account-paper-execution.service",
-        "liquidity-migration-bybit-long-paper.service",
-        "liquidity-migration-bybit-continuous-paper.service",
-        "liquidity-migration-bybit-carry-paper.service",
-    ):
-        fragment = _unit(unit)
-        assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in fragment
-        assert "Environment=REAL_MONEY=false" in fragment
-        assert "integration-only uncalibrated" in fragment
-        read_only = next(
-            line for line in fragment.splitlines() if line.startswith("ReadOnlyPaths=")
-        )
-        assert read_only == "ReadOnlyPaths=/opt/liquidity-migration"
 
 
-def test_persistent_demo_and_paper_workers_have_small_box_memory_limits() -> None:
+def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
     expected = {
         # The demo owner was throttled at its old 384M high during the
         # 2026-08-03 recovery (peak 384.2M, 27M swapped) while being the one
         # unit that must never stall; it now gets at least the producers' room.
         "liquidity-migration-account-execution.service": ("768M", "1024M", "256M"),
-        "liquidity-migration-account-paper-execution.service": ("256M", "384M", "256M"),
         "liquidity-migration-bybit-continuous-demo.service": ("768M", "896M", "384M"),
         "liquidity-migration-bybit-long-demo.service": ("576M", "640M", "384M"),
         "liquidity-migration-bybit-carry-demo.service": ("768M", "896M", "384M"),
-        "liquidity-migration-bybit-continuous-paper.service": ("640M", "768M", "384M"),
-        "liquidity-migration-bybit-long-paper.service": ("640M", "768M", "384M"),
-        "liquidity-migration-bybit-carry-paper.service": ("640M", "768M", "384M"),
     }
     for unit, (high, maximum, swap) in expected.items():
         fragment = _unit(unit)
@@ -166,9 +140,6 @@ def test_producers_require_owner_readiness_and_never_hold_private_order_authorit
         "liquidity-migration-bybit-continuous-demo.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-bybit-carry-demo.service": "liquidity-migration-account-execution.service",
         "liquidity-migration-continuous-hedge.service": "liquidity-migration-account-execution.service",
-        "liquidity-migration-bybit-long-paper.service": "liquidity-migration-account-paper-execution.service",
-        "liquidity-migration-bybit-continuous-paper.service": "liquidity-migration-account-paper-execution.service",
-        "liquidity-migration-bybit-carry-paper.service": "liquidity-migration-account-paper-execution.service",
         "liquidity-migration-bybit-long-mainnet.service": mainnet_owner,
         "liquidity-migration-bybit-carry-mainnet.service": mainnet_owner,
     }
@@ -246,7 +217,6 @@ def test_mainnet_liveness_observer_pages_without_holding_trading_authority() -> 
         "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY"
     )
     environment = _environment("liquidity-migration-mainnet-liveness.service")
-    assert environment["ACCOUNT_LIVENESS_SCOPE"] == "mainnet"
     assert environment["TELEGRAM_ENABLED"] == "1"
 
     wrapper = _read(WRAPPER)
@@ -254,18 +224,17 @@ def test_mainnet_liveness_observer_pages_without_holding_trading_authority() -> 
     start = wrapper.index("liquidity-migration-mainnet-liveness.service:main)")
     case = wrapper[start : wrapper.index("\n        ;;", start)]
     assert "scripts/runtime/check_fleet_liveness.py" in case
-    assert '--account-scope "${ACCOUNT_LIVENESS_SCOPE:?' in case
+    # The scope is the committed literal, not an env indirection a stale unit
+    # file could repoint.
+    assert "--account-scope mainnet" in case
     assert "--carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event" in case
     assert "--long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event" in case
-    # A paper route file would point a funded-account observer at the wrong book.
-    assert "--account-paper-environment-file" not in case
     # Funded accounts re-page well inside the demo watchdog's 6-hour cooldown.
     assert "--cooldown-min 60" in case
 
 
-def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -> None:
+def test_demo_strategy_units_use_one_validated_operational_profile() -> None:
     long_demo = _environment("liquidity-migration-bybit-long-demo.service")
-    long_paper = _environment("liquidity-migration-bybit-long-paper.service")
     sizing_keys = (
         "NOTIONAL_MULTIPLIER",
         "ENTRY_LEVERAGE",
@@ -277,28 +246,10 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
         "PER_POSITION_NOTIONAL_PCT_EQUITY",
     )
     continuous_demo = _environment("liquidity-migration-bybit-continuous-demo.service")
-    continuous_paper = _environment("liquidity-migration-bybit-continuous-paper.service")
     carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
-    carry_paper = _environment("liquidity-migration-bybit-carry-paper.service")
-    for environment in (
-        long_demo,
-        long_paper,
-        continuous_demo,
-        continuous_paper,
-        carry_demo,
-        carry_paper,
-    ):
+    for environment in (long_demo, continuous_demo, carry_demo):
         assert set(environment).isdisjoint(sizing_keys)
-    for key in (
-        "LOOKBACK_DAYS",
-        "WORKERS",
-    ):
-        assert continuous_demo[key] == continuous_paper[key]
-    for key in ("LOOKBACK_DAYS", "WORKERS", "WS_KLINES_ENABLED", "WS_KLINES_BOOTSTRAP_WORKERS"):
-        assert long_demo[key] == long_paper[key]
-    for key in ("LOOKBACK_DAYS", "WORKERS", "WS_KLINES_ENABLED"):
-        assert carry_demo[key] == carry_paper[key]
-    # Carry has no WS kline plane in either environment.
+    # Carry has no WS kline plane.
     assert carry_demo["WS_KLINES_ENABLED"] == "0"
     long_runner = _read("scripts/runtime/run_bybit_long_demo_event_engine.sh")
     continuous_runner = _read("scripts/runtime/run_bybit_continuous_demo_event_engine.sh")
@@ -307,11 +258,8 @@ def test_demo_and_paper_strategy_units_use_one_validated_operational_profile() -
         assert 'ACCOUNT_RISK_POLICY_FILE' in runner
         assert '--operational-profile-file' in runner
     assert long_demo["EXECUTION_ENVIRONMENT"] == "demo"
-    assert long_paper["EXECUTION_ENVIRONMENT"] == "paper"
     assert continuous_demo["EXECUTION_ENVIRONMENT"] == "demo"
-    assert continuous_paper["EXECUTION_ENVIRONMENT"] == "paper"
     assert carry_demo["EXECUTION_ENVIRONMENT"] == "demo"
-    assert carry_paper["EXECUTION_ENVIRONMENT"] == "paper"
 
 
 def test_demo_account_notification_reads_no_retired_continuous_status_root() -> None:
@@ -321,59 +269,6 @@ def test_demo_account_notification_reads_no_retired_continuous_status_root() -> 
     demo_owner = _environment("liquidity-migration-account-execution.service")
     assert "CONTINUOUS_CYCLE_ROOT" not in demo_owner
     assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in demo_owner
-
-
-def test_paper_producers_follow_demo_kline_planes_without_crossing_write_roots() -> None:
-    long_demo = _environment("liquidity-migration-bybit-long-demo.service")
-    long_paper = _environment("liquidity-migration-bybit-long-paper.service")
-    assert long_paper["DATA_ROOT"] != long_demo["DATA_ROOT"]
-    assert long_paper["KLINES_FOLLOW_ROOT"] == long_demo["DATA_ROOT"]
-    assert long_paper["USE_DAEMON"] == "1"
-
-    continuous_demo = _environment("liquidity-migration-bybit-continuous-demo.service")
-    continuous_paper = _environment("liquidity-migration-bybit-continuous-paper.service")
-    assert continuous_paper["DATA_ROOT"] != continuous_demo["DATA_ROOT"]
-    assert continuous_paper["KLINES_FOLLOW_ROOT"] == continuous_demo["DATA_ROOT"]
-
-    # Carry follows the demo market plane through its own follow variable
-    # (no WS kline store; the follower reads the demo public REST store).
-    carry_demo = _environment("liquidity-migration-bybit-carry-demo.service")
-    carry_paper = _environment("liquidity-migration-bybit-carry-paper.service")
-    assert carry_paper["DATA_ROOT"] != carry_demo["DATA_ROOT"]
-    assert carry_paper["CARRY_MARKET_FOLLOW_ROOT"] == carry_demo["DATA_ROOT"]
-    assert "KLINES_FOLLOW_ROOT" not in carry_paper
-
-    rmom = _read("scripts/runtime/run_continuous_rmom_refresh.sh")
-    assert "CONTINUOUS_PAPER_DATA_ROOT" not in rmom
-    assert rmom.count("precompute_residual_momentum.py") == 1
-
-
-def test_paper_producer_sandboxes_include_the_authorized_shared_capture_root() -> None:
-    common = {
-        "/opt/liquidity-migration/data/bybit-account-paper",
-        "/opt/liquidity-migration/data/bybit-account-paper-intents",
-        "/opt/liquidity-migration/data/bybit-account-paper-market-capture",
-    }
-    strategy_roots = {
-        "liquidity-migration-bybit-long-paper.service": (
-            "/opt/liquidity-migration/data/bybit-long-paper-event"
-        ),
-        "liquidity-migration-bybit-continuous-paper.service": (
-            "/opt/liquidity-migration/data/bybit-continuous-paper-event"
-        ),
-        "liquidity-migration-bybit-carry-paper.service": (
-            "/opt/liquidity-migration/data/bybit-carry-paper-event"
-        ),
-    }
-    for unit, strategy_root in strategy_roots.items():
-        fragment = _unit(unit)
-        directive = next(
-            line for line in fragment.splitlines() if line.startswith("ReadWritePaths=")
-        )
-        assert set(directive.removeprefix("ReadWritePaths=").split()) == {
-            *common,
-            strategy_root,
-        }
 
 
 def test_install_is_stopped_exact_commit_preparation_only() -> None:
@@ -397,57 +292,33 @@ def test_install_is_stopped_exact_commit_preparation_only() -> None:
     assert "units_started=0" in install
 
 
-def test_install_provisions_a_credential_fenced_paper_runtime_boundary() -> None:
+def test_install_prepares_the_demo_runtime_config_with_bounded_tree_normalization() -> None:
     text = _read(DEPLOY)
     boundary = text[
-        text.index("ensure_paper_runtime_identity()") : text.index("require_checkout()")
+        text.index("prepare_demo_runtime_config()") : text.index("require_checkout()")
     ]
-    assert "useradd --system" in boundary
-    assert "--shell /usr/sbin/nologin" in boundary
-    assert "PAPER_RUNTIME_USER=liquidity-migration-paper" in text
-    assert "PAPER_ENVIRONMENT" in boundary
-    assert "allowed_tuning" in boundary
-    assert "CANDIDATE_UNIVERSE_FILE" in boundary
-    assert "BYBIT_DEMO_API_KEY" in boundary
-    # The paper twin's capital base derives from the committed operational
-    # profile rather than a hidden per-host tuning value.
-    assert (
-        'values["PAPER_EQUITY_USDT"] = '
-        "f\"{load_operational_profile(sys.argv[8]).capital_reference_usdt:g}\""
-        in boundary
-    )
-    assert '"PAPER_EQUITY_USDT",' not in boundary
-    assert "reset_path_safety preflight-paper" in boundary
     assert "reset_path_safety preflight-demo" in boundary
-    assert "reset_path_safety normalize-paper" in boundary
     assert "reset_path_safety normalize-demo" in boundary
-    assert "run_phase_pair runtime-tree-preflight" in boundary
-    assert "run_phase_pair runtime-tree-normalize" in boundary
-    assert boundary.index("runtime-tree-preflight") < boundary.index(
-        "runtime-tree-normalize"
-    )
-    assert boundary.count("--create-missing") >= 2
+    assert "run_phase demo-tree-preflight" in boundary
+    assert "run_phase demo-tree-normalize" in boundary
+    assert boundary.index("demo-tree-preflight") < boundary.index("demo-tree-normalize")
+    assert "--create-missing" in boundary
     assert "chown -R" not in boundary
-    assert 'test -w "$root/.locks"' in boundary
     assert "--continuous-root" in boundary
-    assert "find \"$root\" -type f -exec chmod 0640" not in boundary
-    assert "test ! -r \"$path\"" in boundary
-    assert "test ! -w \"$root\"" in boundary
-    assert "lm_load_group_systemd_environment" in text
+    # The retired paper host config is removed, never re-provisioned.
+    assert "retire_paper_host_config" in boundary
+    retired = text[text.index("RETIRED_PAPER_CONFIG_DIR=") : text.index("prepare_demo_runtime_config()")]
+    assert "/etc/liquidity-migration/account-paper-execution" in retired
 
 
-def test_install_binds_one_shared_strategy_target_tape_per_environment() -> None:
+def test_install_binds_the_shared_strategy_target_tape() -> None:
     text = _read(DEPLOY)
     boundary = text[
-        text.index("prepare_paper_runtime_boundary()") : text.index("require_checkout()")
+        text.index("prepare_demo_runtime_config()") : text.index("require_checkout()")
     ]
 
     assert '"$demo_capture/strategy-targets.jsonl"' in boundary
     assert 'values["STRATEGY_TARGET_CAPTURE_PATH"] = str(target_capture)' in boundary
-    assert (
-        '"STRATEGY_TARGET_CAPTURE_PATH": str(Path(sys.argv[4]) / "strategy-targets.jsonl")'
-        in boundary
-    )
 
 
 def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it() -> None:
@@ -458,8 +329,6 @@ def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it(
     assert activate.index("account-execution.service") < activate.index("bybit-long-demo.service")
     for forbidden in ("git fetch", "git checkout", "pip install", "lm_write_resolved", "sed -i"):
         assert forbidden not in activate
-    assert 'if [ "$AUTH_PROFILE" = operational ]' in activate
-    assert "liquidity-migration-account-paper-execution.service" in activate
 
 
 def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
@@ -539,8 +408,8 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
     for phase in (
         "install-locked-dependencies",
         "focused-runtime-tests",
-        "paper-tree-preflight",
-        "paper-tree-normalize",
+        "demo-tree-preflight",
+        "demo-tree-normalize",
         "seed-residual-momentum",
     ):
         assert phase in text
@@ -672,8 +541,8 @@ def test_verify_mode_is_read_only_and_checks_profile_topology() -> None:
     assert "systemctl start" not in verify
     assert "systemctl enable" not in verify
     assert "systemctl disable" not in verify
-    assert "demo-operational" in text
-    assert "paper owner is active under demo-only authorization" in verify
+    # The retired split profile is rejected loudly, not silently accepted.
+    assert "profile demo-operational retired" in text
 
 
 def test_systemd_installer_is_manifest_exact_and_never_starts_current_units() -> None:
@@ -687,17 +556,19 @@ def test_systemd_installer_is_manifest_exact_and_never_starts_current_units() ->
     assert "cp " in install
 
 
-def test_resolved_sleeves_are_atomically_generated_then_group_bound() -> None:
+def test_resolved_sleeves_are_atomically_generated_then_root_bound() -> None:
     lib = _read("deploy/lib_sleeves.sh")
     writer = lib[lib.index("lm_write_resolved_sleeve_toggles()") : lib.index("lm_verify_resolved_sleeve_toggles()")]
     assert "chmod 0600" in writer
     assert "CONTINUOUS_HEDGE_TIMER" in writer
     deploy = _read(DEPLOY)
-    assert 'chown root:"$PAPER_RUNTIME_GROUP" /etc/liquidity-migration/sleeves.resolved.env' in deploy
-    assert "chmod 0640 /etc/liquidity-migration/sleeves.resolved.env" in deploy
+    assert "chown root:root /etc/liquidity-migration/sleeves.resolved.env" in deploy
+    assert "chmod 0600 /etc/liquidity-migration/sleeves.resolved.env" in deploy
     rmom = _read("scripts/runtime/run_continuous_rmom_refresh.sh")
     assert "lm_load_sleeve_toggles" not in rmom
     assert "CONTINUOUS_SLEEVE is required" in rmom
+    assert "CONTINUOUS_PAPER_DATA_ROOT" not in rmom
+    assert rmom.count("precompute_residual_momentum.py") == 1
     rmom_unit = _unit("liquidity-migration-continuous-rmom-refresh.service")
     assert "EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env" in rmom_unit
 
@@ -722,7 +593,7 @@ def test_workflow_runs_ci_on_push_and_only_manual_guarded_vps_modes() -> None:
     assert "--owner-acknowledgement" not in workflow
     # No dispatchable branch may name a mode the deploy script does not have.
     assert "\n            recover)" not in workflow
-    assert "authorize_demo_paper_operation:" in workflow
+    assert "authorize_demo_operation:" in workflow
     assert "authorization_reference:" in workflow
     assert 'deploy_args=("$DEPLOY_MODE_INPUT")' in workflow
     assert 'scripts/deploy_vps_live.sh "${deploy_args[@]}"' in workflow
@@ -812,35 +683,6 @@ def test_recovery_generator_is_exact_commit_and_non_destructive() -> None:
     assert "GITHUB_TOKEN" not in text
 
 
-def test_paper_owner_owns_paper_telegram_notifications() -> None:
-    owner = _unit("liquidity-migration-account-paper-execution.service")
-    owner_unset = " ".join(
-        line for line in owner.splitlines() if line.startswith("UnsetEnvironment=")
-    )
-    assert "TELEGRAM_BOT_TOKEN" not in owner_unset
-    assert "TELEGRAM_CHAT_ID" not in owner_unset
-    environment = _environment("liquidity-migration-account-paper-execution.service")
-    assert environment["TELEGRAM_ENABLED"] == "1"
-    assert "CONTINUOUS_CYCLE_ROOT" not in environment
-    assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in environment
-    for producer in (
-        "liquidity-migration-bybit-long-paper.service",
-        "liquidity-migration-bybit-continuous-paper.service",
-    ):
-        unset = " ".join(
-            line for line in _unit(producer).splitlines() if line.startswith("UnsetEnvironment=")
-        )
-        assert "TELEGRAM_BOT_TOKEN" in unset
-        assert "TELEGRAM_CHAT_ID" in unset
-    script = _read("scripts/runtime/run_account_paper_execution_service.sh")
-    assert '"${TELEGRAM_ENABLED:-0}" == "1"' in script
-    assert "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing" in script
-    assert "--telegram" in script
-    assert "--continuous-cycle-root" in script
-    deploy = _read(DEPLOY)
-    assert "paper Telegram credentials unavailable" in deploy
-
-
 def test_a_failing_nested_phase_aborts_the_rollout_instead_of_reporting_ok() -> None:
     """Bash suppresses errexit for the whole dynamic extent of a function called from a
     condition context, so nesting a mode inside ``run_phase``'s ``if "$@"`` demotes
@@ -921,7 +763,7 @@ def test_named_deploy_gates_fail_closed_even_under_a_suppressed_errexit() -> Non
 
 
 def test_rollout_and_reset_survive_a_dying_ssh_transport() -> None:
-    for script in (DEPLOY, ROOT / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"):
+    for script in (DEPLOY, ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh"):
         text = _read(script)
         assert "trap 'exit 129' HUP" in text
         assert "trap 'exit 141' PIPE" in text
@@ -958,19 +800,6 @@ def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> No
     assert "timeout-minutes:" in workflow
 
 
-def test_paper_runner_has_no_hidden_equity_fallback() -> None:
-    """The paper runner must fail closed on a missing equity input, like every sibling
-    required input in this script: a hidden 10,000 default runs the twin 25x
-    under-scaled against the deployed 250,000 capital reference.
-    """
-    script = _read("scripts/runtime/run_account_paper_execution_service.sh")
-    assert 'PAPER_EQUITY_USDT="${PAPER_EQUITY_USDT:-}"' in script
-    assert "PAPER_EQUITY_USDT:-10000" not in script
-    assert 'if [[ -z "$PAPER_EQUITY_USDT" ]]; then' in script
-    required_check = script[script.index('if [[ -z "$PAPER_EQUITY_USDT" ]]; then') :]
-    assert "exit 2" in required_check.split("\nfi", 1)[0]
-
-
 def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
     """A retired sleeve must leave no cycle root behind, or the owners keep reading a
     dead sleeve's completion receipt and every hourly digest carries a permanently
@@ -979,7 +808,7 @@ def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
 
     for unit in (
         "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-account-execution-mainnet.service",
     ):
         text = (ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
         assert "Environment=CONTINUOUS_CYCLE_ROOT=" not in text, unit
@@ -1129,9 +958,7 @@ def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> 
     assert "if any_mainnet_sleeve_on; then" in verify
     assert "mainnet owner is not active and enabled" in verify
     assert "timer_on liquidity-migration-mainnet-liveness.timer" in verify
-    assert "is active under demo/paper authorization" in verify
-    # The mirror unit is verified too, or a toggled-on mirror is invisible here.
-    assert "liquidity-migration-paper-target-mirror.service" in verify
+    assert "is active under demo authorization" in verify
     assert "mainnet_carry=%s mainnet_long=%s" in verify
 
     # An enabled timer is not a succeeding watchdog: without this the funded
@@ -1144,7 +971,7 @@ def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> 
 
 
 def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
-    """``lm_load_group_systemd_environment`` unsets any key it was not asked for, so a
+    """``lm_load_private_systemd_environment`` unsets any key it was not asked for, so a
     toggle missing from this allowlist is an unbound-variable abort under ``set -u``
     at the next activation.
     """
@@ -1155,20 +982,29 @@ def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
         library.index("lm_verify_resolved_sleeve_toggles()")
     ]
     generated = set(re.findall(r"printf '([A-Z_]+)=%s", writer))
-    assert "PAPER_TARGET_MIRROR" in generated
+    assert generated == {
+        "LONG_SLEEVE",
+        "CONTINUOUS_SLEEVE",
+        "CARRY_SLEEVE",
+        "CARRY_MAINNET_SLEEVE",
+        "LONG_MAINNET_SLEEVE",
+        "CONTINUOUS_HEDGE_TIMER",
+    }
 
     text = _read(DEPLOY)
     authorization = text[text.index("load_authorization()") : text.index("unit_on()")]
     call = authorization[
-        authorization.index("sleeves.resolved.env") : authorization.index("# A resolved file")
+        authorization.index("lm_load_private_systemd_environment") :
+        authorization.index("# A resolved file written by a pre-carry install")
     ]
-    allowed = set(re.findall(r"\b([A-Z][A-Z0-9_]*)\b", call)) - {"PAPER_RUNTIME_GROUP"}
+    allowed = set(re.findall(r"\b([A-Z][A-Z0-9_]*)\b", call))
     assert generated <= allowed, generated - allowed
     for key in generated:
         assert f'"${key}"' in authorization, key
     # An older resolved file predates the newest keys; absent must mean off
     # rather than a hard failure mid-rollout.
-    assert "mirror-mainnet-keys=absent treated-as=off" in authorization
+    assert "carry-keys=absent treated-as=off" in authorization
+    assert "mainnet-keys=absent treated-as=off" in authorization
 
 
 def test_routine_activation_restores_and_rollout_stops_the_funded_fleet() -> None:

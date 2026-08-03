@@ -100,12 +100,9 @@ DATASETS = {
     "universe_current",
     "event_demo_klines_1h",
     "long_native_demo_cycles",
-    "long_native_paper_cycles",
     "long_native_mainnet_cycles",
     "continuous_fade_demo_cycles",
-    "continuous_fade_paper_cycles",
     "carry_hold_demo_cycles",
-    "carry_hold_paper_cycles",
     "carry_hold_mainnet_cycles",
     "carry_funding_events",
     "binance_usdm_klines_1h",
@@ -130,12 +127,9 @@ DATASET_KEYS = {
     "universe_current": ("snapshot_ts_ms", "symbol"),
     "event_demo_klines_1h": ("ts_ms", "symbol"),
     "long_native_demo_cycles": ("cycle_id",),
-    "long_native_paper_cycles": ("cycle_id",),
     "long_native_mainnet_cycles": ("cycle_id",),
     "continuous_fade_demo_cycles": ("cycle_id",),
-    "continuous_fade_paper_cycles": ("cycle_id",),
     "carry_hold_demo_cycles": ("cycle_id",),
-    "carry_hold_paper_cycles": ("cycle_id",),
     "carry_hold_mainnet_cycles": ("cycle_id",),
     # Keyed by settlement instant, so the carry sleeve's overlap-window
     # incremental appends are idempotent at the storage layer.
@@ -309,10 +303,10 @@ def _ensure_lock_directory(lock_path: Path) -> None:
     """Create a secure lock directory, inheriting a dataset root owner for root observers.
 
     Operational dataset locks live below ``ROOT/.locks``. When euid 0 is the
-    first reader of a paper-owned root, that directory must still belong to the
-    paper runtime. Deployment pre-creates it; this bootstrap/repair path covers
-    fresh roots and an interrupted bootstrap without making path contents an
-    ownership authority.
+    first reader of a root owned by another runtime identity, that directory
+    must still belong to that owner. Deployment pre-creates it; this
+    bootstrap/repair path covers fresh roots and an interrupted bootstrap
+    without making path contents an ownership authority.
     """
     directory = lock_path.parent
     inherited_owner: tuple[int, int] | None = None
@@ -658,9 +652,7 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
 _LEDGER_MONTH_COL = "_ledger_month"
 LEDGER_BUCKET_SOURCE: dict[str, str] = {
     "continuous_fade_demo_cycles": "ts_ms",
-    "continuous_fade_paper_cycles": "ts_ms",
     "carry_hold_demo_cycles": "ts_ms",
-    "carry_hold_paper_cycles": "ts_ms",
 }
 
 
@@ -835,7 +827,7 @@ def _write_dataset_unlocked(
         df = with_date_column(df)
     path.mkdir(parents=True, exist_ok=True)
 
-    # Month-bucket the demo/paper ledgers regardless of the caller's partition_by,
+    # Month-bucket the cycle ledgers regardless of the caller's partition_by,
     # so the hot-path write touches the current month, not the whole history.
     if dataset in LEDGER_BUCKET_SOURCE:
         df = _with_ledger_month(df, dataset)
@@ -905,10 +897,9 @@ def read_dataset_columns(
     # rename, so an unlocked scan_parquet -> collect can straddle one and read a
     # torn file. The collect() below must stay inside the lock.
     #
-    # ``lock=False`` is for cross-boundary followers reading a leader root they
-    # must not write, since locking would create a file under the leader's
-    # ``.locks``. The torn-read race is accepted there: it raises, the follower's
-    # cycle holds its standing book, and the next cycle retries.
+    # ``lock=False`` is for cross-boundary readers of a root they must not
+    # write, since locking would create a file under that root's ``.locks``.
+    # The torn-read race is accepted there: it raises and the caller retries.
     lock_ctx = (
         exclusive_file_lock(
             dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01

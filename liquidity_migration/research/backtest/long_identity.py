@@ -1,4 +1,4 @@
-"""Stable LONG execution identities shared by research, paper, and demo."""
+"""Stable LONG execution identities shared by research and the live runtime."""
 
 from __future__ import annotations
 

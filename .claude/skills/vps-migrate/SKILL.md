@@ -1,11 +1,11 @@
 ---
 name: vps-migrate
-description: Migrate or recover the demo/paper VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, staged workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
+description: Migrate or recover the demo VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, staged workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
 ---
 
 # Migrate or recover the VPS
 
-This workflow crosses SSH, credentials, deployment, and running demo/paper
+This workflow crosses SSH, credentials, deployment, and running demo
 services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
@@ -24,7 +24,7 @@ receipts or this skill.
    intended mode.
 2. Inspect local and remote worktree state without cleaning it.
 3. Confirm the task authorizes recovery/deployment, not only diagnosis.
-4. Verify all credential paths remain demo/paper and `REAL_MONEY=false`.
+4. Verify all credential paths remain demo and `REAL_MONEY=false`.
 5. Read current workflow/script refusal conditions.
 6. Record whether the fleet is quiescent and which profile marker
    (`/etc/liquidity-migration/profile`) is installed.

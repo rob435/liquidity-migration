@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "maintain" / "reset_demo_paper_ledgers.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "maintain" / "reset_demo_ledgers.sh"
 
 
 def _text() -> str:
@@ -49,22 +49,17 @@ def test_reset_rejects_real_money_and_bad_routes_before_service_mutation() -> No
     assert 'case "$target_compare/"' in archive_checks
 
 
-def test_reset_stops_producers_before_both_account_owners() -> None:
+def test_reset_stops_producers_before_the_account_owner() -> None:
     text = _text()
     units = text[text.index("STOP_UNITS=(") : text.index("ACCOUNT_BOUND_UNITS=(")]
     demo_owner = units.index("liquidity-migration-account-execution.service")
-    paper_owner = units.index("liquidity-migration-account-paper-execution.service")
     for producer in (
         "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-long-paper.service",
         "liquidity-migration-bybit-continuous-demo.service",
-        "liquidity-migration-bybit-continuous-paper.service",
         "liquidity-migration-bybit-carry-demo.service",
-        "liquidity-migration-bybit-carry-paper.service",
         "liquidity-migration-continuous-hedge.service",
     ):
         assert units.index(producer) < demo_owner
-        assert units.index(producer) < paper_owner
 
 
 def test_reset_holds_process_and_account_leases_across_archive() -> None:
@@ -76,43 +71,24 @@ def test_reset_holds_process_and_account_leases_across_archive() -> None:
     assert "LOCK_EX | fcntl.LOCK_NB" in lease_helper
     assert "canonical_demo_account_lease_path" in text
     assert text.index("\nacquire_demo_account_lease\n") < archive
-    assert text.index("\nacquire_paper_account_lease\n") < archive
     assert archive < text.index('release_demo_account_lease "normal completion"')
-    assert archive < text.index('release_paper_account_lease "normal completion"')
-    assert "canonical paper-account lease is already held" in text
+    assert "canonical demo-account lease is already held" in text
     assert "failure recovery" in text
 
 
-def test_paper_runner_and_reset_share_historical_owner_lease_path() -> None:
-    runner = (
-        SCRIPT.parents[2] / "liquidity_migration" / "runtime" / "account_paper_runner.py"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        'PAPER_ACCOUNT_LEASE_PATH="$PWD/$PAPER_ACCOUNT_ROOT/account_execution_owner.lock"'
-        in _text()
-    )
-    assert 'requested_route.account_path / "account_execution_owner.lock"' in runner
-
-
-def test_reset_prepares_and_opens_account_leases_without_path_truncation() -> None:
+def test_reset_prepares_and_opens_the_account_lease_without_path_truncation() -> None:
     text = _text()
     demo = text[text.index("acquire_demo_account_lease()") : text.index("release_demo_account_lease()")]
-    paper = text[text.index("acquire_paper_account_lease()") : text.index("release_paper_account_lease()")]
-    for block, descriptor, path in (
-        (demo, "8", "$DEMO_ACCOUNT_LEASE_PATH"),
-        (paper, "7", "$PAPER_ACCOUNT_LEASE_PATH"),
-    ):
-        prepare = block.index("account_owner_lease")
-        nontruncating_open = block.index(f'exec {descriptor}<>"{path}"', prepare)
-        acquire = block.index("acquire-inherited", nontruncating_open)
-        assert prepare < nontruncating_open < acquire
-        assert "mkdir -p" not in block
-        assert f'exec {descriptor}>"' not in block
-        assert "multiline identity metadata" in block
-        assert "lease_mount_id" in block
-        assert "parent_mount_id" in block
-        assert "ACCOUNT_LEASE_RECEIPT" in block
+    prepare = demo.index("account_owner_lease")
+    nontruncating_open = demo.index('exec 8<>"$DEMO_ACCOUNT_LEASE_PATH"', prepare)
+    acquire = demo.index("acquire-inherited", nontruncating_open)
+    assert prepare < nontruncating_open < acquire
+    assert "mkdir -p" not in demo
+    assert 'exec 8>"' not in demo
+    assert "multiline identity metadata" in demo
+    assert "lease_mount_id" in demo
+    assert "parent_mount_id" in demo
+    assert "ACCOUNT_LEASE_RECEIPT" in demo
 
 
 def test_reset_and_deploy_share_host_maintenance_lock_with_legacy_bridge() -> None:
@@ -259,32 +235,29 @@ def test_reset_clears_account_epochs_in_place_without_retiring_lock_inodes() -> 
     assert "Finalizing fresh canonical account roots" not in text
 
 
-def test_reset_revalidates_both_held_owner_leases_in_clear_process() -> None:
+def test_reset_revalidates_the_held_owner_lease_in_clear_process() -> None:
     text = _text()
     clear_process = text[text.index('"$PYTHON" - \\\n  "$DEMO_ACCOUNT_LEASE_PATH"') :]
     demo_check = clear_process.index("revalidate_inherited_account_owner_lease(8, demo_receipt)")
-    paper_check = clear_process.index("revalidate_inherited_account_owner_lease(7, paper_receipt)")
     helper_call = clear_process.index(
         "clear_account_epoch_roots_preserving_locks(sys.argv[offset + 1 :])"
     )
 
-    assert demo_check < paper_check < helper_call
+    assert demo_check < helper_call
     assert '"${DEMO_ACCOUNT_LEASE_RECEIPT[@]}"' in clear_process[:demo_check]
-    assert '"${PAPER_ACCOUNT_LEASE_RECEIPT[@]}"' in clear_process[:demo_check]
     assert "parent_mount_id=values[9]" in clear_process[:demo_check]
 
 
-def test_reset_restores_paper_ownership_and_only_shares_public_demo_inputs() -> None:
+def test_reset_restores_private_ownership_and_only_shares_public_demo_inputs() -> None:
     text = _text()
     boundary = text[
         text.index("# Reset runs as root") : text.index(
-            'release_paper_account_lease "normal completion"'
+            'release_demo_account_lease "normal completion"'
         )
     ]
-    assert "PAPER_RUNTIME_UID" in boundary and "PAPER_RUNTIME_GID" in boundary
+    assert "ROOT_RUNTIME_UID" in boundary and "ROOT_RUNTIME_GID" in boundary
     assert "demo_account_normalize_args" in boundary
-    assert "paper_normalize_args" in boundary
-    assert "normalize-paper" in boundary
+    assert "normalize-private" in boundary
     assert "normalize-demo" in boundary
     assert "--continuous-root" in boundary
     for forbidden in ("chown -R", 'find "$root"', "install -d", "mkdir -p"):
@@ -302,19 +275,14 @@ def test_reset_strictly_preflights_runtime_paths_before_owner_leases_and_clear()
         'echo "  quiescence verified (all managed units loaded and inactive)"',
         literal_inactive,
     )
-    identity = text.index('id -u "$PAPER_RUNTIME_USER"', quiescence)
-    strict = text.index("account_preflight_args=(preflight", identity)
-    paper = text.index("paper_preflight_args=(preflight-paper", strict)
-    demo = text.index("preflight-demo", paper)
+    strict = text.index("account_preflight_args=(preflight", quiescence)
+    demo = text.index("preflight-demo", strict)
     demo_lease = text.index("\nacquire_demo_account_lease\n", demo)
-    paper_lease = text.index("\nacquire_paper_account_lease\n", demo_lease)
-    destructive = text.index("FAILURE_RECOVERY_ALLOWED=0", paper_lease)
+    destructive = text.index("FAILURE_RECOVERY_ALLOWED=0", demo_lease)
 
     assert stopped < load_state < failed_only < reset_failed < literal_inactive < quiescence
-    assert quiescence < identity < strict < paper < demo < demo_lease < paper_lease < destructive
-    assert "--reject-symlinks" in text[strict:paper]
-    assert "PAPER_RUNTIME_UID=" in text[identity:strict]
-    assert "PAPER_RUNTIME_GID=" in text[identity:strict]
+    assert quiescence < strict < demo < demo_lease < destructive
+    assert "--reject-symlinks" in text[strict:demo]
 
 
 def test_reset_never_auto_restarts_after_destructive_epoch_clear_begins() -> None:
@@ -331,7 +299,7 @@ def test_failed_post_clear_handoff_stops_and_verifies_every_managed_unit() -> No
     cleanup = text[text.index("cleanup() {") : text.index("trap cleanup EXIT")]
     failed_stop = text.index("stop_all_managed_units_after_failed_handoff()")
     cleanup_stop = cleanup.index("stop_all_managed_units_after_failed_handoff")
-    stopped_release = cleanup.index('release_paper_account_lease "failed stopped handoff"')
+    stopped_release = cleanup.index('release_demo_account_lease "failed stopped handoff"')
 
     assert failed_stop < text.index("cleanup() {")
     assert cleanup_stop < stopped_release

@@ -84,7 +84,6 @@ from liquidity_migration.strategy.event_demo_data import (
     _utc_now_ms,
 )
 from liquidity_migration.account.execution_environment import (
-    ExecutionEnvironment,
     account_id_for_environment,
     candidate_universe_realm,
     execution_environment,
@@ -139,7 +138,7 @@ class ContinuousEntrySelectionObservation:
 
 @dataclass(frozen=True, slots=True)
 class ContinuousDemoCycleConfig:
-    """Continuous demo/paper target-producer configuration."""
+    """Continuous demo target-producer configuration."""
 
     # --- code-defined active selection ---
     decile: int = 9  # short the top composite decile
@@ -186,7 +185,7 @@ class ContinuousDemoCycleConfig:
     entry_btc_risk_high: float = 0.90
     entry_btc_risk_tail_mult: float = 0.35
     entry_btc_risk_min_prior: int = BTC_RISK_MIN_PRIOR
-    # Explicit demo/paper scale multiplier, recorded in configs and ledgers.
+    # Explicit exposure scale multiplier, recorded in configs and ledgers.
     notional_multiplier: float = 1.0
     # SHA-256 of the shared operational profile when runtime sizing came from
     # that profile. Empty is retained for isolated diagnostics/tests.
@@ -219,11 +218,6 @@ class ContinuousDemoCycleConfig:
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
-    # Follow ANOTHER root's flushed WS kline snapshot (read-only) instead of a
-    # second WS pool, so a co-located shadow shares one market-data plane and
-    # identical signal inputs (the rmom gate is read from that root too, being
-    # derived purely from its klines). Empty runs the sleeve's own pool.
-    klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 45
     ws_klines_universe_refresh_seconds: float = 3600.0
@@ -233,9 +227,8 @@ class ContinuousDemoCycleConfig:
 
 
 def continuous_cycles_dataset(config: ContinuousDemoCycleConfig) -> str:
-    """Cycle-heartbeat dataset for the continuous demo or paper planner."""
-    if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER:
-        return "continuous_fade_paper_cycles"
+    """Cycle-heartbeat dataset for the continuous demo planner."""
+    execution_environment(config.execution_environment)
     return "continuous_fade_demo_cycles"
 
 
@@ -1592,17 +1585,16 @@ def _first_entry_rejection_reason(
 
 
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
-    environment = execution_environment(config.execution_environment)
-    return CONTINUOUS_STRATEGY_ID + ("_paper" if environment is ExecutionEnvironment.PAPER else "")
+    execution_environment(config.execution_environment)
+    return CONTINUOUS_STRATEGY_ID
 
 
 def continuous_managed_strategy_ids(config: ContinuousDemoCycleConfig) -> tuple[str, ...]:
-    suffix = "_paper" if execution_environment(config.execution_environment) is ExecutionEnvironment.PAPER else ""
-    return (CONTINUOUS_STRATEGY_ID + suffix,)
+    return (continuous_strategy_id(config),)
 
 
 def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
-    """Resolve the active demo/paper profile into explicit knobs.
+    """Resolve the active demo profile into explicit knobs.
 
     Uses the shared code-defined component book (a single funding-gated
     turn3_pop3 cell), inverse-vol sizing, TP12, and a 24-hour maximum hold.
@@ -2155,10 +2147,10 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
 
 
 def _signal_source_root(config: ContinuousDemoCycleConfig, own_root: Path) -> Path:
-    """Return the market-data leader root that owns the causal RMOM table."""
+    """Return the market-data root that owns the causal RMOM table."""
 
-    followed = str(config.klines_follow_root or "").strip()
-    return Path(followed).expanduser() if followed else Path(own_root).expanduser()
+    del config
+    return Path(own_root).expanduser()
 
 
 def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
@@ -2187,10 +2179,10 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
 
 
 def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
-    """Validate target routing, paper/demo separation, and strategy invariants.
+    """Validate target routing and strategy invariants.
 
-    Operational demo and paper modes require their canonical account owner;
-    direct sleeve order authority is retired.
+    Operational demo mode requires its canonical account owner; direct sleeve
+    order authority is retired.
     """
     execution_environment(config.execution_environment)
     if config.strategy_profile not in CONTINUOUS_DEMO_PROFILES:
@@ -2244,7 +2236,7 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
             raise ValueError("ensemble component funding_min_at_entry must be None or finite")
     if not has_account_inbox:
         raise ValueError(
-            "operational demo/paper mode requires account_intent_inbox_root and "
+            "operational demo mode requires account_intent_inbox_root and "
             "account_execution_root; direct sleeve order authority is retired"
         )
 

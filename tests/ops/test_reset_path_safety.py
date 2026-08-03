@@ -9,9 +9,9 @@ import pytest
 from liquidity_migration.ops import reset_path_safety as safety
 from liquidity_migration.ops.reset_path_safety import (
     normalize_demo_runtime_roots,
-    normalize_paper_runtime_roots,
+    normalize_private_runtime_roots,
     preflight_demo_runtime_roots,
-    preflight_paper_runtime_roots,
+    preflight_private_runtime_roots,
     preflight_reset_targets,
     remove_reset_targets,
 )
@@ -265,12 +265,12 @@ def test_remove_rechecks_that_deleted_target_did_not_reappear(
     assert target.is_dir()
 
 
-def test_paper_normalization_sets_exact_private_permissions_and_creates_locks(
+def test_private_normalization_sets_exact_private_permissions_and_creates_locks(
     tmp_path: Path,
 ) -> None:
     anchor = tmp_path / "data"
     account = anchor / "account"
-    strategy = anchor / "paper-strategy"
+    strategy = anchor / "private-strategy"
     (account / "journal").mkdir(parents=True, mode=0o755)
     strategy.mkdir(mode=0o755)
     account.chmod(0o755)
@@ -280,7 +280,7 @@ def test_paper_normalization_sets_exact_private_permissions_and_creates_locks(
     _file(strategy / "cycle.parquet", mode=0o644)
     missing = anchor / "missing"
 
-    results = normalize_paper_runtime_roots(
+    results = normalize_private_runtime_roots(
         anchor,
         (account, strategy, missing),
         uid=os.getuid(),
@@ -305,12 +305,12 @@ def test_paper_normalization_sets_exact_private_permissions_and_creates_locks(
     assert stat.S_IMODE((strategy / "cycle.parquet").stat().st_mode) == 0o600
 
 
-def test_paper_normalization_noop_tree_skips_permission_writes_and_syncs(
+def test_private_normalization_noop_tree_skips_permission_writes_and_syncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     nested = root / "journal"
     locks = root / ".locks"
     nested.mkdir(parents=True)
@@ -320,7 +320,7 @@ def test_paper_normalization_noop_tree_skips_permission_writes_and_syncs(
     locks.chmod(0o700)
     _file(nested / "event.json", mode=0o600)
     final_rescan_called = False
-    original_verify = safety._verify_normalized_paper_tree
+    original_verify = safety._verify_normalized_private_tree
 
     def observe_final_rescan(
         original: safety._InspectionPlan,
@@ -339,31 +339,31 @@ def test_paper_normalization_noop_tree_skips_permission_writes_and_syncs(
         )
 
     def unexpected_mutation(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("an already-normalized paper tree must not be rewritten")
+        pytest.fail("an already-normalized private tree must not be rewritten")
 
     monkeypatch.setattr(safety, "_normalize_planned_regular", unexpected_mutation)
     monkeypatch.setattr(safety, "_normalize_planned_directory", unexpected_mutation)
     monkeypatch.setattr(safety.os, "fchmod", unexpected_mutation)
     monkeypatch.setattr(safety.os, "fsync", unexpected_mutation)
-    monkeypatch.setattr(safety, "_verify_normalized_paper_tree", observe_final_rescan)
+    monkeypatch.setattr(safety, "_verify_normalized_private_tree", observe_final_rescan)
 
-    normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+    normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
     assert final_rescan_called is True
 
 
-def test_paper_normalization_noop_tree_final_rescan_rejects_late_entry(
+def test_private_normalization_noop_tree_final_rescan_rejects_late_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     locks = root / ".locks"
     locks.mkdir(parents=True)
     root.chmod(0o700)
     locks.chmod(0o700)
     _file(root / "event.json", mode=0o600)
-    original_verify = safety._verify_normalized_paper_tree
+    original_verify = safety._verify_normalized_private_tree
 
     def add_late_entry(
         original: safety._InspectionPlan,
@@ -380,18 +380,18 @@ def test_paper_normalization_noop_tree_final_rescan_rejects_late_entry(
             gid=gid,
         )
 
-    monkeypatch.setattr(safety, "_verify_normalized_paper_tree", add_late_entry)
+    monkeypatch.setattr(safety, "_verify_normalized_private_tree", add_late_entry)
 
     with pytest.raises(RuntimeError, match="tree entries changed during normalization"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+        normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
 
-def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
+def test_private_normalization_bounds_open_directory_cache_for_wide_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     for index in range(128):
         child = root / f"partition-{index:03d}"
@@ -412,7 +412,7 @@ def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
 
     monkeypatch.setattr(safety._ApplyContext, "directory_fd", observe_open_count)
 
-    normalize_paper_runtime_roots(
+    normalize_private_runtime_roots(
         anchor,
         (root,),
         uid=os.getuid(),
@@ -422,14 +422,14 @@ def test_paper_normalization_bounds_open_directory_cache_for_wide_tree(
     assert maximum_open <= 3
 
 
-def test_paper_normalization_bounds_open_directory_cache_across_many_roots(
+def test_private_normalization_bounds_open_directory_cache_across_many_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
     roots: list[Path] = []
     for index in range(128):
-        root = anchor / f"paper-{index:03d}"
+        root = anchor / f"private-{index:03d}"
         (root / ".locks").mkdir(parents=True)
         roots.append(root)
 
@@ -447,7 +447,7 @@ def test_paper_normalization_bounds_open_directory_cache_across_many_roots(
 
     monkeypatch.setattr(safety._ApplyContext, "directory_fd", observe_open_count)
 
-    normalize_paper_runtime_roots(
+    normalize_private_runtime_roots(
         anchor,
         roots,
         uid=os.getuid(),
@@ -457,7 +457,7 @@ def test_paper_normalization_bounds_open_directory_cache_across_many_roots(
     assert maximum_open <= 3
 
 
-def test_paper_normalization_batch_rejects_symlink_before_permissions_change(
+def test_private_normalization_batch_rejects_symlink_before_permissions_change(
     tmp_path: Path,
 ) -> None:
     anchor = tmp_path / "data"
@@ -473,8 +473,8 @@ def test_paper_normalization_batch_rejects_symlink_before_permissions_change(
     victim = _file(external / "must-survive.json", "external evidence\n", mode=0o644)
     (second / "external-link").symlink_to(external, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="paper runtime tree contains a symlink"):
-        normalize_paper_runtime_roots(
+    with pytest.raises(ValueError, match="private runtime tree contains a symlink"):
+        normalize_private_runtime_roots(
             anchor,
             (first, second),
             uid=os.getuid(),
@@ -486,26 +486,26 @@ def test_paper_normalization_batch_rejects_symlink_before_permissions_change(
     assert victim.read_text(encoding="utf-8") == "external evidence\n"
 
 
-def test_paper_normalization_rejects_unsafe_lock_namespace_before_mutation(
+def test_private_normalization_rejects_unsafe_lock_namespace_before_mutation(
     tmp_path: Path,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True, mode=0o755)
     _file(root / ".locks", "not a directory\n", mode=0o644)
 
     with pytest.raises(ValueError, match="lock namespace must be a real directory"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+        normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
-def test_paper_normalization_safely_creates_missing_direct_child_roots(tmp_path: Path) -> None:
+def test_private_normalization_safely_creates_missing_direct_child_roots(tmp_path: Path) -> None:
     anchor = tmp_path / "data"
     anchor.mkdir()
-    missing = anchor / "paper"
+    missing = anchor / "private"
 
-    (result,) = normalize_paper_runtime_roots(
+    (result,) = normalize_private_runtime_roots(
         anchor,
         (missing,),
         uid=os.getuid(),
@@ -527,8 +527,8 @@ def test_create_missing_rejects_nested_root_before_mutating_existing_batch(tmp_p
     existing.chmod(0o755)
     nested = anchor / "absent-parent" / "nested"
 
-    with pytest.raises(ValueError, match="missing direct-child paper roots"):
-        normalize_paper_runtime_roots(
+    with pytest.raises(ValueError, match="missing direct-child private roots"):
+        normalize_private_runtime_roots(
             anchor,
             (existing, nested),
             uid=os.getuid(),
@@ -553,9 +553,9 @@ def test_preflight_accepts_overlapping_selected_roots_and_zero_targets(tmp_path:
     assert safety.main(("preflight", "--anchor", str(anchor))) == 0
 
 
-def test_strict_and_paper_preflight_reject_symlinks_before_mutation(tmp_path: Path) -> None:
+def test_strict_and_private_preflight_reject_symlinks_before_mutation(tmp_path: Path) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     external = tmp_path / "external"
     external.mkdir()
@@ -563,16 +563,16 @@ def test_strict_and_paper_preflight_reject_symlinks_before_mutation(tmp_path: Pa
 
     with pytest.raises(ValueError, match="strict reset preflight rejects a symlink"):
         preflight_reset_targets(anchor, (root,), reject_symlinks=True)
-    with pytest.raises(ValueError, match="paper runtime tree contains a symlink"):
-        preflight_paper_runtime_roots(anchor, (root,))
+    with pytest.raises(ValueError, match="private runtime tree contains a symlink"):
+        preflight_private_runtime_roots(anchor, (root,))
 
 
-def test_paper_normalization_detects_post_chmod_hardlink_and_restores_mode(
+def test_private_normalization_detects_post_chmod_hardlink_and_restores_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     payload = _file(root / "event.json", mode=0o644)
     alias = tmp_path / "late-hardlink.json"
@@ -598,19 +598,19 @@ def test_paper_normalization_detects_post_chmod_hardlink_and_restores_mode(
     owner = payload.stat().st_uid, payload.stat().st_gid
 
     with pytest.raises(RuntimeError, match="changed"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=owner[0], gid=owner[1])
+        normalize_private_runtime_roots(anchor, (root,), uid=owner[0], gid=owner[1])
 
     assert injected is True
     assert stat.S_IMODE(payload.stat().st_mode) == 0o644
     assert stat.S_IMODE(alias.stat().st_mode) == 0o644
 
 
-def test_paper_normalization_final_rescan_rejects_late_unplanned_entry(
+def test_private_normalization_final_rescan_rejects_late_unplanned_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     original_normalize = safety._normalize_planned_directory
     injected = False
@@ -632,17 +632,17 @@ def test_paper_normalization_final_rescan_rejects_late_unplanned_entry(
     monkeypatch.setattr(safety, "_normalize_planned_directory", add_late_entry)
 
     with pytest.raises(RuntimeError, match="tree entries changed during normalization"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+        normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
     assert injected is True
 
 
-def test_paper_normalization_final_rescan_rejects_created_lock_replacement(
+def test_private_normalization_final_rescan_rejects_created_lock_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     displaced = tmp_path / "displaced-locks"
     original_normalize = safety._normalize_planned_directory
@@ -667,7 +667,7 @@ def test_paper_normalization_final_rescan_rejects_created_lock_replacement(
     monkeypatch.setattr(safety, "_normalize_planned_directory", replace_created_locks)
 
     with pytest.raises(RuntimeError, match="entry changed during normalization"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+        normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
     assert injected is True
     assert stat.S_IMODE((root / ".locks").stat().st_mode) == 0o777
@@ -679,7 +679,7 @@ def test_permission_normalization_rolls_back_after_partial_fchmod_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     payload = _file(root / "setuid.json", mode=0o4644)
     identity = (payload.stat().st_dev, payload.stat().st_ino)
@@ -699,7 +699,7 @@ def test_permission_normalization_rolls_back_after_partial_fchmod_failure(
     owner = payload.stat().st_uid, payload.stat().st_gid
 
     with pytest.raises(RuntimeError, match="cannot normalize reset path permissions"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=owner[0], gid=owner[1])
+        normalize_private_runtime_roots(anchor, (root,), uid=owner[0], gid=owner[1])
 
     assert injected is True
     assert stat.S_IMODE(payload.stat().st_mode) == 0o4644
@@ -774,7 +774,7 @@ def test_regular_mutation_rechecks_descriptor_mount_id_after_leaf_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anchor = tmp_path / "data"
-    root = anchor / "paper"
+    root = anchor / "private"
     root.mkdir(parents=True)
     payload = _file(root / "event.json", mode=0o644)
     payload_identity = (payload.stat().st_dev, payload.stat().st_ino)
@@ -788,7 +788,7 @@ def test_regular_mutation_rechecks_descriptor_mount_id_after_leaf_validation(
     monkeypatch.setattr(safety, "_mount_id_for_fd", descriptor_mount_id)
 
     with pytest.raises(RuntimeError, match="file changed before normalization"):
-        normalize_paper_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
+        normalize_private_runtime_roots(anchor, (root,), uid=os.getuid(), gid=os.getgid())
 
     assert stat.S_IMODE(payload.stat().st_mode) == 0o644
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "liquidity-migration"
 version = "0.1.0"
-description = "PIT research and demo/paper execution for liquidity-migration strategies."
+description = "PIT research and demo execution for liquidity-migration strategies."
 requires-python = ">=3.11"
 dependencies = [
     "certifi>=2024.0.0",

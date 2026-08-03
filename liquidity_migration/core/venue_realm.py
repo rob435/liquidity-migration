@@ -1,7 +1,7 @@
 """Which Bybit venue a private credential authenticates against: ``demo`` or ``mainnet``.
 
 Distinct from ``ExecutionEnvironment``, which names the owner process a producer
-publishes to (``paper`` is an owner with no venue credentials at all).
+publishes to.
 
 The realm is always named explicitly — credential resolution takes it as a
 required argument — and the endpoint the transport resolved to is read back and

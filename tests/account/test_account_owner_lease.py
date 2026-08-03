@@ -54,7 +54,7 @@ def _run_inherited_cli(
     descriptor: int,
     prepared: lease_module.PreparedAccountOwnerLease,
     *,
-    environment: str = "paper",
+    environment: str = "mainnet",
     role: str = "ledger_reset",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -494,7 +494,7 @@ def test_revalidate_inherited_checks_full_receipt_and_held_lock_without_rewritin
             path,
             prepared.device,
             prepared.inode,
-            "paper",
+            "mainnet",
             "ledger_reset",
             prepared_receipt=prepared,
         )
@@ -540,7 +540,7 @@ def test_revalidate_inherited_cli_uses_complete_receipt_without_rewriting(
             path,
             prepared.device,
             prepared.inode,
-            "paper",
+            "mainnet",
             "ledger_reset",
             prepared_receipt=prepared,
         )
@@ -570,12 +570,12 @@ def test_acquire_inherited_cli_keeps_lock_on_parent_descriptor_after_return(
     descriptor = os.open(path, os.O_RDWR)
     contender = -1
     try:
-        completed = _run_inherited_cli(descriptor, prepared, environment="paper")
+        completed = _run_inherited_cli(descriptor, prepared, environment="mainnet")
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout == ""
         metadata = json.loads(path.read_text(encoding="utf-8"))
         assert metadata == {
-            "environment": "paper",
+            "environment": "mainnet",
             "pid": os.getpid(),
             "role": "ledger_reset",
             "started_at_ns": metadata["started_at_ns"],
@@ -749,7 +749,7 @@ def test_acquire_inherited_revalidates_after_flock_before_truncating(
                 path,
                 prepared.device,
                 prepared.inode,
-                "paper",
+                "mainnet",
                 "ledger_reset",
             )
     finally:
@@ -814,7 +814,7 @@ def test_acquire_inherited_final_revalidation_detects_post_fsync_replacement(
                 path,
                 prepared.device,
                 prepared.inode,
-                "paper",
+                "mainnet",
                 "ledger_reset",
             )
     finally:
@@ -838,7 +838,7 @@ def test_acquire_inherited_api_raises_typed_contention_error(tmp_path: Path) -> 
                 path,
                 prepared.device,
                 prepared.inode,
-                "paper",
+                "mainnet",
                 "ledger_reset",
             )
     finally:
@@ -961,7 +961,7 @@ def test_demo_mutation_capability_rechecks_held_path_credential_and_environment(
         with pytest.raises(RuntimeError, match="different environment"):
             lease.require_held_for(
                 api_key="demo-key",
-                environment="paper",
+                environment="mainnet",
                 action="place_order",
             )
         lease.path = tmp_path / "alternate.lock"

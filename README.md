@@ -1,6 +1,6 @@
 # liquidity-migration
 
-Research and demo/paper execution for crypto-perpetual strategies, primarily on
+Research and demo execution for crypto-perpetual strategies, primarily on
 Bybit.
 
 ## Sleeves
@@ -10,9 +10,9 @@ Bybit.
 | LONG | `LongV12WideStop` | `LONG_SLEEVE=on` — switched from `LongV11aDivWeekendVol` 2026-08-03; standing v11a positions drain under their published terms ([detail](docs/trading_logic.md)) |
 | CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE=on` |
 | CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE=off` — retired 2026-07-29 by owner override |
-| paper target mirror | republishes the demo fleet's targets onto the paper route | `PAPER_TARGET_MIRROR=on` |
 
-Paper sleeves for CONTINUOUS and CARRY, and both mainnet sleeves, are off.
+Both mainnet sleeves are off. The paper fleet (paper owner, paper producers,
+target mirror) was retired 2026-08-03; demo is the only practice book.
 `deploy/sleeves.env` is a ceiling: a host override can turn an enabled sleeve
 off, never on.
 

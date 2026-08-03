@@ -13,19 +13,19 @@ on:
         type: choice
         options: [rollout, install, activate, verify]
       profile:
-        description: Demo-only or demo plus integration-only paper topology.
+        description: Deploy profile (single profile since the 2026-08-03 paper retirement).
         required: true
         default: operational
         type: choice
-        options: [operational, demo-operational]
+        options: [operational]
       authorization_reference:
         description: >-
           Required owner/task reference for a rollout. Recorded in the dispatch
           record only; the deploy script takes no such flag.
         required: false
         type: string
-      authorize_demo_paper_operation:
-        description: Explicitly authorize bounded demo/paper operation.
+      authorize_demo_operation:
+        description: Explicitly authorize bounded demo operation.
         required: true
         default: false
         type: boolean
@@ -98,7 +98,7 @@ jobs:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
           DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
           DEPLOY_AUTHORIZATION_REFERENCE_INPUT: ${{ inputs.authorization_reference }}
-          DEPLOY_OWNER_ACKNOWLEDGED_INPUT: ${{ inputs.authorize_demo_paper_operation }}
+          DEPLOY_OWNER_ACKNOWLEDGED_INPUT: ${{ inputs.authorize_demo_operation }}
         run: |
           set -euo pipefail
           deploy_args=("$DEPLOY_MODE_INPUT")

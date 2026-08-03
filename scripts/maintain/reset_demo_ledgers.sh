@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Archive and rebuild demo/paper account state and strategy projections on the VPS.
+# Archive and rebuild demo account state and strategy projections on the VPS.
 #
 # Safe defaults:
 #   * no flag means DRY RUN (no service or file mutation)
 #   * --execute is required to stop services, archive, and rebuild projections
 #   * concurrent execute attempts are refused by a nonblocking process lock
-#   * execute holds both account-owner leases from quiescence through
-#     archive/reset, then releases them only for the owner-first restart handoff
+#   * execute holds the account-owner lease from quiescence through
+#     archive/reset, then releases it only for the owner-first restart handoff
 #   * REAL_MONEY/mainnet configuration is refused
 #   * the demo owner must load the same resolved demo credential env file
-#   * canonical demo/paper account roots, inboxes, and captures are archived
+#   * the canonical demo account root, inbox, and capture are archived
 #     and recreated empty in the same maintenance transaction
 #   * the Bybit demo account must have no positions and no open orders
 #   * only initially-active daemons/timers are restarted and verified, unless
@@ -18,10 +18,10 @@
 #     continuous account-equity high-water risk state are preserved
 #
 # Examples (from /opt/liquidity-migration):
-#   scripts/maintain/reset_demo_paper_ledgers.sh
-#   scripts/maintain/reset_demo_paper_ledgers.sh --sleeves continuous
-#   scripts/maintain/reset_demo_paper_ledgers.sh --execute --sleeves all --label exit-overhaul
-#   scripts/maintain/reset_demo_paper_ledgers.sh --execute --sleeves long --include-reports
+#   scripts/maintain/reset_demo_ledgers.sh
+#   scripts/maintain/reset_demo_ledgers.sh --sleeves continuous
+#   scripts/maintain/reset_demo_ledgers.sh --execute --sleeves all --label exit-overhaul
+#   scripts/maintain/reset_demo_ledgers.sh --execute --sleeves long --include-reports
 #
 # --include-caches is deliberately separate: it removes selected roots' .cache
 # directories and can force a slow market-data bootstrap. residual_momentum.parquet
@@ -39,9 +39,9 @@ MAINTENANCE_LOCK_HELPER="$RESET_REPOSITORY_DIRECTORY/liquidity_migration/ops/mai
 
 usage() {
   cat <<'EOF'
-Usage: scripts/maintain/reset_demo_paper_ledgers.sh [options]
+Usage: scripts/maintain/reset_demo_ledgers.sh [options]
 
-Archive and rebuild demo + paper account state and strategy telemetry.
+Archive and rebuild demo account state and strategy telemetry.
 Canonical account journals begin a new epoch only after the venue
 flatness guard; the prior journals remain in the verified archive.
 Default mode is a read-only preview. Mutation requires --execute.
@@ -50,7 +50,7 @@ Options:
   --execute                 stop writers, verify demo account flat, archive, rebuild,
                             restart previously-active units, and verify them
   --leave-stopped           execute the reset but leave every managed unit stopped;
-                            required before explicit paper-owner/demo-owner staging
+                            required before explicit demo-owner staging
   --dry-run                 explicit preview (the default)
   --sleeves LIST            all (default), long, continuous, carry, or comma-separated list
   --archive-dir DIR         archive destination (default: data/_archive)
@@ -59,19 +59,15 @@ Options:
   --include-caches          also archive/reset .cache/ in selected roots (slow rebuild)
   --env-file FILE           demo credential env (default: /etc/liquidity-migration/bybit-demo.env)
   --account-env-file FILE   demo owner route env (default: /etc/liquidity-migration/account-execution.env)
-  --paper-account-env-file FILE
-                            paper owner route env (default: /etc/liquidity-migration/account-paper-execution.env)
   --settle-seconds N        wait before restart verification (default: 3; max: 60)
   -h, --help                show this help
 
-After a continuous reset it writes fresh demo + paper cycle heartbeats. The demo
-heartbeat records the venue-verified flat boundary; the paper heartbeat records
-that the old deterministic epoch was archived and not carried forward.
+After a continuous reset it writes a fresh demo cycle heartbeat recording the
+venue-verified flat boundary.
 
-The account-owner roots, intent inboxes, raw captures, and strategy telemetry
-are archived in full before a fresh epoch is created. Demo reset additionally
-requires venue-flat proof; paper reset explicitly retires the archived
-simulated epoch without pretending the demo proof applies to it.
+The account-owner root, intent inbox, raw capture, and strategy telemetry are
+archived in full before a fresh epoch is created; the reset additionally
+requires venue-flat proof.
 
 The command never removes configs, persistent lock inodes, residual_momentum.parquet,
 or root-level market-data datasets. It never cancels orders or closes positions: execute
@@ -80,8 +76,7 @@ Execute also refuses if another deploy/reset maintenance operation holds the sha
 host lock or if any submit-armed systemd unit does not load the same resolved
 credential env file. The authenticated demo-account lock path has no operator
 override; it is derived from Bybit `userID` through the same repository helper as
-the owner, rule probe, and venue-accounting command. The canonical paper-owner
-lease is likewise held while its local epoch is cleared in place.
+the owner, rule probe, and venue-accounting command.
 EOF
 }
 
@@ -114,7 +109,7 @@ validate_real_money_value() {
       return 0
       ;;
     1|true|yes|on)
-      die "refusing ledger reset: REAL_MONEY='$raw' from $source selects mainnet. This workflow is demo/paper only."
+      die "refusing ledger reset: REAL_MONEY='$raw' from $source selects mainnet. This workflow is demo only."
       ;;
     *)
       die "refusing ledger reset: ambiguous REAL_MONEY='$raw' from $source. Use false/off/0 for demo."
@@ -132,15 +127,12 @@ LEAVE_STOPPED=0
 EXECUTED_CANDIDATE_COMMIT=""
 ENV_FILE="/etc/liquidity-migration/bybit-demo.env"
 ACCOUNT_ENV_FILE="${ACCOUNT_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-execution.env}"
-PAPER_ACCOUNT_ENV_FILE="${ACCOUNT_PAPER_EXECUTION_ENV_FILE:-/etc/liquidity-migration/account-paper-execution.env}"
 SETTLE_SECONDS="${LEDGER_RESET_SETTLE_SECONDS:-3}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
 MAINTENANCE_LOCK_DIR=/run/liquidity-migration
 MAINTENANCE_LOCK_FILE="$MAINTENANCE_LOCK_DIR/maintenance.lock"
 LEGACY_DEPLOY_LOCK_FILE="$MAINTENANCE_LOCK_DIR/deploy.lock"
 LEGACY_RESET_LOCK_FILE=/run/lock/liquidity-migration-ledger-reset.lock
-PAPER_RUNTIME_USER=liquidity-migration-paper
-PAPER_RUNTIME_GROUP=liquidity-migration-paper
 
 acquire_host_maintenance_locks() {
   # fd 9 is the canonical cross-operation mutex. fds 6 and 5 bridge old
@@ -230,11 +222,6 @@ while [[ "$#" -gt 0 ]]; do
     --account-env-file)
       [[ "$#" -ge 2 ]] || die "--account-env-file requires a value"
       ACCOUNT_ENV_FILE="$2"
-      shift 2
-      ;;
-    --paper-account-env-file)
-      [[ "$#" -ge 2 ]] || die "--paper-account-env-file requires a value"
-      PAPER_ACCOUNT_ENV_FILE="$2"
       shift 2
       ;;
     --settle-seconds)
@@ -442,10 +429,7 @@ PY
 }
 
 [[ -r "$ACCOUNT_ENV_FILE" ]] || die "demo account env is missing or unreadable: $ACCOUNT_ENV_FILE"
-[[ -r "$PAPER_ACCOUNT_ENV_FILE" ]] || die "paper account env is missing or unreadable: $PAPER_ACCOUNT_ENV_FILE"
 
-# Resolve each owner route independently; paper and demo intentionally reuse
-# variable names in separate env files.
 DEMO_KERNEL_REQUIRED="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_KERNEL_REQUIRED)"
 DEMO_ACCOUNT_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_ROOT)"
 DEMO_ACCOUNT_INBOX_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_INTENT_INBOX_ROOT)"
@@ -454,15 +438,6 @@ DEMO_ACCOUNT_CAPTURE_ROOT="$(systemd_env_value "$ACCOUNT_ENV_FILE" ACCOUNT_CAPTU
   || die "demo account env must set ACCOUNT_EXECUTION_KERNEL_REQUIRED=1"
 [[ -n "$DEMO_ACCOUNT_ROOT" && -n "$DEMO_ACCOUNT_INBOX_ROOT" && -n "$DEMO_ACCOUNT_CAPTURE_ROOT" ]] \
   || die "demo account env must set ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_CAPTURE_ROOT"
-
-PAPER_KERNEL_REQUIRED="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_PAPER_KERNEL_REQUIRED)"
-PAPER_ACCOUNT_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_EXECUTION_ROOT)"
-PAPER_ACCOUNT_INBOX_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_INTENT_INBOX_ROOT)"
-PAPER_ACCOUNT_CAPTURE_ROOT="$(systemd_env_value "$PAPER_ACCOUNT_ENV_FILE" ACCOUNT_PAPER_CAPTURE_ROOT)"
-[[ "$PAPER_KERNEL_REQUIRED" == "1" ]] \
-  || die "paper account env must set ACCOUNT_PAPER_KERNEL_REQUIRED=1"
-[[ -n "$PAPER_ACCOUNT_ROOT" && -n "$PAPER_ACCOUNT_INBOX_ROOT" && -n "$PAPER_ACCOUNT_CAPTURE_ROOT" ]] \
-  || die "paper account env must set ACCOUNT_EXECUTION_ROOT, ACCOUNT_INTENT_INBOX_ROOT, and ACCOUNT_PAPER_CAPTURE_ROOT"
 
 repo_data_path() {
   "$CANONICAL_PYTHON" - "$1" "$PWD" <<'PY'
@@ -485,26 +460,17 @@ PY
 DEMO_ACCOUNT_ROOT="$(repo_data_path "$DEMO_ACCOUNT_ROOT")" || die "invalid demo account root"
 DEMO_ACCOUNT_INBOX_ROOT="$(repo_data_path "$DEMO_ACCOUNT_INBOX_ROOT")" || die "invalid demo account inbox root"
 DEMO_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$DEMO_ACCOUNT_CAPTURE_ROOT")" || die "invalid demo account capture root"
-PAPER_ACCOUNT_ROOT="$(repo_data_path "$PAPER_ACCOUNT_ROOT")" || die "invalid paper account root"
-PAPER_ACCOUNT_INBOX_ROOT="$(repo_data_path "$PAPER_ACCOUNT_INBOX_ROOT")" || die "invalid paper account inbox root"
-PAPER_ACCOUNT_CAPTURE_ROOT="$(repo_data_path "$PAPER_ACCOUNT_CAPTURE_ROOT")" || die "invalid paper account capture root"
-PAPER_ACCOUNT_LEASE_PATH="$PWD/$PAPER_ACCOUNT_ROOT/account_execution_owner.lock"
-[[ "$PAPER_ACCOUNT_LEASE_PATH" == /* && "$PAPER_ACCOUNT_LEASE_PATH" != *$'\n'* ]] \
-  || die "canonical paper-account lease path is invalid"
 
 ACCOUNT_STATE_TARGETS=(
   "$DEMO_ACCOUNT_ROOT"
   "$DEMO_ACCOUNT_INBOX_ROOT"
   "$DEMO_ACCOUNT_CAPTURE_ROOT"
-  "$PAPER_ACCOUNT_ROOT"
-  "$PAPER_ACCOUNT_INBOX_ROOT"
-  "$PAPER_ACCOUNT_CAPTURE_ROOT"
 )
 
 # Refuse route layouts that overlap each other or any strategy root: a narrow
 # account reset could otherwise recursively erase a preserved journal, cache,
-# config, or unselected sleeve. The deployment uses six sibling roots, so
-# overlap means a bad env file.
+# config, or unselected sleeve. The deployment uses sibling roots, so overlap
+# means a bad env file.
 "$CANONICAL_PYTHON" - "$PWD" "${ACCOUNT_STATE_TARGETS[@]}" <<'PY' \
   || die "account execution roots must be pairwise disjoint and separate from strategy roots"
 import pathlib
@@ -517,11 +483,8 @@ reserved = [
     (repo / raw).resolve(strict=False)
     for raw in (
         "data/bybit-long-demo-event",
-        "data/bybit-long-paper-event",
         "data/bybit-continuous-demo-event",
-        "data/bybit-continuous-paper-event",
         "data/bybit-carry-demo-event",
-        "data/bybit-carry-paper-event",
     )
 ]
 
@@ -583,40 +546,22 @@ LONG_LEDGER_TARGETS=(
   data/bybit-long-demo-event/strategy_event_tape.jsonl
   data/bybit-long-demo-event/strategy_event_decision_tape.jsonl
   data/bybit-long-demo-event/strategy_target_scheduling_capture.jsonl
-  data/bybit-long-paper-event/long_native_paper_cycles
-  data/bybit-long-paper-event/strategy_event_tape.jsonl
-  data/bybit-long-paper-event/strategy_event_decision_tape.jsonl
-  data/bybit-long-paper-event/strategy_target_scheduling_capture.jsonl
 )
 CONTINUOUS_LEDGER_TARGETS=(
   data/bybit-continuous-demo-event/continuous_fade_demo_cycles
   data/bybit-continuous-demo-event/strategy_event_tape.jsonl
   data/bybit-continuous-demo-event/strategy_event_decision_tape.jsonl
   data/bybit-continuous-demo-event/strategy_target_scheduling_capture.jsonl
-  data/bybit-continuous-paper-event/continuous_fade_paper_cycles
-  data/bybit-continuous-paper-event/strategy_event_tape.jsonl
-  data/bybit-continuous-paper-event/strategy_event_decision_tape.jsonl
-  data/bybit-continuous-paper-event/strategy_target_scheduling_capture.jsonl
 )
 CARRY_LEDGER_TARGETS=(
   data/bybit-carry-demo-event/carry_hold_demo_cycles
   data/bybit-carry-demo-event/strategy_event_tape.jsonl
   data/bybit-carry-demo-event/strategy_event_decision_tape.jsonl
   data/bybit-carry-demo-event/strategy_target_scheduling_capture.jsonl
-  data/bybit-carry-paper-event/carry_hold_paper_cycles
-  data/bybit-carry-paper-event/strategy_event_tape.jsonl
-  data/bybit-carry-paper-event/strategy_event_decision_tape.jsonl
-  data/bybit-carry-paper-event/strategy_target_scheduling_capture.jsonl
 )
-LONG_ROOTS=(data/bybit-long-demo-event data/bybit-long-paper-event)
-CONTINUOUS_ROOTS=(
-  data/bybit-continuous-demo-event
-  data/bybit-continuous-paper-event
-)
-CARRY_ROOTS=(
-  data/bybit-carry-demo-event
-  data/bybit-carry-paper-event
-)
+LONG_ROOTS=(data/bybit-long-demo-event)
+CONTINUOUS_ROOTS=(data/bybit-continuous-demo-event)
+CARRY_ROOTS=(data/bybit-carry-demo-event)
 
 OUT=()
 (( SELECT_LONG )) && append_unique "${LONG_LEDGER_TARGETS[@]}"
@@ -700,16 +645,12 @@ STOP_UNITS=(
   liquidity-migration-continuous-hedge.timer
   liquidity-migration-continuous-rmom-refresh.timer
   liquidity-migration-bybit-long-demo.service
-  liquidity-migration-bybit-long-paper.service
   liquidity-migration-bybit-continuous-demo.service
-  liquidity-migration-bybit-continuous-paper.service
   liquidity-migration-bybit-carry-demo.service
-  liquidity-migration-bybit-carry-paper.service
   liquidity-migration-continuous-hedge.service
   liquidity-migration-continuous-rmom-refresh.service
   liquidity-migration-demo-liveness.service
   liquidity-migration-account-execution.service
-  liquidity-migration-account-paper-execution.service
 )
 # The account owner is the only venue-mutating process and must use the exact
 # credential file selected by --env-file (after symlink/path resolution).
@@ -723,15 +664,11 @@ NON_RESTARTABLE_ONESHOTS=(
 )
 OWNER_RESTART_UNITS=(
   liquidity-migration-account-execution.service
-  liquidity-migration-account-paper-execution.service
 )
 DOWNSTREAM_RESTART_UNITS=(
   liquidity-migration-bybit-long-demo.service
-  liquidity-migration-bybit-long-paper.service
   liquidity-migration-bybit-continuous-demo.service
-  liquidity-migration-bybit-continuous-paper.service
   liquidity-migration-bybit-carry-demo.service
-  liquidity-migration-bybit-carry-paper.service
   liquidity-migration-continuous-rmom-refresh.timer
   liquidity-migration-continuous-hedge.timer
   liquidity-migration-demo-liveness.timer
@@ -762,7 +699,7 @@ if [[ "$MODE" == "dry-run" ]]; then
   echo
   echo "DRY RUN: no services or files were changed."
   echo "Execute only after reviewing the plan:"
-  execute_hint="scripts/maintain/reset_demo_paper_ledgers.sh --execute --sleeves $SLEEVES_RAW"
+  execute_hint="scripts/maintain/reset_demo_ledgers.sh --execute --sleeves $SLEEVES_RAW"
   [[ -n "$LABEL" ]] && execute_hint="$execute_hint --label $LABEL"
   (( INCLUDE_REPORTS )) && execute_hint="$execute_hint --include-reports"
   (( INCLUDE_CACHES )) && execute_hint="$execute_hint --include-caches"
@@ -772,7 +709,7 @@ if [[ "$MODE" == "dry-run" ]]; then
   exit 0
 fi
 
-# Even a fully-absent layout passes through the flatness guard, creates all six
+# Even a fully-absent layout passes through the flatness guard, creates all
 # roots, and writes an archive+manifest, so a missing epoch is never mistaken
 # for a completed reset.
 [[ -r "$ENV_FILE" ]] || die "demo env file is missing or unreadable: $ENV_FILE"
@@ -983,10 +920,6 @@ verify_owner_route_env \
   liquidity-migration-account-execution.service \
   "$ACCOUNT_ENV_FILE" \
   ACCOUNT_EXECUTION_ROOT,ACCOUNT_INTENT_INBOX_ROOT,ACCOUNT_CAPTURE_ROOT
-verify_owner_route_env \
-  liquidity-migration-account-paper-execution.service \
-  "$PAPER_ACCOUNT_ENV_FILE" \
-  ACCOUNT_EXECUTION_ROOT,ACCOUNT_INTENT_INBOX_ROOT,ACCOUNT_CAPTURE_ROOT,ACCOUNT_PAPER_CAPTURE_ROOT
 
 was_active() {
   local needle="$1" unit
@@ -1007,9 +940,7 @@ RESTART_COMPLETE=0
 FAILURE_RECOVERY_ALLOWED=1
 MANIFEST_DIR=""
 DEMO_ACCOUNT_LEASE_HELD=0
-PAPER_ACCOUNT_LEASE_HELD=0
 DEMO_ACCOUNT_LEASE_RECEIPT=()
-PAPER_ACCOUNT_LEASE_RECEIPT=()
 
 acquire_demo_account_lease() {
   local helper_output lease_device lease_inode lease_uid lease_gid lease_mount_id
@@ -1064,63 +995,10 @@ release_demo_account_lease() {
   fi
 }
 
-acquire_paper_account_lease() {
-  local helper_output lease_device lease_inode lease_uid lease_gid lease_mount_id
-  local parent_device parent_inode parent_uid parent_gid parent_mount_id extra rc value
-
-  helper_output="$(
-    "$PYTHON" -m liquidity_migration.account.account_owner_lease \
-      prepare "$PAPER_ACCOUNT_LEASE_PATH"
-  )" || die "cannot prepare canonical paper-account lease safely"
-  [[ "$helper_output" != *$'\n'* ]] \
-    || die "paper-account lease helper returned multiline identity metadata"
-  IFS=$'\t' read -r \
-    lease_device lease_inode lease_uid lease_gid lease_mount_id \
-    parent_device parent_inode parent_uid parent_gid parent_mount_id extra \
-    <<< "$helper_output"
-  [[ -z "$extra" ]] || die "paper-account lease helper returned extra identity metadata"
-  PAPER_ACCOUNT_LEASE_RECEIPT=(
-    "$lease_device" "$lease_inode" "$lease_uid" "$lease_gid" "$lease_mount_id"
-    "$parent_device" "$parent_inode" "$parent_uid" "$parent_gid" "$parent_mount_id"
-  )
-  for value in "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}"; do
-    [[ "$value" =~ ^[0-9]+$ ]] \
-      || die "paper-account lease helper returned invalid identity metadata"
-  done
-  if ! { exec 7<>"$PAPER_ACCOUNT_LEASE_PATH"; }; then
-    die "cannot open canonical paper-account lease without truncation: $PAPER_ACCOUNT_LEASE_PATH"
-  fi
-
-  if "$PYTHON" -m liquidity_migration.account.account_owner_lease acquire-inherited \
-    7 "$PAPER_ACCOUNT_LEASE_PATH" "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}" \
-    paper ledger_reset; then
-    PAPER_ACCOUNT_LEASE_HELD=1
-    echo "  canonical paper-account lease acquired for archive/reset: $PAPER_ACCOUNT_LEASE_PATH"
-    return 0
-  else
-    rc="$?"
-  fi
-
-  exec 7>&-
-  if [[ "$rc" == "73" ]]; then
-    die "canonical paper-account lease is already held: $PAPER_ACCOUNT_LEASE_PATH"
-  fi
-  die "cannot acquire canonical paper-account lease: $PAPER_ACCOUNT_LEASE_PATH"
-}
-
-release_paper_account_lease() {
-  local context="$1"
-  if (( PAPER_ACCOUNT_LEASE_HELD )); then
-    exec 7>&-
-    PAPER_ACCOUNT_LEASE_HELD=0
-    echo "  canonical paper-account lease released for owner-first restart handoff ($context)"
-  fi
-}
-
 restart_previously_active() {
   local context="$1" unit failed=0
   echo
-  echo "Restarting previously-active account owners first ($context) ..."
+  echo "Restarting the previously-active account owner first ($context) ..."
   for unit in "${OWNER_RESTART_UNITS[@]}"; do
     if was_active "$unit"; then
       if "$SYSTEMCTL_BIN" start "$unit"; then
@@ -1205,7 +1083,6 @@ cleanup() {
   [[ -z "$MANIFEST_DIR" ]] || rm -rf -- "$MANIFEST_DIR"
   if (( SERVICES_STOPPED )) && (( ! RESTART_COMPLETE )); then
     if (( FAILURE_RECOVERY_ALLOWED )) && (( ! LEAVE_STOPPED )); then
-      release_paper_account_lease "failure recovery"
       release_demo_account_lease "failure recovery"
       cleanup_notice "Reset did not complete; attempting to restore pre-reset service state."
       if ! restart_previously_active "failure recovery"; then
@@ -1220,7 +1097,6 @@ cleanup() {
       else
         cleanup_notice "CRITICAL: reset handoff failed and at least one managed unit remains active."
       fi
-      release_paper_account_lease "failed stopped handoff"
       release_demo_account_lease "failed stopped handoff"
     fi
   fi
@@ -1276,35 +1152,17 @@ for unit in "${STOP_UNITS[@]}"; do
 done
 echo "  quiescence verified (all managed units loaded and inactive)"
 
-# Bind every filesystem tree before either account lease can create, chown,
-# truncate, or write a lock leaf. Paper/demo-specific policies additionally
+# Bind every filesystem tree before the account lease can create, chown,
+# truncate, or write a lock leaf. The private/demo policies additionally
 # reject unsafe cache/lock components, while the strict account pass rejects a
 # final root symlink as well as symlinks anywhere below an account root.
-id -u "$PAPER_RUNTIME_USER" >/dev/null 2>&1 \
-  || die "paper runtime user is not provisioned: $PAPER_RUNTIME_USER"
-[[ "$(id -gn "$PAPER_RUNTIME_USER")" == "$PAPER_RUNTIME_GROUP" ]] \
-  || die "paper runtime user has the wrong primary group"
-PAPER_RUNTIME_UID="$(id -u "$PAPER_RUNTIME_USER")"
-PAPER_RUNTIME_GID="$(id -g "$PAPER_RUNTIME_USER")"
-
 account_preflight_args=(preflight --anchor "$PWD/data" --reject-symlinks)
 for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
   account_preflight_args+=(--target "$PWD/$target")
 done
 "$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${account_preflight_args[@]}" \
-  || die "account root descriptor/mount preflight failed before owner leases"
-
-paper_preflight_args=(preflight-paper --anchor "$PWD/data")
-for root in \
-  "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
-  data/bybit-long-paper-event data/bybit-continuous-paper-event \
-  data/bybit-carry-paper-event; do
-  paper_preflight_args+=(--root "$PWD/$root")
-done
-"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
-  "${paper_preflight_args[@]}" \
-  || die "paper runtime descriptor/mount preflight failed before owner leases"
+  || die "account root descriptor/mount preflight failed before owner lease"
 
 "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
   --anchor "$PWD/data" \
@@ -1312,7 +1170,7 @@ done
   --root "$PWD/data/bybit-continuous-demo-event" \
   --root "$PWD/data/bybit-carry-demo-event" \
   --continuous-root "$PWD/data/bybit-continuous-demo-event" \
-  || die "demo runtime descriptor/mount preflight failed before owner leases"
+  || die "demo runtime descriptor/mount preflight failed before owner lease"
 
 reset_tree_preflight_args=(preflight --anchor "$PWD/data")
 for target in "${SELECTED_ROOTS[@]}" "${EXISTING_TARGETS[@]}"; do
@@ -1320,10 +1178,9 @@ for target in "${SELECTED_ROOTS[@]}" "${EXISTING_TARGETS[@]}"; do
 done
 "$PYTHON" -m liquidity_migration.ops.reset_path_safety \
   "${reset_tree_preflight_args[@]}" \
-  || die "reset target descriptor/mount preflight failed before owner leases"
+  || die "reset target descriptor/mount preflight failed before owner lease"
 
 acquire_demo_account_lease
-acquire_paper_account_lease
 
 echo
 echo "Checking demo/mainnet boundary and flat-account precondition ..."
@@ -1419,10 +1276,8 @@ git_head="$EXECUTED_CANDIDATE_COMMIT"
   echo "leave_stopped=$LEAVE_STOPPED"
   echo "env_file=$ENV_FILE"
   echo "account_env_file=$ACCOUNT_ENV_FILE"
-  echo "paper_account_env_file=$PAPER_ACCOUNT_ENV_FILE"
   echo "demo_account_lease_path=$DEMO_ACCOUNT_LEASE_PATH"
   echo "demo_boundary=venue_verified_flat_positions_0_open_orders_0"
-  echo "paper_boundary=archived_deterministic_epoch_not_carried_forward"
   echo "active_before=${ACTIVE_BEFORE[*]}"
   for target in "${ACCOUNT_STATE_TARGETS[@]}"; do
     echo "account_epoch_target=$target"
@@ -1489,7 +1344,6 @@ echo
 echo "Removing only archived generated projections and epoch telemetry ..."
 "$PYTHON" - \
   "$DEMO_ACCOUNT_LEASE_PATH" "${DEMO_ACCOUNT_LEASE_RECEIPT[@]}" \
-  "$PAPER_ACCOUNT_LEASE_PATH" "${PAPER_ACCOUNT_LEASE_RECEIPT[@]}" \
   -- "${ACCOUNT_STATE_TARGETS[@]}" <<'PY'
 from pathlib import Path
 import sys
@@ -1527,11 +1381,9 @@ def parse_receipt(arguments: list[str], offset: int) -> tuple[PreparedAccountOwn
 
 
 demo_receipt, offset = parse_receipt(sys.argv, 1)
-paper_receipt, offset = parse_receipt(sys.argv, offset)
 if offset >= len(sys.argv) or sys.argv[offset] != "--":
     raise SystemExit("account-owner lease receipt boundary is invalid before epoch clear")
 revalidate_inherited_account_owner_lease(8, demo_receipt)
-revalidate_inherited_account_owner_lease(7, paper_receipt)
 
 results = clear_account_epoch_roots_preserving_locks(sys.argv[offset + 1 :])
 for result in results:
@@ -1563,7 +1415,7 @@ done
 # monitoring has an explicit new-epoch fact before the producer restarts.
 if (( SELECT_CONTINUOUS )); then
   echo
-  echo "Writing post-reset demo-flat and paper-archive boundary heartbeats ..."
+  echo "Writing the post-reset demo-flat boundary heartbeat ..."
   "$PYTHON" - --write-reset-boundary "$STAMP" "$ARCHIVE_PATH" <<'PY'
 import datetime as dt
 import sys
@@ -1577,55 +1429,37 @@ from liquidity_migration.data.storage import write_dataset
 stamp = sys.argv[2]
 archive_path = sys.argv[3]
 now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-for root, dataset, mode in (
-    (
-        Path("data/bybit-continuous-demo-event"),
-        "continuous_fade_demo_cycles",
-        "demo",
-    ),
-    (
-        Path("data/bybit-continuous-paper-event"),
-        "continuous_fade_paper_cycles",
-        "paper",
-    ),
-):
-    row = {
-        "cycle_id": f"ledger-reset-{stamp}-{mode}",
-        "ts_ms": now_ms,
-        "mode": "ledger_reset_boundary",
-        "environment": mode,
-        "entries_executed": 0,
-        "exits_executed": 0,
-        "open_trades_before": 0,
-        "open_trades_after": 0,
-        "reset_archive": archive_path,
-    }
-    if mode == "demo":
-        row.update(
-            reason="verified_flat_ledger_reset",
-            account_flat_verified=True,
-            paper_epoch_archived=False,
-            flatness_basis="bybit_demo_positions_and_open_orders",
-        )
-    else:
-        row.update(
-            reason="archived_paper_epoch_reset",
-            account_flat_verified=False,
-            paper_epoch_archived=True,
-            flatness_basis="fresh_empty_deterministic_epoch",
-        )
-    write_dataset(pl.DataFrame([row]), root, dataset, append=True)
-print("  reset-boundary-heartbeats-ok demo_venue_flat=1 paper_epoch_archived=1")
+row = {
+    "cycle_id": f"ledger-reset-{stamp}-demo",
+    "ts_ms": now_ms,
+    "mode": "ledger_reset_boundary",
+    "environment": "demo",
+    "entries_executed": 0,
+    "exits_executed": 0,
+    "open_trades_before": 0,
+    "open_trades_after": 0,
+    "reset_archive": archive_path,
+    "reason": "verified_flat_ledger_reset",
+    "account_flat_verified": True,
+    "flatness_basis": "bybit_demo_positions_and_open_orders",
+}
+write_dataset(
+    pl.DataFrame([row]),
+    Path("data/bybit-continuous-demo-event"),
+    "continuous_fade_demo_cycles",
+    append=True,
+)
+print("  reset-boundary-heartbeat-ok demo_venue_flat=1")
 PY
 fi
 
-# Reset runs as root while every writer is stopped. Restore both private
-# account trees and the deliberately shared demo-cache boundary through held
-# descriptors; no recursive pathname chown/find traversal is allowed here.
+# Reset runs as root while every writer is stopped. Restore the private
+# account trees and the demo-cache boundary through held descriptors; no
+# recursive pathname chown/find traversal is allowed here.
 ROOT_RUNTIME_UID="$(id -u root)"
 ROOT_RUNTIME_GID="$(id -g root)"
 demo_account_normalize_args=(
-  normalize-paper --anchor "$PWD/data"
+  normalize-private --anchor "$PWD/data"
   --uid "$ROOT_RUNTIME_UID" --gid "$ROOT_RUNTIME_GID"
 )
 for root in "$DEMO_ACCOUNT_ROOT" "$DEMO_ACCOUNT_INBOX_ROOT" "$DEMO_ACCOUNT_CAPTURE_ROOT"; do
@@ -1635,20 +1469,6 @@ done
   "${demo_account_normalize_args[@]}" \
   || die "descriptor-rooted demo account permission normalization failed"
 
-paper_normalize_args=(
-  normalize-paper --anchor "$PWD/data"
-  --uid "$PAPER_RUNTIME_UID" --gid "$PAPER_RUNTIME_GID"
-)
-for root in \
-  "$PAPER_ACCOUNT_ROOT" "$PAPER_ACCOUNT_INBOX_ROOT" "$PAPER_ACCOUNT_CAPTURE_ROOT" \
-  data/bybit-long-paper-event data/bybit-continuous-paper-event \
-  data/bybit-carry-paper-event; do
-  paper_normalize_args+=(--root "$PWD/$root")
-done
-"$PYTHON" -m liquidity_migration.ops.reset_path_safety \
-  "${paper_normalize_args[@]}" \
-  || die "descriptor-rooted paper runtime permission normalization failed"
-
 "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
   --anchor "$PWD/data" \
   --root "$PWD/data/bybit-long-demo-event" \
@@ -1656,7 +1476,7 @@ done
   --root "$PWD/data/bybit-carry-demo-event" \
   --continuous-root "$PWD/data/bybit-continuous-demo-event" \
   --uid "$ROOT_RUNTIME_UID" \
-  --gid "$PAPER_RUNTIME_GID" \
+  --gid "$ROOT_RUNTIME_GID" \
   || die "descriptor-rooted shared demo cache normalization failed"
 
 if (( LEAVE_STOPPED )); then
@@ -1669,7 +1489,6 @@ if (( LEAVE_STOPPED )); then
     echo "  inactive: $unit"
   done
 else
-  release_paper_account_lease "normal completion"
   release_demo_account_lease "normal completion"
   restart_previously_active "normal completion"
   if (( SETTLE_SECONDS > 0 )); then
@@ -1685,7 +1504,6 @@ else
 fi
 
 if (( LEAVE_STOPPED )); then
-  release_paper_account_lease "post-receipt stopped handoff"
   release_demo_account_lease "post-receipt stopped handoff"
 fi
 RESTART_COMPLETE=1
@@ -1697,8 +1515,8 @@ echo "  archive: $ARCHIVE_PATH"
 echo "  archive sha256: $archive_sha"
 echo "  archive digest: $SHA_PATH"
 echo "  archived/reset targets: ${#EXISTING_TARGETS[@]}"
-echo "  account journals/inboxes/captures: archived; fresh empty epoch created"
-echo "  boundary truth: demo venue-flat verified; prior paper epoch archived"
+echo "  account journal/inbox/capture: archived; fresh empty epoch created"
+echo "  boundary truth: demo venue-flat verified"
 if (( LEAVE_STOPPED )); then
   echo "  service state: all managed units stopped and verified"
 else

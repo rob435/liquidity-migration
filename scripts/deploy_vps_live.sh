@@ -17,8 +17,12 @@ if [ "$MODE" = rollout ]; then
         esac
     done
     case "$DEPLOY_PROFILE" in
-        demo-operational|operational) ;;
-        *) echo "$MODE requires --profile demo-operational|operational" >&2; exit 2 ;;
+        operational) ;;
+        demo-operational)
+            echo "profile demo-operational retired with paper trading (2026-08-03); use --profile operational" >&2
+            exit 2
+            ;;
+        *) echo "$MODE requires --profile operational" >&2; exit 2 ;;
     esac
 elif [ "$#" -ne 0 ]; then
     echo "usage: deploy_vps_live.sh {install|activate|verify|rollout|activate-mainnet|stop-mainnet}" >&2
@@ -290,45 +294,23 @@ exec(compile(source, namespace["__file__"], "exec"), namespace)
 }
 
 PROFILE_MARKER=/etc/liquidity-migration/profile
-PAPER_RUNTIME_USER=liquidity-migration-paper
-PAPER_RUNTIME_GROUP=liquidity-migration-paper
-PAPER_ACCOUNT_ROOT=/opt/liquidity-migration/data/bybit-account-paper
-PAPER_INBOX_ROOT=/opt/liquidity-migration/data/bybit-account-paper-intents
-PAPER_CAPTURE_ROOT=/opt/liquidity-migration/data/bybit-account-paper-market-capture
-PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
-PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
-PAPER_SYMBOLS_FILE=$PAPER_CONFIG_DIR/symbols.txt
-PAPER_RULES_FILE=$PAPER_CONFIG_DIR/demo-rules.json
-PAPER_RISK_FILE=$PAPER_CONFIG_DIR/risk-policy.json
+# Retired paper-fleet artifacts, removed from any host that still carries them.
+# The runtime user/group stay if present (inert without units); state roots
+# stay on disk as historical record.
+RETIRED_PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
+RETIRED_PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
 CONTINUOUS_DEMO_ROOT=/opt/liquidity-migration/data/bybit-continuous-demo-event
 CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
-LONG_PAPER_ROOT=/opt/liquidity-migration/data/bybit-long-paper-event
-CONTINUOUS_PAPER_ROOT=/opt/liquidity-migration/data/bybit-continuous-paper-event
-CARRY_PAPER_ROOT=/opt/liquidity-migration/data/bybit-carry-paper-event
 
-ensure_paper_runtime_identity() {
-    command -v getent >/dev/null 2>&1 || fail "getent is unavailable"
-    command -v runuser >/dev/null 2>&1 || fail "runuser is unavailable"
-    getent group "$PAPER_RUNTIME_GROUP" >/dev/null \
-        || groupadd --system "$PAPER_RUNTIME_GROUP"
-    if ! id -u "$PAPER_RUNTIME_USER" >/dev/null 2>&1; then
-        useradd --system --gid "$PAPER_RUNTIME_GROUP" --no-create-home \
-            --home-dir /nonexistent --shell /usr/sbin/nologin "$PAPER_RUNTIME_USER"
-    fi
-    [ "$(id -gn "$PAPER_RUNTIME_USER")" = "$PAPER_RUNTIME_GROUP" ] \
-        || fail "$PAPER_RUNTIME_USER does not use $PAPER_RUNTIME_GROUP as its primary group"
-    paper_shell="$(getent passwd "$PAPER_RUNTIME_USER" | awk -F: '{print $7}')"
-    case "$paper_shell" in
-        /usr/sbin/nologin|/sbin/nologin|/bin/false) ;;
-        *) fail "$PAPER_RUNTIME_USER must be a non-login account" ;;
-    esac
+retire_paper_host_config() {
+    rm -f "$RETIRED_PAPER_ENVIRONMENT"
+    rm -rf "$RETIRED_PAPER_CONFIG_DIR"
 }
 
-prepare_paper_runtime_boundary() {
+prepare_demo_runtime_config() {
     [ "$REPO_DIR" = /opt/liquidity-migration ] \
-        || fail "systemd paper paths require REPO_DIR=/opt/liquidity-migration"
-    ensure_paper_runtime_identity
+        || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
     for path in \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env; do
@@ -446,134 +428,14 @@ except BaseException:
     raise
 PY
 
-    install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 0710 /etc/liquidity-migration
-    install -d -o root -g "$PAPER_RUNTIME_GROUP" -m 0750 "$PAPER_CONFIG_DIR"
-    install -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0600 \
-        "$demo_symbols" "$PAPER_SYMBOLS_FILE"
-    install -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0600 \
-        "$demo_rules" "$PAPER_RULES_FILE"
-    install -o "$PAPER_RUNTIME_USER" -g "$PAPER_RUNTIME_GROUP" -m 0600 \
-        "$demo_risk" "$PAPER_RISK_FILE"
+    install -d -o root -g root -m 0700 /etc/liquidity-migration
+    chown root:root /etc/liquidity-migration/sleeves.resolved.env
+    chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
+    retire_paper_host_config
 
-    # Rebuild the non-secret paper route as strict data: an existing file may
-    # contribute tuning values only, never credentials or alternate roots.
-    if [ -e "$PAPER_ENVIRONMENT" ] || [ -L "$PAPER_ENVIRONMENT" ]; then
-        [ -f "$PAPER_ENVIRONMENT" ] && [ ! -L "$PAPER_ENVIRONMENT" ] \
-            || fail "paper environment must be a real regular file"
-        chown root:root "$PAPER_ENVIRONMENT"
-        chmod 0600 "$PAPER_ENVIRONMENT"
-    else
-        install -o root -g root -m 0600 /dev/null "$PAPER_ENVIRONMENT"
-    fi
-    "$PYTHON" - "$PAPER_ENVIRONMENT" \
-        "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$PAPER_SYMBOLS_FILE" "$PAPER_RULES_FILE" "$PAPER_RISK_FILE" \
-        "$REPO_DIR/configs/operational.demo.json" \
-        "$demo_capture" "$demo_account_root" <<'PY'
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-
-from liquidity_migration.policy.operational_profile import load_operational_profile
-from liquidity_migration.policy.systemd_environment import (
-    load_private_systemd_environment,
-)
-
-path = Path(sys.argv[1])
-existing = load_private_systemd_environment(path) if path.stat().st_size else {}
-for key in (
-    "BYBIT_DEMO_API_KEY",
-    "BYBIT_DEMO_API_SECRET",
-    "BYBIT_REAL_API_KEY",
-    "BYBIT_REAL_API_SECRET",
-):
-    if existing.get(key):
-        raise SystemExit(f"paper environment contains forbidden credential {key}")
-if existing.get("REAL_MONEY", "").strip().lower() not in {"", "0", "false", "no", "off"}:
-    raise SystemExit("paper environment does not explicitly disable REAL_MONEY")
-allowed_tuning = {
-    "MAX_DEMO_RULE_AGE_HOURS",
-    "ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS",
-}
-values = {key: value for key, value in existing.items() if key in allowed_tuning}
-# The paper twin's capital base tracks the committed profile's capital
-# reference, keeping it comparable to the demo book with no per-host tuning.
-values["PAPER_EQUITY_USDT"] = f"{load_operational_profile(sys.argv[8]).capital_reference_usdt:g}"
-# The paper owner unit enables Telegram: keep operator-provided notification
-# credentials or seed them from the demo channel. Transport keys only; venue
-# credentials stay forbidden above.
-telegram_keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
-telegram = {key: existing.get(key, "").strip() for key in telegram_keys}
-if not all(telegram.values()):
-    demo_channel = Path("/etc/liquidity-migration/bybit-demo.env")
-    seeded = (
-        load_private_systemd_environment(demo_channel) if demo_channel.is_file() else {}
-    )
-    for key in telegram_keys:
-        telegram[key] = telegram[key] or seeded.get(key, "").strip()
-if not all(telegram.values()):
-    raise SystemExit(
-        "paper Telegram credentials unavailable: provide TELEGRAM_BOT_TOKEN and "
-        "TELEGRAM_CHAT_ID in the paper environment or bybit-demo.env"
-    )
-values.update(telegram)
-values.update(
-    {
-        "ACCOUNT_PAPER_KERNEL_REQUIRED": "1",
-        "ACCOUNT_RAW_MARKET_PERSISTENCE": "0",
-        "ACCOUNT_EXECUTION_ROOT": sys.argv[2],
-        "ACCOUNT_INTENT_INBOX_ROOT": sys.argv[3],
-        "ACCOUNT_PAPER_CAPTURE_ROOT": sys.argv[4],
-        "STRATEGY_TARGET_CAPTURE_PATH": str(Path(sys.argv[4]) / "strategy-targets.jsonl"),
-        "ACCOUNT_SYMBOLS_FILE": sys.argv[5],
-        "CANDIDATE_UNIVERSE_FILE": sys.argv[5],
-        "ACCOUNT_DEMO_RULES_FILE": sys.argv[6],
-        "ACCOUNT_RISK_POLICY_FILE": sys.argv[7],
-        # Read-only demo roots for the paper target mirror: the demo capture
-        # tape, and the demo owner's health projection for equity-ratio scaling.
-        "DEMO_ACCOUNT_CAPTURE_ROOT": sys.argv[9],
-        "DEMO_ACCOUNT_EXECUTION_ROOT": sys.argv[10],
-    }
-)
-descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(value)}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
-PY
-    chown root:"$PAPER_RUNTIME_GROUP" "$PAPER_ENVIRONMENT"
-    chmod 0640 "$PAPER_ENVIRONMENT"
-    chown root:"$PAPER_RUNTIME_GROUP" /etc/liquidity-migration/sleeves.resolved.env
-    chmod 0640 /etc/liquidity-migration/sleeves.resolved.env
-
-    paper_uid="$(id -u "$PAPER_RUNTIME_USER")"
-    paper_gid="$(id -g "$PAPER_RUNTIME_USER")"
     root_uid="$(id -u root)"
+    root_gid="$(id -g root)"
 
-    paper_path_args=()
-    for root in \
-        "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
-        paper_path_args+=(--root "$root")
-    done
-    paper_tree_preflight_phase() {
-        "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-paper \
-            --anchor "$REPO_DIR/data" "${paper_path_args[@]}"
-    }
     demo_tree_preflight_phase() {
         "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
             --anchor "$REPO_DIR/data" \
@@ -581,93 +443,27 @@ PY
             --root "$CARRY_DEMO_ROOT" \
             --continuous-root "$CONTINUOUS_DEMO_ROOT"
     }
-    paper_tree_normalize_phase() {
-        "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-paper \
-            --anchor "$REPO_DIR/data" "${paper_path_args[@]}" \
-            --uid "$paper_uid" --gid "$paper_gid" --create-missing
-    }
     demo_tree_normalize_phase() {
         "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" --root "$CONTINUOUS_DEMO_ROOT" \
             --root "$CARRY_DEMO_ROOT" \
             --continuous-root "$CONTINUOUS_DEMO_ROOT" \
-            --uid "$root_uid" --gid "$paper_gid" --create-missing
+            --uid "$root_uid" --gid "$root_gid" --create-missing
     }
 
-    # The batches are disjoint. Complete both read-only plans before either
-    # mutation starts, then normalize them concurrently. Each normalizer still
-    # performs its own full descriptor-rooted plan and independent final rescan.
-    run_phase_pair runtime-tree-preflight \
-        paper-tree-preflight paper_tree_preflight_phase \
-        demo-tree-preflight demo_tree_preflight_phase \
-        || fail "paper/demo runtime descriptor/mount preflight failed"
-    run_phase_pair runtime-tree-normalize \
-        paper-tree-normalize paper_tree_normalize_phase \
-        demo-tree-normalize demo_tree_normalize_phase \
-        || fail "descriptor-rooted paper/demo runtime normalization failed"
+    # The normalizer performs a full read-only descriptor-rooted plan first and
+    # an independent final rescan after mutating.
+    run_phase demo-tree-preflight demo_tree_preflight_phase \
+        || fail "demo runtime descriptor/mount preflight failed"
+    run_phase demo-tree-normalize demo_tree_normalize_phase \
+        || fail "descriptor-rooted demo runtime normalization failed"
     chown root:root \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env
     chmod 0600 \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env
-}
-
-verify_paper_runtime_boundary() {
-    ensure_paper_runtime_identity
-    for path in \
-        "$PAPER_ENVIRONMENT" /etc/liquidity-migration/sleeves.resolved.env \
-        "$PAPER_SYMBOLS_FILE" "$PAPER_RULES_FILE" "$PAPER_RISK_FILE"; do
-        runuser -u "$PAPER_RUNTIME_USER" -- test -r "$path" \
-            || fail "paper runtime cannot read required non-secret input: $path"
-    done
-    for path in \
-        /etc/liquidity-migration/bybit-demo.env \
-        /etc/liquidity-migration/account-execution.env; do
-        runuser -u "$PAPER_RUNTIME_USER" -- test ! -r "$path" \
-            || fail "paper runtime can read forbidden demo config: $path"
-    done
-    for root in \
-        "$PAPER_ACCOUNT_ROOT" "$PAPER_INBOX_ROOT" "$PAPER_CAPTURE_ROOT" \
-        "$LONG_PAPER_ROOT" "$CONTINUOUS_PAPER_ROOT" "$CARRY_PAPER_ROOT"; do
-        if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
-            # A root introduced by the commit being deployed does not exist
-            # until its install phase creates it; the post-install check is strict.
-            echo "paper-boundary-pending root=$root reason=created-by-this-install"
-            continue
-        fi
-        runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root" \
-            || fail "paper runtime cannot write its explicit state root: $root"
-        runuser -u "$PAPER_RUNTIME_USER" -- test -w "$root/.locks" \
-            || fail "paper runtime cannot write its persistent lock directory: $root/.locks"
-    done
-    # The carry paper producer follows the carry demo market plane read-only
-    # (CARRY_MARKET_FOLLOW_ROOT). Carry has no WS kline plane, but normalize-demo
-    # still provisions the traversable cache tree.
-    for root in "$LONG_DEMO_ROOT" "$CONTINUOUS_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
-        if [ ! -e "$root" ] && [ "${PAPER_BOUNDARY_PRE_INSTALL:-0}" = 1 ]; then
-            echo "paper-boundary-pending root=$root reason=created-by-this-install"
-            continue
-        fi
-        runuser -u "$PAPER_RUNTIME_USER" -- \
-            test -x "$root/.cache/ws_klines" \
-            || fail "paper runtime cannot traverse demo kline cache: $root"
-        snapshot="$root/.cache/ws_klines/store.parquet"
-        if [ -e "$snapshot" ]; then
-            runuser -u "$PAPER_RUNTIME_USER" -- test -r "$snapshot" \
-                || fail "paper runtime cannot read demo kline snapshot: $snapshot"
-        fi
-        runuser -u "$PAPER_RUNTIME_USER" -- test ! -w "$root" \
-            || fail "paper runtime can write demo market root: $root"
-    done
-    if [ -e "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet" ]; then
-        runuser -u "$PAPER_RUNTIME_USER" -- \
-            test -r "$CONTINUOUS_DEMO_ROOT/residual_momentum.parquet" \
-            || fail "paper runtime cannot read the shared RMOM input"
-    fi
-    runuser -u "$PAPER_RUNTIME_USER" -- test ! -w "$REPO_DIR/liquidity_migration" \
-        || fail "paper runtime can write repository code"
 }
 
 require_checkout() {
@@ -1030,7 +826,6 @@ install_mode() {
 
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
-    ensure_paper_runtime_identity
     run_phase install-systemd-manifest lm_install_current_systemd_units
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
@@ -1064,9 +859,8 @@ PY
     fi
     export CONTINUOUS_HEDGE_TIMER
     lm_write_resolved_sleeve_toggles
-    prepare_paper_runtime_boundary
+    prepare_demo_runtime_config
     lm_verify_resolved_sleeve_toggles
-    run_phase verify-paper-runtime-boundary verify_paper_runtime_boundary
     require_clean_head
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
     echo "next: run activate to start the sleeves this checkout enables"
@@ -1077,7 +871,9 @@ load_authorization() {
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
     # Which profile is installed, read from the marker install wrote. An
-    # explicit --profile on this invocation wins.
+    # explicit --profile on this invocation wins. Since the 2026-08-03 paper
+    # retirement there is one profile; a demo-operational marker from an older
+    # install reads as the same authorization and self-heals on the next rollout.
     AUTH_PROFILE="${DEPLOY_PROFILE:-}"
     if [ -z "$AUTH_PROFILE" ] && [ -r "$PROFILE_MARKER" ]; then
         AUTH_PROFILE="$(cat "$PROFILE_MARKER")"
@@ -1085,45 +881,41 @@ load_authorization() {
     [ -n "$AUTH_PROFILE" ] || AUTH_PROFILE=operational
     AUTH_SHUTDOWN_EXPIRED_DEMO_RULES=0
     case "$AUTH_PROFILE" in demo-operational|operational) ;; *) fail "unsupported profile $AUTH_PROFILE" ;; esac
-    if [ "$AUTH_PROFILE" = operational ]; then
-        # Pre-install: state roots introduced by the commit being deployed do
-        # not exist yet; the strict boundary check re-runs after install.
-        PAPER_BOUNDARY_PRE_INSTALL=1 verify_paper_runtime_boundary
-    fi
 
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
-    lm_load_group_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/sleeves.resolved.env "$PAPER_RUNTIME_GROUP" \
-        LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE \
-        CARRY_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR \
-        CARRY_MAINNET_SLEEVE LONG_MAINNET_SLEEVE CONTINUOUS_HEDGE_TIMER
+    # A resolved file written before the paper retirement is 0640 with the
+    # retired runtime group; normalize so the strict private loader accepts it.
+    if [ -e /etc/liquidity-migration/sleeves.resolved.env ]; then
+        chown root:root /etc/liquidity-migration/sleeves.resolved.env
+        chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
+    fi
+    lm_load_private_systemd_environment "$PYTHON" \
+        /etc/liquidity-migration/sleeves.resolved.env \
+        LONG_SLEEVE CONTINUOUS_SLEEVE CARRY_SLEEVE \
+        CARRY_MAINNET_SLEEVE LONG_MAINNET_SLEEVE CONTINUOUS_HEDGE_TIMER \
+        CONTINUOUS_PAPER_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR
+    # The three retired paper keys are loaded solely for the retirement
+    # rollout's pre-install stage: there the host checkout still sources the
+    # PREVIOUS commit's lib_sleeves.sh, whose resolved-toggle verifier greps
+    # those keys against these variables. Nothing below reads them, and a
+    # post-retirement resolved file simply leaves them unset.
     # A resolved file written by a pre-carry install lacks the carry keys;
     # absent means never deployed, i.e. off. Bridges only the rollout that
     # introduces them — the post-install verifier requires them present.
-    if [ -z "${CARRY_SLEEVE:-}" ] || [ -z "${CARRY_PAPER_SLEEVE:-}" ]; then
+    if [ -z "${CARRY_SLEEVE:-}" ]; then
         echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
         CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
-        CARRY_PAPER_SLEEVE="${CARRY_PAPER_SLEEVE:-off}"
     fi
-    if [ -z "${PAPER_TARGET_MIRROR:-}" ] || [ -z "${CARRY_MAINNET_SLEEVE:-}" ] \
-        || [ -z "${LONG_MAINNET_SLEEVE:-}" ]; then
-        echo "sleeves-resolved-transition mirror-mainnet-keys=absent treated-as=off reason=pre-mirror-install"
-        PAPER_TARGET_MIRROR="${PAPER_TARGET_MIRROR:-off}"
+    if [ -z "${CARRY_MAINNET_SLEEVE:-}" ] || [ -z "${LONG_MAINNET_SLEEVE:-}" ]; then
+        echo "sleeves-resolved-transition mainnet-keys=absent treated-as=off reason=pre-mainnet-install"
         CARRY_MAINNET_SLEEVE="${CARRY_MAINNET_SLEEVE:-off}"
         LONG_MAINNET_SLEEVE="${LONG_MAINNET_SLEEVE:-off}"
     fi
-    for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CONTINUOUS_PAPER_SLEEVE" \
-        "$CARRY_SLEEVE" "$CARRY_PAPER_SLEEVE" "$PAPER_TARGET_MIRROR" \
+    for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CARRY_SLEEVE" \
         "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
-    if [ "$AUTH_PROFILE" = demo-operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-        fail "demo-operational authorization cannot run the paper continuous sleeve"
-    fi
-    if [ "$AUTH_PROFILE" = demo-operational ] && sleeve_on "$CARRY_PAPER_SLEEVE"; then
-        fail "demo-operational authorization cannot run the paper carry sleeve"
-    fi
     lm_verify_resolved_sleeve_toggles
     lm_verify_no_unknown_liqmig_units
     lm_verify_guarded_unit_surfaces
@@ -1213,11 +1005,6 @@ rollout_flat_check() {
 
 verify_topology() {
     unit_on liquidity-migration-account-execution.service || fail "demo owner is not active and enabled"
-    if [ "$AUTH_PROFILE" = operational ]; then
-        unit_on liquidity-migration-account-paper-execution.service || fail "paper owner is not active and enabled"
-    else
-        unit_off liquidity-migration-account-paper-execution.service || fail "paper owner is active under demo-only authorization"
-    fi
 
     if sleeve_on "$LONG_SLEEVE"; then
         expected_downstream_on liquidity-migration-bybit-long-demo.service \
@@ -1225,23 +1012,11 @@ verify_topology() {
     else
         unit_off liquidity-migration-bybit-long-demo.service || fail "LONG demo producer is not off"
     fi
-    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$LONG_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-long-paper.service \
-            || fail "LONG paper producer is not active"
-    else
-        unit_off liquidity-migration-bybit-long-paper.service || fail "LONG paper producer is not off"
-    fi
     if sleeve_on "$CONTINUOUS_SLEEVE"; then
         expected_downstream_on liquidity-migration-bybit-continuous-demo.service \
             || fail "continuous demo producer is not active"
     else
         unit_off liquidity-migration-bybit-continuous-demo.service || fail "continuous demo producer is not off"
-    fi
-    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-continuous-paper.service \
-            || fail "continuous paper producer is not active"
-    else
-        unit_off liquidity-migration-bybit-continuous-paper.service || fail "continuous paper producer is not off"
     fi
     if sleeve_on "$CARRY_SLEEVE"; then
         expected_downstream_on liquidity-migration-bybit-carry-demo.service \
@@ -1249,21 +1024,8 @@ verify_topology() {
     else
         unit_off liquidity-migration-bybit-carry-demo.service || fail "carry demo producer is not off"
     fi
-    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CARRY_PAPER_SLEEVE"; then
-        expected_downstream_on liquidity-migration-bybit-carry-paper.service \
-            || fail "carry paper producer is not active"
-    else
-        unit_off liquidity-migration-bybit-carry-paper.service || fail "carry paper producer is not off"
-    fi
-    if [ "$AUTH_PROFILE" = operational ] && sleeve_on "$PAPER_TARGET_MIRROR"; then
-        expected_downstream_on liquidity-migration-paper-target-mirror.service \
-            || fail "paper target mirror is not active"
-    else
-        unit_off liquidity-migration-paper-target-mirror.service || fail "paper target mirror is not off"
-    fi
 
-    if sleeve_on "$CONTINUOUS_SLEEVE" \
-        || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
+    if sleeve_on "$CONTINUOUS_SLEEVE"; then
         expected_downstream_on liquidity-migration-continuous-rmom-refresh.timer \
             || fail "RMOM timer is not active"
     else
@@ -1277,7 +1039,7 @@ verify_topology() {
         timer_off liquidity-migration-continuous-hedge.timer || fail "hedge timer is not off"
     fi
     # With no mainnet sleeve on, a running mainnet unit must not hide behind a
-    # green demo/paper verification; with one on, the funded fleet is verified
+    # green demo verification; with one on, the funded fleet is verified
     # exactly like the others.
     if any_mainnet_sleeve_on; then
         unit_on liquidity-migration-account-execution-mainnet.service \
@@ -1309,7 +1071,7 @@ verify_topology() {
             liquidity-migration-bybit-long-mainnet.service \
             liquidity-migration-mainnet-liveness.timer; do
             unit_off "$mainnet_unit" \
-                || fail "$mainnet_unit is active under demo/paper authorization"
+                || fail "$mainnet_unit is active under demo authorization"
         done
     fi
     expected_downstream_on liquidity-migration-demo-liveness.timer \
@@ -1372,8 +1134,7 @@ seed_rmom() {
         ok=1
         systemctl reset-failed liquidity-migration-continuous-rmom-refresh.service 2>/dev/null || true
         systemctl start liquidity-migration-continuous-rmom-refresh.service || ok=0
-        if sleeve_on "$CONTINUOUS_SLEEVE" \
-            || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
+        if sleeve_on "$CONTINUOUS_SLEEVE"; then
             "$PYTHON" scripts/research/check_residual_momentum_gate.py \
                 --path "$gate_path" || ok=0
         fi
@@ -1397,27 +1158,12 @@ activate_mode() {
     done
     systemctl enable liquidity-migration-account-execution.service
     systemctl start liquidity-migration-account-execution.service
-    if [ "$AUTH_PROFILE" = operational ]; then
-        systemctl enable liquidity-migration-account-paper-execution.service
-        systemctl start liquidity-migration-account-paper-execution.service
-    fi
 
     start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
-    if [ "$AUTH_PROFILE" = operational ]; then
-        start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-paper.service
-    fi
     start_if "$CONTINUOUS_SLEEVE" liquidity-migration-bybit-continuous-demo.service
-    if [ "$AUTH_PROFILE" = operational ]; then
-        start_if "$CONTINUOUS_PAPER_SLEEVE" liquidity-migration-bybit-continuous-paper.service
-    fi
     start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
-    if [ "$AUTH_PROFILE" = operational ]; then
-        start_if "$CARRY_PAPER_SLEEVE" liquidity-migration-bybit-carry-paper.service
-        start_if "$PAPER_TARGET_MIRROR" liquidity-migration-paper-target-mirror.service
-    fi
 
-    if sleeve_on "$CONTINUOUS_SLEEVE" \
-        || { [ "$AUTH_PROFILE" = operational ] && sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; }; then
+    if sleeve_on "$CONTINUOUS_SLEEVE"; then
         run_phase seed-residual-momentum seed_rmom
         systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
     fi
@@ -1504,21 +1250,25 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-continuous-hedge.timer
     liquidity-migration-continuous-rmom-refresh.timer
     liquidity-migration-bybit-long-demo.service
-    liquidity-migration-bybit-long-paper.service
     liquidity-migration-bybit-long-mainnet.service
     liquidity-migration-bybit-continuous-demo.service
-    liquidity-migration-bybit-continuous-paper.service
     liquidity-migration-bybit-carry-demo.service
-    liquidity-migration-bybit-carry-paper.service
     liquidity-migration-bybit-carry-mainnet.service
-    liquidity-migration-paper-target-mirror.service
     liquidity-migration-continuous-hedge.service
     liquidity-migration-continuous-rmom-refresh.service
     liquidity-migration-demo-liveness.service
     liquidity-migration-mainnet-liveness.service
+    # Paper fleet, retired 2026-08-03. Kept in the stop list so the rollout
+    # that carries the retirement quiesces a host still running them; the
+    # manifest install then removes the unit files for good.
+    liquidity-migration-bybit-long-paper.service
+    liquidity-migration-bybit-continuous-paper.service
+    liquidity-migration-bybit-carry-paper.service
+    liquidity-migration-paper-target-mirror.service
 )
 # Owners stop last and start first: every mainnet producer declares
-# Requires=/After= on the mainnet owner.
+# Requires=/After= on the mainnet owner. The retired paper owner stays here
+# for the same transition reason as the retired producers above.
 ROLLOUT_OWNER_UNITS=(
     liquidity-migration-account-execution.service
     liquidity-migration-account-paper-execution.service

@@ -45,60 +45,15 @@ case "$UNIT:$ENTRYPOINT" in
             --max-age-seconds 30
         )
         ;;
-    liquidity-migration-account-paper-execution.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_account_paper_execution_service.sh)
-        ;;
-    liquidity-migration-account-paper-execution.service:readiness)
-        COMMAND=(
-            /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.runtime.account_owner_readiness
-            --environment paper
-            --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
-            --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
-            --capture-root "${ACCOUNT_PAPER_CAPTURE_ROOT:?ACCOUNT_PAPER_CAPTURE_ROOT is required}"
-            --expected-invocation-id "${INVOCATION_ID:?INVOCATION_ID is required}"
-            --timeout-seconds 180
-            --max-age-seconds 30
-        )
-        ;;
-    liquidity-migration-paper-target-mirror.service:main)
-        # Republishes the demo fleet's published targets onto the paper route,
-        # verbatim, so execution is the only difference between the two books.
-        COMMAND=(
-            /opt/liquidity-migration/.venv/bin/python
-            -m liquidity_migration.runtime.paper_target_mirror_runner
-            --demo-capture-tape "${DEMO_ACCOUNT_CAPTURE_ROOT:?DEMO_ACCOUNT_CAPTURE_ROOT is required}/strategy-targets.jsonl"
-            --demo-account-root "${DEMO_ACCOUNT_EXECUTION_ROOT:?DEMO_ACCOUNT_EXECUTION_ROOT is required}"
-            --account-root "${ACCOUNT_EXECUTION_ROOT:?ACCOUNT_EXECUTION_ROOT is required}"
-            --inbox-root "${ACCOUNT_INTENT_INBOX_ROOT:?ACCOUNT_INTENT_INBOX_ROOT is required}"
-            --cursor-path "${ACCOUNT_PAPER_CAPTURE_ROOT:?ACCOUNT_PAPER_CAPTURE_ROOT is required}/paper-target-mirror-cursor.json"
-            --sleeve "${PAPER_MIRROR_SLEEVE:-carry}"
-            --scale-mode "${PAPER_MIRROR_SCALE_MODE:-verbatim}"
-            --poll-seconds "${PAPER_MIRROR_POLL_SECONDS:-5}"
-            # Runs as root to read the 0600 demo tape, so the paper route
-            # manifests belong to the paper owner, not to this process.
-            --owner-user "${PAPER_RUNTIME_USER:-liquidity-migration-paper}"
-        )
-        ;;
     liquidity-migration-bybit-long-demo.service:main | \
-    liquidity-migration-bybit-long-paper.service:main | \
     liquidity-migration-bybit-long-mainnet.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_long_demo_event_engine.sh)
         ;;
-    liquidity-migration-bybit-continuous-demo.service:main | \
-    liquidity-migration-bybit-continuous-paper.service:main)
+    liquidity-migration-bybit-continuous-demo.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_continuous_demo_event_engine.sh)
         ;;
     liquidity-migration-bybit-carry-demo.service:main | \
-    liquidity-migration-bybit-carry-paper.service:main | \
     liquidity-migration-bybit-carry-mainnet.service:main)
-        # The sleeve contract names the paper follow root
-        # CARRY_MARKET_FOLLOW_ROOT; the carry runner consumes the generic
-        # MARKET_FOLLOW_ROOT. The demo unit sets neither.
-        if [ -n "${CARRY_MARKET_FOLLOW_ROOT:-}" ]; then
-            MARKET_FOLLOW_ROOT="$CARRY_MARKET_FOLLOW_ROOT"
-            export MARKET_FOLLOW_ROOT
-        fi
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_carry_demo_event_engine.sh)
         ;;
     liquidity-migration-continuous-hedge.service:main)
@@ -111,8 +66,7 @@ case "$UNIT:$ENTRYPOINT" in
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/check_fleet_liveness.py
-            --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
-            --account-paper-environment-file /etc/liquidity-migration/account-paper-execution.env
+            --account-scope demo
             --max-cycle-age-min 10
             --cooldown-min 360
             --telegram
@@ -122,7 +76,7 @@ case "$UNIT:$ENTRYPOINT" in
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/check_fleet_liveness.py
-            --account-scope "${ACCOUNT_LIVENESS_SCOPE:?ACCOUNT_LIVENESS_SCOPE is required}"
+            --account-scope mainnet
             --carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event
             --long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event
             --max-cycle-age-min 10

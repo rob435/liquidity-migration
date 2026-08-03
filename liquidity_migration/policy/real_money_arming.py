@@ -33,7 +33,6 @@ __all__ = ["CheckResult", "preflight", "main"]
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
 MAINNET_OWNER_ENV = Path("/etc/liquidity-migration/account-execution-mainnet.env")
 DEMO_OWNER_ENV = Path("/etc/liquidity-migration/account-execution.env")
-PAPER_OWNER_ENV = Path("/etc/liquidity-migration/account-paper-execution.env")
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
 
@@ -445,7 +444,7 @@ def _create_state_roots(args: argparse.Namespace) -> int:
     # Resolved on both sides: a lexical compare misses a symlinked or ``..`` path
     # that lands in another realm's tree.
     resolved = {target: target.resolve() for target in targets}
-    for other in (DEMO_OWNER_ENV, PAPER_OWNER_ENV):
+    for other in (DEMO_OWNER_ENV,):
         for root in _declared_roots(other):
             here = root.resolve()
             for target, full in resolved.items():

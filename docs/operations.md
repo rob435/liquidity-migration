@@ -12,8 +12,8 @@ fleet's start/stop modes are below; what arming a funded account requires before
 | --- | --- |
 | `status` | Read-only topology verification (`deploy_vps_live.sh verify`). No arguments. |
 | `equity [ARGS]` | Descriptive equity curves. `--sleeves long,continuous,carry` (`carry` renders `configs/lane2_carry_hold_v3.json` from the cross-venue panel, not a daemon replay), `--years N`, `--chart-leverage X`. |
-| `research-refresh {plan,run,reconcile}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
-| `reset [ARGS]` | Demo/paper ledger reset. Preview unless `--execute`. |
+| `research-refresh {plan,run}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
+| `reset [ARGS]` | Demo ledger reset. Preview unless `--execute`. |
 | `venue-accounting --account-root R --start-time-ms N --output PATH` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Read-only. |
 | `wedged-command {report,probe}`, `--execute resolve` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the demo account root/id/realm and loads the owner's credentials on the host, so the operator passes only the subcommand and its flags. |
 | `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
@@ -42,8 +42,8 @@ scripts/ops.sh status
 checks out the exact commit from `$REMOTE/$BRANCH`, installs `requirements.lock` with
 `--no-deps`, runs Ruff, mypy and six focused runtime test files, installs the unit manifest,
 disables every project unit, removes unknown `liquidity-migration-*` units, resolves the
-hedge timer, writes `/etc/liquidity-migration/sleeves.resolved.env` and normalizes the paper
-and demo runtime trees. Prints `install-ok commit=<sha> units_started=0`. It does **not**
+hedge timer, writes `/etc/liquidity-migration/sleeves.resolved.env` and normalizes the
+demo runtime trees. Prints `install-ok commit=<sha> units_started=0`. It does **not**
 write the profile marker; only `rollout` does.
 
 **activate** reads `/etc/liquidity-migration/profile` (defaulting to `operational` when
@@ -65,7 +65,7 @@ EXPECTED_COMMIT="$COMMIT" BRANCH="$(git branch --show-current)" \
   scripts/ops.sh deploy --execute rollout --profile operational
 ```
 
-`--profile demo-operational|operational` is required and lands in the profile marker just
+`--profile operational` is required and lands in the profile marker just
 before activation. Phases, each printing start/ok/failed with elapsed seconds: prefetch
 the target and confirm it is on `$REMOTE/$BRANCH`; verify the current topology;
 flat-account check (no venue position, no working order, zero aggregate target, read from
@@ -124,7 +124,7 @@ the kernel exempts a reducing batch from the capital, leverage, freshness and pa
 checks that would otherwise refuse an order on a degraded account, and retries a reduction
 without limit. A tripped loss guard does not block an exit.
 
-`--environment` is named explicitly and has no default; it accepts `demo`, `paper` or
+`--environment` is named explicitly and has no default; it accepts `demo` or
 `mainnet`. `--symbol` and `--sleeve` narrow the plan, but a narrowed flatten will not
 satisfy a rollout, which wants the whole account flat.
 
@@ -148,21 +148,21 @@ flat on its own. Flatten reports them and waits.
 
 | Profile | Runs |
 | --- | --- |
-| `demo-operational` | Demo owner, demo producers, hedge/RMOM timers, liveness. Paper owner and paper sleeves must be off. |
-| `operational` | Both owners, plus the paper producers and target mirror the toggles allow. |
+| `operational` | The demo owner, the demo producers its toggles allow, hedge/RMOM timers, liveness. The only profile since the 2026-08-03 paper retirement; `demo-operational` is rejected with a message naming the retirement. |
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling; the host file
 `/etc/liquidity-migration/sleeves.env` may only narrow `on` to `off`.
 
 | Toggle | Now | Units it gates |
 | --- | --- | --- |
-| `LONG_SLEEVE` | on | `bybit-long-demo`, `bybit-long-paper` |
+| `LONG_SLEEVE` | on | `bybit-long-demo` |
 | `CARRY_SLEEVE` | on | `bybit-carry-demo` |
-| `PAPER_TARGET_MIRROR` | on | `paper-target-mirror` |
 | `CONTINUOUS_SLEEVE` | off | `bybit-continuous-demo`; forces the hedge timer on |
-| `CONTINUOUS_PAPER_SLEEVE` | off | `bybit-continuous-paper` |
-| `CARRY_PAPER_SLEEVE` | off | `bybit-carry-paper`, retired in favour of the mirror |
 | `CARRY_MAINNET_SLEEVE`, `LONG_MAINNET_SLEEVE` | off | `bybit-carry-mainnet`, `bybit-long-mainnet`; either one on also brings up the mainnet owner and liveness timer |
+
+The retired paper toggles (`CONTINUOUS_PAPER_SLEEVE`, `CARRY_PAPER_SLEEVE`,
+`PAPER_TARGET_MIRROR`) are ignored with a warning if a stale host override still
+carries them.
 
 Turning a sleeve off stops new targets; it does not flatten an existing target or venue
 position — the last targets stay standing in the journal, which is why a sleeve-off fleet
@@ -186,7 +186,7 @@ scripts/ops.sh reset --execute --leave-stopped --sleeves all --label planned-res
 
 Also `--sleeves long|continuous|carry|all`, `--archive-dir DIR` (default `data/_archive`),
 `--include-reports`, `--include-caches`, `--settle-seconds N`, `--env-file`,
-`--account-env-file`, `--paper-account-env-file`.
+`--account-env-file`.
 
 `--execute` refuses unless the demo account is already flat with no open orders, the
 maintenance lock is free, mainnet configuration is absent, every managed unit reports

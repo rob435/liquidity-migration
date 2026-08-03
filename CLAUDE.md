@@ -1,6 +1,6 @@
 # liquidity-migration
 
-Research and demo/paper execution for crypto-perpetual strategies, mostly on
+Research and demo execution for crypto-perpetual strategies, mostly on
 Bybit.
 
 @AGENTS.md

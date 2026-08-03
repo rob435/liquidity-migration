@@ -38,7 +38,6 @@ from liquidity_migration.strategy.continuous_demo import (
 )
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
 from liquidity_migration.account.execution_environment import execution_environment
-from liquidity_migration.marketdata.kline_follower import FollowerKlineStreamManager, build_kline_follower
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
@@ -65,38 +64,15 @@ def _build_continuous_kline_universe(
     return top_turnover_kline_universe(market, top_n=top_n, label="continuous")
 
 
-def _follower_continuous_kline_stream_manager_factory(
-    config: ResearchConfig,
-    demo_config: ContinuousDemoCycleConfig,
-    cache_root: Path,
-) -> FollowerKlineStreamManager:
-    """Read-only follower of the leader root's flushed kline snapshot (no WS pool).
-
-    Selected when ``klines_follow_root`` is set, so a co-located shadow shares the
-    leader's market-data plane instead of running a duplicate. ``cache_root`` is
-    used only to refuse a circular self-follow: the follower writes nothing, so
-    following its own root would read a snapshot nobody updates."""
-    del config
-    return build_kline_follower(
-        leader_root=demo_config.klines_follow_root,
-        follower_root=cache_root,
-    )
-
-
 def _select_kline_stream_manager_factory(
     demo_config: ContinuousDemoCycleConfig,
     explicit: Callable[..., Any] | None,
 ) -> Callable[..., Any]:
-    """An explicitly injected factory (tests) always wins; otherwise follow when
-    ``klines_follow_root`` is set, else run the sleeve's own WS pool.
-
-    The base daemon invokes the factory only when ``ws_klines_enabled`` is True,
-    and follow mode rides that same gate: WS_KLINES_ENABLED=0 with
-    KLINES_FOLLOW_ROOT means no manager at all (pure REST), not a follower."""
+    """An explicitly injected factory (tests) always wins; otherwise run the
+    sleeve's own WS pool."""
+    del demo_config
     if explicit is not None:
         return explicit
-    if demo_config.klines_follow_root:
-        return _follower_continuous_kline_stream_manager_factory
     return _default_continuous_kline_stream_manager_factory
 
 

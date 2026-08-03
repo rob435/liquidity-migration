@@ -14,18 +14,17 @@ English: [`plain_english_guide.md`](plain_english_guide.md).
 
 Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 
-| Sleeve | Trades | Demo | Paper | Mainnet |
-| --- | --- | --- | --- | --- |
-| LONG | Long a fresh volume pump, bought on a shallow retrace | on | on (own producer, `operational` profile only) | off |
-| CARRY | Long coins whose shorts pay a deep crowd fee | on | on (demo targets mirrored) | off |
-| CONTINUOUS | Short decile 9 of an hourly pump composite | off | off | — |
-| Hedge | Long BTC+ETH against the CONTINUOUS short book | off (follows CONTINUOUS) | none | — |
+| Sleeve | Trades | Demo | Mainnet |
+| --- | --- | --- | --- |
+| LONG | Long a fresh volume pump, bought on a shallow retrace | on | off |
+| CARRY | Long coins whose shorts pay a deep crowd fee | on | off |
+| CONTINUOUS | Short decile 9 of an hourly pump composite | off | — |
+| Hedge | Long BTC+ETH against the CONTINUOUS short book | off (follows CONTINUOUS) | — |
 
 Producers publish absolute component targets; they never place orders and never own fills,
-funding, or P&L ([`architecture.md`](architecture.md)). `PAPER_TARGET_MIRROR=on`
-republishes demo CARRY targets onto the paper route, so the two books differ only in
-execution; the paper CARRY producer is off because two independent producers raced their
-caches into a TLMUSDT position demo never asked for (−70.73 USDT, 2026-07-29).
+funding, or P&L ([`architecture.md`](architecture.md)). The paper fleet — a credential-free
+twin owner fed by a target mirror — was retired 2026-08-03; demo is the only practice book
+and the mainnet route is wired but off.
 
 ## LONG — `LongV12WideStop`
 
@@ -291,10 +290,8 @@ the same 0.35.
 **Limits.** The standard historical curve reproduces the component book, the funding
 admission, inverse-vol sizing, TP12, the 24h hold, the 35% component stop, and the BTC+ETH
 hedge with its regime. It does not reproduce the live accepted-decision BTC-risk state,
-account risk admission, venue rules, fills, or reconciliation. There is no paper hedge
-service, so any paper CONTINUOUS book is an unhedged-book result and cannot be compared
-against that hedged curve. A data root named `full_pit` establishes nothing about
-membership ([`data.md`](data.md)).
+account risk admission, venue rules, fills, or reconciliation. A data root named
+`full_pit` establishes nothing about membership ([`data.md`](data.md)).
 
 ## Hedge (off with CONTINUOUS)
 
@@ -372,10 +369,7 @@ surface. Caps are a fraction of observed wallet equity
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
 [`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to its own
 partition of it; [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) halts
-the day at a loss ceiling. The paper twin's fixed capital base comes from the same file:
-`scripts/deploy_vps_live.sh:503` sets `PAPER_EQUITY_USDT =
-load_operational_profile(...).capital_reference_usdt` (currently 250,000), with no per-host
-tuning — every percentage return or drawdown read off the paper book is against that number.
+the day at a loss ceiling.
 
 **Profile load refusals** (all in
 [`operational_profile.py`](../liquidity_migration/policy/operational_profile.py)): unknown or

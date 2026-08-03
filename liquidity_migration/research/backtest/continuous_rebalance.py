@@ -87,7 +87,7 @@ class ContinuousRebalanceComponents:
 
 @dataclass(frozen=True)
 class ContinuousRebalanceResizePlan:
-    """One desired live/paper resize action for an already-open continuous short."""
+    """One desired live resize action for an already-open continuous short."""
 
     trade_id: str
     symbol: str
@@ -102,7 +102,7 @@ class ContinuousRebalanceResizePlan:
 
 @dataclass(frozen=True)
 class ContinuousRebalanceScaleState:
-    """Prior state required to compute the next live/paper target scale."""
+    """Prior state required to compute the next live target scale."""
 
     prior_raw_returns: tuple[float, ...]
     prior_scaled_equity: float = 1.0
@@ -234,7 +234,7 @@ def compute_continuous_rebalance_scale(
 ) -> float:
     """Compute today's target scale from prior-only state.
 
-    This is the live/paper equivalent of the scale calculation inside the
+    This is the live equivalent of the scale calculation inside the
     backtest loop. ``prior_raw_returns`` must exclude the day being sized.
     """
     if not rule.enabled:
@@ -378,7 +378,7 @@ def _capped_hedge_legs(
 
 @dataclass(frozen=True)
 class ContinuousHedgeState:
-    """Prior-only state required to compute the live/paper hedge ratio.
+    """Prior-only state required to compute the live hedge ratio.
 
     ``prior_raw_returns`` are per-unit (scale=1) book day returns and
     ``prior_hedge_returns`` the hedge-instrument day returns for the SAME ledger
@@ -404,7 +404,7 @@ def compute_continuous_hedge_ratios_2f(
     hedge_rule: ContinuousHedgeRule,
     target_scale: float,
 ) -> tuple[float, float]:
-    """Live/paper twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.
+    """Live twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.
 
     Returns per-leg long-hedge notionals as fractions of equity. Must match the
     backtest loop's per-leg ratios when fed the same prior series (parity-tested).
@@ -423,7 +423,7 @@ def compute_continuous_hedge_ratio(
     hedge_rule: ContinuousHedgeRule,
     target_scale: float,
 ) -> float:
-    """Live/paper twin of the hedge sizing inside ``apply_rebalance_rule``.
+    """Live twin of the hedge sizing inside ``apply_rebalance_rule``.
 
     Returns the long-hedge notional as a fraction of equity:
     ``clip(-beta, 0, hedge_cap) * target_scale``. Must match the backtest loop's

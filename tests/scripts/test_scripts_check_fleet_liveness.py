@@ -34,11 +34,6 @@ def _stub_account_authority(monkeypatch) -> None:
     """Keep unrelated main-loop tests focused on cooldown/timer behavior."""
 
     monkeypatch.setattr(
-        M.pwd,
-        "getpwnam",
-        lambda _name: type("User", (), {"pw_uid": Path.cwd().stat().st_uid})(),
-    )
-    monkeypatch.setattr(
         M,
         "evaluate_required_account_owner_states",
         lambda _states, **_kwargs: [],
@@ -169,29 +164,21 @@ def test_unit_states_timers_alert_on_not_active() -> None:
 
 
 def test_required_account_owners_must_be_active() -> None:
-    states = {
-        M._DEMO_ACCOUNT_OWNER_UNIT: "active",
-        M._PAPER_ACCOUNT_OWNER_UNIT: "inactive",
-    }
+    states = {M._DEMO_ACCOUNT_OWNER_UNIT: "inactive"}
     alerts = M.evaluate_required_account_owner_states(states)
-    assert [alert.key for alert in alerts] == [f"unit:{M._PAPER_ACCOUNT_OWNER_UNIT}"]
+    assert [alert.key for alert in alerts] == [f"unit:{M._DEMO_ACCOUNT_OWNER_UNIT}"]
     assert alerts[0].severity == M.CRITICAL
     assert (
-        M.evaluate_required_account_owner_states(
-            {
-                M._DEMO_ACCOUNT_OWNER_UNIT: "active",
-                M._PAPER_ACCOUNT_OWNER_UNIT: "active",
-            }
-        )
+        M.evaluate_required_account_owner_states({M._DEMO_ACCOUNT_OWNER_UNIT: "active"})
         == []
     )
     assert (
         M.evaluate_required_account_owner_states(
             {
-                M._DEMO_ACCOUNT_OWNER_UNIT: "active",
-                M._PAPER_ACCOUNT_OWNER_UNIT: "inactive",
+                M._DEMO_ACCOUNT_OWNER_UNIT: "inactive",
+                M._MAINNET_ACCOUNT_OWNER_UNIT: "active",
             },
-            required_units=(M._DEMO_ACCOUNT_OWNER_UNIT,),
+            required_units=(M._MAINNET_ACCOUNT_OWNER_UNIT,),
         )
         == []
     )
@@ -309,7 +296,7 @@ def test_gather_long_alerts_covers_cycle_and_input_freshness(tmp_path) -> None:
     }
 
 
-def test_gather_long_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
+def test_gather_long_alerts_reads_the_mainnet_cycle_dataset(tmp_path) -> None:
     import argparse
 
     import polars as pl
@@ -318,20 +305,20 @@ def test_gather_long_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    long_root = tmp_path / "long-paper"
+    long_root = tmp_path / "long-mainnet"
     long_root.mkdir()
     write_dataset(
         pl.DataFrame(
             [
                 {
-                    "cycle_id": "paper-c1",
+                    "cycle_id": "mainnet-c1",
                     "ts_ms": now - 60 * MIN,
                     "kline_store_max_ts_ms": now - 8 * HOUR,
                 }
             ]
         ),
         long_root,
-        "long_native_paper_cycles",
+        "long_native_mainnet_cycles",
         partition_by=(),
     )
 
@@ -341,10 +328,10 @@ def test_gather_long_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
             long_root=long_root,
             now_ms=now,
             args=args,
-            cycles_dataset="long_native_paper_cycles",
+            cycles_dataset="long_native_mainnet_cycles",
         )
     }
-    assert keys == {"liveness:long-paper", "ws_stale:long-paper"}
+    assert keys == {"liveness:long-mainnet", "ws_stale:long-mainnet"}
 
 
 def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
@@ -422,7 +409,7 @@ def test_gather_carry_alerts_fresh_healthy_cycle_is_clean(tmp_path) -> None:
     assert M.gather_carry_alerts(carry_root=carry_root, now_ms=now, args=args) == []
 
 
-def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
+def test_gather_carry_alerts_reads_the_mainnet_cycle_dataset(tmp_path) -> None:
     import argparse
 
     import polars as pl
@@ -431,13 +418,13 @@ def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
 
     now = 1_000 * HOUR
     args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    carry_root = tmp_path / "carry-paper"
+    carry_root = tmp_path / "carry-mainnet"
     carry_root.mkdir()
     write_dataset(
         pl.DataFrame(
             [
                 {
-                    "cycle_id": "paper-c1",
+                    "cycle_id": "mainnet-c1",
                     "ts_ms": now - 60 * MIN,
                     "decision_stale": False,
                     "decision_error": "",
@@ -445,7 +432,7 @@ def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
             ]
         ),
         carry_root,
-        "carry_hold_paper_cycles",
+        "carry_hold_mainnet_cycles",
         partition_by=(),
     )
 
@@ -455,10 +442,10 @@ def test_gather_carry_alerts_reads_the_paper_cycle_dataset(tmp_path) -> None:
             carry_root=carry_root,
             now_ms=now,
             args=args,
-            cycles_dataset="carry_hold_paper_cycles",
+            cycles_dataset="carry_hold_mainnet_cycles",
         )
     }
-    assert keys == {"liveness:carry-paper"}
+    assert keys == {"liveness:carry-mainnet"}
 
 
 def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
@@ -523,14 +510,14 @@ def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
     assert [alert.key for alert in wrong_owner] == ["account_capture_missing"]
     stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 4 * MIN, max_age_minutes=3)
     assert [alert.key for alert in stale] == ["account_capture_stale"]
-    paper = M.gather_account_capture_alerts(
-        capture_root=tmp_path / "paper-missing",
+    mainnet = M.gather_account_capture_alerts(
+        capture_root=tmp_path / "mainnet-missing",
         now_ms=receive_ms,
         max_age_minutes=3,
-        label="paper",
+        label="mainnet",
     )
-    assert [alert.key for alert in paper] == ["account_capture_missing_paper"]
-    assert "paper account execution" in paper[0].message
+    assert [alert.key for alert in mainnet] == ["account_capture_missing_mainnet"]
+    assert "mainnet account execution" in mainnet[0].message
 
 
 def test_continuous_reset_boundary_is_not_a_signal_cycle(tmp_path) -> None:
@@ -701,11 +688,11 @@ def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_pat
 
     wrong_environment = M.gather_account_owner_health_alerts(
         account_root=demo_root,
-        environment="paper",
+        environment="mainnet",
         now_ms=now_ms,
         max_age_minutes=1,
     )
-    assert [alert.key for alert in wrong_environment] == ["account_owner_health:paper"]
+    assert [alert.key for alert in wrong_environment] == ["account_owner_health:mainnet"]
 
 
 def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
@@ -916,50 +903,6 @@ def test_gather_continuous_healthy_inputs_are_clean(tmp_path) -> None:
     assert alerts == []
 
 
-def test_gather_continuous_paper_alerts_uses_paper_cycle_dataset(tmp_path) -> None:
-    import polars as pl
-
-    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2)
-    now = 10_000_000
-    root = tmp_path / "bybit-continuous-paper-event"
-    root.mkdir()
-
-    from liquidity_migration.data.storage import write_dataset
-
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "ts_ms": now - 60 * 60_000,
-                    "max_rmom_day_ts": 0,
-                    "universe_symbols": 0,
-                    "kline_store_rows": 0,
-                }
-            ]
-        ),
-        root,
-        "continuous_fade_paper_cycles",
-        partition_by=(),
-    )
-    keys = {
-        a.key
-        for a in M.gather_continuous_alerts(
-            continuous_root=root,
-            now_ms=now,
-            args=args,
-            cycles_dataset="continuous_fade_paper_cycles",
-        )
-    }
-
-    assert "liveness:bybit-continuous-paper-event" in keys
-    assert "rmom:bybit-continuous-paper-event" in keys
-    # Label-keyed: demo and paper trip these
-    # independently; a shared fixed key let one sleeve's cooldown suppress the
-    # other's alert.
-    assert "continuous_universe_empty:bybit-continuous-paper-event" in keys
-    assert "continuous_kline_store_empty:bybit-continuous-paper-event" in keys
-
-
 def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alarm(
     tmp_path,
 ) -> None:
@@ -972,7 +915,7 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
     )
 
     now = 1_000 * HOUR
-    root = tmp_path / "bybit-continuous-paper-event"
+    root = tmp_path / "bybit-continuous-demo-event"
     root.mkdir()
     completed_cycle_ts = now - 20 * MIN
     write_dataset(
@@ -1000,14 +943,14 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
             ]
         ),
         root,
-        "continuous_fade_paper_cycles",
+        "continuous_fade_demo_cycles",
         partition_by=(),
     )
     write_strategy_cycle_health(
         root,
         StrategyCycleHealth(
             sleeve="continuous",
-            environment="paper",
+            environment="demo",
             cycle_id="completed",
             cycle_ts_ms=completed_cycle_ts,
             completed_ts_ns=(now - MIN) * 1_000_000,
@@ -1020,8 +963,6 @@ def test_current_generation_completion_fixes_cold_cycle_age_and_store_false_alar
         continuous_root=root,
         now_ms=now,
         args=SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2),
-        cycles_dataset="continuous_fade_paper_cycles",
-        environment="paper",
         unit_runtime=M.UnitRuntime(
             invocation_id=CURRENT_INVOCATION_ID,
             active_age_minutes=20.0,
@@ -1331,40 +1272,30 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False
     monkeypatch.delenv("LONG_SLEEVE", raising=False)
     assert M._sleeve_on("LONG_SLEEVE") is False
-    monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
-    assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is False
     monkeypatch.delenv("CARRY_SLEEVE", raising=False)
     assert M._sleeve_on("CARRY_SLEEVE") is False
-    monkeypatch.delenv("CARRY_PAPER_SLEEVE", raising=False)
-    assert M._sleeve_on("CARRY_PAPER_SLEEVE") is False
 
 
 def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
     monkeypatch.setenv("CARRY_SLEEVE", "on")
-    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "off")
 
     units = M._default_units_for_toggles()
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
     assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-long-paper.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
     assert "liquidity-migration-continuous-hedge.timer" in units
     assert "liquidity-migration-continuous-hedge.service" in units
-    assert "liquidity-migration-bybit-continuous-paper.service" not in units
     assert "liquidity-migration-bybit-carry-demo.service" in units
-    # Carry paper follows CARRY_PAPER_SLEEVE directly (dedicated toggle).
-    assert "liquidity-migration-bybit-carry-paper.service" not in units
 
     monkeypatch.setenv("CARRY_SLEEVE", "off")
-    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "on")
     units = M._default_units_for_toggles()
     assert "liquidity-migration-bybit-carry-demo.service" not in units
-    assert "liquidity-migration-bybit-carry-paper.service" in units
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    units = M._default_units_for_toggles()
+    assert "liquidity-migration-bybit-long-demo.service" not in units
 
 
 def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
@@ -1375,7 +1306,6 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
     _stub_account_authority(monkeypatch)
     monkeypatch.setenv("LONG_SLEEVE", "off")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
     monkeypatch.setattr(
         M,
         "_unit_states",
@@ -1397,11 +1327,7 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
             "operator-extra.timer",
             "--continuous-root",
             "",
-            "--continuous-paper-root",
-            "",
             "--long-root",
-            "",
-            "--long-paper-root",
             "",
             "--state-file",
             str(tmp_path / "state.json"),
@@ -1416,101 +1342,30 @@ def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> N
     monkeypatch.delenv("ACCOUNT_EXECUTION_KERNEL_REQUIRED", raising=False)
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
 
     units = M._default_units_for_toggles()
 
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
     assert "liquidity-migration-bybit-long-demo.service" in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
 
 
-def test_demo_account_scope_excludes_every_paper_owner_and_producer(monkeypatch) -> None:
+def test_demo_account_scope_returns_the_toggle_derived_demo_units(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "on")
     monkeypatch.setenv("CARRY_SLEEVE", "on")
-    monkeypatch.setenv("CARRY_PAPER_SLEEVE", "on")
-    monkeypatch.setenv("PAPER_TARGET_MIRROR", "on")
 
     units = M._default_units_for_scope("demo")
 
-    assert M._PAPER_TARGET_MIRROR_UNIT not in units
-    assert M._PAPER_TARGET_MIRROR_UNIT in M._default_units_for_scope("demo-paper")
+    assert units == M._default_units_for_toggles()
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert M._PAPER_ACCOUNT_OWNER_UNIT not in units
+    assert M._MAINNET_ACCOUNT_OWNER_UNIT not in units
     assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-long-paper.service" not in units
     assert "liquidity-migration-bybit-continuous-demo.service" in units
-    assert "liquidity-migration-bybit-continuous-paper.service" not in units
     assert "liquidity-migration-bybit-carry-demo.service" in units
-    assert "liquidity-migration-bybit-carry-paper.service" not in units
     assert "liquidity-migration-continuous-rmom-refresh.timer" in units
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
     assert "liquidity-migration-continuous-rmom-refresh.timer" not in (M._default_units_for_scope("demo"))
-
-
-def test_paper_liveness_roots_come_from_group_readable_owner_environment(tmp_path, monkeypatch) -> None:
-    account = tmp_path / "paper-account"
-    capture = tmp_path / "paper-capture"
-    environment = tmp_path / "account-paper-execution.env"
-    environment.write_text(
-        f"ACCOUNT_EXECUTION_ROOT={account}\nACCOUNT_PAPER_CAPTURE_ROOT={capture}\n",
-        encoding="utf-8",
-    )
-    environment.chmod(0o640)
-    monkeypatch.setattr(
-        M.grp,
-        "getgrnam",
-        lambda _name: type("Group", (), {"gr_gid": environment.stat().st_gid})(),
-    )
-
-    assert M._paper_roots_from_environment(environment) == (account, capture)
-
-
-def test_demo_account_scope_skips_paper_health_and_capture_gathers(tmp_path, monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
-    monkeypatch.setattr(
-        M,
-        "_unit_states",
-        lambda units: {unit: "active" for unit in units},
-    )
-    monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
-    monkeypatch.setattr(
-        M,
-        "gather_account_capture_alerts",
-        lambda **kwargs: calls.append(("capture", str(kwargs.get("label") or "demo"))) or [],
-    )
-    monkeypatch.setattr(
-        M,
-        "gather_account_owner_health_alerts",
-        lambda **kwargs: calls.append(("owner", str(kwargs["environment"]))) or [],
-    )
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "check_fleet_liveness.py",
-            "--account-scope",
-            "demo",
-            "--continuous-root",
-            "",
-            "--continuous-paper-root",
-            "",
-            "--long-root",
-            "",
-            "--long-paper-root",
-            "",
-            "--hedge-model-prior",
-            "",
-            "--state-file",
-            str(tmp_path / "state.json"),
-        ],
-    )
-
-    assert M.main() == 0
-    assert calls == [("capture", "demo"), ("owner", "demo")]
 
 
 def test_account_scope_defaults_from_bound_environment(monkeypatch) -> None:
@@ -1528,7 +1383,7 @@ def test_unknown_account_scope_is_rejected() -> None:
 
 
 def test_mainnet_account_scope_units_follow_the_mainnet_toggles(monkeypatch) -> None:
-    for toggle in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_PAPER_SLEEVE", "CARRY_SLEEVE", "CARRY_PAPER_SLEEVE"):
+    for toggle in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CARRY_SLEEVE"):
         monkeypatch.setenv(toggle, "on")
     monkeypatch.delenv("CARRY_MAINNET_SLEEVE", raising=False)
     monkeypatch.delenv("LONG_MAINNET_SLEEVE", raising=False)
@@ -1541,14 +1396,14 @@ def test_mainnet_account_scope_units_follow_the_mainnet_toggles(monkeypatch) -> 
     monkeypatch.setenv("LONG_MAINNET_SLEEVE", "on")
     units = M._default_units_for_scope("mainnet")
     assert units == [M._MAINNET_ACCOUNT_OWNER_UNIT, M._CARRY_MAINNET_UNIT, M._LONG_MAINNET_UNIT]
-    # Every demo/paper toggle is on above; none of their units may leak in.
-    assert not [unit for unit in units if "demo" in unit or "paper" in unit]
+    # Every demo toggle is on above; none of its units may leak in.
+    assert not [unit for unit in units if "demo" in unit]
 
 
-def test_mainnet_account_scope_skips_every_demo_and_paper_gather(tmp_path, monkeypatch) -> None:
+def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) -> None:
     """The mainnet watchdog must page on its own fleet only.
 
-    Several demo/paper gathers are otherwise unconditional, and a mainnet run
+    Several demo gathers are otherwise unconditional, and a mainnet run
     that inherits them alerts forever about roots it does not own.
     """
     calls: list[tuple[str, str]] = []
@@ -1563,7 +1418,6 @@ def test_mainnet_account_scope_skips_every_demo_and_paper_gather(tmp_path, monke
         ("gather_account_health_alerts", "reconciliation"),
         ("gather_demo_rule_alerts", "demo_rules"),
         ("gather_hedge_model_prior_alerts", "hedge_prior"),
-        ("gather_demo_paper_agreement_alerts", "agreement"),
     ):
         monkeypatch.setattr(M, name, lambda _label=label, **_kwargs: calls.append((_label, "")) or [])
     # Each gather also reports the root it was handed: a mainnet-labelled call
@@ -1686,8 +1540,6 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
             "--telegram",
             "--continuous-root",
             "",
-            "--continuous-paper-root",
-            "",
             "--long-root",
             "",
             "--state-file",
@@ -1720,8 +1572,6 @@ def _run_both_roots_skipped(monkeypatch) -> None:
         [
             "check_fleet_liveness.py",
             "--continuous-root",
-            "",
-            "--continuous-paper-root",
             "",
             "--long-root",
             "",
@@ -1764,8 +1614,6 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
             "check_fleet_liveness.py",
             "--continuous-root",
             "",
-            "--continuous-paper-root",
-            "",
             "--long-root",
             "",
             "--state-file",
@@ -1792,8 +1640,6 @@ def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -
             "check_fleet_liveness.py",
             "--continuous-root",
             str(croot),
-            "--continuous-paper-root",
-            "",
             "--long-root",
             "",
         ],
@@ -1806,65 +1652,34 @@ def test_continuous_root_still_drives_default_state_dir(tmp_path, monkeypatch) -
 # Watchdog / kill-switch / telegram alerting
 # --------------------------------------------------------------------------- #
 def test_rmom_timer_not_monitored_when_continuous_off(monkeypatch) -> None:
-    """With both continuous sleeves off (the documented LONG-only kill switch) the deploy
+    """With the continuous sleeve off (the documented LONG-only kill switch) the deploy
     disables the rmom-refresh timer, so the watchdog must not monitor it or it pages
     CRITICAL forever on a timer the deploy intentionally disabled.
     """
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
 
     units = M._default_units_for_toggles()
 
-    # The rmom-refresh service/timer must be ABSENT when both continuous sleeves are off.
+    # The rmom-refresh service/timer must be ABSENT when the continuous sleeve is off.
     for u in (
         "liquidity-migration-continuous-rmom-refresh.service",
         "liquidity-migration-continuous-rmom-refresh.timer",
     ):
         assert u not in units, u
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert M._PAPER_ACCOUNT_OWNER_UNIT in units
     # Long sleeve units still present.
     assert "liquidity-migration-bybit-long-demo.service" in units
 
 
-def test_rmom_refresh_monitored_in_paper_only_mode(monkeypatch) -> None:
-    """The deploy enables the rmom-refresh timer under ``continuous_rmom_refresh_on``
-    (demo OR paper), because the paper shadow follows the same
-    residual_momentum.parquet. So with CONTINUOUS_SLEEVE=off but
-    CONTINUOUS_PAPER_SLEEVE=on the timer is enabled and must be monitored.
-    """
-    monkeypatch.setenv("LONG_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "on")
-
-    units = M._default_units_for_toggles()
-
-    assert "liquidity-migration-continuous-rmom-refresh.service" in units
-    assert "liquidity-migration-continuous-rmom-refresh.timer" in units
-    # The DEMO-only hedge timer rides CONTINUOUS_SLEEVE alone, so it must be absent.
-    assert "liquidity-migration-continuous-hedge.timer" not in units
-    assert "liquidity-migration-continuous-hedge.service" not in units
-    assert "liquidity-migration-bybit-continuous-demo.service" not in units
-    # The paper daemon IS monitored.
-    assert "liquidity-migration-bybit-continuous-paper.service" in units
-
-
 def test_continuous_rmom_refresh_on_predicate(monkeypatch) -> None:
     """The shared helper must mirror deploy/lib_sleeves.sh continuous_rmom_refresh_on
-    exactly: true iff EITHER continuous sleeve is on."""
-    for demo, paper, expected in (
-        ("off", "off", False),
-        ("on", "off", True),
-        ("off", "on", True),
-        ("on", "on", True),
-    ):
-        monkeypatch.setenv("CONTINUOUS_SLEEVE", demo)
-        monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", paper)
-        assert M._continuous_rmom_refresh_on() is expected, (demo, paper)
-    # Unset both -> fail-safe off.
+    exactly: true iff the CONTINUOUS sleeve is on."""
+    for value, expected in (("off", False), ("on", True)):
+        monkeypatch.setenv("CONTINUOUS_SLEEVE", value)
+        assert M._continuous_rmom_refresh_on() is expected, value
+    # Unset -> fail-safe off.
     monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
-    monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
     assert M._continuous_rmom_refresh_on() is False
 
 
@@ -1877,14 +1692,13 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     args = parser.parse_args([])
     for attr in (
         "continuous_root",
-        "continuous_paper_root",
         "long_root",
-        "long_paper_root",
+        "carry_root",
+        "carry_mainnet_root",
+        "long_mainnet_root",
         "hedge_model_prior",
         "account_root",
-        "account_paper_root",
         "account_capture_root",
-        "account_paper_capture_root",
     ):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
@@ -1896,13 +1710,10 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
 def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     roots = {
         "CONTINUOUS_DEMO_DATA_ROOT": "/fresh/continuous-demo",
-        "CONTINUOUS_PAPER_DATA_ROOT": "/fresh/continuous-paper",
         "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
-        "LONG_PAPER_DATA_ROOT": "/fresh/long-paper",
+        "CARRY_DEMO_DATA_ROOT": "/fresh/carry-demo",
         "ACCOUNT_EXECUTION_ROOT": "/fresh/demo-account",
-        "ACCOUNT_PAPER_EXECUTION_ROOT": "/fresh/paper-account",
         "ACCOUNT_CAPTURE_ROOT": "/fresh/demo-capture",
-        "ACCOUNT_PAPER_CAPTURE_ROOT": "/fresh/paper-capture",
     }
     for key, value in roots.items():
         monkeypatch.setenv(key, value)
@@ -1910,13 +1721,10 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     args = M.build_arg_parser().parse_args([])
 
     assert args.continuous_root == roots["CONTINUOUS_DEMO_DATA_ROOT"]
-    assert args.continuous_paper_root == roots["CONTINUOUS_PAPER_DATA_ROOT"]
     assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
-    assert args.long_paper_root == roots["LONG_PAPER_DATA_ROOT"]
+    assert args.carry_root == roots["CARRY_DEMO_DATA_ROOT"]
     assert args.account_root == roots["ACCOUNT_EXECUTION_ROOT"]
-    assert args.account_paper_root == roots["ACCOUNT_PAPER_EXECUTION_ROOT"]
     assert args.account_capture_root == roots["ACCOUNT_CAPTURE_ROOT"]
-    assert args.account_paper_capture_root == roots["ACCOUNT_PAPER_CAPTURE_ROOT"]
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
@@ -2009,8 +1817,6 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
         "--telegram",
         "--continuous-root",
         "",
-        "--continuous-paper-root",
-        "",
         "--long-root",
         "",
         "--state-file",
@@ -2048,8 +1854,6 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
         "check_fleet_liveness.py",
         "--telegram",
         "--continuous-root",
-        "",
-        "--continuous-paper-root",
         "",
         "--long-root",
         "",
@@ -2180,27 +1984,11 @@ def test_oneshot_runtime_alert() -> None:
     assert "240s" in slow.message
 
 
-def test_long_paper_sleeve_defaults_to_demo_toggle(monkeypatch) -> None:
-    monkeypatch.delenv("LONG_PAPER_SLEEVE", raising=False)
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    assert M._long_paper_sleeve_on() is True
-    monkeypatch.setenv("LONG_SLEEVE", "off")
-    assert M._long_paper_sleeve_on() is False
-    # An explicit paper toggle wins over the demo fallback in both directions.
-    monkeypatch.setenv("LONG_PAPER_SLEEVE", "on")
-    assert M._long_paper_sleeve_on() is True
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("LONG_PAPER_SLEEVE", "off")
-    assert M._long_paper_sleeve_on() is False
-
-
 def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
     return [
         "check_fleet_liveness.py",
         "--telegram",
         "--continuous-root",
-        "",
-        "--continuous-paper-root",
         "",
         "--long-root",
         "",

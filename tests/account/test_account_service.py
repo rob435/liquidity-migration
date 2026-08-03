@@ -767,7 +767,7 @@ def test_completed_request_id_cannot_be_reused_with_different_content(tmp_path: 
     [
         ("route_id", "account-route-v1-" + "0" * 64),
         ("account_id", "wrong-account"),
-        ("environment", "paper"),
+        ("environment", "mainnet"),
     ],
 )
 def test_request_route_identity_mismatch_fails_before_queue_or_execution(

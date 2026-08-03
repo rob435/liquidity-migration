@@ -357,12 +357,12 @@ def test_continuous_daemon_publishes_post_evidence_completion_health(
     tmp_path: Path,
 ) -> None:
     invocation_id = "34" * 16
-    route = _route(tmp_path / "route", environment="paper")
+    route = _route(tmp_path / "route")
     result = PublishedTargetCyclePayload(
         {
             "cycle_id": "continuous-target-health-1000",
             "ts_ms": 1_000,
-            "mode": "paper_target",
+            "mode": "demo_target",
             "universe_symbols": 10,
         },
         publication=ExitFirstPublication((), (), ()),
@@ -376,12 +376,12 @@ def test_continuous_daemon_publishes_post_evidence_completion_health(
         def stats(self) -> dict[str, object]:
             return {"store": {"rows": 383_711}}
 
-    root = tmp_path / "continuous-paper"
+    root = tmp_path / "continuous-demo"
     daemon = ContinuousDemoDaemon(
         root,
         config=ResearchConfig(data_root=tmp_path),
         demo_config=ContinuousDemoCycleConfig(
-            execution_environment="paper",
+            execution_environment="demo",
             account_intent_inbox_root=route.inbox_root,
             account_execution_root=route.account_root,
             ws_klines_enabled=False,
@@ -400,7 +400,7 @@ def test_continuous_daemon_publishes_post_evidence_completion_health(
     assert health.cycle_ts_ms == 1_000
     assert health.completed_ts_ns == 2_000_000_000
     assert health.invocation_id == invocation_id
-    assert health.environment == "paper"
+    assert health.environment == "demo"
     assert health.ws_kline_store_rows == 383_711
     assert (
         load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")[0][0].event_id

@@ -33,7 +33,7 @@ Start from the source that owns the question:
   the kernel and owner in `liquidity_migration/account/`
   (`account_service.py`, `account_kernel.py`), the credentialed edge in
   `liquidity_migration/venue/` (`account_reconcile.py`), the tape in
-  `liquidity_migration/data/trade_lifecycle.py`, the owner launchers and paper
+  `liquidity_migration/data/trade_lifecycle.py`, the owner launchers and
   twin in `liquidity_migration/runtime/`, and their tests.
 
 Use `rg --files` and `rg` for direct discovery.

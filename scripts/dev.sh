@@ -45,8 +45,6 @@ MYPY_TARGETS=(
   scripts/research/build_trade_diagnostics.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
-  scripts/maintain/check_demo_paper_agreement.py
-  scripts/research/measure_execution_twin_error.py
 )
 
 command="${1:-help}"

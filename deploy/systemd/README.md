@@ -10,11 +10,9 @@ commit-owned workload for that unit and entrypoint.
 | Unit | Role |
 | --- | --- |
 | `liquidity-migration-account-execution.service` | Sole Bybit demo order, fill, position, funding, protection, journal, and health owner |
-| `liquidity-migration-account-paper-execution.service` | Integration-only uncalibrated paper account owner |
-| `liquidity-migration-bybit-long-{demo,paper}.service` | LONG target producers |
-| `liquidity-migration-bybit-carry-{demo,paper}.service` | CARRY target producers |
-| `liquidity-migration-bybit-continuous-{demo,paper}.service` | CONTINUOUS component-target producers |
-| `liquidity-migration-paper-target-mirror.service` | Republishes the demo fleet's targets onto the paper route |
+| `liquidity-migration-bybit-long-demo.service` | LONG target producer |
+| `liquidity-migration-bybit-carry-demo.service` | CARRY target producer |
+| `liquidity-migration-bybit-continuous-demo.service` | CONTINUOUS component-target producer |
 | `liquidity-migration-continuous-hedge.service` | Demo-only hedge target publisher |
 | `liquidity-migration-continuous-rmom-refresh.service` | Residual-momentum refresh |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
@@ -90,15 +88,11 @@ Install requires a clean target checkout and a fully quiescent project fleet.
 It checks out the exact remote commit, installs locked dependencies, runs the
 focused validation, installs only the current unit manifest, disables every
 project unit, removes unknown surfaces, and writes resolved sleeve toggles.
-Paper/demo tree preflights run concurrently; both must pass before the two
-disjoint normalizers run concurrently, and each normalizer keeps its independent
-final rescan. Install starts nothing.
+The demo tree preflight must pass before its normalizer runs, and the
+normalizer keeps its independent final rescan. Install starts nothing.
 
 Configure the environment, roots, candidate universe, rules, risk policy, and
-sleeve toggles on the stopped host before activating. Choose the `operational`
-profile only for an intended demo+paper fleet; the paper execution model is
-commit-owned and explicitly `integration_only_uncalibrated`
-(`docs/architecture.md`, Realms and credentials).
+sleeve toggles on the stopped host before activating.
 
 ### Activate and verify
 
@@ -115,46 +109,37 @@ before enabled producers. A preserved RMOM table is reused only when the full
 current-day gate passes and the prior refresh unit is not failed; otherwise the
 bounded refresh path repairs it. Activation enables only allowed timers and
 verifies the topology. `verify` is read-only. Both refuse a dirty/wrong
-checkout, changed inputs, unknown unit surfaces, unit overrides, an exchange
-credential or an enabled `REAL_MONEY` in the paper environment, or
+checkout, changed inputs, unknown unit surfaces, unit overrides, or
 profile/topology disagreement.
 
-## Profiles
+## Profile
 
-- `demo-operational`: demo owner and allowed demo producers; demo hedge/RMOM;
-  demo-scoped liveness. Every paper unit is stopped/disabled and
-  `CONTINUOUS_PAPER_SLEEVE=off`.
-- `operational`: demo and paper owners; allowed demo/paper producers; hedge/RMOM;
-  demo-paper liveness. Paper fills are integration-only and uncalibrated.
+One profile remains: `operational` — the demo owner, the demo producers its
+toggles allow, hedge/RMOM, demo-scoped liveness. `demo-operational` was the
+"operational minus paper" profile and retired with the paper fleet 2026-08-03;
+a rollout passing it is rejected with a message naming the retirement, and a
+host marker still reading `demo-operational` self-heals on the next rollout.
 
-There is no paper hedge unit. Paper CONTINUOUS therefore shadows component
-decisions and sizing, not the complete hedged portfolio.
-
-Both require `ACCOUNT_RAW_MARKET_PERSISTENCE=0`. Live L2 readiness, exact
+The deploy requires `ACCOUNT_RAW_MARKET_PERSISTENCE=0`. Live L2 readiness, exact
 decision books, canonical journals, and account protection remain active.
 
 ## Environment files
 
 - `/etc/liquidity-migration/bybit-demo.env`
 - `/etc/liquidity-migration/account-execution.env`
-- `/etc/liquidity-migration/account-paper-execution.env`
 - `/etc/liquidity-migration/sleeves.resolved.env`
 - `/etc/liquidity-migration/bybit-mainnet.env` and
   `account-execution-mainnet.env` — absent unless the owner installs them; no
   deploy mode writes either.
 
-Deploy requires root-owned mode-`0600` demo/private files, root-owned
-mode-`0640` paper-route/sleeve files bound to the dedicated paper runtime group,
-and paper-owned mode-`0600` input mirrors. Demo and paper account/inbox/capture
-roots must be absolute, real, pairwise disjoint, and non-nested. Candidate/rule
-coverage is proved against the demo sources, and the paper candidate, rule, and
-risk mirrors must be byte-exact copies.
+Deploy requires root-owned mode-`0600` private files. The demo
+account/inbox/capture roots must be absolute, real, pairwise disjoint, and
+non-nested. Candidate/rule coverage is proved against the demo sources.
 
 `configs/operational.demo.json` is installed at the demo
-`ACCOUNT_RISK_POLICY_FILE` during the stopped install, then mirrored into the
-paper boundary. LONG, CONTINUOUS, the demo hedge, and the account owners parse
-those same bytes. Sizing/leverage is deliberately absent from the strategy unit
-`Environment=` lines.
+`ACCOUNT_RISK_POLICY_FILE` during the stopped install. LONG, CONTINUOUS, the
+demo hedge, and the account owners parse those same bytes. Sizing/leverage is
+deliberately absent from the strategy unit `Environment=` lines.
 
 Repository sleeve defaults live in `deploy/sleeves.env`. The optional host file
 may narrow an enabled sleeve to off. The resolved file is generated during
@@ -170,7 +155,7 @@ The guarded reset is dry-run by default and refuses mutation until Bybit demo is
 flat with no orders. It publishes the old epoch through an exclusively created,
 descriptor-bound archive and sidecar, fsyncs them, and rechecks the exact
 archive identity and digest before clearing account/inbox/capture payload.
-Account, paper, and shared-demo filesystem trees are preflighted and normalized
+Account and shared-demo filesystem trees are preflighted and normalized
 through held descriptors; mount boundaries and unsafe aliases fail closed, and
 no root recursive pathname ownership traversal is used. `--leave-stopped`
 executes the reset and leaves every managed unit stopped.

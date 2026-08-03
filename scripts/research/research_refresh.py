@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Append-first market refresh, derived-feature refresh, backtest, and reconciliation.
+"""Append-first market refresh, derived-feature refresh, and backtest.
 
 Routine runs use ``--data-mode tail``: current data is refreshed with an overlap,
 Bybit's independent manifest is rebuilt over its canonical history, and all-root
 manifest validation stays mandatory. ``--data-mode canonical`` uses the full-PIT
 builders and is the mode for a complete rebuild.
-
-The optional demo/paper/backtest reconciliation compares accepted entry keys and
-keeps execution/accounting evidence separate from historical performance.
 """
 
 from __future__ import annotations
@@ -31,12 +28,6 @@ import polars as pl  # noqa: E402
 
 from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
-from liquidity_migration.research.execution.three_way_reconciliation import (  # noqa: E402
-    reconcile_account_roots_to_backtest,
-    write_three_way_artifacts,
-)
-
-
 PYTHON = REPO / ".venv" / "bin" / "python"
 if not PYTHON.is_file():
     PYTHON = Path(sys.executable)
@@ -1103,59 +1094,6 @@ def _as_mapping(value: object) -> Mapping[str, Any]:
     return value
 
 
-def _run_reconciliation(
-    *,
-    args: argparse.Namespace,
-    run_dir: Path,
-    configuration: Mapping[str, Any],
-    code_commit: str,
-    ledger: RunLedger | None = None,
-) -> dict[str, str] | None:
-    demo_root = str(args.demo_account_root or "").strip()
-    paper_root = str(args.paper_account_root or "").strip()
-    if bool(demo_root) != bool(paper_root):
-        raise ValueError("demo and paper account roots must be supplied together")
-    if not demo_root:
-        if ledger is not None:
-            ledger.append(
-                {
-                    "step_id": "reconcile.demo_paper_backtest",
-                    "status": "skipped_no_account_snapshots",
-                }
-            )
-        return None
-    report_root = Path(args.backtest_report_root).expanduser().resolve() if getattr(
-        args, "backtest_report_root", None
-    ) else _report_root(run_dir, venue="bybit")
-    end = dt.date.fromisoformat(str(configuration["end_exclusive"]))
-    start_ms = _date_ms(args.reconcile_start) if args.reconcile_start else None
-    report = reconcile_account_roots_to_backtest(
-        demo_account_root=demo_root,
-        paper_account_root=paper_root,
-        backtest_report_root=report_root,
-        venue="bybit",
-        start_ms=start_ms,
-        end_ms=_date_ms(end),
-        code_commit=code_commit,
-        account_snapshot_commit=args.account_snapshot_commit,
-        sleeves=tuple(str(value) for value in configuration["sleeves"]),
-    )
-    out = Path(args.reconcile_out).expanduser().resolve() if getattr(args, "reconcile_out", None) else (
-        run_dir / "reconciliation"
-    )
-    paths = write_three_way_artifacts(report, out)
-    if ledger is not None:
-        ledger.append(
-            {
-                "step_id": "reconcile.demo_paper_backtest",
-                "status": "succeeded",
-                "snapshot_id": report["snapshot_id"],
-                "artifacts": paths,
-            }
-        )
-    return paths
-
-
 def _execute(args: argparse.Namespace) -> int:
     configuration = _manifest_configuration(args)
     end = dt.date.fromisoformat(str(configuration["end_exclusive"]))
@@ -1235,35 +1173,8 @@ def _execute(args: argparse.Namespace) -> int:
                 "path": str(summary_path),
             }
         )
-    _run_reconciliation(
-        args=args,
-        run_dir=run_dir,
-        configuration=configuration,
-        code_commit=code_commit,
-        ledger=ledger,
-    )
     ledger.append({"step_id": "run", "status": "succeeded"})
     print(f"\nresearch refresh complete: {run_dir}")
-    return 0
-
-
-def _reconcile_only(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve(strict=True)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    configuration = _as_mapping(manifest.get("configuration"))
-    code_commit = str(manifest.get("code_commit") or "")
-    if len(code_commit) != 40:
-        raise RuntimeError("run manifest lacks a full code commit")
-    paths = _run_reconciliation(
-        args=args,
-        run_dir=run_dir,
-        configuration=configuration,
-        code_commit=code_commit,
-        ledger=RunLedger(run_dir),
-    )
-    if paths is None:
-        raise RuntimeError("reconcile requires demo and paper account roots")
-    print(json.dumps(paths, indent=2))
     return 0
 
 
@@ -1304,12 +1215,6 @@ def _add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ancillary-workers", type=int, default=4)
     parser.add_argument("--binance-workers", type=int, default=24)
     parser.add_argument("--binance-job-batch-size", type=int, default=48)
-    parser.add_argument("--demo-account-root", default=None, help="frozen read-only demo account snapshot")
-    parser.add_argument("--paper-account-root", default=None, help="frozen read-only paper account snapshot")
-    parser.add_argument("--reconcile-start", type=_date, default=None)
-    parser.add_argument("--account-snapshot-commit", default=None)
-    parser.add_argument("--backtest-report-root", default=None)
-    parser.add_argument("--reconcile-out", default=None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1319,14 +1224,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_refresh_arguments(plan)
     run = sub.add_parser("run", help="execute or resume the workflow")
     _add_refresh_arguments(run)
-    reconcile = sub.add_parser("reconcile", help="reconcile frozen account snapshots with a completed run")
-    reconcile.add_argument("--run-dir", required=True)
-    reconcile.add_argument("--demo-account-root", required=True)
-    reconcile.add_argument("--paper-account-root", required=True)
-    reconcile.add_argument("--reconcile-start", type=_date, default=None)
-    reconcile.add_argument("--account-snapshot-commit", default=None)
-    reconcile.add_argument("--backtest-report-root", default=None)
-    reconcile.add_argument("--reconcile-out", default=None)
     return parser
 
 
@@ -1336,8 +1233,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _plan(args)
     if args.command == "run":
         return _execute(args)
-    if args.command == "reconcile":
-        return _reconcile_only(args)
     raise AssertionError(args.command)
 
 

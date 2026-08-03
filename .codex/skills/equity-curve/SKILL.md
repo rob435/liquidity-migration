@@ -32,12 +32,12 @@ contract. Do not assume a default window is OOS or that both venues are required
   engine.
 - `continuous` reconstructs the continuous component book and hedge through
   `scripts/research/continuous_deployed_equity_refresh.py`. The sleeve was retired from
-  demo and paper on 2026-07-29, so that curve is a research reconstruction of a
+  the forward routes on 2026-07-29, so that curve is a research reconstruction of a
   dormant profile, never a live record.
 - `carry` renders the registered research config
   `configs/lane2_carry_hold_v3.json` from the cross-venue panel, through the
   same `--research-config` path (below). It is the registered research shape,
-  not a demo/paper daemon replay.
+  not a demo daemon replay.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,
   netting, optional overlays, order lifecycle, and deploy environment can differ.
   Read `docs/trading_logic.md` and the emitted config before claiming

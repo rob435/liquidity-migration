@@ -38,7 +38,6 @@ from liquidity_migration.venue.account_reconcile import (
     AccountReconciliationStaleError,
 )
 from liquidity_migration.account.account_service import AccountConvergenceItem, AccountConvergenceReport
-from liquidity_migration.runtime.account_paper_runner import publish_paper_owner_health
 from liquidity_migration.runtime.account_service_runner import (
     PositionTruthSettling,
     append_unique_notification_health_error,
@@ -46,14 +45,13 @@ from liquidity_migration.runtime.account_service_runner import (
     owner_health_publish_decision,
     publish_demo_owner_health,
 )
-from liquidity_migration.core.deterministic_runtime import VirtualClock
 
 
 def _health(*, loop_sequence: int = 1) -> AccountOwnerHealth:
     return AccountOwnerHealth(
         owner="account_execution",
-        environment="paper",
-        account_id="paper-account",
+        environment="demo",
+        account_id="health-account",
         status=AccountOwnerHealthStatus.HEALTHY,
         observed_ts_ns=10_000,
         loop_sequence=loop_sequence,
@@ -147,10 +145,10 @@ def test_health_artifact_round_trips_strict_canonical_schema(tmp_path: Path) -> 
     assert path.read_bytes().endswith(b"\n")
     assert read_account_owner_health(tmp_path) == health
     assert json.loads(path.read_bytes()) == {
-        "account_id": "paper-account",
+        "account_id": "health-account",
         "available_margin_usdt": 10_000.0,
         "detail": "",
-        "environment": "paper",
+        "environment": "demo",
         "equity_usdt": 10_000.0,
         "journal_sequence": 0,
         "journal_state_hash": GENESIS_HASH,
@@ -209,51 +207,6 @@ def test_systemd_invocation_id_is_required_from_the_service_environment() -> Non
         require_systemd_invocation_id({})
     with pytest.raises(RuntimeError, match="lowercase hexadecimal"):
         require_systemd_invocation_id({"INVOCATION_ID": "A" * 32})
-
-
-def test_paper_publisher_binds_fixed_capital_to_current_kernel_state(tmp_path: Path) -> None:
-    clock = VirtualClock(current_wall_ns=20_000, current_monotonic_ns=200)
-    kernel = AccountExecutionKernel(
-        tmp_path,
-        account_id="paper-account",
-        clock=clock,
-        id_seed="paper-health-test",
-    )
-    kernel.record_venue_snapshot(
-        snapshot_key="paper-fact-1",
-        venue_positions={},
-        reconstructed_positions={},
-        mismatches=[],
-        exchange_ts_ns=19_000,
-        local_receive_ts_ns=19_100,
-        metadata={"source": "paper_twin"},
-    )
-    state = kernel._state_ref()
-
-    published = publish_paper_owner_health(
-        kernel=kernel,
-        account_root=tmp_path,
-        account_id="paper-account",
-        equity_usdt=12_345.0,
-        status=AccountOwnerHealthStatus.BLOCKED,
-        observed_ts_ns=20_000,
-        loop_sequence=7,
-        requested_symbols_ready=False,
-        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        last_batch_id="batch-6",
-        detail="targets lack demo-verified rules: NEWUSDT",
-    )
-
-    assert published.journal_sequence == state.events_applied == 1
-    assert published.journal_state_hash == state.rolling_state_hash
-    assert published.equity_usdt == 12_345.0
-    assert published.available_margin_usdt == 12_345.0
-    assert published.invocation_id == TEST_ACCOUNT_OWNER_INVOCATION_ID
-    assert published.status == AccountOwnerHealthStatus.BLOCKED
-    assert published.detail.startswith(
-        "execution_model_scope=integration_only_uncalibrated; "
-    )
-    assert read_account_owner_health(tmp_path) == published
 
 
 def test_demo_publisher_binds_wallet_capital_to_current_kernel_state(tmp_path: Path) -> None:
@@ -427,7 +380,7 @@ def test_recent_health_retries_one_concurrent_projection_replacement(
 
     assert require_recent_account_owner_health(
         tmp_path,
-        environment="paper",
+        environment="demo",
         max_age_ns=2_000,
         now_ns=11_000,
     ) == second
@@ -437,7 +390,7 @@ def test_recent_health_accepts_health_that_matches_the_observed_head_during_adva
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    kernel = AccountExecutionKernel(tmp_path, account_id="paper-account")
+    kernel = AccountExecutionKernel(tmp_path, account_id="health-account")
     first_head = kernel.record_venue_snapshot(
         snapshot_key="first-head",
         venue_positions={},
@@ -480,7 +433,7 @@ def test_recent_health_accepts_health_that_matches_the_observed_head_during_adva
 
     assert require_recent_account_owner_health(
         tmp_path,
-        environment="paper",
+        environment="demo",
         max_age_ns=2_000,
         now_ns=11_000,
     ) == before
@@ -499,7 +452,7 @@ def test_recent_health_accepts_sustained_same_journal_heartbeat_churn(
 
     result = require_recent_account_owner_health(
         tmp_path,
-        environment="paper",
+        environment="demo",
         max_age_ns=2_000,
         now_ns=11_000,
     )
@@ -530,7 +483,7 @@ def test_recent_health_rejects_sustained_different_journal_head_churn(
     with pytest.raises(RuntimeError, match="changed while binding"):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
         )
@@ -812,7 +765,7 @@ def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path)
     assert (
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
             expected_invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
@@ -822,12 +775,35 @@ def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path)
     with pytest.raises(RuntimeError, match="current systemd generation"):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
             expected_invocation_id="00000000000000000000000000000002",
         )
     with pytest.raises(RuntimeError, match="environment"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="mainnet",
+            max_age_ns=2_000,
+            now_ns=11_000,
+        )
+    with pytest.raises(RuntimeError, match="stale"):
+        require_recent_account_owner_health(
+            tmp_path,
+            environment="demo",
+            max_age_ns=500,
+            now_ns=11_000,
+        )
+
+    blocked = AccountOwnerHealth(
+        **{
+            **_health().to_dict(),
+            "status": AccountOwnerHealthStatus.BLOCKED,
+            "detail": "owner loop failed",
+        }
+    )
+    write_account_owner_health(tmp_path, blocked)
+    with pytest.raises(RuntimeError, match="owner loop failed"):
         require_recent_account_owner_health(
             tmp_path,
             environment="demo",
@@ -837,30 +813,7 @@ def test_require_recent_health_checks_environment_status_and_age(tmp_path: Path)
     with pytest.raises(RuntimeError, match="stale"):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
-            max_age_ns=500,
-            now_ns=11_000,
-        )
-
-    blocked = AccountOwnerHealth(
-        **{
-            **_health().to_dict(),
-            "status": AccountOwnerHealthStatus.BLOCKED,
-            "detail": "paper loop failed",
-        }
-    )
-    write_account_owner_health(tmp_path, blocked)
-    with pytest.raises(RuntimeError, match="paper loop failed"):
-        require_recent_account_owner_health(
-            tmp_path,
-            environment="paper",
-            max_age_ns=2_000,
-            now_ns=11_000,
-        )
-    with pytest.raises(RuntimeError, match="stale"):
-        require_recent_account_owner_health(
-            tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=13_000,
         )
@@ -882,14 +835,14 @@ def test_queue_head_warmup_is_transient_only_while_owner_health_is_fresh(
     with pytest.raises(AccountOwnerMarketWarmupPending):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
         )
     with pytest.raises(RuntimeError, match="stale") as stale:
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=13_000,
         )
@@ -897,9 +850,9 @@ def test_queue_head_warmup_is_transient_only_while_owner_health_is_fresh(
 
 
 def test_require_recent_health_binds_exact_verified_journal_head(tmp_path: Path) -> None:
-    kernel = AccountExecutionKernel(tmp_path, account_id="paper-account")
+    kernel = AccountExecutionKernel(tmp_path, account_id="health-account")
     kernel.record_venue_snapshot(
-        snapshot_key="paper-head",
+        snapshot_key="health-head",
         venue_positions={},
         reconstructed_positions={},
         mismatches=[],
@@ -919,8 +872,8 @@ def test_require_recent_health_binds_exact_verified_journal_head(tmp_path: Path)
 
     assert require_recent_account_owner_health(
         tmp_path,
-        environment="paper",
-        expected_account_id="paper-account",
+        environment="demo",
+        expected_account_id="health-account",
         max_age_ns=2_000,
         now_ns=11_000,
     ) == matching
@@ -929,8 +882,8 @@ def test_require_recent_health_binds_exact_verified_journal_head(tmp_path: Path)
     with pytest.raises(RuntimeError, match="journal sequence mismatch"):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
-            expected_account_id="paper-account",
+            environment="demo",
+            expected_account_id="health-account",
             max_age_ns=2_000,
             now_ns=11_000,
         )
@@ -944,8 +897,8 @@ def test_require_recent_health_rejects_wrong_expected_account_on_empty_journal(
     with pytest.raises(RuntimeError, match="account_id"):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
-            expected_account_id="another-paper-account",
+            environment="demo",
+            expected_account_id="another-account",
             max_age_ns=2_000,
             now_ns=11_000,
         )
@@ -1064,8 +1017,8 @@ def test_exact_binding_remains_the_default_for_sizing_consumers(tmp_path: Path) 
         )
 
 
-def test_paper_scope_annotation_does_not_hide_queue_head_warmup(tmp_path: Path) -> None:
-    """The paper twin's scope annotation must not turn warmup into a CRITICAL page.
+def test_scope_annotation_does_not_hide_queue_head_warmup(tmp_path: Path) -> None:
+    """A historical scope annotation must not turn warmup into a CRITICAL page.
 
     Its detail always begins with ``execution_model_scope=...``, so a strict prefix
     test never matches and the bounded queue-head warmup pages every hour.
@@ -1088,7 +1041,7 @@ def test_paper_scope_annotation_does_not_hide_queue_head_warmup(tmp_path: Path) 
     with pytest.raises(AccountOwnerMarketWarmupPending):
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
         )
@@ -1099,15 +1052,15 @@ def test_scope_annotation_never_masks_a_real_blocking_reason(tmp_path: Path) -> 
         **{
             **_health().to_dict(),
             "status": AccountOwnerHealthStatus.BLOCKED,
-            "detail": "execution_model_scope=integration_only_uncalibrated; paper loop failed",
+            "detail": "execution_model_scope=integration_only_uncalibrated; owner loop failed",
         }
     )
     write_account_owner_health(tmp_path, blocked)
 
-    with pytest.raises(RuntimeError, match="paper loop failed") as blocked_error:
+    with pytest.raises(RuntimeError, match="owner loop failed") as blocked_error:
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
         )
@@ -1127,7 +1080,7 @@ def test_annotation_only_detail_is_not_treated_as_warmup(tmp_path: Path) -> None
     with pytest.raises(RuntimeError) as blocked_error:
         require_recent_account_owner_health(
             tmp_path,
-            environment="paper",
+            environment="demo",
             max_age_ns=2_000,
             now_ns=11_000,
         )

@@ -106,7 +106,7 @@ def _ready_roots(
     return account, inbox, capture
 
 
-@pytest.mark.parametrize("environment", ["demo", "paper"])
+@pytest.mark.parametrize("environment", ["demo", "mainnet"])
 def test_require_owner_ready_binds_route_health_journal_and_capture(
     tmp_path: Path,
     environment: str,
@@ -507,7 +507,7 @@ def test_readiness_rejects_wrong_account_identity_and_root_alias(tmp_path: Path)
             inbox_root=inbox,
             capture_root=capture,
             expected_invocation_id=CURRENT_INVOCATION_ID,
-            expected_account_id="bybit-paper-unified",
+            expected_account_id="bybit-mainnet-unified",
             now_ns=NOW_NS,
         )
     with pytest.raises(ValueError, match="must be distinct"):
@@ -567,7 +567,7 @@ def test_capture_root_must_not_be_a_symlink(tmp_path: Path) -> None:
     "unit_name",
     (
         "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-paper-execution.service",
+        "liquidity-migration-account-execution-mainnet.service",
     ),
 )
 def test_owner_exec_start_post_binds_current_systemd_invocation_in_registered_wrapper(

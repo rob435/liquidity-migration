@@ -17,9 +17,9 @@ import order tells you what it is allowed to know.
 | `research/backtest/` | Every sleeve's registered rule and historical equity engine, plus chart writers | |
 | `research/execution/` | Measurement of what actually happened: trade diagnostics, measured cost model, twin calibration, three-way reconciliation, venue accounting | |
 | `policy/` | The dials: operational sizing profile, execution config, equity-anchored envelope, the account loss halt, real-money profile and arming, systemd environment reading | |
-| `ops/` | The operator surface in both directions: Telegram and notifications, the destructive reset path and its archive, epoch reset, maintenance lock, demo/paper agreement | |
+| `ops/` | The operator surface in both directions: Telegram and notifications, the destructive reset path and its archive, epoch reset, maintenance lock | |
 | `cli/` | `python -m liquidity_migration` — `commands.py` and its argparse builders in `parsers.py` | |
-| `runtime/` | What a systemd unit actually executes: the demo and paper owner runners, readiness, and the paper twin (mirror, equity, funding accrual, passive execution) | |
+| `runtime/` | What a systemd unit actually executes: the account owner runners and readiness | |
 
 `__init__.py` and `__main__.py` are the only modules at the package root.
 

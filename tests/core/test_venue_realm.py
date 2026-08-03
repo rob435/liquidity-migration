@@ -10,7 +10,6 @@ import pytest
 from liquidity_migration.account.account_route import derive_account_route
 from liquidity_migration.account.execution_environment import (
     EXECUTION_ENVIRONMENT_CHOICES,
-    EXECUTION_ENVIRONMENT_VALUES,
     ExecutionEnvironment,
     account_id_for_environment,
     execution_environment,
@@ -33,15 +32,12 @@ def test_every_environment_has_an_account_id_and_a_defined_realm() -> None:
     }
     assert len(set(account_ids.values())) == len(ExecutionEnvironment)
     assert account_ids[ExecutionEnvironment.MAINNET] == "bybit-mainnet-unified"
-    # paper addresses no venue at all; callers must handle its absence rather
-    # than be handed a plausible-looking default.
-    assert venue_realm_for_environment("paper") is None
     assert venue_realm_for_environment("demo") is VenueRealm.DEMO
     assert venue_realm_for_environment("mainnet") is VenueRealm.MAINNET
 
 
 def test_environment_and_realm_parsers_reject_every_fallback() -> None:
-    for bogus in ("", None, " ", "live", "real", "prod", "mainet"):
+    for bogus in ("", None, " ", "live", "real", "prod", "mainet", "paper"):
         with pytest.raises(ValueError):
             execution_environment(bogus)
     for bogus in ("", None, " ", "live", "paper", "prod"):
@@ -106,7 +102,7 @@ def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
 def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() -> None:
     """CARRY and LONG may address the mainnet owner; nothing defaults to it. LONG can
     only join because the profile's ``sleeve_limits`` partition means it cannot spend
-    CARRY's share. CONTINUOUS is retired and stays ``demo|paper``.
+    CARRY's share. CONTINUOUS is retired and stays ``demo``-only.
     """
 
     partitioned = {
@@ -140,7 +136,7 @@ def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() 
         if function_name in partitioned:
             assert rendered == "EXECUTION_ENVIRONMENT_CHOICES"
         else:
-            assert rendered == "('demo', 'paper')", (function_name, rendered)
+            assert rendered == "('demo',)", (function_name, rendered)
 
 
 def test_the_owner_runner_defaults_its_realm_to_demo() -> None:
@@ -153,13 +149,6 @@ def test_the_owner_runner_defaults_its_realm_to_demo() -> None:
     assert 'demo=True,\n' not in source
     assert 'required_rules_environment="demo"' not in source
     assert 'environment="demo",' not in source
-
-
-def test_execution_environment_and_venue_realm_stay_distinct_types() -> None:
-    """``paper`` is an owner, not a venue; folding them would hide that."""
-
-    assert EXECUTION_ENVIRONMENT_VALUES > {realm.value for realm in VenueRealm}
-    assert "paper" not in {realm.value for realm in VenueRealm}
 
 
 class TestClientVenueRealm:

@@ -1,7 +1,7 @@
-"""One ordered event clock for historical, paper, and demo strategy scheduling.
+"""One ordered event clock for historical and live strategy scheduling.
 
 Arrival adapters differ: historical runs supply a timestamped tape, while demo
-and paper daemons receive timer and confirmed-bar wakeups.  Every adapter must
+daemons receive timer and confirmed-bar wakeups.  Every adapter must
 turn that arrival into :class:`StrategyEvent` and use the same dispatcher.  The
 dispatcher owns ordering, virtual-clock advancement, duplicate detection, and
 a hash-chained input tape; strategy callbacks do not read ambient time.

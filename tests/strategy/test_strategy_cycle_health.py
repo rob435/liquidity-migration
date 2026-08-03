@@ -21,7 +21,7 @@ INVOCATION_ID = "12" * 16
 def _health(**overrides: object) -> StrategyCycleHealth:
     values: dict[str, object] = {
         "sleeve": "continuous",
-        "environment": "paper",
+        "environment": "demo",
         "cycle_id": "continuous-target-test-1000",
         "cycle_ts_ms": 1_000,
         "completed_ts_ns": 2_000_000_000,

@@ -359,30 +359,6 @@ def test_two_factor_targets_are_published_as_one_batch(monkeypatch, tmp_path, ca
     }
 
 
-def test_paper_execution_publishes_only_to_bound_paper_route(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    _setup_runner(
-        monkeypatch,
-        tmp_path,
-        argv=_execute_args(tmp_path),
-        execution_environment="paper",
-    )
-    monkeypatch.setattr(
-        hedge_runner,
-        "compute_hedge_decision_2f",
-        lambda cfg, **kwargs: _two_factor_decision(),
-    )
-
-    assert hedge_runner.main() == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["execution_environment"] == "paper"
-    assert out["status"] == "target_queued"
-    route = json.loads((tmp_path / "account" / "account_route.json").read_text())
-    assert route["account_id"] == "bybit-paper-unified"
-    assert route["environment"] == "paper"
-
-
 def test_execution_environment_is_required(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py"])
 

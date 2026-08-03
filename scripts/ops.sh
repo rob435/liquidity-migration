@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One thin operator-facing router for the surviving demo/paper and research operations.
+# One thin operator-facing router for the surviving demo and research operations.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,7 +33,7 @@ Safe operator commands:
                                zero exposure; reads only
   flatten --execute --environment ENV --reason TEXT [ARGS...]
                                publish the zero targets and wait for the owner
-                               to converge. ENV is demo|paper|mainnet and has no
+                               to converge. ENV is demo|mainnet and has no
                                default. Stop the producing sleeve first, or it
                                can republish while this converges.
   venue-accounting [ARGS...]   capture/reconcile read-only demo accounting evidence
@@ -110,7 +110,7 @@ remote_reset() {
     cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd "$REPO_DIR"
-exec bash scripts/maintain/reset_demo_paper_ledgers.sh "${RESET_ARGS[@]}"
+exec bash scripts/maintain/reset_demo_ledgers.sh "${RESET_ARGS[@]}"
 REMOTE_SCRIPT
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }

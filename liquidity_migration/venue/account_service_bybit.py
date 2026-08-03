@@ -18,9 +18,7 @@ from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.account.execution_adapters import (
-    INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE,
     L2BookSnapshot,
-    MarketOrderExecutionTwin,
 )
 from liquidity_migration.account.market_capture import SequenceAwareMarketRecorder
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm
@@ -107,26 +105,6 @@ class CapturedBybitMarketProvider:
         if book is None:
             raise RuntimeError(f"no captured execution book for market input {input_key}")
         return book
-
-
-class CapturedPaperExecutionAdapter:
-    """Uncalibrated integration port using the exact decision-boundary book."""
-
-    name = f"paper_{INTEGRATION_ONLY_EXECUTION_MODEL_SCOPE}"
-
-    def __init__(
-        self,
-        *,
-        market_provider: CapturedBybitMarketProvider,
-        twin: MarketOrderExecutionTwin,
-    ) -> None:
-        self.market_provider = market_provider
-        self.twin = twin
-
-    def submit(self, command: Any, market_input: MarketInputRef) -> Any:
-        book = self.market_provider.execution_book(market_input.input_key)
-        self.twin.books[command.symbol.upper()] = book
-        return self.twin.submit(command, market_input)
 
 
 class BybitAccountSnapshotProvider:

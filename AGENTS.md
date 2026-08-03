@@ -10,7 +10,7 @@ the per-sleeve capital partition in `account_kernel.py`.
 
 ## Runtime Safety
 
-- Default to offline, shadow, paper, or demo operation.
+- Default to offline, shadow, or demo operation.
 - Arming real money — setting `REAL_MONEY`, installing mainnet credentials,
   starting a funded unit — is the owner's own act, on a separate instruction
   naming the deployment and its risk boundary. Building and testing that tooling

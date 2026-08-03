@@ -124,8 +124,8 @@ reference price (`protection_engine.py:123-151`);
 account owner's venue-native entry stop is the other plane and is anchored to the decision
 reference price, because it is armed in the same `place_order` call as the entry and no fill exists
 yet ([`architecture.md`](architecture.md), *Venue-native protection*). Four
-distinct legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in paper, a
-submit-time idealization; the planning/target-acceptance clock now exposed as `entry_target_ts_ms`
+distinct legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in retired
+paper roots, a submit-time idealization; the planning/target-acceptance clock now exposed as `entry_target_ts_ms`
 (which may precede a fill); and the 2026-05-25 WAVESUSDT rows from a retired path that decoded an
 order-link signal timestamp into that field — making the position look hours older than the venue fill.
 Do not merge those rows with current projections unlabelled.
@@ -290,69 +290,26 @@ overwriting (`:887-969`). Reusing a `--run-id` skips only a step whose exact com
 succeeded and whose artifact still exists; changed windows, roots, source commits, or configuration are
 refused under an existing ID.
 
-**Three-way reconciliation.** Either inline — `plan` and `run` both accept
-`--demo-account-root` / `--paper-account-root`, which must be supplied together (`demo and paper
-account roots must be supplied together`), and a `run` given neither records
-`reconcile.demo_paper_backtest / skipped_no_account_snapshots` in the event ledger rather than failing
-(`:1114-1126, :1238-1244`) — or attached afterwards:
-
-```bash
-research-refresh reconcile --run-dir ... --demo-account-root ... --paper-account-root ... \
-  [--account-snapshot-commit <40-hex>]
-```
-
-The snapshots are frozen copies the operator makes; the tool does not copy a live account root while
-writers are active. It verifies each journal before reading (`read_account_journal(..., verify=True)`
-plus `verify_account_journal`) and stores the receipt in the report's `source_identity`
-(`three_way_reconciliation.py:302-306, :577, :587`). `--account-snapshot-commit` is optional and
-recorded in `source_identity` alongside `code_commit` and `code_identity_status`; a non-40-lowercase-hex
-value raises. Without it the tool falls back to commit strings scavenged from journal payloads, and if
-that is ambiguous the report is stamped `unverified` with the warning `demo/paper code identity is not
-proven by the supplied account snapshots` (`:523-541`). The run manifest's own `code_commit` must be 40
-characters or `reconcile` refuses outright.
-
-Comparison is on the grain `(sleeve, active component, symbol, causal signal_ts_ms)`. CONTINUOUS runtime
-component tags are mapped to their code-defined names first — `p3`→`turn3p3`, `p4p3`→`turn4p3`,
-`p4p5`→`turn4p5` (`_CONTINUOUS_COMPONENT_ALIASES`, `:39-46, :160-177`); an unmappable tag becomes
-`unknown:<raw>` and raises the warning `unmapped live continuous component identities`. So a journal
-`p4p3` against a backtest `turn4p3` is already reconciled — not a disagreement.
-
-The report keeps three distinct states per key, not one: `demo_proposed`/`paper_proposed` (target
-published), `demo_accepted`/`paper_accepted` (risk decision accepted), and
-`demo_execution_states`/`paper_execution_states` (account-level net-symbol command/fill state), plus
-`backtest_modeled`. The headline `three_way_overlap` and `three_way_exact` counts are computed on the
-**accepted** sets only, so a proposed-but-risk-rejected key is not a demo/paper disagreement. Execution
-states are one of `proposal_without_risk_decision`, `risk_rejected`, `accepted_batch_symbol_filled`,
-`accepted_target_command_rejected`, `accepted_target_commanded_without_fill`,
-`accepted_target_no_net_command` (`:246-258`).
-
-Agreement supports a structural entry-key claim and nothing else. The report's own `claim_scope`
-(`:610-613`) reads "accepted entry-key structural agreement only; execution quality, fill attribution,
-account PnL, backtest performance, and runtime parity remain separate" — **runtime parity** is the most
-tempting over-claim, because the demo/paper execution-state columns sit right there. The markdown
-footer adds that the columns "must not be read as separately attributable component fills"
-(`:716-718`). `reconciliation/` is immutable in the same sense as the run summary:
-`three_way_reconciliation.json`, `three_way_reconciliation.md` and `entry_agreement.csv` are written
-idempotently, and re-running with different evidence raises `immutable reconciliation artifact changed`
-rather than overwriting (`:724-730, :775-777`) — choose a new `--reconcile-out`.
+**Three-way reconciliation (retired).** The demo/paper/backtest reconciliation tool and the
+`research-refresh reconcile` subcommand were removed with the paper fleet on 2026-08-03; the
+reconciliation reports produced while it ran remain under their dated run directories and
+`docs/audit/`.
 
 ## Operational roots
 
-Exact VPS paths come from the host env files, not from this document:
-`/etc/liquidity-migration/account-execution.env` and
-`/etc/liquidity-migration/account-paper-execution.env`. Each route names its own
+Exact VPS paths come from the host env file, not from this document:
+`/etc/liquidity-migration/account-execution.env`. The route names its own
 `ACCOUNT_EXECUTION_ROOT` (canonical journal), `ACCOUNT_INTENT_INBOX_ROOT` (target inbox) and
-`ACCOUNT_CAPTURE_ROOT` / `ACCOUNT_PAPER_CAPTURE_ROOT` (market capture); demo and paper roots are
-absolute, **real**, **owner-controlled**, pairwise-disjoint and non-nested. Real and owner-controlled
-are code-enforced, not stylistic: `reset_path_safety.py:1050` ("paper runtime root must be a real
-directory"), `:1054` (paper lock namespace), `:1057` ("paper runtime tree contains a symlink"), and
-`:1134` / `:1142` / `:1145` for the demo root, each demo route leaf and the demo lock namespace, plus
-the uid/gid/mode rebinding at `:732-844`. A symlinked account root or a convenience bind mount is not a
-legal layout. The paper mirror additionally reads
-`DEMO_ACCOUNT_EXECUTION_ROOT` and `DEMO_ACCOUNT_CAPTURE_ROOT`. The demo account owner alone mutates
-Bybit; the paper owner alone advances the deterministic paper account. Their journals own lifecycle
-and accounting state, and Parquet views are rebuildable projections. Strategy `DATA_ROOT` directories
-hold signal inputs, caches and cycle telemetry — not position or P&L authority.
+`ACCOUNT_CAPTURE_ROOT` (market capture); account roots are absolute, **real**,
+**owner-controlled**, pairwise-disjoint and non-nested. Real and owner-controlled are
+code-enforced, not stylistic: `reset_path_safety.py` ("private runtime root must be a real
+directory", the private lock namespace, "private runtime tree contains a symlink") and the demo
+root/leaf/lock-namespace checks, plus the uid/gid/mode rebinding. A symlinked account root or a
+convenience bind mount is not a legal layout. The demo account owner alone mutates Bybit. Its
+journal owns lifecycle and accounting state, and Parquet views are rebuildable projections.
+Strategy `DATA_ROOT` directories hold signal inputs, caches and cycle telemetry — not position or
+P&L authority. (The retired paper route's roots and journals remain on disk as history; nothing
+routes to them.)
 
 Dataset and account roots use persistent `flock(2)` leaves: ownership is the kernel lock on the open
 file description, not the file's contents, and release or crash recovery never unlinks the leaf. Never
@@ -374,18 +331,15 @@ by two `_validate_lock_fd_path` calls); multiply-linked leaves are reconciled by
 `_recover_internal_lock_alias` (`:439-463`). The mode change is the migration, not corruption — do not
 hand-clean them.
 
-Paper `.locks` directories and leaves are owned by `liquidity-migration-paper`, mode `0700`. Deployment
-pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-paper` / `normalize-demo`
-(`scripts/deploy_vps_live.sh:584-607`; `reset_path_safety.py:908-955` does `os.mkdir(".locks", 0o700,
-dir_fd=root_fd)` and rebinds/validates owner), and `deploy_vps_live.sh:642-643` then verifies the paper
-user can write `$root/.locks`. Reset restores the same boundary before restarting paper services. At
-runtime root may *observe* an owner-controlled lock but a non-root user may only use its own
-(`_lock_owner_allowed`, `storage.py:273-276`); when euid 0 is the first reader of a paper-owned root,
-`_ensure_lock_directory` fchowns/fchmods the directory to the *data root's* owner and 0700
-(`:308-356`). The lock directory — real, not group/world-writable — is the ownership authority for its
-leaves, and a leaf whose uid does not match its directory is rejected: "lock path owner must match its
-lock directory" (`:377-378`). Creating a root-owned `.locks` under a paper root wedges every paper
-service.
+`.locks` directories and leaves are owned by the data root's owner, mode `0700`. Deployment
+pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-private` /
+`normalize-demo` (`os.mkdir(".locks", 0o700, dir_fd=root_fd)` with owner rebinding/validation).
+Reset restores the same boundary before restarting services. At runtime root may *observe* an
+owner-controlled lock but a non-root user may only use its own (`_lock_owner_allowed`); when euid 0
+is the first reader of a root owned by another identity, `_ensure_lock_directory` fchowns/fchmods
+the directory to the *data root's* owner and 0700. The lock directory — real, not
+group/world-writable — is the ownership authority for its leaves, and a leaf whose uid does not
+match its directory is rejected: "lock path owner must match its lock directory".
 
 Host-maintenance and account-owner leases follow the same persistent-inode rule: parent namespaces and
 leaves are opened with no-follow descriptors and checked for single-link ownership and mount identity;
@@ -394,7 +348,7 @@ as inherited file descriptors plus (device, inode) metadata rather than paths, a
 acquisition — account-lease metadata is written only after the inherited descriptor still matches the
 prepared path **and** holds the kernel flock (`account_owner_lease.py:535-645`,
 `revalidate_inherited_account_owner_lease` at `:647-727`; canonical demo lease directory
-`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_paper_ledgers.sh:145-172`, where the host
+`/run/lock/liquidity-migration` at `:26`; `scripts/maintain/reset_demo_ledgers.sh`, where the host
 maintenance lock dir is the different path `/run/liquidity-migration`). Simplifying that handoff to a
 plain path breaks the revalidation.
 
