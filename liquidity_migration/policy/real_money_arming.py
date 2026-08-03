@@ -329,45 +329,10 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
     return results
 
 
-def _sleeve_checks() -> list[CheckResult]:
-    path = Path("/etc/liquidity-migration/sleeves.resolved.env")
-    try:
-        values = parse_systemd_environment_bytes(path.read_bytes(), label=str(path))
-    except (OSError, ValueError) as exc:
-        return [
-            CheckResult(
-                "sleeve toggles",
-                False,
-                f"{path} is unavailable: {exc}",
-                "run the staged install so the resolved sleeve file is regenerated",
-            )
-        ]
-    enabled = [
-        key
-        for key in ("CARRY_MAINNET_SLEEVE", "LONG_MAINNET_SLEEVE")
-        if values.get(key, "").strip().lower() == "on"
-    ]
-    return [
-        CheckResult(
-            "sleeve toggles",
-            bool(enabled),
-            f"enabled: {', '.join(enabled)}" if enabled else "no mainnet producer is enabled",
-            ""
-            if enabled
-            else (
-                "turn CARRY_MAINNET_SLEEVE and/or LONG_MAINNET_SLEEVE on in "
-                "deploy/sleeves.env and re-install -- repo-off is a hard ceiling a "
-                "host override cannot lift"
-            ),
-        )
-    ]
-
-
 def preflight(
     *,
     credential_env: Path = MAINNET_CREDENTIAL_ENV,
     owner_env: Path = MAINNET_OWNER_ENV,
-    check_sleeves: bool = True,
 ) -> list[CheckResult]:
     """Every arming precondition, reported at once. Reads only; writes nothing."""
 
@@ -388,8 +353,6 @@ def preflight(
                     dial_values=credentials, installed_path=installed_profile
                 )
             )
-    if check_sleeves:
-        results.extend(_sleeve_checks())
     return results
 
 
@@ -551,7 +514,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     check.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
     check.add_argument("--owner-env", default=str(MAINNET_OWNER_ENV))
-    check.add_argument("--no-sleeve-check", action="store_true")
     check.add_argument("--json", action="store_true")
 
     render = subparsers.add_parser(
@@ -593,7 +555,6 @@ def main(argv: list[str] | None = None) -> int:
     results = preflight(
         credential_env=Path(args.credential_env),
         owner_env=Path(args.owner_env),
-        check_sleeves=not args.no_sleeve_check,
     )
     if args.json:
         print(

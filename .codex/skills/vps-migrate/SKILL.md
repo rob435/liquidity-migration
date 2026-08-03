@@ -10,7 +10,7 @@ services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
 - `scripts/deploy_vps_live.sh` with
-  `install|activate|verify|rollout|activate-mainnet|stop-mainnet`;
+  `install|activate|verify|rollout|stop-mainnet`;
 - `scripts/vps/print_vps_recovery_command.sh` and the current SSH restore scripts;
 - `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.

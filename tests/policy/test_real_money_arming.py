@@ -242,7 +242,7 @@ def test_preflight_reports_the_missing_files_rather_than_raising(tmp_path: Path)
     results = preflight(
         credential_env=tmp_path / "absent-a.env",
         owner_env=tmp_path / "absent-b.env",
-        check_sleeves=False,
+        
     )
     assert [row.ok for row in results] == [False, False]
     assert all("does not exist" in row.detail for row in results)
@@ -257,7 +257,7 @@ def test_preflight_never_puts_a_secret_in_its_report(tmp_path: Path) -> None:
         tmp_path, BYBIT_REAL_API_KEY=secret, BYBIT_REAL_API_SECRET=secret
     )
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
 
     rendered = "\n".join(row.render() for row in results)
     assert secret not in rendered
@@ -270,13 +270,13 @@ def test_preflight_reports_the_arming_switch_as_the_owners_act(tmp_path: Path) -
     credential = _filled_credential_env(tmp_path)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     real_money = next(row for row in results if row.name == "REAL_MONEY")
     assert not real_money.ok
     assert "by hand" in real_money.fix
 
     armed = _filled_credential_env(tmp_path, REAL_MONEY="true")
-    results = preflight(credential_env=armed, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=armed, owner_env=owner)
     assert next(row for row in results if row.name == "REAL_MONEY").ok
 
 
@@ -285,7 +285,7 @@ def test_preflight_refuses_a_demo_key_in_the_mainnet_file(tmp_path: Path) -> Non
     credential = _env_file(tmp_path, "bybit-mainnet.env", body)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     demo = next(row for row in results if row.name == "BYBIT_DEMO_API_KEY")
     assert not demo.ok
     assert "never reach a funded run" in demo.fix
@@ -298,7 +298,7 @@ def test_preflight_reports_a_bad_dial_without_crashing(tmp_path: Path) -> None:
     credential = _env_file(tmp_path, "bybit-mainnet.env", body)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     dials = next(row for row in results if row.name == "dials")
     assert not dials.ok
     assert "RM_ENTRY_LEVERAGE cannot exceed" in dials.detail
@@ -309,7 +309,7 @@ def test_preflight_refuses_a_world_readable_credential_file(tmp_path: Path) -> N
     credential.chmod(0o644)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     assert not results[0].ok
     assert "must be root-owned 0600" in results[0].detail
 
@@ -322,7 +322,7 @@ def test_preflight_writes_nothing(tmp_path: Path) -> None:
         for path in sorted(tmp_path.iterdir())
     }
 
-    preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    preflight(credential_env=credential, owner_env=owner)
 
     after = {
         path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
@@ -427,7 +427,7 @@ def test_preflight_catches_an_empty_telegram_pair_before_arming(tmp_path: Path) 
     credential = _env_file(tmp_path, "bybit-mainnet.env", body)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     row = next(check for check in results if check.name == "notifications")
     assert not row.ok
     assert "TELEGRAM_BOT_TOKEN" in row.detail
@@ -439,7 +439,7 @@ def test_preflight_catches_an_empty_telegram_pair_before_arming(tmp_path: Path) 
             "TELEGRAM_CHAT_ID=", "TELEGRAM_CHAT_ID=1"
         ),
     )
-    results = preflight(credential_env=filled, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=filled, owner_env=owner)
     assert next(check for check in results if check.name == "notifications").ok
 
 
@@ -474,7 +474,7 @@ def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
     current_dir.mkdir()
     current = _filled_credential_env(current_dir)
 
-    results = preflight(credential_env=current, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=current, owner_env=owner)
     drift = next(row for row in results if row.name == "profile matches dials")
     assert not drift.ok
     assert "is not the one that would be enforced" in drift.detail
@@ -482,7 +482,7 @@ def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
     # Re-rendering from the current dials clears it.
     assert main(["render-profile", "--from-env", str(current), "--execute",
                  "--output", str(installed), "--overwrite"]) == 0
-    results = preflight(credential_env=current, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=current, owner_env=owner)
     assert next(row for row in results if row.name == "profile matches dials").ok
 
 
@@ -501,14 +501,14 @@ def test_preflight_checks_the_state_roots_exist(tmp_path: Path) -> None:
         owner_body = owner_body.replace(line, f"{key}={roots / name}")
     owner = _env_file(tmp_path, "owner.env", owner_body)
 
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     row = next(check for check in results if check.name == "state roots")
     assert not row.ok
     assert "create-state-roots" in row.fix
 
     for name in ("account", "inbox", "capture"):
         (roots / name).mkdir(parents=True)
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     assert next(check for check in results if check.name == "state roots").ok
 
 
@@ -748,7 +748,7 @@ def test_create_state_roots_accepts_a_root_that_is_a_symlinked_directory(
     assert {Path(path).name for path in summary["created"]} == {"inbox", "capture"}
 
     credential = _filled_credential_env(tmp_path)
-    results = preflight(credential_env=credential, owner_env=owner, check_sleeves=False)
+    results = preflight(credential_env=credential, owner_env=owner)
     assert next(row for row in results if row.name == "state roots").ok
 
 

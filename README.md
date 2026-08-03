@@ -10,10 +10,12 @@ Bybit.
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
 | CARRY | `lane2_carry_hold_v3` | `CARRY_SLEEVE` |
 | CONTINUOUS | `continuous_ensemble_v2` | `CONTINUOUS_SLEEVE` |
-| LONG / CARRY, real money | as above | `LONG_MAINNET_SLEEVE`, `CARRY_MAINNET_SLEEVE` |
+| LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
-Which toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not here.
-That file is a ceiling: a host override can turn an enabled sleeve off, never on.
+Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
+here. That file is a ceiling: a host override can turn an enabled sleeve off,
+never on. Real money has no repo toggle at all — arming lives only on the host,
+next to the live API key, so a git commit can never arm.
 Demo is the only practice book — the paper fleet was retired and nothing reads
 its journals. What each sleeve trades is in
 [`docs/trading_logic.md`](docs/trading_logic.md).
@@ -61,7 +63,7 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [docs/research/archive/2026-08-01-settlement-sawtooth-program.md](docs/research/archive/2026-08-01-settlement-sawtooth-program.md) | the price pattern around funding payments, and why the carry book cannot be hedged |
 | [liquidity_migration/README.md](liquidity_migration/README.md) | which subpackage owns a module, and what may import what |
 | [scripts/README.md](scripts/README.md) | which script to run, and who runs it |
-| [docs/real_money.md](docs/real_money.md) | the funded-account envelope, the owner's arming runbook, and what is still unproven |
+| [docs/operations.md](docs/operations.md) §Real money | the funded-account envelope, the owner's arming runbook, and what is still unproven |
 | [docs/research/archive/](docs/research/archive/README.md) | dated research runs — the underlying tables behind a number |
 
 Registered configs cite the archived runs by section;

@@ -23,7 +23,7 @@ simply, without jargon.
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |
 | Data roots, timestamps, point-in-time membership, refresh | [docs/data.md](docs/data.md) |
-| The funded account: envelope, arming runbook, what is unproven | [docs/real_money.md](docs/real_money.md) |
+| The funded account: envelope, arming runbook, what is unproven | [docs/operations.md](docs/operations.md) §Real money |
 
 **The evidence** — research, all under `docs/research/`:
 

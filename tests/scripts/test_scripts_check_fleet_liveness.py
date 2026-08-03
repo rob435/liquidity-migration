@@ -1597,21 +1597,16 @@ def test_unknown_account_scope_is_rejected() -> None:
         M._default_units_for_scope("mainnet-paper")
 
 
-def test_mainnet_account_scope_units_follow_the_mainnet_toggles(monkeypatch) -> None:
+def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) -> None:
+    """An armed mainnet fleet always runs both registered producers; the watchdog
+    inventory is unconditional and no demo unit may leak in.
+    """
+
     for toggle in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CARRY_SLEEVE"):
         monkeypatch.setenv(toggle, "on")
-    monkeypatch.delenv("CARRY_MAINNET_SLEEVE", raising=False)
-    monkeypatch.delenv("LONG_MAINNET_SLEEVE", raising=False)
 
-    assert M._default_units_for_scope("mainnet") == [M._MAINNET_ACCOUNT_OWNER_UNIT]
-
-    monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "on")
-    assert M._default_units_for_scope("mainnet") == [M._MAINNET_ACCOUNT_OWNER_UNIT, M._CARRY_MAINNET_UNIT]
-
-    monkeypatch.setenv("LONG_MAINNET_SLEEVE", "on")
     units = M._default_units_for_scope("mainnet")
     assert units == [M._MAINNET_ACCOUNT_OWNER_UNIT, M._CARRY_MAINNET_UNIT, M._LONG_MAINNET_UNIT]
-    # Every demo toggle is on above; none of its units may leak in.
     assert not [unit for unit in units if "demo" in unit]
 
 

@@ -52,7 +52,7 @@ Operator commands:
                                create the mainnet state roots; dry run without
                                --execute
   deploy MODE [ARGS...]        MODE is install|activate|staged|rollout|
-                               activate-mainnet|stop-mainnet
+                               stop-mainnet
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
@@ -246,8 +246,8 @@ exec .venv/bin/python -m liquidity_migration.venue.wedged_command_resolution \
       shift
     fi
     case "${1:-}" in
-      install|activate|staged|rollout|activate-mainnet|stop-mainnet) ;;
-      *) die_usage "deploy mode must be install, activate, staged, rollout, activate-mainnet, or stop-mainnet" ;;
+      install|activate|staged|rollout|stop-mainnet) ;;
+      *) die_usage "deploy mode must be install, activate, staged, rollout, or stop-mainnet" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "$@"
     ;;

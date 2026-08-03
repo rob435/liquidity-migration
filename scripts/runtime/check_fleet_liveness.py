@@ -762,12 +762,9 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
     if account_scope not in _ACCOUNT_SCOPES:
         raise ValueError(f"unsupported account liveness scope: {account_scope}")
     if account_scope == "mainnet":
-        mainnet_units = [_MAINNET_ACCOUNT_OWNER_UNIT]
-        if _sleeve_on("CARRY_MAINNET_SLEEVE"):
-            mainnet_units.append(_CARRY_MAINNET_UNIT)
-        if _sleeve_on("LONG_MAINNET_SLEEVE"):
-            mainnet_units.append(_LONG_MAINNET_UNIT)
-        return mainnet_units
+        # An armed mainnet fleet always runs both registered producers; the
+        # installed risk profile, not a toggle, decides their shares.
+        return [_MAINNET_ACCOUNT_OWNER_UNIT, _CARRY_MAINNET_UNIT, _LONG_MAINNET_UNIT]
     return _default_units_for_toggles()
 
 
@@ -1610,7 +1607,7 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_CARRY_DEMO_UNIT),
             )
         )
-    if mainnet and carry_mainnet_root is not None and _sleeve_on("CARRY_MAINNET_SLEEVE"):
+    if mainnet and carry_mainnet_root is not None:
         alerts.extend(
             gather_carry_alerts(
                 carry_root=carry_mainnet_root,
@@ -1620,7 +1617,7 @@ def main() -> int:
                 unit_runtime=unit_runtime.get(_CARRY_MAINNET_UNIT),
             )
         )
-    if mainnet and long_mainnet_root is not None and _sleeve_on("LONG_MAINNET_SLEEVE"):
+    if mainnet and long_mainnet_root is not None:
         alerts.extend(
             gather_long_alerts(
                 long_root=long_mainnet_root,

@@ -30,7 +30,7 @@ Do not maintain a static package-subcommand list.
 
 - Deployment/account state: `scripts/ops.sh status`.
 - Deploy: `scripts/ops.sh deploy {install,activate,staged,rollout,
-  activate-mainnet,stop-mainnet}`. `staged` installs and activates in one
+  stop-mainnet}`. `staged` installs and activates in one
   command; `rollout`'s venue-flat proof is advisory on a no-mainnet fleet.
   There is no `recover` mode and no
   operational-authority receipt — both were removed on 2026-07-31.

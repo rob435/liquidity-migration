@@ -448,13 +448,13 @@ liveness (`demo-operational` was "operational minus paper" and is rejected by na
 marker self-heals on the next rollout). Liveness scope is hardcoded in the committed argv:
 `check_fleet_liveness.py --account-scope demo` for the demo watchdog and
 `--account-scope mainnet` for the mainnet one, choices `_ACCOUNT_SCOPES = ("demo",
-"mainnet")`. Deploy modes: `install | activate | verify | rollout | activate-mainnet |
-stop-mainnet`.
+"mainnet")`. Deploy modes: `install | activate | verify | rollout | stop-mainnet`.
 Activation starts owners before producers; shutdown stops producers before owners.
-`activate` and `activate-mainnet` both reach the funded fleet through
+When `REAL_MONEY=true` is set in the host's `bybit-mainnet.env` — the single arming
+switch — a plain `activate` or `rollout` reaches the funded fleet through
 `start_mainnet_fleet`, which creates the mainnet state roots and requires the arming
-preflight to pass before it starts anything; with both mainnet toggles off, `verify`
-instead asserts the whole mainnet half inactive.
+preflight to pass before it starts anything; disarmed, `verify` instead asserts the
+whole mainnet half inactive.
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling — a host override
 may turn a repo-enabled sleeve off but cannot resurrect a disabled one. Which sleeves are

@@ -422,4 +422,4 @@ day where such components carry >20% of gross exposure measures plumbing rather 
 economics ([`research_findings.md`](research/research_findings.md)).
 
 Grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
-[`real_money.md`](real_money.md).
+[`operations.md`](operations.md) §Real money.

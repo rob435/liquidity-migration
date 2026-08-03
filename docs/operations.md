@@ -3,8 +3,8 @@
 [`scripts/ops.sh`](../scripts/ops.sh) is the operator router and
 [`scripts/deploy_vps_live.sh`](../scripts/deploy_vps_live.sh) the deploy engine behind it;
 both act on one VPS over SSH. `scripts/ops.sh help` is the current surface. The funded
-fleet's start/stop modes are below; what arming a funded account requires beforehand is in
-[`real_money.md`](real_money.md).
+fleet — its envelope, arming runbook, and what is still unproven — is the *Real money*
+section below.
 
 ## Commands
 
@@ -21,7 +21,7 @@ fleet's start/stop modes are below; what arming a funded account requires before
 | `venue-accounting [ARGS]` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Runs on the host with the host's credentials; `LOCAL=1` runs it against this checkout. Read-only. |
 | `wedged-command {report,probe,resolve}` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the demo account root/id/realm and loads the owner's credentials on the host, so the operator passes only the subcommand and its flags. Demo resolves these itself — see below. |
 | `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
-| `deploy MODE [ARGS]` | `MODE` is `install`, `activate`, `staged`, `rollout`, `activate-mainnet` or `stop-mainnet`. |
+| `deploy MODE [ARGS]` | `MODE` is `install`, `activate`, `staged`, `rollout` or `stop-mainnet`. |
 | `help` | Print the current surface and do nothing else. |
 
 A `UNIT` that does not already start with `liquidity-migration-` gets the prefix, so `logs
@@ -133,23 +133,191 @@ from a compromised host). And the stopped window between `install` and `activate
 host-side environment, roots, candidate universe, rules, risk policy and sleeve toggles are
 meant to be edited.
 
-## Mainnet modes
+## Real money
 
-```bash
-scripts/ops.sh deploy activate-mainnet
-scripts/ops.sh deploy stop-mainnet
-```
+CARRY and LONG on one funded Bybit account, each holding a private share of an
+envelope scaled to observed wallet equity. As of today `REAL_MONEY` is unset, no
+mainnet credential exists, and no mainnet unit has started.
 
-**activate-mainnet** refuses unless a mainnet sleeve resolves on, creates the mainnet state
-roots, then requires `real-money preflight` to pass before it enables the owner, starts the
-producers their toggles allow, enables the mainnet liveness timer, and verifies. It sets no
-credential and no `REAL_MONEY`; both are the owner's own prior acts.
+**The single arming switch is `REAL_MONEY=true` in
+`/etc/liquidity-migration/bybit-mainnet.env`** — the same root-owned `0600` file
+the live API key goes into, edited on the VPS by the owner's own hand. There is
+no repo toggle, so a git commit can never arm. When the switch is armed, a plain
+`activate` or `rollout` creates the mainnet state roots, requires `real-money
+preflight` to pass, then starts the mainnet owner, both producers, and the
+liveness timer. Which sleeves trade, and at what share, is the installed risk
+profile's decision.
 
-**stop-mainnet** disables and stops the mainnet timer, watchdog, both producers and the
-owner, and fails if any survives. It stops publication only — exposure is unchanged, so
-flatten. It also leaves the sleeves on, so `verify` then fails and
-the next `activate` or `rollout` restarts the fleet; turn the toggles off and install to make
-a stop stick.
+**stop-mainnet** (`scripts/ops.sh deploy stop-mainnet`) disables and stops the
+mainnet timer, watchdog, both producers and the owner, and fails if any
+survives. It stops publication only — exposure is unchanged, so flatten. While
+`REAL_MONEY` stays armed, `verify` fails and the next `activate` or `rollout`
+restarts the fleet; set `REAL_MONEY=false` to make a stop stick, then
+`scripts/ops.sh flatten --execute --environment mainnet --reason ...` to close
+the book.
+
+### The envelope
+
+No money amount binds anything. `capital_reference_usdt` in
+[`configs/operational.mainnet.json`](../configs/operational.mainnet.json) is only
+a scale: the runtime reference tracks observed wallet equity, and every cap in
+the profile is a ratio of it
+([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py)).
+Equity down rescales the caps immediately; equity up waits for a move larger
+than the dead band; missing or stale equity holds the current reference, and
+below the floor it clamps rather than collapsing. `account_risk.sleeve_limits`
+partitions the account gross and margin caps into per-sleeve shares; the kernel
+holds each sleeve to its share on every exposure-increasing batch and refuses a
+sleeve the partition does not name. Risk-reducing batches bypass every cap, so
+exits are always possible. A dedicated subaccount would put the ceiling at the
+venue instead of in software; declined, so these caps are what hold size.
+
+### Dials
+
+One file: [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)
+→ `/etc/liquidity-migration/bybit-mainnet.env`. Every dial is optional (omitting
+one takes the committed default) and every dial is a ratio except the floor.
+
+| Dial | Default | Meaning |
+| --- | --- | --- |
+| `RM_EQUITY_FRACTION` | 1.0 | Fraction of the wallet the envelope scales to. Cannot exceed 1. |
+| `RM_EQUITY_FLOOR_USDT` / `RM_EXPAND_DEAD_BAND_FRACTION` | 100.0 / 0.05 | Reference floor (the one dial that is an amount) and the expansion-only dead band, in `[0, 1)`. |
+| `RM_MAX_LEVERAGE` / `RM_ENTRY_LEVERAGE` | 2.0 / 2.0 | Hard ceiling — the renderer refuses above 2.0 — and what producers request. Entry ≤ max. |
+| `RM_ACCOUNT_GROSS_MULTIPLE` | 2.0 | Gross ceiling ×reference. Bounded by leverage and by `entry_leverage × initial_margin_fraction`. |
+| `RM_SYMBOL_NOTIONAL_FRACTION` | 0.5 | Largest single-symbol position. |
+| `RM_INITIAL_MARGIN_FRACTION` | 1.0 | Margin ceiling. Cannot exceed 1. |
+| `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily realised-loss halt. Trips a flatten. |
+| `RM_CARRY_GROSS_SHARE` / `RM_LONG_GROSS_SHARE` | 0.55 / 0.40 | Per-sleeve shares of the gross and margin caps. With the 0.01 retired-CONTINUOUS token share they must sum ≤ 1. |
+| `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native stop distance, armed with the entry. |
+| `RM_CARRY_NOTIONAL_MULTIPLIER` / `RM_LONG_NOTIONAL_MULTIPLIER` | 1.0 / 0.4 | Per-sleeve sizing. |
+
+Plus `RM_{CARRY,LONG}_MAX_NEW_ENTRIES_PER_CYCLE` (10 / 5, positive integers) and
+`RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY` (0.5).
+`scripts/ops.sh real-money render-profile` turns all of them into the profile the
+kernel enforces; a dial set that cannot produce a loadable profile is refused
+there, naming the dial to move, instead of at start-up over a funded account.
+
+### Arming (owner-executed)
+
+Run `scripts/ops.sh real-money preflight` at any point to see which of these is
+still outstanding (`LOCAL=1` runs it against this checkout instead of the VPS).
+It reads only, reports a credential by name and never by value, takes `--json`,
+and exits 1 while anything is outstanding.
+
+1. **Confirm the account is flat by hand.** No manual position, no open order.
+   The owner's startup check and the reconciler see USDT-settled linear only, so
+   anything else on the UID stays invisible to both — see *Still unproven*.
+2. **Create the API key** on the funded account: contract trading only,
+   **withdrawal disabled**, IP-allowlisted to the VPS.
+3. **Fill in the credential file.** Copy
+   [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template) to
+   `/etc/liquidity-migration/bybit-mainnet.env`, root-owned `0600`, edited on the
+   VPS by hand — the key and secret never enter an agent session. Paste into
+   `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` — deliberately different
+   variables from the demo pair — and set the dials.
+4. **Copy the route file.**
+   [`deploy/account-execution-mainnet.env.template`](../deploy/account-execution-mainnet.env.template)
+   to `/etc/liquidity-migration/account-execution-mainnet.env`, root-owned `0600`.
+   Its roots are disjoint from demo.
+5. **Create the state roots**: `scripts/ops.sh real-money create-state-roots
+   --execute` (dry run without `--execute`). It refuses a relative root, a root
+   that is not a directory, and any root inside a directory the demo owner
+   declares.
+6. **Render the profile** (`D=/etc/liquidity-migration/account-execution-mainnet`):
+   `scripts/ops.sh real-money render-profile --execute --output $D/risk-policy.json`.
+7. **Freeze the inputs** — universe first, then rules against it:
+   `scripts/maintain/freeze_account_candidate_universe.py --realm mainnet` and
+   `scripts/maintain/freeze_venue_instrument_rules.py --realm mainnet`. Rules
+   come from the read-only `get_instruments_info` endpoint; never run the demo
+   order probe against mainnet (it places live orders and refuses any realm but
+   demo by name).
+8. **Flip the switch**: `REAL_MONEY=true` in the credential file, by your own
+   hand. This is the whole arming decision.
+9. **Start the fleet**, at Tier 1 size: `scripts/ops.sh deploy activate`.
+
+Changing any dial afterwards means re-rendering the profile and reinstalling.
+Preflight verifies: both env files exist as strict root-owned `0600` `KEY=value`;
+credentials present with both demo variables absent; `REAL_MONEY` a recognised
+value (an unrecognised value fails rather than being guessed); the Telegram pair
+set; the dials parse, render, and load; all 12 route keys declared with
+`ACCOUNT_VENUE_REALM=mainnet`; state roots and frozen artifacts exist; and the
+installed profile is byte-identical to the render of the current dials — the
+likeliest arming mistake is editing a dial and forgetting to re-render.
+
+### Capital controls in force
+
+Absolute pre-trade caps (component gross, account gross, initial margin,
+available margin, leverage) rejected atomically inside the journal transaction
+and the per-sleeve partition: [`account_kernel.py`](../liquidity_migration/account/account_kernel.py).
+Caps rescale with observed equity: [`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py).
+Daily loss halt → `run_safety_flat_once`: [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py).
+Venue-native stop armed in the same `place_order` call and read back after
+create: [`venue_protection.py`](../liquidity_migration/venue/venue_protection.py).
+One owner process per account and journal ↔ venue reconciliation:
+[`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py),
+[`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py).
+An independent watchdog (`liquidity-migration-mainnet-liveness.timer`) pages
+every 3 minutes holding no credential and no ordering edge. The mainnet client
+refuses to construct while `REAL_MONEY` is unset, and producers get no
+credentials and no arming switch in any realm — order authority is the account
+owner's alone.
+
+### Still unproven
+
+Every step above exists and is tested; none of it has run against a funded
+account. The venue behaviour the code asserts — the post-create stop assertion,
+the reconciler, the wedged-command path — is untried against a mainnet key.
+Known hazards, kept verbatim from the pre-arming review:
+
+- **The ownership and position reads are realm-aware but narrow, and fail
+  open.** Both ask Bybit for `category=linear, settleCoin=USDT` only. A
+  USDC-settled, inverse, spot or options order *or position* on the same UID is
+  invisible: startup passes, the reconciler reports `healthy` with that exposure
+  omitted — while `totalEquity` does count it, so the caps and the daily loss
+  halt size against exposure the owner cannot see or close. Keep the UID to
+  USDT-linear by hand. Bybit's own liquidation and ADL orders carry no kernel
+  `orderLinkId`, so they classify unowned — that blocks the owner's own
+  reduce-only close on the symbol being liquidated. Hedge mode is unsupported
+  and shows up as `dual_side_position_not_supported`.
+- **Preflight never reads the wallet.** The first authenticated wallet read
+  happens at owner bootstrap, so a UNIFIED row that blanks account-wide equity
+  fields, a non-UTA account, or a hedge-mode account surfaces as a
+  `Restart=always` loop rather than a preflight line.
+- **Wallet equity counts non-USDT collateral.** `totalEquity` is an account-wide
+  USD aggregate, so on a mixed-collateral account the envelope scales off assets
+  the strategy cannot post as USDT margin, and a collateral drawdown alone can
+  rescale the caps or trip the daily loss halt. `RM_EQUITY_FRACTION=1.0` is only
+  right on a USDT-only account.
+- **Three funding shapes stop the owner permanently, outside the degrade
+  path**: a linear settlement row in any currency but USDT; more than ~357
+  settlements/day (the 2,500-row epoch-replay page bound); and, off demo, a
+  settlement row carrying nonzero `cashFlow`. Each is a `Restart=always` crash
+  loop with the book unmanaged, permanent until dealt with by hand. Demo still
+  *books* a `cashFlow`-bearing settlement (double-count latent, pinned by test);
+  whether demo should refuse too is an open owner decision.
+- **Nothing refreshes the mainnet candidate universe** — the automatic refreeze
+  is demo-only; re-freeze by hand to admit a new listing.
+- **The watchdog's mainnet scope is unexercised** — thresholds chosen, not
+  measured. Watch it during Tier 1 rather than relying on it.
+- **Known rough edges.** Reconcile staleness floors (30 s funding / 15 s
+  positions) and the owner's 4 s health-age bound may trip on mainnet latency; a
+  stale protection sync raises exactly like an absent stop; release-to-pending
+  retries without a ceiling; `account_gross` comes from target quantities, not
+  venue position value; margin tiers unmodelled.
+
+### Ramp
+
+The demo record behind Tier 1 — real funding, simulated fills, and the exit-depth
+measurements — is in [`research/carry_hold.md`](research/carry_hold.md) and
+[`research/research_findings.md`](research/research_findings.md). Tier 1 buys
+real fills, not returns. Any breach drops to 0, not one tier down.
+
+| Tier | Capital | Gate to the next tier |
+| --- | --- | --- |
+| 1 | venue minimums on 3 names | 5 days: no unexplained journal/venue mismatches, no protection-stale events, no resize churn, realised cost within 1.5× the 15.56bp model |
+| 2 | 10% of ceiling | 10 more days clean, plus one funding-regime turn survived |
+| 3 | 50% | 20 more days clean, plus one ≥5% drawdown handled unattended |
+| 4 | 100% | 30 more days clean |
 
 ## Flatten
 
@@ -203,9 +371,11 @@ flat on its own. Flatten reports them and waits.
 | `LONG_SLEEVE` | `bybit-long-demo` |
 | `CARRY_SLEEVE` | `bybit-carry-demo` |
 | `CONTINUOUS_SLEEVE` | `bybit-continuous-demo`; forces the hedge timer on |
-| `CARRY_MAINNET_SLEEVE`, `LONG_MAINNET_SLEEVE` | `bybit-carry-mainnet`, `bybit-long-mainnet`; either one on also brings up the mainnet owner and liveness timer |
 
-Which are on right now is in the file itself, not here.
+Which are on right now is in the file itself, not here. The mainnet units have
+no sleeve toggle: `REAL_MONEY=true` in the host's `bybit-mainnet.env` is the
+single arming switch (see *Real money* above), and it brings up the mainnet
+owner, both producers, and the liveness timer together.
 
 The retired paper toggles (`CONTINUOUS_PAPER_SLEEVE`, `CARRY_PAPER_SLEEVE`,
 `PAPER_TARGET_MIRROR`) are ignored with a warning if a stale host override still
@@ -304,5 +474,5 @@ skill.
 
 - Local gates, none of which touch the VPS: `scripts/dev.sh doctor`, `scripts/dev.sh check`,
   `.venv/bin/python -m pytest -q`. CI on `main` runs the same gates; the deploy does not.
-- Mainnet arming: [`real_money.md`](real_money.md). Agent working rules:
+- Mainnet arming: the *Real money* section above. Agent working rules:
   [`AGENTS.md`](../AGENTS.md).

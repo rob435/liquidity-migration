@@ -96,4 +96,4 @@ without a URL a total host loss is silent. **No URL is provisioned by default.**
   the watchdog unit strips the API keys and `REAL_MONEY` straight back out, so it can page but holds
   no trading authority.
 - Thresholds here were chosen against demo latency. They are unexercised on a funded account —
-  watch them during Tier 1 rather than trusting them ([`real_money.md`](real_money.md)).
+  watch them during Tier 1 rather than trusting them ([`operations.md`](operations.md) §Real money).

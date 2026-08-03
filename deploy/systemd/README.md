@@ -21,7 +21,7 @@ unit shapes.
 | `liquidity-migration-continuous-rmom-refresh.service` | Residual-momentum refresh |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |
-| `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers, gated by `CARRY_MAINNET_SLEEVE` / `LONG_MAINNET_SLEEVE` |
+| `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 
 The hedge, RMOM, and liveness services are invoked by their matching timers.
@@ -68,9 +68,11 @@ absent on demo: reclaim throttling on the latency-critical owner stretched
 venue round-trips into the stale-exposure wedge, and `MemoryMax` already bounds
 it.
 
-Mainnet units are installed by the manifest and started only when a mainnet
-toggle is on; `activate` and `activate-mainnet` both route through
-`start_mainnet_fleet`. See [`../../docs/real_money.md`](../../docs/real_money.md).
+Mainnet units are installed by the manifest and started only when the single
+arming switch — `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env`
+— is set; a plain `activate` or `rollout` then routes through
+`start_mainnet_fleet`. See the Real-money section of
+[`../../docs/operations.md`](../../docs/operations.md).
 
 ## Watchdog timers
 

@@ -231,7 +231,8 @@ def test_real_money_allowlist_covers_the_arming_subcommands() -> None:
     assert "preflight, render-profile, or create-state-roots" in rejected.stderr
     help_text = _run("help").stdout
     assert "real-money create-state-roots [--execute]" in help_text
-    assert "activate-mainnet|stop-mainnet" in help_text
+    assert "stop-mainnet" in help_text
+    assert "activate-mainnet" not in help_text
 
 
 def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Path) -> None:
@@ -279,7 +280,7 @@ def _deploy_harness(tmp_path: Path) -> tuple[Path, str, Path, dict[str, str]]:
 
 def test_deploy_forwards_every_mode_without_an_execute_handshake(tmp_path: Path) -> None:
     checkout, _commit, capture, environment = _deploy_harness(tmp_path)
-    for mode in ("install", "activate", "activate-mainnet", "stop-mainnet"):
+    for mode in ("install", "activate", "stop-mainnet"):
         result = subprocess.run(
             ["bash", str(checkout / "scripts/ops.sh"), "deploy", mode],
             cwd=checkout,

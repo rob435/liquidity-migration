@@ -5,17 +5,21 @@ set -euo pipefail
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "$MODE" in
-    install|activate|verify|staged|rollout|activate-mainnet|stop-mainnet) ;;
+    install|activate|verify|staged|rollout|stop-mainnet) ;;
+    activate-mainnet)
+        echo "activate-mainnet retired 2026-08-03: the arming switch is REAL_MONEY=true in /etc/liquidity-migration/bybit-mainnet.env; a plain activate or rollout starts the mainnet fleet when it is armed" >&2
+        exit 2
+        ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
 esac
 
 deploy_usage() {
     cat >&2 <<'USAGE'
-usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|activate-mainnet|stop-mainnet}
+usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|stop-mainnet}
   --profile operational                   required for staged and rollout
   --stop-first / --no-stop-first          install|activate|staged: stop a running
                                           fleet instead of refusing. Default: stop
-                                          unless a mainnet sleeve is on.
+                                          unless real money is armed.
   --require-flat                          rollout: gate on a flat demo account
                                           rather than reporting residuals
   --refresh-demo-rules                    install|staged: re-probe stale demo
@@ -625,10 +629,10 @@ running_liqmig_units() {
 }
 
 # STOP_FIRST=auto resolves to "stop" for a pure demo fleet and to the
-# refusal for a funded one. The sleeve toggles have to be loaded first.
+# refusal for a funded one.
 resolve_stop_first() {
     [ "$STOP_FIRST" = auto ] || return 0
-    if any_mainnet_sleeve_on; then
+    if mainnet_armed; then
         STOP_FIRST=0
     else
         STOP_FIRST=1
@@ -992,13 +996,16 @@ load_authorization() {
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/sleeves.resolved.env \
         LONG_SLEEVE CONTINUOUS_SLEEVE CARRY_SLEEVE \
-        CARRY_MAINNET_SLEEVE LONG_MAINNET_SLEEVE CONTINUOUS_HEDGE_TIMER \
+        CONTINUOUS_HEDGE_TIMER \
         CONTINUOUS_PAPER_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR
     # The three retired paper keys are loaded solely for the retirement
     # rollout's pre-install stage: there the host checkout still sources the
     # PREVIOUS commit's lib_sleeves.sh, whose resolved-toggle verifier greps
     # those keys against these variables. Nothing below reads them, and a
-    # post-retirement resolved file simply leaves them unset.
+    # post-retirement resolved file simply leaves them unset. The mainnet
+    # sleeve keys were retired 2026-08-03 (REAL_MONEY is the arming switch);
+    # a stale resolved file may still carry them, and the loader simply does
+    # not ask for them.
     # A resolved file written by a pre-carry install lacks the carry keys;
     # absent means never deployed, i.e. off. Bridges only the rollout that
     # introduces them — the post-install verifier requires them present.
@@ -1006,13 +1013,8 @@ load_authorization() {
         echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
         CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
     fi
-    if [ -z "${CARRY_MAINNET_SLEEVE:-}" ] || [ -z "${LONG_MAINNET_SLEEVE:-}" ]; then
-        echo "sleeves-resolved-transition mainnet-keys=absent treated-as=off reason=pre-mainnet-install"
-        CARRY_MAINNET_SLEEVE="${CARRY_MAINNET_SLEEVE:-off}"
-        LONG_MAINNET_SLEEVE="${LONG_MAINNET_SLEEVE:-off}"
-    fi
     for value in "$LONG_SLEEVE" "$CONTINUOUS_SLEEVE" "$CARRY_SLEEVE" \
-        "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE" "$CONTINUOUS_HEDGE_TIMER"; do
+        "$CONTINUOUS_HEDGE_TIMER"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
     lm_verify_resolved_sleeve_toggles
@@ -1029,8 +1031,29 @@ unit_off() {
         && ! systemctl is-enabled --quiet "$1" 2>/dev/null
 }
 
-any_mainnet_sleeve_on() {
-    sleeve_on "${CARRY_MAINNET_SLEEVE:-off}" || sleeve_on "${LONG_MAINNET_SLEEVE:-off}"
+# The single arming switch: REAL_MONEY=true in the mainnet credential file,
+# written by the owner's own hand next to the live API key. No file, or any
+# other value, means disarmed. The value is read through the strict private
+# loader and never printed. Cached: one answer per run.
+MAINNET_CREDENTIAL_ENV=/etc/liquidity-migration/bybit-mainnet.env
+MAINNET_ARMED_STATE=""
+mainnet_armed() {
+    if [ -z "$MAINNET_ARMED_STATE" ]; then
+        if [ ! -f "$MAINNET_CREDENTIAL_ENV" ]; then
+            MAINNET_ARMED_STATE=off
+        else
+            MAINNET_ARMED_STATE="$(
+                unset REAL_MONEY
+                lm_load_private_systemd_environment "$PYTHON" \
+                    "$MAINNET_CREDENTIAL_ENV" REAL_MONEY || exit 3
+                case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
+                    1|true|yes|on) echo armed ;;
+                    *) echo off ;;
+                esac
+            )" || fail "cannot read the arming switch from $MAINNET_CREDENTIAL_ENV"
+        fi
+    fi
+    [ "$MAINNET_ARMED_STATE" = armed ]
 }
 
 # verify_topology collects every mismatch instead of dying on the first one, so
@@ -1159,22 +1182,14 @@ verify_topology() {
     else
         verify_unit off liquidity-migration-continuous-hedge.timer "hedge timer is not off"
     fi
-    # With no mainnet sleeve on, a running mainnet unit must not hide behind a
-    # green demo verification; with one on, the funded fleet is verified
-    # exactly like the others.
-    if any_mainnet_sleeve_on; then
+    # Disarmed, a running mainnet unit must not hide behind a green demo
+    # verification; armed, the funded fleet is verified exactly like the
+    # others.
+    if mainnet_armed; then
         verify_unit on liquidity-migration-account-execution-mainnet.service \
             "mainnet owner is not active and enabled"
-        if sleeve_on "$CARRY_MAINNET_SLEEVE"; then
-            verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
-        else
-            verify_unit off liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not off"
-        fi
-        if sleeve_on "$LONG_MAINNET_SLEEVE"; then
-            verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
-        else
-            verify_unit off liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not off"
-        fi
+        verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
+        verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
         # An enabled timer says nothing about the run it fires. A watchdog that
         # fails every fire is the silence it exists to break.
@@ -1224,9 +1239,10 @@ verify_topology() {
         printf 'verify-mismatch %s\n' "${VERIFY_MISMATCHES[@]}" >&2
         fail "topology verification found ${#VERIFY_MISMATCHES[@]} mismatch(es) on $installed_head"
     fi
-    printf 'verify-ok commit=%s requested=%s profile=%s mainnet_carry=%s mainnet_long=%s\n' \
-        "$installed_head" "$EXPECTED_COMMIT" "$AUTH_PROFILE" \
-        "$CARRY_MAINNET_SLEEVE" "$LONG_MAINNET_SLEEVE"
+    local mainnet_state=off
+    if mainnet_armed; then mainnet_state=armed; fi
+    printf 'verify-ok commit=%s requested=%s profile=%s mainnet=%s\n' \
+        "$installed_head" "$EXPECTED_COMMIT" "$AUTH_PROFILE" "$mainnet_state"
 }
 
 start_if() {
@@ -1295,7 +1311,7 @@ activate_mode() {
         systemctl enable --now liquidity-migration-continuous-hedge.timer
     fi
     systemctl enable --now liquidity-migration-demo-liveness.timer
-    if any_mainnet_sleeve_on; then
+    if mainnet_armed; then
         start_mainnet_fleet
     fi
     verify_topology
@@ -1319,22 +1335,17 @@ require_mainnet_preflight() {
     [ "$status" -eq 0 ] || fail "mainnet preflight has outstanding steps (status $status)"
 }
 
+# Which sleeves trade, and at what share, is the installed risk profile's
+# decision; the preflight proves the profile is the render of the dials
+# before anything starts.
 start_mainnet_fleet() {
     ensure_mainnet_state_roots
     require_mainnet_preflight
     systemctl enable "$MAINNET_OWNER_UNIT"
     systemctl start "$MAINNET_OWNER_UNIT"
-    start_if "$CARRY_MAINNET_SLEEVE" liquidity-migration-bybit-carry-mainnet.service
-    start_if "$LONG_MAINNET_SLEEVE" liquidity-migration-bybit-long-mainnet.service
+    systemctl enable --now liquidity-migration-bybit-carry-mainnet.service
+    systemctl enable --now liquidity-migration-bybit-long-mainnet.service
     systemctl enable --now "$MAINNET_LIVENESS_TIMER"
-}
-
-activate_mainnet_mode() {
-    load_authorization
-    any_mainnet_sleeve_on \
-        || fail "no mainnet sleeve is on; turn CARRY_MAINNET_SLEEVE and/or LONG_MAINNET_SLEEVE on in deploy/sleeves.env, then install"
-    start_mainnet_fleet
-    verify_topology
 }
 
 stop_mainnet_mode() {
@@ -1365,7 +1376,9 @@ stop_mainnet_mode() {
     done
     echo "stop-mainnet-ok"
     echo "note: this stopped publication only; exposure is unchanged. Flatten through the account owner."
-    echo "note: the mainnet sleeves are still on, so verify now fails and the next activate or rollout restarts this fleet. Turn CARRY_MAINNET_SLEEVE/LONG_MAINNET_SLEEVE off and install to make the stop stick."
+    if mainnet_armed; then
+        echo "note: REAL_MONEY is still armed, so verify now fails and the next activate or rollout restarts this fleet. Set REAL_MONEY=false in /etc/liquidity-migration/bybit-mainnet.env to make the stop stick."
+    fi
 }
 
 ROLLOUT_DOWNSTREAM_UNITS=(
@@ -1542,7 +1555,7 @@ rollout_flat_required() {
     if [ "${REQUIRE_FLAT:-0}" -eq 1 ]; then
         return 0
     fi
-    any_mainnet_sleeve_on
+    mainnet_armed
 }
 
 rollout_flat_phase() {
@@ -1619,7 +1632,6 @@ case "$MODE" in
     install) install_mode ;;
     activate) activate_mode ;;
     staged) staged_mode ;;
-    activate-mainnet) activate_mainnet_mode ;;
     stop-mainnet) stop_mainnet_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;

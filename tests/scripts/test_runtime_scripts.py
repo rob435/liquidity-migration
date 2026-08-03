@@ -1043,16 +1043,16 @@ def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
     assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner
 
 
-def _mainnet_harness(carry: str, long_: str, preflight_status: int) -> str:
+def _mainnet_harness(armed: str, preflight_status: int) -> str:
     """The real mainnet functions over stub systemctl/python, so behavior is exercised
-    rather than pattern-matched.
+    rather than pattern-matched. ``armed`` pre-seeds the cached switch state.
     """
 
     text = _read(DEPLOY)
     library = _read("deploy/lib_sleeves.sh")
     return (
         "set -u\n"
-        f"PYTHON=fake_python\nCARRY_MAINNET_SLEEVE={carry}\nLONG_MAINNET_SLEEVE={long_}\n"
+        f"PYTHON=fake_python\n"
         f"PREFLIGHT_STATUS={preflight_status}\n"
         'fail() { echo "fail:$*"; exit 9; }\n'
         "require_checkout() { :; }\n"
@@ -1071,18 +1071,19 @@ def _mainnet_harness(carry: str, long_: str, preflight_status: int) -> str:
         "}\n"
         + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
         + text[
-            text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")
+            text.index("# The single arming switch") : text.index("# verify_topology collects")
         ]
         + text[text.index("start_if() {") : text.index("seed_rmom()")]
         + text[
             text.index("MAINNET_OWNER_UNIT=") : text.index("ROLLOUT_DOWNSTREAM_UNITS=(")
         ]
+        + f"MAINNET_ARMED_STATE={armed}\n"
     )
 
 
-def test_mainnet_activation_creates_roots_then_gates_on_preflight() -> None:
+def test_mainnet_start_creates_roots_then_gates_on_preflight() -> None:
     blocked = subprocess.run(
-        ["bash", "-c", _mainnet_harness("on", "off", 1) + "\nactivate_mainnet_mode\n"],
+        ["bash", "-c", _mainnet_harness("armed", 1) + "\nstart_mainnet_fleet\n"],
         capture_output=True,
         text=True,
     )
@@ -1094,7 +1095,7 @@ def test_mainnet_activation_creates_roots_then_gates_on_preflight() -> None:
     assert "systemctl:start" not in combined
 
     started = subprocess.run(
-        ["bash", "-c", _mainnet_harness("on", "off", 0) + "\nactivate_mainnet_mode\n"],
+        ["bash", "-c", _mainnet_harness("armed", 0) + "\nstart_mainnet_fleet\n"],
         capture_output=True,
         text=True,
     )
@@ -1105,39 +1106,87 @@ def test_mainnet_activation_creates_roots_then_gates_on_preflight() -> None:
     assert (
         "systemctl:enable liquidity-migration-account-execution-mainnet.service" in combined
     )
+    # The owner starts first; both registered producers always start — the
+    # installed risk profile, not a toggle, decides their shares.
     assert (
         combined.index("systemctl:enable liquidity-migration-account-execution-mainnet.service")
-        < combined.index("systemctl:start liquidity-migration-bybit-carry-mainnet.service")
+        < combined.index("systemctl:enable --now liquidity-migration-bybit-carry-mainnet.service")
     )
     assert (
-        combined.index("systemctl:start liquidity-migration-bybit-carry-mainnet.service")
+        combined.index("systemctl:enable --now liquidity-migration-bybit-carry-mainnet.service")
+        < combined.index("systemctl:enable --now liquidity-migration-bybit-long-mainnet.service")
+    )
+    assert (
+        combined.index("systemctl:enable --now liquidity-migration-bybit-long-mainnet.service")
         < combined.index("systemctl:enable --now liquidity-migration-mainnet-liveness.timer")
     )
-    # A sleeve that is off is disabled, not started.
-    assert "systemctl:disable --now liquidity-migration-bybit-long-mainnet.service" in combined
-    assert "systemctl:start liquidity-migration-bybit-long-mainnet.service" not in combined
-    assert combined.index("mainnet-liveness.timer") < combined.index("verify_topology")
     for foreign in ("-demo.service", "-paper", "account-execution.service"):
         assert foreign not in combined, foreign
 
 
-def test_activate_mainnet_refuses_when_no_mainnet_sleeve_is_on() -> None:
-    result = subprocess.run(
-        ["bash", "-c", _mainnet_harness("off", "off", 0) + "\nactivate_mainnet_mode\n"],
-        capture_output=True,
-        text=True,
+def test_mainnet_armed_reads_the_single_switch(tmp_path: Path) -> None:
+    """REAL_MONEY=true in the mainnet credential file is the whole arming decision:
+    absent file, any other value, or an unreadable file must read as disarmed —
+    the last of those loudly.
+    """
+
+    text = _read(DEPLOY)
+    block = text[text.index("# The single arming switch") : text.index("# verify_topology collects")]
+
+    def harness(real_money: str, present: bool, loader_status: int = 0) -> str:
+        cred = tmp_path / f"cred-{abs(hash((real_money, present, loader_status)))}.env"
+        if present:
+            cred.write_text("", encoding="utf-8")
+        return (
+            "set -u\n"
+            'fail() { echo "fail:$*" >&2; exit 9; }\n'
+            "PYTHON=unused\n"
+            f"FAKE_REAL_MONEY={real_money!r}\n"
+            f"LOADER_STATUS={loader_status}\n"
+            "lm_load_private_systemd_environment() {\n"
+            '    [ "$LOADER_STATUS" -eq 0 ] || return "$LOADER_STATUS"\n'
+            '    REAL_MONEY="$FAKE_REAL_MONEY"\n'
+            "}\n"
+            + block
+            + f"MAINNET_CREDENTIAL_ENV={cred}\n"
+            "if mainnet_armed; then echo armed-yes; else echo armed-no; fi\n"
+        )
+
+    for real_money, present, expected in (
+        ("true", True, "armed-yes"),
+        ("1", True, "armed-yes"),
+        ("false", True, "armed-no"),
+        ("", True, "armed-no"),
+        ("true", False, "armed-no"),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", harness(real_money, present)], capture_output=True, text=True
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, (real_money, present, combined)
+        assert expected in combined, (real_money, present, combined)
+        # The switch value itself must never be printed.
+        assert "REAL_MONEY=" not in combined
+
+    unreadable = subprocess.run(
+        ["bash", "-c", harness("true", True, loader_status=3)], capture_output=True, text=True
     )
-    combined = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "no mainnet sleeve is on" in combined
-    assert "deploy/sleeves.env" in combined
-    assert "systemctl:" not in combined
-    assert "python:" not in combined
+    combined = unreadable.stdout + unreadable.stderr
+    assert unreadable.returncode != 0
+    assert "fail:cannot read the arming switch" in combined
+
+    # Armed, a plain activate starts the funded fleet; there is no separate mode.
+    assert "if mainnet_armed; then\n        start_mainnet_fleet" in text
+    retired = subprocess.run(
+        ["bash", str(DEPLOY), "activate-mainnet"], capture_output=True, text=True, check=False
+    )
+    assert retired.returncode == 2
+    assert "activate-mainnet retired" in retired.stderr
 
 
 def test_stop_mainnet_stops_only_mainnet_and_says_exposure_is_unchanged() -> None:
     result = subprocess.run(
-        ["bash", "-c", _mainnet_harness("on", "on", 0) + "\nstop_mainnet_mode\n"],
+        ["bash", "-c", _mainnet_harness("armed", 0) + "\nstop_mainnet_mode\n"],
         check=True,
         capture_output=True,
         text=True,
@@ -1161,7 +1210,7 @@ def test_stop_mainnet_stops_only_mainnet_and_says_exposure_is_unchanged() -> Non
 
 
 def test_stop_mainnet_fails_when_a_unit_survives_the_stop() -> None:
-    harness = _mainnet_harness("on", "on", 0).replace(
+    harness = _mainnet_harness("armed", 0).replace(
         "IS_ACTIVE_STATUS=1", "IS_ACTIVE_STATUS=0"
     )
     result = subprocess.run(
@@ -1174,24 +1223,24 @@ def test_stop_mainnet_fails_when_a_unit_survives_the_stop() -> None:
     assert "unit remained active after mainnet stop" in combined
 
 
-def test_verify_asserts_the_mainnet_fleet_only_when_a_mainnet_sleeve_is_on() -> None:
+def test_verify_asserts_the_mainnet_fleet_only_when_armed() -> None:
     text = _read(DEPLOY)
     verify = text[text.index("verify_topology()") : text.index("start_if()")]
-    assert "if any_mainnet_sleeve_on; then" in verify
+    assert "if mainnet_armed; then" in verify
     assert "mainnet owner is not active and enabled" in verify
     assert "verify_unit on liquidity-migration-mainnet-liveness.timer" in verify
     assert "is active under demo authorization" in verify
-    assert "mainnet_carry=%s mainnet_long=%s" in verify
+    assert "mainnet=%s" in verify
 
     # An enabled timer is not a succeeding watchdog: without this the funded
     # observer can fail every fire and verify still reads green. Scoped inside
-    # the mainnet branch so a stale failure cannot break demo verify.
+    # the armed branch so a stale failure cannot break demo verify.
     failed_check = "systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service"
     assert failed_check in verify
     assert (
         'verify_note "liquidity-migration-mainnet-liveness.service is failed"' in verify
     )
-    assert verify.index("if any_mainnet_sleeve_on; then") < verify.index(failed_check)
+    assert verify.index("if mainnet_armed; then") < verify.index(failed_check)
     assert verify.index(failed_check) < verify.index("for oneshot in")
 
 
@@ -1211,8 +1260,6 @@ def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
         "LONG_SLEEVE",
         "CONTINUOUS_SLEEVE",
         "CARRY_SLEEVE",
-        "CARRY_MAINNET_SLEEVE",
-        "LONG_MAINNET_SLEEVE",
         "CONTINUOUS_HEDGE_TIMER",
     }
 
@@ -1229,14 +1276,13 @@ def test_resolved_sleeve_allowlist_covers_every_generated_toggle() -> None:
     # An older resolved file predates the newest keys; absent must mean off
     # rather than a hard failure mid-rollout.
     assert "carry-keys=absent treated-as=off" in authorization
-    assert "mainnet-keys=absent treated-as=off" in authorization
 
 
 def test_routine_activation_restores_and_rollout_stops_the_funded_fleet() -> None:
     text = _read(DEPLOY)
     activate = text[text.index("activate_mode()") : text.index("MAINNET_OWNER_UNIT=")]
     assert activate.index("liquidity-migration-demo-liveness.timer") < activate.index(
-        "if any_mainnet_sleeve_on; then\n        start_mainnet_fleet"
+        "if mainnet_armed; then\n        start_mainnet_fleet"
     )
     assert activate.index("start_mainnet_fleet") < activate.index("verify_topology")
 
@@ -1273,7 +1319,7 @@ def test_deploy_rejects_an_unknown_mode_and_a_stray_mode_argument() -> None:
     for argv, expected in (
         (["activate-mainnnet"], "invalid deploy mode"),
         (["stop"], "invalid deploy mode"),
-        (["activate-mainnet", "--profile", "operational"], "usage: deploy_vps_live.sh"),
+        (["activate-mainnet", "--profile", "operational"], "activate-mainnet retired"),
     ):
         result = subprocess.run(
             ["bash", str(DEPLOY), *argv], capture_output=True, text=True, check=False
@@ -1289,10 +1335,10 @@ def test_deploy_rejects_an_unknown_mode_and_a_stray_mode_argument() -> None:
         "verify",
         "staged",
         "rollout",
-        "activate-mainnet",
         "stop-mainnet",
     ):
         assert mode in usage, mode
+    assert "activate-mainnet" not in usage
     # Every flag is scoped to the modes that read it, and the usage says so.
     for flag in ("--profile", "--stop-first", "--require-flat", "--refresh-demo-rules"):
         assert flag in usage, flag
@@ -1315,20 +1361,20 @@ def test_deploy_rejects_an_unknown_mode_and_a_stray_mode_argument() -> None:
         assert f"{mode} requires --profile" in missing.stderr, mode
 
 
-def test_stop_mainnet_says_the_sleeves_still_restart_the_fleet() -> None:
-    """`activate`/`rollout` restart the funded fleet from the sleeve toggles, so a
-    stop that leaves them on is undone by the next routine deploy.
+def test_stop_mainnet_says_the_armed_switch_still_restarts_the_fleet() -> None:
+    """`activate`/`rollout` restart the funded fleet from the arming switch, so a
+    stop that leaves REAL_MONEY armed is undone by the next routine deploy.
     """
 
     result = subprocess.run(
-        ["bash", "-c", _mainnet_harness("on", "off", 0) + "\nstop_mainnet_mode\n"],
+        ["bash", "-c", _mainnet_harness("armed", 0) + "\nstop_mainnet_mode\n"],
         check=True,
         capture_output=True,
         text=True,
     )
     combined = result.stdout + result.stderr
     assert "the next activate or rollout restarts this fleet" in combined
-    assert "CARRY_MAINNET_SLEEVE/LONG_MAINNET_SLEEVE off" in combined
+    assert "Set REAL_MONEY=false in /etc/liquidity-migration/bybit-mainnet.env" in combined
 
 
 def _verify_harness(
@@ -1354,7 +1400,8 @@ def _verify_harness(
         "EXPECTED_COMMIT=abc123\n"
         "EXPECTED_COMMIT_EXPLICIT=1\n"
         "LONG_SLEEVE=off\nCONTINUOUS_SLEEVE=off\nCARRY_SLEEVE=off\n"
-        "CARRY_MAINNET_SLEEVE=off\nLONG_MAINNET_SLEEVE=off\nCONTINUOUS_HEDGE_TIMER=off\n"
+        "CONTINUOUS_HEDGE_TIMER=off\n"
+        'mainnet_armed() { [ "${MAINNET_ARMED_STATE:-off}" = armed ]; }\n'
         f"ACTIVE_UNITS={active!r}\nENABLED_UNITS={enabled!r}\nFAILED_UNITS={failed!r}\n"
         f"PERMISSIONS_STATUS={permissions_status}\n"
         'fail() { echo "fail:$*" >&2; exit 1; }\n'
@@ -1523,7 +1570,6 @@ def _quiescence_harness(tmp_path: Path, stop_first: str, mainnet: str) -> str:
         "set -u\n"
         f"STATE_FILE={state}\n"
         f"STOP_FIRST={stop_first}\n"
-        f"CARRY_MAINNET_SLEEVE={mainnet}\nLONG_MAINNET_SLEEVE=off\n"
         'fail() { echo "fail:$*" >&2; exit 1; }\n'
         "systemctl() {\n"
         '    case "$1" in\n'
@@ -1540,13 +1586,14 @@ def _quiescence_harness(tmp_path: Path, stop_first: str, mainnet: str) -> str:
         "    return 0\n"
         "}\n"
         + library[library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")]
-        + text[text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")]
+        + text[text.index("# The single arming switch") : text.index("# verify_topology collects")]
         + text[text.index("running_liqmig_units() {") : text.index("git_fetch() {")]
         + text[
             text.index("ROLLOUT_DOWNSTREAM_UNITS=(") : text.index(
                 "stop_all_rollout_units_best_effort()"
             )
         ]
+        + ("MAINNET_ARMED_STATE=armed\n" if mainnet == "on" else "MAINNET_ARMED_STATE=off\n")
     )
 
 
@@ -1662,15 +1709,15 @@ def test_rollout_gates_on_a_flat_account_for_a_funded_fleet_and_reports_for_a_de
         return (
             "set -Eeuo pipefail\n"
             f"REQUIRE_FLAT={require_flat}\n"
-            f"CARRY_MAINNET_SLEEVE={mainnet}\nLONG_MAINNET_SLEEVE=off\n"
             + text[text.index("fail() {") : text.index("run_phase_pair() {")]
             + library[
                 library.index("sleeve_on() {") : library.index("continuous_rmom_refresh_on()")
             ]
             + text[
-                text.index("any_mainnet_sleeve_on()") : text.index("# verify_topology collects")
+                text.index("# The single arming switch") : text.index("# verify_topology collects")
             ]
             + text[text.index("rollout_flat_required() {") : text.index("rollout_mode() {")]
+            + ("MAINNET_ARMED_STATE=armed\n" if mainnet == "on" else "MAINNET_ARMED_STATE=off\n")
             + "\nresidual() { return 4; }\n"
             "rollout_flat_phase pre-stop-flat-account-proof residual\n"
             "echo reached-the-stop\n"
@@ -1693,7 +1740,7 @@ def test_rollout_gates_on_a_flat_account_for_a_funded_fleet_and_reports_for_a_de
 
 
 def test_stop_mainnet_cannot_report_ok_without_systemctl() -> None:
-    harness = _mainnet_harness("on", "off", 0).replace("systemctl() {\n", "unused() {\n", 1)
+    harness = _mainnet_harness("armed", 0).replace("systemctl() {\n", "unused() {\n", 1)
     result = subprocess.run(
         ["bash", "-c", "PATH=/nonexistent\n" + harness + "\nstop_mainnet_mode\n"],
         capture_output=True,
