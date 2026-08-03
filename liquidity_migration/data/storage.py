@@ -647,33 +647,45 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
     )
 
 
-# Continuous cycle heartbeats are wide and written every minute, so partition
-# them monthly instead of rewriting an unbounded monolith.
+# Cycle heartbeats are wide and written once per 60s producer cycle, and every
+# append rewrites the whole part file it lands in (see _write_part). Day buckets
+# keep that rewrite at one day of rows (~1,440) instead of a whole month
+# (~43,200) or, for an unregistered dataset, the entire history.
+#
+# Every dataset a target producer appends a cycle row to belongs here. Being
+# absent is not a smaller bucket, it is no bucket at all: write_dataset falls
+# through to a single part.parquet that grows forever.
+_LEDGER_BUCKET_COL = "date"
+# Written by the older month scheme. Still dropped on read so parts from before
+# the day-bucket switch keep reading.
 _LEDGER_MONTH_COL = "_ledger_month"
 LEDGER_BUCKET_SOURCE: dict[str, str] = {
     "continuous_fade_demo_cycles": "ts_ms",
     "carry_hold_demo_cycles": "ts_ms",
+    "carry_hold_mainnet_cycles": "ts_ms",
+    "long_native_demo_cycles": "ts_ms",
+    "long_native_mainnet_cycles": "ts_ms",
 }
 
 
-def _with_ledger_month(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
-    """Add the int yyyymm _ledger_month partition column for a bucketed ledger
-    dataset, derived from its registered timestamp source. Rows whose source ts
-    is missing/null/<=0 fall into bucket 0 so a malformed row never crashes the
-    write. A no-op for datasets not in
+def _with_ledger_date(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
+    """Set the YYYY-MM-DD ``date`` partition column for a bucketed ledger dataset
+    from its registered timestamp source. The registered source wins over any
+    date the caller put on the frame, so the bucket is always a pure function of
+    one column. Rows whose source ts is missing/null/<=0 go to ``date=unknown``:
+    a malformed row never crashes the write, and ``unknown`` sorts after any real
+    date so a since_date read never prunes it away. A no-op for datasets not in
     LEDGER_BUCKET_SOURCE or when the source column is absent."""
     src = LEDGER_BUCKET_SOURCE.get(dataset)
     if src is None or src not in df.columns or df.is_empty():
         return df
-    month = pl.col(src).cast(pl.Int64, strict=False)
+    ts = pl.col(src).cast(pl.Int64, strict=False)
     return df.with_columns(
-        pl.when(month.is_null() | (month <= 0))
-        .then(pl.lit(0, dtype=pl.Int64))
-        .otherwise(
-            pl.from_epoch(month, time_unit="ms").dt.strftime("%Y%m").cast(pl.Int64, strict=False)
-        )
-        .fill_null(0)
-        .alias(_LEDGER_MONTH_COL)
+        pl.when(ts.is_null() | (ts <= 0))
+        .then(pl.lit("unknown"))
+        .otherwise(pl.from_epoch(ts, time_unit="ms").dt.strftime("%Y-%m-%d"))
+        .fill_null("unknown")
+        .alias(_LEDGER_BUCKET_COL)
     )
 
 # How stale an orphaned `.*.tmp` part file must be before the sweep removes it.
@@ -827,12 +839,13 @@ def _write_dataset_unlocked(
         df = with_date_column(df)
     path.mkdir(parents=True, exist_ok=True)
 
-    # Month-bucket the cycle ledgers regardless of the caller's partition_by,
-    # so the hot-path write touches the current month, not the whole history.
+    # Day-bucket the cycle ledgers regardless of the caller's partition_by, so
+    # the hot-path write reads and rewrites one day of rows, not the whole month
+    # and not the whole history.
     if dataset in LEDGER_BUCKET_SOURCE:
-        df = _with_ledger_month(df, dataset)
-        if _LEDGER_MONTH_COL in df.columns:
-            partition_by = (_LEDGER_MONTH_COL,)
+        df = _with_ledger_date(df, dataset)
+        if _LEDGER_BUCKET_COL in df.columns:
+            partition_by = (_LEDGER_BUCKET_COL,)
 
     partition_cols = [col for col in partition_by if col in df.columns]
     if not partition_cols:
@@ -915,6 +928,21 @@ def read_dataset_columns(
             if top_date_dirs:
                 kept = [d for d in top_date_dirs if d.name[len("date="):] >= since_date]
                 files = sorted(f for d in kept for f in d.glob("**/*.parquet"))
+                # A dataset can also hold parts outside the date= tree: a part
+                # from an older partition scheme, or a top-level part.parquet.
+                # Their paths carry no date, so they are never prunable and must
+                # still be read. Scanning the top level only keeps this cheap on
+                # a (date,symbol) root, where there is nothing else to find.
+                files += sorted(
+                    f
+                    for child in path.iterdir()
+                    if child.is_dir()
+                    and not child.name.startswith("date=")
+                    and not child.name.startswith(".")
+                    for f in child.glob("**/*.parquet")
+                )
+                files += sorted(path.glob("*.parquet"))
+                files = sorted(set(files))
             else:
                 files = [f for f in sorted(path.glob("**/*.parquet")) if _partition_date_ge(f, since_date)]
         else:

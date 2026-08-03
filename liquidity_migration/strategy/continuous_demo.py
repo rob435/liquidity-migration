@@ -2842,11 +2842,14 @@ def run_continuous_demo_cycle(
             )
         )
         payload.update(_btc_risk_sizing_payload_fields(btc_risk_sizing_stats))
+        # storage day-buckets registered cycle ledgers regardless of what we pass
+        # here. Naming the day partition anyway means an unregistered dataset
+        # still gets a bounded part instead of one monolith.
         write_dataset(
             pl.DataFrame([payload], infer_schema_length=None),
             root,
             cycles_dataset,
-            partition_by=(),
+            partition_by=("date",),
         )
         try:
             write_continuous_cycle_status(

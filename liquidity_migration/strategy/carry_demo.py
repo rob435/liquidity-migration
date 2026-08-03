@@ -1566,11 +1566,14 @@ def run_carry_demo_cycle(
                 separators=(",", ":"),
             ),
         }
+        # storage day-buckets registered cycle ledgers regardless of what we pass
+        # here. Naming the day partition anyway means an unregistered dataset
+        # still gets a bounded part instead of one monolith.
         write_dataset(
             pl.DataFrame([payload], infer_schema_length=None),
             root,
             cycles_dataset,
-            partition_by=(),
+            partition_by=("date",),
         )
     return PublishedTargetCyclePayload(
         payload,

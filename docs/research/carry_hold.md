@@ -377,8 +377,9 @@ and deploy this strategy in its place. The runtime now exists:
    live bar keying is close-time (decision at 00:00 close, computed 00:20)
    — knowledge-content identical to the research row, one grid-phase
    convention apart, inside the registered decision-clock caveat. (c) The
-   cycles datasets grow as single part files (~1.4k rows/day) until a
-   month-bucket registration lands; queued.
+   cycles datasets (~1.4k rows/day) are written one day-bucketed part per
+   calendar day, so a cycle append rewrites one day rather than the whole
+   history; landed.
 
 ## 8. What this document does not claim
 
