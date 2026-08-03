@@ -1206,7 +1206,13 @@ verify_topology() {
         done
     fi
     verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
-    verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
+    # First-rollout tolerance: the pre-install verification runs against the
+    # outgoing topology, where a unit introduced by this commit does not exist
+    # yet. Once installed the manifest check requires the fragment, so this
+    # cannot skip a deleted unit.
+    if systemctl cat liquidity-migration-telegram-controls.service >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
+    fi
     for oneshot in \
         liquidity-migration-continuous-rmom-refresh.service \
         liquidity-migration-continuous-hedge.service \
