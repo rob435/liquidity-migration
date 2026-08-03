@@ -1013,18 +1013,20 @@ mainnet_armed() {
             # it, so ownership and mode are normalized here, at first read.
             chown root:root "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
             chmod 600 "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
+            # Early install stages read the switch before PYTHON or the bash
+            # env-loader helpers exist in their context, so this read stands
+            # entirely on its own: the checkout's interpreter and the strict
+            # parser module, nothing else.
             MAINNET_ARMED_STATE="$(
-                unset REAL_MONEY
-                # Early install stages read the switch before PYTHON is
-                # assigned; the checkout's interpreter is the one default
-                # that is always right on the host.
-                lm_load_private_systemd_environment \
-                    "${PYTHON:-${REPO_DIR:-/opt/liquidity-migration}/.venv/bin/python}" \
-                    "$MAINNET_CREDENTIAL_ENV" REAL_MONEY || exit 3
-                case "$(printf '%s' "${REAL_MONEY:-}" | tr '[:upper:]' '[:lower:]')" in
-                    1|true|yes|on) echo armed ;;
-                    *) echo off ;;
-                esac
+                "${PYTHON:-${REPO_DIR:-/opt/liquidity-migration}/.venv/bin/python}" -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
+values = parse_systemd_environment_bytes(Path(sys.argv[1]).read_bytes(), label=sys.argv[1])
+armed = str(values.get("REAL_MONEY", "")).strip().lower() in {"1", "true", "yes", "on"}
+print("armed" if armed else "off")
+' "$MAINNET_CREDENTIAL_ENV" "${REPO_DIR:-/opt/liquidity-migration}"
             )" || fail "cannot read the arming switch from $MAINNET_CREDENTIAL_ENV"
         fi
     fi
