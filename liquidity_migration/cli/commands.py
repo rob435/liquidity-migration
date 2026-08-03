@@ -467,6 +467,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         replay_days=args.replay_days,
         workers=args.workers,
         ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
+        ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", 16),
         # The store must span the cycle window whatever --replay-days says.
         ws_klines_lookback_days=int(args.replay_days) + 2,
     )

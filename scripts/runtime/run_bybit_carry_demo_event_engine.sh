@@ -69,6 +69,7 @@ WORKERS="${WORKERS:-4}"
 # WS klines are the primary bar source; REST covers gaps. 0 disables the
 # stream and returns to REST-on-cycle.
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
+WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
 OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
 if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
     echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
@@ -89,6 +90,7 @@ if [[ -n "${CANDIDATE_UNIVERSE_FILE:-}" ]]; then
 fi
 if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
     target_route_args+=(--ws-klines-enabled)
+    target_route_args+=(--ws-klines-bootstrap-workers "$WS_KLINES_BOOTSTRAP_WORKERS")
 else
     target_route_args+=(--no-ws-klines)
 fi

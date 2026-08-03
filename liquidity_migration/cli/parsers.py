@@ -426,6 +426,12 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     )
     p.set_defaults(ws_klines_enabled=d.ws_klines_enabled)
     p.add_argument(
+        "--ws-klines-bootstrap-workers",
+        type=int,
+        default=d.ws_klines_bootstrap_workers,
+        help="Parallelism of the one-time store backfill (the demo unit pins 2).",
+    )
+    p.add_argument(
         "--risk-policy-file",
         required=True,
         help=(
