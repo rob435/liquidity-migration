@@ -19,6 +19,61 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — The audit's whole program lands: decode gate, journal
+  decoupling, day buckets, owner diet, continuous-runtime removal.** Owner
+  directive: fix the ranked findings from audit pass 2, agents doing the
+  grunt work. Seven commits (`8f3cb18`…`580d4e8`), gate green at 2,829
+  tests, all read-side — no journal byte, no capital-preservation control,
+  and no strategy decision changed, with one bounded exception named below.
+  - **WS pre-decode gate** (`f377046`): raw-frame substring gates below
+    pybit drop unconfirmed kline ticks and sample ticker deltas at one per
+    symbol per 5s (snapshots always pass; both gates fail open). **Change
+    point: WS decision prices (mark/last) may now age up to 5s** where the
+    60s REST cache replacement already bounded them — the one
+    strategy-adjacent effect in the program. Liveness stamps on the drop
+    path only; a seam test pins pybit's `_on_message` so an upgrade fails a
+    test instead of silently costing the fleet ~42% of a core.
+  - **Journal ↔ watchdog decoupling** (`ab485e3`): venue snapshots were
+    already change-triggered; the heartbeat floor rises 30s → 10min (~2,880
+    → ~144 segments/day flat), and the sub-minute venue-fact liveness proof
+    moves to owner health as `venue_facts_at_ns` (schema v3), stamped from
+    the reconciler's own report. This closes a real hole: an owner whose
+    venue reads failed forever kept publishing healthy, and mainnet had no
+    venue-fact freshness check at all. Every detection bound tightens or
+    holds. Owner restarts first at deploy; the watchdog's startup grace
+    covers the schema window.
+  - **Day-bucketed cycle ledgers** (`55fc6bc`): the per-append rewrite drops
+    ~30x (month → day parts); `carry_hold_mainnet_cycles` is registered so
+    an armed mainnet can never write an unbounded monolith; a latent
+    `since_date` reader bug (non-date partitions silently dropped) is fixed;
+    `scripts/maintain/migrate_cycle_ledger_buckets.py` re-parts a live root
+    with row-count + content-digest proof.
+  - **Owner diet** (`1e76f2b`, `6ebdf5f`): notifier skips identical state
+    writes (~173k no-op fsyncs/day gone) and gates its 1Hz journal copy on
+    the head; protection anchors memoized on
+    `(rolling_state_hash, events_applied)`; rejected entry attempts join the
+    planning cursor's memo family; the settled-funding REST query gates at
+    60s + hour boundaries under the untouched 24h overlap (~43k → ~1.4k
+    calls/day, worst case a 60s discovery delay, never a miss); venue-order
+    and target-proposal acceleration indexes kill the O(orders-ever) ack
+    scan and the quadratic replay term; the convergence walk collapses to
+    one pass. Deferred by design: gating per-order REST recovery on WS gap
+    detection — the one non-equivalent transformation; measure first.
+  - **Continuous runtime removed** (`8f3cb18`, `580d4e8`): five units + four
+    launchers deleted (hedge book verified flat first), deploy/watchdog/
+    reset threads excised, the watchdog cooldown state re-anchored to repo
+    data (it had been resurrecting the retired sleeve's directory every 3
+    minutes), display labels tell the truth (v4 book, `CARRY_STRATEGY_ID`
+    stays `carry_hold_v3` on purpose — it is the frozen journal key the
+    standing book is filed under), the mainnet owner can no longer latch
+    permanently failed (`StartLimitIntervalSec=0`), and the dead
+    delta-neutral probe script is gone. Research surfaces stay.
+  - **VPS cleanup (same day, before the code program):** ~2.3GB of retired
+    data deleted — paper roots (~869MB), the CONT demo root (327MB), dead
+    `depth`/`liquidations` collectors (142MB), and the unreferenced
+    `cutover-evidence` debris (981MB, dominated by a nested copy of a
+    v8-era reset archive). Disk 36% → 30%. The reset archives and
+    `retired-authority` stay as deliberate evidence retention.
 - **2026-08-03 — WS kline store made to actually serve; audit pass 2 filed.**
   The kline plane deployed at `a1058e9` streamed but never served a cycle:
   carry's reader window ended one bar in the future, so the store's coverage
@@ -801,7 +856,7 @@ producers, and mainnet liveness timer are installed and off.
 | --- | --- |
 | Account owner | demo |
 | Target producers | demo × LONG/CARRY |
-| Timers | demo liveness (active); continuous hedge + rmom refresh (off) |
+| Timers | demo liveness (active) |
 
 - Bulk collectors are removed and raw account-market persistence is disabled.
   Live L2 readiness and exact decision-book capture remain enabled.
