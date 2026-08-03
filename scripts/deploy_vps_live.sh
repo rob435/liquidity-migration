@@ -1008,6 +1008,11 @@ mainnet_armed() {
         if [ ! -f "$MAINNET_CREDENTIAL_ENV" ]; then
             MAINNET_ARMED_STATE=off
         else
+            # A hand-edited file arrives 0644 from nano; the strict loader
+            # would refuse it before the later provisioning could normalize
+            # it, so ownership and mode are normalized here, at first read.
+            chown root:root "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
+            chmod 600 "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
             MAINNET_ARMED_STATE="$(
                 unset REAL_MONEY
                 lm_load_private_systemd_environment "$PYTHON" \
