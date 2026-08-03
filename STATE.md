@@ -19,6 +19,23 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — CARRY promoted to `lane2_carry_hold_v4` (owner override).**
+  Deployed `95497d1` via `ops.sh deploy rollout`, `rollout-ok` 17:06 UTC,
+  `verify-ok … mainnet=off`, all eleven units in expected states. The change
+  point is visible in the persisted cycle journal: 17:03:32 UTC row
+  `strategy_profile=carry_hold_v3_live_v1` (desired book 2 names, gross
+  0.143) → 17:07:17 UTC row `carry_hold_v4_live_v1` (1 name, gross 0.055 —
+  v4's persistence cut acting on its first decision). `strategy_id` stays
+  `carry_hold_v3` on purpose: a frozen journal lineage key, documented at the
+  constant. Standing book was 0 (same-day clean-slate epoch), so no migration
+  diffs were needed; today's desired entry publishes at the next 00:00 UTC
+  decision because the 6h entry-validity window had already closed — registered
+  behavior, not a fault. Watchdog 17:07 UTC: "0 active alert(s)". Promotion
+  note (with the honest caveat: **0 forward-scored days at promotion**; v3
+  keeps scoring as comparator) in `docs/research/strategy_program.md`.
+  **Mainnet remains disarmed** — when the owner sets `REAL_MONEY=true` in the
+  host's `bybit-mainnet.env` and runs activate, the funded CARRY trades v4
+  through this same code path (preflight still gates).
 - **2026-08-03 — Latency/efficiency program (owner priority): WebSocket-first
   market data, incremental hot-path state, watchdog slimmed.** Measured
   before-numbers on the aged epoch, same day: the watchdog burned 22–28 s CPU
