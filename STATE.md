@@ -19,6 +19,29 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — WS kline store made to actually serve; audit pass 2 filed.**
+  The kline plane deployed at `a1058e9` streamed but never served a cycle:
+  carry's reader window ended one bar in the future, so the store's coverage
+  probe could never pass (`kline_store_rows=0` live — and that gauge was
+  itself a hardcoded 0), and LONG's store retained 90 days against a 100-day
+  window, serving 4 of 120 symbols. Fixed in `a52b35e` (window end passed
+  unmodified, store retention = lookback+1, real gauge, real-store tests) and
+  deployed 17:50 UTC staged install+activate, `verify-ok`. First post-deploy
+  cycles: carry store rows 0 → 231,020 (98% of the window), LONG 5,985 →
+  193,263 (82 symbols), zero REST kline rows; remaining names converge as
+  hourly refreshes backfill heads the old retention never kept, and the
+  cache-skip fast path engages per sleeve at 100% coverage. Decision inputs
+  unchanged — the close-keyed view already cut at the decision bar. This
+  corrects the `9fb64c1` entry's "store serves" attribution below (its other
+  numbers stand). The owner-requested second-pass audit — measured CPU by
+  thread, storage growth, latency chains, ranked findings, nothing else
+  changed — is
+  [docs/audit/2026-08-03-latency-architecture-audit.md](docs/audit/2026-08-03-latency-architecture-audit.md);
+  headline: each producer burns ~21% of a core decoding WS messages it
+  discards, the journal grows ~2,880 snapshot files/day at zero trading by
+  design coupling to the watchdog, and cycle ledgers rewrite their whole
+  month partition every 60 s.
+
 - **2026-08-03 — Telegram control buttons deployed (owner request).** Deployed
   `3a319b3` via `ops.sh deploy rollout`, `rollout-ok` 17:37 UTC, `verify-ok …
   mainnet=off`, now twelve units in expected states. A new always-on daemon
