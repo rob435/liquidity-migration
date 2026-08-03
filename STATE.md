@@ -19,6 +19,33 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-03 — two owner-ordered follow-ups to the purge, deployed the same
+  afternoon.** (1) **The account-owner lease slimmed to its load-bearing core**
+  (`1c8d32c`, rollout-ok 12:53 UTC, first watchdog run after it "0 active
+  alert(s)"): the ~900-line filesystem provenance chain and the reset script's
+  10-field receipt plumbing are gone; what stays is one kernel flock per
+  authenticated Bybit account, the credential binding, and the
+  deleted/replaced-lock-file check — the live owner was verified holding the
+  slim lock on the host (fresh contender refused). (2) **Arming real money is
+  one switch** (`3d5462e`): `REAL_MONEY=true` in
+  `/etc/liquidity-migration/bybit-mainnet.env`, set by the owner's own hand
+  next to the live API key, is the whole arming decision. The mainnet sleeve
+  toggles (`CARRY_MAINNET_SLEEVE`/`LONG_MAINNET_SLEEVE`), the
+  `activate-mainnet` mode, and the repo-edit-then-install dance are deleted; a
+  plain `activate`/`rollout` starts the funded fleet when armed (state roots +
+  preflight still gate the start; the installed risk profile decides sleeve
+  shares), and setting the switch false makes a stop survive the next
+  activate — the stop-mainnet persistence hole is closed. Real money has no
+  repo toggle: a git commit can never arm. `docs/real_money.md` deleted on the
+  same order; its envelope, dials, runbook, preflight contract, hazards list,
+  and ramp live in `docs/operations.md` §Real money. **Deploy receipt:**
+  `rollout-ok commit=3d5462e profile=operational` 13:21 UTC, verify table
+  all-expected with the new `mainnet=off` field (the switch read disarmed from
+  the absent credential file), account proved flat mid-rollout (positions 0,
+  targets 0, working orders 0), `sleeves.resolved.env` regenerated without the
+  mainnet keys, first post-deploy watchdog run 13:23 UTC **"0 active
+  alert(s)"**.
+
 - **2026-08-03 — the de-friction purge deployed: every non-critical operator
   ritual removed (owner instruction), live at `6d366fe` since 12:11 UTC in one
   rollout together with the paper retirement and the memory retune below.**
