@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -942,7 +943,7 @@ class AccountIntentInbox:
     def claim_next_safety_flat(
         self,
         *,
-        processed_batches: set[str],
+        processed_batches: AbstractSet[str],
         authorized_request_hashes: Mapping[str, str],
     ) -> tuple[Path, AccountTargetRequest] | None:
         """Claim the earliest risk-authored all-flat request safely out of FIFO.
@@ -1646,9 +1647,73 @@ class AccountExecutionService:
                 )
             )
 
+        revision_by_symbol = {
+            symbol: max((sequence for _, _, sequence in rows), default=0)
+            for symbol, rows in desires_by_symbol.items()
+        }
+
         symbols = set(state.aggregate_targets)
         symbols.update(symbol for symbol, position in state.positions.items() if abs(position.signed_qty) > tolerance)
         symbols.update(state.working_symbols(tolerance=tolerance))
+
+        # Each symbol's retry clock reads the journal from its own revision
+        # onwards, so walking the whole journal once per symbol costs the tick
+        # symbols x events. One pass instead: the trading events collapse to a
+        # single newest-timestamp per symbol (the revision each symbol counts
+        # from is known before the loop), and the far rarer convergence-retry
+        # events are kept as rows because their batch prefix is only known once
+        # the plan's generation is computed below.
+        retry_root = "account-convergence/"
+        anchor_event_types = {
+            AccountEventType.ACK.value,
+            AccountEventType.FILL.value,
+            AccountEventType.ORDER_STATUS.value,
+        }
+        symbol_of_retry_head = {f"{retry_root}{symbol}/": symbol for symbol in symbols}
+
+        def retry_head_symbol(batch_id: str) -> str | None:
+            head_end = batch_id.find("/", len(retry_root))
+            return symbol_of_retry_head.get(batch_id[: head_end + 1]) if head_end >= 0 else None
+
+        newest_activity_ns: dict[str, int] = {}
+        retry_rows_by_symbol: dict[str, list[tuple[str, int, int]]] = {}
+        # Retry rows whose head names no symbol we are planning for. They cannot
+        # match any prefix built below, but carrying them keeps the test the
+        # original one rather than one that trusts the head split.
+        retry_rows_unmapped: list[tuple[str, int, int]] = []
+        for event in events:
+            event_symbol = event.symbol
+            if (
+                event.event_type in anchor_event_types
+                and event_symbol in symbols
+                and event.sequence >= revision_by_symbol.get(event_symbol, 0)
+            ):
+                newest = newest_activity_ns.get(event_symbol)
+                if newest is None or event.wall_ts_ns > newest:
+                    newest_activity_ns[event_symbol] = event.wall_ts_ns
+            correlation_id = event.correlation_id
+            if not correlation_id.startswith(retry_root):
+                continue
+            mapped = retry_head_symbol(correlation_id)
+            retry_row = (correlation_id, event.sequence, event.wall_ts_ns)
+            if mapped is None:
+                retry_rows_unmapped.append(retry_row)
+            elif event.sequence >= revision_by_symbol.get(mapped, 0):
+                retry_rows_by_symbol.setdefault(mapped, []).append(retry_row)
+
+        # Same shape for the retry-attempt count: every batch ever processed is
+        # in this set, so counting one symbol's prefix must not read all of it.
+        retry_batches_by_symbol: dict[str, list[str]] = {}
+        retry_batches_unmapped: list[str] = []
+        for batch_id in state.processed_batches:
+            if not batch_id.startswith(retry_root):
+                continue
+            mapped = retry_head_symbol(batch_id)
+            if mapped is None:
+                retry_batches_unmapped.append(batch_id)
+            else:
+                retry_batches_by_symbol.setdefault(mapped, []).append(batch_id)
+
         plans: list[_ConvergencePlan] = []
         for symbol in sorted(symbols):
             target_qty = float(state.aggregate_targets.get(symbol, 0.0))
@@ -1666,10 +1731,7 @@ class AccountExecutionService:
                 continue
 
             symbol_desires = desires_by_symbol.get(symbol, [])
-            revision_sequence = max(
-                (sequence for _, _, sequence in symbol_desires),
-                default=0,
-            )
+            revision_sequence = revision_by_symbol.get(symbol, 0)
             active = [
                 (target_key, payload, sequence)
                 for target_key, payload, sequence in symbol_desires
@@ -1724,9 +1786,10 @@ class AccountExecutionService:
                 ],
             }
             generation = hashlib.sha256(canonical_json(generation_material)).hexdigest()[:20]
-            prefix = f"account-convergence/{symbol}/{generation}/"
-            retry_batches = sorted(batch_id for batch_id in state.processed_batches if batch_id.startswith(prefix))
-            attempts = len(retry_batches)
+            prefix = f"{retry_root}{symbol}/{generation}/"
+            attempts = 0
+            for retry_batches in (retry_batches_by_symbol.get(symbol, ()), retry_batches_unmapped):
+                attempts += sum(1 for batch_id in retry_batches if batch_id.startswith(prefix))
             desired_event = event_at_sequence(revision_sequence)
             desired_since_ns = (
                 desired_event.wall_ts_ns
@@ -1734,17 +1797,17 @@ class AccountExecutionService:
                 else self._orphan_observed_since_ns(events, symbol=symbol, fallback=now_ns)
             )
             retry_anchor_ns = desired_since_ns
-            for event in events:
-                if event.sequence < revision_sequence:
-                    continue
-                if event.symbol == symbol and event.event_type in {
-                    AccountEventType.ACK.value,
-                    AccountEventType.FILL.value,
-                    AccountEventType.ORDER_STATUS.value,
-                }:
-                    retry_anchor_ns = max(retry_anchor_ns, event.wall_ts_ns)
-                if event.correlation_id.startswith(prefix):
-                    retry_anchor_ns = max(retry_anchor_ns, event.wall_ts_ns)
+            newest_activity = newest_activity_ns.get(symbol)
+            if newest_activity is not None and newest_activity > retry_anchor_ns:
+                retry_anchor_ns = newest_activity
+            for retry_rows in (retry_rows_by_symbol.get(symbol, ()), retry_rows_unmapped):
+                for retry_correlation_id, retry_sequence, retry_wall_ts_ns in retry_rows:
+                    if (
+                        retry_wall_ts_ns > retry_anchor_ns
+                        and retry_sequence >= revision_sequence
+                        and retry_correlation_id.startswith(prefix)
+                    ):
+                        retry_anchor_ns = retry_wall_ts_ns
 
             no_working = working_order_count == 0
             residual_pending = abs(residual) > tolerance
@@ -2382,7 +2445,10 @@ class AccountExecutionService:
             and str((row.get("metadata") or {}).get("reason") or "") == "native_disaster_stop_breached"
         }
         claimed = inbox.claim_next_safety_flat(
-            processed_batches=set(state.processed_batches),
+            # Read-only: the claim only tests membership, and a commit replaces
+            # the committed state object rather than mutating it, so the live
+            # set is safe to hand over and needs no per-tick copy.
+            processed_batches=state.processed_batches,
             authorized_request_hashes=authorized_request_hashes,
         )
         if claimed is None:

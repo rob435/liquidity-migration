@@ -328,6 +328,21 @@ class AccountState:
         repr=False,
         compare=False,
     )
+    # Same contract: derived entirely from ``orders``. A venue order id maps to
+    # a set because two commands can carry the same id, and a caller joining on
+    # venue identity must be able to see that the join is ambiguous.
+    command_ids_by_venue_order_id: dict[str, set[str]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    # Same contract: derived entirely from ``target_proposals``, keyed by the
+    # proposal's batch id.
+    target_proposal_keys_by_batch: dict[str, set[str]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def working_signed_qty(self, symbol: str) -> float:
         return math.fsum(
@@ -387,6 +402,15 @@ def transaction_state_copy(state: AccountState) -> AccountState:
         events_applied=state.events_applied,
         rolling_state_hash=state.rolling_state_hash,
         working_order_ids=set(state.working_order_ids),
+        # The nested sets are reducer-mutated in place, so each one needs its
+        # own copy or a rolled-back transaction would leave the committed index
+        # carrying entries for events that never landed.
+        command_ids_by_venue_order_id={
+            key: set(value) for key, value in state.command_ids_by_venue_order_id.items()
+        },
+        target_proposal_keys_by_batch={
+            key: set(value) for key, value in state.target_proposal_keys_by_batch.items()
+        },
     )
 
 

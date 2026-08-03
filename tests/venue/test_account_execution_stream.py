@@ -9,6 +9,7 @@ import pytest
 from liquidity_migration.venue.account_execution_stream import (
     BybitAccountExecutionConsumer,
     PrivateExecutionStreamSupervisor,
+    _command_id_for_row,
 )
 from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
@@ -569,3 +570,91 @@ def test_malformed_known_command_execution_latches_health_failure(tmp_path: Path
     assert "exec-1" not in kernel.state().executions
     assert len(manager.failures) == 1
     assert "malformed" in str(manager.failures[0][1])
+
+
+def _extra_command(kernel: AccountExecutionKernel, *, batch_id: str, target_qty: float) -> str:
+    result = kernel.submit_targets(
+        batch_id=batch_id,
+        market_inputs=[MarketInputRef(
+            input_key=f"book-{batch_id}",
+            symbol="BUSDT",
+            exchange_ts_ns=900_000_000,
+            local_receive_ts_ns=1_000_000_000,
+            reference_price=10.0,
+        )],
+        targets=[DesiredTarget(
+            decision_key=f"d-{batch_id}",
+            target_key="hedge/main/BUSDT",
+            sleeve="hedge",
+            strategy_id="hedge-v1",
+            component_id="main",
+            symbol="BUSDT",
+            signed_qty=target_qty,
+            reference_price=10.0,
+            leverage=10.0,
+        )],
+        risk_snapshot=AccountRiskSnapshot(100.0, 100.0, "wallet", 950_000_000),
+        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 20.0, 10.0),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+    )
+    assert len(result.commands) == 1
+    return result.commands[0].command_id
+
+
+def test_row_without_a_link_id_joins_on_the_venue_order_id(tmp_path: Path) -> None:
+    kernel, command_id = _command(tmp_path)
+    kernel.record_ack(
+        command_id=command_id,
+        accepted=True,
+        venue_order_id="venue-solo",
+        exchange_ts_ns=1_150_000_000,
+        local_ack_ts_ns=1_151_000_000,
+    )
+
+    row = {"orderId": "venue-solo"}
+    assert _command_id_for_row(row, kernel._state_ref()) == command_id
+
+
+def test_two_commands_sharing_a_venue_order_id_resolve_to_no_command(tmp_path: Path) -> None:
+    kernel, first_command_id = _command(tmp_path)
+    kernel.record_ack(
+        command_id=first_command_id,
+        accepted=True,
+        venue_order_id="venue-shared",
+        exchange_ts_ns=1_150_000_000,
+        local_ack_ts_ns=1_151_000_000,
+    )
+    # Clear the working order so the next batch commands the same symbol again.
+    kernel.record_order_status(
+        command_id=first_command_id,
+        status="cancelled",
+        cumulative_filled_qty=0.0,
+        exchange_ts_ns=1_152_000_000,
+        local_receive_ts_ns=1_153_000_000,
+    )
+    second_command_id = _extra_command(kernel, batch_id="batch-2", target_qty=1.0)
+    kernel.record_ack(
+        command_id=second_command_id,
+        accepted=True,
+        venue_order_id="venue-shared",
+        exchange_ts_ns=1_154_000_000,
+        local_ack_ts_ns=1_155_000_000,
+    )
+    state = kernel._state_ref()
+    assert state.command_ids_by_venue_order_id["venue-shared"] == {first_command_id, second_command_id}
+
+    # The join is ambiguous, so venue identity resolves to nothing; only an
+    # explicit client id can still name the command.
+    assert _command_id_for_row({"orderId": "venue-shared"}, state) == ""
+    assert _command_id_for_row(
+        {"orderId": "venue-shared", "orderLinkId": second_command_id}, state
+    ) == second_command_id
+
+    message = _execution(first_command_id)
+    message["data"][0]["orderId"] = "venue-shared"  # type: ignore[index]
+    message["data"][0]["orderLinkId"] = ""  # type: ignore[index]
+    BybitAccountExecutionConsumer(kernel=kernel).on_execution(
+        message,
+        local_receive_ts_ns=1_210_000_000,
+    )
+    assert kernel.state().executions == {}

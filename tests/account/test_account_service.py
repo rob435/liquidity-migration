@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from liquidity_migration.account.account_kernel import (
+    AccountEventType,
     AccountExecutionKernel,
     AccountRiskPolicy,
     AccountRiskSnapshot,
@@ -2995,3 +2996,357 @@ def test_new_completed_requests_restarts_after_an_epoch_reset(tmp_path: Path) ->
     _submit_and_complete(inbox, route, request_id="reset-2")
     rows = inbox.new_completed_requests(cursor)
     assert [request.request_id for request, _receipt in rows] == ["reset-2"]
+
+
+class _MembershipOnlySet(set):
+    """A batch set that records how the safety-flat claim reads it."""
+
+    def __init__(self, values: Any) -> None:
+        super().__init__(values)
+        self.contains_calls = 0
+        self.iterations = 0
+
+    def __contains__(self, value: object) -> bool:
+        self.contains_calls += 1
+        return super().__contains__(value)
+
+    def __iter__(self) -> Any:
+        self.iterations += 1
+        return super().__iter__()
+
+
+def test_safety_flat_claim_reads_the_live_batch_set_without_copying_it(tmp_path: Path) -> None:
+    service = _service(tmp_path / "account", CountingTwin())
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="queued-entry",
+            batch_id="queued-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    probe = _MembershipOnlySet(service.kernel._state_ref().processed_batches)
+    service.kernel._state_ref().processed_batches = probe
+
+    assert service.run_safety_flat_once(inbox) is None
+    # Membership is the whole contract, so the owner hands over the committed
+    # set itself: a defensive copy would have iterated it once per tick.
+    assert probe.contains_calls == 1
+    assert probe.iterations == 0
+
+
+def test_committing_a_batch_leaves_the_prior_processed_batch_set_untouched(tmp_path: Path) -> None:
+    service = _service(tmp_path / "account", CountingTwin())
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="first-batch",
+            batch_id="first-batch",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    before = service.kernel._state_ref().processed_batches
+    snapshot = set(before)
+    assert "first-batch" in snapshot
+
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="second-batch",
+            batch_id="second-batch",
+            kind=SleeveAdapterKind.LONG,
+            notional=30.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    after = service.kernel._state_ref().processed_batches
+
+    assert "second-batch" in after
+    # A commit publishes a new state object; a reader still holding the old set
+    # sees exactly what it saw before.
+    assert after is not before
+    assert before == snapshot
+
+
+class _SymbolMarketProvider:
+    """Per-symbol books captured at the current clock, so they never go stale."""
+
+    def __init__(self, clock: VirtualClock) -> None:
+        self.clock = clock
+
+    def current(self, symbols: list[str], *, batch_id: str) -> dict[str, MarketInputRef]:
+        assert batch_id
+        local_ns = self.clock.wall_time_ns()
+        return {
+            symbol: MarketInputRef(
+                input_key=f"book-{symbol}-{batch_id}",
+                symbol=symbol,
+                exchange_ts_ns=local_ns - 100_000_000,
+                local_receive_ts_ns=local_ns,
+                reference_price=10.0,
+                bid_price=9.9,
+                ask_price=10.1,
+                book_sequence=1,
+                source="test",
+            )
+            for symbol in symbols
+        }
+
+
+class _SymbolRulesProvider:
+    def __init__(self, rules: dict[str, InstrumentRules]) -> None:
+        self.rules = rules
+
+    def current(self, symbols: list[str]) -> dict[str, InstrumentRules]:
+        return {symbol: self.rules[symbol] for symbol in symbols}
+
+
+def _symbol_rules(symbol: str) -> InstrumentRules:
+    return InstrumentRules(
+        symbol=symbol,
+        qty_step=0.1,
+        min_qty=0.1,
+        min_notional=1.0,
+        tick_size=0.1,
+        max_order_qty=100.0,
+        max_leverage=20.0,
+    )
+
+
+def _symbol_request(
+    route: AccountRoute,
+    *,
+    request_id: str,
+    batch_id: str,
+    kind: SleeveAdapterKind,
+    notional: float,
+    symbol: str,
+) -> AccountTargetRequest:
+    return AccountTargetRequest(
+        request_id=request_id,
+        batch_id=batch_id,
+        created_ts_ns=NOW_NS,
+        route_id=route.route_id,
+        account_id=route.account_id,
+        environment=route.environment,
+        intents=(
+            RequestedIntent(
+                adapter_kind=kind,
+                intent=SleeveTargetIntent(
+                    decision_key=f"decision:{batch_id}",
+                    target_key=f"{kind.value}/main/{symbol}",
+                    strategy_id=f"{kind.value}-v1",
+                    component_id="main",
+                    symbol=symbol,
+                    signed_notional_usdt=notional,
+                    leverage=10.0,
+                    reason="test",
+                    metadata={},
+                ),
+            ),
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _WalkedAnchor:
+    revision_sequence: int
+    anchor_ns: int
+    trading_only_ns: int
+    prefix_hits: int
+
+
+def _walked_retry_anchor(
+    events: Any,
+    state: Any,
+    *,
+    symbol: str,
+    generation: str,
+    desired_since_ns: int,
+) -> _WalkedAnchor:
+    """The pre-hoist per-symbol journal walk, rewritten straight from the rule.
+
+    ``trading_only_ns`` drops the correlation-prefix half, so a test can show
+    that half is doing work rather than agreeing by accident.
+    """
+
+    revision_sequence = max(
+        (
+            int(state.component_target_desire_sequences.get(target_key) or 0)
+            for target_key, payload in state.component_target_desires.items()
+            if str(payload.get("symbol") or "").upper() == symbol
+        ),
+        default=0,
+    )
+    prefix = f"account-convergence/{symbol}/{generation}/"
+    anchor = desired_since_ns
+    trading_only = desired_since_ns
+    prefix_hits = 0
+    for event in events:
+        if event.sequence < revision_sequence:
+            continue
+        if event.symbol == symbol and event.event_type in {
+            AccountEventType.ACK.value,
+            AccountEventType.FILL.value,
+            AccountEventType.ORDER_STATUS.value,
+        }:
+            anchor = max(anchor, event.wall_ts_ns)
+            trading_only = max(trading_only, event.wall_ts_ns)
+        if event.correlation_id.startswith(prefix):
+            prefix_hits += 1
+            anchor = max(anchor, event.wall_ts_ns)
+    return _WalkedAnchor(revision_sequence, anchor, trading_only, prefix_hits)
+
+
+def test_convergence_retry_anchors_match_the_per_symbol_journal_walk(tmp_path: Path) -> None:
+    backoff_ns = 1_000_000
+    cap_ns = 30_000_000
+    adapter = ScriptedExecutionAdapter("reject", "partial_cancel", *["reject"] * 14)
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=backoff_ns,
+        convergence_retry_backoff_cap_ns=cap_ns,
+        max_convergence_retries=10,
+    )
+    service.market_provider = _SymbolMarketProvider(clock)
+    service.rules_provider = _SymbolRulesProvider(
+        {"BUSDT": _symbol_rules("BUSDT"), "CUSDT": _symbol_rules("CUSDT")}
+    )
+    inbox = _inbox(tmp_path)
+
+    inbox.submit(
+        _symbol_request(
+            _route(tmp_path),
+            request_id="b-entry",
+            batch_id="b-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            symbol="BUSDT",
+        )
+    )
+    assert service.run_once(inbox) is not None
+    clock.advance_ns(1_000)
+    inbox.submit(
+        _symbol_request(
+            _route(tmp_path),
+            request_id="c-entry",
+            batch_id="c-entry",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+            symbol="CUSDT",
+        )
+    )
+    assert service.run_once(inbox) is not None
+
+    # Let both symbols retry at least once so the journal also carries events
+    # whose correlation id is a convergence batch of its own.
+    for _ in range(10):
+        clock.advance_ns(4 * backoff_ns)
+        service.converge_once()
+        items = service.convergence_report().items
+        if len(items) == 2 and all(item.retry_attempts >= 1 for item in items):
+            break
+
+    # A new desire revision for BUSDT starts a new generation, so the retries
+    # of the old generation must stop counting towards the new backoff.
+    clock.advance_ns(backoff_ns)
+    inbox.submit(
+        _symbol_request(
+            _route(tmp_path),
+            request_id="b-entry-2",
+            batch_id="b-entry-2",
+            kind=SleeveAdapterKind.LONG,
+            notional=30.0,
+            symbol="BUSDT",
+        )
+    )
+    assert service.run_once(inbox) is not None
+
+    # A retry the risk kernel refuses leaves convergence-batch events with no
+    # ack behind them, which is what makes the correlation-prefix half of the
+    # walk the newest thing the anchor can see.
+    restored_policy = service.risk_policy
+    service.risk_policy = replace(service.risk_policy, max_symbol_notional_usdt=0.5)
+    clock.advance_ns(64 * backoff_ns)
+    refused = service.converge_once()
+    assert refused is not None and not refused.accepted
+
+    # One more ordinary retry afterwards, so the newest trading event in the
+    # journal belongs to a single symbol: the other symbol's anchor must not
+    # move with it.
+    service.risk_policy = restored_policy
+    # Short enough that only the freshly revised symbol is due again.
+    clock.advance_ns(2 * backoff_ns)
+    retried = service.converge_once()
+    assert retried is not None and retried.accepted and retried.commands
+    assert retried.batch_id.split("/")[1] != refused.batch_id.split("/")[1]
+
+    events, state = service.kernel._snapshot_ref()
+    items = {item.symbol: item for item in service.convergence_report().items}
+    assert set(items) == {"BUSDT", "CUSDT"}
+
+    walked: dict[str, _WalkedAnchor] = {}
+    for symbol, item in items.items():
+        assert item.retryable and item.next_retry_ts_ns is not None
+        walked[symbol] = _walked_retry_anchor(
+            events,
+            state,
+            symbol=symbol,
+            generation=item.generation,
+            desired_since_ns=item.desired_since_ns,
+        )
+        delay = min(backoff_ns * (2 ** min(item.retry_attempts, 62)), cap_ns)
+        assert item.next_retry_ts_ns == walked[symbol].anchor_ns + delay
+
+    # The two symbols really are anchored from different revisions; the refused
+    # symbol is anchored on a convergence batch rather than on a trading event;
+    # BUSDT carries retries of a stale generation that its new generation must
+    # not count; and CUSDT's walk crosses a fill and a terminal status as well
+    # as acks.
+    assert walked["BUSDT"].revision_sequence != walked["CUSDT"].revision_sequence
+    assert walked["CUSDT"].prefix_hits >= 1
+    refused_symbol = refused.batch_id.split("/")[1]
+    assert walked[refused_symbol].anchor_ns > walked[refused_symbol].trading_only_ns
+    stale_generation_batches = {
+        batch_id
+        for batch_id in state.processed_batches
+        if batch_id.startswith("account-convergence/BUSDT/")
+        and not batch_id.startswith(f"account-convergence/BUSDT/{items['BUSDT'].generation}/")
+    }
+    assert stale_generation_batches
+    assert items["BUSDT"].retry_attempts < len(
+        {
+            batch_id
+            for batch_id in state.processed_batches
+            if batch_id.startswith("account-convergence/BUSDT/")
+        }
+    )
+    newest_trading_ns = max(
+        event.wall_ts_ns
+        for event in events
+        if event.event_type
+        in {
+            AccountEventType.ACK.value,
+            AccountEventType.FILL.value,
+            AccountEventType.ORDER_STATUS.value,
+        }
+    )
+    assert any(walk.anchor_ns < newest_trading_ns for walk in walked.values())
+    crossed = {
+        event.event_type
+        for event in events
+        if event.symbol == "CUSDT" and event.sequence >= walked["CUSDT"].revision_sequence
+    }
+    assert {
+        AccountEventType.ACK.value,
+        AccountEventType.FILL.value,
+        AccountEventType.ORDER_STATUS.value,
+    } <= crossed

@@ -227,7 +227,16 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         target_key = str(payload.get("target_key") or "")
         if not target_key:
             raise AccountTransitionError("target requires target_key")
-        state.target_proposals[f"{event.correlation_id}:{target_key}"] = dict(payload)
+        proposal_key = f"{event.correlation_id}:{target_key}"
+        replaced = state.target_proposals.get(proposal_key)
+        if replaced is not None:
+            # A rewritten proposal key may carry a different batch; drop the old
+            # membership so the index stays a mirror of ``target_proposals``.
+            state.target_proposal_keys_by_batch.get(
+                str(replaced.get("batch_id") or ""), set()
+            ).discard(proposal_key)
+        state.target_proposals[proposal_key] = dict(payload)
+        state.target_proposal_keys_by_batch.setdefault(str(payload.get("batch_id") or ""), set()).add(proposal_key)
     elif event_type is AccountEventType.RISK_DECISION:
         batch_id = str(payload.get("batch_id") or event.correlation_id)
         if not batch_id:
@@ -239,8 +248,10 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             aggregates = payload.get("aggregate_targets") or {}
             if not isinstance(updates, Mapping) or not isinstance(aggregates, Mapping):
                 raise AccountTransitionError("accepted risk decision has invalid target maps")
+            # Sorted so replay order never depends on set iteration order.
             accepted_proposals = [
-                target for target in state.target_proposals.values() if str(target.get("batch_id") or "") == batch_id
+                state.target_proposals[proposal_key]
+                for proposal_key in sorted(state.target_proposal_keys_by_batch.get(batch_id, ()))
             ]
             # A convergence retry reasserts an accepted desire only to emit a
             # fresh net command; it must not become a new lifecycle revision or
@@ -386,6 +397,11 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         if not accepted:
             state.working_order_ids.discard(command_id)
         order.venue_order_id = str(payload.get("venue_order_id") or "")
+        if order.venue_order_id:
+            # The single place an order gains a venue identity: an ack is
+            # refused unless the order is still ``commanded``, so this can never
+            # orphan an earlier binding.
+            state.command_ids_by_venue_order_id.setdefault(order.venue_order_id, set()).add(command_id)
         order.rejection_key = str(payload.get("rejection_key") or "")
         ack_metadata = payload.get("metadata") or {}
         try:
@@ -3096,12 +3112,16 @@ class AccountExecutionKernel:
                 and abs(float(state.aggregate_targets.get(symbol, 0.0))) <= tolerance
                 and abs(state.working_signed_qty(symbol)) <= tolerance
             )
+            # Sorted so a tie on target_key cannot order rows by set iteration.
+            batch_proposals = (
+                state.target_proposals[proposal_key]
+                for proposal_key in sorted(state.target_proposal_keys_by_batch.get(order.batch_id, ()))
+            )
             target_rows = sorted(
                 (
                     dict(target)
-                    for target in state.target_proposals.values()
-                    if str(target.get("batch_id") or "") == order.batch_id
-                    and str(target.get("symbol") or "").upper() == symbol
+                    for target in batch_proposals
+                    if str(target.get("symbol") or "").upper() == symbol
                 ),
                 key=lambda target: str(target.get("target_key") or ""),
             )

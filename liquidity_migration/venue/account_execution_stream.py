@@ -71,13 +71,11 @@ def _command_id_for_row(row: Mapping[str, Any], state: AccountState) -> str:
 
     venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
     if venue_order_id:
-        matches = [
-            order.command_id
-            for order in state.orders.values()
-            if order.venue_order_id == venue_order_id
-        ]
+        # Two commands can share a venue order id; that join is ambiguous and
+        # resolves to nothing, exactly as the full scan it replaces did.
+        matches = state.command_ids_by_venue_order_id.get(venue_order_id, ())
         if len(matches) == 1:
-            return matches[0]
+            return next(iter(matches))
     command_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
     return command_id if command_id in state.orders else ""
 

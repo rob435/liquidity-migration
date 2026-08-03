@@ -9,6 +9,10 @@ from pathlib import Path
 import pytest
 
 import liquidity_migration.account.account_kernel as account_kernel_module
+from liquidity_migration.account.account_contracts import (
+    AccountState,
+    transaction_state_copy,
+)
 from liquidity_migration.account.account_kernel import (
     AccountEvent,
     AccountEventType,
@@ -3821,3 +3825,119 @@ def test_sparse_venue_snapshots_replay_to_the_same_domain_state(tmp_path: Path) 
     assert [dense.orders[key].command_sequence for key in sorted(dense.orders)] != [
         sparse.orders[key].command_sequence for key in sorted(sparse.orders)
     ]
+
+
+def _indexed_journal(root: Path) -> AccountExecutionKernel:
+    """Open, partially chunk, and close a symbol so both indexes hold rows."""
+
+    kernel = _kernel(root)
+    rules = _rules(max_order_qty=1.0)
+    market = _book().market_ref(input_key="index-book")
+    driver = KernelExecutionDriver(kernel)
+    open_result = kernel.submit_targets(
+        batch_id="index-open",
+        market_inputs=[market],
+        targets=[
+            _target(decision="index-open-d", key="continuous/main/BUSDT", sleeve="continuous", qty=2.0)
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+    )
+    driver.execute_batch(
+        open_result,
+        market_inputs={"BUSDT": market},
+        adapter=_twin(name="historical", rules=rules),
+    )
+    add_result = kernel.submit_targets(
+        batch_id="index-add",
+        market_inputs=[market],
+        targets=[
+            _target(decision="index-add-d", key="long/main/BUSDT", sleeve="long", qty=1.0),
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+    )
+    driver.execute_batch(
+        add_result,
+        market_inputs={"BUSDT": market},
+        adapter=_twin(name="historical", rules=rules),
+    )
+    close_result = kernel.submit_targets(
+        batch_id="index-close",
+        market_inputs=[market],
+        targets=[
+            _target(decision="index-close-d", key="continuous/main/BUSDT", sleeve="continuous", qty=0.0),
+            _target(decision="index-close-long-d", key="long/main/BUSDT", sleeve="long", qty=0.0),
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=rules,
+    )
+    driver.execute_batch(
+        close_result,
+        market_inputs={"BUSDT": market},
+        adapter=_twin(name="historical", rules=rules),
+    )
+    return kernel
+
+
+def _scanned_command_ids_by_venue_order_id(state: AccountState) -> dict[str, set[str]]:
+    scanned: dict[str, set[str]] = {}
+    for order in state.orders.values():
+        if order.venue_order_id:
+            scanned.setdefault(order.venue_order_id, set()).add(order.command_id)
+    return scanned
+
+
+def _scanned_target_proposal_keys_by_batch(state: AccountState) -> dict[str, set[str]]:
+    scanned: dict[str, set[str]] = {}
+    for proposal_key, target in state.target_proposals.items():
+        scanned.setdefault(str(target.get("batch_id") or ""), set()).add(proposal_key)
+    return scanned
+
+
+def test_reducer_indexes_equal_a_brute_force_scan_of_the_state_they_accelerate(
+    tmp_path: Path,
+) -> None:
+    kernel = _indexed_journal(tmp_path)
+    state = kernel.state()
+
+    venue_scan = _scanned_command_ids_by_venue_order_id(state)
+    batch_scan = _scanned_target_proposal_keys_by_batch(state)
+    # Not vacuous: several acknowledged commands and three batches of targets.
+    assert len(venue_scan) >= 4
+    assert set(batch_scan) == {"index-open", "index-add", "index-close"}
+    assert state.command_ids_by_venue_order_id == venue_scan
+    assert state.target_proposal_keys_by_batch == batch_scan
+
+    # A replay from the durable segments rebuilds the same indexes, and
+    # ``verify=True`` re-checks every event's state hash on the way through:
+    # the indexes are reducer bookkeeping and change no recorded hash.
+    replayed = account_kernel_module.reduce_account_events(read_account_journal(tmp_path, verify=True))
+    assert replayed.command_ids_by_venue_order_id == venue_scan
+    assert replayed.target_proposal_keys_by_batch == batch_scan
+    receipt = verify_account_journal(tmp_path)
+    assert receipt["events"] == len(read_account_journal(tmp_path))
+    assert receipt["final_state_hash"] == state.state_hash()
+
+
+def test_transaction_state_copy_gives_each_reducer_index_its_own_sets(tmp_path: Path) -> None:
+    committed = _indexed_journal(tmp_path).state()
+    copied = transaction_state_copy(committed)
+    assert copied.command_ids_by_venue_order_id == committed.command_ids_by_venue_order_id
+    assert copied.target_proposal_keys_by_batch == committed.target_proposal_keys_by_batch
+
+    venue_order_id = sorted(committed.command_ids_by_venue_order_id)[0]
+    batch_id = sorted(committed.target_proposal_keys_by_batch)[0]
+    copied.command_ids_by_venue_order_id[venue_order_id].add("abandoned-command")
+    copied.command_ids_by_venue_order_id["abandoned-venue-order"] = {"abandoned-command"}
+    copied.target_proposal_keys_by_batch[batch_id].add("abandoned:proposal")
+    copied.target_proposal_keys_by_batch["abandoned-batch"] = {"abandoned:proposal"}
+
+    # A transaction that never commits must leave the committed indexes alone.
+    assert "abandoned-command" not in committed.command_ids_by_venue_order_id[venue_order_id]
+    assert "abandoned-venue-order" not in committed.command_ids_by_venue_order_id
+    assert "abandoned:proposal" not in committed.target_proposal_keys_by_batch[batch_id]
+    assert "abandoned-batch" not in committed.target_proposal_keys_by_batch
