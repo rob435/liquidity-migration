@@ -13,6 +13,15 @@ Two events make "in flight" permanent:
 Either way the symbol is frozen: no producer request, no convergence pass, and no
 exit, while the real position sits at the venue behind only its native stop.
 
+A third stranding exists past submission: an ``acknowledged`` or
+``partially_filled`` order whose venue side ends without the terminal status
+ever reaching the journal — a reduce-only remainder auto-cancelled at flat, a
+fill/cancel lost across a crash window. The order stays in
+``working_order_ids`` forever, freezing its symbol exactly like a commanded
+wedge (BANKUSDT, 2026-08-01). ``stalled_working_orders`` names those; it is a
+separate listing because ``wedged_commands`` also feeds the kernel's
+reduce-only escape hatch, whose semantics must not widen.
+
 This module reports the wedge; it does not resolve it. Resolution needs an
 operator-authorized journal transition recording what actually happened at the
 venue.
@@ -26,7 +35,9 @@ from typing import Any, Iterable
 __all__ = [
     "WEDGE_AMBIGUOUS_SUBMISSION",
     "WEDGE_NEVER_SUBMITTED",
+    "WEDGE_STALLED_WORKING_ORDER",
     "WedgedCommand",
+    "stalled_working_orders",
     "wedged_commands",
 ]
 
@@ -37,6 +48,11 @@ WEDGE_AMBIGUOUS_SUBMISSION = "ambiguous_submission"
 #: Committed to the journal but provably never dispatched. Safe to abandon, but
 #: only an operator-authorized transition may say so.
 WEDGE_NEVER_SUBMITTED = "never_submitted"
+
+#: Venue-side order still working in the journal long past any plausible life:
+#: the terminal status never arrived. The venue probe decides whether it is
+#: genuinely gone; a live order is refused resolution.
+WEDGE_STALLED_WORKING_ORDER = "stalled_working_order"
 
 #: How long a ``commanded`` order may sit before it counts as wedged rather than
 #: in flight. Healthy submissions resolve in under a second; minutes here so
@@ -116,5 +132,47 @@ def wedged_commands(
             )
         )
     # Worst first: a frozen open position outranks a stuck exit, then by age.
+    found.sort(key=lambda w: (not w.blocks_exit, -w.age_ns, w.symbol))
+    return tuple(found)
+
+
+def stalled_working_orders(
+    orders: Iterable[Any],
+    *,
+    now_ns: int,
+    wedge_after_ns: int = DEFAULT_WEDGE_AFTER_NS,
+) -> tuple[WedgedCommand, ...]:
+    """Return every venue-side working order too old to still be in flight.
+
+    ``acknowledged`` and ``partially_filled`` orders normally terminalize
+    through the private stream or the reconciler; one that has outlived the
+    bound has lost that path and freezes its symbol like a commanded wedge.
+    Deliberately not folded into :func:`wedged_commands`, which also drives
+    the kernel's reduce-only escape hatch.
+    """
+
+    bound = max(int(wedge_after_ns), 0)
+    found: list[WedgedCommand] = []
+    for order in orders:
+        if str(getattr(order, "status", "")) not in ("acknowledged", "partially_filled"):
+            continue
+        started = int(getattr(order, "last_submission_started_ts_ns", 0) or 0)
+        created = int(getattr(order, "created_ts_ns", 0) or 0)
+        anchor = started if started > 0 else created
+        if anchor <= 0:
+            continue
+        age_ns = int(now_ns) - anchor
+        if age_ns < bound:
+            continue
+        found.append(
+            WedgedCommand(
+                command_id=str(getattr(order, "command_id", "")),
+                symbol=str(getattr(order, "symbol", "")).upper(),
+                kind=WEDGE_STALLED_WORKING_ORDER,
+                age_ns=age_ns,
+                signed_qty=float(getattr(order, "signed_qty", 0.0) or 0.0),
+                reduce_only=bool(getattr(order, "reduce_only", False)),
+            )
+        )
     found.sort(key=lambda w: (not w.blocks_exit, -w.age_ns, w.symbol))
     return tuple(found)

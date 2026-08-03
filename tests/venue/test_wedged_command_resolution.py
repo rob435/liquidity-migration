@@ -399,3 +399,141 @@ def test_a_live_working_order_still_freezes_the_symbol(tmp_path: Path) -> None:
     )
 
     assert result.commands == ()
+
+
+def _stalled_exit_kernel(tmp_path: Path) -> tuple[AccountExecutionKernel, VirtualClock, str]:
+    """Open 5 units, then leave a reduce-only exit ``partially_filled`` with
+    its venue side gone — the BANKUSDT 2026-08-01 stranding."""
+
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=100)
+    kernel = AccountExecutionKernel(tmp_path, account_id="stall", clock=clock, id_seed="stall")
+    opened = kernel.submit_targets(
+        batch_id="open",
+        market_inputs=(_market(),),
+        targets=(_target(5.0, decision="d-open"),),
+        risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 950),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+    )
+    entry = opened.commands[0]
+    KernelExecutionDriver(kernel).ingest(
+        (
+            ExecutionObservation(
+                observation_type="ack",
+                command_id=entry.command_id,
+                exchange_ts_ns=1_100_000_000,
+                local_receive_ts_ns=1_110_000_000,
+                accepted=True,
+                venue_order_id="venue-open",
+            ),
+            ExecutionObservation(
+                observation_type="fill",
+                command_id=entry.command_id,
+                exchange_ts_ns=1_120_000_000,
+                local_receive_ts_ns=1_130_000_000,
+                venue_order_id="venue-open",
+                execution_id="exec-open",
+                signed_qty=5.0,
+                price=10.0,
+                fee_usdt=0.01,
+            ),
+        )
+    )
+    closing = kernel.submit_targets(
+        batch_id="close",
+        market_inputs=(_market(key="book-3"),),
+        targets=(_target(0.0, decision="d-close"),),
+        risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet-3", 1_400_000_000),
+        risk_policy=POLICY,
+        instrument_rules=RULES,
+    )
+    exit_id = closing.commands[0].command_id
+    kernel.record_submission_attempt(command_id=exit_id, adapter_name="bybit_demo")
+    KernelExecutionDriver(kernel).ingest(
+        (
+            ExecutionObservation(
+                observation_type="ack",
+                command_id=exit_id,
+                exchange_ts_ns=1_500_000_000,
+                local_receive_ts_ns=1_510_000_000,
+                accepted=True,
+                venue_order_id="venue-close",
+            ),
+            ExecutionObservation(
+                observation_type="fill",
+                command_id=exit_id,
+                exchange_ts_ns=1_520_000_000,
+                local_receive_ts_ns=1_530_000_000,
+                venue_order_id="venue-close",
+                execution_id="exec-close-1",
+                signed_qty=-2.0,
+                price=10.0,
+                fee_usdt=0.01,
+            ),
+        )
+    )
+    assert kernel.state().orders[exit_id].status == "partially_filled"
+    clock.advance_ns(DEFAULT_WEDGE_AFTER_NS + 1_000_000_000)
+    return kernel, clock, exit_id
+
+
+def test_a_stalled_partial_fill_resolves_on_authorized_absent_evidence(tmp_path: Path) -> None:
+    kernel, _clock, exit_id = _stalled_exit_kernel(tmp_path)
+
+    evidence = resolve_wedged_command(
+        kernel=kernel,
+        client=_Venue(),
+        command_id=exit_id,
+        operator="owner",
+        reason="venue shows no open order and the position is flat",
+        authorize_absent=True,
+    )
+
+    assert evidence.classification == "absent"
+    resolved = kernel.state().orders[exit_id]
+    assert resolved.status == "partially_filled_cancelled"
+    assert exit_id not in kernel.state().working_order_ids
+    last = read_account_journal(tmp_path)[-1]
+    assert last.payload["rejection_key"] == RESOLUTION_REJECTION_KEY
+    assert last.payload["metadata"]["wedge_kind"] == "stalled_working_order"
+    assert last.payload["cumulative_filled_qty"] == pytest.approx(2.0)
+
+
+def test_a_stalled_working_order_still_live_at_the_venue_is_refused(tmp_path: Path) -> None:
+    kernel, _clock, exit_id = _stalled_exit_kernel(tmp_path)
+    venue = _Venue(
+        open_orders=[{"orderLinkId": exit_id, "orderStatus": "PartiallyFilled", "orderId": "v9"}]
+    )
+
+    with pytest.raises(WedgedCommandResolutionRefused, match="still holds a working order"):
+        resolve_wedged_command(
+            kernel=kernel,
+            client=venue,
+            command_id=exit_id,
+            operator="owner",
+            reason="manual check",
+            authorize_absent=True,
+        )
+    assert kernel.state().orders[exit_id].status == "partially_filled"
+
+
+def test_a_terminal_order_has_no_wedge_to_resolve(tmp_path: Path) -> None:
+    kernel, _clock, exit_id = _stalled_exit_kernel(tmp_path)
+    resolve_wedged_command(
+        kernel=kernel,
+        client=_Venue(),
+        command_id=exit_id,
+        operator="owner",
+        reason="venue shows no open order and the position is flat",
+        authorize_absent=True,
+    )
+
+    with pytest.raises(WedgedCommandResolutionRefused, match="not a working order"):
+        resolve_wedged_command(
+            kernel=kernel,
+            client=_Venue(),
+            command_id=exit_id,
+            operator="owner",
+            reason="second attempt",
+            authorize_absent=True,
+        )

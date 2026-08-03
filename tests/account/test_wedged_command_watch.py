@@ -10,6 +10,8 @@ from liquidity_migration.account.wedged_command_watch import (
     DEFAULT_WEDGE_AFTER_NS,
     WEDGE_AMBIGUOUS_SUBMISSION,
     WEDGE_NEVER_SUBMITTED,
+    WEDGE_STALLED_WORKING_ORDER,
+    stalled_working_orders,
     wedged_commands,
 )
 
@@ -111,3 +113,34 @@ def test_the_bound_is_configurable_for_a_tighter_real_money_posture() -> None:
     order = _Order(created_ts_ns=NOW - 30 * SEC)
     assert wedged_commands([order], now_ns=NOW) == ()
     assert len(wedged_commands([order], now_ns=NOW, wedge_after_ns=10 * SEC)) == 1
+
+
+def test_a_stalled_venue_order_is_listed_separately_not_as_a_commanded_wedge() -> None:
+    """BANKUSDT 2026-08-01: partially filled exits whose venue side ended
+    without the terminal status ever reaching the journal."""
+
+    stalled = _Order(
+        status="partially_filled",
+        reduce_only=True,
+        created_ts_ns=NOW - DEFAULT_WEDGE_AFTER_NS - SEC,
+    )
+    assert wedged_commands([stalled], now_ns=NOW) == ()
+    found = stalled_working_orders([stalled], now_ns=NOW)
+    assert len(found) == 1
+    assert found[0].kind == WEDGE_STALLED_WORKING_ORDER
+
+    acked = _Order(
+        status="acknowledged",
+        created_ts_ns=NOW - DEFAULT_WEDGE_AFTER_NS - SEC,
+    )
+    assert stalled_working_orders([acked], now_ns=NOW)[0].kind == WEDGE_STALLED_WORKING_ORDER
+
+
+def test_stalled_listing_ignores_fresh_commanded_and_terminal_orders() -> None:
+    fresh = _Order(status="acknowledged", created_ts_ns=NOW - 1 * SEC)
+    commanded = _Order(created_ts_ns=NOW - DEFAULT_WEDGE_AFTER_NS - SEC)
+    terminal = _Order(
+        status="partially_filled_cancelled",
+        created_ts_ns=NOW - DEFAULT_WEDGE_AFTER_NS - SEC,
+    )
+    assert stalled_working_orders([fresh, commanded, terminal], now_ns=NOW) == ()

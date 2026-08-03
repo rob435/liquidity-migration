@@ -38,6 +38,8 @@ from liquidity_migration.account.wedged_command_watch import (
     DEFAULT_WEDGE_AFTER_NS,
     WEDGE_AMBIGUOUS_SUBMISSION,
     WEDGE_NEVER_SUBMITTED,
+    WEDGE_STALLED_WORKING_ORDER,
+    stalled_working_orders,
     wedged_commands,
 )
 
@@ -267,17 +269,17 @@ def resolve_wedged_command(
     order = state.orders.get(command_id)
     if order is None:
         raise WedgedCommandResolutionRefused(f"unknown command {command_id!r}")
-    if order.status != "commanded":
+    if order.status not in ("commanded", "acknowledged", "partially_filled"):
         raise WedgedCommandResolutionRefused(
-            f"command {command_id} is {order.status}, not commanded; there is no wedge to resolve"
+            f"command {command_id} is {order.status}, not a working order; "
+            "there is no wedge to resolve"
         )
     observed_ns = int(now_ns if now_ns is not None else kernel.clock.wall_time_ns())
     wedges = {
         wedge.command_id: wedge
-        for wedge in wedged_commands(
-            [order],
-            now_ns=observed_ns,
-            wedge_after_ns=wedge_after_ns,
+        for wedge in (
+            *wedged_commands([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
+            *stalled_working_orders([order], now_ns=observed_ns, wedge_after_ns=wedge_after_ns),
         )
     }
     wedge = wedges.get(command_id)
@@ -358,7 +360,10 @@ def describe_wedges(
 
     return tuple(
         f"{wedge.describe()} [{_KIND_ADVICE[wedge.kind]}]"
-        for wedge in wedged_commands(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns)
+        for wedge in (
+            *wedged_commands(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
+            *stalled_working_orders(orders, now_ns=now_ns, wedge_after_ns=wedge_after_ns),
+        )
     )
 
 
@@ -368,6 +373,9 @@ _KIND_ADVICE = {
     ),
     WEDGE_NEVER_SUBMITTED: (
         "journal-proven never dispatched; still probed before any resolution"
+    ),
+    WEDGE_STALLED_WORKING_ORDER: (
+        "venue-side order whose terminal status never arrived; a live probe refuses resolution"
     ),
 }
 
