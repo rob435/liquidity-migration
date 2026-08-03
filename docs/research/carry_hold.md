@@ -16,6 +16,10 @@ unchanged; v1/v2 keep scoring. Trade diagnostics:
 *(2026-07-31: **`lane2_carry_hold_v4` is registered and is the lead config**
 — see §0.1. v1/v2/v3 all keep scoring and are unchanged; a regression test
 pins that v4 moved nothing in them.)*
+*(2026-08-03: **v4 is PROMOTED to the demo CARRY sleeve** by owner override —
+producer profile `carry_hold_v4_live_v1`, promotion note and forward-record
+caveat (0 scored days at promotion) in
+`docs/research/strategy_program.md`, deploy receipt in `STATE.md`.)*
 
 ## 0. 2026-07-28 correction — read this before any number below
 

@@ -267,7 +267,7 @@ def continuous_profile_universe_inputs(continuous_config: object) -> dict[str, A
 
 
 def carry_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
-    """Pre-signal population for the CARRY sleeve (lane2_carry_hold_v3).
+    """Pre-signal population for the CARRY sleeve (lane2_carry_hold_v4).
 
     Runtime universe is the top 100 by trailing 24h turnover; enforcement uses a
     top-150 superset so rank churn cannot starve the book between freezes. The

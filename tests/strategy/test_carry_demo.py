@@ -2,10 +2,11 @@
 view, fail-closed data guards, diff-based target planner, account-owner publication.
 
 The integration tests replay the registered rule (``decide_book`` over
-``configs/lane2_carry_hold_v3.json``) on a deterministic synthetic market: period-3
-price pattern (ret_3d exactly 0 so the toxic-band filter never engages; 30d daily vol
-~6.5% so the dead-name floor passes) and 8h funding prints that are benign except for
-the named deep symbols.
+``configs/lane2_carry_hold_v4.json``) on a deterministic synthetic market: period-3
+price pattern (ret_3d exactly 0, outside v4's [-0.30, 0.0) toxic band because the
+high edge is exclusive; 30d daily vol ~6.5% so the dead-name floor passes) and 8h
+funding prints that are benign except for the named deep symbols — deep every
+settlement, so v4's crowding-persistence multiplier stays at full size.
 """
 
 from __future__ import annotations

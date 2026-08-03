@@ -1,7 +1,7 @@
 """CARRY sleeve decision engine: the crowd-fee collector.
 
 Computes the daily target book for the deployed carry sleeve by replaying
-the registered ``lane2_carry_hold_v3`` state machine over a rolling window
+the registered ``lane2_carry_hold_v4`` state machine over a rolling window
 of Bybit hourly data. The strategy logic is NOT reimplemented here: the
 engine calls the exact registered-scorer functions
 (:func:`liquidity_migration.research.backtest.financed_longs.carry_hold_weights` and friends)
@@ -18,8 +18,11 @@ window is re-captured on any bar where its funding print re-crosses the entry
 threshold (entry implies hold). There is no state file, so recovery from
 downtime of any length is a plain restart.
 
-``configs/lane2_carry_hold_v3.json`` is loaded only so the deployed parameters
-are byte-identical to the registered ones.
+``configs/lane2_carry_hold_v4.json`` is loaded only so the deployed parameters
+are byte-identical to the registered ones. (v3 → v4, promoted 2026-08-03 by
+owner decision: the toxic band's high edge moves to 0% and a crowding-persistence
+size multiplier zeroes names whose recent settlements were rarely deep. Both
+features live in the shared registered scorer, so the switch is the config file.)
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ MIN_REPLAY_DAYS = 45
 #: flattening a healthy book on a data hole. The real universe is 100 names.
 MIN_DECISION_SYMBOLS = 50
 
-CARRY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "lane2_carry_hold_v3.json"
+CARRY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "lane2_carry_hold_v4.json"
 
 
 class CarrySleeveError(RuntimeError):
@@ -107,7 +110,7 @@ class CarrySleeveError(RuntimeError):
 
 
 def load_carry_config(path: Path | None = None) -> CarryHoldConfig:
-    """The registered v3 parameters, byte-identical to the Lane-2 file."""
+    """The registered v4 parameters, byte-identical to the Lane-2 file."""
     return CarryHoldConfig.from_json(str(path or CARRY_CONFIG_PATH))
 
 
@@ -206,12 +209,19 @@ def decide_book(
 
 _logger = logging.getLogger(__name__)
 
+#: FROZEN persisted journal key, not a version claim: every carry reservation,
+#: component target and planning snapshot in the account journal is keyed by
+#: this string, and the diff machine below revises those components in place.
+#: Renaming it would strand the standing book behind an invisible identity.
+#: The deployed VERSION is ``CARRY_PROFILE_NAME`` (recorded on every cycle
+#: payload and target), plus ``CARRY_CONFIG_PATH``. Deployed v4 since
+#: 2026-08-03; the id keeps the lineage name it was born with.
 CARRY_STRATEGY_ID = "carry_hold_v3"
 #: One stable component per symbol. Unlike the continuous sleeve (one
 #: component per signal), carry manages a persistent per-symbol target that is
 #: revised in place, so the component key never needs a fresh identity.
 CARRY_COMPONENT_ID = "carry_hold"
-CARRY_PROFILE_NAME = "carry_hold_v3_live_v1"
+CARRY_PROFILE_NAME = "carry_hold_v4_live_v1"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"

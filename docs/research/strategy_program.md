@@ -39,11 +39,32 @@ one-off runners are retired.
   candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
   across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
   1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
-- **`lane2_carry_hold_v4` is registered (2026-07-31) and is NOT deployed.** The
-  CARRY sleeve still publishes v3. v4 adds a crowding-persistence size multiplier
-  and moves the toxic band's high edge to 0%; its claim is capital efficiency
-  (same money, ~30% less capital) and not return — at its own capital the paired
-  differential against v3 is t 0.47. Detail: `docs/research/carry_hold.md` §0.1.
+- **`lane2_carry_hold_v4` is PROMOTED to the demo CARRY sleeve (2026-08-03,
+  owner override).** v4 adds a crowding-persistence size multiplier and moves
+  the toxic band's high edge to 0%; its claim is capital efficiency (same
+  money, ~30% less capital) and not return — at its own capital the paired
+  differential against v3 is t 0.47. Detail: `docs/research/carry_hold.md`
+  §0.1. Promotion note (`governance.md` §3):
+  - **Claim:** v3's book on ~30% less capital; capital-normalised differential
+    vs v3 **+10.76 bp/day (t 3.23)** on seen data, own-capital +1.07 (t 0.47,
+    not significant); Sharpe 1.41 → 1.64 is the scale-free statement.
+  - **Config commit:** registered 2026-07-31
+    (`configs/lane2_carry_hold_v4.json`); producer switch is this commit
+    (`CARRY_PROFILE_NAME = carry_hold_v4_live_v1`; the journal strategy id
+    stays `carry_hold_v3` — a frozen lineage key, documented at the constant).
+  - **Forward record: 0 scored days.** The daily scorer has not run since v4
+    entered `DEFAULT_CONFIGS` (ledger ends at panel day 2026-07-27), so this
+    promotion rides on seen-data evidence and the owner's decision. v3 keeps
+    scoring as the primary comparator; the v4−v3 paired differential is the
+    experiment the forward record grades.
+  - **Decision:** owner, 2026-08-03 ("promote v4 to demo and live now").
+    Demo is done through the normal deploy flow; mainnet trades v4 whenever
+    the owner arms `REAL_MONEY` (separate door, `governance.md` §6).
+  - **Date:** 2026-08-03. Change point = the deploy receipt in `STATE.md`.
+  Migration: the producer's stateless replay recomputes the desired book under
+  v4 at the first post-deploy cycle, so the standing v3 book converges by
+  ordinary exit-first diffs (persistence-cut names exit, the rest resize); no
+  flatten, no stranded components.
 - **The settlement sawtooth program is CLOSED (2026-08-01; kill criteria 2
   and 4 fired).** The step is arbitrage-free by construction — slope 1.0340 on
   365,691 settlements, net to a long zero at every depth — and every trade
@@ -63,8 +84,9 @@ one-off runners are retired.
   funding-boundary convention understates carry configs by ~+0.5 bp/day at
   midnight, 24/24 phases (§4 there). The deployed ~00:20 fill stays as-is
   (H7: it saves ~42 bp per entry).
-- The publishing profiles are `lane2_carry_hold_v3` (CARRY) and
-  `LongV12WideStop` (LONG, since the 2026-08-03 rollout). `continuous_ensemble_v2` at revision
+- The publishing profiles are `lane2_carry_hold_v4` (CARRY, since the
+  2026-08-03 promotion) and `LongV12WideStop` (LONG, since the 2026-08-03
+  rollout). `continuous_ensemble_v2` at revision
   `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
   id predates the 2026-07-26 replacement and no longer implies an ensemble) was
   retired from demo and paper on 2026-07-29 by owner override and its code is

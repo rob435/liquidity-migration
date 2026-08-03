@@ -130,14 +130,17 @@ a separate methodology label `invalid` / `biased_benchmark` / `exploratory` deri
 taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
-## CARRY — `lane2_carry_hold_v3`
+## CARRY — `lane2_carry_hold_v4`
 
-> **`lane2_carry_hold_v4` is registered (2026-07-31) and is NOT what runs.** This
-> section describes the deployed sleeve, which is still v3. v4 moves the toxic
-> band's high edge to 0% and adds a crowding-persistence size multiplier; it is a
-> Lane-2 research registration accruing a forward record, and switching the
-> sleeve to it is a separate owner act through the normal deploy flow with a
-> recorded change point. Nothing in v4 changed v3 — a regression test pins that.
+> **Promoted 2026-08-03 by owner override** (previously v3; change point and
+> promotion note in [`strategy_program.md`](research/strategy_program.md), deploy
+> receipt in `STATE.md`). v4 moves the toxic band's high edge to 0% and adds a
+> crowding-persistence size multiplier — both live in the shared registered
+> scorer, so the producer switch is the config file plus the profile name
+> (`carry_hold_v4_live_v1`). The journal strategy id stays `carry_hold_v3`: a
+> frozen lineage key, not a version claim. v3 keeps scoring daily as the
+> primary comparator, and the v4−v3 paired differential is the registered
+> forward experiment. At promotion the forward record had **0 scored days**.
 > See [`carry_hold.md`](research/carry_hold.md) §0.1.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
@@ -150,14 +153,17 @@ Per-name hysteresis:
 | Enter | last settled funding print < −10 bp |
 | Exit (normalize) | print rises above −3 bp |
 | Exit (recovery) | trailing daily funding rate recovers > 30 bp over 2 days |
-| Block entry, suspend hold to zero weight | trailing 3d return in [−30%, −5%) |
+| Block entry, suspend hold to zero weight | trailing 3d return in [−30%, 0%) — v4 widened the high edge from −5% |
 | Block entry | trailing 30d daily vol < 5% |
+| Drop to zero weight (v4) | ≤ 10% of the name's last 20 settlements printed deeper than −10 bp — the isolated deep print is the book's one losing cohort |
 
 Null conditioning values fail open. The book is empty on 28% of days in the full record;
 flat is a state, not a fault.
 
-**Sizing.** `weight = 0.10 × clip(|trailing 24h settled funding| / 120bp-day, 0.25, 1.0)`,
-gross capped at 1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing
+**Sizing.** `weight = 0.10 × clip(|trailing 24h settled funding| / 120bp-day, 0.25, 1.0)
+× persistence` — the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it
+(a name with fewer than 20 settlements of history fails open at full size) — gross capped
+at 1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing
 equity is anchored to the decision, not the live mark — sizing off the live mark makes the
 day's target a function of the book's own unrealized P&L (2026-07-30: $84.7k traded against
 a ~$30k book in thirteen hours, zero strategy exits). A 5%-of-standing / $1 dead-band is
@@ -168,8 +174,9 @@ published exit-first. Entry intents expire 6h after the decision bar and are not
 inside the last 15 minutes of that window. A declared 35% stop backstops each position at
 the venue. No time stop.
 
-**Limits.** Concentrated (~3–4 names when active), long-only crash beta, single-venue Bybit
-evidence, capacity ~$1M at 1% participation. The registered daily frame exits every name
+**Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3
+and is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity
+~$1M at 1% participation. The registered daily frame exits every name
 24h before its final panel bar, worth roughly +0.13 Sharpe. The single-clock level is
 decision-hour lucky: the same construction over 12 daily offsets spans Sharpe 0.30–1.52 and
 midnight is the best cell. The three v3 filters were chosen in-sample in the review that
