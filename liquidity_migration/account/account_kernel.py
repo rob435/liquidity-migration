@@ -2095,6 +2095,10 @@ class AccountExecutionKernel:
                     "reference_price": _finite(market.reference_price, label="market reference_price"),
                     "bid_price": None if market.bid_price is None else _finite(market.bid_price, label="bid_price"),
                     "ask_price": None if market.ask_price is None else _finite(market.ask_price, label="ask_price"),
+                    # The displayed touch sizes size a resting entry's clip, so
+                    # the journal must carry the evidence the clip was cut from.
+                    "bid_qty": None if market.bid_qty is None else _finite(market.bid_qty, label="bid_qty"),
+                    "ask_qty": None if market.ask_qty is None else _finite(market.ask_qty, label="ask_qty"),
                     "book_sequence": market.book_sequence,
                     "source": market.source,
                     "metadata": json_safe(dict(market.metadata)),
