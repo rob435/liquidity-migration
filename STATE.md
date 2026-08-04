@@ -19,6 +19,33 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (morning) — First funded night: no trades (legitimately), two
+  faults found and fixed, quote recipe confirmed by the full night fit.**
+  The 00:20 UTC carry decision failed for 42 minutes on both fleets
+  ("decision bar carries 6 universe symbols") and healed itself at 01:00;
+  the recovered decision was an empty book — cash — and demo decided
+  identically on a healthy 100-symbol universe, so the funded account
+  held no positions and the first maker-share receipts wait for the first
+  non-empty book. Root cause: `get_klines` treats its end as exclusive
+  while two callers pass inclusive bar-open windows, so the newest closed
+  hourly bar could never be fetched by REST — the cycle's tail fetch
+  returned zero rows every cycle (`kline_fetch_symbols=105`,
+  `kline_fetched_rows=0`) and the kline-store bootstrap could never fill
+  its newest target bar (`failed=36` on every restart). Normally the WS
+  stream's own confirm covers the tail invisibly; the 23:50 redeploy
+  restart left store holes the reader refuses to serve, and at 00:20 the
+  daily decision needed exactly the bar REST could not supply. Both call
+  sites fixed (+1 bar at the boundary), regression-tested both ways
+  (`event_demo_data.py`, `kline_stream_manager.py`). Second fault the same
+  night: the funded owner paged CRITICAL at 00:03 refusing a one-cent
+  equity rebase — the mainnet dials pin the gross cap at exactly
+  reference × max leverage, and the rescale's floating-point rounding sat
+  a hair above the strict bound (~1 cent value in 10 fails); the envelope
+  re-proof now carries the same micro-USDT tolerance the other checks
+  already had (`operational_profile.py`). The overnight quote lab
+  completed all eight segments; the full fit (n=12,656) validates the
+  Sell side and keeps the shipped 15s/120s recipe unchanged —
+  `docs/research/research_findings.md` §1 has the per-arm table.
 - **2026-08-04 (early) — Entries rest at the touch instead of crossing the
   spread (owner instruction, first funded night; money landed in the Unified
   Trading account the same hour).** Both account owners now create an

@@ -22,9 +22,13 @@ one-off runners are retired.
   (`docs/research/research_findings.md` §1). **This is an execution change
   point for both sleeves' forward records**: entry fills should turn
   maker-heavy and entry prices move from crossing to the touch. Change point =
-  this commit; deploy receipt in `STATE.md`. The full per-arm model fit from
-  the complete overnight run (Sell side + the other four arms) remains the
-  morning task and may retune the recipe.
+  this commit; deploy receipt in `STATE.md`. **The full night fit is done
+  (2026-08-04 morning, n=12,656 across all six arms plus a repeat): the
+  recipe stays as shipped.** The Sell side quotes as well as the Buy side
+  (the short entries carry makes are covered), the slower 30s/180s arm ties
+  on cost while exceeding the owner's 120 s sibling-batch budget, and the
+  10s/60s no-chase arm is rejected. Per-arm table and the three recorded
+  decisions in `docs/research/research_findings.md` §1.
 - **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
   authority `docs/research/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
   prospective — earlier verdicts stand as recorded. Because it no longer controls

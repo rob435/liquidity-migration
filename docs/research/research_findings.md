@@ -138,8 +138,34 @@ entry moments, and quoting loses on tight-spread books — which is why the ship
 least two ticks and ~1 bp of quoted spread. **Shipped 2026-08-04**: both account owners now rest entries at
 the touch on exactly this arm's recipe with a bounded cross at the deadline (change point in
 `strategy_program.md`); entry fills journal `is_maker` per fill, so the live maker share accrues as
-receipts from the first night. The remaining overnight segments (Sell side, chase 4/0, reprice 30/10,
-timeout 180/60) are the morning fit that may retune the recipe.
+receipts from the first night.
+
+**The full night is fitted (2026-08-04: eight segments, n=12,656 attempts — all six arms plus a base-arm
+repeat).** One uniform accounting throughout: a fill costs its observed price against the decision mid plus
+the observed 2.0 bp maker fee; an unfilled or rejected attempt is priced as if we then paid up at the
+end-of-window touch plus the 5.5 bp taker fee. Per arm (fill rate, all-in mean cost per side):
+
+| arm (side, reprice, window) | fill % | time-to-fill (median) | all-in mean | taker basis |
+| --- | --- | --- | --- | --- |
+| Buy 15s/120s — shipped (runs 1, 2) | 69.2% / 71.2% | ~42s | 4.56 / 4.63 bp | 7.1 bp |
+| Sell 15s/120s (runs 1, 2) | 62.2% / 67.3% | ~41s | 4.99 / 4.10 bp | 7.0 bp |
+| Buy/Sell 30s/180s, chase 4 | 78.6% / 79.3% | ~42s | 4.68 / 4.41 bp | 7.1 bp |
+| Buy/Sell 10s/60s, no chase | 53.3% / 45.0% | ~30s | 5.52 / 5.93 bp | 7.2 bp |
+
+Three decisions follow. (1) **The Sell side works as well as the Buy side** — the mechanism is now
+validated for the short entries carry actually makes. (2) **The shipped 15s/120s recipe stays.** The
+30s/180s arm ties it on cost (the differences are inside one standard error at these sample sizes); its
+higher passive share is paid for with worse per-fill prices (2.3 vs 1.8 bp) and more price movement against
+the fill afterwards, and a 180 s window does not fit inside the account owner's 120 s sibling-batch
+freshness budget — it is the measured-but-unadopted candidate if that budget is ever widened. The
+10s/60s no-chase arm is rejected: fills collapse below 55%. (3) **No isolated reprice-interval read
+exists** — the 30 s reprice only ever ran with the 180 s window, so nothing can be claimed about reprice
+cadence alone. The live fleet should do slightly better than these numbers: where the lab rejected a
+would-cross quote and waited out the window, the fleet sends a market order at decision time instead,
+which on average beats paying up at the drifted end-of-window touch. First live maker-share grade: none
+yet — carry's 2026-08-04 decision was legitimately cash (demo decided identically on a healthy
+100-symbol universe) and LONG made no entries, so the first funded receipts wait for the first
+non-empty book.
 
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
 `LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
