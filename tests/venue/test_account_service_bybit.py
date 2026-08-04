@@ -396,29 +396,101 @@ def test_snapshot_provider_names_the_realm_in_its_wallet_faults() -> None:
         provider.current(batch_id="b1")
 
 
-def test_snapshot_provider_names_an_all_blank_account_wide_row() -> None:
-    """The named refusal only reaches a fully blank row; a partial one keeps the
-    per-field message, so neither text may claim a venue account mode.
+def test_snapshot_provider_reads_the_coin_row_when_aggregates_blank() -> None:
+    """The venue blanks the account-wide margin aggregates in some unified
+    margin modes (observed live 2026-08-04 on the funded mainnet account)
+    while the per-coin row stays populated; the snapshot falls back to it.
     """
 
     clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
     account = {
-        "totalEquity": "",
+        "totalEquity": "1417.03752928",
+        "totalWalletBalance": "1417.03752928",
+        "totalPerpUPL": "0",
+        "totalAvailableBalance": "",
+        "totalMarginBalance": "",
+        "totalInitialMargin": "",
+        "totalMaintenanceMargin": "",
+        "accountIMRate": "",
+        "coin": [
+            {
+                "coin": "USDT",
+                "equity": "1417.00057425",
+                "walletBalance": "1417.00057425",
+                "unrealisedPnl": "0",
+                "totalOrderIM": "10.5",
+                "totalPositionIM": "6.5",
+                "locked": "0",
+            }
+        ],
+    }
+
+    snapshot = BybitAccountSnapshotProvider(
+        _MainnetWalletClient(account), clock=clock
+    ).current(batch_id="b1")
+
+    assert snapshot.equity_usdt == 1417.03752928
+    assert snapshot.available_margin_usdt == pytest.approx(1417.00057425 - 17.0)
+
+
+def test_snapshot_provider_charges_unrealized_losses_never_gains() -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
+    base = {
+        "totalEquity": "100",
         "totalAvailableBalance": "",
         "totalMarginBalance": "",
         "totalInitialMargin": "",
     }
-    provider = BybitAccountSnapshotProvider(_MainnetWalletClient(account), clock=clock)
+    coin = {
+        "coin": "USDT",
+        "walletBalance": "100",
+        "totalOrderIM": "10",
+        "totalPositionIM": "0",
+        "locked": "0",
+    }
 
-    with pytest.raises(RuntimeError, match="blanks every account-wide field"):
+    losing = BybitAccountSnapshotProvider(
+        _MainnetWalletClient({**base, "coin": [{**coin, "unrealisedPnl": "-30"}]}),
+        clock=clock,
+    ).current(batch_id="b1")
+    winning = BybitAccountSnapshotProvider(
+        _MainnetWalletClient({**base, "coin": [{**coin, "unrealisedPnl": "30"}]}),
+        clock=clock,
+    ).current(batch_id="b1")
+
+    assert losing.available_margin_usdt == pytest.approx(60.0)
+    assert winning.available_margin_usdt == pytest.approx(90.0)
+
+
+def test_snapshot_provider_fails_closed_when_nothing_numeric_remains() -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
+    all_blank = {
+        "totalEquity": "",
+        "totalWalletBalance": "",
+        "totalPerpUPL": "",
+        "totalAvailableBalance": "",
+        "totalMarginBalance": "",
+        "totalInitialMargin": "",
+    }
+
+    provider = BybitAccountSnapshotProvider(_MainnetWalletClient(all_blank), clock=clock)
+    with pytest.raises(RuntimeError, match="carries no numeric equity"):
         provider.current(batch_id="b1")
 
-    partial = BybitAccountSnapshotProvider(
-        _MainnetWalletClient({**account, "totalEquity": "100", "totalMarginBalance": "100"}),
+    # Equity resolves but every available-margin rung is blank, including a
+    # coin row missing its margin deductions: refuse rather than default them.
+    no_available = BybitAccountSnapshotProvider(
+        _MainnetWalletClient(
+            {
+                **all_blank,
+                "totalEquity": "100",
+                "coin": [{"coin": "USDT", "walletBalance": "100", "unrealisedPnl": "0"}],
+            }
+        ),
         clock=clock,
     )
-    with pytest.raises(RuntimeError, match="Bybit totalInitialMargin is missing/non-numeric"):
-        partial.current(batch_id="b1")
+    with pytest.raises(RuntimeError, match="carries no numeric available margin"):
+        no_available.current(batch_id="b1")
 
 
 def test_account_owner_startup_requires_order_submit_permission() -> None:

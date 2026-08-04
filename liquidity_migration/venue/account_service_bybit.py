@@ -23,16 +23,6 @@ from liquidity_migration.account.execution_adapters import (
 from liquidity_migration.account.market_capture import SequenceAwareMarketRecorder
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm
 
-#: All four blank means the UNIFIED row carries no account-level equity at all.
-#: Which venue account or margin modes produce that is unverified here.
-ACCOUNT_WIDE_WALLET_FIELDS = (
-    "totalEquity",
-    "totalAvailableBalance",
-    "totalMarginBalance",
-    "totalInitialMargin",
-)
-
-
 def require_named_realm(client: Any, *, label: str) -> VenueRealm:
     """Read the realm a private client names, refusing an unnamed or unparsable one."""
 
@@ -52,6 +42,82 @@ def _finite(value: Any, *, label: str) -> float:
     if not math.isfinite(output):
         raise RuntimeError(f"Bybit {label} is non-finite")
     return output
+
+
+def _finite_or_none(value: Any) -> float | None:
+    try:
+        output = float(value)
+    except (TypeError, ValueError):
+        return None
+    return output if math.isfinite(output) else None
+
+
+def _usdt_coin_row(account: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    coins = account.get("coin")
+    if not isinstance(coins, list):
+        return None
+    for row in coins:
+        if isinstance(row, Mapping) and str(row.get("coin") or "").upper() == "USDT":
+            return row
+    return None
+
+
+def _account_equity(account: Mapping[str, Any], *, realm: VenueRealm) -> float:
+    """Account equity, preferring the venue's account-wide figure.
+
+    The venue blanks the account-wide aggregates in some unified-account
+    margin modes (observed live 2026-08-04 on the funded account) while the
+    per-coin row stays populated, so each rung falls through only on blank
+    fields — a rung never mixes numeric and defaulted values.
+    """
+
+    equity = _finite_or_none(account.get("totalEquity"))
+    if equity is not None:
+        return equity
+    wallet = _finite_or_none(account.get("totalWalletBalance"))
+    perp_upl = _finite_or_none(account.get("totalPerpUPL"))
+    if wallet is not None and perp_upl is not None:
+        return wallet + perp_upl
+    coin = _usdt_coin_row(account)
+    if coin is not None:
+        coin_equity = _finite_or_none(coin.get("equity"))
+        if coin_equity is not None:
+            return coin_equity
+    raise RuntimeError(
+        f"Bybit {realm.value} UNIFIED wallet carries no numeric equity "
+        "(totalEquity, totalWalletBalance+totalPerpUPL, and the USDT coin row all blank)"
+    )
+
+
+def _available_margin(account: Mapping[str, Any], *, realm: VenueRealm) -> float:
+    available = _finite_or_none(account.get("totalAvailableBalance"))
+    if available is not None:
+        return available
+    margin_balance = _finite_or_none(account.get("totalMarginBalance"))
+    initial_margin = _finite_or_none(account.get("totalInitialMargin"))
+    if margin_balance is not None and initial_margin is not None:
+        return margin_balance - initial_margin
+    coin = _usdt_coin_row(account)
+    if coin is not None:
+        wallet = _finite_or_none(coin.get("walletBalance"))
+        order_im = _finite_or_none(coin.get("totalOrderIM"))
+        position_im = _finite_or_none(coin.get("totalPositionIM"))
+        locked = _finite_or_none(coin.get("locked"))
+        upl = _finite_or_none(coin.get("unrealisedPnl"))
+        if (
+            wallet is not None
+            and order_im is not None
+            and position_im is not None
+            and locked is not None
+            and upl is not None
+        ):
+            # Charge unrealized losses, never count unrealized gains.
+            return wallet + min(0.0, upl) - order_im - position_im - locked
+    raise RuntimeError(
+        f"Bybit {realm.value} UNIFIED wallet carries no numeric available margin "
+        "(totalAvailableBalance, totalMarginBalance-totalInitialMargin, "
+        "and the USDT coin row all blank)"
+    )
 
 
 class CapturedBybitMarketProvider:
@@ -121,19 +187,8 @@ class BybitAccountSnapshotProvider:
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], Mapping):
             raise RuntimeError(f"Bybit {self.realm.value} wallet response has no UNIFIED account row")
         account = rows[0]
-        if all(account.get(field) in (None, "") for field in ACCOUNT_WIDE_WALLET_FIELDS):
-            raise RuntimeError(
-                f"Bybit {self.realm.value} UNIFIED row blanks every account-wide field "
-                f"({', '.join(ACCOUNT_WIDE_WALLET_FIELDS)}); the owner cannot size against it"
-            )
-        equity = _finite(account.get("totalEquity"), label="totalEquity")
-        available_raw = account.get("totalAvailableBalance")
-        if available_raw in (None, ""):
-            margin_balance = _finite(account.get("totalMarginBalance"), label="totalMarginBalance")
-            initial_margin = _finite(account.get("totalInitialMargin"), label="totalInitialMargin")
-            available = margin_balance - initial_margin
-        else:
-            available = _finite(available_raw, label="totalAvailableBalance")
+        equity = _account_equity(account, realm=self.realm)
+        available = _available_margin(account, realm=self.realm)
         if equity <= 0.0 or available < 0.0:
             raise RuntimeError(
                 f"Bybit {self.realm.value} wallet snapshot has nonpositive equity or negative available margin"
