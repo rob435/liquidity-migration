@@ -19,6 +19,36 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (afternoon, late) — The funded account was emptied through the
+  venue's own website, the wallet reader broke on the account's new payload
+  shape, and the fix is committed (`48ebc50`, not yet deployed — the next
+  owner redeploy carries it).** Three CRITICAL pages (11:44–13:46 UTC) said
+  the mainnet owner was blocked on "totalMarginBalance is missing/non-numeric"
+  with equity going stale. Two separate things happened. (1) At ~11:42 UTC
+  Bybit began blanking every account-wide margin total in the funded account's
+  wallet response (a documented unified-account margin-mode behavior; the
+  per-coin USDT row stays populated) — the snapshot parser only knew the
+  account-wide fields, so every capital refresh crashed. It now reads the
+  coin row when the totals are blank, charges unrealized losses but never
+  counts gains, and still fails closed naming what was blank when nothing
+  numeric remains. (2) The venue's own transaction log shows the money left
+  by hand: 11:48 UTC −999.2 USDT transfer out + a 999 USDT on-chain
+  withdrawal to BSC `0x23d3…1250` in the same second (the address that
+  received 3,940.99 USDT from this account on Aug 2, before the fleet was
+  funded), then 13:11 UTC the remaining 419.27 USDT self-transferred out,
+  leaving 0.00002922 USDT. The API key holds no transfer/withdraw
+  permission (probed: refused), so this was the account login, i.e. the
+  owner's own hand — **owner to confirm; if these withdrawals are not
+  yours, treat the venue login as compromised immediately.** Until the
+  redeploy, the mainnet owner keeps paging hourly; after it, the owner will
+  truthfully report the ~0.04 USDT equity and the envelope/loss controls
+  react as designed. The 14:39 UTC disk warnings (80%, both fleets) were
+  ~1.7 GB of stale CI temp dirs, two old comparator tarballs, and the pip
+  cache — deleted, disk 80% → 75% (9.0 GB free). The remaining growth is
+  the quote-lab tape (17 GB, ~1 GB/h while its two capture processes run;
+  they self-stop at 6 GB free, and two replay jobs were actively reading
+  the tape, so it was left untouched — owner decision: stop the capture,
+  compress finished days, or accept the warning returning within ~a day).
 - **2026-08-04 (evening) — The resting-entry recipe was upgraded from the
   quote-forge lab's full-night replay (third execution change point; not
   yet deployed — next owner redeploy carries it).** Entries now place by
