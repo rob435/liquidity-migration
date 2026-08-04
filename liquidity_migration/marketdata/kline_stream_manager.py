@@ -517,10 +517,15 @@ class KlineStreamManager:
         call acquires once. A manual acquire-per-symbol under-counted the multi-page
         fetches and let bootstrap run at ~2x the per-IP budget (ratelimit-rest-1)."""
         last_exc: Exception | None = None
+        # ``end_ms`` is the newest CLOSED bar's open (inclusive intent), while
+        # get_klines' end is EXCLUSIVE — without the +interval the bootstrap
+        # can never fetch its newest target bar, and a symbol missing only
+        # that bar re-fetches zero rows on every restart (live 2026-08-04).
+        interval_ms = self.interval_minutes * 60_000
         for attempt in range(max(self.bootstrap_max_attempts_per_symbol, 1)):
             try:
                 rows = self.market_data.get_klines(
-                    symbol, str(self.interval_minutes), start_ms, end_ms,
+                    symbol, str(self.interval_minutes), start_ms, end_ms + interval_ms,
                 )
                 bars = [_kline_row_to_bar_dict(row) for row in rows]
                 return self._store.bootstrap_symbol(symbol, bars)

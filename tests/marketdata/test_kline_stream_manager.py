@@ -239,6 +239,53 @@ def test_bootstrap_skips_symbols_with_full_window_coverage_after_recovery(tmp_pa
         manager.stop()
 
 
+def test_bootstrap_fetches_the_newest_closed_bar(tmp_path: Path) -> None:
+    """A symbol missing ONLY the newest closed bar must gain it at bootstrap.
+
+    The bootstrap window's ``end_ms`` is the newest closed bar's open
+    (inclusive intent) while get_klines' end is exclusive — without +interval
+    at the call site the fetch returns zero new rows, the one-bar gap survives
+    every restart, and the 00:20 daily decision starves whenever the WS
+    confirm is missing (live 2026-08-04).
+    """
+    now_ms = int(time.time() * 1000)
+    newest_closed_open_ms = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
+    window_start_ms = newest_closed_open_ms - 5 * 24 * MS_PER_HOUR
+
+    pre_store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    for ts in range(window_start_ms, newest_closed_open_ms, MS_PER_HOUR):
+        pre_store.add_bar(
+            "BTCUSDT",
+            {"start": ts, "open": "1", "high": "1",
+             "low": "1", "close": "1", "volume": "1", "turnover": "1"},
+            confirmed=True,
+        )
+    pre_store.flush_to_disk()
+
+    def _exclusive_end_klines(symbol, interval, start, end):
+        # Mirrors BybitMarketData.get_klines: rows strictly below ``end``.
+        return [_bar_row(ts, close=1.0) for ts in range(start, end, MS_PER_HOUR)]
+
+    manager, _pool, market = _build_manager(
+        tmp_path=tmp_path,
+        initial_symbols=["BTCUSDT"],
+        kline_factory=_exclusive_end_klines,
+    )
+    stats = manager.start()
+    try:
+        assert market.kline_calls == ["BTCUSDT"]
+        assert stats["bootstrap"]["symbols_succeeded"] == 1
+        assert stats["bootstrap"]["symbols_failed"] == 0
+        frame = manager.store().get_klines(
+            ["BTCUSDT"],
+            start_ms=newest_closed_open_ms,
+            end_ms=newest_closed_open_ms,
+        )
+        assert frame.height == 1
+    finally:
+        manager.stop()
+
+
 def test_bootstrap_does_not_skip_symbol_with_only_latest_hour(tmp_path: Path) -> None:
     """The bootstrap skip keys on ``coverage_in_window``, not ``coverage_through``:
     otherwise a restart with a flush file holding one hour leaves the store on a tiny

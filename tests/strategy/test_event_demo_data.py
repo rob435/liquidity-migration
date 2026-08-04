@@ -60,9 +60,11 @@ def test_demo_kline_cache_avoids_refetching_complete_window(tmp_path: Path) -> N
     assert first.height == 6
     assert first_stats["fetch_symbols"] == 2
     assert first_stats["fetched_rows"] == 6
+    # The reader's window is inclusive over bar opens; the client call adds
+    # one hour because get_klines' end is exclusive.
     assert market.calls == [
-        ("AAAUSDT", "60", 0, 2 * MS_PER_HOUR),
-        ("BBBUSDT", "60", 0, 2 * MS_PER_HOUR),
+        ("AAAUSDT", "60", 0, 3 * MS_PER_HOUR),
+        ("BBBUSDT", "60", 0, 3 * MS_PER_HOUR),
     ]
     cached = read_dataset(tmp_path, "event_demo_klines_1h")
     assert cached.height == 6
@@ -110,7 +112,10 @@ def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
         cache_root=tmp_path,
     )
 
-    assert market.calls == [("AAAUSDT", "60", 2 * MS_PER_HOUR, 2 * MS_PER_HOUR)]
+    # A tail-only range [2h, 2h] must still fetch the 2h bar: exclusive-end
+    # get_klines gets end+1h, or the newest closed bar is unreachable (the
+    # 2026-08-04 00:20 decision starvation).
+    assert market.calls == [("AAAUSDT", "60", 2 * MS_PER_HOUR, 3 * MS_PER_HOUR)]
     assert updated.height == 3
     assert stats["cache_rows"] == 2
     assert stats["fetch_symbols"] == 1

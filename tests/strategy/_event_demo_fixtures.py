@@ -15,9 +15,11 @@ class FakeKlineMarket:
         self, symbol: str, interval: str, start: int, end: int
     ) -> list[list[str]]:
         self.calls.append((symbol, interval, start, end))
+        # ``end`` is EXCLUSIVE, matching BybitMarketData.get_klines — an
+        # inclusive fake here would hide a caller that drops the tail bar.
         return [
             [str(ts_ms), "100", "110", "90", "105", "1.5", "157.5"]
-            for ts_ms in range(start, end + 1, MS_PER_HOUR)
+            for ts_ms in range(start, end, MS_PER_HOUR)
         ]
 
 
