@@ -19,6 +19,27 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (evening) — The resting-entry recipe was upgraded from the
+  quote-forge lab's full-night replay (third execution change point; not
+  yet deployed — next owner redeploy carries it).** Entries now place by
+  the displayed touch sizes (improve into the spread when the book leans
+  toward the entry, rest one tick behind when it leans hard against, join
+  otherwise), never rest behind the touch past half the window, improve
+  near the end, and cross early when the mid has run against the entry past
+  twice the half-spread-plus-taker-fee; the 15 s staleness reprice is gone
+  (chasing a retreating market surrendered queue position for nothing). The
+  quote manager now reads the owner's own reconstructed book (free, carries
+  sizes) instead of REST tickers. Selected on 199,785 queue-honest paired
+  replay attempts over the full overnight tape: −0.36 bp/entry vs the
+  shipped recipe (t −11.1), deadline crosses halved, and the churn
+  alternatives measured worse — evidence in
+  `docs/research/research_findings.md` §1, change point in
+  `strategy_program.md`, the lab itself at `~/Desktop/quote-forge`. Demo
+  probes there also proved the demo realm's matching engine holds phantom
+  internal liquidity (post-only at the published touch dies ~80% there), so
+  demo fill numbers overstate nothing for this change — grading stays with
+  funded `is_maker` receipts.
+
 - **2026-08-04 (afternoon) — Owner's one-click redeploy landed; whole fleet
   on `544bee0` since 10:59 UTC** (all units restarted together: both carry
   producers, both LONG producers, both account owners, Telegram controls).

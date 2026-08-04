@@ -198,6 +198,34 @@ depth-tape measurement. Caveat: one overnight hour, 22 symbols; the numbers are 
 fill model — reprice amends also lose queue priority, which this bound ignores and which bites harder
 at size.
 
+**The entry recipe was rebuilt in a standalone execution lab and upgraded (2026-08-04, quote-forge;
+change point in `strategy_program.md`).** The lab replayed the full overnight order-book tape (34 symbols,
+199,785 paired attempts) through seven candidate recipes with a queue-honest fill model: every recipe saw
+the same decision instants, a resting order only fills when recorded trades clear the queue ahead of it or
+the market trades through it, and an unfilled window ends by paying the far touch — so each attempt is one
+all-in number. The winner stacks three measured mechanisms on the shipped recipe: place by the displayed
+touch sizes (improve one tick inside when the book leans toward the entry, rest one tick behind when it
+leans hard against — joining a touch that is about to trade buys the adverse fill), escalate with the clock
+(never behind the touch past half the window, improve near the end), and cross early once the mid has run
+against the entry by twice the half-spread-plus-taker-fee. Against the shipped join-and-reprice recipe:
+**−0.36 bp per entry (t = −11.1), deadline crosses halved (6.9% vs 13.5%), median fill 15.5 s vs 19.8 s,
+and the least price movement against the fill afterwards** — winning in every spread and lean bucket,
+strongest exactly where carry trades (illiquid names, 2–8 tick spreads), flat and never negative on
+liquid one-tick books. Three negative results are as load-bearing as the win: gluing the quote to every
+touch move is *worse* than the shipped recipe (+0.09 bp, t +4.5 — every reprice rejoins the back of the
+queue), a trade-flow toxicity brake is worse (+0.13, t +6.0), and one-dial retunes of the winner all tie
+or lose, so the recipe ships on its measured defaults. A cadence check ran the winner with evaluations
+throttled to the owner loop's pace: 89% of the edge survives at 3 s — which is why the fleet integration
+is a policy change inside the existing quote manager, not new execution infrastructure. Two lab-method
+findings correct earlier numbers: the demo realm's matching engine holds internal liquidity its published
+book does not show (post-only orders at the published touch die ~80% of the time there; the overnight
+lab's 2,777 `rejected_would_cross` terminals were this, and its fill rates therefore *understate* the
+fleet's GTC path), and maker fees are per-symbol (2.0 bp on most lab names, 4.0 bp observed on TLMUSDT),
+so the flat 2.0 bp in the replay accounting is optimistic on the 4 bp names. Live receipts, tape, and the
+lab itself: `~/Desktop/quote-forge` (FINDINGS.md, INTEGRATION.md); the demo probes there grade engine
+mechanics only — the first honest queue-economics grade stays with the funded account's own `is_maker`
+receipts.
+
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
 `LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
 2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `STATE.md`). All ~20 v11a quirks were ablated

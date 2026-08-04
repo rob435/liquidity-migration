@@ -114,6 +114,7 @@ def build_manager(
     window: float = 120.0,
     clip_fraction: float = 1.0,
     min_clip_notional: float = 100.0,
+    touch_source: Any = None,
 ) -> tuple[EntryQuoteManager, FakeClient, FakeKernel, FakeClock]:
     client = client or FakeClient()
     kernel = kernel or FakeKernel()
@@ -129,6 +130,7 @@ def build_manager(
         kernel=kernel,
         clock=clock,
         entry_stop_verifier=verifier,
+        touch_source=touch_source,
     )
     return manager, client, kernel, clock
 
@@ -189,6 +191,125 @@ def test_fill_runs_deferred_stop_verification_once() -> None:
     clock.tick(120.0 + 2 * 20.0 + 1.0)
     manager.advance()
     assert not manager.symbol_has_active_quote("LAUSDT")
+
+
+def test_plan_places_by_book_lean() -> None:
+    manager, _, _, _ = build_manager()
+    # The book leans toward the buy (bid-heavy): improve one tick inside.
+    assert (
+        manager.plan_entry_quote(
+            symbol="LAUSDT", is_buy=True, bid=0.0376, ask=0.0380, bid_qty=900.0, ask_qty=100.0
+        )
+        == "0.0377"
+    )
+    # The book leans hard against the buy (ask-heavy): rest one tick behind.
+    assert (
+        manager.plan_entry_quote(
+            symbol="LAUSDT", is_buy=True, bid=0.0376, ask=0.0380, bid_qty=100.0, ask_qty=900.0
+        )
+        == "0.0375"
+    )
+    # Balanced, or without displayed sizes: join the touch, as always.
+    assert (
+        manager.plan_entry_quote(
+            symbol="LAUSDT", is_buy=True, bid=0.0376, ask=0.0380, bid_qty=500.0, ask_qty=500.0
+        )
+        == "0.0376"
+    )
+    assert manager.plan_entry_quote(symbol="LAUSDT", is_buy=True, bid=0.0376, ask=0.0380) == "0.0376"
+    # Mirrored for a sell.
+    assert (
+        manager.plan_entry_quote(
+            symbol="LAUSDT", is_buy=False, bid=0.0376, ask=0.0380, bid_qty=100.0, ask_qty=900.0
+        )
+        == "0.0379"
+    )
+
+
+def test_drift_against_the_entry_crosses_before_the_deadline() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(
+        command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376, decision_mid=0.0378
+    )
+    # The market runs far above the decision mid: waiting has already cost
+    # more than the spread, so the quote crosses well before the 120 s end.
+    client.tickers["LAUSDT"] = (0.0390, 0.0394)
+    clock.tick(10.0)
+    manager.advance()
+    quote = manager._quotes[order.command_id]
+    assert quote.crossed
+    assert len(client.amends) == 1
+    assert float(client.amends[0]["price"]) >= 0.0394
+
+
+def test_without_a_decision_mid_the_drift_cross_stays_off() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    client.tickers["LAUSDT"] = (0.0390, 0.0394)
+    clock.tick(10.0)
+    manager.advance()
+    quote = manager._quotes[order.command_id]
+    assert not quote.crossed  # it rejoined the touch instead
+    assert client.amends and client.amends[0]["price"] == "0.039"
+
+
+def test_adverse_lean_holds_back_early_then_urgency_joins_and_improves() -> None:
+    # Ask-heavy book: the resting buy placed one tick behind stays there
+    # early, joins the touch past half the window, improves near the end.
+    touch = {"value": (0.0378, 0.0382, 100.0, 900.0)}
+    manager, client, kernel, clock = build_manager(touch_source=lambda _s: touch["value"])
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0377)
+
+    clock.tick(10.0)
+    manager.advance()
+    assert client.amends == []  # behind the touch on purpose, early window
+
+    clock.tick(55.0)  # past urgency_join_frac
+    manager.advance()
+    assert client.amends == [{"symbol": "LAUSDT", "orderLinkId": "cmd-1", "price": "0.0378"}]
+
+    clock.tick(40.0)  # past urgency_improve_frac (105 s of 120)
+    manager.advance()
+    assert client.amends[-1]["price"] == "0.0379"
+
+
+def test_favorable_lean_jumps_the_queue_from_the_touch() -> None:
+    touch = {"value": (0.0378, 0.0382, 900.0, 100.0)}
+    manager, client, kernel, clock = build_manager(touch_source=lambda _s: touch["value"])
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0378)
+    clock.tick(5.0)
+    manager.advance()
+    assert client.amends == [{"symbol": "LAUSDT", "orderLinkId": "cmd-1", "price": "0.0379"}]
+    # Once inside the spread and ahead of the displayed touch, hold.
+    clock.tick(5.0)
+    manager.advance()
+    assert len(client.amends) == 1
+
+
+def test_touch_source_outranks_the_rest_fallback() -> None:
+    manager, client, kernel, clock = build_manager(
+        touch_source=lambda _s: (0.0380, 0.0384, 500.0, 500.0)
+    )
+    client.tickers["LAUSDT"] = (0.0300, 0.0304)  # stale REST would mislead
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    clock.tick(5.0)
+    manager.advance()
+    assert client.amends == [{"symbol": "LAUSDT", "orderLinkId": "cmd-1", "price": "0.038"}]
 
 
 def test_reprice_chases_only_toward_the_market() -> None:

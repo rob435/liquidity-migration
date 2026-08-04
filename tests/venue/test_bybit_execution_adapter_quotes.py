@@ -235,7 +235,10 @@ def test_big_entry_rests_only_the_clip_the_touch_can_absorb() -> None:
     observations = list(
         adapter.submit_prepared(
             entry_command(signed_qty=100_000.0),
-            market_input(bid_qty=1_200.0, ask_qty=50.0),
+            # Near-balanced touch sizes: placement joins the bid, keeping this
+            # test about the clip (a strong lean would improve a tick and
+            # shift the price the clip floor divides by).
+            market_input(bid_qty=1_200.0, ask_qty=1_100.0),
         )
     )
 

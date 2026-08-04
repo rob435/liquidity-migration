@@ -940,6 +940,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     snapshot_provider = BybitAccountSnapshotProvider(private_client)
+
+    def _recorder_touch(symbol: str) -> tuple[float, float, float, float] | None:
+        """The owner's own reconstructed book: touch with displayed sizes."""
+
+        book = recorder.current_book(symbol, depth=1)
+        if book is None or book.sequence_gap or not book.bids or not book.asks:
+            return None
+        best_bid, best_ask = book.bids[0], book.asks[0]
+        if best_bid.price <= 0.0 or best_ask.price <= best_bid.price:
+            return None
+        return best_bid.price, best_ask.price, best_bid.qty, best_ask.qty
+
     entry_quotes = (
         EntryQuoteManager(
             private_client,
@@ -952,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
             kernel=kernel,
             clock=SystemClock(),
             entry_stop_verifier=native_protection.verify_entry_attached_stop,
+            touch_source=_recorder_touch,
         )
         if args.entry_quote_window_seconds > 0.0
         else None

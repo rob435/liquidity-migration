@@ -5,8 +5,17 @@ the near touch (its price never worse than the market order it replaces would
 have started from). This manager then advances every resting entry on the
 account owner's normal loop cadence, so nothing ever blocks the owner:
 
-- while resting, amend the order to the touch when the touch moves away
-  (every ``reprice_seconds``, at most ``max_amends`` times);
+- placement reads the displayed touch sizes: when the book leans toward the
+  entry, rest one tick inside the spread (the market is about to leave);
+  when it leans hard against, rest one tick behind the touch (joining a
+  touch that is about to trade buys the adverse fill); otherwise join;
+- while resting, chase only toward the market (a touch that fell away left
+  our order alone at the front — the best place to be), improve when the
+  book starts leaning our way, and escalate with the clock: past half the
+  window never rest behind the touch, near the end improve into the spread;
+- when the mid has already run against the entry by more than twice the
+  half-spread-plus-taker-fee, cross immediately — the market has proven the
+  wait more expensive than the spread;
 - when the window closes, amend the price through the far touch so the
   remainder fills as a taker at a bounded price;
 - if the cross cannot clear the remainder inside ``cross_grace_seconds``,
@@ -16,10 +25,15 @@ account owner's normal loop cadence, so nothing ever blocks the owner:
 
 Exits (reduce-only commands) never rest; they stay market orders.
 
-The recipe mirrors the arm measured on the 2026-08-03 overnight quote lab
-(Buy, reprice 15s, timeout 120s, n=1,586 attempts over 34 symbols): 70.4%
-passive fill rate, median time-to-fill 41.6s, median all-in cost 1.9 bp
-against the fleet's measured 7.78 bp taker basis.
+Change point 2026-08-04 (quote-forge lab): the lean/urgency/drift recipe
+replaced the 15 s staleness reprice after a 34-symbol full-night replay of
+recorded books (199,785 paired attempts, queue-honest fill bounds) measured
+it 0.36 bp/entry cheaper than the join-and-reprice control (t = -11) with
+deadline crosses halved, and a cadence check showed 89% of that edge
+survives a 3 s evaluation loop — this loop. The original 2026-08-03
+overnight-lab numbers for the control (70.4% fill, median 41.6 s, 1.9 bp
+vs the 7.78 bp taker basis) understate GTC reality: that lab ran PostOnly
+into the demo realm's phantom internal liquidity.
 
 Restart safety: quotes live in memory, but every pass re-scans the kernel's
 working entry commands and adopts any resting venue limit it is not tracking,
@@ -51,6 +65,13 @@ class EntryStopVerifier(Protocol):
     def __call__(self, *, symbol: str, expected_stop_price: float, command_id: str) -> str: ...
 
 
+class TouchSource(Protocol):
+    """Current touch with displayed sizes: (bid, ask, bid_qty, ask_qty),
+    or None while the book is unhealthy or one-sided."""
+
+    def __call__(self, symbol: str) -> tuple[float, float, float, float] | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class EntryQuoteConfig:
     """Knobs for the resting-entry lifecycle. ``window_seconds <= 0`` disables
@@ -67,11 +88,26 @@ class EntryQuoteConfig:
     stretch one entry into hundreds of windows."""
 
     window_seconds: float = 120.0
-    reprice_seconds: float = 15.0
+    reprice_seconds: float = 3.0
     cross_grace_seconds: float = 20.0
     max_amends: int = 8
     clip_touch_fraction: float = 1.0
     min_clip_notional_usdt: float = 100.0
+    # Book-lean placement (displayed touch share minus one half, from the
+    # entry's chair). ``improve_lean``: at or above this, rest one tick
+    # inside the spread. ``back_lean``: at or above this magnitude against
+    # us, rest one tick behind the touch. Either 0 disables that behavior.
+    improve_lean: float = 0.15
+    back_lean: float = 0.15
+    # Urgency: past ``urgency_join_frac`` of the window never rest behind
+    # the touch; past ``urgency_improve_frac`` improve when the spread allows.
+    urgency_join_frac: float = 0.5
+    urgency_improve_frac: float = 0.85
+    # Cross early once the mid has run against the entry by more than
+    # 2 x (half-spread + this fee); 0 disables the early cross. Measured on
+    # the quote-forge night replay: making this trigger MORE sensitive was
+    # the only clearly harmful dial.
+    drift_cross_fee_bp: float = 5.5
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.window_seconds):
@@ -86,6 +122,14 @@ class EntryQuoteConfig:
             raise ValueError("entry clip_touch_fraction must be finite and non-negative")
         if not math.isfinite(self.min_clip_notional_usdt) or self.min_clip_notional_usdt < 0.0:
             raise ValueError("entry min_clip_notional_usdt must be finite and non-negative")
+        for name in ("improve_lean", "back_lean", "drift_cross_fee_bp"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"entry quote {name} must be finite and non-negative")
+        for name in ("urgency_join_frac", "urgency_improve_frac"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"entry quote {name} must be inside [0, 1]")
 
     @property
     def enabled(self) -> bool:
@@ -100,6 +144,8 @@ class _QuoteState:
     price: float
     deadline_ns: int
     last_reprice_ns: int
+    window_start_ns: int = 0
+    decision_mid: float = 0.0
     amend_count: int = 0
     crossed: bool = False
     cross_deadline_ns: int = 0
@@ -132,6 +178,7 @@ class EntryQuoteManager:
         kernel: Any,
         clock: Clock,
         entry_stop_verifier: EntryStopVerifier | None = None,
+        touch_source: TouchSource | None = None,
     ) -> None:
         self.client = client
         self.config = config
@@ -140,6 +187,9 @@ class EntryQuoteManager:
         self.kernel = kernel
         self.clock = clock
         self.entry_stop_verifier = entry_stop_verifier
+        # The owner's own reconstructed book (free, carries displayed sizes);
+        # REST tickers remain the fallback and carry no sizes.
+        self.touch_source = touch_source
         self._quotes: dict[str, _QuoteState] = {}
         # Working entry commands probed once and found to be non-resting
         # (a market order in flight, or a venue row not yet visible).
@@ -153,6 +203,24 @@ class EntryQuoteManager:
         tick = float(getattr(rule, "tick_size", 0.0) or 0.0)
         return tick if math.isfinite(tick) and tick > 0.0 else 0.0
 
+    @staticmethod
+    def _lean(is_buy: bool, bid_qty: float | None, ask_qty: float | None) -> float | None:
+        """Displayed touch share from the entry's chair: positive = the book
+        leans toward the entry filling late (price about to move away),
+        negative = the touch is about to trade into us. None without sizes."""
+
+        if bid_qty is None or ask_qty is None:
+            return None
+        try:
+            bid_size, ask_size = float(bid_qty), float(ask_qty)
+        except (TypeError, ValueError):
+            return None
+        total = bid_size + ask_size
+        if not math.isfinite(total) or total <= 0.0 or bid_size < 0.0 or ask_size < 0.0:
+            return None
+        share = bid_size / total
+        return share - 0.5 if is_buy else 0.5 - share
+
     def plan_entry_quote(
         self,
         *,
@@ -160,11 +228,16 @@ class EntryQuoteManager:
         is_buy: bool,
         bid: float | None,
         ask: float | None,
+        bid_qty: float | None = None,
+        ask_qty: float | None = None,
     ) -> str | None:
-        """The near-touch limit price, or None when quoting cannot help here.
+        """The resting limit price, or None when quoting cannot help here.
 
         Every None falls back to the exact market order the fleet sent before
-        this module existed.
+        this module existed. Placement is by book lean when the displayed
+        touch sizes are known: improve into the spread when the book leans
+        toward the entry, rest one tick behind the touch when it leans hard
+        against, join the touch otherwise (and always, without sizes).
         """
 
         if not self.config.enabled:
@@ -173,7 +246,7 @@ class EntryQuoteManager:
         if tick <= 0.0:
             return None
         if bid is None or ask is None:
-            bid, ask = self._touch(symbol)
+            bid, ask, bid_qty, ask_qty = self._touch(symbol)
             if bid is None or ask is None:
                 return None
         if not (math.isfinite(bid) and math.isfinite(ask)) or bid <= 0.0 or ask <= bid:
@@ -182,6 +255,15 @@ class EntryQuoteManager:
         mid = (ask + bid) / 2.0
         if spread < MIN_SPREAD_TICKS * tick or spread / mid < MIN_SPREAD_FRACTION:
             return None
+        lean = self._lean(is_buy, bid_qty, ask_qty)
+        if lean is not None and self.config.improve_lean > 0.0 and lean >= self.config.improve_lean:
+            # The spread gate above guarantees one tick inside stays a maker.
+            improved = bid + tick if is_buy else ask - tick
+            return snap_price_text(improved, tick, round_up=not is_buy)
+        if lean is not None and self.config.back_lean > 0.0 and lean <= -self.config.back_lean:
+            behind = bid - tick if is_buy else ask + tick
+            if behind > 0.0:
+                return snap_price_text(behind, tick, round_up=not is_buy)
         # Buy rests at the bid, sell at the ask; snapping toward the inside of
         # the book can never produce a price that crosses.
         return snap_price_text(bid if is_buy else ask, tick, round_up=not is_buy)
@@ -244,8 +326,10 @@ class EntryQuoteManager:
         symbol: str,
         is_buy: bool,
         price: float,
+        decision_mid: float | None = None,
     ) -> None:
         now_ns = self.clock.wall_time_ns()
+        mid = float(decision_mid or 0.0)
         self._quotes[command_id] = _QuoteState(
             command_id=command_id,
             symbol=symbol.upper(),
@@ -253,6 +337,8 @@ class EntryQuoteManager:
             price=price,
             deadline_ns=now_ns + int(self.config.window_seconds * 1e9),
             last_reprice_ns=now_ns,
+            window_start_ns=now_ns,
+            decision_mid=mid if math.isfinite(mid) and mid > 0.0 else 0.0,
         )
 
     # ------------------------------------------------------------------
@@ -298,11 +384,30 @@ class EntryQuoteManager:
     def _order_state(self, command_id: str) -> Any | None:
         return self.kernel._state_ref().orders.get(command_id)
 
-    def _touch(self, symbol: str) -> tuple[float | None, float | None]:
+    def _touch(
+        self, symbol: str
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        """(bid, ask, bid_qty, ask_qty). The owner's own reconstructed book
+        first (free, carries sizes); REST tickers as the fallback (no sizes)."""
+
+        if self.touch_source is not None:
+            try:
+                touch = self.touch_source(symbol)
+            except Exception:  # noqa: BLE001 - the REST fallback still answers
+                touch = None
+            if touch is not None:
+                bid, ask, bid_qty, ask_qty = touch
+                if (
+                    math.isfinite(bid)
+                    and math.isfinite(ask)
+                    and bid > 0.0
+                    and ask > bid
+                ):
+                    return bid, ask, bid_qty, ask_qty
         try:
             rows = self.client.get_tickers(symbol=symbol)
         except Exception:  # noqa: BLE001 - a failed read just skips this reprice
-            return None, None
+            return None, None, None, None
         for row in rows or []:
             if str(row.get("symbol") or "").upper() != symbol.upper():
                 continue
@@ -310,11 +415,11 @@ class EntryQuoteManager:
                 bid = float(row.get("bid1Price") or 0.0)
                 ask = float(row.get("ask1Price") or 0.0)
             except (TypeError, ValueError):
-                return None, None
+                return None, None, None, None
             if bid > 0.0 and ask > bid:
-                return bid, ask
-            return None, None
-        return None, None
+                return bid, ask, None, None
+            return None, None, None, None
+        return None, None, None, None
 
     def _adopt_untracked(self) -> None:
         """Track any working entry command whose resting limit this process
@@ -369,6 +474,9 @@ class EntryQuoteManager:
                 price=price,
                 deadline_ns=created_ns + int(self.config.window_seconds * 1e9),
                 last_reprice_ns=now_ns,
+                window_start_ns=created_ns,
+                # No decision mid survives the restart; the drift-cross stays
+                # off for adopted quotes and the window-end cross bounds them.
                 metadata={"adopted_after_restart": True},
             )
             _logger.warning(
@@ -421,34 +529,95 @@ class EntryQuoteManager:
         if now_ns - quote.last_reprice_ns < int(self.config.reprice_seconds * 1e9):
             return
         quote.last_reprice_ns = now_ns
-        if quote.amend_count >= self.config.max_amends:
-            return
         tick = self.tick_size(quote.symbol)
         if tick <= 0.0:
             return
-        bid, ask = self._touch(quote.symbol)
+        bid, ask, bid_qty, ask_qty = self._touch(quote.symbol)
         if bid is None or ask is None:
             return
-        # Chase only toward the market. A touch that moved the other way left
-        # our order alone at the front of the book — the best place to be.
-        if quote.is_buy:
-            if bid <= quote.price + tick * 0.5:
+        # The market has already run past the price of crossing: stop paying
+        # for patience and take the far touch now, bounded exactly like the
+        # window-end cross.
+        if self.config.drift_cross_fee_bp > 0.0 and quote.decision_mid > 0.0:
+            mid = (bid + ask) / 2.0
+            drift_bp = (mid - quote.decision_mid) / quote.decision_mid * 1e4
+            against_bp = drift_bp if quote.is_buy else -drift_bp
+            half_spread_bp = (ask - bid) / 2.0 / mid * 1e4
+            if against_bp >= 2.0 * (half_spread_bp + self.config.drift_cross_fee_bp):
+                self._cross(quote, now_ns)
                 return
-            new_price = snap_price_text(bid, tick, round_up=False)
-        else:
-            if ask >= quote.price - tick * 0.5:
-                return
-            new_price = snap_price_text(ask, tick, round_up=True)
+        if quote.amend_count >= self.config.max_amends:
+            return
+        new_price = self._desired_price(quote, now_ns, tick, bid, ask, bid_qty, ask_qty)
+        if new_price is None or abs(float(new_price) - quote.price) < tick * 0.5:
+            return
         if self._amend(quote, new_price):
             quote.price = float(new_price)
             quote.amend_count += 1
+
+    def _desired_price(
+        self,
+        quote: _QuoteState,
+        now_ns: int,
+        tick: float,
+        bid: float,
+        ask: float,
+        bid_qty: float | None,
+        ask_qty: float | None,
+    ) -> str | None:
+        """Where this quote should rest right now, or None to hold.
+
+        A touch that fell away left our order alone at the front of the book
+        — the best place to be, so never chase toward a retreating market.
+        Everything else escalates: rejoin when overtaken, jump the queue when
+        the book leans our way and there is spread to jump into, never rest
+        behind the touch past half the window, improve outright near the end.
+        """
+
+        touch = bid if quote.is_buy else ask
+        can_improve = (ask - bid) >= MIN_SPREAD_TICKS * tick
+        improved = bid + tick if quote.is_buy else ask - tick
+        window_ns = int(self.config.window_seconds * 1e9)
+        start_ns = quote.window_start_ns or (quote.deadline_ns - window_ns)
+        elapsed = (
+            min(1.0, max(0.0, (now_ns - start_ns) / window_ns)) if window_ns > 0 else 1.0
+        )
+        lean = self._lean(quote.is_buy, bid_qty, ask_qty)
+        half = tick * 0.5
+        ahead = quote.price > touch + half if quote.is_buy else quote.price < touch - half
+        behind = quote.price < touch - half if quote.is_buy else quote.price > touch + half
+
+        def text(price: float) -> str:
+            return snap_price_text(price, tick, round_up=not quote.is_buy)
+
+        wants_improve = (
+            lean is not None
+            and self.config.improve_lean > 0.0
+            and lean >= self.config.improve_lean
+            and can_improve
+        )
+        if elapsed >= self.config.urgency_improve_frac and can_improve and not ahead:
+            return text(improved)
+        if behind:
+            stay_back = (
+                lean is not None
+                and self.config.back_lean > 0.0
+                and lean <= -self.config.back_lean
+                and elapsed < self.config.urgency_join_frac
+            )
+            if stay_back:
+                return None
+            return text(improved) if wants_improve else text(touch)
+        if not ahead and wants_improve:
+            return text(improved)
+        return None
 
     def _cross(self, quote: _QuoteState, now_ns: int) -> None:
         """Amend through the far touch: the remainder fills as a taker at a
         price bounded by the far touch, unlike the unbounded market order."""
 
         tick = self.tick_size(quote.symbol)
-        bid, ask = self._touch(quote.symbol)
+        bid, ask, _bid_qty, _ask_qty = self._touch(quote.symbol)
         far = ask if quote.is_buy else bid
         if tick <= 0.0 or far is None:
             # Cannot price a bounded cross right now; retry next pass until

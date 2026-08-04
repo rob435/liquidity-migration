@@ -249,6 +249,8 @@ class BybitDemoExecutionAdapter:
                 is_buy=command.signed_qty > 0.0,
                 bid=market_input.bid_price,
                 ask=market_input.ask_price,
+                bid_qty=market_input.bid_qty,
+                ask_qty=market_input.ask_qty,
             )
         except Exception:  # noqa: BLE001 - quoting must never block an entry
             return None
@@ -346,11 +348,20 @@ class BybitDemoExecutionAdapter:
             # the fallback proof, exactly as it does for a repaired stop.
             verification = "deferred_resting_quote"
             if self.entry_quotes is not None and not idempotent_existing_order:
+                decision_mid = None
+                if (
+                    market_input.bid_price is not None
+                    and market_input.ask_price is not None
+                    and market_input.bid_price > 0.0
+                    and market_input.ask_price > market_input.bid_price
+                ):
+                    decision_mid = (market_input.bid_price + market_input.ask_price) / 2.0
                 self.entry_quotes.register(
                     command_id=command.command_id,
                     symbol=command.symbol,
                     is_buy=command.signed_qty > 0.0,
                     price=float(quote_price),
+                    decision_mid=decision_mid,
                 )
         else:
             verification = self._verify_entry_attached_stop(command)
