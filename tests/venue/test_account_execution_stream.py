@@ -658,3 +658,35 @@ def test_two_commands_sharing_a_venue_order_id_resolve_to_no_command(tmp_path: P
         local_receive_ts_ns=1_210_000_000,
     )
     assert kernel.state().executions == {}
+
+
+def test_clip_sized_order_fills_terminal_below_the_commanded_qty(tmp_path: Path) -> None:
+    """A resting entry clipped to the displayed touch places LESS than its
+    command on purpose (2026-08-04 sizing program). The venue's Filled for
+    that smaller order must terminate the command — waiting for fills to
+    reach the commanded quantity parks the terminal forever and stalls the
+    slice loop (observed live on the first clip, 2026-08-04)."""
+
+    kernel, command_id = _command(tmp_path)
+    kernel.record_ack(
+        command_id=command_id,
+        accepted=True,
+        venue_order_id="venue-1",
+        exchange_ts_ns=1_150_000_000,
+        local_ack_ts_ns=1_151_000_000,
+    )
+    consumer = BybitAccountExecutionConsumer(kernel=kernel)
+    # The clip (1 of the commanded 2) fills completely...
+    consumer.on_execution(_execution(command_id), local_receive_ts_ns=1_212_000_000)
+    # ...and the venue closes ITS order.
+    consumer.on_order({"data": [{
+        "orderLinkId": command_id,
+        "orderStatus": "Filled",
+        "cumExecQty": "1",
+        "updatedTime": "1210",
+    }]}, local_receive_ts_ns=1_213_000_000)
+
+    state = kernel.state()
+    assert command_id not in consumer.pending_terminal
+    assert state.orders[command_id].status == "filled"
+    assert state.working_signed_qty("BUSDT") == 0.0

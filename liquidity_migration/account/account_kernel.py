@@ -458,10 +458,22 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             # gate. An absolute epsilon rejects the venue's own Filled row for
             # large multi-fill orders, and the raise happens inside the journal
             # transaction, so the retry loop would never converge.
-            if abs(order.filled_signed_qty - order.signed_qty) > quantity_tolerance(order.signed_qty):
+            tolerance = quantity_tolerance(order.signed_qty)
+            reconstructed = abs(order.filled_signed_qty)
+            cumulative = abs(float(payload.get("cumulative_filled_qty") or 0.0))
+            # The venue's Filled closes ITS order. A clip-sized resting entry
+            # places less than the command on purpose (2026-08-04 sizing
+            # program), so the reconstruction must cover the venue's own
+            # cumulative — not the commanded quantity. Events without a
+            # cumulative keep the original commanded-quantity rule they were
+            # written under.
+            required = cumulative if cumulative > 0.0 else abs(order.signed_qty)
+            if reconstructed + tolerance < required:
                 raise AccountTransitionError("filled status precedes reconstructed executions")
-            # Snap so residual float error cannot accumulate across later reads.
-            order.filled_signed_qty = order.signed_qty
+            if abs(reconstructed - abs(order.signed_qty)) <= tolerance:
+                # Snap so residual float error cannot accumulate across later
+                # reads; only when the fills really span the whole command.
+                order.filled_signed_qty = order.signed_qty
         order.status = status
         order.rejection_key = str(payload.get("rejection_key") or order.rejection_key)
         order.terminal_status_recorded = True

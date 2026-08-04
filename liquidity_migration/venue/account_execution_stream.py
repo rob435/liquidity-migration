@@ -500,8 +500,12 @@ class BybitAccountExecutionConsumer:
         if key in self._terminal_recorded:
             self.pending_terminal.pop(command_id, None)
             return
-        if terminal.status == "filled" and reconstructed + tolerance < abs(order.signed_qty):
-            return
+        # No commanded-quantity check here: a clip-sized resting entry places
+        # LESS than the command on purpose (2026-08-04 sizing program), so a
+        # venue "Filled" whose fills are all ingested (the guard above) is
+        # terminal for ITS order regardless of the command's larger quantity.
+        # Live 2026-08-04: the old ``reconstructed < command qty`` wait parked
+        # the first clip's terminal forever and stalled the slice loop.
         self.kernel.record_order_status(
             command_id=command_id,
             status=terminal.status,
