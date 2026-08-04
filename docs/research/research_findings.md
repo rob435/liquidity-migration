@@ -179,9 +179,16 @@ the queue-wait bound ((queue + clip) ÷ same-side print flow) runs 2–26 minute
 window, and the bounded cross at the deadline would then have to walk a book whose first level holds
 ~50 USDT. Two conclusions and one refusal follow. (1) The shipped mechanism is correctly sized for the
 current envelope and does not need retuning for it. (2) It does NOT scale much past ~1–2× today's
-clips on the illiquid half — before the wallet grows materially, entries there need slicing (several
-sequential quote windows per name, or resting size capped at a fraction of displayed depth). That is a
-design change: proposed here, not built, the owner decides. (3) A large-size test on the demo account
+clips on the illiquid half — big entries there need slicing. **Built the same day at owner direction
+("prepare for big sizing, up to 5,000 USDT notional"):** each quote window now rests at most the
+quantity already displayed at the touch (floored at 100 USDT per window so a near-empty book cannot
+stretch one entry into hundreds of windows), the command ends its window with the shortfall
+un-ordered, and the owner's convergence machinery plans the next window — a retry that made progress
+no longer spends the retry budget, so a 5,000 USDT entry arrives as a sequence of touch-sized windows
+(~2.5 min each) instead of one order thirty times the queue. Deep books are untouched: when the touch
+absorbs the whole command, nothing is capped. Dials: `--entry-clip-touch-fraction` (0 disables) and
+`--entry-clip-min-notional-usdt`. The mechanism is built and tested but has zero live receipts at
+size — grading starts when real entries exercise it. (3) A large-size test on the demo account
 would not be evidence: demo fills are simulated against real prints with no queue position, so a big
 resting order fills far too easily — the only honest large-clip receipts are funded ones, or more
 depth-tape measurement. Caveat: one overnight hour, 22 symbols; the numbers are a scale check, not a

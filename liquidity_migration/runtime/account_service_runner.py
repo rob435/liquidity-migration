@@ -612,6 +612,27 @@ def main(argv: list[str] | None = None) -> int:
             "2026-08-03 overnight quote lab measured at a 70%% passive fill rate."
         ),
     )
+    parser.add_argument(
+        "--entry-clip-touch-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Rest at most this fraction of the quantity already displayed at "
+            "the touch per quote window (0 disables clipping). A larger entry "
+            "arrives as a sequence of touch-sized windows via convergence "
+            "re-planning; measured 2026-08-04, the thin half of the universe "
+            "displays only 23-181 USDT at the touch."
+        ),
+    )
+    parser.add_argument(
+        "--entry-clip-min-notional-usdt",
+        type=float,
+        default=100.0,
+        help=(
+            "Floor for one window's resting clip, so a near-empty touch "
+            "cannot stretch one entry into hundreds of windows."
+        ),
+    )
     parser.add_argument("--idle-seconds", type=float, default=0.1)
     parser.add_argument(
         "--confirm-demo-orders",
@@ -654,6 +675,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-unsubmitted-exposure-age-seconds must be positive and finite")
     if not math.isfinite(args.entry_quote_window_seconds) or args.entry_quote_window_seconds < 0.0:
         parser.error("--entry-quote-window-seconds must be zero or a positive finite number")
+    if not math.isfinite(args.entry_clip_touch_fraction) or args.entry_clip_touch_fraction < 0.0:
+        parser.error("--entry-clip-touch-fraction must be zero or a positive finite number")
+    if not math.isfinite(args.entry_clip_min_notional_usdt) or args.entry_clip_min_notional_usdt < 0.0:
+        parser.error("--entry-clip-min-notional-usdt must be zero or a positive finite number")
     if not math.isfinite(args.continuous_cycle_max_age_minutes) or args.continuous_cycle_max_age_minutes <= 0.0:
         parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
@@ -918,7 +943,11 @@ def main(argv: list[str] | None = None) -> int:
     entry_quotes = (
         EntryQuoteManager(
             private_client,
-            config=EntryQuoteConfig(window_seconds=args.entry_quote_window_seconds),
+            config=EntryQuoteConfig(
+                window_seconds=args.entry_quote_window_seconds,
+                clip_touch_fraction=args.entry_clip_touch_fraction,
+                min_clip_notional_usdt=args.entry_clip_min_notional_usdt,
+            ),
             instrument_rules=rules,
             kernel=kernel,
             clock=SystemClock(),

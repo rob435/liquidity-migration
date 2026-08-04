@@ -112,13 +112,19 @@ def build_manager(
     verifier: Any = None,
     tick: float = 0.0001,
     window: float = 120.0,
+    clip_fraction: float = 1.0,
+    min_clip_notional: float = 100.0,
 ) -> tuple[EntryQuoteManager, FakeClient, FakeKernel, FakeClock]:
     client = client or FakeClient()
     kernel = kernel or FakeKernel()
     clock = clock or FakeClock()
     manager = EntryQuoteManager(
         client,
-        config=EntryQuoteConfig(window_seconds=window),
+        config=EntryQuoteConfig(
+            window_seconds=window,
+            clip_touch_fraction=clip_fraction,
+            min_clip_notional_usdt=min_clip_notional,
+        ),
         instrument_rules=rules_for("LAUSDT", tick),
         kernel=kernel,
         clock=clock,
@@ -163,7 +169,7 @@ def test_fill_runs_deferred_stop_verification_once() -> None:
         calls.append(kwargs)
         return "armed"
 
-    manager, _, kernel, _ = build_manager(verifier=verifier)
+    manager, _, kernel, clock = build_manager(verifier=verifier)
     order = working_entry()
     kernel.state.orders[order.command_id] = order
     kernel.state.working_order_ids.add(order.command_id)
@@ -177,6 +183,11 @@ def test_fill_runs_deferred_stop_verification_once() -> None:
     assert len(calls) == 1
     assert calls[0]["expected_stop_price"] == pytest.approx(0.03)
     assert calls[0]["command_id"] == order.command_id
+    # The terminal state outlives the fill until the probe horizon (so a
+    # sliced entry's exemption never flickers), then expires.
+    assert manager.symbol_has_active_quote("LAUSDT")
+    clock.tick(120.0 + 2 * 20.0 + 1.0)
+    manager.advance()
     assert not manager.symbol_has_active_quote("LAUSDT")
 
 
@@ -229,8 +240,14 @@ def test_deadline_crosses_at_a_bounded_price_then_cancels_the_remainder() -> Non
     manager.advance()
     assert client.cancels == ["cmd-1"]
 
-    # The venue cancel lands through the stream; the quote is then dropped.
+    # The venue cancel lands through the stream; the state is retained (the
+    # convergence exemption covers the gap to the next clip) and dropped once
+    # past the probe horizon.
     order.status = "partially_filled_cancelled"
+    manager.advance()
+    assert "cmd-1" in manager._quotes
+    assert manager.symbol_has_active_quote("LAUSDT")
+    clock.tick(30.0)
     manager.advance()
     assert "cmd-1" not in manager._quotes
 
@@ -304,3 +321,81 @@ def test_active_quote_probe_expires_after_window_and_grace() -> None:
     assert not manager.symbol_has_active_quote("OTHERUSDT")
     clock.tick(120.0 + 2 * 20.0 + 1.0)
     assert not manager.symbol_has_active_quote("LAUSDT")
+
+
+def test_clip_caps_a_large_entry_to_the_displayed_touch() -> None:
+    manager, _, _, _ = build_manager()
+    # 120 units displayed at the bid: the commanded 1,000 rests as 120.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=1000.0, price=1.0,
+        bid_qty=120.0, ask_qty=9999.0,
+    ) == "120"
+    # A resting sell joins the ask queue, so it reads the ask size.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=False, command_qty=1000.0, price=1.0,
+        bid_qty=9999.0, ask_qty=120.0,
+    ) == "120"
+
+
+def test_clip_floor_stops_a_near_empty_touch_from_making_dust_windows() -> None:
+    manager, _, _, _ = build_manager()
+    # 3 units displayed, floor 100 USDT at price 1.0 -> clip 100 units.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=1000.0, price=1.0,
+        bid_qty=3.0, ask_qty=3.0,
+    ) == "100"
+
+
+def test_clip_places_the_full_command_when_blind_disabled_or_not_needed() -> None:
+    manager, _, _, _ = build_manager()
+    # No displayed size to read.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=1000.0, price=1.0,
+        bid_qty=None, ask_qty=None,
+    ) is None
+    # The touch absorbs the whole command.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=100.0, price=1.0,
+        bid_qty=5000.0, ask_qty=5000.0,
+    ) is None
+    disabled, _, _, _ = build_manager(clip_fraction=0.0)
+    assert disabled.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=1000.0, price=1.0,
+        bid_qty=120.0, ask_qty=120.0,
+    ) is None
+
+
+def test_clip_never_strands_a_venue_minimum_remainder() -> None:
+    manager, _, _, _ = build_manager()
+    # min_notional is 5 at price 1.0: a 104 command capped at 100 would leave
+    # a 4-unit tail no future order could place, so the whole command rests.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=104.0, price=1.0,
+        bid_qty=100.0, ask_qty=100.0,
+    ) is None
+    # A 105 command leaves a viable 5-unit tail and is capped.
+    assert manager.plan_entry_clip(
+        symbol="LAUSDT", is_buy=True, command_qty=105.0, price=1.0,
+        bid_qty=100.0, ask_qty=100.0,
+    ) == "100"
+
+
+def test_terminal_quote_keeps_the_probe_alive_until_the_horizon() -> None:
+    manager, _, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    # The clip's order terminates 140s in (cross grace exhausted, cancelled).
+    clock.tick(140.0)
+    kernel.state.orders[order.command_id] = working_entry(
+        status="partially_filled_cancelled", filled=40.0
+    )
+    manager.advance()
+    # The convergence exemption must cover the seconds between this window
+    # and the next clip's create, so the state survives its own terminal.
+    assert manager.symbol_has_active_quote("LAUSDT")
+    clock.tick(25.0)  # past window + 2x cross grace
+    manager.advance()
+    assert not manager.symbol_has_active_quote("LAUSDT")
+    assert manager._quotes == {}

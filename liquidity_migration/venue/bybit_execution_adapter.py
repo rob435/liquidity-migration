@@ -264,7 +264,20 @@ class BybitDemoExecutionAdapter:
         params = self._order_params(command)
         quote_price = self._entry_quote_price(command, market_input)
         execution_style = "market"
+        clip_qty: str | None = None
         if quote_price is not None:
+            if self.entry_quotes is not None:
+                try:
+                    clip_qty = self.entry_quotes.plan_entry_clip(
+                        symbol=command.symbol,
+                        is_buy=command.signed_qty > 0.0,
+                        command_qty=command.qty,
+                        price=float(quote_price),
+                        bid_qty=market_input.bid_qty,
+                        ask_qty=market_input.ask_qty,
+                    )
+                except Exception:  # noqa: BLE001 - clipping must never block an entry
+                    clip_qty = None
             params.update(
                 {
                     "orderType": "Limit",
@@ -272,6 +285,11 @@ class BybitDemoExecutionAdapter:
                     "timeInForce": "GTC",
                 }
             )
+            if clip_qty is not None:
+                # Rest only what the displayed touch can absorb; the command
+                # terminates at the window end with the shortfall un-ordered
+                # and convergence plans the next window.
+                params["qty"] = clip_qty
             execution_style = "resting_quote"
         # Measures the create-order request only; leverage negotiation sits
         # outside request/ack RTT but inside command-decision-to-socket delay.
@@ -353,6 +371,9 @@ class BybitDemoExecutionAdapter:
             metadata["entry_quote_window_seconds"] = (
                 self.entry_quotes.config.window_seconds if self.entry_quotes is not None else 0.0
             )
+            if clip_qty is not None:
+                metadata["entry_clip_qty"] = clip_qty
+                metadata["entry_commanded_qty"] = command.qty
         return (
             ExecutionObservation(
                 observation_type=ExecutionObservationType.ACK,

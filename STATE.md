@@ -19,6 +19,25 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (midday) — Big entries arrive as touch-sized windows (owner:
+  "prepare for big sizing, up to 5,000 USDT notional").** A resting entry
+  now rests at most the quantity already displayed at the touch (bid size
+  for a buy, ask size for a sell; floor 100 USDT per window), the command
+  terminates its window with the shortfall un-ordered, and convergence
+  plans the next window — with two supporting changes that make the loop
+  first-class: a convergence retry that made progress (any fill since the
+  last attempt, ordered by journal sequence) no longer spends the
+  3-attempt retry budget or grows the backoff, and a finished window's
+  quote state survives until its probe horizon so the health exemption
+  covers the seconds between windows. Each window carries its own attached
+  stop and journals `entry_clip_qty` beside the commanded quantity. Deep
+  books are untouched (no cap when the touch absorbs the command); the
+  market path, exits, and resizes-down are unchanged. Dials
+  `--entry-clip-touch-fraction` (0 disables) and
+  `--entry-clip-min-notional-usdt`. Motivating measurement (depth tape,
+  22 symbols): the whole displayed touch on the thin half of the universe
+  is 23–181 USDT — a 5,000 USDT order would be 30–200× the queue it
+  joins. Ungraded at size until real receipts.
 - **2026-08-04 (morning) — First funded night: no trades (legitimately), two
   faults found and fixed, quote recipe confirmed by the full night fit.**
   The 00:20 UTC carry decision failed for 42 minutes on both fleets

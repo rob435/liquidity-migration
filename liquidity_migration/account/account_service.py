@@ -1691,11 +1691,25 @@ class AccountExecutionService:
             return symbol_of_retry_head.get(batch_id[: head_end + 1]) if head_end >= 0 else None
 
         newest_activity_ns: dict[str, int] = {}
+        # Newest fill SEQUENCE per symbol since its revision: a retry that made
+        # progress is not a failure, so the retry budget and backoff count only
+        # the attempts since the last fill. A large entry sliced into
+        # touch-sized windows converges through many planned re-plans without
+        # exhausting, while an entry that stops filling still meets the full
+        # limit. Sequences, not wall timestamps: fills carry venue receive
+        # time while batch events carry the owner clock, and only the journal
+        # sequence totally orders across the two sources.
+        newest_fill_sequence: dict[str, int] = {}
+        risk_decision_type = AccountEventType.RISK_DECISION.value
         retry_rows_by_symbol: dict[str, list[tuple[str, int, int]]] = {}
+        # One RISK_DECISION event is journaled per processed batch (accepted or
+        # rejected), so these rows count retry attempts exactly, in order.
+        retry_risk_rows_by_symbol: dict[str, list[tuple[str, int]]] = {}
         # Retry rows whose head names no symbol we are planning for. They cannot
         # match any prefix built below, but carrying them keeps the test the
         # original one rather than one that trusts the head split.
         retry_rows_unmapped: list[tuple[str, int, int]] = []
+        retry_risk_rows_unmapped: list[tuple[str, int]] = []
         for event in events:
             event_symbol = event.symbol
             if (
@@ -1706,6 +1720,11 @@ class AccountExecutionService:
                 newest = newest_activity_ns.get(event_symbol)
                 if newest is None or event.wall_ts_ns > newest:
                     newest_activity_ns[event_symbol] = event.wall_ts_ns
+                if (
+                    event.event_type == AccountEventType.FILL.value
+                    and event.sequence > newest_fill_sequence.get(event_symbol, 0)
+                ):
+                    newest_fill_sequence[event_symbol] = event.sequence
             correlation_id = event.correlation_id
             if not correlation_id.startswith(retry_root):
                 continue
@@ -1713,8 +1732,14 @@ class AccountExecutionService:
             retry_row = (correlation_id, event.sequence, event.wall_ts_ns)
             if mapped is None:
                 retry_rows_unmapped.append(retry_row)
+                if event.event_type == risk_decision_type:
+                    retry_risk_rows_unmapped.append((correlation_id, event.sequence))
             elif event.sequence >= revision_by_symbol.get(mapped, 0):
                 retry_rows_by_symbol.setdefault(mapped, []).append(retry_row)
+                if event.event_type == risk_decision_type:
+                    retry_risk_rows_by_symbol.setdefault(mapped, []).append(
+                        (correlation_id, event.sequence)
+                    )
 
         # Same shape for the retry-attempt count: every batch ever processed is
         # in this set, so counting one symbol's prefix must not read all of it.
@@ -1805,6 +1830,20 @@ class AccountExecutionService:
             attempts = 0
             for retry_batches in (retry_batches_by_symbol.get(symbol, ()), retry_batches_unmapped):
                 attempts += sum(1 for batch_id in retry_batches if batch_id.startswith(prefix))
+            # Attempts since the newest fill: the number that budgets and
+            # backs off retries. Total ``attempts`` keeps naming batches.
+            newest_fill_seq = newest_fill_sequence.get(symbol, 0)
+            attempts_since_fill = attempts
+            if attempts and newest_fill_seq:
+                progressed: set[str] = set()
+                for risk_rows in (
+                    retry_risk_rows_by_symbol.get(symbol, ()),
+                    retry_risk_rows_unmapped,
+                ):
+                    for risk_correlation_id, risk_sequence in risk_rows:
+                        if risk_sequence > newest_fill_seq and risk_correlation_id.startswith(prefix):
+                            progressed.add(risk_correlation_id)
+                attempts_since_fill = len(progressed)
             desired_event = event_at_sequence(revision_sequence)
             desired_since_ns = (
                 desired_event.wall_ts_ns
@@ -1849,14 +1888,14 @@ class AccountExecutionService:
                 and residual_pending
                 and not venue_minimum_dust
                 and (
-                    (retry_limit is not None and attempts >= retry_limit)
+                    (retry_limit is not None and attempts_since_fill >= retry_limit)
                     or not can_rebuild
                 )
             )
             retryable = no_working and residual_pending and can_rebuild and not exhausted and not venue_minimum_dust
             next_retry_ts_ns: int | None = None
             if retryable:
-                exponent = min(attempts, 62)
+                exponent = min(attempts_since_fill, 62)
                 retry_delay_ns = min(
                     self.convergence_retry_backoff_ns * (2**exponent),
                     self.convergence_retry_backoff_cap_ns,

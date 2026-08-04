@@ -1707,6 +1707,61 @@ def test_crash_replay_resubmits_the_commanded_order_after_the_market_moved(
     assert restarted.convergence_report().converged
 
 
+def test_sliced_entry_progress_resets_the_retry_budget(tmp_path: Path) -> None:
+    """A retry that made progress is not a failure.
+
+    A large entry sized to the displayed touch arrives as several partial
+    windows (2026-08-04 sizing program): each one terminates partially filled
+    and convergence plans the next. The retry budget and backoff must count
+    only the attempts since the newest fill, or the fourth window of a
+    five-window entry dies as ``retry_exhausted``.
+    """
+
+    adapter = ScriptedExecutionAdapter(
+        "partial_cancel",
+        "partial_cancel",
+        "partial_cancel",
+        "partial_cancel",
+        "fill",
+        partial_qty=0.4,
+    )
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=100,
+        max_convergence_retries=3,
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="sliced-entry",
+            batch_id="sliced-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert service.run_once(inbox) is not None
+    for _ in range(8):
+        clock.advance_ns(10_000)
+        service.run_once(inbox)
+
+    report = service.convergence_report()
+    assert not any(item.exhausted for item in report.items)
+    assert report.healthy
+    # The last step-quantization tail sits below the venue minimum, which is
+    # the converged-dust state, not a failure.
+    assert all(
+        item.status == "converged_within_venue_minimum" for item in report.items
+    )
+    # Four touch-sized windows and the final remainder: five venue orders,
+    # which is one more than the retry limit would ever allow without the
+    # progress reset.
+    assert adapter.submit_calls == 5
+
+
 def test_retry_limit_exhaustion_blocks_health_immediately_and_stays_bounded(tmp_path: Path) -> None:
     adapter = ScriptedExecutionAdapter("reject", "reject")
     clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)

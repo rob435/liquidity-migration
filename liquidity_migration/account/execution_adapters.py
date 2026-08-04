@@ -177,6 +177,8 @@ class L2BookSnapshot:
             reference_price=reference_price,
             bid_price=self.bids[0].price,
             ask_price=self.asks[0].price,
+            bid_qty=self.bids[0].qty,
+            ask_qty=self.asks[0].qty,
             book_sequence=self.sequence,
             source=source,
             metadata={

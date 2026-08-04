@@ -54,12 +54,24 @@ class EntryStopVerifier(Protocol):
 @dataclass(frozen=True, slots=True)
 class EntryQuoteConfig:
     """Knobs for the resting-entry lifecycle. ``window_seconds <= 0`` disables
-    quoting entirely and every entry goes back to a market order."""
+    quoting entirely and every entry goes back to a market order.
+
+    ``clip_touch_fraction`` caps how much of a large entry rests in one
+    window: at most that fraction of the quantity already displayed at the
+    touch (measured 2026-08-04: the whole touch on the thin half of the
+    universe is 23-181 USDT, so a large order resting whole would BE the
+    market). The uncapped remainder is not lost — the command terminates at
+    the window end and convergence re-plans it, so a big entry arrives as a
+    sequence of touch-sized windows. ``0`` disables capping.
+    ``min_clip_notional_usdt`` floors the clip so a near-empty touch cannot
+    stretch one entry into hundreds of windows."""
 
     window_seconds: float = 120.0
     reprice_seconds: float = 15.0
     cross_grace_seconds: float = 20.0
     max_amends: int = 8
+    clip_touch_fraction: float = 1.0
+    min_clip_notional_usdt: float = 100.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.window_seconds):
@@ -70,6 +82,10 @@ class EntryQuoteConfig:
             or self.max_amends < 1
         ):
             raise ValueError("entry quote reprice/grace/amend settings must be positive")
+        if not math.isfinite(self.clip_touch_fraction) or self.clip_touch_fraction < 0.0:
+            raise ValueError("entry clip_touch_fraction must be finite and non-negative")
+        if not math.isfinite(self.min_clip_notional_usdt) or self.min_clip_notional_usdt < 0.0:
+            raise ValueError("entry min_clip_notional_usdt must be finite and non-negative")
 
     @property
     def enabled(self) -> bool:
@@ -169,6 +185,57 @@ class EntryQuoteManager:
         # Buy rests at the bid, sell at the ask; snapping toward the inside of
         # the book can never produce a price that crosses.
         return snap_price_text(bid if is_buy else ask, tick, round_up=not is_buy)
+
+    def plan_entry_clip(
+        self,
+        *,
+        symbol: str,
+        is_buy: bool,
+        command_qty: float,
+        price: float,
+        bid_qty: float | None,
+        ask_qty: float | None,
+    ) -> str | None:
+        """The quantity to rest this window, or None to place the full command.
+
+        A resting buy joins the bid queue, so the cap reads the bid size (the
+        ask for a sell). Any missing or degenerate input means no cap — the
+        full commanded quantity rests, exactly as before this method existed.
+        """
+
+        fraction = self.config.clip_touch_fraction
+        if fraction <= 0.0 or not math.isfinite(command_qty) or command_qty <= 0.0:
+            return None
+        if not math.isfinite(price) or price <= 0.0:
+            return None
+        touch_qty = bid_qty if is_buy else ask_qty
+        if touch_qty is None or not math.isfinite(touch_qty) or touch_qty <= 0.0:
+            return None
+        rule = self.instrument_rules.get(symbol.upper())
+        qty_step = float(getattr(rule, "qty_step", 0.0) or 0.0)
+        min_qty = float(getattr(rule, "min_qty", 0.0) or 0.0)
+        min_notional = float(getattr(rule, "min_notional", 0.0) or 0.0)
+        if qty_step <= 0.0 or not math.isfinite(qty_step):
+            return None
+        clip = max(fraction * touch_qty, self.config.min_clip_notional_usdt / price)
+        step = Decimal(str(qty_step))
+        clip_dec = (Decimal(str(clip)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        # The clip itself must be a viable venue order.
+        min_viable = max(min_qty, min_notional / price if min_notional > 0.0 else 0.0)
+        min_viable_dec = (
+            (Decimal(str(min_viable)) / step).to_integral_value(rounding=ROUND_UP) * step
+            if min_viable > 0.0
+            else step
+        )
+        if clip_dec < min_viable_dec:
+            clip_dec = min_viable_dec
+        command_dec = Decimal(str(command_qty))
+        # No cap when it would not shrink the order, and no cap when the
+        # remainder it leaves behind could never be re-ordered (venue-minimum
+        # dust): a slightly oversized final window beats a stranded tail.
+        if clip_dec >= command_dec or command_dec - clip_dec < min_viable_dec:
+            return None
+        return format(clip_dec.normalize(), "f")
 
     def register(
         self,
@@ -319,11 +386,16 @@ class EntryQuoteManager:
         if order is None:
             self._quotes.pop(command_id, None)
             return
+        now_ns = self.clock.wall_time_ns()
         if order.status in {"filled", "cancelled", "rejected", "partially_filled_cancelled"}:
             self._verify_if_filled(quote, order)
-            self._quotes.pop(command_id, None)
+            # Retain the terminal state until the probe horizon: a sliced
+            # entry's next window starts a couple of owner ticks after this
+            # one ends, and dropping the state here would flicker the
+            # convergence exemption (and its paging) through that gap.
+            if now_ns > quote.deadline_ns + 2 * int(self.config.cross_grace_seconds * 1e9):
+                self._quotes.pop(command_id, None)
             return
-        now_ns = self.clock.wall_time_ns()
         if quote.crossed:
             if quote.cancel_requested:
                 return

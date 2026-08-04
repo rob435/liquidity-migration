@@ -97,7 +97,12 @@ def exit_command() -> OrderCommand:
     )
 
 
-def market_input(bid: float | None = 0.0376, ask: float | None = 0.0380) -> MarketInputRef:
+def market_input(
+    bid: float | None = 0.0376,
+    ask: float | None = 0.0380,
+    bid_qty: float | None = None,
+    ask_qty: float | None = None,
+) -> MarketInputRef:
     return MarketInputRef(
         input_key="cap-1",
         symbol="LAUSDT",
@@ -106,6 +111,8 @@ def market_input(bid: float | None = 0.0376, ask: float | None = 0.0380) -> Mark
         reference_price=0.0378,
         bid_price=bid,
         ask_price=ask,
+        bid_qty=bid_qty,
+        ask_qty=ask_qty,
     )
 
 
@@ -220,3 +227,56 @@ def test_without_a_manager_behavior_is_unchanged() -> None:
     ack = observations[0]
     assert ack.metadata["execution_style"] == "market"
     assert len(verifier_calls) == 1
+
+
+def test_big_entry_rests_only_the_clip_the_touch_can_absorb() -> None:
+    client = FakeClient()
+    adapter, _quotes = build_adapter(client)
+    observations = list(
+        adapter.submit_prepared(
+            entry_command(signed_qty=100_000.0),
+            market_input(bid_qty=1_200.0, ask_qty=50.0),
+        )
+    )
+
+    params = client.placed[0]
+    assert params["orderType"] == "Limit"
+    # The 100 USDT clip floor dominates the 1,200-unit touch at this price:
+    # floor(100 / 0.0376) = 2,659 units, step-quantized.
+    assert params["qty"] == "2659"
+    ack = observations[0]
+    assert ack.metadata["entry_clip_qty"] == "2659"
+    assert ack.metadata["entry_commanded_qty"] == 100_000.0
+
+
+def test_quote_reject_fallback_places_the_full_commanded_qty() -> None:
+    client = FakeClient(reject_limit_create=True)
+    adapter, _quotes = build_adapter(client)
+    observations = list(
+        adapter.submit_prepared(
+            entry_command(signed_qty=100_000.0),
+            market_input(bid_qty=1_200.0, ask_qty=50.0),
+        )
+    )
+
+    assert len(client.placed) == 1
+    params = client.placed[0]
+    assert params["orderType"] == "Market"
+    assert float(params["qty"]) == 100_000.0
+    ack = observations[0]
+    assert ack.metadata["execution_style"] == "market_after_quote_reject"
+    assert "entry_clip_qty" not in ack.metadata
+
+
+def test_blind_book_places_the_full_commanded_qty() -> None:
+    client = FakeClient()
+    adapter, _quotes = build_adapter(client)
+    list(
+        adapter.submit_prepared(
+            entry_command(signed_qty=100_000.0),
+            market_input(),  # no displayed sizes
+        )
+    )
+    params = client.placed[0]
+    assert params["orderType"] == "Limit"
+    assert float(params["qty"]) == 100_000.0

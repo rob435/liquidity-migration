@@ -28,7 +28,15 @@ one-off runners are retired.
   (the short entries carry makes are covered), the slower 30s/180s arm ties
   on cost while exceeding the owner's 120 s sibling-batch budget, and the
   10s/60s no-chase arm is rejected. Per-arm table and the three recorded
-  decisions in `docs/research/research_findings.md` §1.
+  decisions in `docs/research/research_findings.md` §1. **Same day, second
+  execution change point (owner: "prepare for big sizing, up to 5,000 USDT
+  notional"):** an entry larger than the displayed touch now arrives as a
+  sequence of touch-sized quote windows instead of one resting order — the
+  measured touch on the thin half of the universe holds only 23–181 USDT,
+  so this is the difference between joining the queue and being the whole
+  market. Forward-record effect: large entries take minutes instead of
+  seconds, in exchange for staying maker-priced; ungraded until real
+  entries at size produce receipts.
 - **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
   authority `docs/research/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
   prospective — earlier verdicts stand as recorded. Because it no longer controls

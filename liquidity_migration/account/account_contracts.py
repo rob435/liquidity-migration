@@ -77,6 +77,9 @@ class MarketInputRef:
     reference_price: float
     bid_price: float | None = None
     ask_price: float | None = None
+    # Base quantity displayed at each touch; sizes a resting entry's clip.
+    bid_qty: float | None = None
+    ask_qty: float | None = None
     book_sequence: int | None = None
     source: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
