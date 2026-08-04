@@ -48,9 +48,13 @@ one-off runners are retired.
   (reprice on every touch move, toxicity brake) measured *worse* than
   shipped and are recorded as negative results. Change point = this commit;
   evidence `docs/research/research_findings.md` §1 and
-  `~/Desktop/quote-forge/FINDINGS.md`. Forward-record effect: entry cost
-  per window should fall ~0.2–0.4 bp and window-end taker crosses should
-  roughly halve; graded on funded `is_maker`/fill receipts as they accrue.
+  `~/Desktop/quote-forge/FINDINGS.md`. Out-of-sample honesty (13 unseen
+  daytime hours): the cost edge is a night-regime effect — daytime it
+  reads zero — while the halved deadline crosses and faster fills hold in
+  both regimes; the fleet enters at 00:20 UTC, in the measured regime.
+  Forward-record effect: entry cost per window should fall ~0.2–0.4 bp on
+  overnight entries and window-end taker crosses should roughly halve
+  everywhere; graded on funded `is_maker`/fill receipts as they accrue.
 - **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
   authority `docs/research/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
   prospective — earlier verdicts stand as recorded. Because it no longer controls

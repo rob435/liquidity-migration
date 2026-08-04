@@ -216,7 +216,15 @@ touch move is *worse* than the shipped recipe (+0.09 bp, t +4.5 — every repric
 queue), a trade-flow toxicity brake is worse (+0.13, t +6.0), and one-dial retunes of the winner all tie
 or lose, so the recipe ships on its measured defaults. A cadence check ran the winner with evaluations
 throttled to the owner loop's pace: 89% of the edge survives at 3 s — which is why the fleet integration
-is a policy change inside the existing quote manager, not new execution infrastructure. Two lab-method
+is a policy change inside the existing quote manager, not new execution infrastructure. **Out-of-sample
+check (13 unseen daytime hours, 15,391 paired attempts): the cost edge is a night-regime effect** — in the
+faster, tighter daytime market it reads +0.04 bp (noise) — while the structural wins transfer intact
+(deadline crosses 2.0% vs 5.6%, faster fills, better markouts) at zero cost. The fleet enters at the
+00:20 UTC decision, i.e. in the regime where the −0.36 bp was measured; the daytime read bounds the
+downside of the change at zero. A fitted short-horizon price model (imbalance, flow, drift, volatility,
+BTC lead-lag) was also built and validated (out-of-sample IC 0.12 at 5 s): it independently confirms every
+mechanism the recipe uses but does not beat it in paired replay, so it stays in the lab — with one shelved
+discovery, a real BTC-to-illiquid-alts lead of a few seconds (t +3.8), for any future event-driven engine. Two lab-method
 findings correct earlier numbers: the demo realm's matching engine holds internal liquidity its published
 book does not show (post-only orders at the published touch die ~80% of the time there; the overnight
 lab's 2,777 `rejected_would_cross` terminals were this, and its fill rates therefore *understate* the
