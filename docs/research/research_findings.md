@@ -187,8 +187,11 @@ un-ordered, and the owner's convergence machinery plans the next window — a re
 no longer spends the retry budget, so a 5,000 USDT entry arrives as a sequence of touch-sized windows
 (~2.5 min each) instead of one order thirty times the queue. Deep books are untouched: when the touch
 absorbs the whole command, nothing is capped. Dials: `--entry-clip-touch-fraction` (0 disables) and
-`--entry-clip-min-notional-usdt`. The mechanism is built and tested but has zero live receipts at
-size — grading starts when real entries exercise it. (3) A large-size test on the demo account
+`--entry-clip-min-notional-usdt`. **Live-tested on the demo account the same day** (two controlled
+entries, 1,000 and 500 USDT, arriving as 10 and 5 clip-capped windows; three integration defects
+found live and fixed — receipts and the fix list in `STATE.md`). The demo verifies the mechanics
+only: fill rates, fees, and queue behavior at size stay ungraded until funded entries produce
+receipts, and the deadline-cross path did not occur live during the test. (3) A large-size test on the demo account
 would not be evidence: demo fills are simulated against real prints with no queue position, so a big
 resting order fills far too easily — the only honest large-clip receipts are funded ones, or more
 depth-tape measurement. Caveat: one overnight hour, 22 symbols; the numbers are a scale check, not a

@@ -19,6 +19,27 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (midday, later) — The slicing was tested LIVE on the demo
+  account and three real defects were found and fixed in the loop (owner:
+  "test it live on the demo and tweak it live").** Two controlled entries
+  through the demo owner's own inbox (1,000 USDT on 1000XECUSDT, 500 USDT
+  on ZESTUSDT, carry sleeve idle that day): both arrived as sequences of
+  floor-sized windows (10 and 5), every window clip-capped with its stop,
+  both converged, both exited clean. Found live, fixed, pushed: (1) a
+  fully-filled clip never terminated its command — the stream and the
+  kernel both waited for fills to reach the COMMANDED quantity, parking
+  window one forever (`0de55a1`); (2) the health exemption was gated on a
+  working order, turning off in exactly the between-windows gap it exists
+  to cover — the owner flickered blocked at every hand-over and the
+  watchdog missed a page by seconds (`939dc47`; the health line now shows
+  `attempts=since-fill/limit:total=N`); (3) the journaled market-input
+  event omitted the displayed touch sizes the clip is cut from
+  (`713f153`). Demo units run this code since 10:50 UTC (hand-staged;
+  mainnet processes untouched on `6cb159a` until the owner's redeploy).
+  Honest limits: demo fills simulate without queue position, so fill rates
+  and fees here are not evidence, and no window happened to run to its
+  120 s cross live — that path stays covered by tests and the overnight
+  lab only.
 - **2026-08-04 (midday) — Big entries arrive as touch-sized windows (owner:
   "prepare for big sizing, up to 5,000 USDT notional").** A resting entry
   now rests at most the quantity already displayed at the touch (bid size
