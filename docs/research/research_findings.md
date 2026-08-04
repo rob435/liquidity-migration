@@ -167,6 +167,27 @@ yet — carry's 2026-08-04 decision was legitimately cash (demo decided identica
 100-symbol universe) and LONG made no entries, so the first funded receipts wait for the first
 non-empty book.
 
+**Size capacity (2026-08-04, measured from the overnight order-book tape — no orders placed).** The
+lab's clips were 5–10 USDT; the owner asked whether the mechanism holds at a few hundred to a thousand.
+One hour of full depth tape across 22 lab symbols answers the scale question. At the liquid end
+(BTCUSDT: ~217,000 USDT resting at the touch) a 1,000 USDT clip is invisible — but one-tick books are
+gated to market orders anyway. On the illiquid half, where the quoting earns its ~2.5 bp, the ENTIRE
+resting queue at the touch is 23–181 USDT (medians; 25th percentiles 6–94). So today's per-name entries
+(~80–200 USDT at current equity) already join the level as roughly half of it, while a 500–1,000 USDT
+clip would be 3–30× the whole displayed touch on most of these names: the order becomes the market,
+the queue-wait bound ((queue + clip) ÷ same-side print flow) runs 2–26 minutes against the 120 s
+window, and the bounded cross at the deadline would then have to walk a book whose first level holds
+~50 USDT. Two conclusions and one refusal follow. (1) The shipped mechanism is correctly sized for the
+current envelope and does not need retuning for it. (2) It does NOT scale much past ~1–2× today's
+clips on the illiquid half — before the wallet grows materially, entries there need slicing (several
+sequential quote windows per name, or resting size capped at a fraction of displayed depth). That is a
+design change: proposed here, not built, the owner decides. (3) A large-size test on the demo account
+would not be evidence: demo fills are simulated against real prints with no queue position, so a big
+resting order fills far too easily — the only honest large-clip receipts are funded ones, or more
+depth-tape measurement. Caveat: one overnight hour, 22 symbols; the numbers are a scale check, not a
+fill model — reprice amends also lose queue priority, which this bound ignores and which bites harder
+at size.
+
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
 `LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
 2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `STATE.md`). All ~20 v11a quirks were ablated
