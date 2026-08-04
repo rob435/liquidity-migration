@@ -438,6 +438,11 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     """Reject producer settings that the paired account policy cannot accept."""
 
     risk = profile.account_risk
+    # Dials may pin a cap exactly at its bound (gross cap = reference * max
+    # leverage, margin cap = reference), and every equity rebase re-derives the
+    # absolutes by multiplication, so each comparison carries a rounding
+    # allowance far below economic size.
+    tolerance = max(1e-9, profile.capital_reference_usdt * 1e-12)
     leverage_requests = {
         "long": profile.long.entry_leverage,
         "continuous": profile.continuous.entry_leverage,
@@ -452,11 +457,14 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
             "producer leverage exceeds account_risk.max_leverage: "
             + ", ".join(excessive)
         )
-    if risk.max_account_gross_notional_usdt > profile.capital_reference_usdt * risk.max_leverage:
+    if (
+        risk.max_account_gross_notional_usdt
+        > profile.capital_reference_usdt * risk.max_leverage + tolerance
+    ):
         raise ValueError(
             "account_risk account gross cap exceeds capital_reference_usdt * max_leverage"
         )
-    if risk.max_initial_margin_usdt > profile.capital_reference_usdt:
+    if risk.max_initial_margin_usdt > profile.capital_reference_usdt + tolerance:
         raise ValueError(
             "account_risk initial-margin cap exceeds capital_reference_usdt"
         )
@@ -553,7 +561,6 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     )
     carry_margin = carry_gross / profile.carry.entry_leverage
 
-    tolerance = max(1e-9, profile.capital_reference_usdt * 1e-12)
     if (
         max(long_single, continuous_single_symbol, carry_single)
         > risk.max_symbol_notional_usdt + tolerance

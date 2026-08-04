@@ -189,6 +189,23 @@ def test_the_mainnet_partition_is_a_real_partition() -> None:
         )
 
 
+def test_rebasing_at_the_exact_gross_cap_boundary_survives_rounding_noise() -> None:
+    """2026-08-04 00:03 UTC: the funded owner refused a one-cent contraction.
+
+    The mainnet dials pin the gross cap at exactly reference * max_leverage and
+    the margin cap at exactly the reference, and a rebase re-derives both by
+    multiplication — so without an allowance, roughly one cent value in ten
+    lands a rounding step above its bound and fails the proof.
+    """
+
+    from liquidity_migration.policy.operational_profile import load_operational_profile
+
+    profile = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
+    for cents in range(141_690, 141_720):
+        rescaled = profile_at_capital_reference(profile, cents / 100.0)
+        assert rescaled.capital_reference_usdt == pytest.approx(cents / 100.0)
+
+
 def test_the_producer_clamp_is_disabled_when_the_ceiling_tracks_equity() -> None:
     source = (REPO / "liquidity_migration" / "cli" / "commands.py").read_text(encoding="utf-8")
     assert "if operational_profile.capital_reference.tracks_equity" in source
