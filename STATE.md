@@ -19,6 +19,22 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-04 (afternoon) — Owner's one-click redeploy landed; whole fleet
+  on `544bee0` since 10:59 UTC** (all units restarted together: both carry
+  producers, both LONG producers, both account owners, Telegram controls).
+  This carries the kline tail-fetch fix, the envelope boundary tolerance,
+  and the fully live-tested entry slicing onto the funded account ahead of
+  tonight's 00:20 decision. Separately, an **execution lab (quote-forge)**
+  now runs beside the repo — a standalone project (owner directive) probing
+  cheaper entry recipes with real demo orders and queue-honest replays of
+  recorded books; its evidence lives in `~/Desktop/quote-forge/FINDINGS.md`
+  (Mac) and `/root/quote-forge/runs/` (VPS). Nothing in the fleet changes
+  until a recipe wins there and an integration is separately approved. One
+  finding matters to fleet evidence directly: the demo realm's matching
+  engine holds internal liquidity its published book does not show, so demo
+  fill rates and maker shares overstate reality — the first honest
+  `is_maker` grade still comes from the funded account's own receipts.
+
 - **2026-08-04 (midday, later) — The slicing was tested LIVE on the demo
   account and three real defects were found and fixed in the loop (owner:
   "test it live on the demo and tweak it live").** Two controlled entries
