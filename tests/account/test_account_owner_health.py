@@ -97,6 +97,7 @@ def test_convergence_health_is_stable_and_decision_useful() -> None:
         desired_since_ns=1,
         age_ns=31_000_000_000,
         retry_attempts=2,
+        retry_attempts_since_fill=2,
         retry_limit=3,
         next_retry_ts_ns=None,
         retryable=True,
@@ -113,7 +114,7 @@ def test_convergence_health_is_stable_and_decision_useful() -> None:
     assert format_convergence_health(report) == (
         "target convergence unhealthy: "
         "BUSDT:retry_due:target=-2:position=-0.6:working=0:"
-        "residual=-1.4:attempts=2/3"
+        "residual=-1.4:attempts=2/3:total=2"
     )
     assert format_convergence_health(AccountConvergenceReport(1, 1, ())) == ""
 
@@ -133,7 +134,7 @@ def test_convergence_health_is_stable_and_decision_useful() -> None:
         AccountOwnerHealthStatus.BLOCKED,
         "reconciliation healthy; target convergence unhealthy: "
         "BUSDT:retry_due:target=-2:position=-0.6:working=0:"
-        "residual=-1.4:attempts=2/3",
+        "residual=-1.4:attempts=2/3:total=2",
     )
 
 
@@ -1208,6 +1209,7 @@ def test_resting_quote_item_is_healthy_inside_its_window() -> None:
             desired_since_ns=1,
             age_ns=95_000_000_000,
             retry_attempts=0,
+            retry_attempts_since_fill=0,
             retry_limit=3,
             next_retry_ts_ns=None,
             retryable=False,

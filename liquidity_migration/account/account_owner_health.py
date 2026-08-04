@@ -131,7 +131,8 @@ def format_convergence_health(report: Any, *, max_items: int = 3) -> str:
             f"{item.symbol}:{item.status}:target={item.target_signed_qty:g}:"
             f"position={item.position_signed_qty:g}:working={item.working_order_count}:"
             f"residual={item.residual_signed_qty:g}:"
-            f"attempts={item.retry_attempts}/{item.retry_budget_label}"
+            f"attempts={item.retry_attempts_since_fill}/{item.retry_budget_label}"
+            f":total={item.retry_attempts}"
         )
         for item in items[:max_items]
     ]

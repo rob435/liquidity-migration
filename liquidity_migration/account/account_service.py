@@ -342,6 +342,11 @@ class AccountConvergenceItem:
     desired_since_ns: int
     age_ns: int
     retry_attempts: int
+    # Attempts since the newest fill — the number the budget and backoff
+    # actually count. ``retry_attempts`` keeps the all-time total (it names
+    # batches); showing only the total reads as over-budget the moment a
+    # sliced entry passes its fourth window.
+    retry_attempts_since_fill: int
     # ``None`` for strict reductions: capital-preservation work stays durable
     # and retryable with a capped backoff rather than being abandoned.
     retry_limit: int | None
@@ -398,7 +403,8 @@ class AccountConvergenceReport:
         ]
         detail = ", ".join(
             f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
-            f"attempts={item.retry_attempts}/{item.retry_budget_label}"
+            f"attempts={item.retry_attempts_since_fill}/{item.retry_budget_label}"
+            f":total={item.retry_attempts}"
             for item in overdue
         )
         raise RuntimeError(f"account target convergence unhealthy: {detail}")
@@ -1864,9 +1870,15 @@ class AccountExecutionService:
                         retry_anchor_ns = retry_wall_ts_ns
 
             no_working = working_order_count == 0
+            # Deliberately NOT gated on a working order: between two windows
+            # of a sliced entry the previous clip is terminal (nothing works)
+            # while the manager still holds its time-bounded state — that gap
+            # is exactly what the exemption must cover, or a multi-window
+            # entry flickers unhealthy at every hand-over (observed live
+            # 2026-08-04). The probe expires on its own past the window
+            # horizon, so a stalled sequence still ages and pages.
             resting_quote_active = bool(
-                not no_working
-                and self.resting_entry_quotes is not None
+                self.resting_entry_quotes is not None
                 and self.resting_entry_quotes(symbol)
             )
             residual_pending = abs(residual) > tolerance
@@ -1951,6 +1963,7 @@ class AccountExecutionService:
                     now_ns - self._unconverged_first_observed_ns.setdefault(symbol, now_ns),
                 ),
                 retry_attempts=attempts,
+                retry_attempts_since_fill=attempts_since_fill,
                 retry_limit=retry_limit,
                 next_retry_ts_ns=next_retry_ts_ns,
                 retryable=retryable,

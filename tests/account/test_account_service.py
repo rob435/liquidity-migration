@@ -366,6 +366,7 @@ def _service(
     convergence_retry_backoff_cap_ns: int = 30_000_000_000,
     convergence_health_grace_ns: int = 30_000_000_000,
     max_convergence_retries: int = 3,
+    resting_entry_quotes=None,
 ) -> AccountExecutionService:
     route = _route(root.parent)
     clock = clock or VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
@@ -390,6 +391,7 @@ def _service(
         convergence_retry_backoff_cap_ns=convergence_retry_backoff_cap_ns,
         convergence_health_grace_ns=convergence_health_grace_ns,
         max_convergence_retries=max_convergence_retries,
+        resting_entry_quotes=resting_entry_quotes,
     )
 
 
@@ -1731,7 +1733,13 @@ def test_sliced_entry_progress_resets_the_retry_budget(tmp_path: Path) -> None:
         adapter,
         clock=clock,
         convergence_retry_backoff_ns=100,
+        # A grace far below the loop cadence: every hand-over between windows
+        # would flunk it without the exemption below.
+        convergence_health_grace_ns=500,
         max_convergence_retries=3,
+        # The manager reports a live window for the symbol throughout: the
+        # exemption must hold even between windows, when nothing is working.
+        resting_entry_quotes=lambda _symbol: True,
     )
     inbox = _inbox(tmp_path)
     inbox.submit(
@@ -1747,6 +1755,10 @@ def test_sliced_entry_progress_resets_the_retry_budget(tmp_path: Path) -> None:
     for _ in range(8):
         clock.advance_ns(10_000)
         service.run_once(inbox)
+        # Mid-sequence, between windows, nothing is working and the age is
+        # far past the tiny grace: only the resting-window exemption keeps
+        # the owner from flickering unhealthy at every hand-over.
+        assert service.convergence_report().healthy
 
     report = service.convergence_report()
     assert not any(item.exhausted for item in report.items)
