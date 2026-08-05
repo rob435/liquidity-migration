@@ -19,6 +19,34 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-05 (early) — The overnight activation failed on a hand-placed
+  position, the disk then filled to zero and killed the morning redeploy,
+  and both are resolved; the fleet is STOPPED awaiting the owner's re-run.**
+  Last night's activate (20:46 UTC) died at the startup ownership gate,
+  correctly: the account carried a hand-opened HYPEUSDT long (246.44 HYPE
+  ≈ 13.7k USDT notional against 385 USDT equity, ~35× leverage) whose
+  venue TP/SL orders the journal does not own; the owner unit crash-looped
+  31 times overnight (each pass: refuse → readiness timeout → restart) —
+  the source of the night's pages. By morning the position was gone
+  (equity 385.51 → 99.95 USDT, account flat, zero open orders), so that
+  gate now passes. The 04:18 UTC redeploy then failed at staged-install
+  because the disk hit 100%/0 bytes: the two quote-lab capture processes
+  had sat below their 6 GB min-free bound crash-looping since ~15:00,
+  spraying tracebacks into their nohup logs (tape-a.log 2.5 GB +
+  tape-b.log 5.1 GB) — the guard stops tape writes, not the process's own
+  log spam (defect flagged for a fix). Repair, same morning: both capture
+  processes killed, the two spam logs deleted (their tails were
+  unsalvageable at 0 bytes free), and the fully-replayed tape
+  (`tape-night/`, 20 GB, days 08-03/08-04 — the sweep and OOS model runs
+  completed 2026-08-04 ~15:50) is compressing in place to zstd in the
+  background (~2 GB when done; decompress before any re-replay). Disk 100%
+  → 69% and falling. The failed deploy left every unit stopped, demo
+  included, watchdog timers too — the quiesce ran, the install died, so
+  nothing restarted and nothing is paging. Host checkout stands at
+  `cc66c0e` (carries the wallet-reader fix `48ebc50`). Remaining act, the
+  owner's: re-run the one-click deploy; expect the mainnet owner to report
+  the true ~100 USDT equity and the envelope/loss controls to speak to the
+  1417 → 100 collapse if their anchors reach back past the emptying.
 - **2026-08-04 (afternoon, late) — The funded account was emptied through the
   venue's own website, the wallet reader broke on the account's new payload
   shape, and the fix is committed (`48ebc50`, not yet deployed — the next
