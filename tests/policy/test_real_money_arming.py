@@ -142,6 +142,56 @@ def test_lowering_leverage_without_lowering_gross_names_the_dial_to_move() -> No
     assert profile.account_risk.max_leverage == 2.0
 
 
+def test_the_per_order_equity_fraction_dial_reaches_the_long_settings() -> None:
+    # 10% per entry worst-cases to 0.10 x 1.25 vol x 1.5 weekend x 10 positions
+    # = 1.875x equity of gross, so the proof demands the margin cap raised AND
+    # the partition reshaped around it: LONG takes ~94% of the envelope and the
+    # carry multiplier must shrink into the share that remains.
+    dials = parse_real_money_dials(
+        {
+            "RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY": "0.10",
+            "RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY": "1.0",
+            "RM_LONG_GROSS_SHARE": "0.94",
+            "RM_CARRY_GROSS_SHARE": "0.05",
+            "RM_CARRY_NOTIONAL_MULTIPLIER": "0.1",
+        }
+    )
+    assert dials.long_max_order_notional_pct_equity == 0.10
+    _data, profile = render_real_money_profile(dials)
+    assert profile.long.max_order_notional_pct_equity == 0.10
+    # Each companion alone is not enough; the proof names what still breaks.
+    with pytest.raises(
+        ValueError, match="long full-book margin projection exceeds its configured equity cap"
+    ):
+        render_real_money_profile(
+            RealMoneyDials(long_max_order_notional_pct_equity=0.10)
+        )
+    with pytest.raises(ValueError, match="combined producer envelope exceeds"):
+        render_real_money_profile(
+            RealMoneyDials(
+                long_max_order_notional_pct_equity=0.10,
+                long_max_projected_initial_margin_pct_equity=1.0,
+            )
+        )
+    # The default renders zero: the strategy keeps its own per-order derivation.
+    _data, default_profile = render_real_money_profile()
+    assert default_profile.long.max_order_notional_pct_equity == 0.0
+
+
+def test_a_per_order_size_beyond_the_gross_cap_names_the_dial() -> None:
+    with pytest.raises(
+        ValueError,
+        match="RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY .* cannot exceed RM_ACCOUNT_GROSS_MULTIPLE",
+    ):
+        render_real_money_profile(
+            RealMoneyDials(long_max_order_notional_pct_equity=2.5)
+        )
+    with pytest.raises(ValueError, match="must be finite and non-negative"):
+        render_real_money_profile(
+            RealMoneyDials(long_max_order_notional_pct_equity=-0.1)
+        )
+
+
 #: (gross multiple, entry leverage, carry multiplier, long multiplier). Each is
 #: a coherent deployment: producers sized to fit the account they are given.
 _COHERENT_DIALS = (

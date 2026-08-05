@@ -93,6 +93,10 @@ class RealMoneyDials:
     #: itself, as a fraction of equity. The owner's partition binds first; this
     #: is the producer's own refusal.
     long_max_projected_initial_margin_pct_equity: float = 0.5
+    #: Per-entry notional target, as a fraction of equity: 0.10 makes each
+    #: LONG entry 10% of equity. Zero (the default) keeps the strategy's own
+    #: derivation (gross exposure / max positions, scaled by the multiplier).
+    long_max_order_notional_pct_equity: float = 0.0
 
 
 def dial_environment_keys() -> tuple[str, ...]:
@@ -205,6 +209,18 @@ def _validate_dials(dials: RealMoneyDials) -> None:
         raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
     if dials.long_max_projected_initial_margin_pct_equity > 1.0:
         raise ValueError("RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY cannot exceed 1")
+    order_pct = dials.long_max_order_notional_pct_equity
+    if not math.isfinite(order_pct) or order_pct < 0.0:
+        raise ValueError(
+            "RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY must be finite and non-negative "
+            "(0 keeps the strategy's own per-order derivation)"
+        )
+    if order_pct > dials.account_gross_multiple:
+        raise ValueError(
+            f"RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY ({order_pct:g}) cannot exceed "
+            f"RM_ACCOUNT_GROSS_MULTIPLE ({dials.account_gross_multiple:g}); a single "
+            "order larger than the whole account gross cap can never place"
+        )
     shares = dials.carry_gross_share + dials.long_gross_share + _CONTINUOUS_GROSS_SHARE
     if shares > 1.0 + 1e-12:
         raise ValueError(
@@ -277,7 +293,7 @@ def render_real_money_profile_json(
             "max_projected_initial_margin_pct_equity": (
                 dials.long_max_projected_initial_margin_pct_equity
             ),
-            "max_order_notional_pct_equity": 0.0,
+            "max_order_notional_pct_equity": dials.long_max_order_notional_pct_equity,
             "max_new_entries_per_cycle": dials.long_max_new_entries_per_cycle,
         },
         "continuous": {

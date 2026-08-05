@@ -194,6 +194,7 @@ one takes the committed default) and every dial is a ratio except the floor.
 | `RM_CARRY_GROSS_SHARE` / `RM_LONG_GROSS_SHARE` | 0.55 / 0.40 | Per-sleeve shares of the gross and margin caps. With the 0.01 retired-CONTINUOUS token share they must sum ≤ 1. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native stop distance, armed with the entry. |
 | `RM_CARRY_NOTIONAL_MULTIPLIER` / `RM_LONG_NOTIONAL_MULTIPLIER` | 1.0 / 0.4 | Per-sleeve sizing. |
+| `RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY` | 0.0 | Per-entry size as a fraction of equity: 0.10 makes each LONG entry 10% of equity. 0 keeps the strategy's own derivation. Cannot exceed the gross multiple. |
 
 Plus `RM_{CARRY,LONG}_MAX_NEW_ENTRIES_PER_CYCLE` (10 / 5, positive integers) and
 `RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY` (0.5).
