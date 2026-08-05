@@ -14,7 +14,7 @@ section below.
 | `units` | List the fleet's units and timers. |
 | `logs UNIT [LINES]` | One unit's journal, newest last (default 100 lines). |
 | `restart` / `stop` / `start UNIT...` | Unit lifecycle, one or more units at a time. |
-| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,continuous,carry` (`carry` renders `configs/lane2_carry_hold_v3.json` from the cross-venue panel, not a daemon replay), `--years N`, `--chart-leverage X`. |
+| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,continuous,carry` (`carry` renders the deployed rule `configs/lane2_carry_hold_v4.json` from the cross-venue panel, not a daemon replay), `--years N`, `--chart-leverage X`. |
 | `research-refresh {plan,run}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
 | `reset [ARGS]` | Demo ledger reset. Preview unless `--execute`. |
 | `flatten --environment ENV [ARGS]` | Take one account to zero exposure through its own owner. Reads only unless `--execute`. |

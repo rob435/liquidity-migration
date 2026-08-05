@@ -1,8 +1,8 @@
 """CARRY sleeve decision engine: the crowd-fee collector.
 
 Computes the daily target book for the deployed carry sleeve by replaying
-the registered ``lane2_carry_hold_v4`` state machine over a rolling window
-of Bybit hourly data. The strategy logic is NOT reimplemented here: the
+the registered rule (``resolve_carry_strategy_profile``; v4 by default) over
+a rolling window of Bybit hourly data. The strategy logic is NOT reimplemented here: the
 engine calls the exact registered-scorer functions
 (:func:`liquidity_migration.research.backtest.financed_longs.carry_hold_weights` and friends)
 on the live frame (:func:`~liquidity_migration.research.backtest.financed_longs.prepare_decision`),
@@ -18,11 +18,13 @@ window is re-captured on any bar where its funding print re-crosses the entry
 threshold (entry implies hold). There is no state file, so recovery from
 downtime of any length is a plain restart.
 
-``configs/lane2_carry_hold_v4.json`` is loaded only so the deployed parameters
-are byte-identical to the registered ones. (v3 → v4, promoted 2026-08-03 by
-owner decision: the toxic band's high edge moves to 0% and a crowding-persistence
-size multiplier zeroes names whose recent settlements were rarely deep. Both
-features live in the shared registered scorer, so the switch is the config file.)
+The registered config file is loaded only so the deployed parameters are
+byte-identical to the registered ones. Version selection is the
+``CARRY_STRATEGY_PROFILE`` env dial → ``--strategy-profile`` (v3 → v4 promoted
+2026-08-03: the toxic band's high edge moves to 0% and a crowding-persistence
+size multiplier zeroes names whose recent settlements were rarely deep; both
+live in the shared registered scorer, so a version is a config file plus a
+profile name — never a code edit).
 """
 
 from __future__ import annotations
@@ -102,7 +104,43 @@ MIN_REPLAY_DAYS = 45
 #: flattening a healthy book on a data hole. The real universe is 100 names.
 MIN_DECISION_SYMBOLS = 50
 
-CARRY_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "lane2_carry_hold_v4.json"
+_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
+#: The DEFAULT deployed rule file — what envelope proofs and research charts
+#: read when no profile is named. The running producer resolves its own file
+#: through ``resolve_carry_strategy_profile``.
+CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v4.json"
+
+#: Registered CARRY deployments, selectable per unit exactly like LONG's
+#: (``CARRY_STRATEGY_PROFILE`` env → ``--strategy-profile``). Switching
+#: versions is an env change plus a registered config file — never a code edit.
+CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4")
+DEFAULT_CARRY_STRATEGY_PROFILE = "v4"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryStrategyProfile:
+    """One registered CARRY deployment: journaled profile name + rule file."""
+
+    name: str
+    profile_name: str
+    config_path: Path
+
+
+_CARRY_STRATEGY_PROFILES: dict[str, CarryStrategyProfile] = {
+    "v3": CarryStrategyProfile("v3", "carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
+    "v4": CarryStrategyProfile("v4", "carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
+}
+
+
+def resolve_carry_strategy_profile(name: str) -> CarryStrategyProfile:
+    """Resolve a registered CARRY profile; unknown names fail startup."""
+    try:
+        return _CARRY_STRATEGY_PROFILES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown CARRY strategy profile {name!r}; "
+            f"supported: {', '.join(CARRY_STRATEGY_PROFILE_CHOICES)}"
+        ) from None
 
 
 class CarrySleeveError(RuntimeError):
@@ -110,7 +148,7 @@ class CarrySleeveError(RuntimeError):
 
 
 def load_carry_config(path: Path | None = None) -> CarryHoldConfig:
-    """The registered v4 parameters, byte-identical to the Lane-2 file."""
+    """The registered rule parameters, byte-identical to the Lane-2 file."""
     return CarryHoldConfig.from_json(str(path or CARRY_CONFIG_PATH))
 
 
@@ -209,19 +247,22 @@ def decide_book(
 
 _logger = logging.getLogger(__name__)
 
-#: FROZEN persisted journal key, not a version claim: every carry reservation,
-#: component target and planning snapshot in the account journal is keyed by
-#: this string, and the diff machine below revises those components in place.
-#: Renaming it would strand the standing book behind an invisible identity.
-#: The deployed VERSION is ``CARRY_PROFILE_NAME`` (recorded on every cycle
-#: payload and target), plus ``CARRY_CONFIG_PATH``. Deployed v4 since
-#: 2026-08-03; the id keeps the lineage name it was born with.
-CARRY_STRATEGY_ID = "carry_hold_v3"
+#: Persisted journal filing key, version-free on purpose. The VERSION lives in
+#: the strategy profile (``--strategy-profile`` / ``CARRY_STRATEGY_PROFILE``);
+#: reservations, component targets and planning snapshots all file under this
+#: lineage id, which never changes again. A component keeps the id it was born
+#: with for life: the diff machine reads standing state across this id plus
+#: ``CARRY_LEGACY_STRATEGY_IDS`` and revises or exits each component under its
+#: own id, while new components open under this one.
+CARRY_STRATEGY_ID = "carry_hold"
+#: Filing ids of earlier deployments, still read (and drained) from standing
+#: state. The sleeve filed under the version-shaped "carry_hold_v3" from its
+#: first deployment through 2026-08-05, including the v4 promotion.
+CARRY_LEGACY_STRATEGY_IDS: tuple[str, ...] = ("carry_hold_v3",)
 #: One stable component per symbol. Unlike the continuous sleeve (one
 #: component per signal), carry manages a persistent per-symbol target that is
 #: revised in place, so the component key never needs a fresh identity.
 CARRY_COMPONENT_ID = "carry_hold"
-CARRY_PROFILE_NAME = "carry_hold_v4_live_v1"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
@@ -390,6 +431,8 @@ class CarryDemoCycleConfig:
     account_intent_inbox_root: str | None = None
     account_execution_root: str | None = None
     candidate_universe_file: str = ""
+    #: Registered deployment version (``resolve_carry_strategy_profile``).
+    strategy_profile: str = DEFAULT_CARRY_STRATEGY_PROFILE
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
     entry_leverage: float = 2.0
@@ -426,6 +469,7 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
     """
 
     execution_environment(config.execution_environment)
+    resolve_carry_strategy_profile(config.strategy_profile)
     has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
     has_account_execution_root = bool(str(config.account_execution_root or "").strip())
     if has_account_inbox != has_account_execution_root:
@@ -656,8 +700,8 @@ def _trailing_settled_funding(
     return {str(row["symbol"]): float(row["trail"]) for row in sums.iter_rows(named=True)}
 
 
-def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, float]]:
-    """Accepted (signed notional, signed quantity) per open/pending reservation.
+def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, float, str]]:
+    """Accepted (signed notional, signed quantity, filing id) per reservation.
 
     Reservations are accepted desired targets (``open`` or ``target_pending``),
     not fills: the diff compares desire against desire, or a target accepted but
@@ -667,29 +711,43 @@ def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, f
     Quantity comes along because zero is meaningful: a reservation for an
     already-zero target is a completed exit desire with nothing left to reduce,
     and re-exiting it loops forever.
+
+    The filing id (``strategy_id``) comes along because a component is revised
+    under the id it was born with: a legacy-id component drains under its own
+    key while new entries file under ``CARRY_STRATEGY_ID``. Carry keeps one
+    component per symbol, so one symbol standing under two filing ids is
+    unknown safety-critical state and fails closed.
     """
 
     if reservations.is_empty():
         return {}
-    required = {"symbol", "signed_qty", "target_reference_price"}
+    required = {"symbol", "signed_qty", "target_reference_price", "strategy_id"}
     missing = sorted(required - set(reservations.columns))
     if missing:
         raise RuntimeError(f"carry reservations lack expected columns: {missing}")
     frame = reservations.select(
         pl.col("symbol").cast(pl.String),
+        pl.col("strategy_id").cast(pl.String),
         pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0).alias("signed_qty"),
         (
             pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0)
             * pl.col("target_reference_price").cast(pl.Float64, strict=False).fill_null(0.0)
         ).alias("standing_notional_usdt"),
     )
-    sums = frame.group_by("symbol").agg(
+    sums = frame.group_by("symbol", "strategy_id").agg(
         pl.col("standing_notional_usdt").sum(), pl.col("signed_qty").sum()
     )
+    split = sums.group_by("symbol").len().filter(pl.col("len") > 1)
+    if not split.is_empty():
+        symbols = sorted(str(value) for value in split["symbol"].to_list())
+        raise RuntimeError(
+            f"carry symbols standing under more than one filing id: {symbols}"
+        )
     return {
         str(row["symbol"]): (
             float(row["standing_notional_usdt"]),
             float(row["signed_qty"]),
+            str(row["strategy_id"]),
         )
         for row in sums.iter_rows(named=True)
     }
@@ -700,6 +758,7 @@ def _carry_component_intent(
     action: str,
     cycle_now_ms: int,
     symbol: str,
+    strategy_id: str,
     signed_notional_usdt: float,
     leverage: float,
     reason: str,
@@ -722,7 +781,7 @@ def _carry_component_intent(
         adapter_kind=SleeveAdapterKind.CARRY,
         action=action,
         decision_ts_ms=cycle_now_ms,
-        strategy_id=CARRY_STRATEGY_ID,
+        strategy_id=strategy_id,
         component_id=CARRY_COMPONENT_ID,
         symbol=symbol,
         signed_notional_usdt=signed_notional_usdt,
@@ -778,7 +837,7 @@ def _carry_target_plan(
     *,
     decision: CarryDecision | None,
     rule: CarryHoldConfig,
-    standing_rows: dict[str, tuple[float, float]],
+    standing_rows: dict[str, tuple[float, float, str]],
     trail_by_symbol: dict[str, float],
     demo: CarryDemoCycleConfig,
     equity_usdt: float,
@@ -827,11 +886,13 @@ def _carry_target_plan(
     # re-entered underneath its own unconverged target. Resolving it needs an
     # operator (``scripts/ops.sh wedged-command``), hence the count.
     stranded_symbols = sorted(
-        symbol for symbol, (_notional, qty) in standing_rows.items() if qty == 0.0
+        symbol for symbol, (_notional, qty, _sid) in standing_rows.items() if qty == 0.0
     )
+    # A standing component is revised under the filing id it was born with;
+    # only NEW components file under CARRY_STRATEGY_ID.
     live_standing = {
-        symbol: notional
-        for symbol, (notional, qty) in standing_rows.items()
+        symbol: (notional, strategy_id)
+        for symbol, (notional, qty, strategy_id) in standing_rows.items()
         if qty != 0.0
     }
     exit_symbols = sorted(set(live_standing) - set(desired))
@@ -840,6 +901,7 @@ def _carry_target_plan(
             action="exit",
             cycle_now_ms=cycle_now_ms,
             symbol=symbol,
+            strategy_id=live_standing[symbol][1],
             signed_notional_usdt=0.0,
             leverage=demo.entry_leverage,
             reason="carry exit: funding normalized or velocity exit",
@@ -901,6 +963,7 @@ def _carry_target_plan(
                     action="entry",
                     cycle_now_ms=cycle_now_ms,
                     symbol=symbol,
+                    strategy_id=CARRY_STRATEGY_ID,
                     signed_notional_usdt=target_notional,
                     leverage=demo.entry_leverage,
                     reason=(
@@ -913,7 +976,7 @@ def _carry_target_plan(
         for symbol in sorted(set(desired) & set(live_standing)):
             weight = float(desired[symbol])
             target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
-            standing = float(live_standing[symbol])
+            standing, standing_strategy_id = live_standing[symbol]
             delta = target_notional - standing
             threshold = max(
                 RESIZE_MIN_NOTIONAL_USDT,
@@ -926,6 +989,7 @@ def _carry_target_plan(
                     action="resize",
                     cycle_now_ms=cycle_now_ms,
                     symbol=symbol,
+                    strategy_id=standing_strategy_id,
                     signed_notional_usdt=target_notional,
                     leverage=demo.entry_leverage,
                     reason="carry resize: depth rescale",
@@ -1309,7 +1373,7 @@ def run_carry_demo_cycle(
         planning = sleeve_planning_snapshot(
             account_route,
             sleeve=SleeveAdapterKind.CARRY,
-            strategy_ids=(CARRY_STRATEGY_ID,),
+            strategy_ids=(CARRY_STRATEGY_ID, *CARRY_LEGACY_STRATEGY_IDS),
             journal_cursor=state.journal_cursor,
         )
         reservations = target_reservation_rows(planning.canonical_trades)
@@ -1329,7 +1393,8 @@ def run_carry_demo_cycle(
         decision: CarryDecision | None = None
         decision_error: str | None = None
         decision_frozen = False
-        rule = load_carry_config()
+        strategy_profile = resolve_carry_strategy_profile(demo.strategy_profile)
+        rule = load_carry_config(strategy_profile.config_path)
         trail_by_symbol: dict[str, float] = {}
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
@@ -1496,7 +1561,7 @@ def run_carry_demo_cycle(
             "mode": f"{environment}_target",
             "environment": environment,
             "strategy_id": CARRY_STRATEGY_ID,
-            "strategy_profile": CARRY_PROFILE_NAME,
+            "strategy_profile": strategy_profile.profile_name,
             "operational_profile_sha256": demo.operational_profile_sha256,
             "replay_days": demo.replay_days,
             "notional_multiplier": demo.notional_multiplier,

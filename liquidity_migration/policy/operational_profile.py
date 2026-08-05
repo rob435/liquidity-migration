@@ -122,7 +122,7 @@ class LongOperationalSettings:
     notional_multiplier: float
     entry_leverage: float
     max_projected_initial_margin_pct_equity: float
-    max_order_notional_pct_equity: float
+    order_notional_pct_equity: float
     max_new_entries_per_cycle: int
 
 
@@ -323,7 +323,7 @@ def _parse_long(value: object) -> LongOperationalSettings:
         "notional_multiplier",
         "entry_leverage",
         "max_projected_initial_margin_pct_equity",
-        "max_order_notional_pct_equity",
+        "order_notional_pct_equity",
         "max_new_entries_per_cycle",
     }
     row = _object(value, label="operational profile long", fields=fields)
@@ -334,12 +334,12 @@ def _parse_long(value: object) -> LongOperationalSettings:
     if margin_fraction > 1.0:
         raise ValueError("long.max_projected_initial_margin_pct_equity cannot exceed 1")
     order_cap = _positive_float(
-        row["max_order_notional_pct_equity"],
-        label="long.max_order_notional_pct_equity",
+        row["order_notional_pct_equity"],
+        label="long.order_notional_pct_equity",
         allow_zero=True,
     )
     if order_cap > 10.0:
-        raise ValueError("long.max_order_notional_pct_equity cannot exceed 10")
+        raise ValueError("long.order_notional_pct_equity cannot exceed 10")
     return LongOperationalSettings(
         notional_multiplier=_positive_float(
             row["notional_multiplier"], label="long.notional_multiplier"
@@ -348,7 +348,7 @@ def _parse_long(value: object) -> LongOperationalSettings:
             row["entry_leverage"], label="long.entry_leverage"
         ),
         max_projected_initial_margin_pct_equity=margin_fraction,
-        max_order_notional_pct_equity=order_cap,
+        order_notional_pct_equity=order_cap,
         max_new_entries_per_cycle=_positive_int(
             row["max_new_entries_per_cycle"],
             label="long.max_new_entries_per_cycle",
@@ -487,7 +487,7 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
         max_projected_initial_margin_pct_equity=(
             profile.long.max_projected_initial_margin_pct_equity
         ),
-        max_order_notional_pct_equity=profile.long.max_order_notional_pct_equity,
+        order_notional_pct_equity=profile.long.order_notional_pct_equity,
         max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )
     long_projection = projected_long_initial_margin_pct_equity(

@@ -24,9 +24,12 @@ match; never append history to this file.
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
 - **Committed but not yet deployed** (`main` is ahead of the host): the
-  four-dial real-money surface (`8303b34`), the 10× dial ceiling (`ad960df`),
-  and the per-entry LONG size dial (`4269369`) — all mainnet-profile work
-  whose committed defaults render byte-identically to the deployed sizing.
+  four-dial real-money surface (`8303b34`, superseding the same-morning
+  per-entry dial `4269369`), the 10× dial ceiling (`ad960df`), and the
+  2026-08-05 friction fixes (CARRY profile dial, version-free carry journal
+  id with legacy drain, `order_notional_pct_equity` rename — CHANGELOG entry
+  of this date). Committed defaults render byte-identically to the deployed
+  sizing; decisions are unchanged.
   **The host's `bybit-mainnet.env` still carries the retired `RM_*` dial
   names, so the next mainnet render/activation refuses until those lines are
   replaced with the four new dials** (the local `deploy/.env` staging copy is
@@ -67,9 +70,7 @@ renders the equivalent previous sizing): four owner dials.
 sleeve's book ceiling as a multiple of equity, worst case included — each
 carry name takes a tenth of its dial, each LONG entry ≈ its dial / 18.75, and
 the two dials may total 9.9. `RM_DAILY_LOSS_FRACTION` (0.1) and
-`RM_CARRY_STOP_LOSS_FRACTION` (0.35) are the protections. One optional extra,
-`RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY`, sets each LONG entry's size as a
-fraction of equity (0, the default, keeps the strategy's own derivation).
+`RM_CARRY_STOP_LOSS_FRACTION` (0.35) are the protections.
 Everything else the old surface exposed is derived and still proved at
 render; a retired `RM_*` line in an env file is refused by name. The defaults
 reproduce the previous effective sizing exactly (carry multiplier 1.0, LONG

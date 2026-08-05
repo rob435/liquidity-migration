@@ -18,6 +18,9 @@ Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=mainnet
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Registered CARRY deployment (rule file + journaled profile name), the same
+# dial shape as LONG_STRATEGY_PROFILE on the LONG units.
+Environment=CARRY_STRATEGY_PROFILE=v4
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2

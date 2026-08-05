@@ -14,7 +14,7 @@
     "notional_multiplier": 0.5,
     "entry_leverage": 2.0,
     "max_projected_initial_margin_pct_equity": 0.5,
-    "max_order_notional_pct_equity": 0.0,
+    "order_notional_pct_equity": 0.0,
     "max_new_entries_per_cycle": 5
   },
   "continuous": {

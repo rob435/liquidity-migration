@@ -10,7 +10,7 @@
 #
 # EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. Sizing
 # comes from the shared operational profile (ACCOUNT_RISK_POLICY_FILE); the rule
-# is configs/lane2_carry_hold_v4.json.
+# file follows CARRY_STRATEGY_PROFILE (v4 → configs/lane2_carry_hold_v4.json).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -66,6 +66,17 @@ fi
 # hysteresis replay window (engine floor 45d, deployed default 90d).
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-90}"
 WORKERS="${WORKERS:-4}"
+# CARRY_STRATEGY_PROFILE selects the registered deployment, exactly like
+# LONG_STRATEGY_PROFILE on the LONG units. Switching versions is this env
+# line plus a registered config file — never a code edit.
+CARRY_STRATEGY_PROFILE="${CARRY_STRATEGY_PROFILE:-v4}"
+case "$CARRY_STRATEGY_PROFILE" in
+    v3|v4) ;;
+    *)
+        echo "CARRY_STRATEGY_PROFILE must be v3 or v4, got: $CARRY_STRATEGY_PROFILE" >&2
+        exit 2
+        ;;
+esac
 # WS klines are the primary bar source; REST covers gaps. 0 disables the
 # stream and returns to REST-on-cycle.
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
@@ -94,11 +105,12 @@ if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
 else
     target_route_args+=(--no-ws-klines)
 fi
-echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE"
+echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
     carry-demo-cycle \
+    --strategy-profile "$CARRY_STRATEGY_PROFILE" \
     --replay-days "$LOOKBACK_DAYS" \
     --workers "$WORKERS" \
     --daemon --interval-seconds "$INTERVAL_SECONDS" \

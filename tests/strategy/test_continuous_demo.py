@@ -199,6 +199,7 @@ def test_live_state_reproduces_backtest_decile() -> None:
         klines,
         rmom,
         rmom_quantile=config.rmom_quantile,
+        feature_set=config.feature_set,
         start_ms=0,
     )
     expected = _decile_map(backtest.filter(pl.col("ts_ms") == current_hour))
@@ -236,6 +237,7 @@ def test_confirmed_entry_state_uses_the_delayed_closed_bar() -> None:
         klines.filter(pl.col("ts_ms") < current_hour),
         rmom,
         rmom_quantile=config.rmom_quantile,
+        feature_set=config.feature_set,
         start_ms=0,
     )
     expected = panel.filter(pl.col("ts_ms") == deciding_hour)
@@ -2324,3 +2326,19 @@ def test_funding_rejection_is_named_instead_of_being_reported_as_capacity() -> N
         )
         == "funding_admission"
     )
+
+
+def test_dataclass_defaults_equal_the_resolved_profile() -> None:
+    """The dataclass defaults and the profile resolver tell the same story.
+
+    Aligned 2026-08-05: before this, the resolver silently replaced seven
+    dataclass defaults, so reading the dataclass gave seven wrong numbers.
+    Drift between the two must fail here, never steer a raw construction.
+    """
+
+    from liquidity_migration.strategy.continuous_demo import (
+        ContinuousDemoCycleConfig,
+        apply_continuous_demo_profile,
+    )
+
+    assert apply_continuous_demo_profile(ContinuousDemoCycleConfig()) == ContinuousDemoCycleConfig()

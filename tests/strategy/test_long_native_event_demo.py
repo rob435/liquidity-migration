@@ -180,7 +180,7 @@ def test_per_position_notional_scales_by_multiplier() -> None:
     demo_5x = LongNativeDemoCycleConfig(notional_multiplier=5.0)
     assert target_long_order_notional_pct_equity(demo_5x, strategy) == pytest.approx(base_per_position * 5.0)
     # Explicit override wins
-    demo_override = LongNativeDemoCycleConfig(max_order_notional_pct_equity=0.5)
+    demo_override = LongNativeDemoCycleConfig(order_notional_pct_equity=0.5)
     assert target_long_order_notional_pct_equity(demo_override, strategy) == pytest.approx(0.5)
 
 

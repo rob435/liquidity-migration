@@ -322,16 +322,21 @@ def test_view_health_guards_refuse_broken_funding_inputs() -> None:
 
 
 def _rows(
-    standing_notional: dict[str, float], *, price: float = 1.0
-) -> dict[str, tuple[float, float]]:
-    """Planner standing book: {symbol: (notional, signed_qty)}.
+    standing_notional: dict[str, float],
+    *,
+    price: float = 1.0,
+    strategy_id: str = CARRY_STRATEGY_ID,
+) -> dict[str, tuple[float, float, str]]:
+    """Planner standing book: {symbol: (notional, signed_qty, filing id)}.
 
     The planner needs the accepted quantity too, so it can tell real exposure from a
-    zero-quantity reservation (a completed exit desire with nothing left to reduce).
+    zero-quantity reservation (a completed exit desire with nothing left to reduce),
+    and the filing id because a component is revised under the id it was born with.
     """
 
     return {
-        symbol: (notional, notional / price) for symbol, notional in standing_notional.items()
+        symbol: (notional, notional / price, strategy_id)
+        for symbol, notional in standing_notional.items()
     }
 
 
@@ -563,7 +568,7 @@ class TestCarryTargetPlan:
         """
 
         plan = _carry_target_plan(
-            **_plan_kwargs(standing_rows={"STRANDEDUSDT": (0.0, 0.0)})
+            **_plan_kwargs(standing_rows={"STRANDEDUSDT": (0.0, 0.0, CARRY_STRATEGY_ID)})
         )
 
         assert plan.exit_intents == []
@@ -589,7 +594,7 @@ class TestCarryTargetPlan:
         plan = _carry_target_plan(
             **_plan_kwargs(
                 decision=decision,
-                standing_rows={"STRANDEDUSDT": (0.0, 0.0)},
+                standing_rows={"STRANDEDUSDT": (0.0, 0.0, CARRY_STRATEGY_ID)},
                 trail_by_symbol={"STRANDEDUSDT": -0.002},
             )
         )
@@ -1122,3 +1127,75 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
     # Funding has no stream on the venue: the REST sweep still ran, once per symbol.
     assert sorted({symbol for symbol, _s, _e in market.funding_calls}) == sorted(ALL_SYMBOLS)
     assert not funding.is_empty()
+
+
+class TestLegacyFilingIdDrain:
+    """A component keeps the filing id it was born with; only NEW components
+    file under the version-free ``CARRY_STRATEGY_ID``."""
+
+    LEGACY = "carry_hold_v3"
+
+    def test_legacy_component_exits_under_its_own_id(self) -> None:
+        plan = _carry_target_plan(
+            **_plan_kwargs(standing_rows=_rows({"GONEUSDT": 250.0}, strategy_id=self.LEGACY))
+        )
+        exit_intent = plan.exit_intents[0].intent
+        assert exit_intent.target_key == (
+            f"carry/{self.LEGACY}/{CARRY_COMPONENT_ID}/GONEUSDT"
+        )
+
+    def test_legacy_component_resizes_under_its_own_id_and_new_entries_do_not(self) -> None:
+        plan = _carry_target_plan(
+            **_plan_kwargs(standing_rows=_rows({"CUSDT": 100.0}, strategy_id=self.LEGACY))
+        )
+        resize = plan.resize_intents[0].intent
+        assert resize.target_key == f"carry/{self.LEGACY}/{CARRY_COMPONENT_ID}/CUSDT"
+        for item in plan.entry_intents:
+            assert item.intent.target_key.startswith(
+                f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/"
+            )
+        assert plan.planned_entries == 2  # AUSDT + BUSDT under the new id
+
+    def test_one_symbol_under_two_filing_ids_fails_closed(self) -> None:
+        frame = pl.DataFrame(
+            [
+                {
+                    "symbol": "SPLITUSDT",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "signed_qty": 1.0,
+                    "target_reference_price": 100.0,
+                },
+                {
+                    "symbol": "SPLITUSDT",
+                    "strategy_id": self.LEGACY,
+                    "signed_qty": 2.0,
+                    "target_reference_price": 100.0,
+                },
+            ]
+        )
+        with pytest.raises(RuntimeError, match="more than one filing id"):
+            module._carry_standing_rows(frame)
+
+
+class TestCarryStrategyProfileDial:
+    def test_v3_and_v4_resolve_to_their_registered_files(self) -> None:
+        v3 = module.resolve_carry_strategy_profile("v3")
+        v4 = module.resolve_carry_strategy_profile("v4")
+        assert v3.profile_name == "carry_hold_v3_live_v1"
+        assert v3.config_path.name == "lane2_carry_hold_v3.json"
+        assert v4.profile_name == "carry_hold_v4_live_v1"
+        assert v4.config_path == module.CARRY_CONFIG_PATH
+        # Both files load through the registered rule loader.
+        assert load_carry_config(v3.config_path).enter_bp == pytest.approx(
+            load_carry_config(v4.config_path).enter_bp
+        )
+
+    def test_unknown_profile_fails_startup_validation(self) -> None:
+        config = CarryDemoCycleConfig(
+            execution_environment="demo",
+            account_execution_root="/tmp/x",
+            account_intent_inbox_root="/tmp/y",
+            strategy_profile="v99",
+        )
+        with pytest.raises(ValueError, match="unknown CARRY strategy profile"):
+            _validate_carry_demo_config(config)

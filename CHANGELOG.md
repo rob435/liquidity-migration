@@ -16,6 +16,29 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-05 (evening) — The friction audit lands: carry versions become a
+  dial, the carry journal id stops lying, and the misnamed LONG size dial is
+  renamed (committed, not yet deployed — the next owner redeploy carries it).**
+  The owner audited the sleeve-logic reference, named the confusions, and
+  ordered the root causes fixed. (1) CARRY version selection is now
+  `CARRY_STRATEGY_PROFILE=v3|v4` in the unit env → `--strategy-profile`,
+  exactly LONG's dial shape — switching versions was previously a code commit
+  editing a constant. (2) The carry journal filing id is the version-free
+  `carry_hold`; it had been frozen as `carry_hold_v3` while the sleeve ran
+  v4. A standing component keeps the id it was born with: planning reads
+  both ids, exits and resizes publish under each component's own id, new
+  entries file under `carry_hold`, and one symbol standing under two ids
+  fails closed — tests pin the drain. Decisions are unchanged; this is
+  bookkeeping identity, not strategy. (3) `max_order_notional_pct_equity` →
+  `order_notional_pct_equity` everywhere, committed profile JSONs included
+  (renamed atomically, the strict loader refuses a mixed pair): the dial
+  SETS each LONG entry's equity fraction, replacing the sizing chain, and
+  the old "max" name read as a cap. (4) The CONTINUOUS dataclass defaults
+  now equal the profile resolver's values with a pinned identity test —
+  reading the dataclass used to give seven wrong numbers. Deliberate
+  non-change: LONG's dataclass leverage/multiplier defaults stay as they
+  are (a bare config at leverage 2 would trip the 50% margin boot guard;
+  the operational profile remains the only runtime sizing surface).
 - **2026-08-05 (afternoon) — The funded account is back on CROSS margin
   (owner instruction, executed via API on the flat account).** Tuesday's
   hand-trading had left it in isolated margin — the very mode that blanks

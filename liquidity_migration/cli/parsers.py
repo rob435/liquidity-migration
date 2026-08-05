@@ -228,10 +228,13 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         help="Reject configs whose worst-case full-book initial margin exceeds this equity fraction.",
     )
     long_demo.add_argument(
-        "--max-order-notional-pct-equity",
+        "--order-notional-pct-equity",
         type=float,
-        default=demo_defaults.max_order_notional_pct_equity,
-        help="Optional explicit per-entry equity-fraction cap. Default 0 = derive from notional_multiplier.",
+        default=demo_defaults.order_notional_pct_equity,
+        help=(
+            "SETS each entry's size as a fraction of equity, replacing the whole "
+            "derived sizing chain. Default 0 = keep the strategy's own derivation."
+        ),
     )
     long_demo.add_argument("--wallet-balance-fraction", type=float, default=demo_defaults.wallet_balance_fraction)
     long_demo.add_argument("--max-new-entries-per-cycle", type=int, default=demo_defaults.max_new_entries_per_cycle)
@@ -392,12 +395,24 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
     registered Lane-2 config, so the only runtime dials are the profile's
     ``carry`` sizing block. There are no per-flag sizing overrides.
     """
-    from liquidity_migration.strategy.carry_demo import CarryDemoCycleConfig
+    from liquidity_migration.strategy.carry_demo import (
+        CARRY_STRATEGY_PROFILE_CHOICES,
+        CarryDemoCycleConfig,
+    )
 
     d = CarryDemoCycleConfig()
     p = subparsers.add_parser(
         "carry-demo-cycle",
         help="Run one carry target-producer cycle (--daemon for the 60s diff loop).",
+    )
+    p.add_argument(
+        "--strategy-profile",
+        choices=CARRY_STRATEGY_PROFILE_CHOICES,
+        default=d.strategy_profile,
+        help=(
+            "Registered CARRY deployment (rule file + journaled profile name). "
+            "The journal filing id never versions; unknown values fail startup."
+        ),
     )
     p.add_argument(
         "--replay-days",

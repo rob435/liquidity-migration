@@ -288,10 +288,10 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             if long_settings
             else args.max_projected_initial_margin_pct_equity
         ),
-        max_order_notional_pct_equity=(
-            long_settings.max_order_notional_pct_equity
+        order_notional_pct_equity=(
+            long_settings.order_notional_pct_equity
             if long_settings
-            else args.max_order_notional_pct_equity
+            else args.order_notional_pct_equity
         ),
         wallet_balance_fraction=args.wallet_balance_fraction,
         max_new_entries_per_cycle=(
@@ -451,6 +451,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
         account_execution_root=getattr(args, "account_execution_root", None),
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
+        strategy_profile=args.strategy_profile,
         notional_multiplier=carry_settings.notional_multiplier,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,

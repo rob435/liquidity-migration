@@ -127,7 +127,9 @@ class LongNativeDemoCycleConfig:
     # projected full-book initial-margin guard below.
     notional_multiplier: float = 1.0
     entry_leverage: float = 10.0
-    max_order_notional_pct_equity: float = 0.0  # 0 = derive from notional_multiplier
+    #: SETS each entry's equity fraction outright (it is not a cap on the
+    #: derived value); 0 keeps the strategy's own sizing chain.
+    order_notional_pct_equity: float = 0.0
     max_projected_initial_margin_pct_equity: float = 0.50
     wallet_balance_fraction: float = 1.0
     max_new_entries_per_cycle: int = 5
@@ -187,9 +189,9 @@ def _validate_long_demo_config(
         raise ValueError("universe_superset_size must cover the strategy universe")
     if config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
-    if not 0.0 <= config.max_order_notional_pct_equity <= 10.0:
+    if not 0.0 <= config.order_notional_pct_equity <= 10.0:
         # The long sleeve may legitimately exceed 100% per-position notional via leverage.
-        raise ValueError("max_order_notional_pct_equity must be in [0, 10]")
+        raise ValueError("order_notional_pct_equity must be in [0, 10]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.entry_leverage <= 0.0:
@@ -234,8 +236,8 @@ def target_long_order_notional_pct_equity(
     Mirror of event_demo.target_order_notional_pct_equity but with the
     multiplier the long sleeve applies (10× by owner pick).
     """
-    if demo_config.max_order_notional_pct_equity > 0.0:
-        return demo_config.max_order_notional_pct_equity
+    if demo_config.order_notional_pct_equity > 0.0:
+        return demo_config.order_notional_pct_equity
     base = strategy_config.gross_exposure / max(strategy_config.max_concurrent_positions, 1)
     return base * demo_config.notional_multiplier
 

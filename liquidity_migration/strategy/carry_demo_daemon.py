@@ -26,11 +26,11 @@ from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.strategy.carry_demo import (
     CARRY_FETCH_UNIVERSE_TOP_N,
-    CARRY_PROFILE_NAME,
     CarryCycleState,
     CarryDemoCycleConfig,
     _validate_carry_demo_config,
     format_carry_demo_cycle_summary,
+    resolve_carry_strategy_profile,
     run_carry_demo_cycle,
 )
 from liquidity_migration.core.config import ResearchConfig
@@ -88,7 +88,8 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
     _daemon_label = "carry-hold"
 
     def _strategy_profile_name(self) -> str:
-        return CARRY_PROFILE_NAME
+        profile = cast("CarryDemoCycleConfig", self.demo_config).strategy_profile
+        return resolve_carry_strategy_profile(profile).profile_name
 
     def __init__(
         self,

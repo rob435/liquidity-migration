@@ -142,16 +142,16 @@ class ContinuousDemoCycleConfig:
 
     # --- code-defined active selection ---
     decile: int = 9  # short the top composite decile
-    # rmom-LOW gate: keep the lowest-residual-momentum third within each ts.
-    rmom_quantile: float = 0.33
-    feature_set: tuple[str, ...] = FEATURES
+    # rmom-LOW gate: keep the lowest-residual-momentum quartile within each ts.
+    rmom_quantile: float = 0.25
+    feature_set: tuple[str, ...] = ("max_ret168",)
     liq_turnover_min: float = 500_000.0  # liquid gate: signal-bar hourly turnover_quote (USD)
     # --- live state window ---
     lookback_days: int = 45  # confirmed-1h history pulled from the store for the features
     # --- execution / book ---
     max_active: int = 25
     max_new_entries_per_cycle: int = 5
-    max_hold_hours: int = 48  # force-exit cap if a name never leaves the decile
+    max_hold_hours: int = 24  # force-exit cap if a name never leaves the decile
     # Research parity: the engine behind the active profile's equity evidence
     # skips a fresh entry within hold_ms of the symbol's last entry
     # (cooldown_ms = hold_ms) and skips ALL of a component's fresh signals when
@@ -175,11 +175,11 @@ class ContinuousDemoCycleConfig:
     entry_pause_window_minutes: int = 1440
     entry_leverage: float = 2.0
     per_position_notional_pct_equity: float = 2.0  # base % before component, inverse-vol and rebalance scales
-    sizing_mode: str = "flat"  # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
-    target_vol_per_name: float = 0.02  # inverse-vol per-name hourly-vol target
-    vol_weight_clamp: float = 3.0  # inverse-vol multiplier clamp [1/clamp, clamp]
+    sizing_mode: str = "inverse_vol"  # "flat" | "inverse_vol" (target_vol_per_name / rv_168h)
+    target_vol_per_name: float = 0.01  # inverse-vol per-name hourly-vol target
+    vol_weight_clamp: float = 2.0  # inverse-vol multiplier clamp [1/clamp, clamp]
     # Stateful accepted-decision BTC-risk entry-size overlay.
-    entry_btc_risk_sizing_enabled: bool = False
+    entry_btc_risk_sizing_enabled: bool = True
     entry_btc_risk_arm_id: str = CTRL_BTC_RISK_70_90_35_ID
     entry_btc_risk_low: float = 0.70
     entry_btc_risk_high: float = 0.90
@@ -1598,6 +1598,9 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
 
     Uses the shared code-defined component book (a single funding-gated
     turn3_pop3 cell), inverse-vol sizing, TP12, and a 24-hour maximum hold.
+    The dataclass defaults equal these resolved values (a pinned test holds
+    them identical), so reading either tells the truth; this function stays
+    as the enforcement seam.
     """
     if config.strategy_profile != CONTINUOUS_V2_PROFILE:
         return config

@@ -98,13 +98,13 @@ plans exits across **both** registered identities, so components opened under v1
 the switch keep their published stop/TP/hold terms and drain normally (3-day max hold)
 while new entries publish under `long_native_v12_wide_stop`.
 
-There is no separate per-order notional cap. `max_order_notional_pct_equity` is `0.0` in
-[`configs/operational.demo.json`](../configs/operational.demo.json), and 0 means *disabled —
-derive the slot from `gross_exposure / max_concurrent_positions × notional_multiplier`*
-(`long_native_event_demo.py:118`, `target_long_order_notional_pct_equity` at `:214-227`).
-Any value > 0 **replaces** the base slot outright rather than bounding it; the loader
-accepts [0, 10] (`operational_profile.py:335-342`). Setting a small positive number as a
-"safety bound" silently overrides the whole sizing chain.
+`order_notional_pct_equity` (0.0 in
+[`configs/operational.demo.json`](../configs/operational.demo.json)) **sets** each entry's
+size as a fraction of equity when positive, replacing the derived slot; 0 keeps the
+strategy's own chain (`gross_exposure / max_concurrent_positions × notional_multiplier`).
+It is a setter, not a cap — the name says so — and the loader accepts [0, 10]. (Renamed
+from `max_order_notional_pct_equity` 2026-08-05: the old name read as a bound while the
+value replaced the whole sizing chain.)
 
 At the profile's 250,000 USDT capital reference the registered worst-case envelope is
 **234,375.00 USDT gross** and **117,187.50 USDT initial margin**: per-order 9.375% of
@@ -136,12 +136,13 @@ taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
 > promotion note in [`strategy_program.md`](research/strategy_program.md), deploy
 > receipt in `CHANGELOG.md`). v4 moves the toxic band's high edge to 0% and adds a
 > crowding-persistence size multiplier — both live in the shared registered
-> scorer, so the producer switch is the config file plus the profile name
-> (`carry_hold_v4_live_v1`). The journal strategy id stays `carry_hold_v3`: a
-> frozen lineage key, not a version claim. v3 keeps scoring daily as the
-> primary comparator, and the v4−v3 paired differential is the registered
-> forward experiment. At promotion the forward record had **0 scored days**.
-> See [`carry_hold.md`](research/carry_hold.md) §0.1.
+> scorer. Version selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`) in the unit
+> environment → `--strategy-profile`, the same dial shape as LONG's; the journal
+> filing id is the version-free `carry_hold` and never changes with the profile
+> (components born under the pre-2026-08-05 `carry_hold_v3` id drain under it).
+> v3 keeps scoring daily as the primary comparator, and the v4−v3 paired
+> differential is the registered forward experiment. At promotion the forward
+> record had **0 scored days**. See [`carry_hold.md`](research/carry_hold.md) §0.1.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book

@@ -264,7 +264,7 @@ def render_real_money_profile_json(
             "notional_multiplier": long_multiplier,
             "entry_leverage": leverage,
             "max_projected_initial_margin_pct_equity": long_margin_cap,
-            "max_order_notional_pct_equity": 0.0,
+            "order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,
         },
         "continuous": {

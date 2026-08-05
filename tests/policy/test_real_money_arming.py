@@ -145,7 +145,7 @@ def test_the_leverage_dials_speak_in_entry_sizes() -> None:
         max_projected_initial_margin_pct_equity=(
             profile.long.max_projected_initial_margin_pct_equity
         ),
-        max_order_notional_pct_equity=profile.long.max_order_notional_pct_equity,
+        order_notional_pct_equity=profile.long.order_notional_pct_equity,
         max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )
     per_entry = target_long_order_notional_pct_equity(config, long_v11a_profile())

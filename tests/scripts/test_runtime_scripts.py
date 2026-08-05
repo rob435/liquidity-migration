@@ -414,7 +414,7 @@ def test_demo_strategy_units_use_one_validated_operational_profile() -> None:
         "NOTIONAL_MULTIPLIER",
         "ENTRY_LEVERAGE",
         "MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY",
-        "MAX_ORDER_NOTIONAL_PCT_EQUITY",
+        "ORDER_NOTIONAL_PCT_EQUITY",
         "MAX_NEW_ENTRIES_PER_CYCLE",
         "MAX_ACTIVE",
         "BTC_TREND_GATE",
