@@ -19,6 +19,22 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-05 (10:18 UTC) — The owner's re-run deploy landed and the whole
+  fleet is green on `f85371e`; one more disk-full scar surfaced and was
+  repaired in the same pass.** The staged deploy installed and activated
+  everything, but its verify phase failed on the two demo producers: their
+  strategy event tapes ended in a partial line (the append that was running
+  when the disk hit 0 bytes), and the loader refuses a torn tape. Repair:
+  each tape backed up beside itself (`strategy_event_tape.jsonl.enospc-20260805.bak`),
+  the never-completed tail dropped (LONG 1 byte, CARRY 450 bytes), both
+  chains re-validated through the repo loader (1,645 / 1,809 events), and
+  the units' own auto-restart brought them up at 10:18:30. Receipts:
+  `verify-ok commit=f85371e requested=f85371e profile=operational
+  mainnet=armed`, all nine units on/active/enabled; mainnet owner health
+  `healthy` with equity 99.94 USDT read through the coin-row fallback
+  (`48ebc50`'s first live proof — the venue still blanks the account-wide
+  totals); demo watchdog 10:19 UTC sent "✅ cleared" for its last standing
+  alert. The compressed quote-lab tape stands at 2.5 GB, disk 35%.
 - **2026-08-05 (early) — The overnight activation failed on a hand-placed
   position, the disk then filled to zero and killed the morning redeploy,
   and both are resolved; the fleet is STOPPED awaiting the owner's re-run.**
