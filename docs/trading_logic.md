@@ -134,7 +134,7 @@ taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
 
 > **Promoted 2026-08-03 by owner override** (previously v3; change point and
 > promotion note in [`strategy_program.md`](research/strategy_program.md), deploy
-> receipt in `STATE.md`). v4 moves the toxic band's high edge to 0% and adds a
+> receipt in `CHANGELOG.md`). v4 moves the toxic band's high edge to 0% and adds a
 > crowding-persistence size multiplier — both live in the shared registered
 > scorer, so the producer switch is the config file plus the profile name
 > (`carry_hold_v4_live_v1`). The journal strategy id stays `carry_hold_v3`: a

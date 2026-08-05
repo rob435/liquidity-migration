@@ -189,7 +189,7 @@ no longer spends the retry budget, so a 5,000 USDT entry arrives as a sequence o
 absorbs the whole command, nothing is capped. Dials: `--entry-clip-touch-fraction` (0 disables) and
 `--entry-clip-min-notional-usdt`. **Live-tested on the demo account the same day** (two controlled
 entries, 1,000 and 500 USDT, arriving as 10 and 5 clip-capped windows; three integration defects
-found live and fixed — receipts and the fix list in `STATE.md`). The demo verifies the mechanics
+found live and fixed — receipts and the fix list in `CHANGELOG.md`). The demo verifies the mechanics
 only: fill rates, fees, and queue behavior at size stay ungraded until funded entries produce
 receipts, and the deadline-cross path did not occur live during the test. (3) A large-size test on the demo account
 would not be evidence: demo fills are simulated against real prints with no queue position, so a big
@@ -236,7 +236,7 @@ receipts.
 
 **The LONG sleeve's stop was the one mispriced number in it** (registered 2026-08-01 as
 `LongV12WideStop`, `long_v12_profile()`, commit `f04ccdc`; wired as the deployed LONG profile
-2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `STATE.md`). All ~20 v11a quirks were ablated
+2026-08-03 — mechanism in `docs/trading_logic.md`, receipt in `CHANGELOG.md`). All ~20 v11a quirks were ablated
 one at a time on the real engine — the harness reproduces the stored report to within the eight extra days
 of data (294 trades against 292). Every selectivity filter is load-bearing and loses Sharpe when loosened;
 the stop was not.

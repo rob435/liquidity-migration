@@ -16,6 +16,7 @@ simply, without jargon.
 | Question | File |
 | --- | --- |
 | What is running right now | [STATE.md](STATE.md) |
+| What changed, when, with receipts (dated log, newest first) | [CHANGELOG.md](CHANGELOG.md) |
 | Which subpackage owns a module, and what may import what | [liquidity_migration/README.md](liquidity_migration/README.md) |
 | Which script to run, and who runs it | [scripts/README.md](scripts/README.md) |
 | Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |

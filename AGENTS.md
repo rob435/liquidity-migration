@@ -11,10 +11,6 @@ the per-sleeve capital partition in `account_kernel.py`.
 ## Runtime Safety
 
 - Default to offline, shadow, or demo operation.
-- Arming real money — setting `REAL_MONEY`, installing mainnet credentials,
-  starting a funded unit — is the owner's own act, on a separate instruction
-  naming the deployment and its risk boundary. Building and testing that tooling
-  is in scope.
 - Unknown safety-critical state fails closed. Alpha metrics never justify
   dropping a capital-preservation control for real money.
 
@@ -67,14 +63,15 @@ Deciding is not guessing.
 - Report the decision, the runner-up, and what would change your mind. The owner
   reads that instead of the questions you did not ask.
 
-Authority over the work is not authority over the money. A general grant is not
-the separate, deployment-naming instruction that **Runtime Safety** requires
-before real money is armed.
+Authority over the work is not authority over the money. Arming real money has
+one switch — `REAL_MONEY=true` in the host credential file, set by the owner's
+own hand — and no general grant reaches it.
 
 ## Which Source Wins
 
 1. Code, tests, deploy files, and generated artifacts define implemented behavior.
-2. [`STATE.md`](STATE.md) is the operational snapshot.
+2. [`STATE.md`](STATE.md) is the operational snapshot;
+   [`CHANGELOG.md`](CHANGELOG.md) is its dated history.
 3. [`docs/research/strategy_program.md`](docs/research/strategy_program.md) is the current reading
    of the evidence and the only active research queue.
 4. Skills in `.codex/skills/` are navigation aids, never factual authority —

@@ -151,8 +151,8 @@ never a prerequisite.
 
 ## 6. Real money is a separate door
 
-Mainnet, `REAL_MONEY`, and live credentials require a separate, narrow owner
-instruction naming the deployment, capital/risk limits, controls, and expiry.
-No rolling record, green report, or repository authority opens that door.
+Arming real money is one switch set by the owner's own hand: `REAL_MONEY=true`
+in the host credential file beside the live key. No rolling record, green
+report, or repository authority opens that door — a git commit can never arm.
 Demo is the default operating surface, and capital-preservation
 controls are never traded away for velocity.

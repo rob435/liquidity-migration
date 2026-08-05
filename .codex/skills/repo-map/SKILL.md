@@ -16,8 +16,8 @@ diagnostics as local facts, never as runtime authorization.
 
 Start from the source that owns the question:
 
-- Runtime state: `STATE.md`, `deploy/sleeves.env`, systemd units, and current
-  environment/config.
+- Runtime state: `STATE.md` (the snapshot; dated history in `CHANGELOG.md`),
+  `deploy/sleeves.env`, systemd units, and current environment/config.
 - Evidence policy: `AGENTS.md` for the standing rules, `docs/research/governance.md` for
   the Progressive Evidence Model itself.
 - Research decisions and queue: `docs/research/strategy_program.md` and raw run

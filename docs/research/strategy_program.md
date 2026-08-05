@@ -22,7 +22,7 @@ one-off runners are retired.
   (`docs/research/research_findings.md` §1). **This is an execution change
   point for both sleeves' forward records**: entry fills should turn
   maker-heavy and entry prices move from crossing to the touch. Change point =
-  this commit; deploy receipt in `STATE.md`. **The full night fit is done
+  this commit; deploy receipt in `CHANGELOG.md`. **The full night fit is done
   (2026-08-04 morning, n=12,656 across all six arms plus a repeat): the
   recipe stays as shipped.** The Sell side quotes as well as the Buy side
   (the short entries carry makes are covered), the slower 30s/180s arm ties
@@ -61,7 +61,7 @@ one-off runners are retired.
   family-wise error, a survivor needs a reported plateau and a failed placebo
   beside the number.
 - **`LongV12WideStop` is registered (2026-08-01) and wired as the LONG sleeve's
-  deployed profile (2026-08-03; deployment receipt in `STATE.md`).** v12 changes
+  deployed profile (2026-08-03; deployment receipt in `CHANGELOG.md`).** v12 changes
   exactly one thing — the stop opens to 3× ATR and decays back to 1.5× after 48h —
   after ablating all ~20 v11a quirks on the real engine. Paired daily difference
   **+0.48 bp/day, t 3.27, n 1927**; total 38.5% → 51.6%, daily Sharpe 1.24 → 1.49,
@@ -107,7 +107,7 @@ one-off runners are retired.
   - **Decision:** owner, 2026-08-03 ("promote v4 to demo and live now").
     Demo is done through the normal deploy flow; mainnet trades v4 whenever
     the owner arms `REAL_MONEY` (separate door, `governance.md` §6).
-  - **Date:** 2026-08-03. Change point = the deploy receipt in `STATE.md`.
+  - **Date:** 2026-08-03. Change point = the deploy receipt in `CHANGELOG.md`.
   Migration: the producer's stateless replay recomputes the desired book under
   v4 at the first post-deploy cycle, so the standing v3 book converges by
   ordinary exit-first diffs (persistence-cut names exit, the rest resize); no
@@ -152,7 +152,7 @@ one-off runners are retired.
   fleet stopped and flat.
 - The account-kernel remediation was independent of this research reset and
   deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
-  (Deployment) is the authority for what is installed.
+  is the authority for what is installed (deploy receipts in `CHANGELOG.md`).
 - **The 2026-07-25 instrument-repair and program phases (1, 2A/2B, 5) are
   closed.** The anomaly program's conclusion is economic: the durable premium
   is compensation for liquidation risk this capital structure cannot survive,
@@ -513,8 +513,8 @@ modified to help a challenger.
 
 Promotion requires the five-line note in `docs/research/governance.md`, a recorded
 change point, stable demo execution, and an explicit replacement/migration
-diff. Promotion means demo only. Mainnet still requires a separate owner
-instruction naming the deployment and risk boundary.
+diff. Promotion means demo only. Real money stays behind its own switch, set
+by the owner's own hand (`docs/research/governance.md` §6).
 
 ### P4 — directions remain open
 

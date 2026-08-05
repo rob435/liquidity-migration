@@ -47,7 +47,8 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 
 | Doc | Covers |
 | --- | --- |
-| [STATE.md](STATE.md) | last recorded operating state and next action |
+| [STATE.md](STATE.md) | the operational snapshot: what runs now and what constrains it |
+| [CHANGELOG.md](CHANGELOG.md) | the dated operational log: deploys, incidents, repairs, change points |
 | [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
 | [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the hourly digest, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
 | [docs/architecture.md](docs/architecture.md) | producers, account owner, journals, how a target becomes an order |

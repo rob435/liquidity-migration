@@ -19,7 +19,7 @@ pins that v4 moved nothing in them.)*
 *(2026-08-03: **v4 is PROMOTED to the demo CARRY sleeve** by owner override —
 producer profile `carry_hold_v4_live_v1`, promotion note and forward-record
 caveat (0 scored days at promotion) in
-`docs/research/strategy_program.md`, deploy receipt in `STATE.md`.)*
+`docs/research/strategy_program.md`, deploy receipt in `CHANGELOG.md`.)*
 
 ## 0. 2026-07-28 correction — read this before any number below
 

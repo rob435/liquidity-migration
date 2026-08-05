@@ -48,6 +48,6 @@ Report: claim and decision; data that shaped vs graded it; scope; effect
 size, uncertainty, concentration, and costs; artifact/commit identities;
 explicit non-conclusions.
 
-Research quality never grants mainnet authority. Real money requires a
-separate owner instruction naming the deployment, capital/risk limits,
-controls, and expiry (`docs/research/governance.md` §6).
+Research quality never grants mainnet authority. Real money has one arming
+switch, set by the owner's own hand in the host credential file
+(`docs/research/governance.md` §6).
