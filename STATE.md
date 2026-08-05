@@ -19,6 +19,17 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-05 (afternoon) — The funded account is back on CROSS margin
+  (owner instruction, executed via API on the flat account).** Tuesday's
+  hand-trading had left it in isolated margin — the very mode that blanks
+  the account-wide wallet totals; the switch to `REGULAR_MARGIN` was
+  accepted and the totals repopulated immediately, confirming the
+  2026-08-04 diagnosis (the coin-row fallback in `48ebc50` stays as a
+  dormant net). Position mode is one-way and MUST stay one-way: the fleet
+  places every order and stop with `positionIdx 0` and the protection
+  layer refuses nonzero-index rows, so enabling the venue's hedge mode
+  would reject every fleet order. No startup check pins either mode —
+  proposed, owner to decide.
 - **2026-08-05 (midday) — The real-money dial surface collapsed to four dials
   (owner instruction: "just a leverage dial per sleeve, keep the daily loss
   and some protection").** `RM_CARRY_LEVERAGE` (1.0) and `RM_LONG_LEVERAGE`
