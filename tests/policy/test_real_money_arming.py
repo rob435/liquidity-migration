@@ -20,6 +20,7 @@ import pytest
 from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
 from liquidity_migration.policy.real_money_arming import preflight
 from liquidity_migration.policy.real_money_profile import (
+    long_worst_case_upscale,
     RealMoneyDials,
     dial_environment_keys,
     parse_real_money_dials,
@@ -98,125 +99,86 @@ def test_the_template_parses_as_a_strict_systemd_environment_file() -> None:
 def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
     dials = parse_real_money_dials(
         {
-            "RM_MAX_LEVERAGE": "2.0",
-            "RM_ENTRY_LEVERAGE": "1.6",
-            "RM_ACCOUNT_GROSS_MULTIPLE": "1.6",
-            "RM_CARRY_GROSS_SHARE": "0.5",
-            "RM_CARRY_NOTIONAL_MULTIPLIER": "0.7",
-            "RM_LONG_NOTIONAL_MULTIPLIER": "0.3",
+            "RM_CARRY_LEVERAGE": "0.5",
+            "RM_LONG_LEVERAGE": "1.0",
+            "RM_DAILY_LOSS_FRACTION": "0.05",
+            "RM_CARRY_STOP_LOSS_FRACTION": "0.25",
         }
     )
-    assert dials.max_leverage == 2.0
+    assert dials.carry_leverage == 0.5
     _data, profile = render_real_money_profile(dials)
-    assert profile.account_risk.max_leverage == 2.0
-    assert profile.carry.entry_leverage == 1.6
+    reference = profile.capital_reference_usdt
+    # Each sleeve's cap IS its dial: the partition is exact, not a share of slack.
+    carry = next(row for row in profile.account_risk.sleeve_limits if row.sleeve == "carry")
+    long_limit = next(row for row in profile.account_risk.sleeve_limits if row.sleeve == "long")
+    assert carry.max_gross_notional_usdt == pytest.approx(0.5 * reference)
+    assert long_limit.max_gross_notional_usdt == pytest.approx(1.0 * reference)
+    # The account cap is what the sleeves plus the 1% retired token need.
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(
-        1.6 * profile.capital_reference_usdt
+        (0.5 + 1.0) / 0.99 * reference
     )
-    carry = next(
-        limit for limit in profile.account_risk.sleeve_limits if limit.sleeve == "carry"
-    )
-    assert carry.max_gross_notional_usdt == pytest.approx(
-        0.5 * profile.account_risk.max_account_gross_notional_usdt
+    assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.05 * reference)
+    assert profile.carry.declared_stop_loss_fraction == 0.25
+    assert profile.carry.notional_multiplier == 0.5
+    # LONG's multiplier absorbs the strategy's worst-case upscaling so the
+    # dial bounds the worst-case book, not the nominal one.
+    assert profile.long.notional_multiplier == pytest.approx(
+        1.0 / long_worst_case_upscale()
     )
 
 
-def test_lowering_leverage_without_lowering_gross_names_the_dial_to_move() -> None:
-    """A sleeve-level message would name a sleeve, not the dial at fault."""
+def test_the_leverage_dials_speak_in_entry_sizes() -> None:
+    """The template promises entry ~= dial / 18.75 of equity; hold it to that."""
 
-    with pytest.raises(
-        ValueError, match="RM_ACCOUNT_GROSS_MULTIPLE .* cannot exceed RM_ENTRY_LEVERAGE"
-    ):
-        render_real_money_profile(RealMoneyDials(entry_leverage=1.5))
-    # Lowering gross to match is what the message asks for. The producers have
-    # to come down with it -- less gross is less book -- and the proof says so
-    # by naming the sleeve that no longer fits.
+    from liquidity_migration.research.backtest.long_native import long_v11a_profile
+    from liquidity_migration.strategy.long_native_event_demo import (
+        LongNativeDemoCycleConfig,
+        target_long_order_notional_pct_equity,
+    )
+
     _data, profile = render_real_money_profile(
-        RealMoneyDials(
-            entry_leverage=1.5,
-            account_gross_multiple=1.5,
-            carry_notional_multiplier=0.7,
-            long_notional_multiplier=0.3,
-        )
+        RealMoneyDials(carry_leverage=0.1, long_leverage=1.875)
     )
-    assert profile.account_risk.max_leverage == 2.0
-
-
-def test_the_per_order_equity_fraction_dial_reaches_the_long_settings() -> None:
-    # 10% per entry worst-cases to 0.10 x 1.25 vol x 1.5 weekend x 10 positions
-    # = 1.875x equity of gross, so the proof demands the margin cap raised AND
-    # the partition reshaped around it: LONG takes ~94% of the envelope and the
-    # carry multiplier must shrink into the share that remains.
-    dials = parse_real_money_dials(
-        {
-            "RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY": "0.10",
-            "RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY": "1.0",
-            "RM_LONG_GROSS_SHARE": "0.94",
-            "RM_CARRY_GROSS_SHARE": "0.05",
-            "RM_CARRY_NOTIONAL_MULTIPLIER": "0.1",
-        }
+    config = LongNativeDemoCycleConfig(
+        notional_multiplier=profile.long.notional_multiplier,
+        entry_leverage=profile.long.entry_leverage,
+        max_projected_initial_margin_pct_equity=(
+            profile.long.max_projected_initial_margin_pct_equity
+        ),
+        max_order_notional_pct_equity=profile.long.max_order_notional_pct_equity,
+        max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )
-    assert dials.long_max_order_notional_pct_equity == 0.10
-    _data, profile = render_real_money_profile(dials)
-    assert profile.long.max_order_notional_pct_equity == 0.10
-    # Each companion alone is not enough; the proof names what still breaks.
+    per_entry = target_long_order_notional_pct_equity(config, long_v11a_profile())
+    assert per_entry == pytest.approx(0.10)  # 1.875 / 18.75
+
+
+def test_a_retired_dial_is_refused_by_name() -> None:
+    """An old env file must fail loudly, not silently steer by a dead dial."""
+
+    with pytest.raises(ValueError, match="retired real-money dial.*RM_MAX_LEVERAGE"):
+        parse_real_money_dials(
+            {"RM_MAX_LEVERAGE": "2.0", "RM_CARRY_LEVERAGE": "1.0"}
+        )
     with pytest.raises(
-        ValueError, match="long full-book margin projection exceeds its configured equity cap"
+        ValueError, match="RM_ACCOUNT_GROSS_MULTIPLE, RM_LONG_NOTIONAL_MULTIPLIER"
     ):
-        render_real_money_profile(
-            RealMoneyDials(long_max_order_notional_pct_equity=0.10)
-        )
-    with pytest.raises(ValueError, match="combined producer envelope exceeds"):
-        render_real_money_profile(
-            RealMoneyDials(
-                long_max_order_notional_pct_equity=0.10,
-                long_max_projected_initial_margin_pct_equity=1.0,
-            )
-        )
-    # The default renders zero: the strategy keeps its own per-order derivation.
-    _data, default_profile = render_real_money_profile()
-    assert default_profile.long.max_order_notional_pct_equity == 0.0
-
-
-def test_a_per_order_size_beyond_the_gross_cap_names_the_dial() -> None:
-    with pytest.raises(
-        ValueError,
-        match="RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY .* cannot exceed RM_ACCOUNT_GROSS_MULTIPLE",
-    ):
-        render_real_money_profile(
-            RealMoneyDials(long_max_order_notional_pct_equity=2.5)
-        )
-    with pytest.raises(ValueError, match="must be finite and non-negative"):
-        render_real_money_profile(
-            RealMoneyDials(long_max_order_notional_pct_equity=-0.1)
+        parse_real_money_dials(
+            {
+                "RM_LONG_NOTIONAL_MULTIPLIER": "0.4",
+                "RM_ACCOUNT_GROSS_MULTIPLE": "2.0",
+            }
         )
 
 
-#: (gross multiple, entry leverage, carry multiplier, long multiplier). Each is
-#: a coherent deployment: producers sized to fit the account they are given.
-_COHERENT_DIALS = (
-    (1.0, 1.0, 0.5, 0.2),
-    (1.0, 2.0, 0.5, 0.2),
-    (1.5, 1.5, 0.7, 0.3),
-    (1.8, 1.8, 0.9, 0.35),
-    (2.0, 2.0, 1.0, 0.4),
+@pytest.mark.parametrize(
+    ("carry", "long"),
+    [(0.1, 0.1), (0.5, 0.5), (1.0, 0.75), (1.5, 0.4), (1.0, 0.98), (0.01, 1.97)],
 )
-
-
-@pytest.mark.parametrize(("multiple", "leverage", "carry", "long"), _COHERENT_DIALS)
-def test_the_partition_sums_inside_both_account_caps_at_any_leverage(
-    multiple: float, leverage: float, carry: float, long: float
+def test_the_partition_sums_inside_both_account_caps_at_any_dial_pair(
+    carry: float, long: float
 ) -> None:
-    """Deriving the margin share from leverage silently broke this below 2x."""
-
     _data, profile = render_real_money_profile(
-        RealMoneyDials(
-            max_leverage=max(leverage, 2.0),
-            entry_leverage=leverage,
-            account_gross_multiple=multiple,
-            carry_notional_multiplier=carry,
-            long_notional_multiplier=long,
-        )
+        RealMoneyDials(carry_leverage=carry, long_leverage=long)
     )
     risk = profile.account_risk
     assert sum(limit.max_gross_notional_usdt for limit in risk.sleeve_limits) <= (
@@ -225,59 +187,47 @@ def test_the_partition_sums_inside_both_account_caps_at_any_leverage(
     assert sum(limit.max_initial_margin_usdt for limit in risk.sleeve_limits) <= (
         risk.max_initial_margin_usdt + 1e-9
     )
+    assert risk.max_account_gross_notional_usdt <= (
+        2.0 * profile.capital_reference_usdt + 1e-9
+    )
 
 
 def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
     """An operator who typed it meant to change it."""
 
-    with pytest.raises(ValueError, match="RM_MAX_LEVERAGE must be numeric"):
-        parse_real_money_dials({"RM_MAX_LEVERAGE": "2x"})
-    with pytest.raises(ValueError, match="RM_MAX_LEVERAGE is present but empty"):
-        parse_real_money_dials({"RM_MAX_LEVERAGE": "  "})
-    with pytest.raises(ValueError, match="must be an integer"):
-        parse_real_money_dials({"RM_CARRY_MAX_NEW_ENTRIES_PER_CYCLE": "10.5"})
+    with pytest.raises(ValueError, match="RM_CARRY_LEVERAGE must be numeric"):
+        parse_real_money_dials({"RM_CARRY_LEVERAGE": "2x"})
+    with pytest.raises(ValueError, match="RM_CARRY_LEVERAGE is present but empty"):
+        parse_real_money_dials({"RM_CARRY_LEVERAGE": "  "})
 
 
 @pytest.mark.parametrize(
     ("dials", "message"),
     [
-        ({"equity_fraction": 1.5}, "RM_EQUITY_FRACTION cannot exceed 1"),
-        ({"entry_leverage": 5.0}, "RM_ENTRY_LEVERAGE cannot exceed RM_MAX_LEVERAGE"),
-        ({"initial_margin_fraction": 2.0}, "RM_INITIAL_MARGIN_FRACTION cannot exceed 1"),
-        ({"account_gross_multiple": 9.0}, "RM_ACCOUNT_GROSS_MULTIPLE cannot exceed"),
-        ({"carry_gross_share": 0.9}, "must leave room for the"),
-        ({"carry_stop_loss_fraction": 1.0}, "must sit in \\(0, 1\\)"),
-        ({"max_leverage": 0.0}, "RM_MAX_LEVERAGE must be finite and positive"),
-        ({"max_leverage": 5.0}, "RM_MAX_LEVERAGE cannot exceed 2"),
-        ({"carry_max_new_entries_per_cycle": 0}, "must be a positive integer"),
+        ({"carry_leverage": 0.0}, "RM_CARRY_LEVERAGE must be finite and positive"),
+        ({"long_leverage": -0.5}, "RM_LONG_LEVERAGE must be finite and positive"),
+        (
+            {"carry_leverage": 1.5, "long_leverage": 0.6},
+            "cannot exceed 1.98",
+        ),
+        ({"daily_loss_fraction": 1.5}, "RM_DAILY_LOSS_FRACTION must sit in"),
+        ({"carry_stop_loss_fraction": 1.0}, "RM_CARRY_STOP_LOSS_FRACTION must sit in"),
     ],
 )
-def test_no_dial_set_can_produce_an_envelope_the_proof_would_reject(
+def test_no_dial_pair_can_produce_an_envelope_the_proof_would_reject(
     dials: dict, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
         render_real_money_profile(RealMoneyDials(**dials))
 
 
-def test_a_producer_dialled_outside_its_partition_share_is_refused() -> None:
-    """The load-time proof is what catches this, and it runs at render time."""
-
-    with pytest.raises(ValueError, match="'long' gross envelope exceeds its sleeve_limits"):
-        render_real_money_profile(RealMoneyDials(long_notional_multiplier=0.5))
-
-
 def test_every_render_is_reloadable_and_proved() -> None:
     for dials in (
         RealMoneyDials(),
-        # A bigger CARRY share and a smaller LONG one, with LONG sized to fit it.
-        RealMoneyDials(
-            carry_gross_share=0.7, long_gross_share=0.2, long_notional_multiplier=0.2
-        ),
-        RealMoneyDials(entry_leverage=1.8, account_gross_multiple=1.8,
-                       carry_notional_multiplier=0.9, long_notional_multiplier=0.35),
-        RealMoneyDials(equity_fraction=0.25, long_notional_multiplier=0.1),
-        RealMoneyDials(daily_loss_fraction=0.02, expand_dead_band_fraction=0.0),
-        RealMoneyDials(equity_floor_usdt=1.0, carry_max_new_entries_per_cycle=1),
+        RealMoneyDials(carry_leverage=1.5, long_leverage=0.4),
+        RealMoneyDials(carry_leverage=0.05, long_leverage=0.05),
+        RealMoneyDials(daily_loss_fraction=0.02, carry_stop_loss_fraction=0.1),
+        RealMoneyDials(carry_leverage=0.99, long_leverage=0.99),
     ):
         data, profile = render_real_money_profile(dials)
         assert load_operational_profile_bytes(data).source_sha256 == profile.source_sha256
@@ -343,15 +293,16 @@ def test_preflight_refuses_a_demo_key_in_the_mainnet_file(tmp_path: Path) -> Non
 
 def test_preflight_reports_a_bad_dial_without_crashing(tmp_path: Path) -> None:
     body = TEMPLATE.read_text(encoding="utf-8").replace(
-        "RM_ENTRY_LEVERAGE=2.0", "RM_ENTRY_LEVERAGE=50.0"
+        "RM_CARRY_LEVERAGE=1.0", "RM_CARRY_LEVERAGE=50.0"
     )
+    assert "RM_CARRY_LEVERAGE=50.0" in body  # the template line the test bends
     credential = _env_file(tmp_path, "bybit-mainnet.env", body)
     owner = _env_file(tmp_path, "owner.env", OWNER_TEMPLATE.read_text(encoding="utf-8"))
 
     results = preflight(credential_env=credential, owner_env=owner)
     dials = next(row for row in results if row.name == "dials")
     assert not dials.ok
-    assert "RM_ENTRY_LEVERAGE cannot exceed" in dials.detail
+    assert "cannot exceed 1.98" in dials.detail
 
 
 def test_preflight_refuses_a_world_readable_credential_file(tmp_path: Path) -> None:
@@ -506,8 +457,7 @@ def test_preflight_catches_a_profile_that_is_not_the_render_of_the_dials(
     installed = tmp_path / "risk-policy.json"
     stale = _filled_credential_env(
         tmp_path,
-        **{"RM_CARRY_GROSS_SHARE": "0.70", "RM_LONG_GROSS_SHARE": "0.20",
-           "RM_LONG_NOTIONAL_MULTIPLIER": "0.2"},
+        **{"RM_CARRY_LEVERAGE": "0.7", "RM_LONG_LEVERAGE": "0.2"},
     )
     assert main(["render-profile", "--from-env", str(stale), "--execute",
                  "--output", str(installed)]) == 0

@@ -136,9 +136,14 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
 
     assert profile.capital_reference.tracks_equity
     assert profile.capital_reference.equity_fraction == 1.0
-    # The owner's decision: initial margin <= equity, gross up to 2x.
+    # The account cap is exactly what the two sleeve dials plus the retired
+    # token share need: (1.0 carry + 0.75 long) / 0.99, inside the 2x ceiling.
+    gross_multiple = (1.0 + 0.75) / 0.99
     assert profile.account_risk.max_initial_margin_usdt == pytest.approx(reference)
-    assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(2 * reference)
+    assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(
+        gross_multiple * reference
+    )
+    assert profile.account_risk.max_account_gross_notional_usdt <= 2 * reference
     assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.1 * reference)
     assert profile.account_risk.max_leverage == 2.0
     # CARRY and LONG both carry real size because the envelope is partitioned.
@@ -153,7 +158,9 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
     for equity in (200.0, 2_500.0, 40_000.0):
         scaled = profile_at_capital_reference(profile, equity)
         assert scaled.account_risk.max_initial_margin_usdt == pytest.approx(equity)
-        assert scaled.account_risk.max_account_gross_notional_usdt == pytest.approx(2 * equity)
+        assert scaled.account_risk.max_account_gross_notional_usdt == pytest.approx(
+            gross_multiple * equity
+        )
 
 
 def test_the_mainnet_partition_is_a_real_partition() -> None:

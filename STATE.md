@@ -19,6 +19,22 @@ how it got there. That history is in Git.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-05 (midday) — The real-money dial surface collapsed to four dials
+  (owner instruction: "just a leverage dial per sleeve, keep the daily loss
+  and some protection").** `RM_CARRY_LEVERAGE` (1.0) and `RM_LONG_LEVERAGE`
+  (0.75) are each sleeve's book ceiling as a multiple of equity, worst case
+  included (each carry name = a tenth of its dial; each LONG entry ≈ its
+  dial / 18.75); `RM_DAILY_LOSS_FRACTION` (0.1) and
+  `RM_CARRY_STOP_LOSS_FRACTION` (0.35) stay. Everything else the old
+  surface exposed is derived and still proved at render; the defaults
+  reproduce the previous effective sizing exactly (carry multiplier 1.0,
+  LONG 0.4), so nothing trades differently until a dial moves. A retired
+  `RM_*` line is refused BY NAME at render — **the host's
+  `bybit-mainnet.env` still carries the old dials, so the next
+  render/activation will refuse until those lines are replaced with the
+  new four** (the local `deploy/.env` staging copy is already converted).
+  Committed profile regenerated (account gross cap is now the derived
+  1.7677x, was a slack 2.0x; sleeve caps unchanged in effect).
 - **2026-08-05 (10:18 UTC) — The owner's re-run deploy landed and the whole
   fleet is green on `f85371e`; one more disk-full scar surfaced and was
   repaired in the same pass.** The staged deploy installed and activated

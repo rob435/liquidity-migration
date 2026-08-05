@@ -179,28 +179,27 @@ venue instead of in software; declined, so these caps are what hold size.
 ### Dials
 
 One file: [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)
-→ `/etc/liquidity-migration/bybit-mainnet.env`. Every dial is optional (omitting
-one takes the committed default) and every dial is a ratio except the floor.
+→ `/etc/liquidity-migration/bybit-mainnet.env`. Four dials, all optional
+(omitting one takes the committed default), all ratios of wallet equity.
+Sizing is one leverage multiple per sleeve — want more size, raise the
+multiple:
 
 | Dial | Default | Meaning |
 | --- | --- | --- |
-| `RM_EQUITY_FRACTION` | 1.0 | Fraction of the wallet the envelope scales to. Cannot exceed 1. |
-| `RM_EQUITY_FLOOR_USDT` / `RM_EXPAND_DEAD_BAND_FRACTION` | 100.0 / 0.05 | Reference floor (the one dial that is an amount) and the expansion-only dead band, in `[0, 1)`. |
-| `RM_MAX_LEVERAGE` / `RM_ENTRY_LEVERAGE` | 2.0 / 2.0 | Hard ceiling — the renderer refuses above 2.0 — and what producers request. Entry ≤ max. |
-| `RM_ACCOUNT_GROSS_MULTIPLE` | 2.0 | Gross ceiling ×reference. Bounded by leverage and by `entry_leverage × initial_margin_fraction`. |
-| `RM_SYMBOL_NOTIONAL_FRACTION` | 0.5 | Largest single-symbol position. |
-| `RM_INITIAL_MARGIN_FRACTION` | 1.0 | Margin ceiling. Cannot exceed 1. |
+| `RM_CARRY_LEVERAGE` | 1.0 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 1.0 → names up to 10% of equity, book up to 100%. |
+| `RM_LONG_LEVERAGE` | 0.75 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.75 → ~4% per entry, 1.88 → ~10%. |
 | `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily realised-loss halt. Trips a flatten. |
-| `RM_CARRY_GROSS_SHARE` / `RM_LONG_GROSS_SHARE` | 0.55 / 0.40 | Per-sleeve shares of the gross and margin caps. With the 0.01 retired-CONTINUOUS token share they must sum ≤ 1. |
-| `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native stop distance, armed with the entry. |
-| `RM_CARRY_NOTIONAL_MULTIPLIER` / `RM_LONG_NOTIONAL_MULTIPLIER` | 1.0 / 0.4 | Per-sleeve sizing. |
-| `RM_LONG_MAX_ORDER_NOTIONAL_PCT_EQUITY` | 0.0 | Per-entry size as a fraction of equity: 0.10 makes each LONG entry 10% of equity. 0 keeps the strategy's own derivation. Cannot exceed the gross multiple. |
+| `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-Plus `RM_{CARRY,LONG}_MAX_NEW_ENTRIES_PER_CYCLE` (10 / 5, positive integers) and
-`RM_LONG_MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY` (0.5).
-`scripts/ops.sh real-money render-profile` turns all of them into the profile the
-kernel enforces; a dial set that cannot produce a loadable profile is refused
-there, naming the dial to move, instead of at start-up over a funded account.
+The two leverage dials may total at most 1.98: 2× the wallet is the ceiling
+on a funded account, and the retired-CONTINUOUS token share keeps its 1%.
+Everything the old dial surface exposed (account caps, the sleeve partition,
+margin ceilings, entry leverage, the equity floor) is now derived from these
+and still proved at render; a retired `RM_*` variable left in the env file is
+refused by name. `scripts/ops.sh real-money render-profile` turns the dials
+into the profile the kernel enforces; a pair that cannot produce a loadable
+profile is refused there, naming the dial to move, instead of at start-up
+over a funded account.
 
 ### Arming (owner-executed)
 
@@ -240,7 +239,8 @@ the render of the current dials.
 Before flipping the switch, confirm the funded account is flat by hand — the
 owner's startup check and the reconciler see USDT-settled linear only, so
 anything else on the account stays invisible to both (*Still unproven*).
-Start small: `RM_EQUITY_FRACTION` is the size dial, and the envelope and the
+Start small: the two sleeve leverage dials (`RM_CARRY_LEVERAGE`,
+`RM_LONG_LEVERAGE`) are the size controls, and the envelope and the
 watchdog thresholds are unexercised on a funded account until Tier 1 runs.
 
 ### Capital controls in force
@@ -285,8 +285,8 @@ Known hazards, kept verbatim from the pre-arming review:
 - **Wallet equity counts non-USDT collateral.** `totalEquity` is an account-wide
   USD aggregate, so on a mixed-collateral account the envelope scales off assets
   the strategy cannot post as USDT margin, and a collateral drawdown alone can
-  rescale the caps or trip the daily loss halt. `RM_EQUITY_FRACTION=1.0` is only
-  right on a USDT-only account.
+  rescale the caps or trip the daily loss halt. The envelope tracks the full
+  wallet, which is only right on a USDT-only account.
 - **Three funding shapes stop the owner permanently, outside the degrade
   path**: a linear settlement row in any currency but USDT; more than ~357
   settlements/day (the 2,500-row epoch-replay page bound); and, off demo, a
