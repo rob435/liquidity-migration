@@ -172,7 +172,7 @@ def test_a_retired_dial_is_refused_by_name() -> None:
 
 @pytest.mark.parametrize(
     ("carry", "long"),
-    [(0.1, 0.1), (0.5, 0.5), (1.0, 0.75), (1.5, 0.4), (1.0, 0.98), (0.01, 1.97)],
+    [(0.1, 0.1), (0.5, 0.5), (1.0, 0.75), (1.5, 0.4), (1.88, 1.0), (0.01, 9.89)],
 )
 def test_the_partition_sums_inside_both_account_caps_at_any_dial_pair(
     carry: float, long: float
@@ -188,8 +188,29 @@ def test_the_partition_sums_inside_both_account_caps_at_any_dial_pair(
         risk.max_initial_margin_usdt + 1e-9
     )
     assert risk.max_account_gross_notional_usdt <= (
-        2.0 * profile.capital_reference_usdt + 1e-9
+        10.0 * profile.capital_reference_usdt + 1e-9
     )
+    # Venue entry leverage rises with the dials so the gross cap stays
+    # reachable within the wallet's margin.
+    assert risk.max_leverage >= risk.max_account_gross_notional_usdt / (
+        profile.capital_reference_usdt * (1.0 + 1e-9)
+    )
+
+
+def test_dials_past_two_raise_the_venue_entry_leverage_with_them() -> None:
+    """Gross above entry-leverage x wallet is unreachable, so leverage follows."""
+
+    _data, profile = render_real_money_profile(
+        RealMoneyDials(carry_leverage=1.88, long_leverage=1.0)
+    )
+    multiple = (1.88 + 1.0) / 0.99
+    assert profile.account_risk.max_leverage == pytest.approx(multiple)
+    assert profile.carry.entry_leverage == pytest.approx(multiple)
+    assert profile.long.entry_leverage == pytest.approx(multiple)
+    # At or under a 2x total the venue leverage keeps its 2.0 floor.
+    _data, modest = render_real_money_profile(RealMoneyDials())
+    assert modest.account_risk.max_leverage == 2.0
+    assert modest.carry.entry_leverage == 2.0
 
 
 def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
@@ -207,8 +228,8 @@ def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
         ({"carry_leverage": 0.0}, "RM_CARRY_LEVERAGE must be finite and positive"),
         ({"long_leverage": -0.5}, "RM_LONG_LEVERAGE must be finite and positive"),
         (
-            {"carry_leverage": 1.5, "long_leverage": 0.6},
-            "cannot exceed 1.98",
+            {"carry_leverage": 5.0, "long_leverage": 5.0},
+            "cannot exceed 9.9",
         ),
         ({"daily_loss_fraction": 1.5}, "RM_DAILY_LOSS_FRACTION must sit in"),
         ({"carry_stop_loss_fraction": 1.0}, "RM_CARRY_STOP_LOSS_FRACTION must sit in"),
@@ -302,7 +323,7 @@ def test_preflight_reports_a_bad_dial_without_crashing(tmp_path: Path) -> None:
     results = preflight(credential_env=credential, owner_env=owner)
     dials = next(row for row in results if row.name == "dials")
     assert not dials.ok
-    assert "cannot exceed 1.98" in dials.detail
+    assert "cannot exceed 9.9" in dials.detail
 
 
 def test_preflight_refuses_a_world_readable_credential_file(tmp_path: Path) -> None:

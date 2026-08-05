@@ -191,12 +191,17 @@ multiple:
 | `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily realised-loss halt. Trips a flatten. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-The two leverage dials may total at most 1.98: 2× the wallet is the ceiling
-on a funded account, and the retired-CONTINUOUS token share keeps its 1%.
-Everything the old dial surface exposed (account caps, the sleeve partition,
-margin ceilings, entry leverage, the equity floor) is now derived from these
-and still proved at render; a retired `RM_*` variable left in the env file is
-refused by name. `scripts/ops.sh real-money render-profile` turns the dials
+The two leverage dials may total at most 9.9 (the retired-CONTINUOUS token
+share keeps its 1% of a 10× ceiling). Past a total of ~2 the venue margin
+leverage the producers request rises with the dials — gross above
+`entry leverage × wallet` is physically unreachable — and the honest
+protection picture changes: the daily loss halt fires on realised loss only,
+so an open book's drawdown meets the venue's liquidation engine first (at
+10× gross, a ~10% adverse move is the wallet), and some symbols' own venue
+leverage limits may bind. Everything the old dial surface exposed (account
+caps, the sleeve partition, margin ceilings, entry leverage, the equity
+floor) is derived from the dials and still proved at render; a retired
+`RM_*` variable left in the env file is refused by name. `scripts/ops.sh real-money render-profile` turns the dials
 into the profile the kernel enforces; a pair that cannot produce a loadable
 profile is refused there, naming the dial to move, instead of at start-up
 over a funded account.

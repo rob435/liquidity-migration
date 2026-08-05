@@ -45,15 +45,18 @@ REAL_MONEY_DIAL_PREFIX = "RM_"
 _CONTINUOUS_NOTIONAL_MULTIPLIER = 0.001
 _CONTINUOUS_GROSS_SHARE = 0.01
 
-#: Ceiling on total account gross, as a multiple of the wallet. Above 2x the
-#: wallet, what stops the book is the venue's margin engine rather than
-#: anything in this profile, so the two sleeve dials may sum to at most
-#: ``2.0 * (1 - _CONTINUOUS_GROSS_SHARE)`` = 1.98.
-MAX_REAL_MONEY_LEVERAGE = 2.0
+#: Ceiling on total account gross, as a multiple of the wallet: the two
+#: sleeve dials may sum to at most ``10.0 * (1 - _CONTINUOUS_GROSS_SHARE)``
+#: = 9.9. Owner's dial, owner's risk — but be clear what protects the book
+#: up there: the loss halt fires on realised loss and the envelope on
+#: observed equity, while an open position's drawdown meets the venue's
+#: liquidation engine first. At 10x gross a ~10% adverse move on the book
+#: is the wallet.
+MAX_REAL_MONEY_LEVERAGE = 10.0
 
 # Derived constants the old dial surface used to expose. Fixed on purpose:
 # none of them is a sizing decision, and every one is still enforced.
-_ENTRY_LEVERAGE = 2.0  # venue margin leverage requested per order
+_ENTRY_LEVERAGE = 2.0  # venue margin leverage floor requested per order
 _EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band
 _SYMBOL_NOTIONAL_FRACTION = 0.5  # largest single-symbol position
@@ -68,7 +71,9 @@ class RealMoneyDials:
     Each leverage dial is the most that sleeve's book can reach, as a multiple
     of account equity, with the strategy's own worst-case upscaling
     (volatility and weekend size multipliers) already inside the number.
-    Together they may total at most 1.98.
+    Together they may total at most 9.9; past a total of ~2 the venue margin
+    leverage the producers request rises with the dials, and the venue's
+    liquidation engine becomes the binding backstop on an open book.
     """
 
     #: Carry book ceiling, x equity. Each name takes up to one tenth of the
@@ -194,12 +199,34 @@ def render_real_money_profile_json(
     account_gross = reference * account_multiple
     margin_cap = reference  # margin above the wallet is the venue's business
 
+    # Venue margin leverage scales with the dials: gross above
+    # entry-leverage x wallet is physically unreachable, so a book dialled
+    # past 2x raises the per-order leverage it requests along with it.
+    leverage = max(_ENTRY_LEVERAGE, account_multiple)
+
     upscale = long_worst_case_upscale()
     long_multiplier = dials.long_leverage / upscale
     # The producer's own refusal sits exactly at the dial: a worst-case full
     # book posts dial / entry-leverage of equity as margin (headroom for the
     # multiplier round-trip above).
-    long_margin_cap = min(1.0, dials.long_leverage / _ENTRY_LEVERAGE + 1e-9)
+    long_margin_cap = min(1.0, dials.long_leverage / leverage + 1e-9)
+
+    # The single-symbol cap must admit each producer's own worst single
+    # position, so at high dials it scales with them (never past the account
+    # cap; the 0.5 floor keeps the historical bound at modest dials).
+    from liquidity_migration.research.backtest.long_native import long_v11a_profile  # noqa: PLC0415
+    from liquidity_migration.strategy.carry_demo import load_carry_config  # noqa: PLC0415
+
+    long_strategy = long_v11a_profile()
+    long_single = dials.long_leverage * (
+        float(long_strategy.gross_exposure)
+        / max(int(long_strategy.max_concurrent_positions), 1)
+    )
+    carry_single = dials.carry_leverage * float(load_carry_config().per_name_cap)
+    symbol_fraction = min(
+        account_multiple,
+        max(_SYMBOL_NOTIONAL_FRACTION, long_single + 1e-9, carry_single + 1e-9),
+    )
 
     def _share(gross_share: float) -> dict[str, float]:
         # The same fraction of *each* account cap, so the shares sum inside the
@@ -222,10 +249,9 @@ def render_real_money_profile_json(
         "account_risk": {
             "max_component_gross_notional_usdt": account_gross,
             "max_account_gross_notional_usdt": account_gross,
-            "max_symbol_notional_usdt": reference
-            * min(_SYMBOL_NOTIONAL_FRACTION, account_multiple),
+            "max_symbol_notional_usdt": reference * symbol_fraction,
             "max_initial_margin_usdt": margin_cap,
-            "max_leverage": MAX_REAL_MONEY_LEVERAGE,
+            "max_leverage": leverage,
             "quantity_tolerance": 1e-12,
             "max_daily_loss_usdt": reference * dials.daily_loss_fraction,
             "sleeve_limits": {
@@ -236,7 +262,7 @@ def render_real_money_profile_json(
         },
         "long": {
             "notional_multiplier": long_multiplier,
-            "entry_leverage": _ENTRY_LEVERAGE,
+            "entry_leverage": leverage,
             "max_projected_initial_margin_pct_equity": long_margin_cap,
             "max_order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,
@@ -245,17 +271,17 @@ def render_real_money_profile_json(
             "max_active": 1,
             "max_new_entries_per_cycle": 1,
             "btc_trend_gate": "uptrend",
-            "entry_leverage": _ENTRY_LEVERAGE,
+            "entry_leverage": leverage,
             "notional_multiplier": _CONTINUOUS_NOTIONAL_MULTIPLIER,
             "per_position_notional_pct_equity": 2.0,
         },
         "carry": {
             "notional_multiplier": dials.carry_leverage,
-            "entry_leverage": _ENTRY_LEVERAGE,
+            "entry_leverage": leverage,
             "declared_stop_loss_fraction": dials.carry_stop_loss_fraction,
             "max_new_entries_per_cycle": _CARRY_MAX_NEW_ENTRIES_PER_CYCLE,
         },
-        "hedge": {"entry_leverage": _ENTRY_LEVERAGE},
+        "hedge": {"entry_leverage": leverage},
     }
 
 
