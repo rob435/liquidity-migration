@@ -16,6 +16,44 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-06 (19:24 UTC) — The size fixes and the doubled carry dial are
+  DEPLOYED; the funded account is flat, healthy, and sized off the new
+  dials.** One `deploy staged --profile operational --stop-first` from the
+  primary checkout carried both undeployed batches — the 2026-08-05 friction
+  fixes and the same-day entry-size fixes — from `8be7461` to `aa6f793`.
+  Receipts: `staged-ok commit=aa6f793 profile=operational`, `verify-ok …
+  mainnet=armed`, all nine units on/active/enabled; preflight `profile
+  matches dials` (leverage 3.91919, gross 3.91919× equity, carry 2.00×,
+  long 1.88×); the restarted funded producer logs `notional_x=2.0
+  leverage=3.9` under `strategy_profile=v4` and files under the
+  version-free `carry_hold` journal id. The owner's hand-opened HOMEUSDT
+  position was closed before the deploy, and both refusals it had caused
+  cleared on their own with no operator action — the controls behaved
+  exactly as designed. Funded equity reads **160.75 USDT** against 99.94 on
+  2026-08-05; the rise accompanies the hand-traded position and its cause is
+  not independently confirmed here. At this equity each carry name sizes to
+  ≈32 USDT. **2026-08-06 was a cash day on the funded account**: the size
+  floor blanked the 00:20 UTC decision, and the hand position then held the
+  owner blocked past the ~05:50 UTC signal expiry, so the fixes first bite
+  at the 00:20 UTC cycle.
+- **2026-08-06 (research, Lane-1, seen data — no config changed) — A much
+  deeper entry bar was measured for the first time and it LOSES; the
+  registered thresholds stand.** Owner question: enter only below −0.30%
+  per settlement, else exit. Swept enter ∈ {−0.10, −0.20, −0.30, −0.50}%
+  against exit ∈ {−0.03, −0.10, same-as-enter} on the full panel with the
+  measured 7.78 bp/side fee and the registered scorer; the control cell
+  reproduces v3's registered 19.83 bp/day and Sharpe 1.38 exactly, so the
+  harness is sound. Every deeper cell is worse and the degradation is
+  monotonic: the owner's rule scores 11.22 bp/day, Sharpe 0.99, worst dip
+  −48.7% against the control's 19.83 / 1.38 / −28.7%, and the paired daily
+  differential is **−8.60 bp/day at t −2.46** over 1,894 shared days,
+  negative in all six eras. Two mechanisms, both already visible elsewhere
+  in the evidence: the −0.10…−0.30% band carries the bulk of the earning
+  name-days (flat days rise 36% → 62%), and prints deeper than −0.30%
+  cluster in cascades, so the worst dip nearly doubles on a *smaller* book.
+  Dropping the hysteresis band (enter = exit) is separately worse at every
+  depth. Added to the do-not-retest list in
+  [research_findings.md](docs/research/research_findings.md).
 - **2026-08-06 (night) — The funded book missed its entries by six cents: a
   10-dollar size floor silently skipped every ~$10 name, and a hand-opened
   HOME position then wedged the owner. Floor fixed, skip made visible, carry

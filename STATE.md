@@ -11,17 +11,25 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-06)
 
-- **Host runs `8be7461`, all nine units on/active/enabled, mainnet armed**
-  (receipt 2026-08-06 00:37 UTC: `verify-ok commit=8be7461
-  profile=operational mainnet=armed`). The four-dial surface and the 10×
-  ceiling are deployed; `main` is ahead only by the 2026-08-05 evening
-  friction fixes and the 2026-08-06 size-floor fixes (CHANGELOG entries).
-- **The mainnet owner is currently wedged on a hand-opened HOMEUSDT
-  position** (56,980 units plus its venue TP/SL, opened 00:33 UTC
-  2026-08-06): reconcile refuses unowned exposure and the wallet snapshot's
-  available margin reads negative under the position's isolated-margin
-  lock. Both refusals self-clear once the position is closed and the
-  conditional order cancelled; until then the funded fleet places nothing.
+- **Host runs `aa6f793`, whole fleet green since 2026-08-06 19:24 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=aa6f793
+  profile=operational`, `verify-ok … mainnet=armed`. This deploy carried the
+  2026-08-05 friction fixes (CARRY `v4` profile dial, version-free carry
+  journal id, `order_notional_pct_equity` rename) and the 2026-08-06
+  entry-size fixes (floor 6.0, `dust=` counter, wallet fault with numbers).
+- **The funded account is flat, healthy, and sized off the new dials.**
+  Equity **160.75 USDT** (was 99.94 on 2026-08-05 — the rise accompanies the
+  owner's hand-traded HOME position, cause not independently confirmed).
+  The producer reports `notional_x=2.0 leverage=3.9` and the preflight
+  reads `profile matches dials`. At this equity each carry name is
+  ≈ 0.1 × 2.0 × 160.75 ≈ **32 USDT**, two names ≈ 64 USDT gross.
+- **The 2026-08-06 hand-opened HOMEUSDT position is closed** (owner's own
+  act, some time before 19:20 UTC). Both refusals it caused — reconcile
+  against unowned exposure, and a negative available-margin wallet read —
+  cleared on their own, as designed. The funded account took no trade on
+  2026-08-06: the entry-size floor blanked the 00:20 UTC decision and the
+  hand position then held the owner blocked past the ~05:50 UTC signal
+  expiry. Next entry opportunity is the 00:20 UTC cycle.
 - **Real money is armed.** The funded account's owner reports healthy; last
   equity read 99.94 USDT through the coin-row wallet fallback (`48ebc50`) —
   roughly 100 USDT remains after the 2026-08-04 withdrawals (CHANGELOG entry
@@ -31,13 +39,10 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **Committed but not yet deployed** (`main` is ahead of the host): the
-  2026-08-05 friction fixes (CARRY profile dial, version-free carry journal
-  id with legacy drain, `order_notional_pct_equity` rename) and the
-  2026-08-06 entry-size-floor fixes (floor 10.0 → 6.0, `dust=` heartbeat
-  counter, wallet fault with numbers — CHANGELOG entries of those dates).
-  The host's `bybit-mainnet.env` carries the four new dial names (read
-  directly 2026-08-06; the earlier retired-names warning was stale).
+- **Nothing is committed-but-undeployed.** The host's `bybit-mainnet.env`
+  carries the four new dial names (read directly 2026-08-06; the earlier
+  retired-names warning was stale), and the installed risk profile is the
+  render of those dials.
 
 ## Topology
 

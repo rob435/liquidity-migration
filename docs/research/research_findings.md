@@ -348,6 +348,8 @@ and the payment is always on the long side of it. A sign result, unaffected by t
 | regime-scaling overlays | deep-regime variance dominates the pool at any scaling | pooled-variance arithmetic defeats them |
 | per-name vol normalization | Sharpe falls | the premium scales *with* vol |
 | shallower −5 bp entries, band-only-when-shallow, spell-loss floors, X1/band boundary grids | flat plateaus or worse | no cell beat the baseline |
+| **deeper entry bars, −20/−30/−50 bp** (2026-08-06, 8 cells on the registered scorer; control reproduces v3's 19.83 bp/d and Sharpe 1.38 exactly) | monotonically worse and never close: −20 bp → 16.7 bp/d Sharpe 1.25 DD −41.6%; −30 bp → 12.4 / 1.03 / −53.7%; "enter −30 bp else exit" → 11.2 / 0.99 / −48.7%, paired **−8.60 bp/d t −2.46** over 1,894 days, negative in all six eras; −50 bp → 11.9 / 1.14 | **the −10…−30 bp band is where the book earns.** Raising the bar drops flat days 36% → 62% and concentrates what is left in cascades, so the worst dip nearly doubles on a *smaller* book. Depth preference already enters at the size level through the trailing-rate ladder |
+| removing the hysteresis band (enter = exit) at any depth | −1.16 bp/d at −10 bp, −5.25 at −20 bp, −8.60 at −30 bp, all t ≤ −0.8 | the band pays for itself: a round trip costs ~15.6 bp and the gap is what stops the book re-buying the name it just sold |
 | per-name cap 0.15/0.20 | Sharpe pinned ~1.5, MAR rises to ~4 | scales mean and vol together — a sizing decision for an owner, not a Sharpe fix |
 | depth-sizing the spread book | Sharpe falls | a deeper spread carries more basis volatility |
 
