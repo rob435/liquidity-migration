@@ -380,6 +380,31 @@ class TestCarryTargetPlan:
         # shared component id: they are symbol-qualified.
         assert first.decision_key.endswith("/BUSDT")
 
+    def test_the_size_floor_admits_a_ten_dollar_name_and_counts_real_dust(self) -> None:
+        # The 2026-08-06 funded regression: equity 99.94, per-name weight 0.1
+        # -> 9.994 USDT, six cents under the old 10.0 floor, and the whole
+        # book silently stayed in cash. The venue floor is 5 USDT, so a
+        # ~10 USDT name must trade; a 5 USDT name still sits under the 6.0
+        # pre-filter and must be skipped AND counted.
+        plan = _carry_target_plan(
+            **_plan_kwargs(
+                decision=CarryDecision(
+                    decision_ts_ms=D0,
+                    weights={"AUSDT": 0.1, "BUSDT": 0.05},
+                    universe_size=100,
+                    replay_days=90,
+                    gross=0.15,
+                ),
+                trail_by_symbol={"AUSDT": -0.0020, "BUSDT": -0.0045},
+                equity_usdt=99.94,
+            )
+        )
+
+        assert [item.intent.symbol for item in plan.entry_intents] == ["AUSDT"]
+        assert plan.entry_intents[0].intent.signed_notional_usdt == pytest.approx(9.994)
+        assert plan.planned_entries == 1
+        assert plan.entry_dust_skips == 1
+
     def test_diff_emits_exit_resize_and_respects_dead_band(self) -> None:
         plan = _carry_target_plan(
             **_plan_kwargs(
@@ -992,6 +1017,29 @@ def test_summary_formatter_renders_flat_payload() -> None:
     assert "decision_day=2024-10-04" in line
     assert "pub exit/entry/resize=1/2/1" in line
     assert "err=none" in line
+
+
+def test_summary_formatter_surfaces_dust_skipped_entries() -> None:
+    payload = {
+        "cycle_id": "carry-target-carry_hold_v3-1",
+        "mode": "mainnet_target",
+        "decision_ts_ms": D0,
+        "decision_stale": False,
+        "decision_error": None,
+        "desired_book_size": 2,
+        "desired_gross_weight": 0.2,
+        "standing_symbols": 0,
+        "open_positions": 0,
+        "exit_targets_queued": 0,
+        "entry_targets_queued": 0,
+        "resize_targets_queued": 0,
+        "entry_dust_skips": 2,
+        "equity_usdt": 99.94,
+    }
+    assert " dust=2 " in format_carry_demo_cycle_summary(payload)
+
+    payload["entry_dust_skips"] = 0
+    assert "dust=" not in format_carry_demo_cycle_summary(payload)
 
 
 def test_cold_cache_view_trims_leading_partial_day_to_midnight() -> None:

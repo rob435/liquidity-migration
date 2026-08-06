@@ -190,8 +190,13 @@ class BybitAccountSnapshotProvider:
         equity = _account_equity(account, realm=self.realm)
         available = _available_margin(account, realm=self.realm)
         if equity <= 0.0 or available < 0.0:
+            # Carry the numbers: a hand-opened isolated-margin position can
+            # absorb the whole wallet as position margin, and the bare message
+            # gave the operator nothing to diagnose that with (2026-08-06).
             raise RuntimeError(
-                f"Bybit {self.realm.value} wallet snapshot has nonpositive equity or negative available margin"
+                f"Bybit {self.realm.value} wallet snapshot has nonpositive equity "
+                f"or negative available margin "
+                f"(equity={equity:.2f} USDT, available={available:.2f} USDT)"
             )
         observed_ns = self.clock.wall_time_ns()
         material = {

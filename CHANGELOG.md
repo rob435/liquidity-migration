@@ -16,6 +16,36 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-06 (night) — The funded book missed its entries by six cents: a
+  10-dollar size floor silently skipped every ~$10 name, and a hand-opened
+  HOME position then wedged the owner. Floor fixed, skip made visible, carry
+  dial doubled.** At 00:20 UTC both realms picked the same two carry names.
+  Demo (equity $1,427) entered both within three minutes; the funded account
+  (equity $99.94) entered nothing, with `suppressed=0 err=none` — each name
+  sized to 0.1 × 99.94 = **9.994 USDT**, six cents under the producer's
+  `ENTRY_MIN_NOTIONAL_USDT = 10.0`, and the skip counter
+  (`entry_dust_skips`) was recorded in the payload but never rendered in the
+  heartbeat line. Three fixes: (1) the floor drops to **6.0** — the venue's
+  own floor is 5 USDT per order and the kernel already enforces the exact
+  per-symbol rules (min qty, min notional, step rounding), so 10.0 was
+  double-counted safety that blanked a small account; (2) the heartbeat now
+  prints `dust=N` whenever entries are skipped as too small; (3) the wallet
+  fault message carries the numbers (`equity=…, available=…`). Owner
+  instruction "bigger trade size": `RM_CARRY_LEVERAGE` **1.0 → 2.0** in the
+  host env (each carry name ~0.2 × equity ≈ $20; derived venue margin
+  leverage rises to ≈3.9× of the 10× ceiling — on a fixed wallet a bigger
+  book *is* more leverage, the two cannot move apart; LONG stays at the
+  owner's 1.88 ≈ $10 per entry). Separately, at 00:33:57 UTC a hand-opened
+  HOMEUSDT position (56,980 units) with venue TP/SL wedged the running
+  owner, correctly: reconcile refuses unowned exposure
+  (`HOMEUSDT:venue=56980:reconstructed=0`), and the wallet snapshot's
+  available margin went negative under the position's isolated-margin lock.
+  Both blocks self-clear once the position is closed and its conditional
+  order cancelled. The day's entry signal stays publishable until ~05:50 UTC
+  (6 h validity minus the 15-min guard). Also corrected: the host
+  `bybit-mainnet.env` was ALREADY converted to the four new dials (read
+  directly; the 2026-08-05 STATE warning was stale — the 11:38 UTC deploy of
+  `8be7461` could not have armed otherwise).
 - **2026-08-05 (evening) — The friction audit lands: carry versions become a
   dial, the carry journal id stops lying, and the misnamed LONG size dial is
   renamed (committed, not yet deployed — the next owner redeploy carries it).**

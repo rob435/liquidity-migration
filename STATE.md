@@ -9,11 +9,19 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-05)
+## Now (recorded 2026-08-06)
 
-- **Host runs `f85371e`, whole fleet green since 2026-08-05 10:18 UTC**: all
-  nine units on/active/enabled, receipt `verify-ok commit=f85371e
-  requested=f85371e profile=operational mainnet=armed`.
+- **Host runs `8be7461`, all nine units on/active/enabled, mainnet armed**
+  (receipt 2026-08-06 00:37 UTC: `verify-ok commit=8be7461
+  profile=operational mainnet=armed`). The four-dial surface and the 10×
+  ceiling are deployed; `main` is ahead only by the 2026-08-05 evening
+  friction fixes and the 2026-08-06 size-floor fixes (CHANGELOG entries).
+- **The mainnet owner is currently wedged on a hand-opened HOMEUSDT
+  position** (56,980 units plus its venue TP/SL, opened 00:33 UTC
+  2026-08-06): reconcile refuses unowned exposure and the wallet snapshot's
+  available margin reads negative under the position's isolated-margin
+  lock. Both refusals self-clear once the position is closed and the
+  conditional order cancelled; until then the funded fleet places nothing.
 - **Real money is armed.** The funded account's owner reports healthy; last
   equity read 99.94 USDT through the coin-row wallet fallback (`48ebc50`) —
   roughly 100 USDT remains after the 2026-08-04 withdrawals (CHANGELOG entry
@@ -24,16 +32,12 @@ match; never append history to this file.
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
 - **Committed but not yet deployed** (`main` is ahead of the host): the
-  four-dial real-money surface (`8303b34`, superseding the same-morning
-  per-entry dial `4269369`), the 10× dial ceiling (`ad960df`), and the
   2026-08-05 friction fixes (CARRY profile dial, version-free carry journal
-  id with legacy drain, `order_notional_pct_equity` rename — CHANGELOG entry
-  of this date). Committed defaults render byte-identically to the deployed
-  sizing; decisions are unchanged.
-  **The host's `bybit-mainnet.env` still carries the retired `RM_*` dial
-  names, so the next mainnet render/activation refuses until those lines are
-  replaced with the four new dials** (the local `deploy/.env` staging copy is
-  already converted).
+  id with legacy drain, `order_notional_pct_equity` rename) and the
+  2026-08-06 entry-size-floor fixes (floor 10.0 → 6.0, `dust=` heartbeat
+  counter, wallet fault with numbers — CHANGELOG entries of those dates).
+  The host's `bybit-mainnet.env` carries the four new dial names (read
+  directly 2026-08-06; the earlier retired-names warning was stale).
 
 ## Topology
 
@@ -64,19 +68,20 @@ the CARRY book tops out at 1.0× the reference, unlevered). Startup and
 authorization reject unknown profile fields, producer leverage above the
 owner cap, or registered envelopes outside the bound profile.
 
-**Real money** (as committed on `main` 2026-08-05; the deployed host still
-renders the equivalent previous sizing): four owner dials.
-`RM_CARRY_LEVERAGE` (default 1.0) and `RM_LONG_LEVERAGE` (0.75) are each
-sleeve's book ceiling as a multiple of equity, worst case included — each
-carry name takes a tenth of its dial, each LONG entry ≈ its dial / 18.75, and
-the two dials may total 9.9. `RM_DAILY_LOSS_FRACTION` (0.1) and
+**Real money**: four owner dials, set in the host `bybit-mainnet.env`
+(values below read from the host 2026-08-06; the next render/activation
+applies them). `RM_CARRY_LEVERAGE` (**2.0** since 2026-08-06, was 1.0) and
+`RM_LONG_LEVERAGE` (**1.88**) are each sleeve's book ceiling as a multiple
+of equity, worst case included — each carry name takes a tenth of its dial
+(≈ $20 on ~$100 equity), each LONG entry ≈ its dial / 18.75 (≈ $10), and the
+two dials may total 9.9. `RM_DAILY_LOSS_FRACTION` (**0.25**) and
 `RM_CARRY_STOP_LOSS_FRACTION` (0.35) are the protections.
 Everything else the old surface exposed is derived and still proved at
-render; a retired `RM_*` line in an env file is refused by name. The defaults
-reproduce the previous effective sizing exactly (carry multiplier 1.0, LONG
-0.4; derived account gross cap 1.7677×). Honest protection note: the loss
-halt fires on realised loss only, so a dialled-up open book meets the venue's
-liquidation engine before the halt.
+render; a retired `RM_*` line in an env file is refused by name. Derived
+venue margin leverage ≈ 3.9× at these dials — on a fixed wallet a bigger
+book is more leverage; the two cannot move independently. Honest protection
+note: the loss halt fires on realised loss only, so a dialled-up open book
+meets the venue's liquidation engine before the halt.
 
 ## Standing operational constraints
 
@@ -172,7 +177,6 @@ re-diagnose a page that has already been explained.
 
 | Item | State |
 | --- | --- |
-| Host `bybit-mainnet.env` carries retired `RM_*` dial names | The next mainnet render/activation refuses by name until the owner replaces them with the four new dials (2026-08-05); the local `deploy/.env` staging copy is already converted |
 | 2026-08-04 withdrawals await owner confirmation | The venue's own transaction log shows the money leaving through the account login (the API key holds no transfer/withdraw permission — probed, refused), so this was by hand. **If these withdrawals are not the owner's, treat the venue login as compromised immediately** |
 | Quote-lab capture spams its own log when disk-blocked | The 6 GB min-free guard stops tape writes but not the process's nohup traceback spam — it filled the disk to 0 bytes on 2026-08-05 and killed a deploy. Both capture processes are currently killed; flagged for a fix |
 | No startup check pins margin/position mode | Cross + one-way are load-bearing (see Now); a venue-side flip is only caught at order rejection. Proposed, owner to decide |

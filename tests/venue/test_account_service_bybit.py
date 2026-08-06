@@ -392,7 +392,11 @@ def test_snapshot_provider_names_the_realm_in_its_wallet_faults() -> None:
     provider = BybitAccountSnapshotProvider(
         _MainnetWalletClient({"totalEquity": "0", "totalAvailableBalance": "1"}), clock=clock
     )
-    with pytest.raises(RuntimeError, match="Bybit mainnet wallet snapshot has nonpositive equity"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"Bybit mainnet wallet snapshot has nonpositive equity "
+        r"or negative available margin \(equity=0\.00 USDT, available=1\.00 USDT\)",
+    ):
         provider.current(batch_id="b1")
 
 

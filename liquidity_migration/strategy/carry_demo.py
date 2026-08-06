@@ -301,9 +301,14 @@ FUNDING_LOOKBACK_DAYS = 2
 #: backstop against fill rounding and partial fills re-creating it.
 RESIZE_MIN_NOTIONAL_USDT = 1.0
 RESIZE_MIN_FRACTION_OF_STANDING = 0.05
-#: Entries below this notional would round to zero venue quantity and come
+#: Entries below this notional could quantize to zero venue quantity and come
 #: back as a terminal (permanently suppressing) rejection; skip them instead.
-ENTRY_MIN_NOTIONAL_USDT = 10.0
+#: The venue's own floor is 5 USDT per order and the kernel enforces the exact
+#: per-symbol rule (min qty, min notional, step rounding), so this is only a
+#: coarse pre-filter with headroom over 5 — not a second safety margin. At
+#: 10.0 it silently blanked a small account: on 2026-08-06 the funded book
+#: missed both its entries at 0.1 x 99.94 = 9.99 USDT, six cents under.
+ENTRY_MIN_NOTIONAL_USDT = 6.0
 #: Decision-bar rows with a settled print, as a fraction of all decision-bar
 #: rows. Every listed perp settles at least every 8h, so this sits near 1.0 when
 #: healthy; a collapsed fraction means the funding cache is broken, and an empty
@@ -1672,6 +1677,11 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     stranded = int(payload.get("stranded_zero_quantity_reservations", 0) or 0)
     # Only rendered when non-zero: a stranded reservation needs an operator.
     stranded_text = f" stranded={stranded}" if stranded else ""
+    # Only rendered when non-zero: entries skipped as too small to place.
+    # Without this the line reads suppressed=0 err=none while the whole
+    # book silently fails to enter (the 2026-08-06 funded miss).
+    dust = int(payload.get("entry_dust_skips", 0) or 0)
+    dust_text = f" dust={dust}" if dust else ""
     return (
         "carry target producer "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
@@ -1681,6 +1691,6 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"standing={payload.get('standing_symbols')} open={payload.get('open_positions')} "
         f"pub exit/entry/resize={payload.get('exit_targets_queued')}/"
         f"{payload.get('entry_targets_queued')}/{payload.get('resize_targets_queued')} "
-        f"suppressed={suppressed}{stranded_text} equity={equity_text} "
+        f"suppressed={suppressed}{stranded_text}{dust_text} equity={equity_text} "
         f"err={payload.get('decision_error') or 'none'}"
     )
