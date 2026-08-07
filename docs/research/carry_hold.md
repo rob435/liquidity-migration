@@ -343,7 +343,15 @@ and deploy this strategy in its place. The runtime now exists:
    — and **not one beats the baseline on mean bp/day**. 2026 falls +74.1 →
    +18.9 bp/day at a +40% take-profit. The price leg is −1.45 bp/day against
    the crowd fee's +24.57, so the price run is a cost the book carries, not
-   a profit it is failing to bank. Ledger row and method:
+   a profit it is failing to bank. A second wave then took the owner's
+   "sell the top" question seriously — 34 more cells across seven adaptive
+   families (fee-gated, vol-scaled, run-fraction give-back, ratchet floors,
+   depth-relative funding exit, blow-off spike, carry-vs-gain, volume climax,
+   stall) — and **the eight cells that beat the baseline at midnight are all
+   decision-hour luck**: 0–6 of 24 clock phases. The best of them loses its own
+   placebo, where a **random** exit hour in randomly chosen spells scores
+   better than the rule and beats it in 145 of 200 draws. **78 cells, nothing
+   survives.** Ledger row and method:
    `docs/research/research_findings.md` §2; report in
    `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`. Sizing: weight × owner equity × profile multiplier
    (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
