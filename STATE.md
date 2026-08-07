@@ -22,8 +22,24 @@ match; never append history to this file.
   an empty detail.** On the first pass after restart the book converged
   175.2 → flat, both stalled commands terminalized on `terminal` evidence,
   and the error loop that had been running at ~250 failures a minute stopped
-  dead. Zero errors since 09:39:30 UTC. **The funded account was blocked from
-  00:26 to 09:39 UTC and took no trade on 2026-08-07.**
+  dead. Zero errors since 09:39:30 UTC.
+- **The funded account DID trade on 2026-08-07.** The carry sleeve opened
+  ACEUSDT long 283.6 @ 0.11327 at **00:21 UTC** (command `43e6bc00`, ≈32 USDT,
+  sized off the then-current 160.75 equity). The hand-placed buy at 00:26 then
+  blocked it from any further entry until 09:39, and its position was closed
+  at 04:46 as part of the owner's hand-placed close, not on its own terms.
+  Realised from fills **+4.32 USDT** (fees 0.048). An earlier revision of this
+  file said no trade was taken; that was wrong.
+- **Funding is still booked whole, not by share — the one part of the
+  separate-books policy that is NOT done.** Bybit settles funding on the
+  merged venue position and the funding reconciler books the entire row as the
+  bot's P&L. On 2026-08-07 04:00 UTC it credited the bot **+10.72 USDT** on
+  ACEUSDT when the bot owned 4.08% of that position: **≈+0.44 earned,
+  ≈+10.28 belongs to the hand-placed position.** No real money moves wrongly —
+  the cash is in the account either way — but the bot's own P&L record, which
+  research is graded on, is overstated whenever foreign exposure is present.
+  Fix is to pro-rate each settlement by the bot's share of the venue position
+  at settlement time.
 - **The funded account is flat, healthy, and sized off the new dials.**
   Equity **268.78 USDT** (was 160.75 on 2026-08-06; the rise accompanies the
   owner's hand-traded ACE position, cause not independently confirmed).
@@ -208,6 +224,7 @@ re-diagnose a page that has already been explained.
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design (2026-08-03) |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 180 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
+| Funding is booked whole, not by the bot's share | Bybit settles funding on the merged venue position; the funding reconciler books the entire row as the bot's P&L. 2026-08-07 04:00 UTC credited the bot +10.72 USDT on ACEUSDT when it owned 4.08% of that position (≈+0.44 earned, ≈+10.28 the hand-placed position's). Overstates the bot's record whenever foreign exposure is present. Fix: pro-rate each settlement by the bot's share of the venue position at settlement time. **Not started** |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |

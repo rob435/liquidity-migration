@@ -61,7 +61,27 @@ edit STATE.md to match.
 
   Rehearsed against a copy of the live funded journal before deploying: the
   book converges 175.2 → 0, both wedges terminalize on `terminal` evidence,
-  no working orders remain, report healthy.
+  no working orders remain, report healthy. Deployed `a67e035` 09:38 UTC;
+  the account recovered on the first pass at 09:39:26–29 and has logged zero
+  errors since.
+
+  **Correction (same day).** A first revision of this entry and of STATE.md
+  said the funded account took no trade on 2026-08-07. Wrong: the carry sleeve
+  opened **ACEUSDT long 283.6 @ 0.11327 at 00:21 UTC** (command `43e6bc00`),
+  five minutes *before* the hand-placed buy blocked it. That position was
+  closed at 04:46 as part of the owner's hand-placed close rather than on its
+  own terms; realised from fills **+4.32 USDT**, fees 0.048.
+
+  **Still open, found while checking the above: funding is booked whole, not
+  by share.** Bybit settles funding on the merged venue position, and
+  `BybitAccountFundingReconciler` books the whole SETTLEMENT row as the bot's
+  P&L. The 04:00 UTC ACEUSDT settlement credited the bot **+10.72 USDT** when
+  it owned 4.08% of that position — ≈+0.44 earned, **≈+10.28 belongs to the
+  hand-placed position**. No real money moves wrongly; the bot's own P&L
+  record is overstated whenever foreign exposure is present, which is exactly
+  what research grades on. The separate-books change covered positions and
+  orders and did not cover funding. Fix is to pro-rate each settlement by the
+  bot's share of the venue position at settlement time.
 
   **This is a recurrence.** The 2026-08-06 entry below reads the same
   mechanism on HOMEUSDT as "cleared on their own, as designed". That was too
