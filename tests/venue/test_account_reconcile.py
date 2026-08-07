@@ -157,8 +157,9 @@ def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicat
         realm = "demo"
 
         def get_positions(self, **_params: object):
-            # CUSDT exists only at the venue, so its journal quantity is not a
-            # legible basis for a stop plan. DUSDT is flat on both sides.
+            # CUSDT exists only at the venue, so it is exposure this book does
+            # not own and its venue quantity is not a legible basis for a stop
+            # plan. DUSDT is flat on both sides.
             return [
                 {"symbol": "CUSDT", "side": "Buy", "size": "3"},
                 {"symbol": "DUSDT", "side": "Buy", "size": "0"},
@@ -183,8 +184,10 @@ def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicat
         clock=clock,
     ).reconcile_once()
 
-    assert not report.healthy
-    # The call happened at all: a single mismatch must not skip it entirely.
+    # Exposure this book does not own is recorded, not a fault.
+    assert report.healthy, report.mismatches
+    assert report.foreign_positions == {"CUSDT": 3.0}
+    # The call happened at all: one skipped symbol must not skip it entirely.
     assert calls == [frozenset({"CUSDT"})]
 
 
@@ -483,12 +486,15 @@ def test_reconciliation_detects_unowned_order_appearing_after_clean_start(
 
     report = reconciler.reconcile_once()
 
-    assert not report.healthy
-    assert len(report.mismatches) == 1
-    assert report.mismatches[0].startswith("BUSDT:unowned_venue_order:")
-    assert ("conditional" if conditional else "regular") in report.mismatches[0]
-    with pytest.raises(RuntimeError, match="position truth contradicts reduction"):
-        reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=0)
+    # The account owner shares the venue account with the owner trading by
+    # hand, so a venue order it does not own is recorded and left alone rather
+    # than stopping the fleet (decision 2026-08-07).
+    assert report.healthy, report.mismatches
+    snapshot = kernel.state().venue_snapshots[report.snapshot_key]
+    ownership = snapshot["metadata"]["venue_order_ownership"]
+    assert ownership["status"] == "unowned"
+    assert ownership["unique_orders_observed"] == 1
+    reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=0)
     assert client.open_order_calls == [
         {"settle_coin": "USDT"},
         {"settle_coin": "USDT", "order_filter": "StopOrder"},
@@ -834,7 +840,10 @@ def test_reconciliation_semantic_change_is_journaled_immediately(tmp_path: Path)
         if event.event_type == "venue_snapshot"
     ]
     assert len(snapshots) == 2
-    assert not changed.healthy
+    # The book owns nothing in BUSDT, so the venue's position is foreign: a
+    # journaled semantic change, not a fault.
+    assert changed.healthy, changed.mismatches
+    assert changed.foreign_positions == {"BUSDT": 1.0}
     assert list(kernel.state().venue_snapshots) == [changed.snapshot_key]
 
 
@@ -1301,7 +1310,7 @@ def test_demo_reconcile_labels_and_fault_text_are_pinned(tmp_path: Path) -> None
     assert report.snapshot_key.startswith("bybit-demo-position:")
     snapshot = kernel.state().venue_snapshots[report.snapshot_key]
     assert snapshot["metadata"]["source"] == "bybit_demo_rest_reconcile"
-    assert report.mismatches == ("BUSDT:venue=0:reconstructed=1:tol=0.05",)
+    assert report.mismatches == ("BUSDT:venue=0:reconstructed=1:unbacked=1:tol=0.05",)
     with pytest.raises(RuntimeError, match="account reconciliation unhealthy: BUSDT:venue=0"):
         reconciler.require_recent_healthy(max_age_ns=1)
 

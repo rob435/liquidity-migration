@@ -139,21 +139,38 @@ def test_demo_reconciler_terminalizes_a_never_submitted_command(tmp_path: Path) 
     assert report.healthy, report.mismatches
 
 
-def test_mainnet_reconciler_reports_the_wedge_but_never_acts(tmp_path: Path) -> None:
+def test_mainnet_reconciler_terminalizes_on_the_same_evidence_ladder(tmp_path: Path) -> None:
+    """Mainnet self-clears too: an operator-only wedge blocked the owner for hours."""
+
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel, command_id = _wedged_kernel(tmp_path, clock, attempted=False)
     reconciler = BybitAccountReconciler(
         kernel=kernel, client=_MainnetAbsentVenue(), instrument_rules=RULES, clock=clock
     )
-    assert reconciler.auto_resolve_wedges is False
+    assert reconciler.auto_resolve_wedges is True
+
+    report = reconciler.reconcile_once()
+
+    assert kernel.state().orders[command_id].status == "cancelled"
+    assert report.healthy, report.mismatches
+
+
+def test_mainnet_still_refuses_a_wedge_the_evidence_does_not_clear(tmp_path: Path) -> None:
+    """Automatic resolution changed the realm, not the evidence standard."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _wedged_kernel(tmp_path, clock, attempted=False)
+    venue = _LiveVenue(command_id)
+    venue.realm = "mainnet"
+    venue.demo = False
+    reconciler = BybitAccountReconciler(
+        kernel=kernel, client=venue, instrument_rules=RULES, clock=clock
+    )
 
     report = reconciler.reconcile_once()
 
     assert kernel.state().orders[command_id].status == "commanded"
-    assert not report.healthy
-    assert any(
-        mismatch.startswith("wedged_command:never_submitted:") for mismatch in report.mismatches
-    )
+    assert any(mismatch.startswith("wedged_command:") for mismatch in report.mismatches)
 
 
 def test_a_live_venue_order_is_never_terminalized(tmp_path: Path) -> None:
@@ -227,9 +244,11 @@ def test_wedge_lines_do_not_block_same_symbol_reductions(tmp_path: Path) -> None
     """A journal-proven phantom command must not freeze the symbol's exits."""
 
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
-    kernel, _command_id = _wedged_kernel(tmp_path, clock, attempted=False)
+    kernel, command_id = _wedged_kernel(tmp_path, clock, attempted=False)
+    # A live venue order refuses resolution in every realm, so the wedge line
+    # survives the automatic pass and the admission split stays observable.
     reconciler = BybitAccountReconciler(
-        kernel=kernel, client=_MainnetAbsentVenue(), instrument_rules=RULES, clock=clock
+        kernel=kernel, client=_LiveVenue(command_id), instrument_rules=RULES, clock=clock
     )
 
     reconciler.reconcile_once()

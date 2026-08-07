@@ -16,6 +16,58 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-07 — Hand-trading the funded account no longer stops the fleet;
+  the ACEUSDT wedge is fixed at the cause.** The owner bought ACEUSDT by hand
+  at 00:26 UTC on the same account the bot trades, and closed the whole lot by
+  hand at 04:46 UTC. The funded account owner was **blocked from 00:26 to the
+  deploy — about nine hours** — and paged at 07:43. Five separate faults,
+  each fixed:
+  1. **The book counted only its own 283.6, so nine of the eleven sell
+     executions from the hand-placed close were each larger than it and were
+     refused outright.** The book was left holding 175.2 ACE against a flat
+     venue, forever. A venue reduction bigger than the book is now booked down
+     to flat and the remainder recorded as foreign, with the fee split by
+     quantity.
+  2. **One venue order was adopted as two commands.** The synthetic command id
+     mixed in the protection key, which legitimately changes between two
+     executions of the same order — the first adoption moves the protection to
+     a reduction status. The hand-placed close split across two commands, both
+     left part-filled and working forever. The venue order id alone is the
+     identity now.
+  3. **The wedge probe asked for those orders by client id**, which an adopted
+     external order never has, so the venue answered "absent" for an order it
+     plainly held as `Filled` — and absent is the one classification that
+     needs authorization. It probes by venue order id now.
+  4. **A reduce-only wedge refused to terminalize while the venue showed more
+     filled than the book had booked.** Once the book is flat there is no
+     reduction left to lose and the excess is foreign, so the refusal is
+     skipped in exactly that case. The standard is otherwise unchanged: a live
+     order, an unreadable venue, or a real unbooked reduction still refuse.
+  5. **Mainnet only classified wedges and never resolved them**, so the wedge
+     sat until someone noticed. Both realms now resolve on the same evidence
+     ladder. `scripts/ops.sh wedged-command` also grew `--environment
+     demo|mainnet`; it was hardwired to demo, so there had been no operator
+     command for this at all.
+
+  **Policy change, owner's decision 2026-08-07: the bot and the owner keep
+  separate books on one venue account.** Venue exposure above what the bot
+  owns, and venue orders it did not place, are recorded and left strictly
+  alone instead of blocking. The reverse — the bot claiming exposure the venue
+  does not hold — still blocks, and now self-heals. **The known weak point is
+  the safety stop**: the venue takes one stop per coin, sized to the merged
+  position, so the bot's stop would close a hand-placed position too. While
+  foreign exposure is present the stop is left exactly as installed and not
+  re-planned.
+
+  Rehearsed against a copy of the live funded journal before deploying: the
+  book converges 175.2 → 0, both wedges terminalize on `terminal` evidence,
+  no working orders remain, report healthy.
+
+  **This is a recurrence.** The 2026-08-06 entry below reads the same
+  mechanism on HOMEUSDT as "cleared on their own, as designed". That was too
+  generous: it cleared only because that hand-placed close happened to be no
+  larger than the book. Same cause, worse draw.
+
 - **2026-08-06 (19:24 UTC) — The size fixes and the doubled carry dial are
   DEPLOYED; the funded account is flat, healthy, and sized off the new
   dials.** One `deploy staged --profile operational --stop-first` from the

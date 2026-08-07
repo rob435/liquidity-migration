@@ -43,7 +43,10 @@ Operator commands:
                                can republish while this converges.
   venue-accounting [ARGS...]   reconcile demo accounting on the host; LOCAL=1
                                runs it against this checkout instead
-  wedged-command [ARGS...]     report/probe/resolve wedged order commands
+  wedged-command [--environment demo|mainnet] [ARGS...]
+                               report/probe/resolve wedged order commands
+                               (default demo; the reconciler already does this
+                               automatically in both realms)
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
@@ -230,14 +233,36 @@ exec bash scripts/vps/flatten_account.sh "${REMOTE_ARGS[@]}"' "$@"
   wedged-command)
     # `report` and `probe` read only. `resolve` writes one journal transition
     # and never resends an order; it refuses outright when the venue still
-    # holds the order or cannot be read. The wrapper owns the account
-    # root/id/realm (the demo book) and the demo credentials.
+    # holds the order or cannot be read. The reconciler now does this by itself
+    # in both realms, so this stays for inspection and for a wedge the evidence
+    # ladder deliberately refuses.
+    wedged_environment=demo
+    if [[ "${1:-}" == "--environment" ]]; then
+      wedged_environment="${2:-}"
+      shift 2 || die_usage "--environment needs demo or mainnet"
+    fi
+    case "$wedged_environment" in
+      demo)
+        wedged_prelude="$REMOTE_CREDENTIAL_PRELUDE"
+        wedged_root=data/bybit-account-execution
+        wedged_account=bybit-demo-unified
+        ;;
+      mainnet)
+        wedged_prelude='set -a
+. /etc/liquidity-migration/bybit-mainnet.env
+. /etc/liquidity-migration/account-execution-mainnet.env
+set +a'
+        wedged_root=/var/lib/liquidity-migration/account-mainnet
+        wedged_account=bybit-mainnet-unified
+        ;;
+      *) die_usage "wedged-command --environment must be demo or mainnet" ;;
+    esac
     remote_exec 'cd "$REPO_DIR"
-'"$REMOTE_CREDENTIAL_PRELUDE"'
+'"$wedged_prelude"'
 exec .venv/bin/python -m liquidity_migration.venue.wedged_command_resolution \
-  --account-root data/bybit-account-execution \
-  --account-id bybit-demo-unified \
-  --realm demo \
+  --account-root '"$wedged_root"' \
+  --account-id '"$wedged_account"' \
+  --realm '"$wedged_environment"' \
   "${REMOTE_ARGS[@]}"' "$@"
     ;;
   deploy)

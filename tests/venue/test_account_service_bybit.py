@@ -556,13 +556,8 @@ class _StaticKernel:
         return self._state
 
 
-@pytest.mark.parametrize("events_applied", [0, 1])
-@pytest.mark.parametrize("conditional", [False, True])
-def test_demo_owner_startup_rejects_flat_journal_stray_regular_or_conditional_order(
-    events_applied: int,
-    conditional: bool,
-) -> None:
-    row = {
+def _stray_open_order_row(conditional: bool) -> dict[str, str]:
+    return {
         "symbol": "BUSDT",
         "orderId": "stray-1",
         "orderLinkId": "manual-order",
@@ -570,6 +565,15 @@ def test_demo_owner_startup_rejects_flat_journal_stray_regular_or_conditional_or
         "stopOrderType": "StopLoss" if conditional else "",
         "triggerPrice": "0.1" if conditional else "",
     }
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_demo_owner_startup_rejects_empty_journal_stray_regular_or_conditional_order(
+    conditional: bool,
+) -> None:
+    """An empty journal cannot tell a hand-placed order from the wrong account."""
+
+    row = _stray_open_order_row(conditional)
     client = _StartupOpenOrderClient(
         all_kinds=[row],
         conditional=[row] if conditional else [],
@@ -578,13 +582,33 @@ def test_demo_owner_startup_rejects_flat_journal_stray_regular_or_conditional_or
     with pytest.raises(RuntimeError, match="refused .*venue order"):
         require_bybit_order_ownership(
             client=client,
-            kernel=_StaticKernel(AccountState(events_applied=events_applied)),  # type: ignore[arg-type]
+            kernel=_StaticKernel(AccountState(events_applied=0)),  # type: ignore[arg-type]
             # An empty journal must reject even if a verifier were accidentally
-            # permissive; a non-empty flat journal has no native owner.
-            native_order_verifier=(
-                (lambda _row: True) if events_applied == 0 else (lambda _row: False)
-            ),
+            # permissive.
+            native_order_verifier=lambda _row: True,
         )
+
+    assert client.calls == [
+        {"settle_coin": "USDT"},
+        {"settle_coin": "USDT", "order_filter": "StopOrder"},
+    ]
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_demo_owner_startup_leaves_a_hand_placed_order_alone(conditional: bool) -> None:
+    """With a real journal, an order this owner did not place is the owner's own."""
+
+    row = _stray_open_order_row(conditional)
+    client = _StartupOpenOrderClient(
+        all_kinds=[row],
+        conditional=[row] if conditional else [],
+    )
+
+    require_bybit_order_ownership(
+        client=client,
+        kernel=_StaticKernel(AccountState(events_applied=1)),  # type: ignore[arg-type]
+        native_order_verifier=lambda _row: False,
+    )
 
     assert client.calls == [
         {"settle_coin": "USDT"},

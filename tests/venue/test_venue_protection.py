@@ -2298,3 +2298,56 @@ def test_visibility_grace_bounds_record_exchange_time(tmp_path: Path) -> None:
         "stopOrderType": "StopLoss",
     }
     assert manager.is_verified_native_order(row) is False
+
+
+def test_an_execution_with_nothing_to_reduce_is_ignored_not_an_adoption_failure(
+    tmp_path: Path,
+) -> None:
+    """The venue nets exposure this book never opened.
+
+    REST recovery re-offers every unadopted row each pass, so raising on a
+    foreign execution turned one hand-placed close into a permanent error loop
+    (ACEUSDT, 2026-08-07: ~250 adoption failures a minute for four hours).
+    """
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, _client = _manager(kernel, clock)
+    # A hand-placed BUY while this book is long: nothing here to reduce.
+    adding = {
+        "symbol": "BUSDT",
+        "orderId": "hand-placed-buy",
+        "orderLinkId": "",
+        "side": "Buy",
+        "execQty": "50",
+        "execPrice": "10.0",
+        "execId": "foreign-exec-1",
+        "execTime": "2000",
+    }
+
+    assert manager.adopt_execution(adding, local_receive_ts_ns=clock.wall_time_ns()) == ()
+    assert manager.last_error is None or "foreign-exec-1" not in str(manager.last_error)
+    assert kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+    assert "foreign-exec-1" not in kernel.state().executions
+
+
+def test_a_hand_placed_close_larger_than_the_book_reduces_it_to_flat(tmp_path: Path) -> None:
+    """Only this book's share is booked; the rest of the venue row is foreign."""
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, _client = _manager(kernel, clock)
+    closing = {
+        "symbol": "BUSDT",
+        "orderId": "hand-placed-close",
+        "orderLinkId": "",
+        "side": "Sell",
+        "execQty": "52",
+        "execPrice": "10.5",
+        "execId": "foreign-exec-2",
+        "execTime": "2000",
+    }
+
+    manager.adopt_execution(closing, local_receive_ts_ns=clock.wall_time_ns())
+
+    state = kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    assert not state.working_order_ids

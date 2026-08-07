@@ -1215,6 +1215,22 @@ class BybitNativeProtectionManager:
         venue_order_id = str(row.get("orderId") or row.get("order_id") or "")
         if not venue_order_id:
             raise AccountTransitionError("external execution lacks venue orderId")
+        # The venue nets one position per symbol, so its executions include
+        # trades against exposure this book never opened. An execution with
+        # nothing here to reduce is that foreign exposure moving, not an
+        # adoption failure: REST recovery re-offers every unadopted row each
+        # pass, and raising turned one manual close into a permanent error loop
+        # (ACEUSDT, 2026-08-07, ~250 failures a minute for four hours).
+        owned = self.kernel._state_ref().positions.get(symbol)
+        owned_qty = owned.signed_qty if owned is not None else 0.0
+        if owned_qty == 0.0 or owned_qty * signed_qty >= 0.0:
+            _logger.info(
+                "ignoring foreign %s execution %s (%+g) with no owned position to reduce",
+                symbol,
+                execution_id,
+                signed_qty,
+            )
+            return ()
         execution_origin = (
             "bybit_stop_loss_unbound"
             if identity_evidence == "bybit_stop_provenance_unbound"

@@ -3347,7 +3347,16 @@ class AccountExecutionKernel:
         now_wall = max(int(local_receive_ts_ns), 1)
         now_mono = self.clock.monotonic_ns()
         external_order_key = venue_order_id or protection_key
-        command_id = self.ids.make(f"{event_prefix}-order", protection_key, external_order_key)
+        # One venue order is one kernel command. The protection key is NOT part
+        # of the identity when the venue named the order: ``active(symbol)``
+        # legitimately changes between two executions of the same order (the
+        # first adoption moves the protection to a reduction status), and
+        # keying on it split a single manual close across two synthetic
+        # commands, both left partially filled forever (ACEUSDT, 2026-08-07).
+        command_id = self.ids.make(
+            f"{event_prefix}-order",
+            *((external_order_key,) if venue_order_id else (protection_key, external_order_key)),
+        )
 
         def build(state: AccountState) -> list[AccountEventSpec]:
             if execution_id in state.executions:
@@ -3372,9 +3381,20 @@ class AccountExecutionKernel:
             tolerance = quantity_tolerance(position.signed_qty)
             if position.signed_qty == 0.0 or position.signed_qty * fill_qty >= 0.0:
                 raise AccountTransitionError("external protection fill is not position-reducing")
-            if abs(fill_qty) > abs(position.signed_qty) + tolerance:
-                raise AccountTransitionError("external protection fill exceeds reconstructed position")
-            projected_qty = position.signed_qty + fill_qty
+            # A venue reduction may be larger than this book, because the venue
+            # nets the account owner's exposure with exposure opened outside it.
+            # Book the part that reduces what this book owns and account the
+            # remainder as foreign; refusing the whole row instead left the
+            # book permanently long against a flat venue (ACEUSDT, 2026-08-07).
+            booked_qty = fill_qty
+            foreign_qty = 0.0
+            if abs(fill_qty) > abs(position.signed_qty):
+                booked_qty = -position.signed_qty
+                foreign_qty = fill_qty - booked_qty
+            # Fees follow the quantity they paid for; charging a foreign
+            # reduction's whole fee to this book would overstate its costs.
+            booked_fee = fill_fee * (abs(booked_qty) / abs(fill_qty))
+            projected_qty = position.signed_qty + booked_qty
             projected_flat = abs(projected_qty) <= tolerance
             order = state.orders.get(command_id)
             batch_id = order.batch_id if order is not None else f"{event_prefix}/{protection_key}/{external_order_key}"
@@ -3541,7 +3561,7 @@ class AccountExecutionKernel:
                     )
                 )
                 command_qty = abs(position.signed_qty)
-                command_signed_qty = math.copysign(command_qty, fill_qty)
+                command_signed_qty = math.copysign(command_qty, booked_qty)
                 specs.extend(
                     (
                         AccountEventSpec(
@@ -3600,7 +3620,7 @@ class AccountExecutionKernel:
                         ),
                     )
                 )
-            elif order.symbol != symbol or order.signed_qty * fill_qty <= 0.0:
+            elif order.symbol != symbol or order.signed_qty * booked_qty <= 0.0:
                 raise AccountTransitionError("external reduction fill contradicts adopted command")
             specs.append(
                 AccountEventSpec(
@@ -3616,14 +3636,23 @@ class AccountExecutionKernel:
                     payload={
                         "command_id": command_id,
                         "execution_id": execution_id,
-                        "signed_qty": fill_qty,
+                        "signed_qty": booked_qty,
                         "price": fill_price,
-                        "fee_usdt": fill_fee,
+                        "fee_usdt": booked_fee,
                         "exchange_ts_ns": int(exchange_ts_ns),
                         "local_receive_ts_ns": int(local_receive_ts_ns),
                         "metadata": {
                             **dict(metadata or {}),
                             **({"native_protection_key": protection_key} if native_protection else {}),
+                            **(
+                                {
+                                    "venue_execution_signed_qty": fill_qty,
+                                    "venue_execution_fee_usdt": fill_fee,
+                                    "foreign_signed_qty": foreign_qty,
+                                }
+                                if foreign_qty != 0.0
+                                else {}
+                            ),
                             "external_position_reduction": True,
                             "external_native_protection": native_protection,
                             "external_execution_origin": execution_origin,

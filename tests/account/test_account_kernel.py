@@ -792,6 +792,131 @@ def test_venue_delisting_fill_is_an_allowed_external_reduction_origin(
     assert fill.payload["metadata"]["proxy_exactness"] == "structural"
 
 
+def _kernel_holding_a_short(
+    tmp_path: Path, *, qty: float = -2.0
+) -> tuple[AccountExecutionKernel, str]:
+    """Open one short position through the ordinary command path."""
+
+    kernel = _kernel(tmp_path)
+    opened = kernel.submit_targets(
+        batch_id="open-before-external",
+        market_inputs=[_market()],
+        targets=[
+            _target(
+                decision="open-before-external",
+                key="continuous/strategy/external/BUSDT",
+                sleeve="continuous",
+                qty=qty,
+            )
+        ],
+        risk_snapshot=_snapshot(),
+        risk_policy=_policy(),
+        instrument_rules=_rules(),
+    )
+    command = opened.commands[0]
+    KernelExecutionDriver(kernel).ingest(
+        [
+            {
+                "observation_type": "ack",
+                "command_id": command.command_id,
+                "exchange_ts_ns": 1_200_000_000,
+                "local_receive_ts_ns": 1_210_000_000,
+                "accepted": True,
+                "venue_order_id": "entry-before-external",
+            },
+            {
+                "observation_type": "fill",
+                "command_id": command.command_id,
+                "exchange_ts_ns": 1_220_000_000,
+                "local_receive_ts_ns": 1_225_000_000,
+                "venue_order_id": "entry-before-external",
+                "execution_id": "entry-exec-before-external",
+                "signed_qty": qty,
+                "price": 10.0,
+                "fee_usdt": 0.0,
+            },
+        ]
+    )
+    return kernel, command.command_id
+
+
+def test_an_external_reduction_larger_than_the_book_clamps_it_to_flat(tmp_path: Path) -> None:
+    """The venue nets exposure this book never opened; book only our share.
+
+    Refusing the whole row left the book short against a flat venue for hours
+    and blocked every new entry on the account (ACEUSDT, 2026-08-07).
+    """
+
+    kernel, _command_id = _kernel_holding_a_short(tmp_path)
+
+    adopted = kernel.adopt_external_protection_fill(
+        protection_key="external-reduction:BUSDT:manual-close",
+        venue_order_id="manual-close",
+        execution_id="manual-close-exec-1",
+        symbol="BUSDT",
+        signed_qty=9.0,
+        price=10.5,
+        fee_usdt=9.0,
+        exchange_ts_ns=1_300_000_000,
+        local_receive_ts_ns=1_305_000_000,
+        execution_origin="unattributed_external_reduction",
+    )
+
+    state = kernel.state()
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    fill = next(event for event in adopted if event.event_type == AccountEventType.FILL.value)
+    assert fill.payload["signed_qty"] == 2.0
+    # The fee follows the quantity it paid for, not the venue's whole row.
+    assert fill.payload["fee_usdt"] == 2.0
+    metadata = fill.payload["metadata"]
+    assert metadata["venue_execution_signed_qty"] == 9.0
+    assert metadata["foreign_signed_qty"] == 7.0
+    # The synthetic order is terminal, so it never becomes a stalled wedge.
+    adopted_order = next(
+        order for order in state.orders.values() if order.venue_order_id == "manual-close"
+    )
+    assert adopted_order.status == "filled"
+
+
+def test_one_venue_order_adopts_as_one_command_across_protection_keys(tmp_path: Path) -> None:
+    """``active(symbol)`` changes between executions; the venue order does not.
+
+    Keying the synthetic command on the protection key split a single manual
+    close into two commands, both left partially filled forever.
+    """
+
+    kernel, _command_id = _kernel_holding_a_short(tmp_path, qty=-4.0)
+    shared = dict(
+        venue_order_id="manual-close",
+        symbol="BUSDT",
+        price=10.5,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_300_000_000,
+        local_receive_ts_ns=1_305_000_000,
+        execution_origin="unattributed_external_reduction",
+    )
+
+    kernel.adopt_external_protection_fill(
+        protection_key="native-disaster:BUSDT:abc:activation:0002",
+        execution_id="manual-close-exec-1",
+        signed_qty=1.0,
+        **shared,
+    )
+    kernel.adopt_external_protection_fill(
+        protection_key="external-reduction:BUSDT:manual-close",
+        execution_id="manual-close-exec-2",
+        signed_qty=3.0,
+        **shared,
+    )
+
+    state = kernel.state()
+    adopted = [order for order in state.orders.values() if order.venue_order_id == "manual-close"]
+    assert len(adopted) == 1
+    assert adopted[0].status == "filled"
+    assert state.positions["BUSDT"].signed_qty == 0.0
+    assert not state.working_order_ids
+
+
 def test_same_seed_and_input_tape_produce_identical_events_and_state_hashes(tmp_path: Path) -> None:
     roots = [tmp_path / "historical", tmp_path / "paper", tmp_path / "demo"]
     event_rows: list[list[dict[str, object]]] = []

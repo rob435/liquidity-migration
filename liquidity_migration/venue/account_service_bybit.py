@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import threading
 from dataclasses import dataclass, replace
@@ -22,6 +23,9 @@ from liquidity_migration.account.execution_adapters import (
 )
 from liquidity_migration.account.market_capture import SequenceAwareMarketRecorder
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm
+
+_logger_account = logging.getLogger(__name__)
+
 
 def require_named_realm(client: Any, *, label: str) -> VenueRealm:
     """Read the realm a private client names, refusing an unnamed or unparsable one."""
@@ -409,7 +413,7 @@ def require_bybit_order_ownership(
     kernel: AccountExecutionKernel,
     native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
-    """Fail owner startup unless every venue order has a durable owner.
+    """Report venue orders with no durable owner; refuse only on a new journal.
 
     An omitted ``orderFilter`` covers all linear order kinds, but startup also
     issues an explicit ``StopOrder`` query so a wrapper default cannot hide
@@ -417,6 +421,12 @@ def require_bybit_order_ownership(
     journal owns nothing. Only a still-working kernel command or a
     verifier-identified native protection is accepted, and nothing here cancels
     or adopts an order.
+
+    By decision 2026-08-07 the account owner shares the venue account with the
+    owner trading by hand, so an order it does not own is expected and is
+    logged rather than refused. An empty journal still refuses: there, an
+    unowned order is indistinguishable from a journal pointed at the wrong
+    account, which is the case this gate was built for.
     """
 
     realm = require_named_realm(client, label="venue-order ownership inspection")
@@ -438,8 +448,11 @@ def require_bybit_order_ownership(
             f"Bybit {realm.value} startup refused venue orders with an empty/new account journal: "
             + row_summary
         )
-    raise RuntimeError(
-        f"Bybit {realm.value} startup refused unowned venue order(s): " + row_summary
+    _logger_account.warning(
+        "Bybit %s startup saw venue order(s) this account owner does not own; "
+        "treating them as hand-placed and leaving them alone: %s",
+        realm.value,
+        row_summary,
     )
 
 

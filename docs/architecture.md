@@ -288,10 +288,13 @@ also fail closed. Any failed or unconfirmed condition blocks owner health and ne
 immediately.
 
 **Wedged commands.** A command the venue demonstrably does not hold can only be freed by a
-terminal journal transition, and on demo the reconciler performs that transition itself on
-the same evidence ladder as the `wedged-command` CLI — a live order or unreduced fills
-always refuse it (`account_reconcile.py:224-268`; mainnet only classifies, leaving the
-transition an operator act). Anything that survives the automatic pass is listed in health
+terminal journal transition, and the reconciler performs that transition itself in **both**
+realms, on the same evidence ladder as the `wedged-command` CLI — a live order, an
+unreadable venue, or a reduction the book has not booked yet always refuse it. An order the
+kernel adopted from the venue rather than submitted carries no `orderLinkId`, so it is
+probed by its venue order id; and a reduce-only order whose book is already flat has no
+reduction left to lose, so venue quantity past what it booked is foreign rather than
+missing. Anything that survives the automatic pass is listed in health
 as a `wedged_command:<kind>:<symbol>:...` mismatch (`:337`), which blocks new entries on
 that symbol without ever blocking its reductions. Each open wedge is probed at most once a
 minute and at most five per pass (`WEDGE_PROBE_INTERVAL_NS`, `WEDGE_PROBES_PER_PASS`,

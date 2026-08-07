@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from liquidity_migration.venue.account_execution_stream import BybitAccountExecutionConsumer
 from liquidity_migration.venue.account_service_bybit import inspect_bybit_order_ownership, require_named_realm
 from liquidity_migration.venue.wedged_command_resolution import (
+    EXTERNAL_BATCH_PREFIXES,
     WedgedCommandResolutionRefused,
     probe_wedged_command,
     terminalize_wedged_command,
+    venue_identified_order_id,
 )
 from liquidity_migration.account.account_contracts import (
     AccountEvent,
@@ -29,6 +32,8 @@ from liquidity_migration.account.wedged_command_watch import (
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import VenueRealm
+
+_logger = logging.getLogger(__name__)
 
 NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS = 5_000_000_000
 BYBIT_ACCOUNTING_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -88,6 +93,9 @@ class AccountReconciliationReport:
     mismatches: tuple[str, ...]
     observed_ts_ns: int
     native_protection_breach_only: bool = False
+    #: Venue exposure per symbol that this book does not own, signed the way
+    #: the venue holds it. Reported, never traded, and never a mismatch.
+    foreign_positions: Mapping[str, float] = field(default_factory=dict)
 
     def require_healthy(self) -> None:
         if not self.healthy:
@@ -120,13 +128,13 @@ class BybitAccountReconciler:
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self.settle_coin = settle_coin
         self.native_protection_manager = native_protection_manager
-        # Demo terminalizes dead commands itself on the CLI's evidence ladder;
-        # mainnet only classifies, so the wedge is visible but the transition
-        # stays an operator act.
+        # Every realm terminalizes dead commands itself, on the same evidence
+        # ladder: a live order, an unreadable venue, or fills this book has not
+        # reduced still refuse. Leaving mainnet to classify only meant a wedge
+        # sat until an operator noticed, and the account owner is blocked for
+        # every minute of that — four hours on 2026-08-07, overnight.
         self.auto_resolve_wedges = (
-            (self.realm is not VenueRealm.MAINNET)
-            if auto_resolve_wedges is None
-            else bool(auto_resolve_wedges)
+            True if auto_resolve_wedges is None else bool(auto_resolve_wedges)
         )
         self._wedge_probe_last_ns: dict[str, int] = {}
         self._wedge_last_classification: dict[str, str] = {}
@@ -149,9 +157,8 @@ class BybitAccountReconciler:
         execution_rows = 0
         order_rows = 0
         for order in sorted(pending, key=lambda item: item.command_id):
-            venue_identified_external = (
-                order.batch_id.startswith(("external-protection/", "external-reduction/"))
-                and bool(order.venue_order_id)
+            venue_identified_external = order.batch_id.startswith(EXTERNAL_BATCH_PREFIXES) and bool(
+                order.venue_order_id
             )
             if venue_identified_external:
                 executions = self.client.get_trade_history(
@@ -267,11 +274,15 @@ class BybitAccountReconciler:
             probes_this_pass += 1
             self._wedge_probe_last_ns[wedge.command_id] = wedge_now_ns
             evidence = probe_wedged_command(
-                client=self.client, command_id=wedge.command_id, symbol=wedged_order.symbol
+                client=self.client,
+                command_id=wedge.command_id,
+                symbol=wedged_order.symbol,
+                venue_order_id=venue_identified_order_id(wedged_order),
             )
             self._wedge_last_classification[wedge.command_id] = evidence.classification
             if not self.auto_resolve_wedges:
                 continue
+            owned = self.kernel._state_ref().positions.get(str(wedged_order.symbol).upper())
             try:
                 terminalize_wedged_command(
                     kernel=self.kernel,
@@ -281,6 +292,7 @@ class BybitAccountReconciler:
                     now_ns=wedge_now_ns,
                     resolved_by="account_reconciler",
                     authorize_absent=True,
+                    owned_position_qty=owned.signed_qty if owned is not None else 0.0,
                 )
             except WedgedCommandResolutionRefused:
                 # live / unreadable / unreduced fills: correct refusals. The
@@ -356,15 +368,38 @@ class BybitAccountReconciler:
             if len(sides) > 1:
                 mismatches.append(f"{symbol}:dual_side_position_not_supported")
                 illegible_symbols.add(symbol)
+        # The venue nets one position per symbol. Exposure it holds *beyond*
+        # this book's own was opened outside the account owner (the owner
+        # trading by hand on the same account), and by decision 2026-08-07 the
+        # two books run side by side: foreign exposure is recorded, never
+        # traded, and never blocks. The reverse — this book claiming exposure
+        # the venue does not hold — is still a real contradiction, and it
+        # self-heals as external-reduction adoption books the reduction.
+        foreign_positions: dict[str, float] = {}
         for symbol in sorted(set(venue_positions) | set(reconstructed)):
             venue_qty = venue_positions.get(symbol, 0.0)
             reconstructed_qty = reconstructed.get(symbol, 0.0)
             rule = self.rules.get(symbol)
             tolerance = max((rule.qty_step / 2.0 if rule else 0.0), 1e-12)
-            if abs(venue_qty - reconstructed_qty) > tolerance:
+            unbacked = (
+                abs(reconstructed_qty)
+                if venue_qty * reconstructed_qty <= 0.0
+                else max(abs(reconstructed_qty) - abs(venue_qty), 0.0)
+            )
+            if unbacked > tolerance:
                 mismatches.append(
-                    f"{symbol}:venue={venue_qty:.16g}:reconstructed={reconstructed_qty:.16g}:tol={tolerance:.16g}"
+                    f"{symbol}:venue={venue_qty:.16g}:reconstructed={reconstructed_qty:.16g}:"
+                    f"unbacked={unbacked:.16g}:tol={tolerance:.16g}"
                 )
+                illegible_symbols.add(symbol)
+                continue
+            foreign_qty = venue_qty - reconstructed_qty
+            if abs(foreign_qty) > tolerance:
+                foreign_positions[symbol] = foreign_qty
+                # One venue position cannot be split into two stops, so a
+                # protection plan sized from this symbol's venue quantity would
+                # cover exposure this book does not own. Leave whatever stop is
+                # installed alone until the foreign side is gone.
                 illegible_symbols.add(symbol)
         if self.native_protection_manager is not None:
             # Skip per symbol, not for the whole account: a skipped symbol
@@ -395,12 +430,13 @@ class BybitAccountReconciler:
                 f"{type(exc).__name__}:{exc}"
             )
         else:
+            # A venue order this owner did not place is the owner trading by
+            # hand on the same account (decision 2026-08-07). It is recorded in
+            # the journal snapshot below and left strictly alone; blocking on it
+            # stopped the whole fleet from entering for hours.
             for unowned_order in order_ownership.unowned_orders:
-                mismatch = f"unowned_venue_order:{unowned_order.description}"
-                mismatches.append(
-                    f"{unowned_order.symbol}:{mismatch}"
-                    if unowned_order.symbol
-                    else f"venue_order_ownership:{mismatch}"
+                _logger.info(
+                    "leaving hand-placed venue order alone: %s", unowned_order.description
                 )
         ownership_semantics = (
             {
@@ -424,6 +460,7 @@ class BybitAccountReconciler:
         snapshot_semantics = {
             "venue_positions": venue_positions,
             "reconstructed_positions": reconstructed,
+            "foreign_positions": foreign_positions,
             "mismatches": mismatches,
             "venue_order_ownership": ownership_semantics,
         }
@@ -460,6 +497,7 @@ class BybitAccountReconciler:
                     "position_rows_observed": len(position_rows),
                     "venue_order_ownership": ownership_semantics,
                     "wedged_commands_resolved": wedges_resolved,
+                    "foreign_positions": foreign_positions,
                     "source": f"bybit_{self.realm.value}_rest_reconcile",
                 },
             )
@@ -480,6 +518,7 @@ class BybitAccountReconciler:
                 and len(mismatches) == 1
                 and mismatches[0].startswith("native_protection:")
             ),
+            foreign_positions=foreign_positions,
         )
         self.last_report = report
         return report
@@ -541,11 +580,19 @@ class BybitAccountReconciler:
             reconstructed_qty = position.signed_qty if position is not None else 0.0
             rule = self.rules.get(symbol)
             tolerance = max((rule.qty_step / 2.0 if rule else 0.0), 1e-12)
-            if abs(venue_qty - reconstructed_qty) > tolerance:
+            # Venue exposure above this book's own is foreign and does not
+            # contradict a reduction; the venue holding *less* than this book
+            # claims does, because the reduction would then oversell.
+            unbacked = (
+                abs(reconstructed_qty)
+                if venue_qty * reconstructed_qty <= 0.0
+                else max(abs(reconstructed_qty) - abs(venue_qty), 0.0)
+            )
+            if unbacked > tolerance:
                 contradictions.append(
                     f"{symbol}:venue={venue_qty:.16g}:"
                     f"current_reconstructed={reconstructed_qty:.16g}:"
-                    f"tol={tolerance:.16g}"
+                    f"unbacked={unbacked:.16g}:tol={tolerance:.16g}"
                 )
         if contradictions:
             raise AccountPositionTruthMismatchError(

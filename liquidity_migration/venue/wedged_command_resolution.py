@@ -46,6 +46,7 @@ from liquidity_migration.account.wedged_command_watch import (
 )
 
 __all__ = [
+    "EXTERNAL_BATCH_PREFIXES",
     "RESOLUTION_REJECTION_KEY",
     "WedgeEvidence",
     "WedgedCommandResolutionRefused",
@@ -54,6 +55,7 @@ __all__ = [
     "probe_wedged_command",
     "resolve_wedged_command",
     "terminalize_wedged_command",
+    "venue_identified_order_id",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -131,34 +133,51 @@ def probe_wedged_command(
     client: Any,
     command_id: str,
     symbol: str,
+    venue_order_id: str = "",
 ) -> WedgeEvidence:
-    """Read the venue three ways for one ``orderLinkId``. Mutates nothing."""
+    """Read the venue three ways for one order. Mutates nothing.
+
+    A command this repository submitted is found by its ``orderLinkId``. An
+    adopted external order — a manual close, a liquidation, an exchange-created
+    stop — was never given one, so the venue only answers to its ``orderId``.
+    Probing such an order by client id returned "absent" for an order the venue
+    plainly held as Filled, and absent is the one classification that needs
+    authorization (ACEUSDT, 2026-08-07).
+    """
 
     symbol = symbol.upper()
+    venue_order_id = str(venue_order_id or "")
+    identity = {"order_id": venue_order_id} if venue_order_id else {"order_link_id": command_id}
+
+    def owns(row: Mapping[str, Any]) -> bool:
+        if venue_order_id:
+            return str(row.get("orderId") or row.get("order_id") or "") == venue_order_id
+        return str(row.get("orderLinkId") or row.get("order_link_id") or "") == command_id
+
     open_orders = _query(
         "open_orders",
         getattr(client, "get_open_orders", None),
         symbol=symbol,
-        order_link_id=command_id,
+        **identity,
     )
     history = _query(
         "order_history",
         getattr(client, "get_order_history", None),
         symbol=symbol,
-        order_link_id=command_id,
+        **identity,
     )
     executions = _query(
         "trade_history",
         getattr(client, "get_trade_history", None),
         symbol=symbol,
-        order_link_id=command_id,
+        **identity,
     )
     errors = tuple(open_orders.errors + history.errors + executions.errors)
 
     execution_ids: list[str] = []
     observed_filled = 0.0
     for row in executions.rows:
-        if str(row.get("orderLinkId") or row.get("order_link_id") or "") != command_id:
+        if not owns(row):
             continue
         execution_id = str(row.get("execId") or row.get("exec_id") or "")
         if execution_id:
@@ -168,11 +187,7 @@ def probe_wedged_command(
         except (TypeError, ValueError):
             pass
 
-    matched = [
-        row
-        for row in (*open_orders.rows, *history.rows)
-        if str(row.get("orderLinkId") or row.get("order_link_id") or "") == command_id
-    ]
+    matched = [row for row in (*open_orders.rows, *history.rows) if owns(row)]
     live = [
         row
         for row in matched
@@ -245,6 +260,19 @@ def probe_wedged_command(
     )
 
 
+#: Batch prefixes the account kernel gives an order it adopted from the venue
+#: rather than submitted. Such an order has no ``orderLinkId`` at the venue.
+EXTERNAL_BATCH_PREFIXES = ("external-protection/", "external-reduction/")
+
+
+def venue_identified_order_id(order: Any) -> str:
+    """Return the venue order id to probe by, or "" to probe by client id."""
+
+    batch_id = str(getattr(order, "batch_id", "") or "")
+    venue_order_id = str(getattr(order, "venue_order_id", "") or "")
+    return venue_order_id if batch_id.startswith(EXTERNAL_BATCH_PREFIXES) else ""
+
+
 def _status(row: Mapping[str, Any]) -> str:
     return str(row.get("orderStatus") or row.get("order_status") or "").strip().lower()
 
@@ -267,13 +295,20 @@ def terminalize_wedged_command(
     authorize_absent: bool = False,
     operator: str = "",
     reason: str = "",
+    owned_position_qty: float | None = None,
 ) -> WedgeEvidence:
     """Terminalize one wedged command on venue evidence.
 
-    Shared by the operator CLI and the demo reconciler's automatic pass. Every
+    Shared by the operator CLI and the reconciler's automatic pass. Every
     refusal here is evidence-based: a live venue order, an unreadable venue,
     or venue fills the journal has not reduced yet refuse the transition in
     every realm, automated or not.
+
+    ``owned_position_qty`` is the book's current position in this symbol. A
+    reduce-only order can only lose an unbooked *reduction*, so once the book
+    is flat there is nothing left for it to lose and venue quantity beyond what
+    the book reduced is foreign exposure the book will never own. Without it a
+    manual close larger than the book refuses forever (ACEUSDT, 2026-08-07).
     """
 
     command_id = str(order.command_id)
@@ -287,8 +322,14 @@ def terminalize_wedged_command(
             f"refusing to resolve {command_id}: {evidence.detail} "
             f"({'; '.join(evidence.query_errors) or 'unclassified status'})"
         )
+    tolerance = _fill_tolerance(order.signed_qty)
     unreconstructed = evidence.observed_filled_qty - abs(order.filled_signed_qty)
-    if unreconstructed > _fill_tolerance(order.signed_qty):
+    reducible = (
+        abs(float(owned_position_qty))
+        if bool(order.reduce_only) and owned_position_qty is not None
+        else unreconstructed
+    )
+    if unreconstructed > tolerance and reducible > tolerance:
         raise WedgedCommandResolutionRefused(
             f"refusing to resolve {command_id}: the venue reports "
             f"{evidence.observed_filled_qty:g} filled against {abs(order.filled_signed_qty):g} "
@@ -381,7 +422,13 @@ def resolve_wedged_command(
             f"command {command_id} is younger than the wedge bound; it may still be in flight"
         )
 
-    evidence = probe_wedged_command(client=client, command_id=command_id, symbol=order.symbol)
+    evidence = probe_wedged_command(
+        client=client,
+        command_id=command_id,
+        symbol=order.symbol,
+        venue_order_id=venue_identified_order_id(order),
+    )
+    position = state.positions.get(str(order.symbol).upper())
     return terminalize_wedged_command(
         kernel=kernel,
         order=order,
@@ -392,6 +439,7 @@ def resolve_wedged_command(
         authorize_absent=bool(authorize_absent) or wedge.kind == WEDGE_NEVER_SUBMITTED,
         operator=str(operator).strip(),
         reason=str(reason).strip(),
+        owned_position_qty=position.signed_qty if position is not None else 0.0,
     )
 
 

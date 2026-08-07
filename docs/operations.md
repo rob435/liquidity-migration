@@ -19,7 +19,7 @@ section below.
 | `reset [ARGS]` | Demo ledger reset. Preview unless `--execute`. |
 | `flatten --environment ENV [ARGS]` | Take one account to zero exposure through its own owner. Reads only unless `--execute`. |
 | `venue-accounting [ARGS]` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Runs on the host with the host's credentials; `LOCAL=1` runs it against this checkout. Read-only. |
-| `wedged-command {report,probe,resolve}` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the demo account root/id/realm and loads the owner's credentials on the host, so the operator passes only the subcommand and its flags. Demo resolves these itself — see below. |
+| `wedged-command [--environment demo\|mainnet] {report,probe,resolve}` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the account root/id/realm and loads that owner's credentials on the host, so the operator passes only the subcommand and its flags. Defaults to demo. Both realms resolve these themselves — see below. |
 | `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
 | `deploy MODE [ARGS]` | `MODE` is `install`, `activate`, `staged`, `rollout` or `stop-mainnet`. |
 | `help` | Print the current surface and do nothing else. |
@@ -268,10 +268,11 @@ owner's alone.
 
 ### Still unproven
 
-Every step above exists and is tested; none of it has run against a funded
-account. The venue behaviour the code asserts — the post-create stop assertion,
-the reconciler, the wedged-command path — is untried against a mainnet key.
-Known hazards, kept verbatim from the pre-arming review:
+Every step above exists and is tested. The reconciler and the wedged-command
+path have now run against the funded account — and the first real exercise, on
+2026-08-07, found five faults in them at once (CHANGELOG). Read the rest of
+this section as still-open risk, not as cleared. Known hazards, kept verbatim
+from the pre-arming review:
 
 - **The ownership and position reads are realm-aware but narrow, and fail
   open.** Both ask Bybit for `category=linear, settleCoin=USDT` only. A
@@ -433,19 +434,23 @@ owner is running — the journal becomes the thing that disagrees with the accou
 `ops.sh flatten` instead. `phase-failed name=<phase> ... status=N` names a failing deploy
 step.
 
-**A command is wedged.** On demo, nothing. The owner's reconciler probes any command stuck
-past the wedge bound (300 s) on its own ~2 s pass and terminalizes it on venue evidence, so
-it clears within seconds of going wedged; a live order or unreduced fills always refuse
-that transition. A wedge that survives the automatic pass appears in account health as a
-`wedged_command:...` mismatch and pages through the ordinary health alerting. On mainnet
-the reconciler only classifies — the transition stays an operator act, and until it is done
-the wedge blocks new entries while same-symbol exits keep flowing:
+**A command is wedged.** Normally nothing, in either realm. The owner's reconciler probes
+any command stuck past the wedge bound (300 s) on its own ~2 s pass and terminalizes it on
+venue evidence, so it clears within seconds of going wedged; a live order, an unreadable
+venue, or a reduction the book has not booked yet always refuse that transition. A wedge
+that survives the automatic pass appears in account health as a `wedged_command:...`
+mismatch and pages through the ordinary health alerting; until it clears it blocks new
+entries while same-symbol exits keep flowing. Mainnet resolved these only by hand until
+2026-08-07, which left the funded account blocked for nine hours; both realms self-clear
+now. To inspect, or to resolve one the ladder deliberately refused:
 
 ```bash
 scripts/ops.sh wedged-command report
 scripts/ops.sh wedged-command probe --command-id <ID>
 scripts/ops.sh wedged-command resolve --all --operator "$USER" --reason "why"
 ```
+
+Add `--environment mainnet` before the subcommand for the funded book; it defaults to demo.
 
 `resolve` also takes `--command-id <ID>` for one command and `--wedge-after-seconds N` to
 change the age bound. `--operator` and `--reason` are optional and are recorded in the

@@ -19,9 +19,11 @@ from liquidity_migration.core.deterministic_runtime import VirtualClock
 from liquidity_migration.account.execution_adapters import ExecutionObservation, KernelExecutionDriver
 from liquidity_migration.venue.wedged_command_resolution import (
     RESOLUTION_REJECTION_KEY,
+    WedgeEvidence,
     WedgedCommandResolutionRefused,
     probe_wedged_command,
     resolve_wedged_command,
+    terminalize_wedged_command,
 )
 from liquidity_migration.account.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
 
@@ -131,6 +133,114 @@ class _Venue:
     def get_trade_history(self, **_params: object) -> list[dict[str, object]]:
         self._maybe_fail("trade_history")
         return list(self._trade_history)
+
+
+def test_probe_finds_an_adopted_external_order_by_its_venue_order_id() -> None:
+    """An adopted external order was never given an ``orderLinkId``.
+
+    Probing one by client id answered "absent" for an order the venue plainly
+    held as Filled, and absent is the classification that needs authorization
+    (ACEUSDT, 2026-08-07).
+    """
+
+    recorded: list[dict[str, object]] = []
+
+    class _RecordingVenue(_Venue):
+        def get_order_history(self, **params: object) -> list[dict[str, object]]:
+            recorded.append(dict(params))
+            return super().get_order_history(**params)
+
+    venue = _RecordingVenue(
+        order_history=[
+            {"orderId": "venue-1", "orderStatus": "Filled", "cumExecQty": "9"},
+        ]
+    )
+
+    evidence = probe_wedged_command(
+        client=venue,
+        command_id="external-reduction-command",
+        symbol="BUSDT",
+        venue_order_id="venue-1",
+    )
+
+    assert evidence.classification == "terminal"
+    assert evidence.venue_order_id == "venue-1"
+    assert evidence.observed_filled_qty == 9.0
+    # Queried by venue id; the client id the venue never saw is not sent.
+    assert recorded == [{"symbol": "BUSDT", "order_id": "venue-1"}]
+
+
+class _StubOrder:
+    def __init__(self, *, filled: float, signed: float, reduce_only: bool) -> None:
+        self.command_id = "external-reduction-command"
+        self.symbol = "BUSDT"
+        self.filled_signed_qty = filled
+        self.signed_qty = signed
+        self.reduce_only = reduce_only
+
+
+class _StubWedge:
+    kind = "stalled_working_order"
+    age_ns = 10_000_000_000
+    blocks_exit = False
+
+
+class _RecordingKernel:
+    def __init__(self) -> None:
+        self.recorded: list[dict[str, object]] = []
+
+    def record_order_status(self, **kwargs: object) -> None:
+        self.recorded.append(dict(kwargs))
+
+
+def test_a_flat_book_terminalizes_a_reduction_the_venue_filled_larger() -> None:
+    """Venue quantity past what the book reduced is foreign, not a lost fill."""
+
+    kernel = _RecordingKernel()
+    evidence = WedgeEvidence(
+        command_id="external-reduction-command",
+        symbol="BUSDT",
+        classification="terminal",
+        venue_order_status="filled",
+        venue_order_id="venue-1",
+        observed_filled_qty=9.0,
+    )
+
+    terminalize_wedged_command(
+        kernel=kernel,
+        order=_StubOrder(filled=-2.0, signed=-2.0, reduce_only=True),
+        wedge=_StubWedge(),
+        evidence=evidence,
+        now_ns=1_000,
+        resolved_by="test",
+        owned_position_qty=0.0,
+    )
+
+    assert len(kernel.recorded) == 1
+    assert kernel.recorded[0]["status"] == "partially_filled_cancelled"
+
+
+def test_a_book_still_holding_the_position_refuses_the_unreconstructed_fills() -> None:
+    """The evidence standard is unchanged while a reduction can still be lost."""
+
+    evidence = WedgeEvidence(
+        command_id="external-reduction-command",
+        symbol="BUSDT",
+        classification="terminal",
+        venue_order_id="venue-1",
+        observed_filled_qty=9.0,
+    )
+
+    with pytest.raises(WedgedCommandResolutionRefused, match="reconciliation"):
+        terminalize_wedged_command(
+            kernel=_RecordingKernel(),
+            order=_StubOrder(filled=-2.0, signed=-5.0, reduce_only=True),
+            wedge=_StubWedge(),
+            evidence=evidence,
+            now_ns=1_000,
+            resolved_by="test",
+            owned_position_qty=3.0,
+        )
 
 
 def test_probe_classifies_a_live_order_as_unresolvable(tmp_path: Path) -> None:

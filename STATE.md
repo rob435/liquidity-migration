@@ -23,13 +23,24 @@ match; never append history to this file.
   The producer reports `notional_x=2.0 leverage=3.9` and the preflight
   reads `profile matches dials`. At this equity each carry name is
   ≈ 0.1 × 2.0 × 160.75 ≈ **32 USDT**, two names ≈ 64 USDT gross.
+- **The bot and the owner keep separate books on one venue account**
+  (owner's decision 2026-08-07). Venue exposure above what the bot owns, and
+  venue orders the bot did not place, are recorded in the venue snapshot
+  (`foreign_positions`, ownership `status`) and left strictly alone — never
+  traded, never blocking. The bot claiming exposure the venue does not hold
+  still blocks, and now heals itself by booking the reduction down to flat.
+  **The weak point is the safety stop**: the venue takes one stop per coin,
+  sized to the merged position, so the bot's stop would close a hand-placed
+  position too. While foreign exposure is present the installed stop is left
+  alone and not re-planned, which also means no new stop is planned for that
+  coin until the hand-placed side is gone.
 - **The 2026-08-06 hand-opened HOMEUSDT position is closed** (owner's own
-  act, some time before 19:20 UTC). Both refusals it caused — reconcile
-  against unowned exposure, and a negative available-margin wallet read —
-  cleared on their own, as designed. The funded account took no trade on
-  2026-08-06: the entry-size floor blanked the 00:20 UTC decision and the
-  hand position then held the owner blocked past the ~05:50 UTC signal
-  expiry. Next entry opportunity is the 00:20 UTC cycle.
+  act, some time before 19:20 UTC). Both refusals it caused cleared on their
+  own — but only because that close was no larger than the bot's own book;
+  the same mechanism wedged ACEUSDT hard on 2026-08-07 (CHANGELOG). The
+  funded account took no trade on 2026-08-06: the entry-size floor blanked
+  the 00:20 UTC decision and the hand position then held the owner blocked
+  past the ~05:50 UTC signal expiry.
 - **Real money is armed.** The funded account's owner reports healthy; last
   equity read 99.94 USDT through the coin-row wallet fallback (`48ebc50`) —
   roughly 100 USDT remains after the 2026-08-04 withdrawals (CHANGELOG entry
@@ -176,7 +187,8 @@ re-diagnose a page that has already been explained.
 | `continuous-hedge.service FAILED` after an owner-health page | Duplicate of the owner-health root cause. A hedge run blocked by unhealthy owner health now exits 0 with a blocked receipt. |
 | Negative owner-health ages | Strategy event time reused after concurrent heartbeats. Operational freshness now samples adjacent wall time. |
 | `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Root-caused 2026-07-27: venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — socket stays up and answers pings (20s/10s keepalive active), Bybit stops pushing frames. Not the host (kernel clean, producers' busy 508-symbol feeds unaffected through every episode), not scheduled (14 episodes over Jul 19–27 spread across the whole clock), not load (32% of all 20-min windows have a >100 s LONG cycle; only 3/13 episodes do). A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by the old per-attempt clock reset (fixed in `d11db79`+`7af59f3`, **deployed 2026-07-27 ~14:03 UTC**; both owners logged `raw Bybit public stream connected generation=1` at first start — record Bybit's verbatim close/error codes here from the transport logs on the next episode). Fails closed; zero trades lost. If quiet-stalls persist post-deploy, next lever is a second heartbeat topic or proactive resubscribe. |
-| `unadopted external execution: external protection fill is not position-reducing` (2026-07-27 10:47:20, once) | A manual ~10 USDT spot BTCUSDT buy made in the demo account UI at 10:47:20.106 (venue execution `1784799743630817527`), three minutes before the owner's 250k top-up transfers (+90k 10:49:40, +100k 10:52:20, +50k 10:52:26). The kernel manages linear perps only and was flat, so it correctly refused adoption, surfaced the error once, and health returned to green. The ~0.000153 BTC sits in the unified wallet outside the managed book; no reconciliation drift. |
+| `unadopted external execution: external protection fill is not position-reducing` (2026-07-27 10:47:20, once) | A manual ~10 USDT spot BTCUSDT buy made in the demo account UI at 10:47:20.106 (venue execution `1784799743630817527`), three minutes before the owner's 250k top-up transfers (+90k 10:49:40, +100k 10:52:20, +50k 10:52:26). The kernel manages linear perps only and was flat, so it correctly refused adoption, surfaced the error once, and health returned to green. The ~0.000153 BTC sits in the unified wallet outside the managed book; no reconciliation drift. Since 2026-08-07 an execution with nothing to reduce is logged as foreign and ignored, so this shape no longer latches an adoption failure or repeats. |
+| `ignoring foreign … execution … with no owned position to reduce` | Normal since 2026-08-07: the owner trading by hand on the same venue account. Recorded, never traded. Only a `venue=…:reconstructed=…:unbacked=…` line is a real fault. |
 
 ## Open operational defects
 
