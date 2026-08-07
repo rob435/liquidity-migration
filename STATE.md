@@ -9,20 +9,27 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-06)
+## Now (recorded 2026-08-07)
 
-- **Host runs `aa6f793`, whole fleet green since 2026-08-06 19:24 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=aa6f793
+- **Host runs `a67e035`, whole fleet green since 2026-08-07 09:38 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=a67e035
   profile=operational`, `verify-ok … mainnet=armed`. This deploy carried the
+  hand-trading fixes (CHANGELOG 2026-08-07). Before it, `aa6f793` carried the
   2026-08-05 friction fixes (CARRY `v4` profile dial, version-free carry
   journal id, `order_notional_pct_equity` rename) and the 2026-08-06
   entry-size fixes (floor 6.0, `dust=` counter, wallet fault with numbers).
+- **The ACEUSDT wedge is repaired and the funded owner reads `healthy` with
+  an empty detail.** On the first pass after restart the book converged
+  175.2 → flat, both stalled commands terminalized on `terminal` evidence,
+  and the error loop that had been running at ~250 failures a minute stopped
+  dead. Zero errors since 09:39:30 UTC. **The funded account was blocked from
+  00:26 to 09:39 UTC and took no trade on 2026-08-07.**
 - **The funded account is flat, healthy, and sized off the new dials.**
-  Equity **160.75 USDT** (was 99.94 on 2026-08-05 — the rise accompanies the
-  owner's hand-traded HOME position, cause not independently confirmed).
+  Equity **268.78 USDT** (was 160.75 on 2026-08-06; the rise accompanies the
+  owner's hand-traded ACE position, cause not independently confirmed).
   The producer reports `notional_x=2.0 leverage=3.9` and the preflight
   reads `profile matches dials`. At this equity each carry name is
-  ≈ 0.1 × 2.0 × 160.75 ≈ **32 USDT**, two names ≈ 64 USDT gross.
+  ≈ 0.1 × 2.0 × 268.78 ≈ **54 USDT**, two names ≈ 108 USDT gross.
 - **The bot and the owner keep separate books on one venue account**
   (owner's decision 2026-08-07). Venue exposure above what the bot owns, and
   venue orders the bot did not place, are recorded in the venue snapshot
@@ -42,9 +49,9 @@ match; never append history to this file.
   the 00:20 UTC decision and the hand position then held the owner blocked
   past the ~05:50 UTC signal expiry.
 - **Real money is armed.** The funded account's owner reports healthy; last
-  equity read 99.94 USDT through the coin-row wallet fallback (`48ebc50`) —
-  roughly 100 USDT remains after the 2026-08-04 withdrawals (CHANGELOG entry
-  of that date; owner confirmation still outstanding, see Open defects).
+  equity read **268.78 USDT** through the coin-row wallet fallback
+  (`48ebc50`). The 2026-08-04 withdrawals still await owner confirmation
+  (CHANGELOG entry of that date; see Open defects).
 - **The funded account is on cross margin and one-way position mode, and
   one-way is load-bearing**: the fleet places every order and stop with
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
