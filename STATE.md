@@ -30,16 +30,23 @@ match; never append history to this file.
   at 04:46 as part of the owner's hand-placed close, not on its own terms.
   Realised from fills **+4.32 USDT** (fees 0.048). An earlier revision of this
   file said no trade was taken; that was wrong.
-- **Funding is still booked whole, not by share — the one part of the
-  separate-books policy that is NOT done.** Bybit settles funding on the
-  merged venue position and the funding reconciler books the entire row as the
-  bot's P&L. On 2026-08-07 04:00 UTC it credited the bot **+10.72 USDT** on
-  ACEUSDT when the bot owned 4.08% of that position: **≈+0.44 earned,
-  ≈+10.28 belongs to the hand-placed position.** No real money moves wrongly —
-  the cash is in the account either way — but the bot's own P&L record, which
-  research is graded on, is overstated whenever foreign exposure is present.
-  Fix is to pro-rate each settlement by the bot's share of the venue position
-  at settlement time.
+- **Funding is booked by the share the bot actually held** (since 2026-08-07).
+  Bybit settles funding on its netted position, so a settlement can cover
+  exposure this book does not own. Each settlement is now scaled by
+  `owned_qty_at_settlement / venue_settled_size`, where the owned quantity is
+  reconstructed from this book's own fills **at the settlement instant** — not
+  the current position, which on 2026-08-07 had already gone flat by the time
+  the settlement was discovered. The venue's raw numbers are kept verbatim in
+  the event metadata (`venue_funding_usdt`, `venue_settled_size`) and remain
+  what the immutability re-check compares against. **The share is 1.0 whenever
+  the venue position is the bot's own, so this is an identity on an account
+  nobody else trades.** Before it, the 04:00 UTC ACEUSDT settlement credited
+  the bot +10.72 USDT when it had earned +0.44. Funding is what this strategy
+  is for, so a wrong share inflates the measured edge directly.
+- **Funding booked before 2026-08-07 was booked whole and is not restated.**
+  Five settlements totalling **+15.23 USDT** are on the funded journal; the
+  ACEUSDT +10.72 of that is ≈96% not the bot's. Treat funded P&L before this
+  date as overstated by roughly that amount.
 - **The funded account is flat, healthy, and sized off the new dials.**
   Equity **268.78 USDT** (was 160.75 on 2026-08-06; the rise accompanies the
   owner's hand-traded ACE position, cause not independently confirmed).
@@ -234,7 +241,6 @@ re-diagnose a page that has already been explained.
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design (2026-08-03) |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 180 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
-| Funding is booked whole, not by the bot's share | Bybit settles funding on the merged venue position; the funding reconciler books the entire row as the bot's P&L. 2026-08-07 04:00 UTC credited the bot +10.72 USDT on ACEUSDT when it owned 4.08% of that position (≈+0.44 earned, ≈+10.28 the hand-placed position's). Overstates the bot's record whenever foreign exposure is present. Fix: pro-rate each settlement by the bot's share of the venue position at settlement time. **Not started** |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |

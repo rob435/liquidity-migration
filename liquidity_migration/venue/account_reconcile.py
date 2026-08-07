@@ -806,14 +806,27 @@ class BybitAccountFundingReconciler:
                 _require_same_funding_event(prior, row=row, values=values)
                 continue
             row_sha256 = hashlib.sha256(canonical_json(_funding_row_material(row))).hexdigest()
+            # Book only this book's own share. The venue settles funding on its
+            # netted position, so a settlement can cover exposure this book does
+            # not own; booking the row whole credited 10.72 USDT to a book that
+            # had earned 0.44 of it (ACEUSDT, 2026-08-07). The share is 1.0
+            # whenever the venue position is this book's own, so this changes
+            # nothing on an account nobody else trades — and funding is what
+            # this strategy is *for*, so a wrong share inflates the measured
+            # edge directly.
+            settled_size = float(values["settled_size"])
+            owned_qty = _owned_qty_at(
+                self.kernel._state_ref(), str(values["symbol"]), transaction_ms * 1_000_000
+            )
+            share = _funding_share(owned_qty, settled_size)
             appended = self.kernel.record_pnl(
                 pnl_key=f"venue-funding:{identity}",
                 close_key="",
                 symbol=str(values["symbol"]),
-                gross_pnl_usdt=float(values["cash_flow"]),
-                fee_usdt=float(values["fee"]),
-                funding_usdt=float(values["funding"]),
-                net_pnl_usdt=float(values["change"]),
+                gross_pnl_usdt=float(values["cash_flow"]) * share,
+                fee_usdt=float(values["fee"]) * share,
+                funding_usdt=float(values["funding"]) * share,
+                net_pnl_usdt=float(values["change"]) * share,
                 exchange_ts_ns=transaction_ms * 1_000_000,
                 local_receive_ts_ns=observed_ns,
                 source="venue_funding_settlement",
@@ -824,6 +837,14 @@ class BybitAccountFundingReconciler:
                     "category": "linear",
                     "currency": "USDT",
                     "cash_equation": "change=cashFlow+funding-fee",
+                    # The venue's own immutable numbers, kept verbatim so the
+                    # re-verification below still checks this book against the
+                    # venue and not against its own arithmetic.
+                    "venue_funding_usdt": float(values["funding"]),
+                    "venue_change_usdt": float(values["change"]),
+                    "venue_settled_size": settled_size,
+                    "owned_qty_at_settlement": owned_qty,
+                    "owned_share": share,
                 },
             )
             if appended:
@@ -854,6 +875,41 @@ class BybitAccountFundingReconciler:
         if age_ns < 0 or age_ns > bound_ns:
             raise RuntimeError(f"account funding reconciliation is stale: age_ns={age_ns}")
         report.require_healthy()
+
+def _owned_qty_at(state: Any, symbol: str, at_ns: int) -> float:
+    """This book's own position in ``symbol`` at ``at_ns``, from its own fills.
+
+    Funding settles on the position held at the settlement instant, and the
+    settlement is normally discovered up to a minute later — long enough for
+    the position to have changed, and on 2026-08-07 it had gone to flat before
+    discovery. Reading the current position would have booked the wrong share.
+    """
+
+    symbol = symbol.upper()
+    total = 0.0
+    for execution in state.executions.values():
+        order = state.orders.get(str(execution.get("command_id") or ""))
+        if order is None or str(order.symbol).upper() != symbol:
+            continue
+        if int(execution.get("exchange_ts_ns") or 0) > at_ns:
+            continue
+        total = math.fsum((total, float(execution.get("signed_qty") or 0.0)))
+    return total
+
+
+def _funding_share(owned_qty: float, settled_size: float) -> float:
+    """The fraction of one settlement that belongs to this book.
+
+    1.0 whenever the venue charged exactly what this book owns — which is every
+    settlement on an account nobody else trades, so this is an identity there
+    and only bites when the venue position is larger than this book.
+    """
+
+    if settled_size <= 0.0:
+        # No size to divide by: book the row whole, as before.
+        return 1.0
+    return min(abs(owned_qty) / settled_size, 1.0)
+
 
 def _canonical_funding_events(
     events: Sequence[AccountEvent],
@@ -973,12 +1029,23 @@ def _validated_funding_row(
             f"Bybit SETTLEMENT {identity!r} carries cashFlow this reconciler would "
             "double-count against reconstructed fill P&L"
         )
+    # The position the venue charged this settlement on. Bybit nets one
+    # position per symbol, so this can exceed what this book owns; the share is
+    # what makes the booked amount this book's own.
+    settled_size = abs(
+        _funding_number(
+            row.get("size"),
+            label=f"Bybit SETTLEMENT {identity} size",
+            empty_is_zero=True,
+        )
+    )
     return identity, transaction_ms, {
         "symbol": symbol,
         "cash_flow": cash_flow,
         "funding": funding,
         "fee": fee,
         "change": change,
+        "settled_size": settled_size,
     }
 
 
@@ -993,11 +1060,16 @@ def _require_same_funding_event(
     payload = event.payload
     metadata = payload.get("metadata") or {}
     row_sha256 = hashlib.sha256(canonical_json(_funding_row_material(row))).hexdigest()
+    # Compare the venue's own numbers, recorded verbatim, against the venue —
+    # not the share-scaled amounts this book earned. Events written before
+    # 2026-08-07 carry no verbatim copy and were booked whole, so their booked
+    # amounts *are* the venue's.
+    metadata_map = metadata if isinstance(metadata, Mapping) else {}
+    venue_funding = metadata_map.get("venue_funding_usdt", payload.get("funding_usdt"))
+    venue_change = metadata_map.get("venue_change_usdt", payload.get("net_pnl_usdt"))
     numeric_pairs = (
-        (payload.get("gross_pnl_usdt"), values["cash_flow"], "gross/cashFlow"),
-        (payload.get("fee_usdt"), values["fee"], "fee"),
-        (payload.get("funding_usdt"), values["funding"], "funding"),
-        (payload.get("net_pnl_usdt"), values["change"], "net/change"),
+        (venue_funding, values["funding"], "funding"),
+        (venue_change, values["change"], "net/change"),
     )
     mismatches = [
         label

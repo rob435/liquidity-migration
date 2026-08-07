@@ -82,16 +82,34 @@ edit STATE.md to match.
   closed at 04:46 as part of the owner's hand-placed close rather than on its
   own terms; realised from fills **+4.32 USDT**, fees 0.048.
 
-  **Still open, found while checking the above: funding is booked whole, not
-  by share.** Bybit settles funding on the merged venue position, and
-  `BybitAccountFundingReconciler` books the whole SETTLEMENT row as the bot's
+  **Found while checking the above, and fixed the same day: funding was booked
+  whole, not by share.** Bybit settles funding on its netted position, and
+  `BybitAccountFundingReconciler` booked the whole SETTLEMENT row as the bot's
   P&L. The 04:00 UTC ACEUSDT settlement credited the bot **+10.72 USDT** when
-  it owned 4.08% of that position — ≈+0.44 earned, **≈+10.28 belongs to the
-  hand-placed position**. No real money moves wrongly; the bot's own P&L
-  record is overstated whenever foreign exposure is present, which is exactly
-  what research grades on. The separate-books change covered positions and
-  orders and did not cover funding. Fix is to pro-rate each settlement by the
-  bot's share of the venue position at settlement time.
+  it owned 4.08% of that position — ≈+0.44 earned, ≈+10.28 not its own. No
+  real money moves wrongly; the bot's *record* was overstated, and **funding
+  is the entire thesis of the carry sleeve**, so a wrong share inflates the
+  measured edge directly.
+
+  Each settlement is now scaled by
+  `owned_qty_at_settlement / venue_settled_size`. The owned quantity is
+  reconstructed from this book's own fills **at the settlement instant**:
+  reading the current position would have booked zero here, because the
+  position was closed at 04:46 and the settlement not re-read until 09:39. The
+  venue's raw numbers are kept verbatim in the event metadata and are what the
+  immutability re-check now compares against — getting that wrong would raise
+  on every later pass and block the account, so it is pinned by its own test.
+  **The share is 1.0 whenever the venue position is the bot's own, so this is
+  an identity on an account nobody else trades.**
+
+  Rehearsed on a copy of the live journal: the five pre-existing whole-booked
+  settlements re-verify cleanly (0 re-recorded, no raise), and the real ACE row
+  re-identified as new books +0.43693 against the venue's +10.71918 on a 0.0408
+  share — 283.6 of 6,957.5, reconstructed from the journal at 04:00 UTC.
+
+  **Not restated:** the five settlements already on the funded journal, +15.23
+  USDT in total, were booked whole. Funded P&L before 2026-08-07 is overstated
+  by roughly the ACEUSDT +10.28.
 
   **This is a recurrence.** The 2026-08-06 entry below reads the same
   mechanism on HOMEUSDT as "cleared on their own, as designed". That was too

@@ -8,14 +8,21 @@ import pytest
 
 from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
+    AccountRiskPolicy,
+    AccountRiskSnapshot,
+    DesiredTarget,
+    InstrumentRules,
+    MarketInputRef,
     read_account_journal,
 )
+from liquidity_migration.account.execution_adapters import KernelExecutionDriver
 from liquidity_migration.venue.account_reconcile import (
     BYBIT_ACCOUNTING_MAX_WINDOW_MS,
     DEFAULT_FUNDING_OVERLAP_MS,
     DEFAULT_FUNDING_QUERY_INTERVAL_NS,
     FUNDING_HEALTH_MAX_AGE_FLOOR_NS,
     BybitAccountFundingReconciler,
+    _funding_share,
 )
 from liquidity_migration.core.deterministic_runtime import VirtualClock
 
@@ -478,3 +485,177 @@ def test_query_interval_must_be_non_negative_and_under_the_overlap(
     ungated.reconcile_once()
     clock.advance_ns(2_000_000_000)
     assert ungated.reconcile_once().queried is True
+
+
+# ---------------------------------------------------------------------------
+# Funding belongs to whoever held the position (2026-08-07)
+# ---------------------------------------------------------------------------
+
+
+def test_funding_share_is_an_identity_when_the_venue_position_is_this_book_s() -> None:
+    """On an account nobody else trades, the share changes nothing."""
+
+    assert _funding_share(owned_qty=10.0, settled_size=10.0) == 1.0
+    assert _funding_share(owned_qty=-10.0, settled_size=10.0) == 1.0
+    # A row without a size falls back to booking whole, as before.
+    assert _funding_share(owned_qty=10.0, settled_size=0.0) == 1.0
+    # Never more than the whole row, whatever the book thinks it holds.
+    assert _funding_share(owned_qty=99.0, settled_size=10.0) == 1.0
+    assert _funding_share(owned_qty=2.0, settled_size=10.0) == pytest.approx(0.2)
+    assert _funding_share(owned_qty=0.0, settled_size=10.0) == 0.0
+
+
+def _kernel_with_position(
+    root: Path,
+    clock: VirtualClock,
+    *,
+    qty: float,
+    entry_ts_ns: int,
+    exit_ts_ns: int | None = None,
+) -> AccountExecutionKernel:
+    """A book holding ``qty`` BTCUSDT from ``entry_ts_ns``, optionally closed."""
+
+    kernel = _kernel(root, clock)
+    opened = kernel.submit_targets(
+        batch_id="open",
+        market_inputs=[MarketInputRef("book-1", "BTCUSDT", 900, 1_000, 10.0)],
+        targets=[
+            DesiredTarget(
+                decision_key="d1",
+                target_key="carry/strategy/trade/BTCUSDT",
+                sleeve="carry",
+                strategy_id="strategy",
+                component_id="trade",
+                symbol="BTCUSDT",
+                signed_qty=qty,
+                reference_price=10.0,
+                leverage=1.0,
+            )
+        ],
+        risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 950),
+        risk_policy=AccountRiskPolicy(100_000.0, 100_000.0, 100_000.0, 100_000.0, 10.0),
+        instrument_rules={"BTCUSDT": InstrumentRules("BTCUSDT", 0.1, 0.1, 1.0)},
+    )
+    command = opened.commands[0]
+    driver = KernelExecutionDriver(kernel)
+    driver.ingest(
+        [
+            {
+                "observation_type": "ack",
+                "command_id": command.command_id,
+                "exchange_ts_ns": entry_ts_ns,
+                "local_receive_ts_ns": entry_ts_ns,
+                "accepted": True,
+                "venue_order_id": "entry-1",
+            },
+            {
+                "observation_type": "fill",
+                "command_id": command.command_id,
+                "exchange_ts_ns": entry_ts_ns,
+                "local_receive_ts_ns": entry_ts_ns,
+                "venue_order_id": "entry-1",
+                "execution_id": "entry-exec-1",
+                "signed_qty": qty,
+                "price": 10.0,
+                "fee_usdt": 0.0,
+            },
+        ]
+    )
+    if exit_ts_ns is not None:
+        kernel.adopt_external_protection_fill(
+            protection_key="external-reduction:BTCUSDT:manual-close",
+            venue_order_id="manual-close",
+            execution_id="exit-exec-1",
+            symbol="BTCUSDT",
+            signed_qty=-qty,
+            price=10.0,
+            fee_usdt=0.0,
+            exchange_ts_ns=exit_ts_ns,
+            local_receive_ts_ns=exit_ts_ns,
+            execution_origin="unattributed_external_reduction",
+        )
+    return kernel
+
+
+def _merged_settlement() -> dict[str, str]:
+    """One venue settlement charged on a position larger than this book's."""
+
+    row = _settlement()
+    row["symbol"] = "BTCUSDT"
+    row["size"] = "10"
+    row["qty"] = "10"
+    return row
+
+
+def test_funding_books_only_this_book_s_share_of_a_merged_settlement(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=1)
+    kernel = _kernel_with_position(tmp_path, clock, qty=2.0, entry_ts_ns=1_100_000_000)
+    reconciler = BybitAccountFundingReconciler(
+        kernel=kernel, client=FundingClient([_merged_settlement()]), clock=clock
+    )
+
+    reconciler.reconcile_once()
+
+    payload = kernel.state().pnl["venue-funding:settlement-1"]
+    # Venue charged 0.02 on 10 units; this book held 2 of them.
+    assert payload["funding_usdt"] == pytest.approx(0.004)
+    assert payload["net_pnl_usdt"] == pytest.approx(0.004)
+    metadata = payload["metadata"]
+    assert metadata["owned_share"] == pytest.approx(0.2)
+    assert metadata["owned_qty_at_settlement"] == pytest.approx(2.0)
+    # The venue's own numbers are kept verbatim next to the booked share.
+    assert metadata["venue_funding_usdt"] == pytest.approx(0.02)
+    assert metadata["venue_settled_size"] == pytest.approx(10.0)
+
+
+def test_a_share_scaled_settlement_still_re_verifies_against_the_venue(
+    tmp_path: Path,
+) -> None:
+    """The immutability check must compare the venue's numbers, not the share.
+
+    Getting this wrong raises on every later pass and blocks the account.
+    """
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=1)
+    kernel = _kernel_with_position(tmp_path, clock, qty=2.0, entry_ts_ns=1_100_000_000)
+    reconciler = BybitAccountFundingReconciler(
+        kernel=kernel, client=FundingClient([_merged_settlement()]), clock=clock
+    )
+    reconciler.reconcile_once()
+
+    clock.advance_ns(DEFAULT_FUNDING_QUERY_INTERVAL_NS + 100_000_000)
+    second = reconciler.reconcile_once()
+
+    assert second.settlement_rows_observed == 1
+    assert second.settlement_rows_recorded == 0
+    reconciler.require_recent_healthy(max_age_ns=1)
+
+
+def test_funding_uses_the_position_held_at_settlement_not_the_current_one(
+    tmp_path: Path,
+) -> None:
+    """The ACEUSDT case: the position was closed before the settlement was seen.
+
+    Settlement at 1.5s, position closed at 1.6s, discovered at 2.0s. Reading
+    the current position would book nothing at all.
+    """
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=1)
+    kernel = _kernel_with_position(
+        tmp_path,
+        clock,
+        qty=2.0,
+        entry_ts_ns=1_100_000_000,
+        exit_ts_ns=1_600_000_000,
+    )
+    assert kernel.state().positions["BTCUSDT"].signed_qty == 0.0
+
+    BybitAccountFundingReconciler(
+        kernel=kernel, client=FundingClient([_merged_settlement()]), clock=clock
+    ).reconcile_once()
+
+    payload = kernel.state().pnl["venue-funding:settlement-1"]
+    assert payload["metadata"]["owned_qty_at_settlement"] == pytest.approx(2.0)
+    assert payload["funding_usdt"] == pytest.approx(0.004)
