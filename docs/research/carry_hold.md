@@ -350,8 +350,16 @@ and deploy this strategy in its place. The runtime now exists:
    stall) — and **the eight cells that beat the baseline at midnight are all
    decision-hour luck**: 0–6 of 24 clock phases. The best of them loses its own
    placebo, where a **random** exit hour in randomly chosen spells scores
-   better than the rule and beats it in 145 of 200 draws. **78 cells, nothing
-   survives.** Ledger row and method:
+   better than the rule and beats it in 145 of 200 draws. A third wave then
+   moved to **1-minute** klines (100% coverage of the book, 2.95M held minutes,
+   0 missing parts): the true peaks are ~2x the hourly view (mean +19.83%
+   against a mean final of -0.73%), but a volatility spike carries **no signal**
+   (Spearman rho -0.013 against the forward return, non-monotone) because the
+   spike is the middle of the move -- after a >20% hour the next 60m is +0.99%.
+   16 of 17 minute-resolution spike rules lose, and the survivor is beaten by a
+   **random** exit minute in 300 of 300 draws. **105 cells across nine families,
+   nothing survives**; hold the trigger fixed and vary only the delay and the
+   series is monotone, converging to the baseline from below. Ledger row and method:
    `docs/research/research_findings.md` §2; report in
    `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`. Sizing: weight × owner equity × profile multiplier
    (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
