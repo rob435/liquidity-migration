@@ -57,10 +57,11 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **Nothing is committed-but-undeployed.** The host's `bybit-mainnet.env`
-  carries the four new dial names (read directly 2026-08-06; the earlier
-  retired-names warning was stale), and the installed risk profile is the
-  render of those dials.
+- **No code is committed-but-undeployed**; `main` is one docs-only commit
+  ahead of the host (`6b59f25` vs the running `a67e035`), which the next
+  deploy carries. The host's `bybit-mainnet.env` carries the four new dial
+  names (read directly 2026-08-06; the earlier retired-names warning was
+  stale), and the installed risk profile is the render of those dials.
 
 ## Topology
 
