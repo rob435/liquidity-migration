@@ -336,7 +336,16 @@ and deploy this strategy in its place. The runtime now exists:
    pattern — replaces the 2% account fallback so the funding-normalization
    exit is always the real exit), NO take-profit (the book's right tail is
    the P&L; the 2026-07-28 stop grid in the review §11 is why nothing
-   tighter is declared). Sizing: weight × owner equity × profile multiplier
+   tighter is declared). **Measured directly 2026-08-07**, after the owner
+   observed live trades running far in the book's favour and giving it back:
+   29 profit-taking cells on the registered v4 scorer — fixed take-profit,
+   trail-from-peak, armed trail, half scale-out, and take-profit-then-re-enter
+   — and **not one beats the baseline on mean bp/day**. 2026 falls +74.1 →
+   +18.9 bp/day at a +40% take-profit. The price leg is −1.45 bp/day against
+   the crowd fee's +24.57, so the price run is a cost the book carries, not
+   a profit it is failing to bank. Ledger row and method:
+   `docs/research/research_findings.md` §2; report in
+   `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`. Sizing: weight × owner equity × profile multiplier
    (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
    owner's unchanged risk caps. **The equity in that product is the equity as
    of the decision, not the live mark** (2026-07-30 change point): sizing off
