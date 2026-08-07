@@ -396,11 +396,16 @@ class BybitAccountReconciler:
             foreign_qty = venue_qty - reconstructed_qty
             if abs(foreign_qty) > tolerance:
                 foreign_positions[symbol] = foreign_qty
-                # One venue position cannot be split into two stops, so a
-                # protection plan sized from this symbol's venue quantity would
-                # cover exposure this book does not own. Leave whatever stop is
-                # installed alone until the foreign side is gone.
-                illegible_symbols.add(symbol)
+                # Deliberately NOT added to ``illegible_symbols``. Skipping a
+                # symbol leaves it out of the protection sweep *and* stops
+                # ``last_sync_ns_by_symbol`` advancing, so it ages out and
+                # ``require_recent_healthy`` raises "native protection health is
+                # stale" — re-blocking the account through the back door, on
+                # every position the owner scales by hand. The skip is for a
+                # book that cannot be trusted; here this book is right, it is
+                # simply not the whole venue position. The stop plan is a
+                # price, and Bybit's Full-position stops carry no quantity of
+                # their own, so foreign size changes nothing about the plan.
         if self.native_protection_manager is not None:
             # Skip per symbol, not for the whole account: a skipped symbol
             # ages out of ``last_sync_ns_by_symbol`` and fails

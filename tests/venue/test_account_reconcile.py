@@ -144,6 +144,72 @@ def test_reconcile_records_and_fails_on_position_mismatch(tmp_path: Path) -> Non
         reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=1)
 
 
+def test_the_owner_scaling_a_bot_position_by_hand_stays_healthy_and_protected(
+    tmp_path: Path,
+) -> None:
+    """The owner's standing workflow: scale the bot's coin by hand minutes later.
+
+    The bot owns 1.0; the venue holds 10.0. That must stay healthy, and the
+    symbol must still be swept for its stop — skipping it stops
+    ``last_sync_ns_by_symbol`` advancing, so it ages out and
+    ``require_recent_healthy`` raises protection staleness, re-blocking the
+    account on every scaled position.
+    """
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    calls: list[frozenset[str]] = []
+
+    class RecordingNativeManager:
+        def reconcile_venue_positions(
+            self, rows: object, *, skip_symbols: frozenset[str] = frozenset()
+        ) -> None:
+            calls.append(frozenset(skip_symbols))
+
+        def is_verified_native_order(self, _candidate: object) -> bool:
+            return False
+
+        def active(self, _symbol: str) -> object:
+            return None
+
+        def is_position_execution(self, _row: object) -> bool:
+            return True
+
+        @staticmethod
+        def has_native_stop_provenance(_row: object) -> bool:
+            return False
+
+        @staticmethod
+        def native_execution_identity_evidence(_row: object) -> str:
+            return ""
+
+        def sync_symbols(self, _symbols: object) -> None:
+            return None
+
+        def observe_order(self, _row: object) -> bool:
+            return False
+
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(
+            command_id,
+            venue_positions=[{"symbol": "BUSDT", "side": "Buy", "size": "10"}],
+        ),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        native_protection_manager=RecordingNativeManager(),
+        clock=clock,
+    )
+
+    report = reconciler.reconcile_once()
+
+    assert report.healthy, report.mismatches
+    assert report.foreign_positions == {"BUSDT": pytest.approx(9.0)}
+    assert calls == [frozenset()], "a scaled symbol must still be swept"
+    reconciler.require_recent_healthy(max_age_ns=1)
+    # A reduction of the bot's own 1.0 is backed by the venue's 10.0.
+    reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=1)
+
+
 def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicate(
     tmp_path: Path,
 ) -> None:
@@ -187,8 +253,10 @@ def test_protection_reverification_runs_for_symbols_a_mismatch_does_not_implicat
     # Exposure this book does not own is recorded, not a fault.
     assert report.healthy, report.mismatches
     assert report.foreign_positions == {"CUSDT": 3.0}
-    # The call happened at all: one skipped symbol must not skip it entirely.
-    assert calls == [frozenset({"CUSDT"})]
+    # Foreign exposure must NOT skip the symbol: a skipped symbol stops being
+    # marked fresh, ages out, and re-blocks the account on protection
+    # staleness. The book is right here, it is just not the whole venue.
+    assert calls == [frozenset()]
 
 
 def test_protection_reverification_skips_a_symbol_with_an_ambiguous_submission(

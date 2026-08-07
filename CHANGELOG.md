@@ -55,9 +55,19 @@ edit STATE.md to match.
   alone instead of blocking. The reverse — the bot claiming exposure the venue
   does not hold — still blocks, and now self-heals. **The known weak point is
   the safety stop**: the venue takes one stop per coin, sized to the merged
-  position, so the bot's stop would close a hand-placed position too. While
-  foreign exposure is present the stop is left exactly as installed and not
-  re-planned.
+  position, so the bot's stop would close a hand-placed position too.
+
+  **Same-day correction to this entry.** The first cut also skipped the
+  protection sweep for any symbol carrying foreign exposure. That was wrong
+  and was reverted the same morning: a skipped symbol stops having
+  `last_sync_ns_by_symbol` advanced, ages out, and makes
+  `require_recent_healthy` raise `native protection health is stale` — the
+  same account block returning through the back door. Under the owner's
+  standing workflow (scale the bot's coin by hand shortly after it enters) it
+  would have fired on **every scaled position**. The skip is for a book that
+  cannot be trusted; here the book is right, it is simply not the whole venue
+  position, and a Full-position stop plan is a price with no quantity of its
+  own. Now pinned by a test that models the workflow directly.
 
   Rehearsed against a copy of the live funded journal before deploying: the
   book converges 175.2 → 0, both wedges terminalize on `terminal` evidence,

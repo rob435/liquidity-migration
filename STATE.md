@@ -52,11 +52,21 @@ match; never append history to this file.
   (`foreign_positions`, ownership `status`) and left strictly alone — never
   traded, never blocking. The bot claiming exposure the venue does not hold
   still blocks, and now heals itself by booking the reduction down to flat.
-  **The weak point is the safety stop**: the venue takes one stop per coin,
-  sized to the merged position, so the bot's stop would close a hand-placed
-  position too. While foreign exposure is present the installed stop is left
-  alone and not re-planned, which also means no new stop is planned for that
-  coin until the hand-placed side is gone.
+  A symbol carrying foreign exposure **is still swept for its stop** — it must
+  be, because a skipped symbol stops being marked fresh, ages out, and
+  re-blocks the account on `native protection health is stale`. The skip is
+  only for a book that cannot be trusted.
+- **The safety stop covers the owner's hand-placed size, on every trade.** The
+  manager only ever creates Bybit **Full-position** stops (`tpsl_mode="Full"`),
+  which close the entire venue position at trigger and carry no quantity of
+  their own. The owner's standing workflow is to scale a coin by hand shortly
+  after the bot enters it, so the bot's stop sits over the combined position
+  as a matter of course. On 2026-08-07 the ACEUSDT disaster stop was 0.07362
+  (35% below the bot's 0.11327 entry, `DISASTER_STOP_FRACTION=0.35`) over the
+  merged 6,957.5 — had it fired, it would have closed the owner's 6,673.9
+  (≈763 USDT at ≈0.11437) for a loss near **−272 USDT** on an account with
+  ~269 USDT of equity. Known and accepted; the venue offers one stop per coin
+  and cannot split it.
 - **The 2026-08-06 hand-opened HOMEUSDT position is closed** (owner's own
   act, some time before 19:20 UTC). Both refusals it caused cleared on their
   own — but only because that close was no larger than the bot's own book;
