@@ -84,6 +84,11 @@ class BybitDemoExecutionAdapter:
         max_unsubmitted_exposure_age_ns: int = 120_000_000_000,
         entry_stop_verifier: EntryStopVerifier | None = None,
         entry_quotes: EntryQuoteManager | None = None,
+        # True when this process is the only party that sets leverage on the
+        # account. See ``retain_confirmed_leverage``: it decides whether a
+        # symbol going flat forgets its leverage and pays a round trip on the
+        # next entry. False is the hand-traded-account behaviour.
+        sole_leverage_authority: bool = True,
     ) -> None:
         # Realm-agnostic: the order path is identical in both realms, and the
         # arming decision belongs to credential resolution, which requires
@@ -104,6 +109,7 @@ class BybitDemoExecutionAdapter:
         # With a manager, exposure-increasing entries rest at the touch first;
         # every gate inside plan_entry_quote falls back to the market order.
         self.entry_quotes = entry_quotes
+        self.sole_leverage_authority = bool(sole_leverage_authority)
         # Leverage this process has already set at the venue, per symbol.
         # Bybit keeps a symbol's leverage until someone changes it, so resending
         # the value it already holds bought nothing and cost a full round trip
@@ -124,21 +130,26 @@ class BybitDemoExecutionAdapter:
     ) -> None:
         """Forget cached leverage the venue contradicts, or no longer vouches for.
 
-        The owner hand-trades this same account, so a leverage they set by hand
-        supersedes what this process last sent. Skipping ``set_leverage`` on a
-        stale cache would then size an entry at their number instead of the
-        sleeve's.
-
-        Three cases, and the middle one is why this takes two arguments.
         A symbol the venue reports with a DIFFERENT leverage is contradicted:
-        drop it. A symbol with no open position is flat, nothing vouches for
-        the cache, and its next entry pays one ``set_leverage`` — cheap, since
-        that entry is opening a position anyway. A symbol that IS positioned
-        but whose ``leverage`` field did not parse is no evidence either way,
-        so the cache stands: Bybit blanks fields per margin mode (it did
-        exactly that to the account-wide wallet totals on 2026-08-04), and
-        treating blank as contradiction would drop every symbol on every 2s
-        pass and hand back the 175 ms round trip this cache exists to avoid.
+        drop it, always, under either authority setting below. That is the case
+        that protects the sizing.
+
+        A symbol that IS positioned but whose ``leverage`` field did not parse
+        is no evidence either way, so the cache stands: Bybit blanks fields per
+        margin mode (it did exactly that to the account-wide wallet totals on
+        2026-08-04), and treating blank as contradiction would drop every symbol
+        on every pass and hand back the round trip this cache exists to avoid.
+
+        A symbol with no open position is the case ``sole_leverage_authority``
+        decides. Bybit keeps a symbol's leverage after the position closes, so
+        what this process last set is still what the venue holds -- unless
+        somebody else changed it. While the owner hand-traded this account, they
+        could, so a flat symbol was dropped and its next entry paid one
+        ``set_leverage``: measured at 188-194 ms, on every fresh entry. With the
+        owner no longer hand-trading (2026-08-08), nothing else writes leverage
+        here, so the cache survives going flat and that round trip disappears.
+        Pass ``sole_leverage_authority=False`` to restore the old behaviour the
+        moment hand-trading resumes.
         """
 
         confirmed = {str(symbol).upper(): float(value) for symbol, value in venue_leverage.items()}
@@ -146,7 +157,7 @@ class BybitDemoExecutionAdapter:
         for symbol in [
             symbol
             for symbol, cached in self._venue_leverage.items()
-            if symbol not in positioned
+            if (symbol not in positioned and not self.sole_leverage_authority)
             or (symbol in confirmed and confirmed[symbol] != cached)
         ]:
             del self._venue_leverage[symbol]

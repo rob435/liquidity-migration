@@ -737,7 +737,19 @@ def main(argv: list[str] | None = None) -> int:
             "inspection. Two paged reads, and the verdict only logs."
         ),
     )
+    # Ceiling, not the usual path: a queued request whose symbol is not yet
+    # subscribed forces a refresh on the next tick regardless of this.
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--shared-leverage-authority",
+        action="store_true",
+        help=(
+            "Set this when somebody else also changes leverage on the account "
+            "(the owner trading by hand). A symbol that goes flat then forgets "
+            "its leverage and its next entry pays one set_leverage round trip, "
+            "measured at ~190 ms. Off since the owner stopped hand-trading."
+        ),
+    )
     parser.add_argument(
         "--request-market-warmup-timeout-seconds",
         type=float,
@@ -1164,10 +1176,11 @@ def main(argv: list[str] | None = None) -> int:
             args.max_unsubmitted_exposure_age_seconds * 1_000_000_000
         ),
         entry_quotes=entry_quotes,
+        sole_leverage_authority=not args.shared_leverage_authority,
     )
     # Every reconcile pass hands back the leverage the venue actually holds, so
-    # a value the owner changed by hand cannot survive in the adapter's cache
-    # and size the next entry.
+    # a value that disagrees with the adapter's cache cannot survive in it and
+    # size the next entry.
     reconciler.venue_leverage_observer = execution_adapter.retain_confirmed_leverage
     # Account-level daily loss halt; the ceiling rides on the risk policy.
     # Absent or zero leaves the machinery running and observable but never
@@ -1255,6 +1268,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     last_symbol_refresh = float("-inf")
+    # What the public stream was last told to carry, and what the queue head
+    # last asked for. Their difference forces an immediate resubscribe.
+    subscribed_symbols: set[str] = set()
+    head_symbols: set[str] = set()
     last_notification_poll = 0.0
     last_capital_refresh = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
@@ -1309,7 +1326,19 @@ def main(argv: list[str] | None = None) -> int:
                 # the attached stop on fill. Never raises.
                 entry_quotes.advance()
             private_stream_status = private_stream_supervisor.check(now_monotonic=now)
-            if now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25):
+            # The queue head's symbols are known every tick, from the readiness
+            # gate below, but subscribing them waited on this interval -- so a
+            # request for a symbol the stream did not already carry sat up to
+            # ``symbol_refresh_seconds`` before its book even started arriving.
+            # Measured on a flat symbol: 229 ms at best, 3053 ms at worst,
+            # entirely spent waiting. An unsubscribed queued symbol now forces
+            # the refresh on the next tick; the interval stays as the ceiling
+            # for everything else, since the work below reads the filesystem.
+            head_needs_subscription = bool(head_symbols - subscribed_symbols)
+            if (
+                head_needs_subscription
+                or now - last_symbol_refresh >= max(args.symbol_refresh_seconds, 0.25)
+            ):
                 current_state = kernel._state_ref()
                 component_target_symbols = {
                     str(target.get("symbol") or "").upper()
@@ -1338,6 +1367,7 @@ def main(argv: list[str] | None = None) -> int:
                 # below still holds the registered 30s timeout.
                 recorder.set_required_symbols(desired)
                 public_stream.update_symbols(desired)
+                subscribed_symbols = set(desired)
                 last_symbol_refresh = now
             market_readiness = market_warmup_gate.evaluate(
                 inbox=inbox,
@@ -1348,6 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             requested_symbols_ready = market_readiness.ready
             symbol_health_detail = market_readiness.detail
+            head_symbols = {symbol.upper() for symbol in market_readiness.symbols}
             protection_markets, protection_skipped = protection_market_refs(
                 recorder,
                 {

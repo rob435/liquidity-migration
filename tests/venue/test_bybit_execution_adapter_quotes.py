@@ -123,6 +123,7 @@ def build_adapter(
     *,
     with_quotes: bool = True,
     verifier_calls: list[dict[str, Any]] | None = None,
+    sole_leverage_authority: bool = True,
 ) -> tuple[BybitDemoExecutionAdapter, EntryQuoteManager | None]:
     def verifier(**kwargs: Any) -> str:
         if verifier_calls is not None:
@@ -152,6 +153,7 @@ def build_adapter(
         clock=FakeClock(),
         entry_stop_verifier=verifier,
         entry_quotes=quotes,
+        sole_leverage_authority=sole_leverage_authority,
     )
     return adapter, quotes
 
@@ -341,11 +343,40 @@ def test_leverage_the_owner_changed_by_hand_is_not_trusted_from_cache() -> None:
     assert float(client.leverage_calls[-1]["buy_leverage"]) == 2.0
 
 
-def test_a_symbol_absent_from_position_truth_is_no_longer_confirmed() -> None:
-    """Flat means nothing on the venue vouches for the cached number any more."""
+def test_a_flat_symbol_keeps_its_leverage_when_nobody_else_can_change_it() -> None:
+    """Bybit keeps a symbol's leverage after the position closes.
+
+    So when this process is the only party that sets it, going flat is not
+    evidence against the cache, and the next entry must not pay a round trip
+    to re-send the number the venue already holds.
+    """
 
     client = FakeClient()
     adapter, _ = build_adapter(client, with_quotes=False)
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    adapter.retain_confirmed_leverage({"OTHERUSDT": 2.0}, positioned_symbols={"OTHERUSDT"})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # A contradiction still drops it, under either authority: this is what
+    # protects the sizing, and it is not what the flag relaxes.
+    adapter.retain_confirmed_leverage({"LAUSDT": 10.0}, positioned_symbols={"LAUSDT"})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 2
+    assert float(client.leverage_calls[-1]["buy_leverage"]) == 2.0
+
+
+def test_a_flat_symbol_is_no_longer_confirmed_when_the_account_is_shared() -> None:
+    """The hand-traded-account behaviour, kept behind the flag.
+
+    Somebody else may have moved leverage while this book held nothing, so
+    flat means nothing on the venue vouches for the cached number any more.
+    """
+
+    client = FakeClient()
+    adapter, _ = build_adapter(client, with_quotes=False, sole_leverage_authority=False)
     tuple(adapter.prepare_submission(entry_command(), market_input()))
     assert len(client.leverage_calls) == 1
 
