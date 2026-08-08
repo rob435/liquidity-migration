@@ -11,6 +11,7 @@ import pytest
 import liquidity_migration.account.account_kernel as account_kernel_module
 from liquidity_migration.account.account_contracts import (
     AccountState,
+    OrderState,
     transaction_state_copy,
 )
 from liquidity_migration.account.account_kernel import (
@@ -4048,7 +4049,18 @@ def test_reducer_indexes_equal_a_brute_force_scan_of_the_state_they_accelerate(
     assert receipt["final_state_hash"] == state.state_hash()
 
 
-def test_transaction_state_copy_gives_each_reducer_index_its_own_sets(tmp_path: Path) -> None:
+def test_transaction_state_copy_shares_index_sets_and_the_reducer_rebinds(
+    tmp_path: Path,
+) -> None:
+    """The copy shares the index sets; the reducer must never mutate one.
+
+    Copying every set per journal write cost a slice of the whole account
+    history under the journal lock. Sharing is only safe because the reducer
+    rebinds (``d[key] = {*d.get(key, ()), value}``); an in-place ``.add`` would
+    reach through into committed state and a rolled-back transaction would
+    leave the committed index carrying events that never landed.
+    """
+
     committed = _indexed_journal(tmp_path).state()
     copied = transaction_state_copy(committed)
     assert copied.command_ids_by_venue_order_id == committed.command_ids_by_venue_order_id
@@ -4056,13 +4068,194 @@ def test_transaction_state_copy_gives_each_reducer_index_its_own_sets(tmp_path: 
 
     venue_order_id = sorted(committed.command_ids_by_venue_order_id)[0]
     batch_id = sorted(committed.target_proposal_keys_by_batch)[0]
-    copied.command_ids_by_venue_order_id[venue_order_id].add("abandoned-command")
+    before_venue = set(committed.command_ids_by_venue_order_id[venue_order_id])
+    before_batch = set(committed.target_proposal_keys_by_batch[batch_id])
+
+    # Exactly what the reducer does.
+    copied.command_ids_by_venue_order_id[venue_order_id] = {
+        *copied.command_ids_by_venue_order_id.get(venue_order_id, ()),
+        "abandoned-command",
+    }
     copied.command_ids_by_venue_order_id["abandoned-venue-order"] = {"abandoned-command"}
-    copied.target_proposal_keys_by_batch[batch_id].add("abandoned:proposal")
+    copied.target_proposal_keys_by_batch[batch_id] = {
+        *copied.target_proposal_keys_by_batch.get(batch_id, ()),
+        "abandoned:proposal",
+    }
     copied.target_proposal_keys_by_batch["abandoned-batch"] = {"abandoned:proposal"}
 
     # A transaction that never commits must leave the committed indexes alone.
-    assert "abandoned-command" not in committed.command_ids_by_venue_order_id[venue_order_id]
+    assert committed.command_ids_by_venue_order_id[venue_order_id] == before_venue
     assert "abandoned-venue-order" not in committed.command_ids_by_venue_order_id
-    assert "abandoned:proposal" not in committed.target_proposal_keys_by_batch[batch_id]
+    assert committed.target_proposal_keys_by_batch[batch_id] == before_batch
     assert "abandoned-batch" not in committed.target_proposal_keys_by_batch
+
+
+def test_the_reducer_never_mutates_an_index_set_in_place() -> None:
+    """Guards the contract the shared copy depends on.
+
+    A set that arrives in the reducer and comes out the same object changed
+    would corrupt committed state on rollback. Behavioural, not a source scan:
+    the scan only forbade ``setdefault(`` and so missed a ``.get(...).discard()``
+    that emptied a committed batch when a proposal key was rewritten.
+    """
+
+    def _target_event(*, sequence: int, batch_id: str) -> AccountEvent:
+        return AccountEvent(
+            schema_version=1,
+            event_id=f"target-{sequence}",
+            sequence=sequence,
+            event_type=AccountEventType.TARGET.value,
+            correlation_id="CORR",
+            causation_id="CORR",
+            account_id="demo",
+            sleeve="account_execution",
+            symbol="BUSDT",
+            wall_ts_ns=sequence,
+            monotonic_ns=sequence,
+            payload={"target_key": "carry/s/c/BUSDT", "batch_id": batch_id},
+            prev_event_hash="",
+            state_hash="",
+            event_hash="",
+        )
+
+    committed = AccountState()
+    account_kernel_module.apply_account_event(committed, _target_event(sequence=1, batch_id="B-OLD"))
+    before = {key: set(value) for key, value in committed.target_proposal_keys_by_batch.items()}
+    assert before == {"B-OLD": {"CORR:carry/s/c/BUSDT"}}
+
+    # Rewrite the same proposal key under a different batch on a copy. Nothing
+    # this does may reach the committed index it shares.
+    copied = transaction_state_copy(committed)
+    account_kernel_module.apply_account_event(copied, _target_event(sequence=2, batch_id="B-NEW"))
+    assert copied.target_proposal_keys_by_batch == {"B-NEW": {"CORR:carry/s/c/BUSDT"}}
+    assert {
+        key: set(value) for key, value in committed.target_proposal_keys_by_batch.items()
+    } == before, "the reducer reached through the shared set into committed state"
+
+    # And the index still equals a brute-force scan of what it accelerates.
+    assert copied.target_proposal_keys_by_batch == _scanned_target_proposal_keys_by_batch(copied)
+
+
+def test_transaction_state_copy_shares_orders_until_one_is_written(tmp_path: Path) -> None:
+    committed = _indexed_journal(tmp_path).state()
+    copied = transaction_state_copy(committed)
+    command_id = sorted(committed.orders)[0]
+
+    # Sharing is the point: copying every order ever held cost the owner a
+    # linear slice of its whole history on every transaction.
+    assert copied.orders[command_id] is committed.orders[command_id]
+    assert copied.private_order_ids == set()
+
+    written = copied.order_for_write(command_id)
+    assert written is not committed.orders[command_id]
+    assert asdict(written) == asdict(committed.orders[command_id])
+
+    before = asdict(committed.orders[command_id])
+    written.status = "abandoned"
+    written.filled_signed_qty = written.signed_qty
+    copied.put_order(
+        "abandoned-command",
+        OrderState(
+            command_id="abandoned-command",
+            batch_id="abandoned-batch",
+            symbol="ABANDONEDUSDT",
+            signed_qty=1.0,
+            reduce_only=False,
+            created_ts_ns=1,
+            command_sequence=1,
+        ),
+    )
+
+    # A transaction that never commits must leave the committed orders alone.
+    assert asdict(committed.orders[command_id]) == before
+    assert "abandoned-command" not in committed.orders
+    # A second write reuses the copy it already made rather than making another.
+    assert copied.order_for_write(command_id) is written
+
+
+def test_shared_orders_do_not_change_what_a_replay_reconstructs(tmp_path: Path) -> None:
+    journal = _indexed_journal(tmp_path)
+    state = journal.state()
+    replayed = account_kernel_module.reduce_account_events(read_account_journal(tmp_path))
+
+    # The copy-on-write sharing is bookkeeping, not journal content: the
+    # rebuilt state and its hash have to match the live one exactly.
+    assert {key: asdict(value) for key, value in replayed.orders.items()} == {
+        key: asdict(value) for key, value in state.orders.items()
+    }
+    assert replayed.state_hash() == state.state_hash()
+
+
+def test_free_margin_is_charged_the_batch_increase_not_the_whole_book(tmp_path: Path) -> None:
+    """The venue's available margin already excludes the open book's margin.
+
+    Charging the whole projected book against it counted the standing book
+    twice and refused entries the venue would have funded, capping the account
+    at roughly half its equity — well inside the declared envelope.
+    """
+
+    kernel = _kernel(tmp_path)
+    policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=10_000.0,
+        max_account_gross_notional_usdt=10_000.0,
+        max_symbol_notional_usdt=10_000.0,
+        max_initial_margin_usdt=2_500.0,
+        max_leverage=2.0,
+    )
+
+    def submit(batch: str, qty: float, free_margin: float):
+        return kernel.submit_targets(
+            batch_id=batch,
+            market_inputs=[_market()],
+            targets=[_target(decision=batch, key="carry/main/BUSDT", sleeve="carry", qty=qty, leverage=2.0)],
+            risk_snapshot=AccountRiskSnapshot(
+                equity_usdt=2_500.0,
+                available_margin_usdt=free_margin,
+                snapshot_key=f"wallet-{batch}",
+                snapshot_ts_ns=950_000_000,
+            ),
+            risk_policy=policy,
+            instrument_rules=_rules(),
+        )
+
+    # Book grows to 120 qty @ 10 = 1200 notional, 600 margin at 2x.
+    first = submit("b1", 120.0, 2_500.0)
+    assert first.accepted, first.rejection_keys
+
+    # The venue now holds 600 of margin, so it reports 1900 free. Growing the
+    # book to 2400 notional needs another 600 — the venue has 1900 spare and
+    # the declared margin ceiling is 2500, so this has to be admitted.
+    second = submit("b2", 240.0, 1_900.0)
+    assert second.accepted, second.rejection_keys
+
+    # Growing past the declared ceiling is still refused: 2x on 6000 notional
+    # is 3000 of margin against a 2500 cap.
+    beyond = submit("b3", 600.0, 1_300.0)
+    assert not beyond.accepted
+    assert any("initial_margin_limit" in key for key in beyond.rejection_keys)
+
+
+def test_free_margin_still_refuses_a_batch_the_venue_cannot_fund(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    policy = AccountRiskPolicy(
+        max_component_gross_notional_usdt=10_000.0,
+        max_account_gross_notional_usdt=10_000.0,
+        max_symbol_notional_usdt=10_000.0,
+        max_initial_margin_usdt=10_000.0,
+        max_leverage=2.0,
+    )
+    result = kernel.submit_targets(
+        batch_id="broke",
+        market_inputs=[_market()],
+        targets=[_target(decision="d", key="carry/main/BUSDT", sleeve="carry", qty=200.0, leverage=2.0)],
+        risk_snapshot=AccountRiskSnapshot(
+            equity_usdt=2_500.0,
+            available_margin_usdt=10.0,
+            snapshot_key="wallet-broke",
+            snapshot_ts_ns=950_000_000,
+        ),
+        risk_policy=policy,
+        instrument_rules=_rules(),
+    )
+    assert not result.accepted
+    assert any("available_margin_limit" in key for key in result.rejection_keys)

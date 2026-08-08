@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, replace
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -3097,9 +3098,22 @@ def test_safety_flat_claim_reads_the_live_batch_set_without_copying_it(tmp_path:
     probe = _MembershipOnlySet(service.kernel._state_ref().processed_batches)
     service.kernel._state_ref().processed_batches = probe
 
+    # With no authorized flat there is nothing the scan could ever claim, so it
+    # does not run at all: it used to take the inbox lock and re-parse every
+    # pending request on each owner pass to prove that, while producers waited
+    # on the same lock to publish.
     assert service.run_safety_flat_once(inbox) is None
-    # Membership is the whole contract, so the owner hands over the committed
-    # set itself: a defensive copy would have iterated it once per tick.
+    assert probe.contains_calls == 0
+    assert probe.iterations == 0
+
+    # When a flat really is authorized the scan runs, and membership is still
+    # the whole contract: the owner hands over the committed set itself rather
+    # than iterating a defensive copy once per tick.
+    claimed = inbox.claim_next_safety_flat(
+        processed_batches=probe,
+        authorized_request_hashes={"queued-entry": "not-the-right-hash"},
+    )
+    assert claimed is None
     assert probe.contains_calls == 1
     assert probe.iterations == 0
 
@@ -3417,3 +3431,105 @@ def test_convergence_retry_anchors_match_the_per_symbol_journal_walk(tmp_path: P
         AccountEventType.FILL.value,
         AccountEventType.ORDER_STATUS.value,
     } <= crossed
+
+
+def test_the_convergence_scan_memo_returns_what_a_rescan_would_have_built(
+    tmp_path: Path,
+) -> None:
+    backoff_ns = 1_000_000
+    adapter = ScriptedExecutionAdapter("reject", "partial_cancel", *["reject"] * 14)
+    clock = VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        clock=clock,
+        convergence_retry_backoff_ns=backoff_ns,
+        convergence_retry_backoff_cap_ns=30_000_000,
+        max_convergence_retries=10,
+    )
+    service.market_provider = _SymbolMarketProvider(clock)
+    service.rules_provider = _SymbolRulesProvider(
+        {"BUSDT": _symbol_rules("BUSDT"), "CUSDT": _symbol_rules("CUSDT")}
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _symbol_request(
+            _route(tmp_path),
+            request_id="b-entry",
+            batch_id="b-entry",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            symbol="BUSDT",
+        )
+    )
+    assert service.run_once(inbox) is not None
+    clock.advance_ns(1_000)
+    inbox.submit(
+        _symbol_request(
+            _route(tmp_path),
+            request_id="c-entry",
+            batch_id="c-entry",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+            symbol="CUSDT",
+        )
+    )
+    assert service.run_once(inbox) is not None
+    for _ in range(10):
+        clock.advance_ns(4 * backoff_ns)
+        service.converge_once()
+
+    # The memo is an acceleration, so a warm read and a cold rescan have to
+    # agree exactly: a plan that differed would change what the owner sends.
+    warm = service._convergence_plans()
+    assert service._convergence_scan_memo is not None
+    key_before = service._convergence_scan_memo[0]
+    service._convergence_scan_memo = None
+    rescanned = service._convergence_plans()
+    assert [dataclasses.asdict(plan.item) for plan in rescanned] == [dataclasses.asdict(plan.item) for plan in warm]
+    assert [plan.targets for plan in rescanned] == [plan.targets for plan in warm]
+    assert [plan.entry_unwind_eligible for plan in rescanned] == [
+        plan.entry_unwind_eligible for plan in warm
+    ]
+
+    # A journal that moves on invalidates the key rather than serving a stale
+    # walk.
+    clock.advance_ns(4 * backoff_ns)
+    service.converge_once()
+    service._convergence_plans()
+    assert service._convergence_scan_memo is not None
+    assert service._convergence_scan_memo[0] != key_before
+
+
+def test_resubmitting_a_retired_request_leaves_one_durable_file(tmp_path: Path) -> None:
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    request = _request(
+        route,
+        request_id="retry-me",
+        batch_id="retry-me",
+        kind=SleeveAdapterKind.CARRY,
+        notional=25.0,
+    )
+    path = inbox.submit(request)
+    filename = path.name
+
+    # Retire it the way the stale-entry path does.
+    failed = inbox.root / "failed" / filename
+    failed.parent.mkdir(parents=True, exist_ok=True)
+    failed.write_bytes(json.dumps({"request": request.to_dict()}).encode())
+    path.unlink()
+
+    # Re-publishing must not leave the retired copy beside the new one: two
+    # durable files made require_durable_request raise, and that raise came out
+    # of the protection engine's loop and stopped stop-loss evaluation for
+    # every component.
+    inbox.submit(request)
+    durable = [
+        state
+        for state in ("pending", "processing", "completed", "failed")
+        if (inbox.root / state / filename).exists()
+    ]
+    assert durable == ["pending"]
+    evidence = inbox.require_durable_request(request)
+    assert evidence is not None

@@ -834,3 +834,27 @@ def test_window_incomplete_symbols_flags_a_missing_head() -> None:
         [{"symbol": "OKUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(4)]
     )
     assert _window_incomplete_symbols(complete, start_ms=0, end_ms=3 * MS_PER_HOUR) == set()
+
+
+def test_window_incomplete_symbols_flags_a_missing_tail() -> None:
+    """A bar past the window must not vouch for a window that stops short.
+
+    ``symbols_with_coverage_through`` admits a symbol on ``max(bar) >= end_ms``
+    and the store accepts bars stamped up to two hours ahead of local now, so a
+    single bar at ``end_ms + 1h`` marked the symbol covered while the newest bar
+    inside the window was an hour old. The interior and the head are both intact
+    here, so only a tail test catches it — and a stale newest price is what the
+    strategy sizes and decides on.
+    """
+
+    stale_tail = pl.DataFrame(
+        # Contiguous 0h..2h, missing the 3h window end, plus one bar beyond it.
+        [{"symbol": "TAILUSDT", "ts_ms": h * MS_PER_HOUR} for h in (0, 1, 2, 4)]
+    )
+    assert _window_incomplete_symbols(stale_tail, start_ms=0, end_ms=3 * MS_PER_HOUR) == {
+        "TAILUSDT"
+    }
+    # The same shape the fetch planner would repair, and it agrees this is a gap.
+    assert "TAILUSDT" in _demo_kline_fetch_ranges(
+        ["TAILUSDT"], stale_tail, start_ms=0, end_ms=3 * MS_PER_HOUR
+    )

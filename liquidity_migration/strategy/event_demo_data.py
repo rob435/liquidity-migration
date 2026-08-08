@@ -851,6 +851,13 @@ def _window_incomplete_symbols(
     Not interior-only: a widened ``lookback_days`` or a partially bootstrapped
     store leaves the window HEAD absent while the interior is contiguous. A head
     explained by the symbol's listing time is not a hole.
+
+    Nor head-only: the TAIL can be absent too. ``symbols_with_coverage_through``
+    admits a symbol on ``max(bar) >= end_ms``, and the store deliberately accepts
+    bars stamped up to two hours ahead of local now, so one bar past the window
+    can mark a symbol covered while the newest bar INSIDE the window is an hour
+    old. Without this the window is served with a stale newest price and nothing
+    notices. ``_demo_kline_fetch_ranges`` already treats the tail as fetchable.
     """
     if klines.is_empty() or "symbol" not in klines.columns or "ts_ms" not in klines.columns:
         return set()
@@ -867,6 +874,9 @@ def _window_incomplete_symbols(
         symbol = str(row["symbol"])
         lo, hi, n = int(row["lo"]), int(row["hi"]), int(row["n"])
         if n < (hi - lo) // MS_PER_HOUR + 1:
+            incomplete.add(symbol)
+            continue
+        if hi < end_ms:
             incomplete.add(symbol)
             continue
         head = _expected_window_head_ms(

@@ -204,3 +204,61 @@ def test_a_non_positive_ceiling_is_rejected_at_construction() -> None:
     for bad in (0.0, -1.0):
         with pytest.raises(ValueError, match="must be positive"):
             AccountLossGuard(max_daily_loss_usdt=bad)
+
+
+def test_a_restart_keeps_the_day_anchor_and_the_trip(tmp_path) -> None:
+    from liquidity_migration.runtime.account_service_runner import (
+        _persist_loss_guard_state,
+        _read_loss_guard_state,
+    )
+
+    path = tmp_path / "account_loss_guard.json"
+    day_ns = 1_770_000_000_000_000_000
+    guard = AccountLossGuard(max_daily_loss_usdt=100.0)
+    guard.evaluate(equity_usdt=1_000.0, equity_ts_ns=day_ns, now_ns=day_ns)
+    written, write_detail = _persist_loss_guard_state(guard, path=path, last_written=None)
+    assert write_detail == ""
+    assert guard.opening_equity == 1_000.0
+
+    # Draw down past the ceiling and persist the trip.
+    state, _ = guard.evaluate(
+        equity_usdt=880.0, equity_ts_ns=day_ns + 1_000, now_ns=day_ns + 1_000
+    )
+    assert state == LOSS_GUARD_TRIPPED
+    written, write_detail = _persist_loss_guard_state(guard, path=path, last_written=written)
+    assert write_detail == ""
+
+    # A fresh process must not re-anchor to the drawn-down equity, and must not
+    # forget that the ceiling was already reached.
+    restarted = AccountLossGuard(max_daily_loss_usdt=100.0)
+    restarted.restore(_read_loss_guard_state(path))
+    assert restarted.opening_equity == 1_000.0
+    assert restarted.tripped
+    state, detail = restarted.evaluate(
+        equity_usdt=880.0, equity_ts_ns=day_ns + 2_000, now_ns=day_ns + 2_000
+    )
+    assert state == LOSS_GUARD_TRIPPED
+    assert "ceiling" in detail
+
+
+def test_a_missing_anchor_starts_clean_but_an_unreadable_one_refuses(tmp_path) -> None:
+    """No file is a first start; a broken file is unknown safety-critical state.
+
+    Re-anchoring on an unreadable file would silently forget how much of the
+    day's budget is spent and forget a trip — what ``reset`` reserves for an
+    explicit operator action. So it refuses instead of starting clean.
+    """
+
+    from liquidity_migration.runtime.account_service_runner import _read_loss_guard_state
+
+    assert _read_loss_guard_state(tmp_path / "absent.json") is None
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_bytes(b"{not json")
+    with pytest.raises(RuntimeError, match="present but unreadable"):
+        _read_loss_guard_state(corrupt)
+
+    not_an_object = tmp_path / "list.json"
+    not_an_object.write_bytes(b"[1, 2, 3]")
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        _read_loss_guard_state(not_an_object)

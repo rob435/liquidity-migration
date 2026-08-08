@@ -51,6 +51,9 @@ class FakeClient:
         self.amends: list[dict[str, str]] = []
         self.cancels: list[str] = []
         self.amend_error: Exception | None = None
+        self.cancel_error: Exception | None = None
+        # Counts refused attempts too, which ``amends`` cannot.
+        self.amend_attempts = 0
 
     def get_tickers(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         if symbol and symbol in self.tickers:
@@ -63,6 +66,7 @@ class FakeClient:
         return [row for row in self.open_orders if not link or row.get("orderLinkId") == link]
 
     def amend_order(self, *, symbol: str, order_link_id: str, price: str) -> dict[str, Any]:
+        self.amend_attempts += 1
         if self.amend_error is not None:
             raise self.amend_error
         self.amends.append({"symbol": symbol, "orderLinkId": order_link_id, "price": price})
@@ -70,6 +74,8 @@ class FakeClient:
 
     def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, Any]:
         self.cancels.append(order_link_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
         return {}
 
 
@@ -373,6 +379,70 @@ def test_deadline_crosses_at_a_bounded_price_then_cancels_the_remainder() -> Non
     assert "cmd-1" not in manager._quotes
 
 
+def test_an_unpriceable_cross_retries_until_the_grace_runs_out() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+
+    # The touch is unreadable exactly when the window closes.
+    client.tickers.pop("LAUSDT", None)
+    clock.tick(121.0)
+    manager.advance()
+    assert client.amends == []
+
+    # The book comes back inside the grace: the cross must still happen rather
+    # than the order resting untouched until the cancel. The retry is paced on
+    # the reprice cadence, so a pass inside it does nothing.
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+    clock.tick(1.0)
+    manager.advance()
+    assert client.amends == []
+
+    clock.tick(3.0)
+    manager.advance()
+    assert len(client.amends) == 1
+    assert float(client.amends[0]["price"]) >= 0.0380
+    assert client.cancels == []
+
+
+def test_a_rejected_cancel_is_retried_instead_of_abandoning_a_live_order() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+
+    clock.tick(121.0)
+    manager.advance()  # crosses at the deadline
+    clock.tick(21.0)
+
+    # This is the only cancel in the live runtime. A rejected one that latched
+    # would leave a marketable limit resting at the venue for good.
+    client.cancel_error = BybitRequestRejected("cancel refused")
+    manager.advance()
+    assert client.cancels == ["cmd-1"]
+
+    # Paced on the reprice cadence, so a venue that keeps refusing cannot
+    # become a hot loop, but the attempt does come back.
+    manager.advance()
+    assert client.cancels == ["cmd-1"]
+    clock.tick(manager.config.reprice_seconds + 0.1)
+    manager.advance()
+    assert client.cancels == ["cmd-1", "cmd-1"]
+
+    # Once the venue accepts, the manager stops asking.
+    client.cancel_error = None
+    clock.tick(manager.config.reprice_seconds + 0.1)
+    manager.advance()
+    assert client.cancels == ["cmd-1", "cmd-1", "cmd-1"]
+    clock.tick(manager.config.reprice_seconds + 0.1)
+    manager.advance()
+    assert client.cancels == ["cmd-1", "cmd-1", "cmd-1"]
+
+
 def test_amend_reject_is_survivable() -> None:
     manager, client, kernel, clock = build_manager()
     order = working_entry()
@@ -520,3 +590,52 @@ def test_terminal_quote_keeps_the_probe_alive_until_the_horizon() -> None:
     manager.advance()
     assert not manager.symbol_has_active_quote("LAUSDT")
     assert manager._quotes == {}
+
+
+def test_a_rejected_cross_amend_retries_instead_of_resting_at_the_passive_price() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+
+    # The venue refuses the window-end cross. Latching it would leave the entry
+    # sitting at its old passive price until the cancel, never having crossed.
+    client.amend_error = BybitRequestRejected("amend refused")
+    clock.tick(121.0)
+    manager.advance()
+    assert client.cancels == []
+
+    client.amend_error = None
+    clock.tick(3.5)
+    manager.advance()
+    assert len(client.amends) == 1
+    assert float(client.amends[0]["price"]) >= 0.0380
+
+
+def test_the_cross_retry_is_paced_so_a_refusing_venue_is_not_hammered() -> None:
+    """``advance`` runs every owner tick, so an ungated retry is a hot loop.
+
+    Each attempt is a touch read plus a signed amend at roughly 175 ms. Unpaced
+    over the 20 s grace at 10 Hz that is ~200 of each, which blocks the owner
+    loop for longer than the window and trips the venue's order-rate limit.
+    """
+
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+    client.amend_error = BybitRequestRejected("amend refused")
+
+    clock.tick(121.0)
+    # The whole 20 s grace at the owner's ~10 Hz tick.
+    for _ in range(200):
+        manager.advance()
+        clock.tick(0.1)
+
+    # Paced on reprice_seconds (3 s), so about one attempt per 3 s of grace,
+    # not one per pass.
+    assert 1 <= client.amend_attempts <= 8, client.amend_attempts

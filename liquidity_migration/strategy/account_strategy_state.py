@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -27,6 +28,13 @@ from liquidity_migration.account.account_intent_client import (
 from liquidity_migration.account.account_service import AccountIntentInbox
 from liquidity_migration.research.backtest.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
 from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
+
+# Bound once. Every scan below walks the whole journal, and ``Enum.value`` is a
+# descriptor call, not an attribute read — it was 37% of one anchor build.
+_TARGET = AccountEventType.TARGET.value
+_RISK_DECISION = AccountEventType.RISK_DECISION.value
+_FILL = AccountEventType.FILL.value
+_PNL = AccountEventType.PNL.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +83,13 @@ def canonical_entry_attempts(
     risk_by_batch = {
         event.correlation_id: event
         for event in events
-        if event.event_type == AccountEventType.RISK_DECISION.value
+        if event.event_type == _RISK_DECISION
     }
     wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     attempts: list[CanonicalEntryAttempt] = []
     for event in events:
-        if event.event_type != AccountEventType.TARGET.value:
+        if event.event_type != _TARGET:
             continue
         payload = event.payload
         metadata = payload.get("metadata") or {}
@@ -155,6 +163,36 @@ def canonical_entry_attempts(
     return tuple(attempts)
 
 
+def rejected_entry_attempt_expiries(
+    account_root: str | Path,
+    *,
+    sleeve: str | None = None,
+    strategy_ids: tuple[str, ...] | list[str] | set[str] = (),
+    account_events: Sequence[AccountEvent] | None = None,
+) -> dict[str, int]:
+    """Every account-risk-rejected attempt key, with when its signal lapses.
+
+    A pure function of the journal, so it memoizes on journal identity alone.
+    The clock belongs to the caller: mixing it in here would make a memo serve
+    an answer that silently went stale as the window passed.
+    """
+
+    expiries: dict[str, int] = {}
+    for attempt in canonical_entry_attempts(
+        account_root,
+        sleeve=sleeve,
+        strategy_ids=strategy_ids,
+        account_events=account_events,
+    ):
+        if attempt.accepted:
+            continue
+        key = attempt.entry_attempt_key
+        # A key can be attempted more than once; the latest window is the one
+        # that governs whether it is still suppressed.
+        expiries[key] = max(expiries.get(key, 0), int(attempt.signal_valid_until_ms))
+    return expiries
+
+
 def terminal_entry_attempt_keys(
     account_root: str | Path,
     *,
@@ -163,18 +201,30 @@ def terminal_entry_attempt_keys(
     inbox: AccountIntentInbox | None = None,
     account_events: Sequence[AccountEvent] | None = None,
     completed_cursor: CompletedEntryAttemptCursor | None = None,
+    now_ms: int | None = None,
 ) -> frozenset[str]:
-    """Return exact attempts terminal by account risk or service expiry."""
+    """Return exact attempts terminal by account risk or service expiry.
 
+    An attempt key is a stable function of its target key, so a rejection stays
+    matchable forever. Without a bound, one transient refusal — a momentary
+    margin shortfall, a stale book — retired that symbol for the life of the
+    journal: every later cycle minted the identical key and suppressed itself.
+    The signal window the attempt already carries is the bound. Inside it the
+    rejection still suppresses, which is what stops a rejected entry being
+    republished every cycle; past it the decision is a new one and gets to
+    stand or fall on its own.
+    """
+
+    horizon_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     rejected = frozenset(
-        attempt.entry_attempt_key
-        for attempt in canonical_entry_attempts(
+        key
+        for key, valid_until_ms in rejected_entry_attempt_expiries(
             account_root,
             sleeve=sleeve,
             strategy_ids=strategy_ids,
             account_events=account_events,
-        )
-        if not attempt.accepted
+        ).items()
+        if horizon_ms < valid_until_ms
     )
     if inbox is None:
         return rejected
@@ -454,7 +504,7 @@ def _accepted_batches(events: Sequence[AccountEvent]) -> set[str]:
     return {
         event.correlation_id
         for event in events
-        if event.event_type == AccountEventType.RISK_DECISION.value
+        if event.event_type == _RISK_DECISION
         and bool(event.payload.get("accepted"))
     }
 
@@ -467,7 +517,7 @@ def _ordinary_targets_by_batch(
     targets: dict[str, list[AccountEvent]] = {}
     for event in events:
         if (
-            event.event_type != AccountEventType.TARGET.value
+            event.event_type != _TARGET
             or event.correlation_id not in accepted_batches
         ):
             continue
@@ -486,7 +536,7 @@ def _convergence_retry_targets_by_batch(
     candidates: dict[str, list[AccountEvent]] = {}
     for event in events:
         if (
-            event.event_type != AccountEventType.TARGET.value
+            event.event_type != _TARGET
             or event.correlation_id not in accepted_batches
             or not event.correlation_id.startswith("account-convergence/")
         ):
@@ -515,7 +565,7 @@ def _build_batch_fill_index(
         orders.setdefault(key, []).append(order)
     fills: dict[str, list[AccountEvent]] = {}
     for event in events:
-        if event.event_type != AccountEventType.FILL.value:
+        if event.event_type != _FILL:
             continue
         command_id = str(event.payload.get("command_id") or "")
         fills.setdefault(command_id, []).append(event)
@@ -594,10 +644,10 @@ def canonical_account_projection(
 #: ``tests/strategy/test_account_journal_cursor.py`` pins the equivalence.
 PROJECTION_EVENT_TYPES: frozenset[str] = frozenset(
     {
-        AccountEventType.TARGET.value,
-        AccountEventType.RISK_DECISION.value,
-        AccountEventType.FILL.value,
-        AccountEventType.PNL.value,
+        _TARGET,
+        _RISK_DECISION,
+        _FILL,
+        _PNL,
     }
 )
 
@@ -683,7 +733,7 @@ def _batch_fill_summary(
         matching_fills = (
             event
             for event in events
-            if event.event_type == AccountEventType.FILL.value
+            if event.event_type == _FILL
             and str(event.payload.get("command_id") or "") in command_id_set
         )
     else:
@@ -1385,7 +1435,7 @@ def _canonical_reduction_events_from_events(
     target_owners: dict[str, tuple[str, str]] = {}
     for event in events:
         if (
-            event.event_type != AccountEventType.TARGET.value
+            event.event_type != _TARGET
             or event.correlation_id not in accepted_batches
         ):
             continue
@@ -1399,7 +1449,7 @@ def _canonical_reduction_events_from_events(
     output: list[CanonicalReductionEvent] = []
     seen_pnl_keys: set[str] = set()
     for event in events:
-        if event.event_type != AccountEventType.PNL.value:
+        if event.event_type != _PNL:
             continue
         payload = event.payload
         metadata = payload.get("metadata") or {}
@@ -1573,7 +1623,7 @@ def canonical_strategy_trade_rows(
     lifecycles: dict[str, dict[str, Any]] = {}
     for event in events:
         if (
-            event.event_type != AccountEventType.TARGET.value
+            event.event_type != _TARGET
             or event.correlation_id not in accepted_batches
         ):
             continue
@@ -1680,6 +1730,17 @@ def canonical_strategy_trade_rows(
             "target_updated_sequence": latest_event.sequence,
             "account_target_batch_id": latest_event.correlation_id,
             "target_reference_price": target_reference_price,
+            # What the strategy actually asked for, before the venue's quantity
+            # grid rounded it. Reconstructing the standing size from the
+            # quantized quantity and diffing it against an unrounded desire
+            # leaves a gap the size of a venue step, which a resize can never
+            # close: the producer re-proposes it every cycle and the kernel
+            # emits no order. 0.0 when the target predates this field.
+            "raw_target_notional_usdt": float(
+                (latest_payload.get("metadata") or {}).get("raw_target_notional_usdt") or 0.0
+            )
+            if isinstance(latest_payload.get("metadata"), Mapping)
+            else 0.0,
             "target_reason": str(latest_payload.get("reason") or ""),
             "exit_target_ts_ms": (
                 latest_event.wall_ts_ns // 1_000_000
@@ -2047,7 +2108,7 @@ def _latest_component_revision_convergence(
     targets_by_batch: dict[str, list[AccountEvent]] = {}
     for event in events:
         if (
-            event.event_type != AccountEventType.TARGET.value
+            event.event_type != _TARGET
             or event.correlation_id not in accepted_batches
         ):
             continue
@@ -2160,7 +2221,7 @@ def _latest_account_quantity_tolerance(events: Sequence[AccountEvent]) -> float:
 
     for event in reversed(events):
         if (
-            event.event_type != AccountEventType.RISK_DECISION.value
+            event.event_type != _RISK_DECISION
             or not bool(event.payload.get("accepted"))
         ):
             continue

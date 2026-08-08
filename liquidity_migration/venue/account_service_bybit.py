@@ -177,20 +177,123 @@ class CapturedBybitMarketProvider:
         return book
 
 
+class BybitWalletStreamCache:
+    """Latest account balance as the venue pushed it, over the private socket.
+
+    The wallet frame carries the same UNIFIED account row the REST read returns,
+    so it is parsed by the same helpers and yields the same two numbers. Holding
+    it here turns a blocking round trip on the order path into a memory read,
+    and the pushed value is fresher than a REST answer, not staler — it arrives
+    when the balance changes rather than when we get round to asking.
+
+    Never authoritative on its own: an empty or aged cache means the caller
+    falls back to REST, so a dead socket degrades speed and nothing else.
+    """
+
+    def __init__(self, *, clock: Clock | None = None) -> None:
+        self.clock = clock or SystemClock()
+        self._lock = threading.Lock()
+        self._account: Mapping[str, Any] | None = None
+        self._observed_ns = 0
+        self._updates = 0
+
+    def on_message(self, message: Mapping[str, Any]) -> None:
+        """Absorb one wallet frame. Never raises into the socket thread."""
+
+        try:
+            rows = message.get("data") if isinstance(message, Mapping) else None
+            if not isinstance(rows, list):
+                return
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                if str(row.get("accountType") or "UNIFIED").upper() != "UNIFIED":
+                    continue
+                observed = self.clock.wall_time_ns()
+                with self._lock:
+                    self._account = dict(row)
+                    self._observed_ns = observed
+                    self._updates += 1
+        except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
+            _logger_account.exception("private wallet frame could not be absorbed")
+
+    @property
+    def updates(self) -> int:
+        with self._lock:
+            return self._updates
+
+    def current(self, *, max_age_ns: int) -> tuple[Mapping[str, Any], int] | None:
+        """The pushed account row and when it arrived, if fresh enough."""
+
+        with self._lock:
+            account = self._account
+            observed = self._observed_ns
+        if account is None or observed <= 0:
+            return None
+        age_ns = self.clock.wall_time_ns() - observed
+        if age_ns < 0 or age_ns > max_age_ns:
+            return None
+        return account, observed
+
+
 class BybitAccountSnapshotProvider:
     """Read one fresh wallet snapshot for the realm the client names."""
 
-    def __init__(self, client: Any, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        clock: Clock | None = None,
+        wallet_cache: BybitWalletStreamCache | None = None,
+        wallet_max_age_ns: int = 5_000_000_000,
+    ) -> None:
         self.realm = require_named_realm(client, label="account snapshot provider")
         self.client = client
         self.clock = clock or SystemClock()
+        # With a cache the wallet arrives over the socket that is already open;
+        # without one, or when its last frame is too old, this reads REST as
+        # before.
+        self.wallet_cache = wallet_cache
+        self.wallet_max_age_ns = wallet_max_age_ns
 
     def current(self, *, batch_id: str) -> AccountRiskSnapshot:
+        if self.wallet_cache is not None:
+            pushed = self.wallet_cache.current(max_age_ns=self.wallet_max_age_ns)
+            if pushed is not None:
+                account, observed_ns = pushed
+                try:
+                    return self._snapshot_from_account(
+                        account, batch_id=batch_id, observed_ns=observed_ns, source="ws"
+                    )
+                except RuntimeError:
+                    # A pushed row that does not parse is not a reason to refuse
+                    # the batch; ask the venue directly instead.
+                    _logger_account.warning("pushed wallet row was unusable; falling back to REST")
         result = self.client.get_wallet_balance(account_type="UNIFIED", coin="USDT")
         rows = result.get("list") if isinstance(result, Mapping) else None
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], Mapping):
             raise RuntimeError(f"Bybit {self.realm.value} wallet response has no UNIFIED account row")
-        account = rows[0]
+        return self._snapshot_from_account(
+            rows[0],
+            batch_id=batch_id,
+            observed_ns=self.clock.wall_time_ns(),
+            source="rest",
+        )
+
+    def _snapshot_from_account(
+        self,
+        account: Mapping[str, Any],
+        *,
+        batch_id: str,
+        observed_ns: int,
+        source: str,
+    ) -> AccountRiskSnapshot:
+        """Turn one UNIFIED account row into a risk snapshot.
+
+        Shared by the pushed and polled paths so both read the same two numbers
+        out of the same fields; only where the row came from differs.
+        """
+
         equity = _account_equity(account, realm=self.realm)
         available = _available_margin(account, realm=self.realm)
         if equity <= 0.0 or available < 0.0:
@@ -202,12 +305,12 @@ class BybitAccountSnapshotProvider:
                 f"or negative available margin "
                 f"(equity={equity:.2f} USDT, available={available:.2f} USDT)"
             )
-        observed_ns = self.clock.wall_time_ns()
         material = {
             "batch_id": batch_id,
             "equity_usdt": equity,
             "available_margin_usdt": available,
             "observed_ts_ns": observed_ns,
+            "source": source,
         }
         return AccountRiskSnapshot(
             equity_usdt=equity,

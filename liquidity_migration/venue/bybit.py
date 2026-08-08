@@ -23,7 +23,7 @@ from liquidity_migration.marketdata.bybit_errors import (
     BybitDataError,
     BybitRequestRejected,
     BybitSubmissionUncertain,
-    is_rate_limit as _is_rate_limit,
+    is_transient_venue_fault as _is_transient_venue_fault,
 )
 from liquidity_migration.marketdata.bybit_market_data import (
     BybitRestRateLimiter as _BybitRestRateLimiter,
@@ -53,6 +53,16 @@ __all__ = [
 
 #: The only REST host addressed with demo credentials.
 DEMO_REST_ENDPOINT = REALM_REST_ENDPOINTS[VenueRealm.DEMO]
+
+
+def _exec_time_ns(row: Mapping[str, Any]) -> int:
+    """Execution time of one venue row, in nanoseconds; 0 when unreadable."""
+
+    try:
+        millis = float(row.get("execTime") or row.get("exec_time") or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    return int(millis * 1_000_000) if millis > 0.0 else 0
 
 
 def _require_realm_endpoint(client: Any, what: str, *, realm: VenueRealm) -> None:
@@ -428,7 +438,17 @@ class BybitPrivateClient:
         order_link_id: str | None = None,
         limit: int = 50,
         max_pages: int = 20,
+        stop_before_ns: int = 0,
     ) -> list[dict[str, Any]]:
+        """Recent executions, newest first.
+
+        ``stop_before_ns`` stops paging once a page is entirely older than that
+        instant. Bybit returns these newest-first, so every remaining page is
+        older still and a caller that discards old rows would drop them all.
+        Pass it only when the caller really does ignore rows that old; left at
+        zero the walk pages to exhaustion as before.
+        """
+
         params: dict[str, Any] = {
             "category": self.category,
             "limit": max(1, min(int(limit), 100)),
@@ -454,10 +474,18 @@ class BybitPrivateClient:
             if not payload:
                 return rows
             result = payload.get("result", {})
-            rows.extend(result.get("list", []))
+            page = result.get("list", [])
+            rows.extend(page)
             next_cursor = str(result.get("nextPageCursor") or "")
             if not next_cursor:
                 return rows
+            if stop_before_ns > 0 and page:
+                newest_on_page = max(
+                    (_exec_time_ns(row) for row in page),
+                    default=0,
+                )
+                if 0 < newest_on_page < stop_before_ns:
+                    return rows
             if next_cursor in seen_cursors:
                 raise BybitDataError(
                     "Bybit get_trade_history returned a non-advancing pagination cursor"
@@ -693,6 +721,12 @@ class BybitPrivateClient:
                         "retCode": 110043,
                     }
                 last_error = exc
+                # A definite refusal will refuse the identical request again.
+                # Retrying it slept half a second and resent a signed POST that
+                # could only fail, on the path between deciding to trade and
+                # the order leaving — nine times over for a nine-slice batch.
+                if isinstance(exc, BybitRequestRejected) and not _is_transient_venue_fault(exc):
+                    raise
                 if attempt + 1 >= attempts:
                     raise
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
@@ -761,12 +795,26 @@ class BybitPrivateClient:
             payload = method(**params)
             ret_code = payload.get("retCode")
             if ret_code != 0:
+                # "Not now" is not "no". A busy matching engine answering a
+                # reduce-only close used to arrive here as a definite reject,
+                # which terminalizes the command — the stop had fired and the
+                # position kept running. Uncertain instead: the owner keeps the
+                # command live, reconciliation probes the orderLinkId, and
+                # convergence re-plans what the venue never took.
+                if _is_transient_venue_fault(payload):
+                    raise BybitSubmissionUncertain(
+                        f"Bybit {method_name} hit a transient venue fault: {payload}"
+                    )
                 raise BybitRequestRejected(f"Bybit {method_name} failed: {payload}")
             return payload
         except BybitDataError:
             raise
         except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
             if type(exc).__name__ == "InvalidRequestError":
+                if _is_transient_venue_fault(exc):
+                    raise BybitSubmissionUncertain(
+                        f"Bybit {method_name} hit a transient venue fault: {exc}"
+                    ) from exc
                 raise BybitRequestRejected(f"Bybit {method_name} failed: {exc}") from exc
             raise BybitSubmissionUncertain(
                 f"Bybit {method_name} outcome is unknown after transport failure: {exc}"
@@ -793,14 +841,17 @@ class BybitPrivateClient:
                 return payload
             except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
                 last_error = exc
-                # A non-zero retCode that is not a rate-limit is a definite
-                # reject; retrying the identical request just wastes backoff.
-                if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
+                # A non-zero retCode that is neither a rate-limit nor a venue
+                # "not now" is a definite reject; retrying the identical request
+                # just wastes backoff. The transient class matters most on a
+                # close: treating a busy matching engine as a final refusal
+                # leaves a position running after its stop has fired.
+                if isinstance(exc, BybitDataError) and not _is_transient_venue_fault(exc):
                     raise
                 # pybit 5.x raises InvalidRequestError for a non-zero retCode
                 # before the branch above ever sees it. Match by class name to
                 # avoid a hard pybit dependency.
-                if type(exc).__name__ == "InvalidRequestError" and not _is_rate_limit(exc):
+                if type(exc).__name__ == "InvalidRequestError" and not _is_transient_venue_fault(exc):
                     raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
                 if attempt + 1 >= self.retries:
                     break
@@ -993,6 +1044,32 @@ class BybitPrivateWebSocketStream:
         with self._control_lock:
             self._acked_topics.discard(topic)
             self._last_control_error = ""
+
+    def subscribe_wallet(self, callback: Any) -> bool:
+        """Push account balance changes instead of polling for them.
+
+        The socket is already open and authenticated, so this costs nothing per
+        message and replaces a REST read that sat between the decision to trade
+        and the order leaving. Returns False when the client cannot serve the
+        topic, so the caller can keep the REST path rather than fail closed on
+        an optional accelerator. Wallet is a read-only topic: it is deliberately
+        NOT registered as a mutation-topic ack, so readiness still means orders
+        and executions.
+        """
+
+        stream = getattr(self._client, "wallet_stream", None)
+        if not callable(stream):
+            return False
+        try:
+            stream(callback=callback)
+        except Exception as exc:  # noqa: BLE001 - an optional feed must not kill the owner
+            with self._control_lock:
+                self._last_control_error = (
+                    f"private websocket wallet subscription failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:500]
+            return False
+        return True
 
     def subscribe_orders(self, callback: Any) -> None:
         self._mark_subscription_pending("order")

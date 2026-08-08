@@ -412,14 +412,25 @@ def test_planning_cursor_memoizes_rejected_attempts_until_a_new_event(tmp_path: 
         sleeve=SleeveAdapterKind.CARRY,
         strategy_ids=("carry-v1",),
     )
-    # Equality with the unmemoized journal-pure half (inbox=None).
-    assert first == terminal_entry_attempt_keys(
+    # The memo is journal-pure and therefore time-free: it carries when each
+    # rejection's signal lapses, and the caller applies the clock. Filtered at
+    # the same instant it must agree with the unmemoized half (inbox=None).
+    horizon_ms = 1
+    assert frozenset(
+        key for key, valid_until_ms in first.items() if horizon_ms < valid_until_ms
+    ) == terminal_entry_attempt_keys(
         tmp_path,
         sleeve=SleeveAdapterKind.CARRY.value,
         strategy_ids=("carry-v1",),
         inbox=None,
         account_events=projection.events,
+        now_ms=horizon_ms,
     )
+    # Past every window, nothing is suppressed: one transient refusal must not
+    # retire a symbol for the life of the journal.
+    assert not [
+        key for key, valid_until_ms in first.items() if 2**62 < valid_until_ms
+    ]
     # Same head: served from the memo.
     assert (
         cursor.memoized_rejected_entry_attempts(

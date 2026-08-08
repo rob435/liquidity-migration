@@ -102,12 +102,15 @@ class BybitAccountExecutionConsumer:
         native_protection_manager: Any | None = None,
         fill_observer: Callable[[str], Any] | None = None,
         clock: Clock | None = None,
+        wallet_cache: Any | None = None,
     ) -> None:
         self.kernel = kernel
         self.driver = KernelExecutionDriver(kernel)
         self.private_stream = private_stream
         self.native_protection_manager = native_protection_manager
         self.fill_observer = fill_observer
+        # Fed directly from the wallet topic; see ``_subscribe``.
+        self.wallet_cache = wallet_cache
         self.clock = clock or SystemClock()
         self.events: queue.Queue[tuple[str, Mapping[str, Any], int]] = queue.Queue()
         self.pending_terminal: dict[str, PendingTerminalStatus] = {}
@@ -159,6 +162,16 @@ class BybitAccountExecutionConsumer:
     def _subscribe(self, private_stream: Any) -> None:
         private_stream.subscribe_executions(lambda message: self._enqueue("execution", message))
         private_stream.subscribe_orders(lambda message: self._enqueue("order", message))
+        # Optional accelerator on a socket that is already open: the balance is
+        # pushed instead of polled, which takes a REST round trip off the path
+        # between deciding to trade and the order leaving. It is fed straight to
+        # the cache rather than queued, because nothing sequences against it and
+        # the risk snapshot only ever wants the newest value. A stream that
+        # cannot serve the topic just leaves the REST path in place.
+        if self.wallet_cache is not None:
+            subscribe = getattr(private_stream, "subscribe_wallet", None)
+            if callable(subscribe):
+                subscribe(self.wallet_cache.on_message)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

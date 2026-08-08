@@ -445,6 +445,7 @@ def run_long_native_demo_cycle(
             sleeve=SleeveAdapterKind.LONG,
             strategy_ids=tuple(sorted(SUPPORTED_LONG_STRATEGY_IDS)),
             journal_cursor=journal_cursor,
+            now_ms=cycle_now_ms,
         )
         target_publisher = planning.publisher
         unresolved_targets = planning.unresolved_targets

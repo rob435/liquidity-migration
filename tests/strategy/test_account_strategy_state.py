@@ -323,11 +323,22 @@ def test_entry_attempt_projection_includes_risk_rejections_without_trade_rows(
     assert canonical_strategy_trade_rows(
         root, sleeve="long", strategy_ids=("strategy",)
     ).is_empty()
+    # Inside its own signal window the rejection still suppresses the attempt.
     assert terminal_entry_attempt_keys(
         root,
         sleeve="long",
         strategy_ids=("strategy",),
+        now_ms=150,
     ) == frozenset({rejected_attempt_key})
+
+    # Past it the decision is a new one: a stable attempt key must not retire a
+    # symbol for the life of the journal on one transient refusal.
+    assert terminal_entry_attempt_keys(
+        root,
+        sleeve="long",
+        strategy_ids=("strategy",),
+        now_ms=250,
+    ) == frozenset()
 
     # A fresh process reconstructs the same terminal attempt from the journal.
     AccountExecutionKernel(root, account_id="a")
@@ -353,7 +364,7 @@ def test_new_signal_attempt_is_distinct_from_prior_risk_rejection(tmp_path: Path
         },
     )
 
-    terminal = terminal_entry_attempt_keys(root, sleeve="long")
+    terminal = terminal_entry_attempt_keys(root, sleeve="long", now_ms=150)
     assert entry_attempt_key(old_key) in terminal
     assert entry_attempt_key(new_key) not in terminal
 
@@ -390,7 +401,7 @@ def test_execution_rejection_remains_accepted_convergence_state_not_terminal_att
 
     attempts = canonical_entry_attempts(root, sleeve="long")
     assert len(attempts) == 1 and attempts[0].accepted
-    assert terminal_entry_attempt_keys(root, sleeve="long") == frozenset()
+    assert terminal_entry_attempt_keys(root, sleeve="long", now_ms=150) == frozenset()
     rows = canonical_strategy_trade_rows(root, sleeve="long")
     assert rows["status"].to_list() == ["target_pending"]
 

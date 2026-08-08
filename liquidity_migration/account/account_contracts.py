@@ -346,6 +346,32 @@ class AccountState:
         repr=False,
         compare=False,
     )
+    # Command ids whose ``OrderState`` object belongs to this state alone.
+    # ``transaction_state_copy`` shares order objects, so every write must go
+    # through ``order_for_write`` or it reaches into committed state that a
+    # rolled-back transaction must leave untouched.
+    private_order_ids: set[str] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+
+    def order_for_write(self, command_id: str) -> OrderState:
+        """The order under ``command_id``, private to this state and mutable."""
+
+        order = self.orders[command_id]
+        if command_id not in self.private_order_ids:
+            order = copy.copy(order)
+            self.orders[command_id] = order
+            self.private_order_ids.add(command_id)
+        return order
+
+    def put_order(self, command_id: str, order: OrderState) -> OrderState:
+        """Install a freshly built order; it is private by construction."""
+
+        self.orders[command_id] = order
+        self.private_order_ids.add(command_id)
+        return order
 
     def working_signed_qty(self, symbol: str) -> float:
         return math.fsum(
@@ -394,7 +420,10 @@ def transaction_state_copy(state: AccountState) -> AccountState:
         component_targets=dict(state.component_targets),
         aggregate_targets=dict(state.aggregate_targets),
         risk_decisions=dict(state.risk_decisions),
-        orders={key: copy.copy(value) for key, value in state.orders.items()},
+        # Shared values, private dict: a write must privatize through
+        # ``order_for_write``. Copying every order ever held cost a slice of the
+        # whole history per transaction.
+        orders=dict(state.orders),
         positions={key: copy.copy(value) for key, value in state.positions.items()},
         executions=dict(state.executions),
         protections=dict(state.protections),
@@ -405,15 +434,12 @@ def transaction_state_copy(state: AccountState) -> AccountState:
         events_applied=state.events_applied,
         rolling_state_hash=state.rolling_state_hash,
         working_order_ids=set(state.working_order_ids),
-        # The nested sets are reducer-mutated in place, so each one needs its
-        # own copy or a rolled-back transaction would leave the committed index
-        # carrying entries for events that never landed.
-        command_ids_by_venue_order_id={
-            key: set(value) for key, value in state.command_ids_by_venue_order_id.items()
-        },
-        target_proposal_keys_by_batch={
-            key: set(value) for key, value in state.target_proposal_keys_by_batch.items()
-        },
+        # Shared values: the reducer must REBIND these sets
+        # (``d[k] = {*d.get(k, ()), v}``), never ``.add()`` in place, or a
+        # rolled-back transaction leaves committed entries for events that never
+        # landed. Pinned by test_the_reducer_never_mutates_an_index_set_in_place.
+        command_ids_by_venue_order_id=dict(state.command_ids_by_venue_order_id),
+        target_proposal_keys_by_batch=dict(state.target_proposal_keys_by_batch),
     )
 
 

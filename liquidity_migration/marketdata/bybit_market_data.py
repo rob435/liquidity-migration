@@ -15,7 +15,11 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from liquidity_migration.marketdata.bybit_errors import BybitDataError, is_rate_limit as _is_rate_limit
+from liquidity_migration.marketdata.bybit_errors import (
+    BybitDataError,
+    is_rate_limit as _is_rate_limit,
+    is_transient_venue_fault as _is_transient_venue_fault,
+)
 from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate, TickerFrameSampler
 
 try:
@@ -421,11 +425,13 @@ class BybitMarketData:
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
                     self._record_call(elapsed_ms, error_text=str(exc), rate_limited=_is_rate_limit(exc))
                 last_error = exc
-                # A definite (non-rate-limit) venue reject -- bad symbol,
-                # invalid param -- will not change on retry, so raise instead of
-                # spending the backoff on identical calls. Mirrors
-                # BybitPrivateClient._call.
-                if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
+                # A definite venue reject -- bad symbol, invalid param --
+                # will not change on retry, so raise instead of spending the
+                # backoff on identical calls. "Not now" answers (busy matching
+                # engine, server error) do change, so they keep their retries:
+                # same predicate the order path uses, so both classify a venue
+                # refusal the same way.
+                if isinstance(exc, BybitDataError) and not _is_transient_venue_fault(exc):
                     raise
                 if attempt + 1 >= self.retries:
                     break

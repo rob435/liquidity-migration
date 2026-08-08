@@ -1117,11 +1117,16 @@ def deliver_notification_batch(
 
     A retry can duplicate an already-sent page, but committed state can never
     acknowledge and then omit unsent facts.
+
+    Never raises. This runs on the account owner's own loop, and the owner is
+    the only thing that submits exits, reconciles and maintains the native
+    stops — so a full disk on the dedupe write must cost a duplicate message,
+    not the process. The unit is ``Restart=always``, so raising here would
+    crash-loop the owner with the book open.
     """
 
     if not batch.messages:
-        engine.commit(batch)
-        return True
+        return _commit_notification_state(engine, batch, context=context, logger=logger)
     for page_number, page in enumerate(batch.messages, start=1):
         try:
             from liquidity_migration.ops.telegram import send_telegram_message
@@ -1153,5 +1158,21 @@ def deliver_notification_batch(
             len(page),
             page.splitlines()[0][:120] if page else "",
         )
-    engine.commit(batch)
+    return _commit_notification_state(engine, batch, context=context, logger=logger)
+
+
+def _commit_notification_state(
+    engine: AccountNotificationEngine,
+    batch: AccountNotificationBatch,
+    *,
+    context: str,
+    logger: logging.Logger,
+) -> bool:
+    """Advance the dedupe state, reporting a write fault instead of raising."""
+
+    try:
+        engine.commit(batch)
+    except OSError:
+        logger.exception("%s notification state could not be committed", context)
+        return False
     return True

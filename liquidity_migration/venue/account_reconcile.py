@@ -70,7 +70,21 @@ VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS = 10 * 60 * 1_000_000_000
 # pass: wedges are rare, and a resting acknowledged order must not turn every
 # reconcile pass into three extra REST reads per order.
 WEDGE_PROBE_INTERVAL_NS = 60 * 1_000_000_000
+#: Drop-recovery cadence for exchange-native fills. The private stream delivers
+#: these; this only catches what it missed, so it does not belong on the 2s
+#: reconcile cadence.
+TRADE_HISTORY_RECOVERY_INTERVAL_NS = 60 * 1_000_000_000
 WEDGE_PROBES_PER_PASS = 5
+#: Pending-order confirmation is drop recovery, not the primary path — the
+#: private stream is. Ungated it cost two signed REST reads per pending order
+#: per pass; at ~175 ms each, one entry resting for its 120 s quote window paid
+#: 120 round trips, and six at once put the loop permanently behind its own 2 s
+#: cadence. Everything starved that way is a risk control: software stops,
+#: take-profits, quote repricing. A dropped fill is now recovered up to this
+#: interval later, and the every-pass position-truth check still stands behind
+#: it.
+PENDING_ORDER_POLL_INTERVAL_NS = 10 * 1_000_000_000
+PENDING_ORDER_POLLS_PER_PASS = 5
 
 
 class AccountReconciliationStaleError(RuntimeError):
@@ -137,6 +151,8 @@ class BybitAccountReconciler:
             True if auto_resolve_wedges is None else bool(auto_resolve_wedges)
         )
         self._wedge_probe_last_ns: dict[str, int] = {}
+        self._last_trade_history_recovery_ns: dict[str, int] = {}
+        self._last_pending_poll_ns: dict[str, int] = {}
         self._wedge_last_classification: dict[str, str] = {}
         self.consumer = BybitAccountExecutionConsumer(
             kernel=kernel,
@@ -156,7 +172,29 @@ class BybitAccountReconciler:
         pending = [order for order in state.orders.values() if order.status in pending_statuses]
         execution_rows = 0
         order_rows = 0
-        for order in sorted(pending, key=lambda item: item.command_id):
+        # Least-recently-polled first, so a large slice batch cannot starve the
+        # orders at the end of the command-id ordering. A never-polled order is
+        # due at once, so a fresh command still gets one prompt confirmation.
+        poll_now_ns = self.clock.wall_time_ns()
+        pending_ids = {order.command_id for order in pending}
+        self._last_pending_poll_ns = {
+            command_id: stamp
+            for command_id, stamp in self._last_pending_poll_ns.items()
+            if command_id in pending_ids
+        }
+        due = []
+        for order in sorted(
+            pending,
+            key=lambda item: (self._last_pending_poll_ns.get(item.command_id, -1), item.command_id),
+        ):
+            last_poll_ns = self._last_pending_poll_ns.get(order.command_id)
+            # Never polled is due now, stated rather than inferred from a zero
+            # default: under a clock whose epoch is near zero the arithmetic
+            # form makes a fresh order wait out the whole interval.
+            if last_poll_ns is not None and poll_now_ns - last_poll_ns < PENDING_ORDER_POLL_INTERVAL_NS:
+                continue
+            due.append(order)
+        for order in due[:PENDING_ORDER_POLLS_PER_PASS]:
             venue_identified_external = order.batch_id.startswith(EXTERNAL_BATCH_PREFIXES) and bool(
                 order.venue_order_id
             )
@@ -195,6 +233,10 @@ class BybitAccountReconciler:
                     {"data": history},
                     local_receive_ts_ns=self.clock.wall_time_ns(),
                 )
+            # Stamped only once both reads landed. Stamping before them would
+            # lock a command out for the whole interval on the pass where the
+            # read raised — exactly when recovery is most wanted.
+            self._last_pending_poll_ns[order.command_id] = self.clock.wall_time_ns()
 
         # Exchange-native TP/SL orders carry no kernel orderLinkId. Recover
         # executions newer than the active protection installation only, so an
@@ -211,8 +253,37 @@ class BybitAccountReconciler:
                 active = self.native_protection_manager.active(symbol)
                 if active is None:
                     continue
+                # The private stream is the primary path for these rows; this
+                # is drop recovery. Ungated it fanned out one paginated REST
+                # call per held symbol on every reconcile pass — thirty times a
+                # minute per symbol, blocking the owner loop, to re-find rows
+                # the socket had already delivered. Same interval the wedge
+                # probe above already uses.
+                last_recovery_ns = self._last_trade_history_recovery_ns.get(symbol, 0)
+                recovery_now_ns = self.clock.monotonic_ns()
+                if (
+                    last_recovery_ns > 0
+                    and recovery_now_ns - last_recovery_ns < TRADE_HISTORY_RECOVERY_INTERVAL_NS
+                ):
+                    continue
                 activated_ns = int(active[1].get("local_receive_ts_ns") or 0)
-                recent = self.client.get_trade_history(symbol=symbol, limit=50)
+                # Every row older than the activation is dropped by the filter
+                # below, so paging past them is wasted work — and this runs per
+                # held symbol every couple of seconds, in line with the owner
+                # loop, up to twenty round trips deep each time.
+                recent = self.client.get_trade_history(
+                    symbol=symbol,
+                    limit=50,
+                    stop_before_ns=(
+                        max(activated_ns - NATIVE_ACTIVATION_CLOCK_TOLERANCE_NS, 0)
+                        if activated_ns > 0
+                        else 0
+                    ),
+                )
+                # Stamped after the read landed: stamping before it locked the
+                # symbol out of recovery for a full interval on the one pass
+                # where the call raised.
+                self._last_trade_history_recovery_ns[symbol] = recovery_now_ns
                 external = []
                 refreshed = self.kernel._state_ref()
                 for row in recent or []:
@@ -326,6 +397,7 @@ class BybitAccountReconciler:
         # still has its stop proved.
         illegible_symbols: set[str] = set()
         mismatches: list[str] = []
+        wedged_command_ages_s: dict[str, int] = {}
         for order in sorted(
             post_recovery_state.orders.values(),
             key=lambda item: item.command_id,
@@ -359,10 +431,16 @@ class BybitAccountReconciler:
                     # A long-lived resting order is normal; only one whose
                     # venue side is provably gone is stalled.
                     continue
+            # Identity only. This string is hashed into the snapshot's semantic
+            # identity, so a ticking age made an unchanged wedge look like new
+            # truth every second and journaled a transaction on nearly every
+            # pass — tens of thousands of events a day, during exactly the
+            # incident being diagnosed. The age is still reported, in the
+            # metadata below, which is written but not hashed.
             mismatches.append(
-                f"wedged_command:{wedge.kind}:{wedge.symbol}:"
-                f"command={wedge.command_id}:age_s={wedge.age_ns // 1_000_000_000}"
+                f"wedged_command:{wedge.kind}:{wedge.symbol}:command={wedge.command_id}"
             )
+            wedged_command_ages_s[wedge.command_id] = wedge.age_ns // 1_000_000_000
         native_protection_breach_only = False
         for symbol, sides in sorted(active_sides.items()):
             if len(sides) > 1:
@@ -500,6 +578,7 @@ class BybitAccountReconciler:
                     "execution_rows_observed": execution_rows,
                     "order_rows_observed": order_rows,
                     "position_rows_observed": len(position_rows),
+                    "wedged_command_ages_s": dict(sorted(wedged_command_ages_s.items())),
                     "venue_order_ownership": ownership_semantics,
                     "wedged_commands_resolved": wedges_resolved,
                     "foreign_positions": foreign_positions,

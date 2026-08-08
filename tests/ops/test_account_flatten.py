@@ -436,3 +436,171 @@ def _patch_journal(monkeypatch: pytest.MonkeyPatch, states) -> None:
             return _Digest(last)
 
     monkeypatch.setattr(module, "AccountJournalCursor", _Cursor)
+
+
+class TestLossCeilingFlatten:
+    """The ceiling's job is to close the book, not to log that it should."""
+
+    def test_a_trip_publishes_a_zero_target_for_every_open_component(
+        self, tmp_path: Path
+    ) -> None:
+        from liquidity_migration.runtime.account_service_runner import (
+            publish_loss_ceiling_flatten,
+        )
+
+        route = _route(tmp_path)
+        first_key, first = _component(symbol="BUSDT")
+        second_key, second = _component(symbol="ESPUSDT", signed_qty=-50.0)
+        state = _state(components={first_key: first, second_key: second})
+
+        class FakeKernel:
+            def _state_ref(self):
+                return state
+
+        flatten = publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_000,
+        )
+        assert len(flatten.published_request_ids) >= 1
+        assert flatten.unpublished_target_keys == ()
+        assert {key.split("/")[-1] for key in flatten.planned_target_keys} == {
+            "BUSDT",
+            "ESPUSDT",
+        }
+
+        # The zero targets are really in the owner's inbox, which is what the
+        # old code never managed: it called a path that could only claim a
+        # native-stop breach and published nothing at all.
+        queued = list((Path(route.inbox_root) / "pending").glob("*.json"))
+        assert queued
+        blob = "".join(path.read_text() for path in queued)
+        assert "BUSDT" in blob and "ESPUSDT" in blob
+
+    def test_a_flat_book_publishes_nothing(self, tmp_path: Path) -> None:
+        from liquidity_migration.runtime.account_service_runner import (
+            publish_loss_ceiling_flatten,
+        )
+
+        route = _route(tmp_path)
+        state = _state()
+
+        class FakeKernel:
+            def _state_ref(self):
+                return state
+
+        flatten = publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_000,
+        )
+        assert flatten.planned_target_keys == frozenset()
+        assert flatten.published_request_ids == ()
+        assert flatten.unpublished_target_keys == ()
+
+    def test_exposure_opened_after_the_trip_is_closed_too(self, tmp_path: Path) -> None:
+        """The ceiling must not latch on "published once".
+
+        A producer reads owner health once at the top of its cycle and then
+        spends minutes on venue reads before publishing, so a cycle that began
+        before the trip can still add exposure after the flatten. A one-shot
+        flatten would leave that position open for the rest of a day whose
+        ceiling is already breached.
+        """
+
+        from liquidity_migration.runtime.account_service_runner import (
+            publish_loss_ceiling_flatten,
+        )
+
+        route = _route(tmp_path)
+        first_key, first = _component(symbol="BUSDT")
+        state = _state(components={first_key: first})
+
+        class FakeKernel:
+            def _state_ref(self):
+                return state
+
+        first_pass = publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_000,
+        )
+        assert len(first_pass.published_request_ids) == 1
+
+        # Same open set on the next pass: the book is still converging, so
+        # nothing is published again and the inbox is not flooded.
+        quiet = publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_001,
+            already_published=first_pass.planned_target_keys,
+        )
+        assert quiet.published_request_ids == ()
+        assert quiet.planned_target_keys == first_pass.planned_target_keys
+
+        # A straddling producer opens a second name after the trip. The open set
+        # changed, so this one gets a zero target too.
+        second_key, second = _component(symbol="ESPUSDT", signed_qty=-50.0)
+        state.component_targets[second_key] = second
+        after = publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_002,
+            already_published=first_pass.planned_target_keys,
+        )
+        assert len(after.published_request_ids) == 2
+        queued = "".join(
+            path.read_text() for path in (Path(route.inbox_root) / "pending").glob("*.json")
+        )
+        assert "ESPUSDT" in queued
+
+    def test_a_component_that_will_not_publish_is_reported_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial publication must not let the caller latch.
+
+        Each exit is published independently, so one refusal leaves the rest of
+        the book open. The caller latches on an empty second element, so
+        reporting the refusal is what makes the next pass retry.
+        """
+
+        from liquidity_migration.account.account_intent_client import (
+            AccountTargetPublisher,
+        )
+        from liquidity_migration.runtime import account_service_runner as module
+
+        route = _route(tmp_path)
+        first_key, first = _component(symbol="BUSDT")
+        second_key, second = _component(symbol="ESPUSDT", signed_qty=-50.0)
+        state = _state(components={first_key: first, second_key: second})
+
+        class FakeKernel:
+            def _state_ref(self):
+                return state
+
+        class RefusingPublisher:
+            def __init__(self, target_route: AccountRoute) -> None:
+                self._inner = AccountTargetPublisher(target_route)
+
+            def publish(self, *, batch_id, intents, created_ts_ns):
+                if any("ESPUSDT" in str(item.intent.target_key) for item in intents):
+                    raise RuntimeError("inbox refused the zero target")
+                return self._inner.publish(
+                    batch_id=batch_id, intents=intents, created_ts_ns=created_ts_ns
+                )
+
+        monkeypatch.setattr(module, "AccountTargetPublisher", RefusingPublisher)
+
+        flatten = module.publish_loss_ceiling_flatten(
+            kernel=FakeKernel(),
+            route=route,
+            reason="account loss ceiling: test",
+            now_ns=1_770_000_000_000_000_000,
+        )
+        assert len(flatten.published_request_ids) == 1
+        assert [key.split("/")[-1] for key in flatten.unpublished_target_keys] == ["ESPUSDT"]

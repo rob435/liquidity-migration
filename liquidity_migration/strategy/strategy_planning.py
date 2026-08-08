@@ -43,6 +43,7 @@ from liquidity_migration.strategy.account_strategy_state import (
     canonical_account_projection,
     canonical_account_projection_from_digest,
     canonical_strategy_trade_rows,
+    rejected_entry_attempt_expiries,
     terminal_entry_attempt_keys,
 )
 
@@ -117,7 +118,7 @@ class PlanningJournalCursor(AccountJournalCursor):
         self._projection_memo: tuple[tuple[str, int], CanonicalAccountProjection] | None = None
         self._trades_memo: tuple[tuple[str, int, str, tuple[str, ...]], pl.DataFrame] | None = None
         self._rejected_attempts_memo: (
-            tuple[tuple[str, int, str, tuple[str, ...]], frozenset[str]] | None
+            tuple[tuple[str, int, str, tuple[str, ...]], dict[str, int]] | None
         ) = None
         self.completed_attempts = CompletedEntryAttemptCursor()
 
@@ -164,10 +165,13 @@ class PlanningJournalCursor(AccountJournalCursor):
         projection: CanonicalAccountProjection,
         sleeve: SleeveAdapterKind,
         strategy_ids: tuple[str, ...] | list[str] | set[str],
-    ) -> frozenset[str]:
+    ) -> dict[str, int]:
         # The rejected half of the terminal-attempt set is a pure function of
         # the journal and the sleeve scope. The expired half comes from the
         # inbox and keeps its own cursor, so only this half is memoized.
+        # Expiries, not keys: whether a rejection still suppresses depends on
+        # the clock, and a time-dependent memo keyed on journal identity would
+        # keep serving an answer after its window had passed.
         key = (
             digest.head_event_hash,
             digest.events_folded,
@@ -176,11 +180,10 @@ class PlanningJournalCursor(AccountJournalCursor):
         )
         if self._rejected_attempts_memo is not None and self._rejected_attempts_memo[0] == key:
             return self._rejected_attempts_memo[1]
-        rejected = terminal_entry_attempt_keys(
+        rejected = rejected_entry_attempt_expiries(
             account_root,
             sleeve=sleeve.value,
             strategy_ids=strategy_ids,
-            inbox=None,
             account_events=projection.events,
         )
         self._rejected_attempts_memo = (key, rejected)
@@ -205,6 +208,7 @@ def sleeve_planning_snapshot(
     sleeve: SleeveAdapterKind,
     strategy_ids: tuple[str, ...] | list[str] | set[str],
     journal_cursor: AccountJournalCursor | None = None,
+    now_ms: int | None = None,
 ) -> SleevePlanningSnapshot:
     """Snapshot publisher, unresolved work, trades, and terminal attempts.
 
@@ -256,12 +260,17 @@ def sleeve_planning_snapshot(
         # inbox-driven expired half keeps its own incremental cursor. The
         # union is order-independent, so splitting the two halves here is a
         # pure refactor of terminal_entry_attempt_keys.
-        terminal_attempts = journal_cursor.memoized_rejected_entry_attempts(
-            account_root,
-            digest=digest,
-            projection=projection,
-            sleeve=sleeve,
-            strategy_ids=strategy_ids,
+        horizon_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        terminal_attempts = frozenset(
+            attempt_key
+            for attempt_key, valid_until_ms in journal_cursor.memoized_rejected_entry_attempts(
+                account_root,
+                digest=digest,
+                projection=projection,
+                sleeve=sleeve,
+                strategy_ids=strategy_ids,
+            ).items()
+            if horizon_ms < valid_until_ms
         ) | completed_expired_entry_attempt_keys(
             publisher.inbox,
             sleeve=sleeve.value,
@@ -276,6 +285,7 @@ def sleeve_planning_snapshot(
             inbox=publisher.inbox,
             account_events=projection.events,
             completed_cursor=completed_cursor,
+            now_ms=now_ms,
         )
     return SleevePlanningSnapshot(
         publisher=publisher,

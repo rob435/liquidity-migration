@@ -1345,29 +1345,29 @@ def test_private_call_transport_retries_and_final_message_carries_cause(
 
 
 # ---------------------------------------------------------------------------
-# bybit._is_rate_limit must classify on retCode/retMsg, not the whole payload.
+# is_rate_limit must classify on retCode/retMsg, not the whole payload.
 # ---------------------------------------------------------------------------
 
 
 def test_is_rate_limit_ignores_orderid_substring() -> None:
     # orderId contains "10006" but retCode is a definite reject -> NOT a rate limit.
-    assert bybit._is_rate_limit({"retCode": 110001, "result": {"orderId": "a10006b"}}) is False
+    assert bybit_errors.is_rate_limit({"retCode": 110001, "result": {"orderId": "a10006b"}}) is False
 
 
 def test_is_rate_limit_true_on_retcode_10006() -> None:
-    assert bybit._is_rate_limit({"retCode": 10006, "retMsg": "Too many visits"}) is True
+    assert bybit_errors.is_rate_limit({"retCode": 10006, "retMsg": "Too many visits"}) is True
 
 
 def test_is_rate_limit_non_throttle_retmsg_not_matched_via_payload() -> None:
     # A risk/leverage reject whose retMsg legitimately contains "rate limit" must not
     # be misclassified when the code is a definite reject... but the retMsg text itself
     # is the venue's throttle signal, so a retMsg-level match is still honoured:
-    assert bybit._is_rate_limit({"retCode": 110043, "retMsg": "set leverage not modified"}) is False
+    assert bybit_errors.is_rate_limit({"retCode": 110043, "retMsg": "set leverage not modified"}) is False
 
 
 def test_is_rate_limit_string_fallback() -> None:
-    assert bybit._is_rate_limit("rate limit exceeded") is True
-    assert bybit._is_rate_limit("position closed") is False
+    assert bybit_errors.is_rate_limit("rate limit exceeded") is True
+    assert bybit_errors.is_rate_limit("position closed") is False
 
 
 
@@ -2598,3 +2598,135 @@ def test_private_client_refuses_a_transport_that_resolved_to_mainnet() -> None:
             bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=True)
     finally:
         bybit.HTTP = original  # type: ignore[assignment]
+
+
+def test_trade_history_stops_paging_once_a_page_predates_the_bound(monkeypatch) -> None:
+    """The protection reconciler discards executions older than the activation
+    it is checking against, and runs per held symbol every couple of seconds.
+    Paging twenty deep past rows it will throw away is pure round trips."""
+
+    pages = {
+        None: {
+            "retCode": 0,
+            "result": {"list": [{"execId": "e1", "execTime": "5000"}], "nextPageCursor": "p2"},
+        },
+        "p2": {
+            "retCode": 0,
+            "result": {"list": [{"execId": "e2", "execTime": "1000"}], "nextPageCursor": "p3"},
+        },
+        "p3": {
+            "retCode": 0,
+            "result": {"list": [{"execId": "e3", "execTime": "10"}], "nextPageCursor": ""},
+        },
+    }
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.calls: list[dict] = []
+
+        def get_executions(self, **params):
+            self.calls.append(params)
+            return pages[params.get("cursor")]
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    # Page 2 is entirely older than the bound, so page 3 is never fetched.
+    rows = client.get_trade_history(symbol="FOOUSDT", stop_before_ns=2_000 * 1_000_000)
+    assert [row["execId"] for row in rows] == ["e1", "e2"]
+    assert len(client._client.calls) == 2
+
+    # Without a bound the walk still pages to exhaustion, exactly as before.
+    client._client.calls.clear()
+    rows = client.get_trade_history(symbol="FOOUSDT")
+    assert [row["execId"] for row in rows] == ["e1", "e2", "e3"]
+    assert len(client._client.calls) == 3
+
+
+def test_a_busy_venue_on_a_close_is_uncertain_not_a_definite_reject(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    """A close refused as "definite" terminalizes the command, and the position
+    keeps running after its stop fired. A busy matching engine is "not now"."""
+
+    from liquidity_migration.marketdata.bybit_errors import (
+        BybitRequestRejected,
+        BybitSubmissionUncertain,
+    )
+
+    payloads: dict = {"current": {}}
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            pass
+
+        def place_order(self, **params):
+            return dict(payloads["current"])
+
+    client = _make_private_client(monkeypatch, FakeHTTP, held_demo_mutation_lease)
+
+    for transient in (
+        {"retCode": 10016, "retMsg": "Server error"},
+        {"retCode": 170007, "retMsg": "Timeout waiting for response"},
+        {"retCode": 999, "retMsg": "System busy, please try again"},
+    ):
+        payloads["current"] = transient
+        with pytest.raises(BybitSubmissionUncertain):
+            client.place_order(symbol="FOOUSDT", orderLinkId="x", qty="1")
+
+    # A real refusal stays a real refusal.
+    for definite in (
+        {"retCode": 110007, "retMsg": "Insufficient available balance"},
+        {"retCode": 110017, "retMsg": "Reduce-only rule not satisfied"},
+    ):
+        payloads["current"] = definite
+        with pytest.raises(BybitRequestRejected):
+            client.place_order(symbol="FOOUSDT", orderLinkId="x", qty="1")
+
+
+def test_transient_classifier_does_not_swallow_real_refusals() -> None:
+    from liquidity_migration.marketdata.bybit_errors import is_transient_venue_fault
+
+    assert is_transient_venue_fault({"retCode": 10006, "retMsg": "too many visits"})
+    assert is_transient_venue_fault({"retCode": 10016, "retMsg": "Server error"})
+    assert is_transient_venue_fault({"retCode": 0, "retMsg": "system busy"})
+    assert not is_transient_venue_fault({"retCode": 110007, "retMsg": "Insufficient balance"})
+    assert not is_transient_venue_fault({"retCode": 110043, "retMsg": "leverage not modified"})
+    assert not is_transient_venue_fault({"retCode": 110017, "retMsg": "reduce-only rule"})
+
+
+def test_a_definite_reject_stays_definite_when_the_order_body_carries_a_code_digit_run() -> None:
+    """The classifier is handed the exception, not just ``retMsg``.
+
+    ``str(exc)`` for a pybit ``InvalidRequestError`` ends with
+    ``Request → POST /v5/order/create: {...}`` — the whole order body. Scanning
+    it for a bare ``170146`` read an "insufficient balance" refusal on a stop
+    price of ``100025.5`` as "not now", so a definite reject came back as
+    ``BybitSubmissionUncertain`` and left the command to wedge.
+    """
+
+    from pybit.exceptions import InvalidRequestError
+
+    from liquidity_migration.marketdata.bybit_errors import is_transient_venue_fault
+
+    def _rejected(message: str, code: int, body: str) -> InvalidRequestError:
+        return InvalidRequestError(
+            request=f"POST /v5/order/create: {body}",
+            message=message,
+            status_code=code,
+            time="2026-08-08T12:00:00Z",
+            resp_headers=None,
+        )
+
+    # Every digit run below is a transient code appearing inside the body.
+    assert not is_transient_venue_fault(
+        _rejected("Insufficient balance", 110007, '{"symbol":"XUSDT","stopLoss":"100025.5"}')
+    )
+    assert not is_transient_venue_fault(
+        _rejected("Reduce-only rule not satisfied", 110017, '{"orderLinkId":"lm-170146-3"}')
+    )
+    assert not is_transient_venue_fault(
+        _rejected("Insufficient balance", 110007, '{"symbol":"PEPEUSDT","price":"0.0100025"}')
+    )
+    # A genuinely transient one still classifies, read off the venue's own code.
+    assert is_transient_venue_fault(_rejected("System busy", 10016, '{"symbol":"XUSDT"}'))

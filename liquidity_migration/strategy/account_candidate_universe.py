@@ -595,6 +595,12 @@ def write_candidate_universe(path: str | Path, payload: Mapping[str, Any]) -> Pa
     return output.resolve(strict=True)
 
 
+#: Parsed artifacts by (content hash, realm). The artifact is frozen, so its own
+#: hash is an exact key; the loader's ownership and permission checks still run
+#: against the live file on every call.
+_CANDIDATE_UNIVERSE_MEMO: dict[tuple[str, str, str], "FrozenCandidateUniverse"] = {}
+
+
 def _realm_endpoint_host(realm: VenueRealm) -> str:
     """Host portion of the REST endpoint the artifact must have been read from."""
 
@@ -627,6 +633,16 @@ def load_candidate_universe(
         raise ValueError("candidate-universe artifact must not be group/world accessible")
     if snapshot.uid != os.geteuid():
         raise ValueError("candidate-universe artifact must be owned by the verifier")
+    # The artifact is frozen and every producer re-derived the whole thing each
+    # cycle. Its own content hash keys the result exactly: the ownership and
+    # permission checks above still run on every call against the live stat, so
+    # the memo accelerates the parse, not the verification.
+    # The path is part of what this returns, so two artifacts with identical
+    # content at different paths are different answers.
+    memo_key = (str(snapshot.path), snapshot.sha256, venue_realm(realm).value)
+    memoized = _CANDIDATE_UNIVERSE_MEMO.get(memo_key)
+    if memoized is not None:
+        return memoized
     data = snapshot.data
     try:
         payload = json.loads(data)
@@ -793,7 +809,7 @@ def load_candidate_universe(
     )
     if included != list(symbols):
         raise ValueError("candidate-universe decisions do not reproduce symbols")
-    return FrozenCandidateUniverse(
+    universe = FrozenCandidateUniverse(
         path=snapshot.path,
         symbols=symbols,
         artifact_sha256=artifact_hash,
@@ -804,6 +820,11 @@ def load_candidate_universe(
         },
         profile_symbols=profile_symbols,
     )
+    # Bounded: one live artifact per realm, plus a little slack across a swap.
+    if len(_CANDIDATE_UNIVERSE_MEMO) >= 8:
+        _CANDIDATE_UNIVERSE_MEMO.clear()
+    _CANDIDATE_UNIVERSE_MEMO[memo_key] = universe
+    return universe
 
 
 def enforce_frozen_candidate_population(

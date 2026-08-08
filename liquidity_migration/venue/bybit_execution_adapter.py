@@ -118,6 +118,14 @@ class BybitDemoExecutionAdapter:
         # With a manager, exposure-increasing entries rest at the touch first;
         # every gate inside plan_entry_quote falls back to the market order.
         self.entry_quotes = entry_quotes
+        # Leverage this process has already set at the venue, per symbol.
+        # Bybit keeps a symbol's leverage until someone changes it, so resending
+        # the value it already holds bought nothing and cost a full round trip
+        # ahead of every entry — about 175 ms on the Frankfurt route, which was
+        # most of the delay between deciding to trade and the order leaving.
+        # Starts empty each process, so the first entry per symbol still sets
+        # it, and any rejected create drops the symbol back to unknown.
+        self._venue_leverage: dict[str, float] = {}
 
     @staticmethod
     def _entry_protection_metadata(command: OrderCommand) -> dict[str, Any]:
@@ -204,13 +212,22 @@ class BybitDemoExecutionAdapter:
         # Build the deterministic request fields before the durable attempt.
         # The command is immutable, so ``submit_prepared``'s rebuild matches.
         self._order_params(command)
-        if not command.reduce_only:
+        if not command.reduce_only and self._venue_leverage.get(command.symbol) != float(
+            command.leverage
+        ):
             try:
                 self.client.set_leverage(
                     symbol=command.symbol,
                     buy_leverage=command.leverage,
                     sell_leverage=command.leverage,
                 )
+                self._venue_leverage[command.symbol] = float(command.leverage)
+            # Only the DEFINITE reject becomes an unaccepted ack. An
+            # uncertain leverage response must keep propagating: the request
+            # stays pending and the next pass retries the call, which is what
+            # test_uncertain_leverage_response_retries_before_single_order_attempt
+            # pins. Catching it here would turn a retryable venue hiccup into a
+            # lost entry.
             except BybitRequestRejected as exc:
                 local_ack_ts_ns = self.clock.wall_time_ns()
                 return (
@@ -310,6 +327,10 @@ class BybitDemoExecutionAdapter:
                 params = self._order_params(command)
                 result = self.client.place_order(**params)
         except BybitRequestRejected as exc:
+            # A refused create is the one signal that what this process believes
+            # about the symbol may be wrong — margin refusals read as a create
+            # reject. Forget the leverage so the next attempt sets it again.
+            self._venue_leverage.pop(command.symbol, None)
             local_ack_ts_ns = self.clock.wall_time_ns()
             return (
                 ExecutionObservation(

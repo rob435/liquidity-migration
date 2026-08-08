@@ -730,14 +730,29 @@ def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, f
     missing = sorted(required - set(reservations.columns))
     if missing:
         raise RuntimeError(f"carry reservations lack expected columns: {missing}")
+    # Prefer the notional the strategy actually asked for. Rebuilding it from
+    # the quantized quantity leaves the diff below comparing an unrounded desire
+    # against a venue-rounded one, so whenever a single quantity step is worth
+    # more than the resize threshold the gap can never close: the resize is
+    # re-proposed every cycle and the kernel emits no order for it. Targets
+    # written before the raw notional was stamped carry 0.0 and fall back to the
+    # reconstruction.
+    reconstructed = pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(
+        0.0
+    ) * pl.col("target_reference_price").cast(pl.Float64, strict=False).fill_null(0.0)
+    raw_notional = (
+        pl.col("raw_target_notional_usdt").cast(pl.Float64, strict=False).fill_null(0.0)
+        if "raw_target_notional_usdt" in reservations.columns
+        else pl.lit(0.0)
+    )
     frame = reservations.select(
         pl.col("symbol").cast(pl.String),
         pl.col("strategy_id").cast(pl.String),
         pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0).alias("signed_qty"),
-        (
-            pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0)
-            * pl.col("target_reference_price").cast(pl.Float64, strict=False).fill_null(0.0)
-        ).alias("standing_notional_usdt"),
+        pl.when(raw_notional != 0.0)
+        .then(raw_notional)
+        .otherwise(reconstructed)
+        .alias("standing_notional_usdt"),
     )
     sums = frame.group_by("symbol", "strategy_id").agg(
         pl.col("standing_notional_usdt").sum(), pl.col("signed_qty").sum()
@@ -1380,6 +1395,7 @@ def run_carry_demo_cycle(
             sleeve=SleeveAdapterKind.CARRY,
             strategy_ids=(CARRY_STRATEGY_ID, *CARRY_LEGACY_STRATEGY_IDS),
             journal_cursor=state.journal_cursor,
+            now_ms=cycle_now_ms,
         )
         reservations = target_reservation_rows(planning.canonical_trades)
         standing_rows = _carry_standing_rows(reservations)
@@ -1420,27 +1436,37 @@ def run_carry_demo_cycle(
                 ticker_cache=ticker_cache,
                 state_cache_stale_seconds=state_cache_stale_seconds,
             )
-            window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
-            view = _carry_venue_view(
-                klines,
-                funding,
-                window_start_ms=window_start_ms,
-                max_bar_ts_ms=decision_ts_ms,
-            )
-            if not view.is_empty():
-                # A cold-started cache begins mid-day, which the engine's
-                # daily-grid phase guard rightly refuses, so trim to the first
-                # 00:00 UTC key. A no-op once the cache spans the window.
-                first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
-                if first_ts % DAY_MS != 0:
-                    aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
-                    view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
-            universe_eligible = int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
+            # Asked before the panel is built, not after: the decision is frozen
+            # for the whole day, so on all but the first cycle the rebuild below
+            # — two sorts and an as-of join over the whole window — produced a
+            # ``universe_eligible`` that the frozen tuple immediately replaced,
+            # and nothing else read the panel. ``_build_carry_demo_market_data``
+            # stays above, so the hourly funding sweep and the kline caches are
+            # still maintained every cycle.
             frozen = state.frozen_decision(decision_ts_ms)
             if frozen is not None:
                 decision, trail_by_symbol, universe_eligible = frozen
                 decision_frozen = True
             else:
+                window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
+                view = _carry_venue_view(
+                    klines,
+                    funding,
+                    window_start_ms=window_start_ms,
+                    max_bar_ts_ms=decision_ts_ms,
+                )
+                if not view.is_empty():
+                    # A cold-started cache begins mid-day, which the engine's
+                    # daily-grid phase guard rightly refuses, so trim to the
+                    # first 00:00 UTC key. A no-op once the cache spans the
+                    # window.
+                    first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
+                    if first_ts % DAY_MS != 0:
+                        aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
+                        view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
+                universe_eligible = (
+                    int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
+                )
                 _validate_carry_view_health(
                     view,
                     decision_ts_ms=decision_ts_ms,

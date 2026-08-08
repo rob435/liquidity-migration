@@ -2437,6 +2437,7 @@ def run_continuous_demo_cycle(
             sleeve=SleeveAdapterKind.CONTINUOUS,
             strategy_ids=managed_strategy_ids,
             journal_cursor=journal_cursor,
+            now_ms=cycle_now_ms,
         )
         target_publisher = planning.publisher
         unresolved_targets = planning.unresolved_targets

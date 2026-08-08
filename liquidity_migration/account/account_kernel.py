@@ -150,7 +150,7 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
         raise AccountTransitionError("fill requires execution_id")
     if execution_id in state.executions:
         raise AccountTransitionError(f"duplicate execution_id {execution_id}")
-    order = state.orders[command_id]
+    order = state.order_for_write(command_id)
     if order.status not in {"acknowledged", "partially_filled"}:
         raise AccountTransitionError(f"fill for command {command_id} before accepted acknowledgement")
     signed_qty = _finite(payload.get("signed_qty"), label="fill signed_qty")
@@ -232,11 +232,24 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         if replaced is not None:
             # A rewritten proposal key may carry a different batch; drop the old
             # membership so the index stays a mirror of ``target_proposals``.
-            state.target_proposal_keys_by_batch.get(
-                str(replaced.get("batch_id") or ""), set()
-            ).discard(proposal_key)
+            # Rebound, not discarded in place: the copy shares this set. An
+            # emptied batch drops out entirely, because a brute-force scan of
+            # ``target_proposals`` never yields an empty entry.
+            replaced_batch_id = str(replaced.get("batch_id") or "")
+            remaining = set(state.target_proposal_keys_by_batch.get(replaced_batch_id, ())) - {
+                proposal_key
+            }
+            if remaining:
+                state.target_proposal_keys_by_batch[replaced_batch_id] = remaining
+            else:
+                state.target_proposal_keys_by_batch.pop(replaced_batch_id, None)
         state.target_proposals[proposal_key] = dict(payload)
-        state.target_proposal_keys_by_batch.setdefault(str(payload.get("batch_id") or ""), set()).add(proposal_key)
+        # Rebind, never ``.add()``: the transaction copy shares this set.
+        proposal_batch_id = str(payload.get("batch_id") or "")
+        state.target_proposal_keys_by_batch[proposal_batch_id] = {
+            *state.target_proposal_keys_by_batch.get(proposal_batch_id, ()),
+            proposal_key,
+        }
     elif event_type is AccountEventType.RISK_DECISION:
         batch_id = str(payload.get("batch_id") or event.correlation_id)
         if not batch_id:
@@ -342,18 +355,21 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             raise AccountTransitionError(
                 "order command created_ts_ns differs from its event boundary"
             )
-        state.orders[command_id] = OrderState(
-            command_id=command_id,
-            batch_id=str(payload.get("batch_id") or event.correlation_id),
-            symbol=event.symbol,
-            signed_qty=signed_qty,
-            reduce_only=reduce_only,
-            created_ts_ns=created_ts_ns,
-            command_sequence=event.sequence,
-            entry_stop_price=entry_stop_price,
-            entry_stop_fraction=entry_stop_fraction,
-            entry_stop_source=entry_stop_source,
-            entry_stop_trigger_by=entry_stop_trigger_by,
+        state.put_order(
+            command_id,
+            OrderState(
+                command_id=command_id,
+                batch_id=str(payload.get("batch_id") or event.correlation_id),
+                symbol=event.symbol,
+                signed_qty=signed_qty,
+                reduce_only=reduce_only,
+                created_ts_ns=created_ts_ns,
+                command_sequence=event.sequence,
+                entry_stop_price=entry_stop_price,
+                entry_stop_fraction=entry_stop_fraction,
+                entry_stop_source=entry_stop_source,
+                entry_stop_trigger_by=entry_stop_trigger_by,
+            ),
         )
         state.working_order_ids.add(command_id)
     elif event_type is AccountEventType.SUBMISSION_ATTEMPT:
@@ -362,7 +378,7 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             raise AccountTransitionError(
                 f"submission attempt references unknown command {command_id!r}"
             )
-        order = state.orders[command_id]
+        order = state.order_for_write(command_id)
         if order.status != "commanded":
             raise AccountTransitionError(
                 f"submission attempt for non-commanded order {command_id}"
@@ -388,7 +404,7 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         command_id = str(payload.get("command_id") or "")
         if command_id not in state.orders:
             raise AccountTransitionError(f"ack references unknown command {command_id!r}")
-        order = state.orders[command_id]
+        order = state.order_for_write(command_id)
         if order.status != "commanded":
             raise AccountTransitionError(f"second/stale acknowledgement for command {command_id}")
         accepted = bool(payload.get("accepted"))
@@ -401,7 +417,11 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             # The single place an order gains a venue identity: an ack is
             # refused unless the order is still ``commanded``, so this can never
             # orphan an earlier binding.
-            state.command_ids_by_venue_order_id.setdefault(order.venue_order_id, set()).add(command_id)
+            # Rebound, not mutated: see the proposal index above.
+            state.command_ids_by_venue_order_id[order.venue_order_id] = {
+                *state.command_ids_by_venue_order_id.get(order.venue_order_id, ()),
+                command_id,
+            }
         order.rejection_key = str(payload.get("rejection_key") or "")
         ack_metadata = payload.get("metadata") or {}
         try:
@@ -415,7 +435,7 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         command_id = str(payload.get("command_id") or "")
         if command_id not in state.orders:
             raise AccountTransitionError(f"ack observation references unknown command {command_id!r}")
-        order = state.orders[command_id]
+        order = state.order_for_write(command_id)
         accepted = bool(payload.get("accepted"))
         if order.ack_accepted is None or order.ack_accepted is not accepted:
             raise AccountTransitionError(f"ack observation contradicts command {command_id}")
@@ -446,7 +466,7 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
         command_id = str(payload.get("command_id") or "")
         if command_id not in state.orders:
             raise AccountTransitionError(f"order status references unknown command {command_id!r}")
-        order = state.orders[command_id]
+        order = state.order_for_write(command_id)
         status = str(payload.get("status") or "").lower()
         allowed = {"cancelled", "rejected", "filled", "partially_filled_cancelled"}
         if status not in allowed:
@@ -1378,10 +1398,18 @@ class AccountJournal:
                     )
                 prospective_state = committed_state
                 builder_state = prospective_state
+                specs = list(builder(builder_state))
             else:
-                prospective_state = transaction_state_copy(committed_state)
-                builder_state = prospective_state if trusted_readonly_builder else copy.deepcopy(committed_state)
-            specs = list(builder(builder_state))
+                # Ask the builder before paying for the copy: most hot-path
+                # transactions decide there is nothing to write, and the copy
+                # grows with the whole account history under the journal lock.
+                builder_state = (
+                    committed_state if trusted_readonly_builder else copy.deepcopy(committed_state)
+                )
+                specs = list(builder(builder_state))
+                prospective_state = (
+                    transaction_state_copy(committed_state) if specs else committed_state
+                )
             normalized = [_normalized_spec(spec) for spec in specs]
             pending_by_id: dict[str, AccountEvent] = {}
             appended: list[AccountEvent] = []
@@ -2439,7 +2467,25 @@ class AccountExecutionKernel:
             rejections.append(_risk_rejection_key(batch_id, "account_gross_limit"))
         if not risk_reducing_only and component_margin > risk_policy.max_initial_margin_usdt:
             rejections.append(_risk_rejection_key(batch_id, "initial_margin_limit"))
-        if not risk_reducing_only and component_margin > available_margin:
+        # ``available_margin`` is what is left AFTER the open book's margin is
+        # deducted, so charging the whole projected book against it counts the
+        # standing book twice and caps the account near half its equity. Only
+        # the increase is new money; ``max_initial_margin_usdt`` above is the
+        # account-wide bound. Same prices both sides, so this isolates the
+        # quantity change rather than a price move.
+        prior_book_margin = 0.0
+        for prior_payload in state.component_targets.values():
+            prior_symbol = str(prior_payload.get("symbol") or "").upper()
+            if prior_symbol not in prices:
+                continue
+            prior_qty = _finite(prior_payload.get("signed_qty"), label="prior signed_qty")
+            if abs(prior_qty) <= risk_policy.quantity_tolerance:
+                continue
+            prior_leverage = _finite(prior_payload.get("leverage"), label="prior leverage")
+            if prior_leverage > 0.0:
+                prior_book_margin += abs(prior_qty) * prices[prior_symbol] / prior_leverage
+        additional_margin = component_margin - prior_book_margin
+        if not risk_reducing_only and additional_margin > available_margin:
             rejections.append(_risk_rejection_key(batch_id, "available_margin_limit"))
         # ``component_gross`` above is account-wide despite its name. When the
         # profile declares a partition each sleeve is additionally held to its
@@ -3102,6 +3148,13 @@ class AccountExecutionKernel:
                 raise AccountTransitionError(f"unknown close command {command_id!r} for {symbol}")
             if not order.reduce_only:
                 return []
+            # Cheapest decisive check first: both the private stream and REST
+            # recovery re-drive this for the same terminal fact, and the walks
+            # below cover every order and execution the account has held.
+            close_key = f"reduction:{order.batch_id}:{symbol}"
+            pnl_key = f"fills:{order.batch_id}:{symbol}"
+            if pnl_key in state.pnl:
+                return []
             position = state.positions.get(symbol, PositionState())
             tolerance = quantity_tolerance(order.signed_qty)
             batch_orders = {
@@ -3111,16 +3164,12 @@ class AccountExecutionKernel:
             }
             if any(command in state.working_order_ids for command in batch_orders):
                 return []
-            batch_execution_ids = {
-                execution_id
-                for execution_id, execution in state.executions.items()
-                if str(execution.get("command_id") or "") in batch_orders
-            }
-            if not batch_execution_ids:
-                return []
-            close_key = f"reduction:{order.batch_id}:{symbol}"
-            pnl_key = f"fills:{order.batch_id}:{symbol}"
-            if pnl_key in state.pnl:
+            # Only whether any fill belongs to the batch matters here, so stop
+            # at the first one instead of materialising the whole set.
+            if not any(
+                str(execution.get("command_id") or "") in batch_orders
+                for execution in state.executions.values()
+            ):
                 return []
 
             reconstructed_flat = (

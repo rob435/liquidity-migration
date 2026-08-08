@@ -1224,6 +1224,45 @@ class TestLegacyFilingIdDrain:
         with pytest.raises(RuntimeError, match="more than one filing id"):
             module._carry_standing_rows(frame)
 
+    def test_the_standing_notional_is_the_desire_not_the_rounded_quantity(self) -> None:
+        """A resize diffs desire against desire.
+
+        Rebuilding the standing size from the venue-rounded quantity left a gap
+        one quantity step wide that no resize could ever close, so the producer
+        re-proposed it every cycle and the kernel emitted nothing.
+        """
+
+        frame = pl.DataFrame(
+            [
+                {
+                    "symbol": "STEPUSDT",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "signed_qty": 3.0,  # rounded down from 3.7 by a step of 1
+                    "target_reference_price": 100.0,
+                    "raw_target_notional_usdt": 370.0,
+                }
+            ]
+        )
+        standing, qty, filing = module._carry_standing_rows(frame)["STEPUSDT"]
+        assert standing == 370.0
+        assert qty == 3.0
+        assert filing == CARRY_STRATEGY_ID
+
+    def test_a_target_without_a_raw_notional_still_reconstructs(self) -> None:
+        frame = pl.DataFrame(
+            [
+                {
+                    "symbol": "OLDUSDT",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "signed_qty": 3.0,
+                    "target_reference_price": 100.0,
+                    "raw_target_notional_usdt": 0.0,
+                }
+            ]
+        )
+        standing, _qty, _filing = module._carry_standing_rows(frame)["OLDUSDT"]
+        assert standing == 300.0
+
 
 class TestCarryStrategyProfileDial:
     def test_v3_and_v4_resolve_to_their_registered_files(self) -> None:

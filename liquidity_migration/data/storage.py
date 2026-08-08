@@ -230,18 +230,17 @@ def exclusive_file_lock(
         while True:
             try:
                 fd, directory_key = _open_registered_lock_fd(lock_path)
-                while True:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        time.sleep(poll)
-                        continue
-                    break
+                # Block in the kernel rather than spinning on a nonblocking try
+                # plus a sleep: the poll interval, not the holder, decided how
+                # long a waiter sat, so a lock released immediately still cost
+                # the next waiter most of a poll. The kernel wakes the waiter
+                # when the holder actually releases.
+                fcntl.flock(fd, fcntl.LOCK_EX)
                 _recover_internal_lock_alias(lock_path, fd, directory_key=directory_key)
                 _validate_lock_fd_path(lock_path, fd, directory_key=directory_key)
                 if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
                     os.fchmod(fd, 0o600)
-                _validate_lock_fd_path(lock_path, fd, directory_key=directory_key)
+                    _validate_lock_fd_path(lock_path, fd, directory_key=directory_key)
             except _LockPathChanged:
                 _close_registered_lock_fd(fd, acquisition_pid=acquisition_pid)
                 fd = -1

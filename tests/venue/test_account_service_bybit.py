@@ -1134,3 +1134,79 @@ def test_owner_constructors_refuse_an_unrealmed_non_demo_client(tmp_path: Path) 
         )
     with pytest.raises(ValueError, match="contradicts its demo realm"):
         BybitDemoExecutionAdapter(_Unrealmed())
+
+
+class TestWalletStreamCache:
+    """The balance is pushed over a socket that is already open, so the order
+    path reads it from memory instead of paying a REST round trip."""
+
+    def _frame(self, *, equity: str = "268.78", available: str = "200.00") -> dict:
+        return {
+            "topic": "wallet",
+            "data": [
+                {
+                    "accountType": "UNIFIED",
+                    "totalEquity": equity,
+                    "totalAvailableBalance": available,
+                }
+            ],
+        }
+
+    def test_a_pushed_balance_serves_the_snapshot_without_touching_rest(self) -> None:
+        from liquidity_migration.venue.account_service_bybit import (
+            BybitAccountSnapshotProvider,
+            BybitWalletStreamCache,
+        )
+
+        class RefusingClient:
+            realm = "demo"
+
+            def get_wallet_balance(self, **_kwargs):
+                raise AssertionError("REST must not be called when a fresh push exists")
+
+        cache = BybitWalletStreamCache()
+        cache.on_message(self._frame())
+        provider = BybitAccountSnapshotProvider(RefusingClient(), wallet_cache=cache)
+        snapshot = provider.current(batch_id="b1")
+        assert snapshot.equity_usdt == 268.78
+        assert snapshot.available_margin_usdt == 200.0
+        assert cache.updates == 1
+
+    def test_an_empty_or_stale_cache_falls_back_to_rest(self) -> None:
+        from liquidity_migration.venue.account_service_bybit import (
+            BybitAccountSnapshotProvider,
+            BybitWalletStreamCache,
+        )
+
+        class RestClient:
+            realm = "demo"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get_wallet_balance(self, **_kwargs):
+                self.calls += 1
+                return {"list": [{"totalEquity": "100.0", "totalAvailableBalance": "90.0"}]}
+
+        # Empty cache: a dead wallet topic costs speed, never correctness.
+        client = RestClient()
+        cache = BybitWalletStreamCache()
+        provider = BybitAccountSnapshotProvider(client, wallet_cache=cache)
+        assert provider.current(batch_id="b1").equity_usdt == 100.0
+        assert client.calls == 1
+
+        # A push older than the freshness bound is not allowed to satisfy a
+        # request that a REST read would have refused as stale.
+        cache.on_message(self._frame())
+        provider.wallet_max_age_ns = 0
+        assert provider.current(batch_id="b2").equity_usdt == 100.0
+        assert client.calls == 2
+
+    def test_a_malformed_frame_never_poisons_the_cache(self) -> None:
+        from liquidity_migration.venue.account_service_bybit import BybitWalletStreamCache
+
+        cache = BybitWalletStreamCache()
+        for junk in ({}, {"data": None}, {"data": ["nope"]}, {"data": [{"accountType": "SPOT"}]}):
+            cache.on_message(junk)
+        assert cache.updates == 0
+        assert cache.current(max_age_ns=10_000_000_000) is None

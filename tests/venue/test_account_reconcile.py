@@ -1000,7 +1000,9 @@ def test_rest_reconcile_recovers_native_stop_execution_missed_by_ws(tmp_path: Pa
             return {}
 
         def get_trade_history(self, **params: object):
-            assert params == {"symbol": "BUSDT", "limit": 50}
+            # The reconciler stops paging once a page predates the protection
+            # activation, since those rows are filtered out anyway.
+            assert params == {"symbol": "BUSDT", "limit": 50, "stop_before_ns": 0}
             return [{
                 "symbol": "BUSDT",
                 "orderLinkId": "",

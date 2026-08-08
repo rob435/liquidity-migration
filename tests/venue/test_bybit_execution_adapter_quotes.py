@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from liquidity_migration.account.account_contracts import (
@@ -48,6 +48,7 @@ class FakeClient:
     def __init__(self, *, reject_limit_create: bool = False) -> None:
         self.reject_limit_create = reject_limit_create
         self.placed: list[dict[str, Any]] = []
+        self.leverage_calls: list[dict[str, Any]] = []
 
     def place_order(self, **params: Any) -> dict[str, Any]:
         if self.reject_limit_create and params.get("orderType") == "Limit":
@@ -56,6 +57,7 @@ class FakeClient:
         return {"orderId": f"venue-{len(self.placed)}", "_response_time_ms": 1_700_000_000_000}
 
     def set_leverage(self, **params: Any) -> dict[str, Any]:
+        self.leverage_calls.append(dict(params))
         return {}
 
 
@@ -283,3 +285,44 @@ def test_blind_book_places_the_full_commanded_qty() -> None:
     params = client.placed[0]
     assert params["orderType"] == "Limit"
     assert float(params["qty"]) == 100_000.0
+
+
+def test_leverage_is_set_once_per_symbol_not_once_per_entry() -> None:
+    client = FakeClient()
+    adapter, _ = build_adapter(client, with_quotes=False)
+
+    # The venue keeps a symbol's leverage until someone changes it, so
+    # resending the same value cost a full round trip ahead of every entry.
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # A different leverage is a real change and goes to the venue.
+    changed = replace(entry_command(), leverage=5.0)
+    tuple(adapter.prepare_submission(changed, market_input()))
+    assert len(client.leverage_calls) == 2
+    assert float(client.leverage_calls[-1]["buy_leverage"]) == 5.0
+
+    # Exits never negotiate leverage at all.
+    tuple(adapter.prepare_submission(exit_command(), market_input()))
+    assert len(client.leverage_calls) == 2
+
+
+def test_a_refused_create_forgets_the_leverage_it_believed() -> None:
+    client = FakeClient()
+    adapter, _ = build_adapter(client, with_quotes=False)
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # A refused create is the one signal that this belief may be wrong: a
+    # margin refusal arrives as a create reject.
+    def refuse(**_params: Any) -> dict[str, Any]:
+        raise BybitRequestRejected("insufficient margin")
+
+    client.place_order = refuse  # type: ignore[method-assign]
+    tuple(adapter.submit_prepared(entry_command(), market_input()))
+
+    client.place_order = FakeClient.place_order.__get__(client)  # type: ignore[method-assign]
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 2

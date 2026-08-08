@@ -9,6 +9,7 @@ flag cannot leave any of them pointing at the other account.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import time
@@ -52,6 +53,12 @@ from liquidity_migration.account.execution_environment import (
     account_id_for_environment,
     execution_environment,
 )
+from liquidity_migration.account.account_intent_client import AccountTargetPublisher
+from liquidity_migration.ops.account_flatten import (
+    build_flatten_plan,
+    flatten_intents,
+    publish_exit_first_target_requests,
+)
 from liquidity_migration.ops.account_notifications import AccountNotificationEngine, deliver_notification_batch
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
 from liquidity_migration.strategy.continuous_cycle_status import ContinuousCycleStatusReader
@@ -71,6 +78,7 @@ from liquidity_migration.account.account_service import (
 )
 from liquidity_migration.venue.account_service_bybit import (
     BybitAccountSnapshotProvider,
+    BybitWalletStreamCache,
     CapturedBybitMarketProvider,
     VerifiedBybitDemoRulesProvider,
     require_bybit_order_ownership,
@@ -396,6 +404,136 @@ def append_unique_notification_health_error(
     if any(existing.partition(": age_ns=")[0] == identity for existing in errors):
         return
     errors.append(rendered)
+
+
+@dataclass(frozen=True, slots=True)
+class LossCeilingFlatten:
+    """What one loss-ceiling flatten attempt planned and managed to publish."""
+
+    planned_target_keys: frozenset[str]
+    published_request_ids: tuple[str, ...]
+    unpublished_target_keys: tuple[str, ...]
+
+
+def publish_loss_ceiling_flatten(
+    *,
+    kernel: Any,
+    route: Any,
+    reason: str,
+    now_ns: int,
+    already_published: frozenset[str] = frozenset(),
+) -> LossCeilingFlatten:
+    """Publish a zero target for every component still holding exposure.
+
+    Zero targets are risk-reducing, so a BLOCKED owner still closes, and a
+    target is an absolute quantity rather than a delta, so re-publishing one is
+    idempotent in effect.
+
+    Safe to call every pass while tripped: when the open set is exactly
+    ``already_published`` nothing is published, so a book still converging does
+    not queue a redundant flatten per pass. Pass an empty set to force a retry.
+
+    ``unpublished_target_keys`` non-empty means the book is still partly open:
+    each exit is published independently, so one refusal leaves the others
+    standing and the caller must come back.
+    """
+
+    # The owner already holds committed state in memory; re-reading the journal
+    # here would cost a full walk at the worst possible moment.
+    state = kernel._state_ref()
+    plan = build_flatten_plan(
+        state,
+        route_id=route.route_id,
+        environment=route.environment,
+        account_id=route.account_id,
+        journal_sequence=int(state.events_applied),
+    )
+    if plan.already_flat or not plan.components:
+        return LossCeilingFlatten(frozenset(), (), ())
+    intents = flatten_intents(plan, operator="account-loss-guard", reason=reason)
+    planned_target_keys = frozenset(str(item.intent.target_key) for item in intents)
+    if planned_target_keys == already_published:
+        # Already asked for exactly this set; the book is still converging.
+        return LossCeilingFlatten(planned_target_keys, (), ())
+    publication = publish_exit_first_target_requests(
+        AccountTargetPublisher(route),
+        batch_prefix="account-loss-ceiling",
+        exit_intents=intents,
+        entry_intents=(),
+        created_ts_ns=int(now_ns),
+    )
+    for item in publication.errors:
+        _logger.error(
+            "loss-ceiling flatten could not publish %s: %s: %s",
+            item.target_key,
+            item.error_type,
+            item.message,
+        )
+    return LossCeilingFlatten(
+        planned_target_keys=planned_target_keys,
+        published_request_ids=tuple(publication.exit_request_ids),
+        unpublished_target_keys=tuple(item.target_key for item in publication.errors),
+    )
+
+
+def _read_loss_guard_state(path: Path) -> Mapping[str, Any] | None:
+    """The last persisted day anchor and trip, or None on a first start.
+
+    A missing file is a first start. A file that is present but unreadable is
+    unknown safety-critical state, and re-anchoring on it would silently do what
+    ``AccountLossGuard.reset`` reserves for an explicit operator action: forget
+    how much of today's budget is already spent, and forget a trip. Refuse
+    instead, and name the file.
+    """
+
+    try:
+        payload = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"account loss guard state at {path} is present but unreadable ({exc}). "
+            "The day's loss budget and any trip are in that file; starting without "
+            "it would re-anchor to an already-drawn-down equity. Repair it, or "
+            "delete it to re-anchor deliberately."
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(
+            f"account loss guard state at {path} is not a JSON object; repair or "
+            "delete it to re-anchor deliberately."
+        )
+    return payload
+
+
+def _persist_loss_guard_state(
+    guard: AccountLossGuard,
+    *,
+    path: Path,
+    last_written: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any] | None, str]:
+    """Write the anchor when it changes; return what is on disk, and any fault.
+
+    Never kills the owner over bookkeeping — the in-memory anchor still holds
+    for this process — but the fault is returned rather than only logged: an
+    anchor that exists only in memory is lost on the next restart, which is the
+    same forgotten budget the read path refuses to start on.
+    """
+
+    current = guard.snapshot()
+    if current == last_written:
+        return last_written, ""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_bytes(json.dumps(current, sort_keys=True).encode())
+        temporary.replace(path)
+    except OSError as exc:
+        _logger.error("account loss guard state could not be written: %s", exc)
+        return last_written, (
+            f"account loss guard anchor could not be written to {path} ({exc}); "
+            "it holds in memory only and a restart would forget today's budget"
+        )
+    return current, ""
 
 
 def _append_health_error(existing: str, added: str, *, limit: int = 1000) -> str:
@@ -860,11 +998,18 @@ def main(argv: list[str] | None = None) -> int:
         kernel=kernel,
         recorder=recorder,
     )
+    # The balance arrives over the private socket that is already open, so the
+    # risk snapshot below reads it from memory instead of paying a REST round
+    # trip between the decision to trade and the order leaving. An empty or aged
+    # cache falls back to REST, so a dead wallet topic costs speed and nothing
+    # else.
+    wallet_cache = BybitWalletStreamCache()
     execution_consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
         private_stream=private_stream,
         native_protection_manager=native_protection,
         fill_observer=markout_observer.notify,
+        wallet_cache=wallet_cache,
     )
     execution_consumer.start()
     private_stream_supervisor = PrivateExecutionStreamSupervisor(
@@ -939,7 +1084,13 @@ def main(argv: list[str] | None = None) -> int:
             native_protection,
         )
     )
-    snapshot_provider = BybitAccountSnapshotProvider(private_client)
+    snapshot_provider = BybitAccountSnapshotProvider(
+        private_client,
+        wallet_cache=wallet_cache,
+        # The provider's default already matches the service's own
+        # ``max_snapshot_age_ns`` (5s), so a pushed value can never satisfy a
+        # request that a REST read would have refused as stale.
+    )
 
     def _recorder_touch(symbol: str) -> tuple[float, float, float, float] | None:
         """The owner's own reconstructed book: touch with displayed sizes."""
@@ -1053,8 +1204,24 @@ def main(argv: list[str] | None = None) -> int:
             policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
         )
     )
+    loss_guard_state_path = Path(route.account_path) / "account_loss_guard.json"
+    # Fail closed on NEW RISK, not on closing. This process is the only thing
+    # that submits exits, runs convergence and maintains the native stops, and
+    # its unit is Restart=always — so exiting here would crash-loop the account
+    # with its positions behind the venue stop alone. Block instead: health goes
+    # BLOCKED every pass, which stops producers opening risk while exits and
+    # convergence keep running, and the operator sees the file named.
+    loss_guard_state_detail = ""
+    try:
+        loss_guard.restore(_read_loss_guard_state(loss_guard_state_path))
+    except RuntimeError as exc:
+        loss_guard_state_detail = str(exc)
+        _logger.error("%s", exc)
+    last_loss_guard_state: Mapping[str, Any] | None = loss_guard.snapshot()
     envelope_rebase_detail = ""
-    loss_guard_flat_published = False
+    # The component set the loss-ceiling flatten last asked to close. Not a
+    # latch: it only suppresses re-publishing an unchanged plan.
+    loss_ceiling_flattened_keys: frozenset[str] = frozenset()
     try:
         while True:
             now = time.monotonic()
@@ -1342,6 +1509,27 @@ def main(argv: list[str] | None = None) -> int:
                     equity_ts_ns=last_capital_snapshot.snapshot_ts_ns,
                     now_ns=time.time_ns(),
                 )
+                # The anchor and the trip outlive the process. The unit is
+                # Restart=always, and without this a restart re-anchored the
+                # day's budget to an already-drawn-down equity and forgot that
+                # the ceiling had been reached at all.
+                last_loss_guard_state, write_detail = _persist_loss_guard_state(
+                    loss_guard,
+                    path=loss_guard_state_path,
+                    last_written=last_loss_guard_state,
+                )
+                if write_detail:
+                    loss_guard_state_detail = write_detail
+                if loss_guard_state_detail:
+                    health_status = AccountOwnerHealthStatus.BLOCKED
+                    health_detail = _append_health_error(
+                        health_detail, loss_guard_state_detail
+                    )[:1000]
+                    health_signature = (
+                        health_status.value,
+                        health_detail,
+                        requested_symbols_ready,
+                    )
                 if loss_state != LOSS_GUARD_OK:
                     health_status = AccountOwnerHealthStatus.BLOCKED
                     health_detail = _append_health_error(health_detail, loss_detail)[:1000]
@@ -1350,14 +1538,44 @@ def main(argv: list[str] | None = None) -> int:
                         health_detail,
                         requested_symbols_ready,
                     )
-                if loss_state == LOSS_GUARD_TRIPPED and not loss_guard_flat_published:
-                    # Publish once: republishing would queue redundant flats.
-                    # run_safety_flat_once is the same all-flat path a native
-                    # breach uses, so a BLOCKED owner can still close.
-                    _logger.critical("account loss ceiling reached: %s", loss_detail)
+                if loss_state == LOSS_GUARD_TRIPPED:
+                    # Do NOT latch on "published once". A producer reads owner
+                    # health once at the top of its cycle and then spends
+                    # minutes on venue reads before publishing, so a cycle that
+                    # began before the trip can still add exposure after the
+                    # flatten — and a one-shot flatten would leave that new
+                    # position open for the rest of a day whose ceiling is
+                    # already breached. Instead re-plan every pass and publish
+                    # whenever the open set differs from what was last
+                    # published. Self-limiting: an accepted zero target drops
+                    # its key out of ``component_targets``, so a converged book
+                    # plans nothing and this goes quiet.
                     try:
-                        service.run_safety_flat_once(inbox)
-                        loss_guard_flat_published = True
+                        flatten = publish_loss_ceiling_flatten(
+                            kernel=kernel,
+                            route=route,
+                            reason=f"account loss ceiling: {loss_detail}"[:500],
+                            now_ns=time.time_ns(),
+                            already_published=loss_ceiling_flattened_keys,
+                        )
+                        if flatten.published_request_ids or flatten.unpublished_target_keys:
+                            _logger.critical(
+                                "account loss ceiling reached: %s; flatten published "
+                                "%d zero target request(s): %s",
+                                loss_detail,
+                                len(flatten.published_request_ids),
+                                ", ".join(flatten.published_request_ids) or "book already flat",
+                            )
+                            loss_ceiling_flattened_keys = flatten.planned_target_keys
+                        if flatten.unpublished_target_keys:
+                            # Retry next pass: re-plan will still see them open.
+                            loss_ceiling_flattened_keys = frozenset()
+                            health_detail = _append_health_error(
+                                health_detail,
+                                "loss-ceiling flatten left "
+                                f"{len(flatten.unpublished_target_keys)} component(s) open, "
+                                "retrying: " + ", ".join(flatten.unpublished_target_keys),
+                            )[:1000]
                     except Exception as exc:  # noqa: BLE001 - never kill the owner
                         _logger.exception("loss-ceiling safety flat failed")
                         health_detail = _append_health_error(
@@ -1486,7 +1704,13 @@ def main(argv: list[str] | None = None) -> int:
                     context="account",
                     logger=_logger,
                 )
-                last_notification_poll = now
+                # Stamped after the send, not from the loop-top ``now``: a page
+                # can block for the transport's own timeout, and stamping the
+                # earlier reading would make the next pass send again at once —
+                # a hot loop in which quotes never reprice and software stops
+                # never evaluate. Every other cadence here is stamped the same
+                # way, after its work.
+                last_notification_poll = time.monotonic()
             time.sleep(max(args.idle_seconds, 0.01))
     except KeyboardInterrupt:
         return 0

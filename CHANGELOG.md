@@ -16,6 +16,52 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — Two audit passes over the trading hot path, and the second
+  one found six faults in the first one's own work.** An eight-agent
+  adversarial review of the (then uncommitted) hot-path changes, with every
+  load-bearing claim re-checked against source. What changed that touches
+  money:
+  1. **The available-margin gate now charges only a batch's increase, not the
+     whole projected book.** The venue's free margin already nets out the open
+     book, so charging the whole book against it counted the standing book
+     twice and capped the account near half its equity — carry could not reach
+     its own declared share. **This is a risk change, not a refactor: it
+     roughly doubles reachable exposure**, from about equity/2 of initial
+     margin to the profile's declared `max_initial_margin_usdt`. The absolute
+     ceiling and the per-sleeve partition still bind. Recorded here as the
+     change point.
+  2. **The daily loss ceiling closes the book, and no longer latches after
+     closing part of it.** It used to call a path that could only claim a
+     native-stop breach, so it logged critical, latched, and closed nothing.
+     It now publishes the same zero targets the operator flatten publishes,
+     and re-plans every pass while tripped — a strategy reads owner health
+     once per cycle and then spends minutes fetching data, so a cycle
+     straddling the trip could otherwise re-open exposure that nothing ever
+     closed.
+  3. **A definite venue refusal is no longer read as "try again later".** The
+     transient classifier scanned the whole error text for a bare code digit
+     run, and the text ends with the entire order body — so an "insufficient
+     balance" refusal on a stop price of `100025.5` came back retryable.
+     Anchored on the venue's own `ErrCode:` rendering.
+  4. **A stale price could reach a decision.** The hourly-window hole check
+     tested the interior and the head but never the tail, and one bar stamped
+     past the window vouched for a window whose newest price was an hour old.
+     The staleness metric clamped negative lag to zero, reporting "fresh" at
+     exactly the moment the host clock was behind the venue. Both fixed.
+  5. **One unreadable protection fraction no longer stops stop-loss and
+     take-profit evaluation for every other position** — isolated per
+     component, the way the venue reconciler already isolates per symbol.
+  6. **The owner loop is no longer starved by its own recovery reads.**
+     Pending-order confirmation was two signed REST calls per order per pass;
+     one entry resting for its quote window paid 120 round trips. Gated and
+     capped, least-recently-polled first. A dropped fill is recovered up to
+     ten seconds later, with the every-pass position-truth check behind it.
+  Also: the entry cross retry is paced like its neighbouring cancel (it ran at
+  the owner's ~10 Hz tick, ~200 signed calls inside one 20 s window); a full
+  disk on the notification write no longer crash-loops the owner; and the
+  funded `.env.example` documented 17 real-money dials when only four exist —
+  copying it, as the file invites, hard-failed the arming preflight.
+
 - **2026-08-07 — Hand-trading the funded account no longer stops the fleet;
   the ACEUSDT wedge is fixed at the cause.** The owner bought ACEUSDT by hand
   at 00:26 UTC on the same account the bot trades, and closed the whole lot by

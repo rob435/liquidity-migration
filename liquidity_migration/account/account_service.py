@@ -815,6 +815,16 @@ class AccountIntentInbox:
                     if parsed_request.to_dict() != request.to_dict():
                         raise ValueError(f"immutable request_id {request.request_id!r} changed content")
                     if existing.parent.name == "failed":
+                        # Retire the old copy before re-queueing. Leaving it
+                        # meant the request had two durable files, and the next
+                        # ``require_durable_request`` raised — out of the
+                        # protection engine's evaluate loop, which stopped
+                        # stop-loss and take-profit evaluation for every
+                        # component until someone deleted the file by hand.
+                        # The arrival sidecar goes with it so the retry queues
+                        # at the back rather than reclaiming its old place.
+                        existing.unlink(missing_ok=True)
+                        self._arrival_path(filename).unlink(missing_ok=True)
                         continue
                 else:
                     parsed_request = self._request_from_payload(json.loads(existing.read_bytes()))
@@ -970,6 +980,12 @@ class AccountIntentInbox:
         when FIFO processing resumes.
         """
 
+        if not authorized_request_hashes:
+            # Nothing can match, so the scan below cannot return a claim. It ran
+            # on every owner pass, taking the inbox lock and re-parsing every
+            # pending request to prove that — while producers were waiting on
+            # the same lock to publish.
+            return None
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             for _, _, pending, request in self._queued():
                 expected_hash = authorized_request_hashes.get(request.request_id, "")
@@ -1239,6 +1255,115 @@ class _ConvergencePlan:
     entry_unwind_eligible: bool = False
 
 
+#: Marks a snapshot the preview fabricated because the wallet was unavailable.
+#: It carries a zero equity, so it may price an exit but never an entry, and it
+#: is never handed back to a later read as a reusable snapshot.
+_UNAVAILABLE_SNAPSHOT_PREFIX = "exit-only-capital-unavailable:"
+
+
+@dataclass(frozen=True, slots=True)
+class _ConvergenceJournalScan:
+    """What one walk of the journal tells convergence, before any clock."""
+
+    newest_activity_ns: dict[str, int]
+    # Newest fill SEQUENCE per symbol since its revision: a retry that made
+    # progress is not a failure, so the retry budget and backoff count only
+    # the attempts since the last fill. A large entry sliced into touch-sized
+    # windows converges through many planned re-plans without exhausting,
+    # while an entry that stops filling still meets the full limit. Sequences,
+    # not wall timestamps: fills carry venue receive time while batch events
+    # carry the owner clock, and only the journal sequence totally orders
+    # across the two sources.
+    newest_fill_sequence: dict[str, int]
+    retry_rows_by_symbol: dict[str, list[tuple[str, int, int]]]
+    # One RISK_DECISION event is journaled per processed batch (accepted or
+    # rejected), so these rows count retry attempts exactly, in order.
+    retry_risk_rows_by_symbol: dict[str, list[tuple[str, int]]]
+    # Retry rows whose head names no symbol we are planning for. They cannot
+    # match any prefix built by the planner, but carrying them keeps the test
+    # the original one rather than one that trusts the head split.
+    retry_rows_unmapped: list[tuple[str, int, int]]
+    retry_risk_rows_unmapped: list[tuple[str, int]]
+    retry_batches_by_symbol: dict[str, list[str]]
+    retry_batches_unmapped: list[str]
+
+
+def _convergence_journal_scan(
+    *,
+    events: Sequence[Any],
+    processed_batches: AbstractSet[str],
+    symbols: AbstractSet[str],
+    revision_by_symbol: Mapping[str, int],
+    retry_root: str,
+    anchor_event_types: AbstractSet[str],
+    retry_head_symbol: Callable[[str], str | None],
+) -> _ConvergenceJournalScan:
+    """Walk the journal once for everything convergence reads out of it."""
+
+    newest_activity_ns: dict[str, int] = {}
+    newest_fill_sequence: dict[str, int] = {}
+    risk_decision_type = AccountEventType.RISK_DECISION.value
+    fill_type = AccountEventType.FILL.value
+    retry_rows_by_symbol: dict[str, list[tuple[str, int, int]]] = {}
+    retry_risk_rows_by_symbol: dict[str, list[tuple[str, int]]] = {}
+    retry_rows_unmapped: list[tuple[str, int, int]] = []
+    retry_risk_rows_unmapped: list[tuple[str, int]] = []
+    for event in events:
+        event_symbol = event.symbol
+        if (
+            event.event_type in anchor_event_types
+            and event_symbol in symbols
+            and event.sequence >= revision_by_symbol.get(event_symbol, 0)
+        ):
+            newest = newest_activity_ns.get(event_symbol)
+            if newest is None or event.wall_ts_ns > newest:
+                newest_activity_ns[event_symbol] = event.wall_ts_ns
+            if (
+                event.event_type == fill_type
+                and event.sequence > newest_fill_sequence.get(event_symbol, 0)
+            ):
+                newest_fill_sequence[event_symbol] = event.sequence
+        correlation_id = event.correlation_id
+        if not correlation_id.startswith(retry_root):
+            continue
+        mapped = retry_head_symbol(correlation_id)
+        retry_row = (correlation_id, event.sequence, event.wall_ts_ns)
+        if mapped is None:
+            retry_rows_unmapped.append(retry_row)
+            if event.event_type == risk_decision_type:
+                retry_risk_rows_unmapped.append((correlation_id, event.sequence))
+        elif event.sequence >= revision_by_symbol.get(mapped, 0):
+            retry_rows_by_symbol.setdefault(mapped, []).append(retry_row)
+            if event.event_type == risk_decision_type:
+                retry_risk_rows_by_symbol.setdefault(mapped, []).append(
+                    (correlation_id, event.sequence)
+                )
+
+    # Same shape for the retry-attempt count: every batch ever processed is
+    # in this set, so counting one symbol's prefix must not read all of it.
+    retry_batches_by_symbol: dict[str, list[str]] = {}
+    retry_batches_unmapped: list[str] = []
+    for batch_id in processed_batches:
+        if not batch_id.startswith(retry_root):
+            continue
+        mapped = retry_head_symbol(batch_id)
+        if mapped is None:
+            retry_batches_unmapped.append(batch_id)
+        else:
+            retry_batches_by_symbol.setdefault(mapped, []).append(batch_id)
+
+    return _ConvergenceJournalScan(
+        newest_activity_ns=newest_activity_ns,
+        newest_fill_sequence=newest_fill_sequence,
+        retry_rows_by_symbol=retry_rows_by_symbol,
+        retry_risk_rows_by_symbol=retry_risk_rows_by_symbol,
+        retry_rows_unmapped=retry_rows_unmapped,
+        retry_risk_rows_unmapped=retry_risk_rows_unmapped,
+        retry_batches_by_symbol=retry_batches_by_symbol,
+        retry_batches_unmapped=retry_batches_unmapped,
+    )
+
+
 class AccountExecutionService:
     """Single account owner; mode differences exist only in injected providers/adapters."""
 
@@ -1278,6 +1403,10 @@ class AccountExecutionService:
             raise ValueError("account kernel root does not match account route")
         self.kernel = kernel
         self.runtime = AccountKernelRuntime(kernel)
+        # Last convergence journal walk, keyed on the snapshot it was built
+        # from. Derived state only: dropping it costs a rescan, never an
+        # answer.
+        self._convergence_scan_memo: tuple[tuple[Any, ...], _ConvergenceJournalScan] | None = None
         self.market_provider = market_provider
         self.snapshot_provider = snapshot_provider
         self.rules_provider = rules_provider
@@ -1377,6 +1506,7 @@ class AccountExecutionService:
         allow_stale_market_for_reduction_preview: bool = False,
         allow_unavailable_snapshot_for_reduction_preview: bool = False,
         exit_market_fallbacks: Mapping[str, MarketInputRef] | None = None,
+        reuse_snapshot: AccountRiskSnapshot | None = None,
     ) -> tuple[dict[str, MarketInputRef], AccountRiskSnapshot, dict[str, InstrumentRules]]:
         if require_external_health and self.health_provider is not None:
             self.health_provider.require_recent_healthy(max_age_ns=self.max_health_age_ns)
@@ -1398,7 +1528,16 @@ class AccountExecutionService:
                     market_inputs[symbol] = exit_market_fallbacks[symbol]
         snapshot_error = ""
         try:
-            snapshot = self.snapshot_provider.current(batch_id=batch_id)
+            # One batch, one wallet read. The caller hands back the snapshot it
+            # already fetched for this same batch, and only ever one it really
+            # got from the venue — the fabricated preview snapshot below is
+            # never reused, because the risk gate would then price the book off
+            # a zero equity.
+            snapshot = (
+                reuse_snapshot
+                if reuse_snapshot is not None
+                else self.snapshot_provider.current(batch_id=batch_id)
+            )
         except Exception as exc:
             if not allow_unavailable_snapshot_for_reduction_preview:
                 raise
@@ -1470,7 +1609,9 @@ class AccountExecutionService:
                 snapshot = AccountRiskSnapshot(
                     equity_usdt=0.0,
                     available_margin_usdt=0.0,
-                    snapshot_key=(f"exit-only-capital-unavailable:{reason}:observed={observed_key}:batch={batch_id}"),
+                    snapshot_key=(
+                    f"{_UNAVAILABLE_SNAPSHOT_PREFIX}{reason}:observed={observed_key}:batch={batch_id}"
+                ),
                     snapshot_ts_ns=now_ns,
                 )
             else:
@@ -1605,6 +1746,18 @@ class AccountExecutionService:
                 batch_id=request.batch_id,
                 require_external_health=True,
                 account_wide=True,
+                # The preview above already read the wallet for this batch, and
+                # everything between the two reads is local arithmetic. A second
+                # read cost a full round trip to the venue — about 175 ms on the
+                # Frankfurt route — for a number that cannot have moved on our
+                # account. A fabricated preview snapshot is never reused: it
+                # carries a zero equity, and an entry has to price off a real
+                # wallet or fail.
+                reuse_snapshot=(
+                    snapshot
+                    if not snapshot.snapshot_key.startswith(_UNAVAILABLE_SNAPSHOT_PREFIX)
+                    else None
+                ),
             )
         adapted = [AdaptedIntent(item.adapter(), intent) for item, intent in self._prepared_request_intents(request)]
         result = self.runtime.process_cycle(
@@ -1696,69 +1849,43 @@ class AccountExecutionService:
             head_end = batch_id.find("/", len(retry_root))
             return symbol_of_retry_head.get(batch_id[: head_end + 1]) if head_end >= 0 else None
 
-        newest_activity_ns: dict[str, int] = {}
-        # Newest fill SEQUENCE per symbol since its revision: a retry that made
-        # progress is not a failure, so the retry budget and backoff count only
-        # the attempts since the last fill. A large entry sliced into
-        # touch-sized windows converges through many planned re-plans without
-        # exhausting, while an entry that stops filling still meets the full
-        # limit. Sequences, not wall timestamps: fills carry venue receive
-        # time while batch events carry the owner clock, and only the journal
-        # sequence totally orders across the two sources.
-        newest_fill_sequence: dict[str, int] = {}
-        risk_decision_type = AccountEventType.RISK_DECISION.value
-        retry_rows_by_symbol: dict[str, list[tuple[str, int, int]]] = {}
-        # One RISK_DECISION event is journaled per processed batch (accepted or
-        # rejected), so these rows count retry attempts exactly, in order.
-        retry_risk_rows_by_symbol: dict[str, list[tuple[str, int]]] = {}
-        # Retry rows whose head names no symbol we are planning for. They cannot
-        # match any prefix built below, but carrying them keeps the test the
-        # original one rather than one that trusts the head split.
-        retry_rows_unmapped: list[tuple[str, int, int]] = []
-        retry_risk_rows_unmapped: list[tuple[str, int]] = []
-        for event in events:
-            event_symbol = event.symbol
-            if (
-                event.event_type in anchor_event_types
-                and event_symbol in symbols
-                and event.sequence >= revision_by_symbol.get(event_symbol, 0)
-            ):
-                newest = newest_activity_ns.get(event_symbol)
-                if newest is None or event.wall_ts_ns > newest:
-                    newest_activity_ns[event_symbol] = event.wall_ts_ns
-                if (
-                    event.event_type == AccountEventType.FILL.value
-                    and event.sequence > newest_fill_sequence.get(event_symbol, 0)
-                ):
-                    newest_fill_sequence[event_symbol] = event.sequence
-            correlation_id = event.correlation_id
-            if not correlation_id.startswith(retry_root):
-                continue
-            mapped = retry_head_symbol(correlation_id)
-            retry_row = (correlation_id, event.sequence, event.wall_ts_ns)
-            if mapped is None:
-                retry_rows_unmapped.append(retry_row)
-                if event.event_type == risk_decision_type:
-                    retry_risk_rows_unmapped.append((correlation_id, event.sequence))
-            elif event.sequence >= revision_by_symbol.get(mapped, 0):
-                retry_rows_by_symbol.setdefault(mapped, []).append(retry_row)
-                if event.event_type == risk_decision_type:
-                    retry_risk_rows_by_symbol.setdefault(mapped, []).append(
-                        (correlation_id, event.sequence)
-                    )
-
-        # Same shape for the retry-attempt count: every batch ever processed is
-        # in this set, so counting one symbol's prefix must not read all of it.
-        retry_batches_by_symbol: dict[str, list[str]] = {}
-        retry_batches_unmapped: list[str] = []
-        for batch_id in state.processed_batches:
-            if not batch_id.startswith(retry_root):
-                continue
-            mapped = retry_head_symbol(batch_id)
-            if mapped is None:
-                retry_batches_unmapped.append(batch_id)
-            else:
-                retry_batches_by_symbol.setdefault(mapped, []).append(batch_id)
+        # The journal walks are a pure function of the snapshot and the symbols
+        # read off it — no clock reaches them — so they are derived once per
+        # journal change instead of twice per loop pass. Re-deriving them from
+        # every event ever written cost a slice of a core that grew with the
+        # epoch: about 9% at 10k events, half a core at 50k, and past ~200k the
+        # owner can no longer hold its 10Hz cadence. The key is exact rather
+        # than a heuristic, since the rolling hash advances on every journaled
+        # event, so a hit returns what a rescan would have built.
+        scan_key = (
+            state.rolling_state_hash,
+            len(events),
+            len(state.processed_batches),
+            frozenset(symbols),
+            tuple(sorted(revision_by_symbol.items())),
+        )
+        memo = self._convergence_scan_memo
+        if memo is not None and memo[0] == scan_key:
+            scan = memo[1]
+        else:
+            scan = _convergence_journal_scan(
+                events=events,
+                processed_batches=state.processed_batches,
+                symbols=symbols,
+                revision_by_symbol=revision_by_symbol,
+                retry_root=retry_root,
+                anchor_event_types=anchor_event_types,
+                retry_head_symbol=retry_head_symbol,
+            )
+            self._convergence_scan_memo = (scan_key, scan)
+        newest_activity_ns = scan.newest_activity_ns
+        newest_fill_sequence = scan.newest_fill_sequence
+        retry_rows_by_symbol = scan.retry_rows_by_symbol
+        retry_risk_rows_by_symbol = scan.retry_risk_rows_by_symbol
+        retry_rows_unmapped = scan.retry_rows_unmapped
+        retry_risk_rows_unmapped = scan.retry_risk_rows_unmapped
+        retry_batches_by_symbol = scan.retry_batches_by_symbol
+        retry_batches_unmapped = scan.retry_batches_unmapped
 
         plans: list[_ConvergencePlan] = []
         for symbol in sorted(symbols):

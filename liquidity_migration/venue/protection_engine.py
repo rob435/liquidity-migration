@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -29,6 +30,8 @@ from liquidity_migration.strategy.account_strategy_state import (
 )
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from liquidity_migration.venue.venue_protection import NativeProtectionBreach
@@ -162,8 +165,24 @@ class AccountProtectionEngine:
             rule = self.instrument_rules.get(symbol)
             if rule is None or rule.tick_size <= 0.0:
                 continue
-            stop_pct = _optional_fraction(metadata.get("stop_loss_pct"))
-            take_profit_pct = _optional_fraction(metadata.get("take_profit_pct"))
+            try:
+                stop_pct = _optional_fraction(metadata.get("stop_loss_pct"))
+                take_profit_pct = _optional_fraction(metadata.get("take_profit_pct"))
+            except ValueError as exc:
+                # Isolated per component, the way reconcile_venue_positions
+                # attempts every symbol. Unisolated, one unreadable fraction
+                # raised out of this loop and no OTHER component's software stop
+                # or take-profit was evaluated at all — and the targets are
+                # sorted, so an alphabetically early bad value shadowed every
+                # later one. Its own protection was uncomputable either way.
+                _logger.error(
+                    "protection fractions for %s are unusable, so it has no software "
+                    "stop or take-profit until the value is repaired; every other "
+                    "component still evaluates: %s",
+                    target_key,
+                    exc,
+                )
+                continue
             stop = _protection_price(
                 entry_fill_price=anchor.entry_fill_vwap,
                 signed_qty=signed_qty,
@@ -284,6 +303,10 @@ class AccountProtectionEngine:
         """
 
         published: list[AccountTargetRequest] = []
+        if not breaches:
+            # Both reads below are dead without a breach, and the inbox scan
+            # takes the lock producers publish through.
+            return ()
         state = self.kernel._state_ref()
         unresolved = self.inbox.unresolved_requests()
         for breach in sorted(breaches, key=lambda item: item.plan.symbol):

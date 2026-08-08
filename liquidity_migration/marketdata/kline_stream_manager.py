@@ -309,7 +309,12 @@ class KlineStreamManager:
         if newest_ts_ms is None:
             newest_ts_lag_seconds: float | None = None
         else:
-            newest_ts_lag_seconds = max((_utc_now_ms() - int(newest_ts_ms)) / 1000.0, 0.0)
+            # Unclamped on purpose. A negative lag means the newest stored bar
+            # is stamped ahead of local now — the host clock is behind the
+            # venue — and that is the one condition under which the cycle's
+            # whole window can be an hour or more behind the market. Clamping
+            # it to 0.0 reported "perfectly fresh" at exactly that moment.
+            newest_ts_lag_seconds = (_utc_now_ms() - int(newest_ts_ms)) / 1000.0
         return {
             "started": self._started,
             "stopped": self._stopped,

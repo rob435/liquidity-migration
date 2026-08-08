@@ -150,6 +150,8 @@ class _QuoteState:
     crossed: bool = False
     cross_deadline_ns: int = 0
     cancel_requested: bool = False
+    last_cancel_attempt_ns: int = 0
+    last_cross_attempt_ns: int = 0
     verified: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -504,13 +506,35 @@ class EntryQuoteManager:
             if now_ns > quote.deadline_ns + 2 * int(self.config.cross_grace_seconds * 1e9):
                 self._quotes.pop(command_id, None)
             return
-        if quote.crossed:
+        # The grace clock starts at the first cross attempt, whether or not it
+        # could be priced, so an entry whose touch was unreadable at the window
+        # end keeps trying instead of resting untouched until the cancel.
+        if quote.cross_deadline_ns:
             if quote.cancel_requested:
+                return
+            if not quote.crossed and now_ns < quote.cross_deadline_ns:
+                # Paced like the cancel below. ``advance`` runs every owner tick
+                # (~10 Hz), and each attempt is a touch read plus a signed amend
+                # at roughly 175 ms, so an unpaced retry spent the whole grace
+                # window blocking the owner loop and tripping the venue's
+                # order-rate limit.
+                if now_ns - quote.last_cross_attempt_ns < int(self.config.reprice_seconds * 1e9):
+                    return
+                self._cross(quote, now_ns)
                 return
             if now_ns >= quote.cross_deadline_ns:
                 # The bounded cross could not clear the remainder: take the
                 # order down and let convergence re-plan the shortfall.
-                quote.cancel_requested = True
+                # This is the only cancel in the live runtime, so a failure
+                # that latched here would leave a marketable limit resting at
+                # the venue with nothing left to take it down. Latch on
+                # success only, and pace the retry on the reprice cadence so a
+                # venue that keeps refusing cannot become a hot loop. An order
+                # that failed because it had already gone terminal leaves by
+                # the status branch above on a later pass.
+                if now_ns - quote.last_cancel_attempt_ns < int(self.config.reprice_seconds * 1e9):
+                    return
+                quote.last_cancel_attempt_ns = now_ns
                 try:
                     self.client.cancel_order(
                         symbol=quote.symbol, order_link_id=command_id
@@ -518,10 +542,12 @@ class EntryQuoteManager:
                 except Exception:  # noqa: BLE001 - a fill/cancel race is the common cause
                     _logger.warning(
                         "cancel of an uncleared crossed entry quote was rejected "
-                        "(usually a fill race): %s %s",
+                        "(usually a fill race); retrying next pass: %s %s",
                         quote.symbol,
                         command_id,
                     )
+                    return
+                quote.cancel_requested = True
             return
         if now_ns >= quote.deadline_ns:
             self._cross(quote, now_ns)
@@ -616,21 +642,31 @@ class EntryQuoteManager:
         """Amend through the far touch: the remainder fills as a taker at a
         price bounded by the far touch, unlike the unbounded market order."""
 
+        quote.last_cross_attempt_ns = now_ns
         tick = self.tick_size(quote.symbol)
         bid, ask, _bid_qty, _ask_qty = self._touch(quote.symbol)
         far = ask if quote.is_buy else bid
         if tick <= 0.0 or far is None:
-            # Cannot price a bounded cross right now; retry next pass until
-            # the cross grace runs out, then the cancel path takes over.
+            # Cannot price a bounded cross right now. Start the grace clock so
+            # the cancel path still has its deadline, but leave ``crossed``
+            # alone: marking it here would send every later pass out through
+            # the crossed branch, and the retry this comment promises could
+            # never run.
             if quote.cross_deadline_ns == 0:
                 quote.cross_deadline_ns = now_ns + int(self.config.cross_grace_seconds * 1e9)
-                quote.crossed = True
             return
         pad = max(tick * MIN_SPREAD_TICKS, far * MIN_SPREAD_FRACTION)
         crossing = far + pad if quote.is_buy else max(far - pad, tick)
         price_text = snap_price_text(crossing, tick, round_up=quote.is_buy)
-        if self._amend(quote, price_text):
-            quote.price = float(price_text)
+        # The grace clock starts either way so the cancel still fires on time,
+        # but only an amend the venue took counts as crossed. A rejected one
+        # that latched here would leave the entry resting at its old passive
+        # price until the cancel, having never crossed at all.
+        if quote.cross_deadline_ns == 0:
+            quote.cross_deadline_ns = now_ns + int(self.config.cross_grace_seconds * 1e9)
+        if not self._amend(quote, price_text):
+            return
+        quote.price = float(price_text)
         quote.crossed = True
         quote.cross_deadline_ns = now_ns + int(self.config.cross_grace_seconds * 1e9)
 

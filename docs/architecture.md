@@ -31,9 +31,12 @@ Since 2026-08-04, an exposure-increasing entry is created as a GTC limit resting
 touch instead of a market order (still one venue order per command, same `orderLinkId`,
 stop attached at create). The owner loop's
 [`entry_quote_manager.py`](../liquidity_migration/venue/entry_quote_manager.py) advances it
-each pass — reprice toward a moved touch every 15s, amend through the far touch at the
-120s window end, cancel an uncleared remainder after a 20s grace (convergence re-plans
-it), and run the attached-stop verification at fill. Exits, resizes, and native stops are
+each pass — re-evaluate the price every 3s on the lean/urgency/drift recipe that replaced
+the old 15s staleness reprice (change point 2026-08-04, in the module docstring), amend
+through the far touch at the 120s window end, cancel an uncleared remainder after a 20s
+grace (convergence re-plans it), and run the attached-stop verification at fill. A cross
+that cannot be priced retries until the grace runs out, and a rejected cancel is retried
+rather than latched. Exits, resizes, and native stops are
 market-path, unchanged. Every quoting gate (thin spread, missing tick rules, venue
 reject) falls back to the market order, and the convergence health grace treats an
 in-window resting quote as intentional (`resting_quote_active`).
