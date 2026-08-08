@@ -630,50 +630,6 @@ def _transaction_segment_names(root: str | Path) -> list[str]:
         return sorted(entry.name for entry in entries if entry.name.endswith(".json"))
 
 
-def _segment_names_are_contiguous(names: Sequence[str]) -> bool:
-    """Do these filenames cover sequences 1..N with no gap?
-
-    A scan racing the owner's atomic renames can omit an entry that already
-    exists. Filenames carry their own ``<first>-<last>`` range, so the hole is
-    detectable before any file is opened and a re-scan resolves it; a hole that
-    survives re-scanning is real corruption.
-    """
-
-    expected_first = 1
-    for name in names:
-        match = _ACCOUNT_TRANSACTION_FILENAME.fullmatch(name)
-        if match is None:
-            raise AccountJournalIntegrityError(f"invalid account transaction filename: {name}")
-        first_sequence = int(match.group("first"))
-        last_sequence = int(match.group("last"))
-        if last_sequence < first_sequence:
-            raise AccountJournalIntegrityError(
-                f"account transaction filename has an inverted range: {name}"
-            )
-        if first_sequence != expected_first:
-            return False
-        expected_first = last_sequence + 1
-    return True
-
-
-def _stable_transaction_segment_names(
-    root: str | Path, *, attempts: int = 4, backoff_seconds: float = 0.01
-) -> list[str]:
-    """Segment names from a scan that is contiguous, retrying a racy scan."""
-
-    names: list[str] = []
-    for attempt in range(attempts):
-        names = _transaction_segment_names(root)
-        if _segment_names_are_contiguous(names):
-            return names
-        if attempt + 1 < attempts:
-            time.sleep(backoff_seconds)
-    raise AccountJournalIntegrityError(
-        "account transaction filenames are not contiguous after "
-        f"{attempts} scans; the journal has a real sequence hole"
-    )
-
-
 # Filename validation is O(#segments) regex work per call, and hot callers
 # (owner-health probes run several times per producer cycle) revalidate an
 # append-only prefix that cannot have changed: a segment's name embeds its
@@ -712,8 +668,10 @@ def _validated_contiguous_names(
 ) -> list[str]:
     """Sorted, regex-validated, gap-free segment names, prefix-cached per root.
 
-    Semantics match :func:`_stable_transaction_segment_names`: a transiently
-    racy scan is retried, a persistent hole raises. The cache only skips
+    A scan racing the owner's atomic renames can omit an entry that already
+    exists. Filenames carry their own ``<first>-<last>`` range, so the hole is
+    detectable before any file is opened and a re-scan resolves it; a hole that
+    survives re-scanning is real corruption and raises. The cache only skips
     revalidating names it validated before; every call still lists the
     directory, so freshness is never cached.
     """
@@ -892,7 +850,7 @@ class AccountJournalCursor:
         """Advance to the journal's current head and return the digest."""
 
         account_root = Path(root)
-        names = _stable_transaction_segment_names(account_root)
+        names = _validated_contiguous_names(account_root)
         if not names:
             projection = account_journal_path(account_root)
             if projection.exists() and projection.stat().st_size > 0:

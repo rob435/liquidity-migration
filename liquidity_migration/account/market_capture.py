@@ -798,28 +798,35 @@ class SequenceAwareMarketRecorder:
         if self.owner_invocation_id is not None:
             record["owner_invocation_id"] = self.owner_invocation_id
         record["record_id"] = capture_record_id(record)
+        if not persist_to_disk:
+            # Nothing is written, so the JSON normalization has no reader. It
+            # walked and rebuilt every book level of every frame to produce a
+            # value only this return used, and the live callers take nothing off
+            # it but scalars the record already carries — bids and asks are read
+            # back only from the stored tape. Record identity is unaffected:
+            # ``capture_record_id`` hashes the record above, not the normalized
+            # copy. On the funded owner raw persistence is off, so this is the
+            # path every orderbook frame takes.
+            return dict(record)
         safe = json_safe(record)
-        location: CaptureAppendLocation | None = None
-        if persist_to_disk:
-            location = self.store.append(safe)
-            self._publish_owner_readiness(safe, location=location)
+        location = self.store.append(safe)
+        self._publish_owner_readiness(safe, location=location)
         output = dict(safe)
-        if location is not None:
-            try:
-                relative_path = location.path.relative_to(self.store.root).as_posix()
-            except ValueError as exc:
-                raise MarketCaptureError("capture append escaped its configured root") from exc
-            # Locator fields describe the stored line without being part of it
-            # or of its record identity; the path is relative so a copied root
-            # keeps them valid.
-            output.update(
-                {
-                    "capture_segment_path": relative_path,
-                    "capture_byte_offset": location.byte_offset,
-                    "capture_byte_length": location.byte_length,
-                    "capture_record_sha256": location.record_sha256,
-                }
-            )
+        try:
+            relative_path = location.path.relative_to(self.store.root).as_posix()
+        except ValueError as exc:
+            raise MarketCaptureError("capture append escaped its configured root") from exc
+        # Locator fields describe the stored line without being part of it
+        # or of its record identity; the path is relative so a copied root
+        # keeps them valid.
+        output.update(
+            {
+                "capture_segment_path": relative_path,
+                "capture_byte_offset": location.byte_offset,
+                "capture_byte_length": location.byte_length,
+                "capture_record_sha256": location.record_sha256,
+            }
+        )
         return output
 
     def _publish_owner_market_readiness(

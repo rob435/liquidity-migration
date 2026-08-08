@@ -16,6 +16,51 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 (fifth pass) — A 33-agent latency sweep, and the two biggest
+  "dead" findings were the ones worth keeping.** Five readers over disjoint hot
+  paths, every candidate then handed to an adversarial verifier: **15 of 28
+  confirmed, 13 refuted**, four of the refutations catching fabricated numbers.
+  Both reconcile candidates were refuted, which matched the independent
+  judgement made here — deleting the reconciler's second open-order read looked
+  like a free round trip but the repo documents that read twice as a deliberate
+  refusal to trust a wrapper default to expose conditional orders.
+
+  Taken:
+  1. **`AccountJournalCursor.read` regex-revalidated every segment filename on
+     every read.** An identical-semantics, prefix-cached helper already existed
+     180 lines above and was already used by two other readers; the cursor —
+     the per-producer-cycle reader — was the one caller never switched.
+     One-line swap: 3.4 ms → 2.1 ms at 4,105 segments, and the removed term is
+     the one that grows with journal age rather than with new events. The two
+     superseded helpers are deleted with it (44 lines).
+  2. **The capture path JSON-normalized every WebSocket frame even when nothing
+     was written.** `_persist` walked and rebuilt every book level to produce a
+     value only its own return used. Raw persistence is **off** on the funded
+     owner, so that was every orderbook frame. Record identity is unaffected
+     (`capture_record_id` hashes before the copy), and the live callers take
+     only scalars off it — bids and asks are read back solely from the stored
+     tape, verified by grepping every consumer.
+  3. **`CapturedBybitMarketProvider.execution_book` had no callers**, which made
+     its `_contexts` dict write-only: a lock acquisition, a dict write and a
+     10,000-entry eviction scan per symbol per batch, feeding a reader that did
+     not exist.
+
+  Declined, with reasons:
+  - **The `PositionState` copy** (0.21 ms per journaled event batch). The
+     verifier's own caveat is right: explicit field construction would silently
+     reset any field added later, in the money-accounting path, to save 0.2 ms
+     against a system whose cost unit is a 175 ms signed round trip.
+  - **The quote-lab shadow replay, 1,100 lines, the single biggest "junk"
+     find.** It has no production consumer and that is beside the point: it is
+     the machinery behind registered results still cited in
+     `research_findings.md:202` and `strategy_program.md:46` — including the
+     −0.36 bp/entry figure the urgency ladder rests on. Research tooling's
+     consumer is the findings document.
+  - **The LONG `funnel_observer`** (581 lines). The claim may hold —
+     `build_candidate_tape.py` builds that funnel itself rather than injecting
+     an observer — but it is documented architecture and was not worth cutting
+     at the end of a long session over a live account.
+
 - **2026-08-08 16:51 UTC — Deployed `8aa8f25`.** Receipt `staged-ok
   commit=8aa8f25`, `verify-ok … mainnet=armed`, nine of nine units. Deployed
   immediately rather than bundled with the latency work, because the funded

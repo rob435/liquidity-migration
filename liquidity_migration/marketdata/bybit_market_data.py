@@ -801,11 +801,8 @@ class BybitKlineStreamPool:
             if self._closed:
                 raise RuntimeError("pool is closed")
             unique_symbols = sorted({s for s in symbols if s})
-            if self._on_bar is None:
-                self._on_bar = on_bar
-            elif self._on_bar is not on_bar:
-                # A different callback replaces the old one on every connection.
-                self._on_bar = on_bar
+            # A different callback replaces the old one on every connection.
+            self._on_bar = on_bar
             if not self._connections:
                 self._build_initial_connections_locked(unique_symbols)
             else:

@@ -18,9 +18,6 @@ from liquidity_migration.account.account_contracts import (
 from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
-from liquidity_migration.account.execution_adapters import (
-    L2BookSnapshot,
-)
 from liquidity_migration.account.market_capture import SequenceAwareMarketRecorder
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm
 
@@ -129,8 +126,6 @@ class CapturedBybitMarketProvider:
 
     def __init__(self, recorder: SequenceAwareMarketRecorder) -> None:
         self.recorder = recorder
-        self._contexts: dict[str, L2BookSnapshot] = {}
-        self._lock = threading.RLock()
 
     def current(self, symbols: Sequence[str], *, batch_id: str) -> Mapping[str, MarketInputRef]:
         output: dict[str, MarketInputRef] = {}
@@ -141,12 +136,6 @@ class CapturedBybitMarketProvider:
                 reference_key=batch_id,
             )
             market = book.market_ref(input_key=str(record["record_id"]), source="bybit_raw_l2")
-            with self._lock:
-                self._contexts[market.input_key] = book
-                # Bound for rejected batches and crash/retry churn; the adapter
-                # consumes contexts promptly.
-                while len(self._contexts) > 10_000:
-                    self._contexts.pop(next(iter(self._contexts)))
             output[symbol] = replace(
                 market,
                 metadata={
@@ -168,13 +157,6 @@ class CapturedBybitMarketProvider:
                 },
             )
         return output
-
-    def execution_book(self, input_key: str) -> L2BookSnapshot:
-        with self._lock:
-            book = self._contexts.get(input_key)
-        if book is None:
-            raise RuntimeError(f"no captured execution book for market input {input_key}")
-        return book
 
 
 class BybitWalletStreamCache:

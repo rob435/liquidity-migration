@@ -22,7 +22,7 @@ unit shapes.
 | `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 
-The hedge, RMOM, and liveness services are invoked by their matching timers.
+The liveness services are invoked by their matching timers.
 Target producers and auxiliary services have private API, mainnet, `REAL_MONEY`,
 and unnecessary Telegram variables explicitly removed.
 
@@ -36,9 +36,6 @@ No unit can take the fleet down with it.
   plan entries as blocked while still publishing exits, so a degraded fleet
   keeps draining risk.
 - **Mainnet producers** keep `Requires=` on the mainnet owner.
-- **The hedge** has `After=` ordering only and no owner requirement: it
-  publishes into a durable inbox and degrades in-process when owner health is
-  dead, so a restarting owner must not stop a hedge pass from being scheduled.
 - **Neither liveness unit** has an ordering, requirement, binding, part-of,
   requisite, uphold, or wants edge to the owner it watches — a stopped or
   failed owner is what it alerts on. Their only lifecycle edges are
