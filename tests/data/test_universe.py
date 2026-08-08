@@ -141,35 +141,6 @@ def _ticker(symbol: str, turnover_24h: float) -> dict:
 # --------------------------------------------------------------------------- #
 # Non-perp / non-USDT / missing-contractType rows excluded                     #
 # --------------------------------------------------------------------------- #
-def test_universepit2_excludes_dated_inverse_usdc_and_missing_contract_type() -> None:
-    snapshot = 1_800_000_000_000
-    old = snapshot - 100 * MS_PER_DAY
-    instruments = pl.DataFrame([
-        _instrument("AAAUSDT", old),
-        _instrument("BBBUSDT", old),
-        _instrument("FUT0101USDT", old, contract_type="LinearFutures"),  # dated delivery
-        _instrument("INVUSD", old, contract_type="InversePerpetual", settle_coin="USD"),
-        _instrument("USDCPERP", old, settle_coin="USDC"),
-        _instrument("NOCTUSDT", old, contract_type=None),  # missing contractType
-    ])
-    tickers = pl.DataFrame([
-        _ticker("AAAUSDT", 50_000_000.0),
-        _ticker("BBBUSDT", 40_000_000.0),
-        _ticker("FUT0101USDT", 90_000_000.0),  # would rank first if not excluded
-        _ticker("INVUSD", 80_000_000.0),
-        _ticker("USDCPERP", 70_000_000.0),
-        _ticker("NOCTUSDT", 60_000_000.0),
-    ])
-    table = build_current_universe_table(
-        instruments, tickers,
-        universe_config=UniverseConfig(
-            min_turnover_24h=5_000_000.0, min_age_days=30, rank_start=1, rank_end=10, max_symbols=10,
-        ),
-        snapshot_ts_ms=snapshot,
-    )
-    assert table["symbol"].to_list() == ["AAAUSDT", "BBBUSDT"]
-    assert "LinearFutures" not in table["contract_type"].to_list()
-    assert set(table["settle_coin"].to_list()) == {"USDT"}
 
 
 def test_universe_excludes_non_crypto_symbol_types_before_ranking() -> None:

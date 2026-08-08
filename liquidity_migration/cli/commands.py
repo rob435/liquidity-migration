@@ -4,6 +4,10 @@ import argparse
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from liquidity_migration.policy.operational_profile import OperationalProfile
 
 from liquidity_migration.data.archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from liquidity_migration.data.archive_manifest import ArchiveHourlyKlineApiDownloadConfig
@@ -272,8 +276,9 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         operational_profile = load_operational_profile(args.operational_profile_file)
     long_settings = operational_profile.long if operational_profile else None
 
-    # ws_klines_* defaults read off a throwaway default instance (see the
-    # event-demo block above for why the slots class can't be read directly).
+    # ws_klines_* defaults read off a throwaway default instance: on a slots
+    # dataclass a class-level field access yields the member_descriptor, not
+    # the default.
     _long_ws_defaults = LongNativeDemoCycleConfig()
     long_demo_config = LongNativeDemoCycleConfig(
         universe_superset_size=args.universe_superset_size,
@@ -434,6 +439,21 @@ def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchC
     return 0
 
 
+def producer_capital_reference_usdt(operational_profile: OperationalProfile) -> float:
+    """The fixed clamp the carry producer should carry, or 0.0 to disable it.
+
+    In ``account_equity`` mode the ceiling IS the wallet, so a fixed clamp has
+    nothing to clamp to; the owner's equity-anchored caps bind the book and are
+    re-proved at every rebase. Named rather than inlined so the branch can be
+    evaluated on both shipped profiles — the test that guarded it used to grep
+    this file for the condition text and passed with the arms swapped.
+    """
+
+    if operational_profile.capital_reference.tracks_equity:
+        return 0.0
+    return float(operational_profile.capital_reference_usdt)
+
+
 def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
     from liquidity_migration.strategy.carry_demo import (
         CarryDemoCycleConfig,
@@ -456,14 +476,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
-        # In account_equity mode the ceiling IS the wallet, so the producer's
-        # fixed clamp has nothing to clamp to and is disabled (0.0). The owner's
-        # equity-anchored caps bind the book and are re-proved at every rebase.
-        capital_reference_usdt=(
-            0.0
-            if operational_profile.capital_reference.tracks_equity
-            else operational_profile.capital_reference_usdt
-        ),
+        capital_reference_usdt=producer_capital_reference_usdt(operational_profile),
         operational_profile_sha256=operational_profile.source_sha256,
         replay_days=args.replay_days,
         workers=args.workers,

@@ -236,8 +236,8 @@ class LongNativeDemoDaemon:
             if not isinstance(self.demo_config, LongNativeDemoCycleConfig):
                 raise TypeError("LONG daemon config changed to an incompatible type")
             _validate_long_daemon_startup(self.demo_config, self._strategy_config)
-        # Same reasoning as EventDemoDaemon.run: attach the package stderr
-        # handler before bootstrap so the operator can see progress.
+        # Attach the package stderr handler before bootstrap so the operator
+        # can see progress.
         ensure_default_log_handler()
         _logger.info(
             "long_native_event_demo_daemon starting data_root=%s interval_seconds=%.1f "

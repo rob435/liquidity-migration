@@ -1,7 +1,7 @@
 """LONG strategy target producer - forward counterpart to long_native research.
 
-Mirrors event_demo.py for the v11a long sleeve (uni50 FC sniper retrace 1%/6h
-fall-through), publishing desired component targets to the account owner. This
+Runs the v11a long sleeve (uni50 FC sniper retrace 1%/6h fall-through),
+publishing desired component targets to the account owner. This
 module owns target-planning mechanics; the account owner owns execution and
 accounting. Profile guide: ``docs/trading_logic.md``.
 

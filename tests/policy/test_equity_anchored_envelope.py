@@ -214,5 +214,24 @@ def test_rebasing_at_the_exact_gross_cap_boundary_survives_rounding_noise() -> N
 
 
 def test_the_producer_clamp_is_disabled_when_the_ceiling_tracks_equity() -> None:
-    source = (REPO / "liquidity_migration" / "cli" / "commands.py").read_text(encoding="utf-8")
-    assert "if operational_profile.capital_reference.tracks_equity" in source
+    """Evaluate the branch on both shipped profiles.
+
+    This used to grep ``cli/commands.py`` for the text of the if-expression,
+    which passes with the arms swapped — and swapping them ships the fixed
+    clamp on the funded mainnet profile, which governs how much notional the
+    carry producer may target on real money.
+    """
+
+    from liquidity_migration.cli.commands import producer_capital_reference_usdt
+    from liquidity_migration.policy.operational_profile import load_operational_profile
+
+    funded = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
+    assert funded.capital_reference.tracks_equity is True
+    assert producer_capital_reference_usdt(funded) == 0.0
+
+    fixed = load_operational_profile(REPO / "configs" / "operational.demo.json")
+    assert fixed.capital_reference.tracks_equity is False
+    assert producer_capital_reference_usdt(fixed) == pytest.approx(
+        fixed.capital_reference_usdt
+    )
+    assert producer_capital_reference_usdt(fixed) > 0.0

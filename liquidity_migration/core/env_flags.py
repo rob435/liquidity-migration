@@ -25,15 +25,6 @@ def env_flag(name: str, *, environ: Mapping[str, str] | None = None) -> bool:
     return source.get(name, "").strip().lower() in TRUE_ENV_VALUES
 
 
-def explicitly_false_or_unset(value: str | None) -> bool:
-    """True when ``value`` is unset or an explicit false spelling.
-
-    This is the fail-closed predicate for destructive-capability flags: an
-    ambiguous value is treated as NOT explicitly disabled, so callers refuse
-    to proceed.
-    """
-
-    return (value or "").strip().lower() in FALSE_ENV_VALUES
 
 
 def reject_ambiguous_flag(name: str, *, environ: Mapping[str, str] | None = None) -> None:

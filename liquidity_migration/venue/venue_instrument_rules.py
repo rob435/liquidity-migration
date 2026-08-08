@@ -6,8 +6,8 @@ because Bybit's demo realm rejects some orders its own ``minNotionalValue`` says
 it should accept. That probe places live orders and refuses any realm but demo,
 so off demo the declared ``minNotionalValue`` is taken at face value.
 
-The weaker evidence is recorded as such: the artifact says ``venue_declared``
-rather than ``probe_verified``, and each rule's ``source`` names its endpoint.
+The weaker evidence is recorded as such: the artifact says ``venue_declared``,
+and each rule's ``source`` names its endpoint.
 Undersized entries are then rejected by the venue at submit rather than
 pre-empted locally.
 """
@@ -37,8 +37,7 @@ __all__ = [
 VENUE_RULES_SCHEMA_VERSION = 1
 VENUE_RULES_KIND = "bybit_venue_declared_instrument_rules"
 
-#: The evidence standard, stamped into the artifact. The demo receipt instead
-#: carries ``probe_verified``.
+#: The evidence standard, stamped into the artifact.
 VENUE_RULES_EVIDENCE = "venue_declared"
 
 

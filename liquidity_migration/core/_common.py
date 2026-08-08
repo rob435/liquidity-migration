@@ -220,21 +220,3 @@ def _date_symbol_set(frame: pl.DataFrame) -> set[tuple[str, str]]:
     }
 
 
-def _cal_roll(
-    expr: pl.Expr,
-    agg: str,
-    n_days: int,
-    *,
-    shifted: bool,
-    min_samples: int,
-) -> pl.Expr:
-    """Calendar-aware rolling window over a per-symbol (or market) daily ts_ms grid.
-
-    ``shifted=True`` reproduces ``.shift(1).rolling_X(N)`` -- the prior N days
-    EXCLUDING today. ``shifted=False`` reproduces ``.rolling_X(N)`` -- the
-    trailing N days INCLUDING today. The caller applies ``.over("symbol")`` for
-    per-symbol grids, nothing for the single market series. ``min_samples`` is
-    passed explicitly because ``rolling_*_by`` defaults it to 1 while bare
-    ``rolling_*`` defaults it to ``window_size``.
-    """
-    return calendar_roll(expr, agg, n_days, shifted=shifted, min_samples=min_samples)

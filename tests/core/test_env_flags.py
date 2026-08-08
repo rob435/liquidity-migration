@@ -6,7 +6,6 @@ from liquidity_migration.core.env_flags import (
     FALSE_ENV_VALUES,
     TRUE_ENV_VALUES,
     env_flag,
-    explicitly_false_or_unset,
     reject_ambiguous_flag,
 )
 
@@ -29,16 +28,6 @@ def test_env_flag_false_and_ambiguous_spellings_are_not_truthy(value: str) -> No
 
 def test_env_flag_unset_is_false() -> None:
     assert env_flag("X", environ={}) is False
-
-
-@pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off", " OFF "])
-def test_explicitly_false_or_unset_accepts_only_false_spellings(value: str | None) -> None:
-    assert explicitly_false_or_unset(value) is True
-
-
-@pytest.mark.parametrize("value", ["1", "true", "maybe", "2", "enabled"])
-def test_explicitly_false_or_unset_rejects_true_and_ambiguous(value: str) -> None:
-    assert explicitly_false_or_unset(value) is False
 
 
 def test_reject_ambiguous_flag_passes_unset_true_and_false() -> None:

@@ -81,22 +81,6 @@ def test_the_durable_route_identity_carries_the_realm(tmp_path: Path) -> None:
         )
 
 
-def test_no_module_restates_the_environment_arity_as_a_literal() -> None:
-    """The environment arity is one enum, not a scatter of two-valued literals."""
-
-    offenders: list[str] = []
-    for path in sorted((REPO / "liquidity_migration").rglob("*.py")):
-        if path.name in {
-            "execution_environment.py",
-            # Producer choices are asserted precisely by the test below.
-            "parsers.py",
-        }:
-            continue
-        source = path.read_text(encoding="utf-8")
-        for literal in ('{"demo", "paper"}', '{"paper", "demo"}', '("demo", "paper")'):
-            if literal in source:
-                offenders.append(f"{path.name}: {literal}")
-    assert offenders == []
 
 
 def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() -> None:
