@@ -11,10 +11,14 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `8aa8f25`, whole fleet green since 2026-08-08 16:51 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=8aa8f25
-  profile=operational`, `verify-ok … mainnet=armed`. It carried the two fixes
-  below.
+- **Host runs `bad876c`, whole fleet green since 2026-08-08 17:20 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=bad876c
+  profile=operational`, `verify-ok … mainnet=armed`. Zero error-level lines on
+  the funded owner since restart; both funded producers cycle `owner=healthy` /
+  `err=none`. It carried the 33-agent latency sweep (three wins: the journal
+  cursor's per-read filename revalidation, the capture path's JSON
+  normalization of every WebSocket frame, and a write-only book-context cache).
+  The `8aa8f25` deploy at 16:51 UTC carried the two fixes below.
 - **The bot no longer goes blind when you hand-trade.** A negative available
   margin — which the funded account reports whenever a hand-opened position
   absorbs the wallet as position margin and the mark moves — was failing the

@@ -16,6 +16,11 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 17:20 UTC — Deployed `bad876c`** (the sweep below). Receipt
+  `staged-ok commit=bad876c`, `verify-ok … mainnet=armed`, nine of nine units.
+  Owner back at 17:20:33 anchoring `100.00 -> 326.21`, zero error-level lines,
+  both funded producers cycling `owner=healthy` / `err=none`.
+
 - **2026-08-08 (fifth pass) — A 33-agent latency sweep, and the two biggest
   "dead" findings were the ones worth keeping.** Five readers over disjoint hot
   paths, every candidate then handed to an adversarial verifier: **15 of 28
