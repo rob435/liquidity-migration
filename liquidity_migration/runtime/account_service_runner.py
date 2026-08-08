@@ -789,7 +789,13 @@ def main(argv: list[str] | None = None) -> int:
             "cannot stretch one entry into hundreds of windows."
         ),
     )
-    parser.add_argument("--idle-seconds", type=float, default=0.1)
+    # With the venue reads warm the loop is sleep-bound, and this is what sets
+    # how fast a software stop or a queued target is noticed. Measured on the
+    # funded owner: 139 ms per iteration at 0.1, 6.3% of one core. Halving it
+    # halves detection latency against a ~175 ms venue round trip that no
+    # amount of ticking can shorten -- which is also why going below this buys
+    # very little.
+    parser.add_argument("--idle-seconds", type=float, default=0.05)
     parser.add_argument(
         "--confirm-demo-orders",
         action="store_true",

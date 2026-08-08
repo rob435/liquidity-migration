@@ -16,6 +16,41 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — The 200 ms target, met by profiling instead of designing.
+  Owner loop 284 ms → 139 ms → ~89 ms; venue truth 1.37 s → 0.39 s.** After the
+  clever design below failed review, the win came from the dull question: what
+  is the loop actually waiting on? Three REST reads ran on *every* reconcile
+  pass with nothing gating them — one `get_positions`, and the two paged
+  `get_open_orders` queries behind order-ownership inspection — at ~175 ms each
+  against a CloudFront edge. Everything they starve is time-critical: software
+  stops, take-profits, quote repricing.
+  - All three moved to a background read-only thread (`VenuePositionFeed`,
+    `account_reconcile.py`). It touches no kernel state, so it adds no second
+    mutator. Positions refresh at 250 ms because that is what the reduction
+    gate ages; open orders at 2 s because ownership only decides whether a
+    hand-placed order gets logged — since 2026-08-07 it blocks nothing.
+  - Two conditions send a read back inline, both covered by tests that were
+    verified to fail with the guard removed: a pass that **recovered rows**
+    (venue view must post-date the mutations it is compared against, or drift
+    is reported that is not drift and new risk is blocked), and a feed with
+    **nothing newer than the published report** (a stalled feed would otherwise
+    re-stamp an old observation as this pass's freshness). A dead feed degrades
+    to exactly the pre-change behaviour — no new failure mode.
+  - With the reads warm, `--reconcile-seconds` 2.0 → 0.5 and `--idle-seconds`
+    0.1 → 0.05. The reduction-admission bound was **decoupled** from the
+    cadence and pinned at the 4 s it has always been: how fast reconciliation
+    runs is a latency choice, how stale truth may be when an EXIT is admitted
+    is not.
+  - **Measured on the funded owner, not argued.** Before: 284 ms/iteration
+    (3.52 Hz) at 6.2% of one core — 6% CPU with 65% of the iteration blocked
+    said "network, not compute", and `py-spy dump` named the exact frame
+    (`get_open_orders` ← `inspect_bybit_order_ownership` ← `reconcile_once`).
+    After: 139 ms/iteration (7.19 Hz), 6.3% CPU, main thread parked in the idle
+    sleep, venue-fact age at health write 0.387 s. Steady-state reconcile now
+    makes no REST call at all. Commits `6f9d091`, `acee4bf`.
+  - Remaining floor: a signed Bybit round trip is ~175 ms of geography and no
+    amount of ticking shortens it, which is why the tick stops at 50 ms.
+
 - **2026-08-08 — The 200 ms design failed its own safety review. Negative
   result, recorded before anything was built.** Owner set a 200 ms target
   against today's 2 s. Four designs competed; three judges independently picked

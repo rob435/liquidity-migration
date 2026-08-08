@@ -11,11 +11,23 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `9cbe889`, whole fleet green since 2026-08-08 17:59 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=9cbe889
-  profile=operational`, `verify-ok … mainnet=armed`. Zero error-level lines on
-  the funded owner since restart; both funded producers cycle `owner=healthy` /
-  `err=none` at 1.1–1.2 s, the same steady state as before the change.
+- **Host runs `acee4bf`, whole fleet green**: all nine units
+  on/active/enabled, receipt `staged-ok commit=acee4bf profile=operational`,
+  `verify-ok … mainnet=armed`. Zero error-level lines on the funded owner since
+  restart.
+- **The funded owner loop runs at 139 ms per iteration (7.19 Hz), measured, at
+  6.3% of one core.** It was 284 ms (3.52 Hz). Venue position truth is 0.39 s
+  old at the health write, down from 1.37 s. A steady-state reconcile pass now
+  makes **no REST call at all**: `get_positions` and the two `get_open_orders`
+  ownership queries are served by a background read-only feed (250 ms and 2 s
+  respectively). The main thread profiles as parked in the idle sleep, so the
+  loop is sleep-bound rather than network-bound; `--idle-seconds` is 0.05 and
+  `--reconcile-seconds` 0.5. The remaining floor is one signed Bybit round trip
+  at ~175 ms, which is geography (see the memory note) and not shortenable
+  here. Reduction admission still ages venue truth against the same 4 s bound
+  it always had — it is pinned by a floor rather than derived from the cadence.
+- **The `-21 USDT` available margin on the funded account is the owner trading
+  by hand and is read correctly**, not a fault.
 - **The account state copy no longer scales with position count.** Positions
   are shared and privatized through `position_for_write`, exactly as orders
   are; at 301 positions the whole copy is 0.002 ms against 0.295 ms before.
