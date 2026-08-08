@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from liquidity_migration.venue.account_reconcile import (
     VenuePositionFeed,
 )
 from liquidity_migration.core.deterministic_runtime import SystemClock, VirtualClock
+from liquidity_migration.venue.account_service_bybit import BybitPositionStreamCache
 from liquidity_migration.venue.venue_protection import BybitNativeProtectionManager
 
 
@@ -1675,7 +1677,7 @@ class _StubPositionCache:
         self.observed_ns = observed_ns
         self.queries = 0
 
-    def observed_after(self, symbol: str, *, after_ts_ns: int):  # type: ignore[no-untyped-def]
+    def wait_for(self, symbol: str, *, after_ts_ns: int, timeout_seconds: float):  # type: ignore[no-untyped-def]
         self.queries += 1
         if self.row is None or self.observed_ns <= int(after_ts_ns):
             return None
@@ -1706,6 +1708,7 @@ def _protection_manager(tmp_path: Path, cache) -> BybitNativeProtectionManager: 
         fallback_stop_fraction=0.35,
         clock=clock,
         position_stream_cache=cache,
+        entry_stop_push_wait_seconds=0.05,
     )
 
 
@@ -1759,3 +1762,39 @@ def test_no_position_cache_reads_the_venue_exactly_as_before(tmp_path: Path) -> 
 
     assert verdict == "armed"
     assert manager.client.position_reads == 1
+
+
+def test_the_verifier_waits_for_the_push_rather_than_polling_the_venue() -> None:
+    """The position does not exist until the fill, which is after the ack."""
+
+    cache = BybitPositionStreamCache()
+    landed: list[float] = []
+
+    def push_late() -> None:
+        time.sleep(0.05)
+        cache.on_message(
+            {"data": [{"symbol": "BUSDT", "size": "1", "side": "Buy", "stopLoss": "9.0"}]}
+        )
+        landed.append(time.monotonic())
+
+    worker = threading.Thread(target=push_late)
+    started = time.monotonic()
+    worker.start()
+    row = cache.wait_for("BUSDT", after_ts_ns=0, timeout_seconds=2.0)
+    elapsed = time.monotonic() - started
+    worker.join()
+
+    assert row is not None
+    assert row["stopLoss"] == "9.0"
+    assert elapsed < 1.0, f"waited {elapsed:.2f}s for a push that landed at 0.05s"
+
+
+def test_the_wait_gives_up_so_the_venue_read_still_runs() -> None:
+    cache = BybitPositionStreamCache()
+
+    started = time.monotonic()
+    row = cache.wait_for("BUSDT", after_ts_ns=0, timeout_seconds=0.05)
+    elapsed = time.monotonic() - started
+
+    assert row is None
+    assert 0.045 <= elapsed < 1.0

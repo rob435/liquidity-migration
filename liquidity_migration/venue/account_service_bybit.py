@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import threading
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -257,6 +258,9 @@ class BybitPositionStreamCache:
         self.clock = clock or SystemClock()
         self._lock = threading.Lock()
         self._rows: dict[str, tuple[dict[str, Any], int]] = {}
+        # Signalled on every absorbed frame so a caller can wait for the next
+        # one rather than poll the venue for it.
+        self._arrived = threading.Condition(self._lock)
 
     def on_message(self, message: Mapping[str, Any]) -> None:
         """Absorb one position frame. Never raises into the socket thread."""
@@ -266,16 +270,46 @@ class BybitPositionStreamCache:
             if not isinstance(rows, list):
                 return
             observed = self.clock.wall_time_ns()
-            for row in rows:
-                if not isinstance(row, Mapping):
-                    continue
-                symbol = str(row.get("symbol") or "").upper()
-                if not symbol:
-                    continue
-                with self._lock:
+            with self._arrived:
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    symbol = str(row.get("symbol") or "").upper()
+                    if not symbol:
+                        continue
                     self._rows[symbol] = (dict(row), observed)
+                self._arrived.notify_all()
         except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
             _logger_account.exception("private position frame could not be absorbed")
+
+    def wait_for(
+        self,
+        symbol: str,
+        *,
+        after_ts_ns: int,
+        timeout_seconds: float,
+    ) -> Mapping[str, Any] | None:
+        """Block until the venue pushes this symbol's position, or give up.
+
+        A market entry is acknowledged before it fills, and the position does
+        not exist until it does -- which is exactly why the REST verifier had
+        to retry. Waiting for the push costs the few milliseconds the venue
+        actually takes, where polling costs a round trip per attempt. Returning
+        None means the caller reads REST, as it always did.
+        """
+
+        symbol = symbol.upper()
+        bound = max(float(timeout_seconds), 0.0)
+        deadline = time.monotonic() + bound
+        with self._arrived:
+            while True:
+                entry = self._rows.get(symbol)
+                if entry is not None and entry[1] > int(after_ts_ns):
+                    return entry[0]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._arrived.wait(remaining)
 
     def observed_after(self, symbol: str, *, after_ts_ns: int) -> Mapping[str, Any] | None:
         """The pushed row for ``symbol``, only if it landed after ``after_ts_ns``.

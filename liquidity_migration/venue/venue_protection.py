@@ -149,6 +149,7 @@ class BybitNativeProtectionManager:
         fallback_stop_fraction: float,
         clock: Clock | None = None,
         position_stream_cache: Any | None = None,
+        entry_stop_push_wait_seconds: float = 0.5,
     ) -> None:
         # The manager is realm-agnostic: it installs a full-position stop for
         # whatever account the client addresses. What it must not accept is a
@@ -165,8 +166,11 @@ class BybitNativeProtectionManager:
         self.clock = clock or SystemClock()
         # Optional accelerator for entry-attached stop verification. Absent, or
         # holding nothing newer than the acknowledgement being verified, the
-        # REST read runs exactly as it always has.
+        # REST read runs exactly as it always has. The wait is bounded well
+        # under the two round trips it replaces, so the slow path is never
+        # slower than what shipped before it.
         self.position_stream_cache = position_stream_cache
+        self.entry_stop_push_wait_seconds = max(float(entry_stop_push_wait_seconds), 0.0)
         # WS callbacks and the reconciliation loop share this manager. One lock
         # spans planning, the Bybit mutation, journal activation, and every
         # adoption transition, so two revisions cannot be installed from the same
@@ -970,7 +974,16 @@ class BybitNativeProtectionManager:
         if cache is None or acknowledged_ts_ns <= 0:
             return None
         try:
-            row = cache.observed_after(symbol, after_ts_ns=acknowledged_ts_ns)
+            # A market order is acknowledged before it fills, and the position
+            # does not exist until it does -- which is exactly why the REST
+            # verifier had to retry. So wait for the push rather than ask for
+            # what has not happened yet: the venue takes milliseconds, a round
+            # trip takes ~175 ms, and the retry took two.
+            row = cache.wait_for(
+                symbol,
+                after_ts_ns=acknowledged_ts_ns,
+                timeout_seconds=self.entry_stop_push_wait_seconds,
+            )
         except Exception:  # noqa: BLE001 - an accelerator must never break the verifier
             return None
         if row is None:
