@@ -185,7 +185,7 @@ def _apply_fill(state: AccountState, event: AccountEvent) -> None:
     else:
         order.status = "partially_filled"
 
-    position = state.positions.setdefault(order.symbol, PositionState())
+    position = state.position_for_write(order.symbol)
     position.fees_from_fills_usdt += _finite(payload.get("fee_usdt"), label="fill fee_usdt")
     prior_qty = position.signed_qty
     prior_price = position.average_price
@@ -536,6 +536,8 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             or source == "venue_closed_pnl"
         )
         if pnl_position is not None and fill_checkpoint:
+            # Privatize only here: the read above merely tests existence.
+            pnl_position = state.position_for_write(event.symbol)
             pnl_position.reported_realized_usdt = pnl_position.realized_from_fills_usdt
             pnl_position.reported_fees_usdt = pnl_position.fees_from_fills_usdt
     elif event_type is AccountEventType.VENUE_SNAPSHOT:

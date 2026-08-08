@@ -4173,6 +4173,155 @@ def test_transaction_state_copy_shares_orders_until_one_is_written(tmp_path: Pat
     assert copied.order_for_write(command_id) is written
 
 
+def test_transaction_state_copy_shares_positions_until_one_is_written(tmp_path: Path) -> None:
+    """Positions carry the same copy-on-write contract as orders.
+
+    They used to be copied one by one on every journaled event batch, which is
+    a linear slice of the whole symbol history per transaction — and positions
+    are never pruned, so a symbol traded once is copied forever after.
+    """
+
+    committed = _indexed_journal(tmp_path).state()
+    symbol = sorted(committed.positions)[0]
+    copied = transaction_state_copy(committed)
+
+    assert copied.positions[symbol] is committed.positions[symbol]
+    assert copied.private_position_symbols == set()
+
+    written = copied.position_for_write(symbol)
+    assert written is not committed.positions[symbol]
+    assert asdict(written) == asdict(committed.positions[symbol])
+
+    before = asdict(committed.positions[symbol])
+    written.signed_qty += 7.0
+    written.realized_from_fills_usdt += 3.0
+    fresh = copied.position_for_write("NEVERTRADEDUSDT")
+    fresh.signed_qty = 1.0
+
+    # A transaction that never commits must leave the committed positions alone.
+    assert asdict(committed.positions[symbol]) == before
+    assert "NEVERTRADEDUSDT" not in committed.positions
+    # A second write reuses the copy it already made rather than making another.
+    assert copied.position_for_write(symbol) is written
+
+
+def test_a_rolled_back_pnl_checkpoint_leaves_the_committed_position_untouched(
+    tmp_path: Path,
+) -> None:
+    """Drive the real reducer, not the helper, and throw the transaction away.
+
+    Positions are shared with committed state now, so this fails the moment a
+    reducer write site stops going through ``position_for_write`` — which is
+    the whole risk the sharing buys. Asserting through the helper instead would
+    pass either way and prove nothing.
+    """
+
+    committed = _indexed_journal(tmp_path).state()
+    symbol = sorted(committed.positions)[0]
+    # The checkpoint must have somewhere to move, or the write is numerically a
+    # no-op and the test passes whether or not the reducer privatizes.
+    committed.positions[symbol].realized_from_fills_usdt = 41.0
+    committed.positions[symbol].fees_from_fills_usdt = 7.0
+    before = {key: asdict(value) for key, value in committed.positions.items()}
+
+    copied = transaction_state_copy(committed)
+    account_kernel_module.apply_account_event(
+        copied,
+        AccountEvent(
+            schema_version=1,
+            event_id="pnl-rollback",
+            sequence=committed.events_applied + 1,
+            event_type=AccountEventType.PNL.value,
+            correlation_id="CORR",
+            causation_id="CORR",
+            account_id="demo",
+            sleeve="account_execution",
+            symbol=symbol,
+            wall_ts_ns=1,
+            monotonic_ns=1,
+            payload={
+                "pnl_key": "pnl-rollback",
+                "source": "fill_reconstructed",
+                "metadata": {"fill_accounting_checkpoint": True},
+            },
+            prev_event_hash="",
+            state_hash="",
+            event_hash="",
+        ),
+    )
+
+    # The copy advanced its checkpoint; committed state must not have moved.
+    assert copied.positions[symbol].reported_realized_usdt == pytest.approx(
+        copied.positions[symbol].realized_from_fills_usdt
+    )
+    assert {
+        key: asdict(value) for key, value in committed.positions.items()
+    } == before, "the reducer reached through the shared position into committed state"
+
+
+def test_a_rolled_back_fill_leaves_the_committed_position_untouched(tmp_path: Path) -> None:
+    """The fill accounting site, driven through the reducer and discarded.
+
+    ``_apply_fill`` is where quantity, average price, realized P&L and fees are
+    written, so a shared position object leaking here corrupts the account's
+    own books on any transaction that does not commit.
+    """
+
+    committed = _indexed_journal(tmp_path).state()
+    symbol = sorted(committed.positions)[0]
+    command_id = "rollback-command"
+    # The fixture leaves every order filled, so stand up one the fill can land
+    # on. This is setup, not the behaviour under test.
+    acknowledged = committed.put_order(
+        command_id,
+        OrderState(
+            command_id=command_id,
+            batch_id="rollback-batch",
+            symbol=symbol,
+            signed_qty=1.0,
+            reduce_only=False,
+            created_ts_ns=1,
+            command_sequence=99,
+        ),
+    )
+    acknowledged.status = "acknowledged"
+    committed.working_order_ids.add(command_id)
+    before = {key: asdict(value) for key, value in committed.positions.items()}
+
+    copied = transaction_state_copy(committed)
+    account_kernel_module.apply_account_event(
+        copied,
+        AccountEvent(
+            schema_version=1,
+            event_id="fill-rollback",
+            sequence=committed.events_applied + 1,
+            event_type=AccountEventType.FILL.value,
+            correlation_id="CORR",
+            causation_id=command_id,
+            account_id="demo",
+            sleeve="account_execution",
+            symbol=symbol,
+            wall_ts_ns=1,
+            monotonic_ns=1,
+            payload={
+                "command_id": command_id,
+                "execution_id": "exec-rollback",
+                "signed_qty": 0.25,
+                "price": 101.0,
+                "fee_usdt": 0.5,
+            },
+            prev_event_hash="",
+            state_hash="",
+            event_hash="",
+        ),
+    )
+
+    assert copied.positions[symbol].fees_from_fills_usdt != before[symbol]["fees_from_fills_usdt"]
+    assert {
+        key: asdict(value) for key, value in committed.positions.items()
+    } == before, "the fill reducer reached through the shared position into committed state"
+
+
 def test_shared_orders_do_not_change_what_a_replay_reconstructs(tmp_path: Path) -> None:
     journal = _indexed_journal(tmp_path)
     state = journal.state()

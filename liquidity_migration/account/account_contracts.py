@@ -355,6 +355,12 @@ class AccountState:
         repr=False,
         compare=False,
     )
+    # Same contract for positions; see ``position_for_write``.
+    private_position_symbols: set[str] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
 
     def order_for_write(self, command_id: str) -> OrderState:
         """The order under ``command_id``, private to this state and mutable."""
@@ -372,6 +378,25 @@ class AccountState:
         self.orders[command_id] = order
         self.private_order_ids.add(command_id)
         return order
+
+    def position_for_write(self, symbol: str) -> PositionState:
+        """The position for ``symbol``, private to this state and mutable.
+
+        Same contract as ``order_for_write``: ``transaction_state_copy`` shares
+        position objects, so a write that skips this reaches into committed
+        state a rolled-back transaction must leave untouched.
+        """
+
+        position = self.positions.get(symbol)
+        if position is None:
+            position = PositionState()
+        elif symbol in self.private_position_symbols:
+            return position
+        else:
+            position = copy.copy(position)
+        self.positions[symbol] = position
+        self.private_position_symbols.add(symbol)
+        return position
 
     def working_signed_qty(self, symbol: str) -> float:
         return math.fsum(
@@ -424,7 +449,11 @@ def transaction_state_copy(state: AccountState) -> AccountState:
         # ``order_for_write``. Copying every order ever held cost a slice of the
         # whole history per transaction.
         orders=dict(state.orders),
-        positions={key: copy.copy(value) for key, value in state.positions.items()},
+        # Shared values, private dict, exactly as ``orders`` above: a write must
+        # privatize through ``position_for_write``. Copying every position ever
+        # held cost the whole symbol history per transaction, and positions are
+        # never pruned — a flat symbol stays at signed_qty 0.0 forever.
+        positions=dict(state.positions),
         executions=dict(state.executions),
         protections=dict(state.protections),
         closes=dict(state.closes),
