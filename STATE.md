@@ -11,14 +11,23 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `bad876c`, whole fleet green since 2026-08-08 17:20 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=bad876c
+- **Host runs `9cbe889`, whole fleet green since 2026-08-08 17:59 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=9cbe889
   profile=operational`, `verify-ok … mainnet=armed`. Zero error-level lines on
   the funded owner since restart; both funded producers cycle `owner=healthy` /
-  `err=none`. It carried the 33-agent latency sweep (three wins: the journal
-  cursor's per-read filename revalidation, the capture path's JSON
-  normalization of every WebSocket frame, and a write-only book-context cache).
-  The `8aa8f25` deploy at 16:51 UTC carried the two fixes below.
+  `err=none` at 1.1–1.2 s, the same steady state as before the change.
+- **The account state copy no longer scales with position count.** Positions
+  are shared and privatized through `position_for_write`, exactly as orders
+  are; at 301 positions the whole copy is 0.002 ms against 0.295 ms before.
+  Positions are never pruned, so every symbol ever traded was being copied on
+  every journaled event batch. Both reducer write sites — the fill accounting
+  and the PNL checkpoint — have regression tests that fail if either stops
+  privatizing.
+- **The `bad876c` deploy at 17:20 UTC** carried the first 33-agent latency
+  sweep: the journal cursor's per-read filename revalidation, the capture
+  path's JSON normalization of every WebSocket frame, and a write-only
+  book-context cache. The `8aa8f25` deploy at 16:51 UTC carried the two fixes
+  below.
 - **The bot no longer goes blind when you hand-trade.** A negative available
   margin — which the funded account reports whenever a hand-opened position
   absorbs the wallet as position margin and the mark moves — was failing the

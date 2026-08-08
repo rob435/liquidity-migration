@@ -16,6 +16,58 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 17:59 UTC — Deployed `9cbe889`.** Receipt `staged-ok
+  commit=9cbe889`, `verify-ok … mainnet=armed`, nine of nine units. Carried the
+  positions copy-on-write, a second 35-agent sweep, and the dead code the first
+  sweep verified. Funded owner back with **zero** error-level lines; producer
+  cycle time settled at 1.1–1.2 s, matching the pre-change steady state (the
+  33.7 s first cycle is the kline bootstrap, not a regression).
+
+- **2026-08-08 (sixth pass) — Reversing a refusal, and a vacuous test over a
+  real-money branch.**
+  1. **Positions get the copy-on-write that orders already had.** The earlier
+     pass declined this optimisation because the version on offer enumerated
+     `PositionState`'s fields positionally — which silently resets any field
+     added later, in the accounting path, for 3.5x. Declining that was right;
+     stopping there was not. The robust form is the pattern `orders` already
+     uses: `transaction_state_copy` shares position objects and writes go
+     through a new `position_for_write`. At 301 positions the whole state copy
+     goes **0.295 ms → 0.002 ms** (the positions term alone was 0.240 ms) and
+     no longer scales with position count at all. Positions are never pruned,
+     so a symbol traded once was copied on every journaled event batch forever.
+     Exactly two reducer write sites, both converted, each with a regression
+     test driven through the real reducer — **both first drafts passed with the
+     fix removed** and were rewritten until they failed, which is the trap this
+     repo has been caught by before.
+  2. **A test guarding a real-money branch asserted nothing.**
+     `test_the_producer_clamp_is_disabled_when_the_ceiling_tracks_equity` grepped
+     `cli/commands.py` for the *text* of an if-expression, so it passed with the
+     arms swapped — and swapped arms ship the fixed clamp on the funded profile,
+     which governs how much notional the carry producer may target. The branch
+     is now a named function evaluated against both shipped profiles, verified
+     to fail when swapped.
+  3. **Dead:** `_cal_roll` (a pass-through to `calendar_roll` left by the
+     package split, never wired), `explicitly_false_or_unset` (last caller went
+     with paper trading), the superseded non-API kline downloader,
+     `format_universe_report`, `lag_screen`,
+     `enforce_frozen_candidate_population`. **Junk tests:** an arity lint that
+     greps for literals naming the retired `paper` environment so it can never
+     fire, and an exact duplicate universe test. **Stale comments:** four
+     pointing at code deleted with the SHORT sleeve, plus two describing a
+     `probe_verified` receipt field that exists nowhere.
+  4. **Kept, against the sweep's advice.** Three helpers with a definition,
+     test callers and no production caller are **test seams, not dead code**:
+     `KlineStore.has_symbol` (backs an add-only merge assertion),
+     `read_account_route_manifest` (five tamper-rejection tests verify through
+     it), `load_venue_accounting_receipt` (two tests check it rejects mode
+     0644). And `continuous_hedge_manager` stays: `docs/trading_logic.md:311`
+     says the model code "stay[s] for research", written by the same
+     2026-08-03 change that removed its runtime, and deleting it orphans
+     `regenerate_hedge_warmstart.py`, which still writes a 30 KB artifact
+     validated only by the test that would go with it. `continuous_cycle_status`
+     is not dead at all — `continuous_demo.py` writes through it on every
+     published cycle.
+
 - **2026-08-08 17:20 UTC — Deployed `bad876c`** (the sweep below). Receipt
   `staged-ok commit=bad876c`, `verify-ok … mainnet=armed`, nine of nine units.
   Owner back at 17:20:33 anchoring `100.00 -> 326.21`, zero error-level lines,
