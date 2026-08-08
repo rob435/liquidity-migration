@@ -537,6 +537,145 @@ class SegmentedCaptureStore:
             raise first_error
 
 
+@dataclass(frozen=True, slots=True)
+class TickerTouch:
+    """Top of book for one symbol as the venue's ticker topic pushed it."""
+
+    symbol: str
+    bid_price: float
+    ask_price: float
+    bid_qty: float
+    ask_qty: float
+    exchange_ts_ns: int
+    local_receive_ts_ns: int
+    sequence: int
+
+    def snapshot(self) -> L2BookSnapshot:
+        """The same one-level book the order path would read off a real L2."""
+
+        return L2BookSnapshot(
+            symbol=self.symbol,
+            sequence=self.sequence,
+            previous_sequence=None,
+            exchange_ts_ns=self.exchange_ts_ns,
+            local_receive_ts_ns=self.local_receive_ts_ns,
+            bids=(BookLevel(self.bid_price, self.bid_qty),),
+            asks=(BookLevel(self.ask_price, self.ask_qty),),
+            sequence_gap=False,
+            clock_offset_estimate_ns=(
+                self.local_receive_ts_ns - self.exchange_ts_ns if self.exchange_ts_ns else None
+            ),
+        )
+
+
+class BybitTickerTouchCache:
+    """Latest top of book for every candidate symbol, pushed over the public socket.
+
+    The order path reads only the touch -- reference price, bid, ask and the two
+    displayed sizes -- yet a symbol used to be unservable until a full
+    reconstructed L2 book arrived, which is the entire cold-symbol warmup wait.
+    A ticker subscription costs one small frame per change and makes every
+    symbol priceable the instant a target names it.
+
+    This is a floor, never a replacement: a healthy reconstructed book is
+    fresher and carries the depth that quoting and markouts need, so every
+    caller prefers it and opts into this explicitly.
+    """
+
+    __slots__ = ("_touches", "_lock", "clock")
+
+    def __init__(self, *, clock: Clock | None = None) -> None:
+        self._touches: dict[str, TickerTouch] = {}
+        self._lock = threading.Lock()
+        self.clock = clock or SystemClock()
+
+    def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> None:
+        """Absorb one ``tickers.SYMBOL`` frame. Never raises: a malformed frame
+        just leaves the previous touch standing."""
+
+        topic = str(message.get("topic") or "")
+        if not topic.startswith("tickers."):
+            return
+        data = message.get("data")
+        if not isinstance(data, Mapping):
+            return
+        symbol = str(data.get("symbol") or topic.partition(".")[2]).upper()
+        if not symbol:
+            return
+        # Bybit sends the linear ticker as snapshot-then-delta, and a delta
+        # carrying only funding or open interest leaves the touch fields out.
+        bid_price = _optional_positive_float(data.get("bid1Price"))
+        ask_price = _optional_positive_float(data.get("ask1Price"))
+        if bid_price is None or ask_price is None or ask_price <= bid_price:
+            return
+        bid_qty = _optional_positive_float(data.get("bid1Size")) or 0.0
+        ask_qty = _optional_positive_float(data.get("ask1Size")) or 0.0
+        local_ns = int(local_receive_ts_ns or 0) or self.clock.wall_time_ns()
+        touch = TickerTouch(
+            symbol=symbol,
+            bid_price=bid_price,
+            ask_price=ask_price,
+            bid_qty=bid_qty,
+            ask_qty=ask_qty,
+            exchange_ts_ns=int(message.get("ts") or 0) * 1_000_000,
+            local_receive_ts_ns=local_ns,
+            sequence=int(message.get("cs") or 0),
+        )
+        with self._lock:
+            self._touches[symbol] = touch
+
+    def absorb_rest_rows(self, rows: Iterable[Mapping[str, Any]]) -> int:
+        """Seed the cache from a REST tickers read; returns how many landed.
+
+        The rescue path for a symbol no socket is carrying yet: one round trip
+        is a bound, where waiting for a subscription to warm is not.
+        """
+
+        landed = 0
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            previous = self.latest(symbol)
+            self.on_message({"topic": f"tickers.{symbol}", "data": row})
+            if self.latest(symbol) is not previous:
+                landed += 1
+        return landed
+
+    def latest(self, symbol: str) -> TickerTouch | None:
+        with self._lock:
+            return self._touches.get(symbol.upper())
+
+    def symbol_count(self) -> int:
+        with self._lock:
+            return len(self._touches)
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
+
+
+def ticker_cache_callback(cache: BybitTickerTouchCache) -> Callable[[Mapping[str, Any]], Any]:
+    """Bridge raw-stream receive stamps into the ticker cache."""
+
+    def callback(message: Mapping[str, Any]) -> Any:
+        cache.on_message(
+            message,
+            local_receive_ts_ns=int(message.get("_local_receive_ts_ns") or 0) or None,
+        )
+        return None
+
+    return callback
+
+
 @dataclass(slots=True)
 class BookReconstruction:
     symbol: str
@@ -644,10 +783,15 @@ class SequenceAwareMarketRecorder:
         config: MarketCaptureConfig | None = None,
         clock: Clock | None = None,
         owner_invocation_id: str | None = None,
+        touch_cache: BybitTickerTouchCache | None = None,
     ) -> None:
         if owner_invocation_id is not None and (type(owner_invocation_id) is not str or not owner_invocation_id):
             raise ValueError("owner_invocation_id must be a non-empty string when provided")
         self.config = config or MarketCaptureConfig()
+        # Serves a symbol that has no reconstructed book yet. Callers opt in per
+        # read, because a one-level ticker book is a price and not a book: it
+        # can size and protect an order, it cannot grade an execution.
+        self.touch_cache = touch_cache
         self.clock = clock or SystemClock()
         self.owner_invocation_id = owner_invocation_id
         self.store = SegmentedCaptureStore(root, config=self.config)
@@ -1164,14 +1308,28 @@ class SequenceAwareMarketRecorder:
         context_kind: str,
         reference_key: str,
         depth: int | None = None,
+        allow_touch_fallback: bool = False,
     ) -> tuple[dict[str, Any], L2BookSnapshot]:
-        """Persist an exact reconstructed book at a decision/risk/send/fill boundary."""
+        """Persist an exact reconstructed book at a decision/risk/send/fill boundary.
+
+        With ``allow_touch_fallback`` a symbol whose L2 has not arrived is
+        priced from the pushed ticker top of book instead of refusing. The
+        record says which it was, so the journal never implies depth that was
+        never observed.
+        """
 
         symbol = symbol.upper()
         with self._lock:
             state = self.books.get(symbol)
             if state is None or not state.has_snapshot:
-                raise MarketCaptureError(f"no reconstructed book for {symbol}")
+                touch_book = self._touch_snapshot(symbol) if allow_touch_fallback else None
+                if touch_book is None:
+                    raise MarketCaptureError(f"no reconstructed book for {symbol}")
+                return self._persist_touch_context(
+                    context_kind=context_kind,
+                    reference_key=reference_key,
+                    book=touch_book,
+                ), touch_book
             snapshot = state.snapshot(depth=depth or self.config.depth)
             record = self._persist(
                 {
@@ -1194,11 +1352,56 @@ class SequenceAwareMarketRecorder:
             )
             return record, snapshot
 
-    def current_book(self, symbol: str, *, depth: int | None = None) -> L2BookSnapshot | None:
+    def _persist_touch_context(
+        self,
+        *,
+        context_kind: str,
+        reference_key: str,
+        book: L2BookSnapshot,
+    ) -> dict[str, Any]:
+        """Record a decision priced off the pushed ticker touch, labelled as such."""
+
+        return self._persist(
+            {
+                "kind": "book_context",
+                "book_source": "bybit_ticker_touch",
+                "context_kind": context_kind,
+                "reference_key": reference_key,
+                "symbol": book.symbol,
+                "local_receive_ts_ns": self.clock.wall_time_ns(),
+                "book_local_receive_ts_ns": book.local_receive_ts_ns,
+                "exchange_system_ts_ns": book.exchange_ts_ns,
+                "exchange_engine_ts_ns": 0,
+                "update_id": 0,
+                "cross_sequence": book.sequence,
+                "sequence_gap": False,
+                "sequence_gap_reason": "",
+                "bids": [(level.price, level.qty) for level in book.bids],
+                "asks": [(level.price, level.qty) for level in book.asks],
+            },
+            persist_to_disk=True,
+        )
+
+    def _touch_snapshot(self, symbol: str) -> L2BookSnapshot | None:
+        """The pushed top of book, for callers that only need a price."""
+
+        cache = self.touch_cache
+        if cache is None:
+            return None
+        touch = cache.latest(symbol)
+        return None if touch is None else touch.snapshot()
+
+    def current_book(
+        self,
+        symbol: str,
+        *,
+        depth: int | None = None,
+        allow_touch_fallback: bool = False,
+    ) -> L2BookSnapshot | None:
         with self._lock:
             state = self.books.get(symbol.upper())
             if state is None or not state.has_snapshot:
-                return None
+                return self._touch_snapshot(symbol) if allow_touch_fallback else None
             return state.snapshot(depth=depth or self.config.depth)
 
     def current_book_with_observed_wall_ns(
@@ -1206,6 +1409,7 @@ class SequenceAwareMarketRecorder:
         symbol: str,
         *,
         depth: int | None = None,
+        allow_touch_fallback: bool = False,
     ) -> tuple[L2BookSnapshot | None, int]:
         """Return one locked book snapshot followed by its local observation time.
 
@@ -1216,9 +1420,13 @@ class SequenceAwareMarketRecorder:
 
         with self._lock:
             state = self.books.get(symbol.upper())
-            book = (
-                state.snapshot(depth=depth or self.config.depth) if state is not None and state.has_snapshot else None
-            )
+            book: L2BookSnapshot | None
+            if state is not None and state.has_snapshot:
+                book = state.snapshot(depth=depth or self.config.depth)
+            elif allow_touch_fallback:
+                book = self._touch_snapshot(symbol)
+            else:
+                book = None
             return book, self.clock.wall_time_ns()
 
     def close(self) -> None:
@@ -1234,6 +1442,11 @@ class BybitRawPublicMarketStream:
     traffic for one symbol does not prove that the other subscriptions remain
     live.  Any symbol silent past the bounded threshold rebuilds the socket so
     Bybit sends fresh snapshots for the full desired set.
+
+    ``topic_kind="tickers"`` runs the same machinery over the venue's ticker
+    topic instead, which carries only the top of book. That is the whole of
+    what the order path reads, so a second stream on this kind keeps every
+    candidate symbol priceable without paying for depth on all of them.
     """
 
     def __init__(
@@ -1242,6 +1455,7 @@ class BybitRawPublicMarketStream:
         testnet: bool = False,
         depth: int = 50,
         include_public_trades: bool = True,
+        topic_kind: str = "orderbook",
         on_message: Callable[[Mapping[str, Any]], Any],
         websocket_factory: Callable[..., Any] | None = None,
         reconnect_seconds: float = 2.0,
@@ -1252,6 +1466,13 @@ class BybitRawPublicMarketStream:
     ) -> None:
         self.url = TESTNET_PUBLIC_LINEAR_WS if testnet else MAINNET_PUBLIC_LINEAR_WS
         self.depth = depth
+        if topic_kind not in ("orderbook", "tickers"):
+            raise ValueError("topic_kind must be 'orderbook' or 'tickers'")
+        self.topic_kind = topic_kind
+        # Which topic proves a subscription is alive. Public trades are silent
+        # on an untraded symbol, so they never counted, and neither kind of
+        # stream may judge the other's liveness.
+        self._liveness_prefix = f"{topic_kind}."
         if type(include_public_trades) is not bool:
             raise ValueError("include_public_trades must be a boolean")
         if not math.isfinite(stale_reconnect_seconds) or stale_reconnect_seconds <= 0.0:
@@ -1319,6 +1540,9 @@ class BybitRawPublicMarketStream:
     def _topics(self, symbols: Iterable[str]) -> list[str]:
         topics: list[str] = []
         for symbol in sorted({value.upper() for value in symbols if value}):
+            if self.topic_kind == "tickers":
+                topics.append(f"tickers.{symbol}")
+                continue
             topics.append(f"orderbook.{self.depth}.{symbol}")
             if self.include_public_trades:
                 topics.append(f"publicTrade.{symbol}")
@@ -1462,7 +1686,7 @@ class BybitRawPublicMarketStream:
                         or (generation is not None and self._active_connection_generation != generation)
                     ):
                         return
-                    if topic.startswith("orderbook."):
+                    if topic.startswith(self._liveness_prefix):
                         symbol = topic.rsplit(".", 1)[-1].upper()
                         if symbol in self._symbols:
                             prior_frame_at = self._last_orderbook_message_monotonic.get(symbol)
@@ -1800,6 +2024,37 @@ def operational_market_symbols(
     ):
         required.update(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
     return required
+
+
+def warm_symbol_set(
+    desired: set[str],
+    *,
+    warm_until_monotonic: dict[str, float],
+    now_monotonic: float,
+    warm_seconds: float,
+) -> set[str]:
+    """Add symbols whose account work has only just cleared back into ``desired``.
+
+    Dropping a symbol the pass it goes flat means the next entry on it waits
+    for a whole book warmup again. Every currently desired symbol gets a fresh
+    expiry; survivors of an earlier pass stay subscribed until theirs runs out.
+
+    Both arguments are updated in place, which is what the owner loop wants:
+    the expiry map is loop state and the desired set is rebuilt every pass.
+    """
+
+    if not math.isfinite(warm_seconds) or warm_seconds <= 0.0:
+        warm_until_monotonic.clear()
+        return desired
+    deadline = now_monotonic + warm_seconds
+    for symbol in desired:
+        warm_until_monotonic[symbol] = deadline
+    for symbol, expiry in tuple(warm_until_monotonic.items()):
+        if expiry <= now_monotonic:
+            del warm_until_monotonic[symbol]
+        else:
+            desired.add(symbol)
+    return desired
 
 
 def main(argv: list[str] | None = None) -> int:

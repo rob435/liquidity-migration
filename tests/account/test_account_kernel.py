@@ -56,6 +56,7 @@ from liquidity_migration.account.strategy_runtime import (
     LongTargetAdapter,
     RiskTargetAdapter,
     SleeveTargetIntent,
+    set_producer_price_max_age_ns,
 )
 
 
@@ -4408,3 +4409,125 @@ def test_free_margin_still_refuses_a_batch_the_venue_cannot_fund(tmp_path: Path)
     )
     assert not result.accepted
     assert any("available_margin_limit" in key for key in result.rejection_keys)
+
+
+def _priced_market(*, price: float = 10.0) -> MarketInputRef:
+    """A book observed at a realistic wall clock, so producer-price ages are expressible."""
+
+    return MarketInputRef(
+        input_key="book-priced",
+        symbol="BUSDT",
+        exchange_ts_ns=1_800_000_000_000_000_000,
+        local_receive_ts_ns=1_800_000_000_000_000_000,
+        reference_price=price,
+        bid_price=price - 0.01,
+        ask_price=price + 0.01,
+        book_sequence=42,
+        source="test_l2",
+    )
+
+
+def test_a_fresh_producer_price_sizes_the_order_instead_of_the_live_one() -> None:
+    market = _priced_market()
+    intent = SleeveTargetIntent(
+        decision_key="producer-priced",
+        target_key="long/main/BUSDT",
+        strategy_id="long-v1",
+        component_id="main",
+        symbol="BUSDT",
+        signed_notional_usdt=20.0,
+        leverage=10.0,
+        reason="producer price",
+        metadata={
+            "decision_reference_price": 8.0,
+            # 500 ms before the book observation.
+            "decision_reference_price_ts_ms": 1_800_000_000_000 - 500,
+        },
+    )
+
+    target = LongTargetAdapter(producer_price_max_age_ns=60_000_000_000).desired_target(
+        intent, market, _rules()["BUSDT"]
+    )
+
+    assert target.reference_price == 8.0
+    assert target.metadata["raw_signed_qty"] == pytest.approx(20.0 / 8.0)
+    assert target.metadata["sizing_price_source"] == "producer_decision"
+
+
+def test_a_producer_price_past_its_age_bound_is_refused_for_the_live_one() -> None:
+    market = _priced_market()
+    intent = SleeveTargetIntent(
+        decision_key="stale-producer-price",
+        target_key="long/main/BUSDT",
+        strategy_id="long-v1",
+        component_id="main",
+        symbol="BUSDT",
+        signed_notional_usdt=20.0,
+        leverage=10.0,
+        reason="stale producer price",
+        metadata={
+            "decision_reference_price": 8.0,
+            # 61s before the book observation, past the 60s bound.
+            "decision_reference_price_ts_ms": 1_800_000_000_000 - 61_000,
+        },
+    )
+
+    target = LongTargetAdapter(producer_price_max_age_ns=60_000_000_000).desired_target(
+        intent, market, _rules()["BUSDT"]
+    )
+
+    assert target.reference_price == 10.0
+    assert target.metadata["sizing_price_source"] == "live_market"
+
+
+def test_producer_pricing_is_off_until_it_is_configured_on() -> None:
+    market = _priced_market()
+    intent = SleeveTargetIntent(
+        decision_key="default-off",
+        target_key="long/main/BUSDT",
+        strategy_id="long-v1",
+        component_id="main",
+        symbol="BUSDT",
+        signed_notional_usdt=20.0,
+        leverage=10.0,
+        reason="default",
+        metadata={
+            "decision_reference_price": 8.0,
+            "decision_reference_price_ts_ms": 1_800_000_000_000 - 500,
+        },
+    )
+
+    target = LongTargetAdapter().desired_target(intent, market, _rules()["BUSDT"])
+
+    assert target.reference_price == 10.0
+    assert target.metadata["sizing_price_source"] == "live_market"
+
+
+def test_an_exit_always_sizes_off_the_live_price() -> None:
+    """A reduction priced from a stale number leaves a residue behind."""
+
+    market = _priced_market()
+    intent = SleeveTargetIntent(
+        decision_key="risk-exit",
+        target_key="risk/main/BUSDT",
+        strategy_id="risk",
+        component_id="main",
+        symbol="BUSDT",
+        signed_notional_usdt=0.0,
+        leverage=10.0,
+        reason="flatten",
+        metadata={
+            "owner_sleeve": "long",
+            "decision_reference_price": 8.0,
+            "decision_reference_price_ts_ms": 1_800_000_000_000 - 500,
+        },
+    )
+
+    set_producer_price_max_age_ns(60_000_000_000)
+    try:
+        target = RiskTargetAdapter().desired_target(intent, market, _rules()["BUSDT"])
+    finally:
+        set_producer_price_max_age_ns(0)
+
+    assert target.reference_price == 10.0
+    assert target.metadata["sizing_price_source"] == "live_market"

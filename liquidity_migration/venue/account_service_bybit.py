@@ -134,8 +134,14 @@ class CapturedBybitMarketProvider:
                 symbol=symbol,
                 context_kind="account_service_decision",
                 reference_key=batch_id,
+                allow_touch_fallback=True,
             )
-            market = book.market_ref(input_key=str(record["record_id"]), source="bybit_raw_l2")
+            market = book.market_ref(
+                input_key=str(record["record_id"]),
+                # The journal says which the decision was priced from; a
+                # ticker touch is one level and must never read as raw L2.
+                source=str(record.get("book_source") or "bybit_raw_l2"),
+            )
             output[symbol] = replace(
                 market,
                 metadata={

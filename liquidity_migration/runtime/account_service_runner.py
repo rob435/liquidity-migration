@@ -95,12 +95,16 @@ from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecution
 from liquidity_migration.venue.entry_quote_manager import EntryQuoteConfig, EntryQuoteManager
 from liquidity_migration.account.market_capture import (
     BybitRawPublicMarketStream,
+    BybitTickerTouchCache,
     MarketCaptureConfig,
     SequenceAwareMarketRecorder,
     operational_market_symbols,
     recorder_callback,
     symbols_from_file,
+    ticker_cache_callback,
+    warm_symbol_set,
 )
+from liquidity_migration.account.strategy_runtime import set_producer_price_max_age_ns
 from liquidity_migration.policy.equity_anchored_envelope import EquityAnchoredEnvelope
 from liquidity_migration.policy.operational_profile import load_operational_profile
 from liquidity_migration.policy.account_loss_guard import (
@@ -302,7 +306,13 @@ def protection_market_refs(
     skipped: dict[str, str] = {}
     bound = max(int(max_book_age_ns), 0)
     for symbol in symbols:
-        book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
+        # A held symbol with no reconstructed book is exactly the case the
+        # software stop must still cover, and the pushed touch prices it under
+        # the same age bound as the book would be.
+        book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(
+            symbol,
+            allow_touch_fallback=True,
+        )
         if book is None:
             skipped[symbol] = "no_book"
             continue
@@ -741,6 +751,48 @@ def main(argv: list[str] | None = None) -> int:
     # subscribed forces a refresh on the next tick regardless of this.
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--no-touch-feed",
+        dest="touch_feed",
+        action="store_false",
+        help=(
+            "Stop subscribing every candidate symbol's top of book. Without it "
+            "a target on a symbol the L2 stream does not already carry waits "
+            "for a book to arrive before it can be priced."
+        ),
+    )
+    parser.add_argument(
+        "--producer-price-max-age-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Size a target from the producer's own decision price when it is at "
+            "most this old, instead of the live market price (0 keeps live "
+            "pricing). Off by default: publish-to-sizing on this fleet is 3.1s "
+            "at the median but 443s at p90, and the carry producer's own price "
+            "is a daily bar close, so a stale price converts notional wrongly "
+            "with no latency left to gain -- every symbol is already priceable."
+        ),
+    )
+    parser.add_argument(
+        "--touch-rescue-seconds",
+        type=float,
+        default=1.0,
+        help=(
+            "Minimum gap between REST tickers reads used to price a queue head "
+            "no socket is carrying yet. One read is a bound; waiting is not."
+        ),
+    )
+    parser.add_argument(
+        "--symbol-warm-seconds",
+        type=float,
+        default=600.0,
+        help=(
+            "How long a symbol keeps its book subscription after its last "
+            "account work clears, so a repeat entry does not wait for a book "
+            "again. 0 drops it the same pass, as the fleet did before."
+        ),
+    )
+    parser.add_argument(
         "--shared-leverage-authority",
         action="store_true",
         help=(
@@ -772,12 +824,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--entry-quote-window-seconds",
         type=float,
-        default=120.0,
+        default=45.0,
         help=(
             "Rest exposure-increasing entries as a limit order at the touch for "
             "up to this long before crossing the spread (0 disables and every "
-            "entry is a market order again). The 120s default is the arm the "
-            "2026-08-03 overnight quote lab measured at a 70%% passive fill rate."
+            "entry is a market order again). Was 120s, from the 2026-08-03 "
+            "overnight quote lab's 70%% passive fill rate. Cut to 45s on the "
+            "live fills: 15 resting entries filled at a median of 1.3s and a "
+            "maximum of 36.6s, so 45s keeps every passive fill that 120s got "
+            "while bounding the tail. Below that costs fills -- 30s would have "
+            "crossed 1 of 15, 15s would have crossed 3 of 15."
         ),
     )
     parser.add_argument(
@@ -937,6 +993,9 @@ def main(argv: list[str] | None = None) -> int:
             realm=realm,
             max_age_seconds=args.max_demo_rule_age_hours * 3600.0,
         )
+    # Intents are rebuilt from the durable inbox, so their sizing adapters read
+    # this process-wide rather than carrying it.
+    set_producer_price_max_age_ns(int(max(args.producer_price_max_age_seconds, 0.0) * 1e9))
     policy = load_risk_policy(args.risk_policy_file)
     # In ``account_equity`` mode the six absolute caps are a fraction of the
     # observed wallet. The envelope owns the rebase discipline; the kernel's
@@ -1014,6 +1073,12 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     private_stream = build_private_stream()
+    # Every candidate symbol's top of book, pushed continuously, so a target
+    # naming a symbol the L2 stream has never carried is priceable at once
+    # instead of waiting for a book. Measured on this host: 509 symbols cost
+    # ~500 frames/s and ~16% of one core, nearly all of it the websocket
+    # library's own frame handling rather than parsing.
+    touch_cache = BybitTickerTouchCache() if args.touch_feed else None
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(
@@ -1021,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
             persist_raw_market=args.persist_raw_market,
         ),
         owner_invocation_id=invocation_id,
+        touch_cache=touch_cache,
     )
     public_stream = BybitRawPublicMarketStream(
         testnet=False,
@@ -1028,8 +1094,20 @@ def main(argv: list[str] | None = None) -> int:
         include_public_trades=args.persist_raw_market,
         on_message=recorder_callback(recorder),
     )
+    touch_stream = (
+        BybitRawPublicMarketStream(
+            testnet=False,
+            topic_kind="tickers",
+            include_public_trades=False,
+            on_message=ticker_cache_callback(touch_cache),
+        )
+        if touch_cache is not None
+        else None
+    )
     recorder.set_required_symbols(live_symbols)
     public_stream.start(live_symbols)
+    if touch_stream is not None:
+        touch_stream.start(symbols)
     markout_observer = PostFillMarkoutObserver(
         kernel=kernel,
         recorder=recorder,
@@ -1140,9 +1218,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     def _recorder_touch(symbol: str) -> tuple[float, float, float, float] | None:
-        """The owner's own reconstructed book: touch with displayed sizes."""
+        """The owner's own reconstructed book: touch with displayed sizes.
 
-        book = recorder.current_book(symbol, depth=1)
+        Falls back to the pushed ticker touch, which carries the same four
+        numbers, rather than paying the REST tickers round trip the quote
+        manager would otherwise make.
+        """
+
+        book = recorder.current_book(symbol, depth=1, allow_touch_fallback=True)
         if book is None or book.sequence_gap or not book.bids or not book.asks:
             return None
         best_bid, best_ask = book.bids[0], book.asks[0]
@@ -1272,6 +1355,12 @@ def main(argv: list[str] | None = None) -> int:
     # last asked for. Their difference forces an immediate resubscribe.
     subscribed_symbols: set[str] = set()
     head_symbols: set[str] = set()
+    # A symbol that goes flat used to be dropped the same pass, so the next
+    # entry on it paid the whole book warmup again. Each symbol that has real
+    # account work keeps its subscription alive for a while after that work
+    # clears.
+    warm_until_monotonic: dict[str, float] = {}
+    last_touch_rescue = float("-inf")
     last_notification_poll = 0.0
     last_capital_refresh = float("-inf")
     last_health_signature: tuple[str, str, bool] | None = None
@@ -1363,6 +1452,12 @@ def main(argv: list[str] | None = None) -> int:
                         "requested symbols lack verified demo rules: %s",
                         missing_rules,
                     )
+                warm_symbol_set(
+                    desired,
+                    warm_until_monotonic=warm_until_monotonic,
+                    now_monotonic=now,
+                    warm_seconds=args.symbol_warm_seconds,
+                )
                 # Warm all queued symbols in parallel; the queue-head gate
                 # below still holds the registered 30s timeout.
                 recorder.set_required_symbols(desired)
@@ -1376,6 +1471,34 @@ def main(argv: list[str] | None = None) -> int:
                 now_monotonic=now,
                 max_market_age_ns=service.max_market_age_ns,
             )
+            # Nothing is carrying this symbol yet -- no reconstructed book and
+            # no pushed touch. One tickers read bounds that at a round trip;
+            # waiting for a subscription to warm has no bound at all.
+            if (
+                touch_cache is not None
+                and not market_readiness.ready
+                and "no_snapshot" in market_readiness.detail
+                and now - last_touch_rescue >= args.touch_rescue_seconds
+            ):
+                last_touch_rescue = now
+                rescued = 0
+                for symbol in market_readiness.symbols:
+                    if touch_cache.latest(symbol) is not None:
+                        continue
+                    try:
+                        rescued += touch_cache.absorb_rest_rows(
+                            private_client.get_tickers(symbol=symbol)
+                        )
+                    except Exception:  # noqa: BLE001 - the gate just keeps waiting
+                        _logger.warning("tickers rescue read failed for %s", symbol)
+                if rescued:
+                    market_readiness = market_warmup_gate.evaluate(
+                        inbox=inbox,
+                        recorder=recorder,
+                        verified_rule_symbols=set(rules),
+                        now_monotonic=now,
+                        max_market_age_ns=service.max_market_age_ns,
+                    )
             requested_symbols_ready = market_readiness.ready
             symbol_health_detail = market_readiness.detail
             head_symbols = {symbol.upper() for symbol in market_readiness.symbols}
@@ -1807,6 +1930,8 @@ def main(argv: list[str] | None = None) -> int:
         position_feed.close()
         execution_consumer.close()
         public_stream.close()
+        if touch_stream is not None:
+            touch_stream.close()
         recorder.close()
         owner_lease.close()
 

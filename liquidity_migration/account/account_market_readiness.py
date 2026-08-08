@@ -140,7 +140,13 @@ class RequestedMarketWarmupGate:
 
         issues: list[str] = []
         for symbol in symbols:
-            book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(symbol)
+            # A symbol with no reconstructed book falls back to its pushed top
+            # of book, which is all the order path reads. Without that, a head
+            # naming a symbol the L2 stream has never carried simply waits.
+            book, observed_wall_ns = recorder.current_book_with_observed_wall_ns(
+                symbol,
+                allow_touch_fallback=True,
+            )
             if book is None:
                 issues.append(f"{symbol}:no_snapshot")
                 continue

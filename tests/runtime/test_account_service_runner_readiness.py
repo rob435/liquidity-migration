@@ -34,7 +34,10 @@ from liquidity_migration.runtime.account_service_runner import (
     require_startup_reconciliation_safe,
 )
 from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
-from liquidity_migration.account.market_capture import operational_market_symbols
+from liquidity_migration.account.market_capture import (
+    operational_market_symbols,
+    warm_symbol_set,
+)
 from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 
 
@@ -48,12 +51,13 @@ class _Recorder:
         self.books = dict(books or {})
         self.observed_wall_ns = observed_wall_ns
 
-    def current_book(self, symbol: str) -> L2BookSnapshot | None:
+    def current_book(self, symbol: str, **_kwargs: object) -> L2BookSnapshot | None:
         return self.books.get(symbol.upper())
 
     def current_book_with_observed_wall_ns(
         self,
         symbol: str,
+        **_kwargs: object,
     ) -> tuple[L2BookSnapshot | None, int]:
         return self.current_book(symbol), self.observed_wall_ns
 
@@ -61,13 +65,14 @@ class _Recorder:
 class _UpdateBetweenClockAndBookReadRecorder(_Recorder):
     """Recreate a WebSocket update overtaking a caller's earlier clock sample."""
 
-    def current_book(self, symbol: str) -> L2BookSnapshot | None:
+    def current_book(self, symbol: str, **_kwargs: object) -> L2BookSnapshot | None:
         self.books[symbol.upper()] = _book(symbol, local_receive_ts_ns=1_001)
         return super().current_book(symbol)
 
     def current_book_with_observed_wall_ns(
         self,
         symbol: str,
+        **_kwargs: object,
     ) -> tuple[L2BookSnapshot | None, int]:
         return self.current_book(symbol), 1_002
 
@@ -414,6 +419,68 @@ def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
         "EUSDT",
         "FUSDT",
     }
+
+
+def test_a_symbol_that_just_went_flat_keeps_its_book_subscription() -> None:
+    warm: dict[str, float] = {}
+    held = warm_symbol_set(
+        {"BTCUSDT", "SOLUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=100.0,
+        warm_seconds=300.0,
+    )
+    assert held == {"BTCUSDT", "SOLUSDT"}
+
+    # SOLUSDT is flat now and no longer required, but an entry a minute later
+    # must not wait for its book again.
+    still_warm = warm_symbol_set(
+        {"BTCUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=160.0,
+        warm_seconds=300.0,
+    )
+
+    assert still_warm == {"BTCUSDT", "SOLUSDT"}
+
+
+def test_a_symbol_untraded_for_the_whole_window_is_dropped() -> None:
+    warm: dict[str, float] = {}
+    warm_symbol_set(
+        {"BTCUSDT", "SOLUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=100.0,
+        warm_seconds=300.0,
+    )
+
+    cooled = warm_symbol_set(
+        {"BTCUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=401.0,
+        warm_seconds=300.0,
+    )
+
+    assert cooled == {"BTCUSDT"}
+    assert warm == {"BTCUSDT": 701.0}
+
+
+def test_a_zero_warm_window_drops_a_flat_symbol_the_same_pass() -> None:
+    warm: dict[str, float] = {}
+    warm_symbol_set(
+        {"BTCUSDT", "SOLUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=100.0,
+        warm_seconds=300.0,
+    )
+
+    unchanged = warm_symbol_set(
+        {"BTCUSDT"},
+        warm_until_monotonic=warm,
+        now_monotonic=110.0,
+        warm_seconds=0.0,
+    )
+
+    assert unchanged == {"BTCUSDT"}
+    assert warm == {}
 
 
 class _CycleService:
@@ -1038,7 +1105,7 @@ def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
     )
 
     class Recorder:
-        def current_book_with_observed_wall_ns(self, symbol: str):
+        def current_book_with_observed_wall_ns(self, symbol: str, **_kwargs: object):
             book = {"BTCUSDT": healthy, "BUSDT": gapped, "TLMUSDT": None}[symbol]
             return book, 1_000
 
@@ -1081,7 +1148,7 @@ def test_protection_market_refs_rejects_a_frozen_book() -> None:
     observed = 1_000_000_000_000 + PROTECTION_MAX_BOOK_AGE_NS + 1
 
     class Recorder:
-        def current_book_with_observed_wall_ns(self, symbol: str):
+        def current_book_with_observed_wall_ns(self, symbol: str, **_kwargs: object):
             if symbol == "BTCUSDT":
                 return fresh, fresh.local_receive_ts_ns + 1_000_000
             return frozen, observed
@@ -1101,7 +1168,7 @@ def test_protection_market_refs_accepts_a_book_inside_the_bound() -> None:
     book = _protection_book("BTCUSDT", 5_000_000_000_000)
 
     class Recorder:
-        def current_book_with_observed_wall_ns(self, symbol: str):
+        def current_book_with_observed_wall_ns(self, symbol: str, **_kwargs: object):
             return book, book.local_receive_ts_ns + PROTECTION_MAX_BOOK_AGE_NS
 
     refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT"])
@@ -1119,7 +1186,7 @@ def test_protection_market_refs_treats_a_backwards_clock_as_unusable() -> None:
     book = _protection_book("BTCUSDT", 5_000_000_000_000)
 
     class Recorder:
-        def current_book_with_observed_wall_ns(self, symbol: str):
+        def current_book_with_observed_wall_ns(self, symbol: str, **_kwargs: object):
             return book, book.local_receive_ts_ns - 1
 
     refs, skipped = protection_market_refs(Recorder(), ["BTCUSDT"])

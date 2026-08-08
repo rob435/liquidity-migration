@@ -14,7 +14,9 @@ from liquidity_migration.account.market_capture import (
     OWNER_CAPTURE_READINESS_FILENAME,
     OWNER_MARKET_READINESS_FILENAME,
     BybitRawPublicMarketStream,
+    BybitTickerTouchCache,
     MarketCaptureConfig,
+    MarketCaptureError,
     SegmentedCaptureStore,
     SequenceAwareMarketRecorder,
     symbols_from_file,
@@ -1355,3 +1357,185 @@ def test_close_flushes_every_segment_even_when_one_descriptor_fails(
     # The sibling segment was still closed rather than left open and unflushed.
     assert healthy.file.closed
     assert store._segments == {}
+
+
+def _ticker(
+    *,
+    symbol: str = "SOLUSDT",
+    bid: str = "180.10",
+    ask: str = "180.12",
+    bid_qty: str = "40",
+    ask_qty: str = "55",
+) -> dict[str, object]:
+    return {
+        "topic": f"tickers.{symbol}",
+        "type": "snapshot",
+        "ts": 1_800_000_000_000,
+        "cs": 90_001,
+        "data": {
+            "symbol": symbol,
+            "bid1Price": bid,
+            "ask1Price": ask,
+            "bid1Size": bid_qty,
+            "ask1Size": ask_qty,
+            "lastPrice": "180.11",
+        },
+    }
+
+
+def test_a_ticker_frame_makes_a_symbol_priceable_without_any_book(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path, config=_config(), clock=clock, touch_cache=cache
+    )
+    cache.on_message(_ticker(), local_receive_ts_ns=4_000)
+
+    # The order path asks for a price; the L2 stream has never carried SOLUSDT.
+    book, observed = recorder.current_book_with_observed_wall_ns(
+        "SOLUSDT", allow_touch_fallback=True
+    )
+    assert book is not None
+    assert not book.sequence_gap
+    assert book.bids[0].price == 180.10
+    assert book.asks[0].price == 180.12
+    assert book.bids[0].qty == 40.0
+    assert observed >= book.local_receive_ts_ns
+
+    market = book.market_ref(input_key="probe")
+    assert market.reference_price == pytest.approx(180.11)
+    assert market.bid_qty == 40.0
+
+
+def test_a_caller_that_needs_real_depth_never_sees_a_ticker_book(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path, config=_config(), clock=clock, touch_cache=cache
+    )
+    cache.on_message(_ticker(), local_receive_ts_ns=4_000)
+
+    # Markout grading and raw capture must not be handed a one-level book.
+    assert recorder.current_book("SOLUSDT") is None
+    assert recorder.current_book_with_observed_wall_ns("SOLUSDT")[0] is None
+    with pytest.raises(MarketCaptureError):
+        recorder.capture_context(
+            symbol="SOLUSDT",
+            context_kind="account_service_decision",
+            reference_key="batch",
+        )
+
+
+def test_a_real_book_always_beats_the_pushed_touch(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path, config=_config(), clock=clock, touch_cache=cache
+    )
+    recorder.on_message(_snapshot(symbol="BUSDT"), local_receive_ts_ns=4_000)
+    cache.on_message(
+        _ticker(symbol="BUSDT", bid="999.0", ask="1000.0"), local_receive_ts_ns=4_500
+    )
+
+    book = recorder.current_book("BUSDT", allow_touch_fallback=True)
+
+    assert book is not None
+    assert book.bids[0].price == 10.0
+    assert len(book.bids) == 2
+
+
+def test_a_decision_priced_from_the_touch_says_so_in_its_capture_record(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path, config=_config(), clock=clock, touch_cache=cache
+    )
+    cache.on_message(_ticker(), local_receive_ts_ns=4_000)
+
+    record, book = recorder.capture_context(
+        symbol="SOLUSDT",
+        context_kind="account_service_decision",
+        reference_key="batch-7",
+        allow_touch_fallback=True,
+    )
+
+    assert record["book_source"] == "bybit_ticker_touch"
+    assert record["symbol"] == "SOLUSDT"
+    assert record["bids"] == [[180.10, 40.0]]
+    assert book.market_ref(
+        input_key=str(record["record_id"]),
+        source=str(record["book_source"]),
+    ).source == "bybit_ticker_touch"
+
+
+def test_a_ticker_delta_without_the_touch_leaves_the_last_one_standing() -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+    cache.on_message(_ticker(), local_receive_ts_ns=4_000)
+
+    # Funding and open-interest deltas carry no bid1/ask1 at all.
+    cache.on_message(
+        {
+            "topic": "tickers.SOLUSDT",
+            "type": "delta",
+            "ts": 1_800_000_001_000,
+            "data": {"symbol": "SOLUSDT", "fundingRate": "0.0001"},
+        },
+        local_receive_ts_ns=4_500,
+    )
+    # A crossed or absent quote is refused rather than trusted.
+    cache.on_message(
+        _ticker(bid="200.0", ask="100.0"), local_receive_ts_ns=4_600
+    )
+
+    touch = cache.latest("SOLUSDT")
+    assert touch is not None
+    assert (touch.bid_price, touch.ask_price) == (180.10, 180.12)
+    assert touch.local_receive_ts_ns == 4_000
+
+
+def test_a_ticker_stream_subscribes_only_the_ticker_topic() -> None:
+    stream = BybitRawPublicMarketStream(
+        topic_kind="tickers",
+        include_public_trades=False,
+        on_message=lambda message: None,
+    )
+
+    assert stream._topics(["solusdt", "BTCUSDT"]) == [
+        "tickers.BTCUSDT",
+        "tickers.SOLUSDT",
+    ]
+
+    orderbook = BybitRawPublicMarketStream(
+        depth=50, include_public_trades=False, on_message=lambda message: None
+    )
+    assert orderbook._topics(["solusdt"]) == ["orderbook.50.SOLUSDT"]
+    with pytest.raises(ValueError, match="topic_kind"):
+        BybitRawPublicMarketStream(topic_kind="trades", on_message=lambda message: None)
+
+
+def test_a_rest_tickers_read_prices_a_symbol_no_socket_is_carrying() -> None:
+    clock = VirtualClock(current_wall_ns=5_000, current_monotonic_ns=0)
+    cache = BybitTickerTouchCache(clock=clock)
+
+    landed = cache.absorb_rest_rows(
+        [
+            {
+                "symbol": "SOLUSDT",
+                "bid1Price": "180.10",
+                "ask1Price": "180.12",
+                "bid1Size": "40",
+                "ask1Size": "55",
+            },
+            {"symbol": "JUNKUSDT", "bid1Price": "0", "ask1Price": "0"},
+            {"bid1Price": "1", "ask1Price": "2"},
+        ]
+    )
+
+    assert landed == 1
+    touch = cache.latest("SOLUSDT")
+    assert touch is not None
+    assert (touch.bid_price, touch.ask_price, touch.bid_qty) == (180.10, 180.12, 40.0)
+    assert cache.latest("JUNKUSDT") is None

@@ -52,10 +52,65 @@ class TargetAdapter(Protocol):
     ) -> DesiredTarget: ...
 
 
+PRODUCER_PRICE_METADATA_KEY = "decision_reference_price"
+PRODUCER_PRICE_TS_METADATA_KEY = "decision_reference_price_ts_ms"
+
+# Process-wide because intents are rebuilt from the durable inbox, so their
+# adapters cannot carry runtime configuration. The owner sets it once at start.
+_producer_price_max_age_ns = 0
+
+
+def set_producer_price_max_age_ns(value: int) -> None:
+    """Enable sizing from the producer's own decision price up to ``value`` old."""
+
+    global _producer_price_max_age_ns
+    if int(value) < 0:
+        raise ValueError("producer price max age cannot be negative")
+    _producer_price_max_age_ns = int(value)
+
+
+def configured_producer_price_max_age_ns() -> int:
+    return _producer_price_max_age_ns
+
+
+def producer_reference_price(
+    intent: SleeveTargetIntent,
+    market: MarketInputRef,
+    *,
+    max_age_ns: int,
+) -> float | None:
+    """The producer's own decision price, when it is inside ``max_age_ns``.
+
+    Sizing from it removes the live-price dependency, at the cost of converting
+    notional with a price that is by definition older than the market. Measured
+    on this fleet, publish-to-sizing is 3.1s at the median but 443s at p90, so
+    the age bound is what keeps the notional error bounded rather than open.
+    """
+
+    if max_age_ns <= 0:
+        return None
+    raw = intent.metadata.get(PRODUCER_PRICE_METADATA_KEY)
+    raw_ts = intent.metadata.get(PRODUCER_PRICE_TS_METADATA_KEY)
+    if raw is None or raw_ts is None:
+        return None
+    try:
+        price = float(raw)
+        price_ts_ns = int(raw_ts) * 1_000_000
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price <= 0.0 or price_ts_ns <= 0:
+        return None
+    observed_ns = int(market.local_receive_ts_ns)
+    if observed_ns <= 0 or price_ts_ns > observed_ns:
+        return None
+    return price if observed_ns - price_ts_ns <= max_age_ns else None
+
+
 @dataclass(frozen=True, slots=True)
 class _SignedNotionalAdapter:
     sleeve: str
     allowed_sign: int | None
+    producer_price_max_age_ns: int = 0
 
     def desired_target(
         self,
@@ -65,7 +120,12 @@ class _SignedNotionalAdapter:
     ) -> DesiredTarget:
         notional = float(intent.signed_notional_usdt)
         leverage = float(intent.leverage)
-        price = float(market.reference_price)
+        producer_price = producer_reference_price(
+            intent,
+            market,
+            max_age_ns=self.producer_price_max_age_ns,
+        )
+        price = float(producer_price if producer_price is not None else market.reference_price)
         if not all(math.isfinite(value) for value in (notional, leverage, price)):
             raise ValueError("target notional, leverage, and market price must be finite")
         if leverage <= 0.0 or price <= 0.0:
@@ -101,34 +161,73 @@ class _SignedNotionalAdapter:
                 "raw_signed_qty": raw_qty,
                 "quantity_rounding": "toward_zero_to_venue_step",
                 "market_input_key": market.input_key,
+                "sizing_price_source": (
+                    "producer_decision" if producer_price is not None else "live_market"
+                ),
             },
         )
 
 
 class LongTargetAdapter(_SignedNotionalAdapter):
-    def __init__(self) -> None:
-        super().__init__(sleeve="long", allowed_sign=1)
+    def __init__(self, *, producer_price_max_age_ns: int | None = None) -> None:
+        super().__init__(
+            sleeve="long",
+            allowed_sign=1,
+            producer_price_max_age_ns=(
+                configured_producer_price_max_age_ns()
+                if producer_price_max_age_ns is None
+                else producer_price_max_age_ns
+            ),
+        )
 
 
 class ContinuousTargetAdapter(_SignedNotionalAdapter):
-    def __init__(self) -> None:
-        super().__init__(sleeve="continuous", allowed_sign=-1)
+    def __init__(self, *, producer_price_max_age_ns: int | None = None) -> None:
+        super().__init__(
+            sleeve="continuous",
+            allowed_sign=-1,
+            producer_price_max_age_ns=(
+                configured_producer_price_max_age_ns()
+                if producer_price_max_age_ns is None
+                else producer_price_max_age_ns
+            ),
+        )
 
 
 class CarryTargetAdapter(_SignedNotionalAdapter):
     """Long-only funding-carry sleeve (registered config lane2_carry_hold_v4)."""
 
-    def __init__(self) -> None:
-        super().__init__(sleeve="carry", allowed_sign=1)
+    def __init__(self, *, producer_price_max_age_ns: int | None = None) -> None:
+        super().__init__(
+            sleeve="carry",
+            allowed_sign=1,
+            producer_price_max_age_ns=(
+                configured_producer_price_max_age_ns()
+                if producer_price_max_age_ns is None
+                else producer_price_max_age_ns
+            ),
+        )
 
 
 class HedgeTargetAdapter(_SignedNotionalAdapter):
-    def __init__(self) -> None:
-        super().__init__(sleeve="hedge", allowed_sign=None)
+    def __init__(self, *, producer_price_max_age_ns: int | None = None) -> None:
+        super().__init__(
+            sleeve="hedge",
+            allowed_sign=None,
+            producer_price_max_age_ns=(
+                configured_producer_price_max_age_ns()
+                if producer_price_max_age_ns is None
+                else producer_price_max_age_ns
+            ),
+        )
 
 
 class RiskTargetAdapter(_SignedNotionalAdapter):
-    """Risk exits express a replacement target, commonly zero; never an order side."""
+    """Risk exits express a replacement target, commonly zero; never an order side.
+
+    Exits keep sizing off the live price whatever the sleeves do: a reduction
+    priced from a stale number can leave a residue instead of going flat.
+    """
 
     def __init__(self) -> None:
         super().__init__(sleeve="risk", allowed_sign=None)
