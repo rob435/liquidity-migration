@@ -16,6 +16,59 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — A symbol no longer has to have a book before it can be
+  priced.** Commit `a2db3c1`, deployed 22:26 UTC, both realms.
+  - **What the order path actually reads is the top of book** — reference
+    price, bid, ask, and the two displayed sizes. It was waiting for a full
+    depth-50 snapshot to arrive first (~200 ms, up to 3 s). All 509 candidate
+    symbols now carry a pushed ticker, so a target on a symbol the L2 stream
+    has never carried is priceable at once. **Proved on the live demo owner:
+    an entry on AVAXUSDT, never traded before, was priced
+    `source=bybit_ticker_touch` with no reconstructed book present at all.**
+  - **A ticker touch is a price, not a book, and never pretends otherwise.**
+    Callers opt in per read; markout grading and raw capture still refuse
+    anything but real L2; a decision priced from the touch records
+    `book_source=bybit_ticker_touch`, so the journal never implies depth that
+    was never observed.
+  - **Measured cost, on this 2-core host: ~500 frames/s, 90 KB/s, and 16% of
+    one core per owner.** Nearly all of that is the websocket library's own
+    frame handling (12.8% with a no-op handler), not parsing — and 98% of
+    ticker frames carry the touch, so filtering before parsing saves nothing.
+    The owner loop went **69 ms → ~80 ms** per iteration and load ~1.4 → ~1.8.
+    `--no-touch-feed` turns it off in one word.
+  - **A symbol keeps its subscription for 10 minutes after its work clears**
+    (`--symbol-warm-seconds`), so a repeat entry never re-warms; and a queue
+    head no socket is carrying yet is priced by one REST tickers read rather
+    than waiting (`--touch-rescue-seconds`).
+  - **Entry rest window 120 s → 45 s.** 15 live resting entries filled at a
+    median of 1.28 s and a maximum of 36.6 s (60% as maker), so 45 s keeps
+    every passive fill 120 s got while bounding the tail. Going shorter costs
+    fills: 30 s would have crossed 1 of 15, 15 s would have crossed 3 of 15.
+  - **Two measurements that stopped changes rather than causing them.**
+    Subscribed depth stays at 50: `docs/architecture.md:605` and
+    `docs/research/carry_hold.md:300` both walk the visible depth-50 decision
+    book for `book_walk_shortfall_bps`, the only measured impact evidence in
+    the repo. And **the venue floor is geography** — TCP connect to
+    `api.bybit.com` is 7.2 ms and the TLS handshake 18.1 ms, but a full request
+    is 187.6 ms, so ~180 ms of every round trip is the Frankfurt CloudFront
+    edge proxying to Bybit's Asian origin. `api.bytick.com` (193 ms) and
+    `api.byhkbit.com` (206 ms) are the same edges. No code change reaches it;
+    only moving the host near the origin does.
+  - **Sizing from the producer's own decision price is built but off**
+    (`--producer-price-max-age-seconds`, default 0). Producers publish a
+    notional with no price at all, the carry producer's own price is a daily
+    bar close, and publish-to-sizing is 3.1 s at the median but **443 s at
+    p90** — so a stale price would misconvert notional to buy latency the
+    ticker feed already removed. Exits always size off the live price.
+  - **Incident, self-inflicted and cleared.** The latency probe left 0.1
+    AVAXUSDT (~$0.65) — under the venue's 5.10 USDT minimum notional, so the
+    kernel correctly refused to order against it, and protection blocked the
+    demo owner on a position with no component target. The owner then refused
+    the lift that would have taken it back over the minimum, which is the
+    deadlock. Cleared by stopping the demo owner, taking its single-writer
+    lease, and placing one reduce-only close. Mainnet was healthy throughout.
+    **A probe that opens exposure must close it in one order, not two.**
+
 - **2026-08-08 — Owner stops hand-trading; the entry path loses its two
   waits. Entry ~1.0–1.2 s → ~0.76–0.82 s, exit ~250–370 ms.** Commit
   `960c17c`, measured with the same demo probe as the entry below.

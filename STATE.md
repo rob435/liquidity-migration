@@ -15,8 +15,31 @@ match; never append history to this file.
   on/active/enabled, receipt `staged-ok commit=05f34c7 profile=operational`,
   `verify-ok … mainnet=armed`. Zero error-level lines on the funded owner since
   restart.
-- **The funded owner loop runs at 69 ms per iteration (14.56 Hz), measured, at
-  8.2% of one core.** It was 284 ms (3.52 Hz) at 6.2%. Venue position truth is
+- **No symbol waits for a book to be priced.** All 509 candidate symbols carry
+  a pushed top of book (`tickers`), which is exactly what the order path reads;
+  the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a
+  first-ever entry on AVAXUSDT was priced `source=bybit_ticker_touch` with no
+  book present. It costs ~500 frames/s and **16% of one core per owner** —
+  nearly all of it the websocket library's frame handling, not parsing — which
+  moved the owner loop from 69 ms to **~80 ms** per iteration and host load from
+  ~1.4 to ~1.8 on 2 cores. `--no-touch-feed` turns it off. A traded symbol also
+  keeps its subscription for 10 minutes after its work clears, and a head no
+  socket is carrying yet is priced by one REST read rather than waiting.
+- **A ticker touch is a price, not a book.** Callers opt in per read; markout
+  grading and raw capture still refuse anything but real L2; a decision priced
+  from it records `book_source=bybit_ticker_touch`. Subscribed depth stays at
+  50 because `book_walk_shortfall_bps` walks the visible depth-50 decision book
+  — the only measured impact evidence there is.
+- **Entries rest for 45 s, not 120 s.** 15 live resting entries filled at a
+  median of 1.28 s and a maximum of 36.6 s, so 45 s keeps every passive fill
+  120 s got and bounds the tail. 30 s would have crossed 1 of 15; 15 s, 3 of 15.
+- **Sizing from the producer's decision price is built but off**
+  (`--producer-price-max-age-seconds`, default 0). Producers publish a notional
+  with no price, carry's own price is a daily bar close, and publish-to-sizing
+  is 3.1 s median but **443 s at p90**. Exits always size off the live price.
+- **The funded owner loop ran at 69 ms per iteration (14.56 Hz), measured, at
+  8.2% of one core** before the ticker feed above; it is ~80 ms now. It was
+  284 ms (3.52 Hz) at 6.2%. Venue position truth is
   0.23 s old at the health write, down from 1.37 s. A steady-state reconcile pass now
   makes **no REST call at all**: `get_positions` and the two `get_open_orders`
   ownership queries are served by a background read-only feed (250 ms and 2 s
@@ -40,6 +63,13 @@ match; never append history to this file.
   the touch, so on a real book time-to-fill is queue economics; intent → order
   live at the venue is ≈400 ms fresh, ≈245 ms for an exit, against a ~190 ms
   single-round-trip floor.
+- **That ~190 ms floor is geography, and it is now priced.** TCP connect to
+  `api.bybit.com` is 7.2 ms and the TLS handshake 18.1 ms, but a full request is
+  187.6 ms — so ~180 ms of every round trip is the Frankfurt CloudFront edge
+  proxying to Bybit's Asian origin. `api.bytick.com` (193 ms) and
+  `api.byhkbit.com` (206 ms) are the same edges and no better. No code change
+  reaches it; a host near the origin is the only lever, and it is the largest
+  single win left. Owner decision.
 - **The account state copy no longer scales with position count.** Positions
   are shared and privatized through `position_for_write`, exactly as orders
   are; at 301 positions the whole copy is 0.002 ms against 0.295 ms before.
