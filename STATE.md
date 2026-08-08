@@ -19,12 +19,17 @@ match; never append history to this file.
   a pushed top of book (`tickers`), which is exactly what the order path reads;
   the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a
   first-ever entry on AVAXUSDT was priced `source=bybit_ticker_touch` with no
-  book present. It costs ~500 frames/s and **16% of one core per owner** —
-  nearly all of it the websocket library's frame handling, not parsing — which
-  moved the owner loop from 69 ms to **~80 ms** per iteration and host load from
-  ~1.4 to ~1.8 on 2 cores. `--no-touch-feed` turns it off. A traded symbol also
-  keeps its subscription for 10 minutes after its work clears, and a head no
-  socket is carrying yet is priced by one REST read rather than waiting.
+  book present. **A/B on the same host, symbol and probe, 15 minutes apart:
+  with the feed off a cold entry waited 1002 ms to be commanded; with it on,
+  216 ms.** Warm entries are unchanged either way (~830–880 ms) — they never
+  had a book problem. It costs ~500 frames/s and **~14 points of one core per
+  owner** (29.8% vs 15.5%), nearly all of it the websocket library's frame
+  handling rather than parsing. It does **not** slow the owner loop: 76 ms on
+  versus 77 ms off, because the loop is sleep-bound and the feed runs on its
+  own thread. `ACCOUNT_TOUCH_FEED=0` turns it off with a unit restart. A traded
+  symbol also keeps its subscription for 10 minutes after its work clears, and
+  a head no socket is carrying yet is priced by one REST read rather than
+  waiting.
 - **A ticker touch is a price, not a book.** Callers opt in per read; markout
   grading and raw capture still refuse anything but real L2; a decision priced
   from it records `book_source=bybit_ticker_touch`. Subscribed depth stays at
@@ -37,9 +42,10 @@ match; never append history to this file.
   (`--producer-price-max-age-seconds`, default 0). Producers publish a notional
   with no price, carry's own price is a daily bar close, and publish-to-sizing
   is 3.1 s median but **443 s at p90**. Exits always size off the live price.
-- **The funded owner loop ran at 69 ms per iteration (14.56 Hz), measured, at
-  8.2% of one core** before the ticker feed above; it is ~80 ms now. It was
-  284 ms (3.52 Hz) at 6.2%. Venue position truth is
+- **The funded owner loop runs at ~76 ms per iteration, measured**, and was
+  69 ms when the journal was smaller — the ticker feed is not the cause (76 ms
+  with it on, 77 ms with it off). It was 284 ms (3.52 Hz) at 6.2%. Venue
+  position truth is
   0.23 s old at the health write, down from 1.37 s. A steady-state reconcile pass now
   makes **no REST call at all**: `get_positions` and the two `get_open_orders`
   ownership queries are served by a background read-only feed (250 ms and 2 s

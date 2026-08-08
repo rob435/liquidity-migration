@@ -30,12 +30,21 @@ edit STATE.md to match.
     anything but real L2; a decision priced from the touch records
     `book_source=bybit_ticker_touch`, so the journal never implies depth that
     was never observed.
-  - **Measured cost, on this 2-core host: ~500 frames/s, 90 KB/s, and 16% of
-    one core per owner.** Nearly all of that is the websocket library's own
-    frame handling (12.8% with a no-op handler), not parsing — and 98% of
-    ticker frames carry the touch, so filtering before parsing saves nothing.
-    The owner loop went **69 ms → ~80 ms** per iteration and load ~1.4 → ~1.8.
-    `--no-touch-feed` turns it off in one word.
+  - **A/B, same host, same symbol, same probe, 15 minutes apart.** Feed off, a
+    cold SOLUSDT entry waited **1002 ms** to be commanded and took 1783 ms end
+    to end; feed on, **216 ms** and 1026 ms. Warm entries are the same either
+    way (821–881 ms) — they never had a book problem. Exits: 459 ms median off,
+    286 ms on.
+  - **Measured cost: ~500 frames/s, 90 KB/s, and ~14 points of one core per
+    owner** (29.8% with, 15.5% without). Nearly all of that is the websocket
+    library's own frame handling (12.8% with a no-op handler), not parsing —
+    and 98% of ticker frames carry the touch, so filtering before parsing saves
+    nothing. **It does not slow the owner loop:** 76 ms with it on, 77 ms with
+    it off, because the loop is sleep-bound and the feed runs on its own
+    thread. An earlier note in this entry claimed the loop went 69 → 80 ms
+    because of the feed; the A/B disproves that, and the drift from 69 ms is
+    the journal growing. `ACCOUNT_TOUCH_FEED=0` turns the feed off with a unit
+    restart.
   - **A symbol keeps its subscription for 10 minutes after its work clears**
     (`--symbol-warm-seconds`), so a repeat entry never re-warms; and a queue
     head no socket is carrying yet is priced by one REST tickers read rather
