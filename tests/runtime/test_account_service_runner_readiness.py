@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +34,7 @@ from liquidity_migration.runtime.account_service_runner import (
     account_has_open_exposure,
     degrade_or_raise,
     require_startup_reconciliation_safe,
+    sleep_until_intent_or,
 )
 from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
 from liquidity_migration.account.market_capture import (
@@ -1388,3 +1391,43 @@ def test_a_faster_reconcile_cadence_does_not_tighten_the_reduction_gate() -> Non
     assert reconcile_health_max_age_ns(0.05) == RECONCILE_HEALTH_MAX_AGE_FLOOR_NS
     # A slower cadence still widens it, exactly as before.
     assert reconcile_health_max_age_ns(10.0) == 20 * 1_000_000_000
+
+
+def test_the_owner_stops_sleeping_the_moment_an_intent_lands(tmp_path: Path) -> None:
+    pending = tmp_path / "pending"
+    pending.mkdir()
+
+    def land() -> None:
+        time.sleep(0.05)
+        (pending / "request.json").write_text("{}", encoding="utf-8")
+
+    worker = threading.Thread(target=land)
+    started = time.monotonic()
+    worker.start()
+    woke_early = sleep_until_intent_or(2.0, inbox_pending=pending, slice_seconds=0.002)
+    elapsed = time.monotonic() - started
+    worker.join()
+
+    assert woke_early
+    assert elapsed < 1.0, f"slept {elapsed:.2f}s through an arrival"
+
+
+def test_a_quiet_inbox_still_sleeps_the_whole_interval(tmp_path: Path) -> None:
+    pending = tmp_path / "pending"
+    pending.mkdir()
+
+    started = time.monotonic()
+    woke_early = sleep_until_intent_or(0.05, inbox_pending=pending, slice_seconds=0.002)
+    elapsed = time.monotonic() - started
+
+    assert not woke_early
+    assert elapsed >= 0.045
+
+
+def test_a_missing_inbox_directory_still_sleeps_rather_than_spinning(tmp_path: Path) -> None:
+    started = time.monotonic()
+    woke_early = sleep_until_intent_or(0.05, inbox_pending=tmp_path / "absent")
+    elapsed = time.monotonic() - started
+
+    assert not woke_early
+    assert elapsed >= 0.045

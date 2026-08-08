@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -277,6 +278,38 @@ def degrade_or_raise(
 #: only delays a stop decision the venue-native stop still backstops. Sits above
 #: ordinary reconnect jitter and well below the scale of a real outage.
 PROTECTION_MAX_BOOK_AGE_NS = 15 * 1_000_000_000
+
+
+def sleep_until_intent_or(seconds: float, *, inbox_pending: Path, slice_seconds: float = 0.004) -> bool:
+    """Sleep the idle interval, but return the moment a new intent lands.
+
+    The owner used to sleep a flat interval between passes, so an intent that
+    arrived just after a pass waited out the whole of it before anything even
+    looked. That is pure latency on the order path and it costs nothing to
+    remove: a new request is a new file in ``pending``, which moves the
+    directory's mtime, and one ``stat`` every few milliseconds is far cheaper
+    than shortening the interval for every pass.
+
+    Returns True when it woke early for an arrival.
+    """
+
+    deadline = time.monotonic() + max(seconds, 0.0)
+    try:
+        baseline = os.stat(inbox_pending).st_mtime_ns
+    except OSError:
+        # No directory to watch: keep the plain sleep rather than spin.
+        time.sleep(max(seconds, 0.0))
+        return False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        time.sleep(min(slice_seconds, remaining))
+        try:
+            if os.stat(inbox_pending).st_mtime_ns != baseline:
+                return True
+        except OSError:
+            return False
 
 
 def protection_market_refs(
@@ -1923,7 +1956,10 @@ def main(argv: list[str] | None = None) -> int:
                 # never evaluate. Every other cadence here is stamped the same
                 # way, after its work.
                 last_notification_poll = time.monotonic()
-            time.sleep(max(args.idle_seconds, 0.01))
+            sleep_until_intent_or(
+                max(args.idle_seconds, 0.01),
+                inbox_pending=inbox.root / "pending",
+            )
     except KeyboardInterrupt:
         return 0
     finally:
