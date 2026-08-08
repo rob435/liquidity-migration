@@ -151,6 +151,8 @@ class VenuePositionFeed:
         "_clock",
         "_position_interval_s",
         "_order_interval_s",
+        "_wallet_interval_s",
+        "_wallet_cache",
         "_positions",
         "_orders",
         "_lock",
@@ -166,12 +168,22 @@ class VenuePositionFeed:
         clock: Clock,
         interval_seconds: float,
         order_interval_seconds: float,
+        wallet_interval_seconds: float = 0.0,
+        wallet_cache: Any | None = None,
     ) -> None:
         self._client = client
         self._settle_coin = settle_coin
         self._clock = clock
         self._position_interval_s = max(float(interval_seconds), 0.05)
         self._order_interval_s = max(float(order_interval_seconds), 0.05)
+        # Bybit's wallet topic pushes only when the balance CHANGES, so on a
+        # quiet book the pushed row ages out of its freshness window and every
+        # batch pays a blocking get_wallet_balance instead -- measured at a
+        # pinned ~195 ms inside intent-durable-to-order-commanded. Refreshing
+        # here makes the cached equity *fresher* than the window it replaces,
+        # and off the order path entirely.
+        self._wallet_interval_s = max(float(wallet_interval_seconds), 0.0)
+        self._wallet_cache = wallet_cache
         self._positions: tuple[tuple[dict[str, Any], ...], int] | None = None
         self._orders: tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], int] | None = None
         self._lock = threading.Lock()
@@ -218,14 +230,27 @@ class VenuePositionFeed:
         with self._lock:
             self._orders = (tuple(all_kinds), tuple(conditional), observed_ns)
 
+    def _read_wallet(self) -> None:
+        cache = self._wallet_cache
+        if cache is None:
+            return
+        result = self._client.get_wallet_balance(account_type="UNIFIED", coin="USDT")
+        rows = result.get("list") if isinstance(result, Mapping) else None
+        if isinstance(rows, list) and rows and isinstance(rows[0], Mapping):
+            cache.absorb_account_row(rows[0])
+
     def _run(self) -> None:
         next_positions = 0.0
         next_orders = 0.0
+        next_wallet = 0.0
+        wallet_enabled = self._wallet_cache is not None and self._wallet_interval_s > 0.0
         while not self._stop.is_set():
             now = time.monotonic()
             due = (
                 ("positions", self._read_positions)
                 if now >= next_positions
+                else ("wallet", self._read_wallet)
+                if wallet_enabled and now >= next_wallet
                 else ("open orders", self._read_open_orders)
                 if now >= next_orders
                 else None
@@ -244,6 +269,8 @@ class VenuePositionFeed:
             # instead of queueing reads back to back.
             if label == "positions":
                 next_positions = time.monotonic() + self._position_interval_s
+            elif label == "wallet":
+                next_wallet = time.monotonic() + self._wallet_interval_s
             else:
                 next_orders = time.monotonic() + self._order_interval_s
 

@@ -772,6 +772,19 @@ def main(argv: list[str] | None = None) -> int:
         help="How often the background thread refreshes venue position truth.",
     )
     parser.add_argument(
+        "--wallet-feed-seconds",
+        type=float,
+        default=1.0,
+        help=(
+            "How often the background thread refreshes the account wallet. "
+            "Bybit's wallet topic pushes only on a balance change, so on a "
+            "quiet book the pushed row ages out and every batch paid a "
+            "blocking get_wallet_balance -- a pinned ~195 ms on the order "
+            "path. 0 restores that. This makes the cached equity fresher "
+            "than the 5s window it feeds, not staler."
+        ),
+    )
+    parser.add_argument(
         "--order-feed-seconds",
         type=float,
         default=2.0,
@@ -1231,6 +1244,8 @@ def main(argv: list[str] | None = None) -> int:
         clock=reconciler.clock,
         interval_seconds=args.position_feed_seconds,
         order_interval_seconds=args.order_feed_seconds,
+        wallet_interval_seconds=args.wallet_feed_seconds,
+        wallet_cache=wallet_cache,
     )
     position_feed.start()
     reconciler.position_feed = position_feed

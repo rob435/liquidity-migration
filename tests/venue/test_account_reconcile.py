@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -19,8 +20,9 @@ from liquidity_migration.venue.account_reconcile import (
     VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
     AccountReconciliationStaleError,
     BybitAccountReconciler,
+    VenuePositionFeed,
 )
-from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.core.deterministic_runtime import SystemClock, VirtualClock
 from liquidity_migration.venue.venue_protection import BybitNativeProtectionManager
 
 
@@ -1603,3 +1605,65 @@ def test_a_quiet_pass_classifies_ownership_without_the_two_open_order_reads(
 
     assert client.order_reads == 2
     assert second.healthy
+
+
+class _WalletCountingClient(_CountingFlatClient):
+    """Counts wallet reads alongside the position/order reads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wallet_reads = 0
+
+    def get_wallet_balance(self, **_kwargs: object) -> dict[str, object]:
+        self.wallet_reads += 1
+        return {"list": [{"accountType": "UNIFIED", "totalEquity": "1000", "coin": []}]}
+
+
+class _RecordingWalletCache:
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+
+    def absorb_account_row(self, row) -> None:  # type: ignore[no-untyped-def]
+        self.rows.append(dict(row))
+
+
+def test_the_warm_feed_keeps_the_wallet_fresh_off_the_order_path() -> None:
+    client = _WalletCountingClient()
+    cache = _RecordingWalletCache()
+    feed = VenuePositionFeed(
+        client=client,
+        settle_coin="USDT",
+        clock=SystemClock(),
+        interval_seconds=0.05,
+        order_interval_seconds=5.0,
+        wallet_interval_seconds=0.05,
+        wallet_cache=cache,
+    )
+    feed.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and len(cache.rows) < 2:
+            time.sleep(0.01)
+    finally:
+        feed.close()
+
+    assert client.wallet_reads >= 2
+    assert cache.rows and cache.rows[0]["accountType"] == "UNIFIED"
+
+
+def test_no_wallet_cache_means_no_wallet_reads_at_all() -> None:
+    client = _WalletCountingClient()
+    feed = VenuePositionFeed(
+        client=client,
+        settle_coin="USDT",
+        clock=SystemClock(),
+        interval_seconds=0.05,
+        order_interval_seconds=5.0,
+    )
+    feed.start()
+    try:
+        time.sleep(0.3)
+    finally:
+        feed.close()
+
+    assert client.wallet_reads == 0

@@ -205,6 +205,19 @@ class BybitWalletStreamCache:
         except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
             _logger_account.exception("private wallet frame could not be absorbed")
 
+    def absorb_account_row(self, row: Mapping[str, Any]) -> None:
+        """Store a UNIFIED row read some other way, e.g. the warm REST feed."""
+
+        if not isinstance(row, Mapping):
+            return
+        if str(row.get("accountType") or "UNIFIED").upper() != "UNIFIED":
+            return
+        observed = self.clock.wall_time_ns()
+        with self._lock:
+            self._account = dict(row)
+            self._observed_ns = observed
+            self._updates += 1
+
     @property
     def updates(self) -> int:
         with self._lock:
