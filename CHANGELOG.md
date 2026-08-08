@@ -45,6 +45,24 @@ edit STATE.md to match.
   wedged, so `ops.sh wedged-command resolve` — the remedy the code comment
   names — has nothing to act on. Owner's call.
 
+  **Verifying the deploy found a real one, fixed but deliberately NOT
+  redeployed.** The startup log rebases the envelope `2,500.00 -> 359.96` about
+  ten seconds after the process starts. That 2,500 is the declared capital
+  reference, and until the rebase lands the six absolute caps are ratios of it
+  — a ~7x envelope against an observed 355 USDT. The rebase lives in the
+  health-publish block (`account_service_runner.py:1479`), which runs *after*
+  `run_ready_request_or_converge` (:1376) in the same first iteration, so a
+  request already sitting in the inbox across a restart could be admitted
+  against the declared reference at exactly the moment the queue drains. The
+  bootstrap wallet is already read one line before the loop (:1218) and was
+  simply going unused; the envelope is now anchored on it there. Verified by
+  source ordering, not by a test — the loop has no seam to drive without
+  building a harness, and a source-text ordering assertion is the trap that
+  already let one broken invariant pass. **Not deployed:** the window only
+  opens during owner startup, the running owner is past it and correctly
+  anchored, so a restart today would buy nothing that the next restart does not
+  get for free.
+
 - **2026-08-08 (third pass) — Seven agents, and the sharpest one was pointed at
   the previous two hours of my own work.** Four adversarial/audit agents reading
   and four compaction agents editing disjoint directories. Net **−313 source

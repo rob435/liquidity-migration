@@ -1216,6 +1216,19 @@ def main(argv: list[str] | None = None) -> int:
     last_request_failure_signature = ""
     latest_reconcile_report = reconciler.last_report
     last_capital_snapshot = snapshot_provider.current(batch_id="owner-health/bootstrap")
+    # Anchor the envelope on the bootstrap wallet BEFORE the first request is
+    # served. The loop rebases inside the health block, which runs after
+    # ``run_ready_request_or_converge`` — so on iteration one the caps were
+    # still the declared reference. On the funded account that is 2,500 against
+    # an observed 355 USDT: a ~7x envelope for a request queued across a
+    # restart, at exactly the moment the queue drains. The equity is already
+    # read on the line above; this only stops it going unused.
+    if envelope is not None and envelope.observe_equity(last_capital_snapshot.equity_usdt) is not None:
+        service.risk_policy = envelope.policy()
+        policy = service.risk_policy
+        loss_guard.max_daily_loss_usdt = (
+            policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
+        )
     envelope_rebase_detail = ""
     # The component set the loss-ceiling flatten last asked to close. Not a
     # latch: it only suppresses re-publishing an unchanged plan.
