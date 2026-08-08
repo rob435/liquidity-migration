@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -118,25 +119,44 @@ class AccountReconciliationReport:
 
 
 class VenuePositionFeed:
-    """The newest ``get_positions`` read, kept warm off the caller's thread.
+    """The reads every reconcile pass makes, kept warm off the caller's thread.
 
-    Every other REST read in a reconcile pass is interval-gated. This one is
-    not: it runs on every pass, and at ~175 ms against a Frankfurt edge it is
-    the single largest thing standing between the owner loop and its 100 ms
-    tick. The loop was spending that time blocked, so software stops,
-    take-profits and quote repricing all waited on a wallet read.
+    Three REST reads ran on every pass and nothing gated them: one
+    ``get_positions``, and the two ``get_open_orders`` queries behind
+    order-ownership inspection. At ~175 ms each against a Frankfurt edge that
+    is over half a second of the owner loop, per pass, blocked -- and
+    everything it starves is time-critical: software stops, take-profits,
+    quote repricing. A live profile caught the loop sitting in exactly that
+    call.
 
-    Moving the read here makes position truth *fresher*, not staler: the feed
-    refreshes on its own interval rather than the reconcile cadence. The thread
-    only reads the venue -- it touches no kernel state, so it adds no second
-    mutator.
+    Moving them here makes venue truth *fresher*, not staler: the feed
+    refreshes on its own intervals rather than on the reconcile cadence. The
+    thread only reads the venue -- it touches no kernel state, so it adds no
+    second mutator.
 
-    When the feed has nothing newer than the last published report, the caller
-    reads synchronously instead. A dead or lagging feed therefore degrades to
-    exactly the behaviour that shipped before it existed.
+    The two are polled at different rates because they are worth different
+    things. Position truth is what the reduction gate ages, so it is polled
+    hard. Order ownership only decides whether a hand-placed order gets logged
+    and journaled -- since 2026-08-07 it blocks nothing -- so it keeps roughly
+    the cadence reconciliation itself used to run at.
+
+    When the feed has nothing usable, the caller reads synchronously instead. A
+    dead or lagging feed therefore degrades to exactly the behaviour that
+    shipped before it existed.
     """
 
-    __slots__ = ("_client", "_settle_coin", "_clock", "_interval_s", "_latest", "_lock", "_stop", "_thread")
+    __slots__ = (
+        "_client",
+        "_settle_coin",
+        "_clock",
+        "_position_interval_s",
+        "_order_interval_s",
+        "_positions",
+        "_orders",
+        "_lock",
+        "_stop",
+        "_thread",
+    )
 
     def __init__(
         self,
@@ -145,12 +165,15 @@ class VenuePositionFeed:
         settle_coin: str,
         clock: Clock,
         interval_seconds: float,
+        order_interval_seconds: float,
     ) -> None:
         self._client = client
         self._settle_coin = settle_coin
         self._clock = clock
-        self._interval_s = max(float(interval_seconds), 0.05)
-        self._latest: tuple[tuple[dict[str, Any], ...], int] | None = None
+        self._position_interval_s = max(float(interval_seconds), 0.05)
+        self._order_interval_s = max(float(order_interval_seconds), 0.05)
+        self._positions: tuple[tuple[dict[str, Any], ...], int] | None = None
+        self._orders: tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], int] | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -158,7 +181,7 @@ class VenuePositionFeed:
     def start(self) -> None:
         if self._thread is not None:
             return
-        thread = threading.Thread(target=self._run, name="venue-position-feed", daemon=True)
+        thread = threading.Thread(target=self._run, name="venue-truth-feed", daemon=True)
         self._thread = thread
         thread.start()
 
@@ -171,20 +194,58 @@ class VenuePositionFeed:
 
     def latest(self) -> tuple[tuple[dict[str, Any], ...], int] | None:
         with self._lock:
-            return self._latest
+            return self._positions
+
+    def latest_open_orders(
+        self,
+    ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], int] | None:
+        with self._lock:
+            return self._orders
+
+    def _read_positions(self) -> None:
+        rows = self._client.get_positions(settle_coin=self._settle_coin)
+        # Stamped on receipt, exactly where the inline read stamps it.
+        observed_ns = self._clock.wall_time_ns()
+        with self._lock:
+            self._positions = (tuple(rows), observed_ns)
+
+    def _read_open_orders(self) -> None:
+        all_kinds = self._client.get_open_orders(settle_coin=self._settle_coin)
+        conditional = self._client.get_open_orders(
+            settle_coin=self._settle_coin, order_filter="StopOrder"
+        )
+        observed_ns = self._clock.wall_time_ns()
+        with self._lock:
+            self._orders = (tuple(all_kinds), tuple(conditional), observed_ns)
 
     def _run(self) -> None:
+        next_positions = 0.0
+        next_orders = 0.0
         while not self._stop.is_set():
+            now = time.monotonic()
+            due = (
+                ("positions", self._read_positions)
+                if now >= next_positions
+                else ("open orders", self._read_open_orders)
+                if now >= next_orders
+                else None
+            )
+            if due is None:
+                self._stop.wait(0.02)
+                continue
+            label, read = due
             try:
-                rows = self._client.get_positions(settle_coin=self._settle_coin)
+                read()
             except Exception:  # noqa: BLE001 - the caller reads synchronously instead
-                _logger.exception("venue position feed read failed; reconcile will read inline")
+                _logger.exception(
+                    "venue %s feed read failed; reconcile will read inline", label
+                )
+            # Scheduled from completion, so a slow venue stretches the interval
+            # instead of queueing reads back to back.
+            if label == "positions":
+                next_positions = time.monotonic() + self._position_interval_s
             else:
-                # Stamped on receipt, exactly where the inline read stamps it.
-                observed_ns = self._clock.wall_time_ns()
-                with self._lock:
-                    self._latest = (tuple(rows), observed_ns)
-            self._stop.wait(self._interval_s)
+                next_orders = time.monotonic() + self._order_interval_s
 
 
 class BybitAccountReconciler:
@@ -271,6 +332,31 @@ class BybitAccountReconciler:
                     return rows, observed_ns
         raw = self.client.get_positions(settle_coin=self.settle_coin)
         return raw, self.clock.wall_time_ns()
+
+    def _warm_open_orders(
+        self, *, recovered_rows: bool
+    ) -> tuple[Sequence[Any], Sequence[Any]] | None:
+        """The two open-order queries, when the feed holds them.
+
+        ``None`` means inspection reads them itself, unchanged. The
+        ``recovered_rows`` condition is the same one position truth uses, and
+        is here for the same reason: a pass that just moved the book should
+        classify against a venue view taken after it, not before.
+
+        Ownership has no blocking verdict -- an order this book did not place
+        is logged and journaled, never refused (decision 2026-08-07) -- so a
+        snapshot on the order cadence rather than the pass cadence costs
+        nothing but the age of a log line.
+        """
+
+        feed = self.position_feed
+        if feed is None or recovered_rows:
+            return None
+        latest = feed.latest_open_orders()
+        if latest is None:
+            return None
+        all_kinds, conditional, _observed_ns = latest
+        return all_kinds, conditional
 
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
@@ -481,11 +567,10 @@ class BybitAccountReconciler:
             self._wedge_probe_last_ns.pop(wedge.command_id, None)
             self._wedge_last_classification.pop(wedge.command_id, None)
 
+        recovered_rows = bool(execution_rows or order_rows or wedges_resolved)
         # Freshness starts when position truth is received, not before the
         # preceding REST recovery: admission must age the venue fact itself.
-        raw_positions, observed_ns = self._venue_positions(
-            recovered_rows=bool(execution_rows or order_rows or wedges_resolved)
-        )
+        raw_positions, observed_ns = self._venue_positions(recovered_rows=recovered_rows)
         position_rows = _validated_venue_position_rows(raw_positions, realm=self.realm)
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}
@@ -625,6 +710,7 @@ class BybitAccountReconciler:
                     if self.native_protection_manager is not None
                     else None
                 ),
+                prefetched_rows=self._warm_open_orders(recovered_rows=recovered_rows),
             )
         except Exception as exc:  # noqa: BLE001 - unknown venue orders block health, not the owner loop
             mismatches.append(

@@ -1470,11 +1470,23 @@ class _CountingFlatClient(_NoOpenOrdersClient):
 class _StubFeed:
     """Stands in for the background thread without starting one."""
 
-    def __init__(self, rows: tuple[dict[str, str], ...], observed_ns: int) -> None:
+    def __init__(
+        self,
+        rows: tuple[dict[str, str], ...],
+        observed_ns: int,
+        *,
+        open_orders: tuple[tuple[dict[str, str], ...], tuple[dict[str, str], ...]] | None = None,
+    ) -> None:
         self._latest = (rows, observed_ns)
+        self._orders = (
+            (open_orders[0], open_orders[1], observed_ns) if open_orders is not None else None
+        )
 
     def latest(self):
         return self._latest
+
+    def latest_open_orders(self):
+        return self._orders
 
 
 def test_a_quiet_pass_uses_the_warm_feed_instead_of_blocking_on_the_venue(
@@ -1554,3 +1566,40 @@ def test_a_stalled_feed_falls_back_to_reading_the_venue(tmp_path: Path) -> None:
 
     assert client.position_reads == 2
     assert second.observed_ts_ns > first.observed_ts_ns
+
+
+def test_a_quiet_pass_classifies_ownership_without_the_two_open_order_reads(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="warm-orders", clock=clock)
+
+    class _CountingClient(_CountingFlatClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.order_reads = 0
+
+        def get_open_orders(self, **params: object):
+            self.order_reads += 1
+            return []
+
+    client = _CountingClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={},
+        clock=clock,
+    )
+    first = reconciler.reconcile_once()
+    # Two paged queries per pass before the feed existed: all kinds, then
+    # conditional.
+    assert client.order_reads == 2
+
+    reconciler.position_feed = _StubFeed(  # type: ignore[assignment]
+        (), first.observed_ts_ns + 500_000_000, open_orders=((), ())
+    )
+    clock.advance_ns(1_000_000_000)
+    second = reconciler.reconcile_once()
+
+    assert client.order_reads == 2
+    assert second.healthy

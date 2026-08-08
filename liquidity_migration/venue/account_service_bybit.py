@@ -445,8 +445,15 @@ def inspect_bybit_order_ownership(
     client: Any,
     state: AccountState,
     native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    prefetched_rows: tuple[Sequence[Any], Sequence[Any]] | None = None,
 ) -> BybitOrderOwnershipSnapshot:
-    """Read all regular/conditional venue orders and classify durable ownership."""
+    """Read all regular/conditional venue orders and classify durable ownership.
+
+    ``prefetched_rows`` supplies the two queries from a caller that already
+    holds them, so the same classification runs without two blocking reads.
+    Validation is unchanged either way -- rows off a feed are no more trusted
+    than rows off the wire.
+    """
 
     realm = require_named_realm(client, label="venue-order ownership inspection")
 
@@ -460,8 +467,16 @@ def inspect_bybit_order_ownership(
             ) from exc
         return _validated_open_order_rows(value, realm=realm, query_name=query_name)
 
-    all_kinds = read("all-kinds")
-    conditional = read("conditional", order_filter="StopOrder")
+    if prefetched_rows is not None:
+        all_kinds = _validated_open_order_rows(
+            list(prefetched_rows[0]), realm=realm, query_name="all-kinds"
+        )
+        conditional = _validated_open_order_rows(
+            list(prefetched_rows[1]), realm=realm, query_name="conditional"
+        )
+    else:
+        all_kinds = read("all-kinds")
+        conditional = read("conditional", order_filter="StopOrder")
     grouped: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
     for source, rows in (("all-kinds", all_kinds), ("conditional", conditional)):
         for row in rows:

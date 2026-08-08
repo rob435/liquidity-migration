@@ -728,6 +728,15 @@ def main(argv: list[str] | None = None) -> int:
         default=0.25,
         help="How often the background thread refreshes venue position truth.",
     )
+    parser.add_argument(
+        "--order-feed-seconds",
+        type=float,
+        default=2.0,
+        help=(
+            "How often the background thread re-reads open orders for ownership "
+            "inspection. Two paged reads, and the verdict only logs."
+        ),
+    )
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
         "--request-market-warmup-timeout-seconds",
@@ -1092,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
         settle_coin=reconciler.settle_coin,
         clock=reconciler.clock,
         interval_seconds=args.position_feed_seconds,
+        order_interval_seconds=args.order_feed_seconds,
     )
     position_feed.start()
     reconciler.position_feed = position_feed
