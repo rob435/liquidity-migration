@@ -189,17 +189,10 @@ def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
     )
 
 
-def load_risk_policy(
-    path: str | Path,
-    *,
-    snapshot: StableFileSnapshot | None = None,
-) -> AccountRiskPolicy:
-    if snapshot is None:
-        snapshot = read_stable_file(
-            path,
-            label="risk policy",
-            require_single_link=False,
-        )
-    elif snapshot.path != Path(path).expanduser().absolute():
-        raise ValueError("risk policy snapshot path differs")
+def load_risk_policy(path: str | Path) -> AccountRiskPolicy:
+    snapshot = read_stable_file(
+        path,
+        label="risk policy",
+        require_single_link=False,
+    )
     return load_risk_policy_bytes(snapshot.data)

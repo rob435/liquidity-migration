@@ -33,7 +33,6 @@ from liquidity_migration.data.archive_manifest import (
     parse_symbol_directories,
     parse_trade_archive_entries,
     previous_kline_close,
-    run_archive_hourly_klines_download,
     run_archive_hourly_klines_api_download,
     synthesize_v5_listing_manifest_rows,
 )
@@ -630,9 +629,6 @@ def test_detect_universe_shrink_warns_and_names_dropped_symbols(tmp_path) -> Non
 # --- run_* error paths ----------------------------------------------------
 
 
-def test_run_archive_hourly_klines_download_raises_when_manifest_missing(tmp_path) -> None:
-    with pytest.raises(RuntimeError, match="archive_trade_manifest is empty"):
-        run_archive_hourly_klines_download(tmp_path, config=ArchiveHourlyKlineDownloadConfig(name="fixture"))
 
 
 def test_run_archive_hourly_api_download_raises_when_manifest_missing(tmp_path) -> None:

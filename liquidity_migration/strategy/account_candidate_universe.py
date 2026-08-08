@@ -827,27 +827,6 @@ def load_candidate_universe(
     return universe
 
 
-def enforce_frozen_candidate_population(
-    current_eligible_symbols: Sequence[str],
-    frozen: FrozenCandidateUniverse,
-    *,
-    context: str,
-) -> tuple[str, ...]:
-    """Fail on frozen-symbol disappearance and drop only post-freeze additions."""
-
-    current = {_symbol(value) for value in current_eligible_symbols}
-    required = set(frozen.symbols)
-    missing = sorted(required - current)
-    if missing:
-        preview = ",".join(missing[:20])
-        suffix = "..." if len(missing) > 20 else ""
-        raise RuntimeError(
-            f"{context}: frozen candidate population lost {len(missing)} symbol(s): "
-            f"{preview}{suffix}"
-        )
-    return tuple(symbol for symbol in frozen.symbols if symbol in current)
-
-
 def require_profile_binding(
     frozen: FrozenCandidateUniverse,
     *,

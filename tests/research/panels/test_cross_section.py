@@ -12,7 +12,6 @@ from liquidity_migration.research.panels.cross_section import (
     MEASURED_ROUND_TRIP_BP,
     PASSIVE_FLOOR_ROUND_TRIP_BP,
     CrossSectionError,
-    lag_screen,
     long_short,
     summary,
     top_by,
@@ -183,32 +182,4 @@ class TestLagScreen:
                 rows.append((period, f"S{name}", float(name), slope * float(name)))
         return frame(rows)
 
-    def test_screen_scores_every_lag_at_the_requested_annualisation(self) -> None:
-        """``periods_per_year`` must reach the scorer: forwarding it through ``**kwargs``
-        into ``long_short`` raised TypeError, and omitting it scored at the daily
-        default.
-        """
 
-        out = lag_screen(
-            self._build,
-            signal="sig",
-            ret="ret",
-            lags=(0, 1, 4),
-            periods_per_year=365,
-            cost_bp=0.0,
-            cut=0.1,
-        )
-        assert sorted(out) == [0, 1, 4]
-        # A genuine edge decays with the delay; a lag past the horizon is flat.
-        assert out[0].mean_bp > out[1].mean_bp > 0.0
-        assert out[4].mean_bp == pytest.approx(0.0, abs=1e-9)
-
-    def test_annualisation_is_honoured_rather_than_silently_daily(self) -> None:
-        daily = lag_screen(
-            self._build, signal="sig", ret="ret", lags=(0,), periods_per_year=365, cost_bp=0.0
-        )
-        hourly = lag_screen(
-            self._build, signal="sig", ret="ret", lags=(0,), periods_per_year=365 * 24, cost_bp=0.0
-        )
-        # Zero-variance fixture: compare the annualisation directly.
-        assert hourly[0].ann_pct > daily[0].ann_pct

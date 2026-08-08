@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration.core.config import UniverseConfig
-from liquidity_migration.data.universe import build_current_universe_table, format_universe_report
+from liquidity_migration.data.universe import build_current_universe_table
 from liquidity_migration.core._common import MS_PER_DAY
 
 
@@ -47,39 +47,6 @@ def test_current_universe_table_filters_and_ranks() -> None:
     assert table["liquidity_rank"].to_list() == [1, 2]
 
 
-def test_universe_report_contains_symbol_csv() -> None:
-    report = format_universe_report(
-        {
-            "name": "mid",
-            "snapshot": "2026-05-03T00:00:00+00:00",
-            "rows": 1,
-            "symbols": ["AAAUSDT"],
-            "symbol_csv": "AAAUSDT",
-            "config": {
-                "min_turnover_24h": 1_000_000.0,
-                "min_age_days": 30,
-                "max_age_days": 0,
-                "rank_start": 21,
-                "rank_end": 80,
-                "max_symbols": 60,
-                "exclude_symbols": ["BTCUSDT"],
-            },
-            "survivorship_warning": "warning",
-            "universe": [
-                {
-                    "liquidity_rank": 21,
-                    "symbol": "AAAUSDT",
-                    "turnover_24h": 1_000_000.0,
-                    "listing_age_days": 99.0,
-                    "open_interest_value": 500_000.0,
-                    "funding_rate": 0.0001,
-                }
-            ],
-        }
-    )
-
-    assert "AAAUSDT" in report
-    assert "21-80" in report
 
 
 def test_current_universe_table_excludes_non_perp_and_non_usdt_contracts() -> None:

@@ -150,54 +150,6 @@ def build_current_universe_table(
     return ranked.select([col for col in columns if col in ranked.columns]).sort("liquidity_rank")
 
 
-def format_universe_report(payload: dict[str, Any]) -> str:
-    config = payload["config"]
-    lines = [
-        f"# Bybit Universe Snapshot: {payload['name']}",
-        "",
-        f"Snapshot: {payload['snapshot']}",
-        f"Rows: {payload['rows']}",
-        "",
-        "## Filters",
-        "",
-        f"- Min 24h turnover: ${config['min_turnover_24h']:,.0f}",
-        f"- Listing age: {_age_filter_label(config)}",
-        f"- Liquidity ranks: {config['rank_start']}-{config['rank_end'] or 'all'}",
-        f"- Max symbols: {config['max_symbols'] or 'unlimited'}",
-        f"- Excluded symbols: {', '.join(config['exclude_symbols']) if config['exclude_symbols'] else 'none'}",
-        "",
-        "## Symbol CSV",
-        "",
-        "```text",
-        payload["symbol_csv"],
-        "```",
-        "",
-        "## Warning",
-        "",
-        payload["survivorship_warning"],
-        "",
-        "## Top Rows",
-        "",
-        "| Rank | Symbol | 24h Turnover | Listing Age Days | OI Value | Funding |",
-        "|---:|---|---:|---:|---:|---:|",
-    ]
-    for row in payload["universe"][:50]:
-        # Distinguish missing data from a genuine zero.
-        turnover = row.get("turnover_24h")
-        age = row.get("listing_age_days")
-        oi = row.get("open_interest_value")
-        funding = row.get("funding_rate")
-        lines.append(
-            f"| {row['liquidity_rank']} | {row['symbol']} | "
-            f"{('$' + format(turnover, ',.0f')) if turnover is not None else 'n/a'} | "
-            f"{format(age, '.0f') if age is not None else 'n/a'} | "
-            f"{('$' + format(oi, ',.0f')) if oi is not None else 'n/a'} | "
-            f"{format(funding, '.4%') if funding is not None else 'n/a'} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 def _empty_universe_table() -> pl.DataFrame:
     return pl.DataFrame(
         {

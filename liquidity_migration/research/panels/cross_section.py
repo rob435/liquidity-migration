@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable
 
 import numpy as np
 import polars as pl
@@ -187,43 +186,3 @@ def summary(
     )
 
 
-def lag_screen(
-    build: Callable[[int], pl.DataFrame],
-    *,
-    signal: str,
-    ret: str,
-    lags: tuple[int, ...] = (0, 1, 4),
-    periods_per_year: int = 365,
-    cost_bp: float = MEASURED_ROUND_TRIP_BP,
-    sign: int = 1,
-    cut: float = DEFAULT_CUT,
-    period: str = "bar_ts_ms",
-    min_names: int = 10,
-) -> dict[int, Summary]:
-    """Re-score a signal at increasing publication delays.
-
-    A cross-venue or price-derived signal can produce a large, highly
-    significant, completely untradeable effect purely from a stale or
-    bid-ask-bounced print, which reverts mechanically. Genuine slow convergence
-    survives a delay; a stale-print artifact collapses. ``build(lag)`` must
-    return a frame with the signal already shifted by ``lag`` periods.
-
-    Every scoring knob is explicit rather than forwarded through ``**kwargs``,
-    so a mistyped one cannot silently fall back to the daily default.
-    """
-
-    out: dict[int, Summary] = {}
-    for lag in lags:
-        series = long_short(
-            build(lag),
-            signal=signal,
-            ret=ret,
-            sign=sign,
-            cut=cut,
-            period=period,
-            min_names=min_names,
-        )
-        out[lag] = summary(
-            series["ret_bp"], periods_per_year=periods_per_year, cost_bp=cost_bp
-        )
-    return out

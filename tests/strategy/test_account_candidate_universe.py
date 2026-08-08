@@ -11,7 +11,6 @@ import pytest
 from liquidity_migration.strategy.account_candidate_universe import (
     build_candidate_universe_artifact,
     enforce_frozen_candidate_frames,
-    enforce_frozen_candidate_population,
     load_candidate_universe,
     require_scheduled_retirements_flat,
     write_candidate_universe,
@@ -217,23 +216,11 @@ def test_builder_rejects_non_string_symbol_type() -> None:
         )
 
 
-def test_write_load_and_enforce_population(tmp_path: Path) -> None:
+def test_write_then_load_a_candidate_universe_once(tmp_path: Path) -> None:
     path = write_candidate_universe(tmp_path / "candidate.json", _payload())
     assert os.stat(path).st_mode & 0o777 == 0o600
     frozen = load_candidate_universe(path)
     assert frozen.symbols == ("AAAUSDT", "BBBUSDT")
-    # A post-freeze listing is ignored, not admitted.
-    assert enforce_frozen_candidate_population(
-        ["NEWUSDT", "BBBUSDT", "AAAUSDT"],
-        frozen,
-        context="test",
-    ) == ("AAAUSDT", "BBBUSDT")
-    with pytest.raises(RuntimeError, match="lost 1 symbol"):
-        enforce_frozen_candidate_population(
-            ["AAAUSDT", "NEWUSDT"],
-            frozen,
-            context="test",
-        )
     with pytest.raises(FileExistsError):
         write_candidate_universe(path, _payload())
 
