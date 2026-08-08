@@ -16,6 +16,44 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-09 — Three blocking venue reads leave the order path. Entry
+  881 ms → 345 ms median, exit 286 ms → 277 ms.** Commits `bdc705b`,
+  `021edd4`, `d5836bd`, `f7544ce`. Measured with the same probe, same
+  symbol (SOLUSDT), same host, before and after each step.
+  - **The wallet was the hidden one.** Bybit's `wallet` topic pushes only
+    when the balance *changes*, so on a quiet book the pushed row aged out of
+    its 5 s window and every batch paid a blocking `get_wallet_balance`. It
+    showed as a pinned **~195 ms** inside intent-durable-to-order-commanded —
+    three exits measured 194.4, 194.7 and 194.9 ms, which is a round trip, not
+    a scheduler. The warm feed that already serves positions and open orders
+    now serves the wallet at 1 s, making the cached equity *fresher* than the
+    window it feeds. `durable → commanded` **228 ms → 43 ms**.
+  - **Entry-attached stop verification cost two more round trips.** It read
+    position truth back over REST right after the create, and retried, because
+    Bybit lags between accepting an order and making the position readable.
+    The venue pushes that position, `stopLoss` included, within milliseconds of
+    the fill — so wait for the push instead of asking for what has not
+    happened yet. **The control is not relaxed:** a pushed row is accepted only
+    if observed strictly after the acknowledgement being verified, the wait is
+    bounded at 500 ms (well under the two round trips it replaces), and any
+    timeout or fault runs the same REST loop. A test that removes the
+    acknowledgement bound fails.
+    - *First attempt was wrong and the measurement caught it.* Reading the
+      cache at acknowledgement time never worked: a market order is
+      acknowledged **before** it fills, so no pushed row could be newer than
+      the ack and every entry still paid both trips. Entries did not move.
+  - **The owner also stops sleeping through arrivals.** A flat 50 ms sleep
+    meant an intent landing just after a pass waited out the whole interval;
+    a new request is a new file in `pending/`, so one `stat` every 4 ms wakes
+    the loop instead. On its own this changed nothing measurable — which is how
+    the wallet round trip was found.
+  - **Where the remaining time is.** A warm entry is now ~10 ms publish, 25–40
+    ms to command, ~15 ms to the socket, **172 ms of venue round trip**, and
+    the rest. The floor without moving the host is ~250 ms, and the best
+    entries measured 266 ms with exits at 251 ms. The median is held above it
+    by loop scheduling: when the pass is mid-reconcile as the intent lands,
+    `durable → commanded` runs 250–408 ms instead of 25–40 ms.
+
 - **2026-08-08 — A symbol no longer has to have a book before it can be
   priced.** Commit `a2db3c1`, deployed 22:26 UTC, both realms.
   - **What the order path actually reads is the top of book** — reference

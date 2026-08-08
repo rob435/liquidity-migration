@@ -64,11 +64,17 @@ match; never append history to this file.
   `--shared-leverage-authority` to the account owner and redeploy — otherwise
   an entry can be sized against a leverage somebody else changed. A venue value
   that contradicts the cache still drops it either way.
-- **End-to-end order latency, measured on demo:** exit **250–370 ms**, entry
-  **760–820 ms**, entry into an already-held symbol ~600 ms. Entries rest at
-  the touch, so on a real book time-to-fill is queue economics; intent → order
-  live at the venue is ≈400 ms fresh, ≈245 ms for an exit, against a ~190 ms
-  single-round-trip floor.
+- **End-to-end order latency, measured on demo (2026-08-09, n=6 cycles):**
+  entry **345 ms median, 266 ms best**; exit **277 ms median, 251 ms best**.
+  Entry was 881 ms and exit 286 ms before the three blocking venue reads came
+  off the path (wallet, and the two the entry-stop verifier made). Entries rest
+  at the touch, so on a real book time-to-fill is queue economics.
+- **The floor here is ~250 ms and it is one round trip.** A warm entry is ~10 ms
+  publish, 25–40 ms to command, ~15 ms to the socket, then **172 ms of venue
+  round trip**. What holds the median above the floor is loop scheduling: when
+  the pass is mid-reconcile as the intent lands, `durable → commanded` runs
+  250–408 ms instead of 25–40 ms. That is the next lever in software; the
+  172 ms needs the host to move.
 - **That ~190 ms floor is geography, and it is now priced.** TCP connect to
   `api.bybit.com` is 7.2 ms and the TLS handshake 18.1 ms, but a full request is
   187.6 ms — so ~180 ms of every round trip is the Frankfurt CloudFront edge
