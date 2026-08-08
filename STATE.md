@@ -11,10 +11,26 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `0a6c0e0`, whole fleet green since 2026-08-08 15:28 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=0a6c0e0
-  profile=operational`, `verify-ok … mainnet=armed`, and no drift on a
-  re-verify five minutes later. This deploy carried the second and third audit
+- **Host runs `8aa8f25`, whole fleet green since 2026-08-08 16:51 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=8aa8f25
+  profile=operational`, `verify-ok … mainnet=armed`. It carried the two fixes
+  below.
+- **The bot no longer goes blind when you hand-trade.** A negative available
+  margin — which the funded account reports whenever a hand-opened position
+  absorbs the wallet as position margin and the mark moves — was failing the
+  wallet read, blocking the owner and paging you. The kernel already refuses
+  new risk on that number while letting reductions through; two upstream guards
+  made it unreachable. Now passed through. Only a nonpositive equity still
+  fails the read. Before the fix the owner sat blocked ~20 minutes with
+  `equity=$0.00` at both producers.
+- **The declared capital reference is the equity floor, not an invented
+  number.** It was 2,500 USDT against an observed ~355; the reference tracks
+  the wallet, so the declared figure only sizes the caps in the instant before
+  the first read — and at the floor that instant is the smallest envelope
+  rather than a 7x one. The envelope is also now anchored on the bootstrap
+  wallet before the first request is served. Live log reads
+  `capital reference 100.00 -> 331.81`.
+- **The 15:28 UTC deploy of `0a6c0e0`** carried the second and third audit
   passes — six money-affecting fixes: a refused stop that could report success,
   a five-minute convergence outage from one ambiguous submission, a protection
   stop that could never be republished, an accounting fault that blocked exits,
@@ -133,14 +149,8 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **Code is committed and undeployed** (host runs `0a6c0e0`): the envelope is
-  now anchored on the bootstrap wallet before the first request is served; the
-  declared capital reference defaults to the equity floor instead of an
-  invented 2,500, so the pre-read instant is the smallest envelope rather than
-  a 7x one; and a negative available margin is passed to the kernel as the real
-  reading it is instead of failing the wallet snapshot. **That last one is what
-  was paging you while hand-trading** — it is live-affecting and wants the next
-  deploy. The host's `bybit-mainnet.env` carries
+- **No code is committed-but-undeployed**; the host runs the tip of `main`.
+  The host's `bybit-mainnet.env` carries
   the four new dial names (read
   directly 2026-08-06; the earlier retired-names warning was stale), and the
   installed risk profile is the render of those dials.

@@ -16,6 +16,14 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 16:51 UTC — Deployed `8aa8f25`.** Receipt `staged-ok
+  commit=8aa8f25`, `verify-ok … mainnet=armed`, nine of nine units. Deployed
+  immediately rather than bundled with the latency work, because the funded
+  owner had been **blocked for ~20 minutes** — `owner=blocked`, `equity=$0.00`
+  at both producers — and a blocked owner cannot close its own book either. It
+  came back `owner=healthy` with `equity=$333.29`, and the envelope now anchors
+  `100.00 -> 331.81` instead of from an invented 2,500.
+
 - **2026-08-08 (fourth pass) — The alert that pages you for hand-trading, and
   the end of the declared capital.**
   1. **A negative available margin was being treated as a broken wallet read.**
