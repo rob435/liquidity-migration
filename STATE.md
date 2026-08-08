@@ -9,12 +9,33 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-07)
+## Now (recorded 2026-08-08)
 
-- **Host runs `a67e035`, whole fleet green since 2026-08-07 09:38 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=a67e035
+- **Host runs `91f6dab`, whole fleet green since 2026-08-08 13:44 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=91f6dab
   profile=operational`, `verify-ok … mainnet=armed`. This deploy carried the
-  hand-trading fixes (CHANGELOG 2026-08-07). Before it, `aa6f793` carried the
+  two-pass hot-path audit (CHANGELOG 2026-08-08) — the loss ceiling that now
+  actually closes the book, the venue error classifier that no longer reads a
+  definite refusal as retryable, the market-window tail check that stops a
+  stale price reaching a decision, and the per-component isolation of
+  protection evaluation.
+- **It was deployed `staged --stop-first`, not `rollout`, over an open book.**
+  The guarded rollout refused correctly: the bot held **HOMEUSDT 13,120** and
+  **HFTUSDT 11,243**, both long, each behind its venue-side conditional stop.
+  Flattening to satisfy the guard would have closed two live positions, so the
+  owner chose to stop, install, and restart instead. The funded owner was down
+  for about two minutes with both positions covered only by those venue-side
+  stops. It came back with **zero** error-level lines, reconciled both
+  positions without a mismatch, and reads `healthy` with an empty detail.
+- **The loss-guard day anchor now survives a restart.** New file
+  `/var/lib/liquidity-migration/account-mainnet/account_loss_guard.json`,
+  first written 13:43 UTC. Before it, a restart re-anchored the day's loss
+  budget to an already-drawn-down equity and forgot a trip.
+- **The owner was hand-trading through the deploy** (KAITOUSDT, filled
+  13:22–13:23 UTC). The bot left the position and both its conditional orders
+  strictly alone, before and after the restart — the separate-books policy
+  observed working under a restart.
+- Before this, host ran `a67e035` (2026-08-07 hand-trading fixes) and `aa6f793` carried the
   2026-08-05 friction fixes (CARRY `v4` profile dial, version-free carry
   journal id, `order_notional_pct_equity` rename) and the 2026-08-06
   entry-size fixes (floor 6.0, `dust=` counter, wallet fault with numbers).
