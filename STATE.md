@@ -28,6 +28,18 @@ match; never append history to this file.
   it always had — it is pinned by a floor rather than derived from the cadence.
 - **The `-21 USDT` available margin on the funded account is the owner trading
   by hand and is read correctly**, not a fault.
+- **The owner stopped hand-trading the funded account on 2026-08-08.** This is
+  a live dependency, not a note: the execution adapter now keeps a symbol's
+  cached leverage when the symbol goes flat, which removes one ~190 ms round
+  trip before every fresh entry. If hand-trading resumes, pass
+  `--shared-leverage-authority` to the account owner and redeploy — otherwise
+  an entry can be sized against a leverage somebody else changed. A venue value
+  that contradicts the cache still drops it either way.
+- **End-to-end order latency, measured on demo:** exit **250–370 ms**, entry
+  **760–820 ms**, entry into an already-held symbol ~600 ms. Entries rest at
+  the touch, so on a real book time-to-fill is queue economics; intent → order
+  live at the venue is ≈400 ms fresh, ≈245 ms for an exit, against a ~190 ms
+  single-round-trip floor.
 - **The account state copy no longer scales with position count.** Positions
   are shared and privatized through `position_for_write`, exactly as orders
   are; at 301 positions the whole copy is 0.002 ms against 0.295 ms before.

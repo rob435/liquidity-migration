@@ -16,6 +16,32 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — Owner stops hand-trading; the entry path loses its two
+  waits. Entry ~1.0–1.2 s → ~0.76–0.82 s, exit ~250–370 ms.** Commit
+  `960c17c`, measured with the same demo probe as the entry below.
+  - **`set_leverage`, 188–194 ms before every fresh entry, is gone.** Bybit
+    keeps a symbol's leverage after its position closes, so the cached value is
+    still what the venue holds — but the cache was dropped whenever a symbol
+    went flat, precisely because the owner hand-traded the same account and
+    could change it underneath. With hand-trading stopped, drop-on-flat goes
+    and the round trip with it: **11.9–13.9 ms** at that step, from 184–194 ms.
+    A venue value that *contradicts* the cache still drops it under either
+    setting — that is what protects sizing, and it is not what this relaxes.
+    `--shared-leverage-authority` restores the old behaviour in one word the
+    moment hand-trading resumes, and the old behaviour keeps its own test.
+  - **Symbol subscription no longer waits on the refresh interval.** The
+    readiness gate reads the queue head every tick, so the loop knew within
+    50 ms which symbols a request needed, then waited up to
+    `--symbol-refresh-seconds` (5 s) before telling the stream to carry them —
+    and the request could not be served until its book arrived. Measured on a
+    flat symbol: 229 ms at best, **3053 ms** at worst, all of it idle. An
+    unsubscribed queued symbol now forces the refresh on the next tick;
+    afterwards `intent durable → order commanded` measured 191–229 ms.
+  - **Caveat on reading the entry number.** Entries rest at the touch first, so
+    on a real book the time to *fill* is queue economics, not system latency.
+    The system number is intent → order live at the venue: ≈400 ms for a fresh
+    symbol, ≈215 ms once held, ≈245 ms for an exit.
+
 - **2026-08-08 — End-to-end order latency, measured with real demo orders.
   Exit ~260–320 ms, entry ~1.0–1.2 s, and the difference is one `set_leverage`
   plus a cold-symbol book.** Six orders placed and closed on the demo account
