@@ -16,6 +16,52 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — The 200 ms design failed its own safety review. Negative
+  result, recorded before anything was built.** Owner set a 200 ms target
+  against today's 2 s. Four designs competed; three judges independently picked
+  the same winner — *push the private socket's `position` topic into a cache
+  that accelerates the position-truth gate, and move REST reconcile off the
+  loop*. Its central claim was that the cache is a **monotone accelerator**: it
+  can only lower `age_ns` and only raise the venue quantity, so it can unblock
+  an exit but never block one. Three adversarial lenses all returned fatal, on
+  the same root cause, and the two load-bearing branches were then confirmed
+  directly:
+  1. **The staleness check is two-sided.** `account_reconcile.py:631`, `:657`
+     and `:969` all read `if age_ns < 0 or age_ns > bound_ns: raise`. Pushing
+     `observed_ns` up toward now destroys the slack that absorbs a backwards
+     wall-clock step (NTP correction, VM live-migrate). One step back and
+     `age_ns` goes negative → `AccountReconciliationStaleError` → **every exit
+     on every symbol refused** until wall time climbs back past the cached
+     stamp. "Monotone" was simply false.
+  2. **In the new-risk gate the acceleration is pure masking.**
+     `require_recent_healthy` (`:625-635`) never reads `venue_positions` — it
+     checks age, then `report.require_healthy()`. So the cache's *only*
+     possible effect there is to suppress the staleness error, i.e. to keep
+     admitting new risk against a reconciler that has stopped.
+  3. **The continuity guard compares a number to itself.** The cache would be
+     seeded with the same `observed_ns` the report carries, so
+     `_seeded_at_ns >= report.observed_ts_ns` holds by equality **forever**.
+     With freshness stamped from *any* inbound frame, a dead reconciler reads
+     as current indefinitely — and the frame most likely to restamp it is the
+     one that *refutes* the report (owner hand-closes, venue pushes size 0,
+     the merge correctly refuses to lower the quantity, and that same frame
+     certifies the contradicted number as fresh).
+
+  **What survives:** the quantity substitution alone (raise the venue quantity,
+  never lower it), which no lens could break — though its reach is narrower
+  than advertised, since `require_recent_symbols_consistent` short-circuits on
+  any `{symbol}:` mismatch at `:669-676` before reaching the comparison. The
+  real latency win is separable and needs no cache: **the REST pass blocks the
+  10 Hz quote loop**, and taking it off-thread is what buys responsiveness.
+
+  **Two corrections to the numbers this repo was working from:** a reconcile
+  pass is 3 round trips *minimum*, not exactly 3 — `get_positions` and
+  `get_open_orders` both page through `_cursor_result_list` (`bybit.py:518`)
+  until the cursor empties, so ~525 ms is a floor and ~1.05 s is possible. And
+  concurrent signed REST from two threads on one shared client is **already in
+  production**: `account_execution_stream.py:385` calls `sync_symbols` from the
+  consumer thread, reaching `set_trading_stop`.
+
 - **2026-08-08 17:59 UTC — Deployed `9cbe889`.** Receipt `staged-ok
   commit=9cbe889`, `verify-ok … mainnet=armed`, nine of nine units. Carried the
   positions copy-on-write, a second 35-agent sweep, and the dead code the first
