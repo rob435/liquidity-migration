@@ -148,6 +148,7 @@ class BybitNativeProtectionManager:
         instrument_rules: Mapping[str, InstrumentRules],
         fallback_stop_fraction: float,
         clock: Clock | None = None,
+        position_stream_cache: Any | None = None,
     ) -> None:
         # The manager is realm-agnostic: it installs a full-position stop for
         # whatever account the client addresses. What it must not accept is a
@@ -162,6 +163,10 @@ class BybitNativeProtectionManager:
         self.rules = {symbol.upper(): rule for symbol, rule in instrument_rules.items()}
         self.fallback_stop_fraction = fraction
         self.clock = clock or SystemClock()
+        # Optional accelerator for entry-attached stop verification. Absent, or
+        # holding nothing newer than the acknowledgement being verified, the
+        # REST read runs exactly as it always has.
+        self.position_stream_cache = position_stream_cache
         # WS callbacks and the reconciliation loop share this manager. One lock
         # spans planning, the Bybit mutation, journal activation, and every
         # adoption transition, so two revisions cannot be installed from the same
@@ -864,6 +869,7 @@ class BybitNativeProtectionManager:
         expected_stop_price: float,
         command_id: str,
         attempts: int = 3,
+        acknowledged_ts_ns: int = 0,
     ) -> str:
         """Prove the venue actually applied an entry-attached stop.
 
@@ -899,6 +905,24 @@ class BybitNativeProtectionManager:
         tolerance = max(rule.tick_size / 2.0 if rule is not None else 0.0, 1e-12)
         rounds = max(int(attempts), 1)
         read_error = ""
+        # The venue pushes the position, stop included, within milliseconds of
+        # the create. A pushed row observed strictly AFTER this order was
+        # acknowledged answers the same question as the read below, from the
+        # same field, without the round trip -- and usually two, since Bybit
+        # lags between accepting an order and making the position readable.
+        # Anything older than the acknowledgement says nothing about this
+        # order, so it is refused and the REST path runs exactly as before.
+        pushed_row = self._pushed_position_row(symbol, acknowledged_ts_ns=acknowledged_ts_ns)
+        if pushed_row is not None:
+            verdict = self._verdict_from_position_row(
+                pushed_row,
+                symbol=symbol,
+                command_id=command_id,
+                stop_price=stop_price,
+                tolerance=tolerance,
+            )
+            if verdict is not None:
+                return verdict
         for attempt in range(rounds):
             try:
                 rows = self.client.get_positions(symbol=symbol)
@@ -933,6 +957,48 @@ class BybitNativeProtectionManager:
             f"was accepted but position truth is unreadable ({read_error or 'no response'})"
         )[:1000]
         return "unreadable"
+
+    def _pushed_position_row(
+        self,
+        symbol: str,
+        *,
+        acknowledged_ts_ns: int,
+    ) -> Mapping[str, Any] | None:
+        """An open pushed position row for this order, or None to read REST."""
+
+        cache = self.position_stream_cache
+        if cache is None or acknowledged_ts_ns <= 0:
+            return None
+        try:
+            row = cache.observed_after(symbol, after_ts_ns=acknowledged_ts_ns)
+        except Exception:  # noqa: BLE001 - an accelerator must never break the verifier
+            return None
+        if row is None:
+            return None
+        return row if self._open_position_row([row], symbol) is not None else None
+
+    def _verdict_from_position_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        symbol: str,
+        command_id: str,
+        stop_price: float,
+        tolerance: float,
+    ) -> str | None:
+        """The same verdict the REST loop reaches from the same two fields."""
+
+        venue_stop = _optional_float(row.get("stopLoss") or row.get("stop_loss"))
+        if venue_stop is not None and abs(venue_stop - stop_price) <= tolerance:
+            self._unarmed_entries.pop(symbol, None)
+            return "armed"
+        return self._repair_unapplied_entry_stop(
+            symbol=symbol,
+            command_id=command_id,
+            stop_price=stop_price,
+            observed_stop=venue_stop,
+            observed_mark=_optional_float(row.get("markPrice") or row.get("mark_price")),
+        )
 
     def _repair_unapplied_entry_stop(
         self,

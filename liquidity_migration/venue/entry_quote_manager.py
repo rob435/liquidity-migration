@@ -62,7 +62,14 @@ MIN_SPREAD_FRACTION = 0.0001
 
 
 class EntryStopVerifier(Protocol):
-    def __call__(self, *, symbol: str, expected_stop_price: float, command_id: str) -> str: ...
+    def __call__(
+        self,
+        *,
+        symbol: str,
+        expected_stop_price: float,
+        command_id: str,
+        acknowledged_ts_ns: int = 0,
+    ) -> str: ...
 
 
 class TouchSource(Protocol):

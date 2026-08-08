@@ -2191,7 +2191,13 @@ def test_bybit_demo_adapter_verifies_the_attached_stop_after_the_create() -> Non
 
     seen: list[dict[str, object]] = []
 
-    def verifier(*, symbol: str, expected_stop_price: float, command_id: str) -> str:
+    def verifier(
+        *,
+        symbol: str,
+        expected_stop_price: float,
+        command_id: str,
+        acknowledged_ts_ns: int = 0,
+    ) -> str:
         seen.append(
             {
                 "symbol": symbol,

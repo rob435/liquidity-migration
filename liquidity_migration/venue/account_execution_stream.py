@@ -103,6 +103,7 @@ class BybitAccountExecutionConsumer:
         fill_observer: Callable[[str], Any] | None = None,
         clock: Clock | None = None,
         wallet_cache: Any | None = None,
+        position_cache: Any | None = None,
     ) -> None:
         self.kernel = kernel
         self.driver = KernelExecutionDriver(kernel)
@@ -111,6 +112,7 @@ class BybitAccountExecutionConsumer:
         self.fill_observer = fill_observer
         # Fed directly from the wallet topic; see ``_subscribe``.
         self.wallet_cache = wallet_cache
+        self.position_cache = position_cache
         self.clock = clock or SystemClock()
         self.events: queue.Queue[tuple[str, Mapping[str, Any], int]] = queue.Queue()
         self.pending_terminal: dict[str, PendingTerminalStatus] = {}
@@ -172,6 +174,14 @@ class BybitAccountExecutionConsumer:
             subscribe = getattr(private_stream, "subscribe_wallet", None)
             if callable(subscribe):
                 subscribe(self.wallet_cache.on_message)
+        # Same contract for positions: the venue pushes the row, stop included,
+        # within milliseconds of a fill, which is what entry-attached stop
+        # verification reads back. Fed straight to the cache for the same
+        # reason — only the newest row per symbol matters.
+        if self.position_cache is not None:
+            subscribe_positions = getattr(private_stream, "subscribe_positions", None)
+            if callable(subscribe_positions):
+                subscribe_positions(self.position_cache.on_message)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

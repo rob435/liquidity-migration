@@ -237,6 +237,62 @@ class BybitWalletStreamCache:
         return account, observed
 
 
+class BybitPositionStreamCache:
+    """Latest position row per symbol, as the venue pushed it.
+
+    Entry-attached stop verification reads position truth back the moment the
+    create is acknowledged, to prove the venue really applied the stop. Over
+    REST that is a round trip, and usually two: Bybit lags between accepting
+    the order and making the position readable, so the first read finds
+    nothing and the verifier retries. Measured against a Frankfurt edge that
+    is ~350 ms inside every market entry.
+
+    The push arrives when the position changes, which is exactly the moment
+    being verified, so this is fresher than the read it replaces. It is never
+    authoritative alone: the verifier only accepts a row observed strictly
+    after the order acknowledgement, and reads REST otherwise.
+    """
+
+    def __init__(self, *, clock: Clock | None = None) -> None:
+        self.clock = clock or SystemClock()
+        self._lock = threading.Lock()
+        self._rows: dict[str, tuple[dict[str, Any], int]] = {}
+
+    def on_message(self, message: Mapping[str, Any]) -> None:
+        """Absorb one position frame. Never raises into the socket thread."""
+
+        try:
+            rows = message.get("data") if isinstance(message, Mapping) else None
+            if not isinstance(rows, list):
+                return
+            observed = self.clock.wall_time_ns()
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                symbol = str(row.get("symbol") or "").upper()
+                if not symbol:
+                    continue
+                with self._lock:
+                    self._rows[symbol] = (dict(row), observed)
+        except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
+            _logger_account.exception("private position frame could not be absorbed")
+
+    def observed_after(self, symbol: str, *, after_ts_ns: int) -> Mapping[str, Any] | None:
+        """The pushed row for ``symbol``, only if it landed after ``after_ts_ns``.
+
+        The bound is the whole safety of this path: a row observed before the
+        order was acknowledged says nothing about whether that order's stop was
+        applied.
+        """
+
+        with self._lock:
+            entry = self._rows.get(symbol.upper())
+        if entry is None:
+            return None
+        row, observed = entry
+        return row if observed > int(after_ts_ns) else None
+
+
 class BybitAccountSnapshotProvider:
     """Read one fresh wallet snapshot for the realm the client names."""
 

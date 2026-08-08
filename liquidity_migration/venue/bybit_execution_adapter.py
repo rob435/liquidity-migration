@@ -417,7 +417,10 @@ class BybitDemoExecutionAdapter:
                     decision_mid=decision_mid,
                 )
         else:
-            verification = self._verify_entry_attached_stop(command)
+            verification = self._verify_entry_attached_stop(
+                command,
+                acknowledged_ts_ns=local_ack_ts_ns,
+            )
         metadata: dict[str, Any] = {
             "local_socket_send_ts_ns": send_ts_ns,
             "exchange_ack_ts_status": "observed" if exchange_ack_ts_ns else "unavailable",
@@ -450,7 +453,12 @@ class BybitDemoExecutionAdapter:
             ),
         )
 
-    def _verify_entry_attached_stop(self, command: OrderCommand) -> str:
+    def _verify_entry_attached_stop(
+        self,
+        command: OrderCommand,
+        *,
+        acknowledged_ts_ns: int = 0,
+    ) -> str:
         """Prove the venue applied the attached stop, right after the create.
 
         Never raises: the order is already at the venue, and losing this
@@ -471,6 +479,7 @@ class BybitDemoExecutionAdapter:
                     symbol=command.symbol,
                     expected_stop_price=float(stop_price),
                     command_id=command.command_id,
+                    acknowledged_ts_ns=acknowledged_ts_ns,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - the ACK must survive a verifier fault

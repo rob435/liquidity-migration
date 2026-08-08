@@ -79,6 +79,7 @@ from liquidity_migration.account.account_service import (
     StaleEntryRequestExpired,
 )
 from liquidity_migration.venue.account_service_bybit import (
+    BybitPositionStreamCache,
     BybitAccountSnapshotProvider,
     BybitWalletStreamCache,
     CapturedBybitMarketProvider,
@@ -1071,11 +1072,18 @@ def main(argv: list[str] | None = None) -> int:
     native_protection_policy = NativeDisasterProtectionPolicy(
         fallback_stop_fraction=args.disaster_stop_fraction,
     )
+    # Fed by the private position topic below. Entry-attached stop
+    # verification prefers a row the venue pushed after the order was
+    # acknowledged, which is the same field the REST read returns without the
+    # round trip -- and usually two, because Bybit lags between accepting an
+    # order and making the position readable.
+    position_cache = BybitPositionStreamCache()
     native_protection = BybitNativeProtectionManager(
         kernel=kernel,
         client=private_client,
         instrument_rules=rules,
         fallback_stop_fraction=native_protection_policy.fallback_stop_fraction,
+        position_stream_cache=position_cache,
     )
     # No unowned regular or conditional order may exist before a stream starts
     # or a request is claimed, so a new journal requires an empty venue book.
@@ -1170,6 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
         native_protection_manager=native_protection,
         fill_observer=markout_observer.notify,
         wallet_cache=wallet_cache,
+        position_cache=position_cache,
     )
     execution_consumer.start()
     private_stream_supervisor = PrivateExecutionStreamSupervisor(

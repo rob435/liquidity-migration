@@ -1667,3 +1667,95 @@ def test_no_wallet_cache_means_no_wallet_reads_at_all() -> None:
         feed.close()
 
     assert client.wallet_reads == 0
+
+
+class _StubPositionCache:
+    def __init__(self, row: dict | None, observed_ns: int) -> None:
+        self.row = row
+        self.observed_ns = observed_ns
+        self.queries = 0
+
+    def observed_after(self, symbol: str, *, after_ts_ns: int):  # type: ignore[no-untyped-def]
+        self.queries += 1
+        if self.row is None or self.observed_ns <= int(after_ts_ns):
+            return None
+        return self.row
+
+
+class _PositionReadCountingClient:
+    """Only what the entry-stop verifier touches."""
+
+    demo = True
+    realm = "demo"
+
+    def __init__(self) -> None:
+        self.position_reads = 0
+
+    def get_positions(self, **_kwargs: object) -> list[dict]:
+        self.position_reads += 1
+        return [{"symbol": "BUSDT", "size": "1", "side": "Buy", "stopLoss": "9.0"}]
+
+
+def _protection_manager(tmp_path: Path, cache) -> BybitNativeProtectionManager:  # type: ignore[no-untyped-def]
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=0)
+    kernel, _ = _kernel(tmp_path, clock)
+    return BybitNativeProtectionManager(
+        kernel=kernel,
+        client=_PositionReadCountingClient(),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1, environment="demo")},
+        fallback_stop_fraction=0.35,
+        clock=clock,
+        position_stream_cache=cache,
+    )
+
+
+def test_a_pushed_position_verifies_the_stop_without_a_venue_read(tmp_path: Path) -> None:
+    cache = _StubPositionCache(
+        {"symbol": "BUSDT", "size": "1", "side": "Buy", "stopLoss": "9.0"},
+        observed_ns=2_000,
+    )
+    manager = _protection_manager(tmp_path, cache)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT",
+        expected_stop_price=9.0,
+        command_id="cmd-1",
+        acknowledged_ts_ns=1_000,
+    )
+
+    assert verdict == "armed"
+    assert manager.client.position_reads == 0
+
+
+def test_a_pushed_position_older_than_the_ack_is_refused(tmp_path: Path) -> None:
+    """It says nothing about whether THIS order's stop was applied."""
+
+    cache = _StubPositionCache(
+        {"symbol": "BUSDT", "size": "1", "side": "Buy", "stopLoss": "9.0"},
+        observed_ns=500,
+    )
+    manager = _protection_manager(tmp_path, cache)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT",
+        expected_stop_price=9.0,
+        command_id="cmd-2",
+        acknowledged_ts_ns=1_000,
+    )
+
+    assert verdict == "armed"
+    assert manager.client.position_reads == 1, "must fall back to the venue read"
+
+
+def test_no_position_cache_reads_the_venue_exactly_as_before(tmp_path: Path) -> None:
+    manager = _protection_manager(tmp_path, None)
+
+    verdict = manager.verify_entry_attached_stop(
+        symbol="BUSDT",
+        expected_stop_price=9.0,
+        command_id="cmd-3",
+        acknowledged_ts_ns=1_000,
+    )
+
+    assert verdict == "armed"
+    assert manager.client.position_reads == 1

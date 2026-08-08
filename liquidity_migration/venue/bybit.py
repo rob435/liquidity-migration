@@ -1072,6 +1072,30 @@ class BybitPrivateWebSocketStream:
             return False
         return True
 
+    def subscribe_positions(self, callback: Any) -> bool:
+        """Push position rows instead of polling for them.
+
+        The venue emits the position, stop loss included, within milliseconds
+        of a fill. Entry-attached stop verification used to read that back over
+        REST and retry when the position was not yet visible -- two round trips
+        after every market entry. Same read-only accelerator contract as
+        ``subscribe_wallet``: False means the caller keeps the REST path.
+        """
+
+        stream = getattr(self._client, "position_stream", None)
+        if not callable(stream):
+            return False
+        try:
+            stream(callback=callback)
+        except Exception as exc:  # noqa: BLE001 - an optional feed must not kill the owner
+            with self._control_lock:
+                self._last_control_error = (
+                    f"private websocket position subscription failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:500]
+            return False
+        return True
+
     def subscribe_orders(self, callback: Any) -> None:
         self._mark_subscription_pending("order")
         try:
