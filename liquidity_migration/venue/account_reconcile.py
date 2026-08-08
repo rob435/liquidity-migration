@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -116,6 +117,76 @@ class AccountReconciliationReport:
             raise RuntimeError("account reconciliation unhealthy: " + "; ".join(self.mismatches))
 
 
+class VenuePositionFeed:
+    """The newest ``get_positions`` read, kept warm off the caller's thread.
+
+    Every other REST read in a reconcile pass is interval-gated. This one is
+    not: it runs on every pass, and at ~175 ms against a Frankfurt edge it is
+    the single largest thing standing between the owner loop and its 100 ms
+    tick. The loop was spending that time blocked, so software stops,
+    take-profits and quote repricing all waited on a wallet read.
+
+    Moving the read here makes position truth *fresher*, not staler: the feed
+    refreshes on its own interval rather than the reconcile cadence. The thread
+    only reads the venue -- it touches no kernel state, so it adds no second
+    mutator.
+
+    When the feed has nothing newer than the last published report, the caller
+    reads synchronously instead. A dead or lagging feed therefore degrades to
+    exactly the behaviour that shipped before it existed.
+    """
+
+    __slots__ = ("_client", "_settle_coin", "_clock", "_interval_s", "_latest", "_lock", "_stop", "_thread")
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        settle_coin: str,
+        clock: Clock,
+        interval_seconds: float,
+    ) -> None:
+        self._client = client
+        self._settle_coin = settle_coin
+        self._clock = clock
+        self._interval_s = max(float(interval_seconds), 0.05)
+        self._latest: tuple[tuple[dict[str, Any], ...], int] | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        thread = threading.Thread(target=self._run, name="venue-position-feed", daemon=True)
+        self._thread = thread
+        thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5.0)
+            self._thread = None
+
+    def latest(self) -> tuple[tuple[dict[str, Any], ...], int] | None:
+        with self._lock:
+            return self._latest
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                rows = self._client.get_positions(settle_coin=self._settle_coin)
+            except Exception:  # noqa: BLE001 - the caller reads synchronously instead
+                _logger.exception("venue position feed read failed; reconcile will read inline")
+            else:
+                # Stamped on receipt, exactly where the inline read stamps it.
+                observed_ns = self._clock.wall_time_ns()
+                with self._lock:
+                    self._latest = (tuple(rows), observed_ns)
+            self._stop.wait(self._interval_s)
+
+
 class BybitAccountReconciler:
     """Recover dropped WS facts, then verify REST order and position truth."""
 
@@ -168,6 +239,38 @@ class BybitAccountReconciler:
         self.last_report: AccountReconciliationReport | None = None
         self._last_journaled_semantic_hash: str | None = None
         self._last_journal_checkpoint_monotonic_ns: int | None = None
+        #: Optional warm read of venue positions. Set by the owner runtime once
+        #: startup reconciliation has completed strictly and inline.
+        self.position_feed: VenuePositionFeed | None = None
+
+    def _venue_positions(self, *, recovered_rows: bool) -> tuple[Any, int]:
+        """Venue position truth, from the warm feed when that is sound.
+
+        Two conditions send the read back inline, and both matter:
+
+        ``recovered_rows`` -- this pass applied fills, orders or a wedge
+        terminalization to the kernel. A feed snapshot taken before those
+        landed shows the venue behind a book that has moved, which is not drift
+        but reads exactly like it, and a drift mismatch blocks new risk. Passes
+        that changed nothing cannot have that problem. In steady state every
+        recovery read is interval-gated, so nothing changes on almost every
+        pass and the warm read is used.
+
+        Not newer than the published report -- a stalled feed would otherwise
+        re-stamp an old snapshot as this pass's observation, and freshness is
+        what the reduction gate consumes.
+        """
+
+        feed = self.position_feed
+        if feed is not None and not recovered_rows:
+            latest = feed.latest()
+            if latest is not None:
+                rows, observed_ns = latest
+                previous = self.last_report
+                if previous is None or observed_ns > previous.observed_ts_ns:
+                    return rows, observed_ns
+        raw = self.client.get_positions(settle_coin=self.settle_coin)
+        return raw, self.clock.wall_time_ns()
 
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
@@ -378,10 +481,11 @@ class BybitAccountReconciler:
             self._wedge_probe_last_ns.pop(wedge.command_id, None)
             self._wedge_last_classification.pop(wedge.command_id, None)
 
-        raw_positions = self.client.get_positions(settle_coin=self.settle_coin)
         # Freshness starts when position truth is received, not before the
         # preceding REST recovery: admission must age the venue fact itself.
-        observed_ns = self.clock.wall_time_ns()
+        raw_positions, observed_ns = self._venue_positions(
+            recovered_rows=bool(execution_rows or order_rows or wedges_resolved)
+        )
         position_rows = _validated_venue_position_rows(raw_positions, realm=self.realm)
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}

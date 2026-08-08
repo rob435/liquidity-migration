@@ -1305,3 +1305,19 @@ def test_venue_facts_are_not_part_of_the_owner_health_signature() -> None:
     # ...and the published field still comes from the reconciler's own report.
     assert "venue_facts_report = reconciler.last_report" in source
     assert "venue_facts_at_ns=venue_facts_report.observed_ts_ns," in source
+
+
+def test_a_faster_reconcile_cadence_does_not_tighten_the_reduction_gate() -> None:
+    from liquidity_migration.runtime.account_service_runner import (
+        RECONCILE_HEALTH_MAX_AGE_FLOOR_NS,
+        reconcile_health_max_age_ns,
+    )
+
+    # The cadence used to set this bound outright. Running reconciliation more
+    # often is a latency choice; how old venue truth may be at the gate that
+    # admits an EXIT is not, and it stays where it has always been.
+    assert reconcile_health_max_age_ns(2.0) == RECONCILE_HEALTH_MAX_AGE_FLOOR_NS
+    assert reconcile_health_max_age_ns(0.5) == RECONCILE_HEALTH_MAX_AGE_FLOOR_NS
+    assert reconcile_health_max_age_ns(0.05) == RECONCILE_HEALTH_MAX_AGE_FLOOR_NS
+    # A slower cadence still widens it, exactly as before.
+    assert reconcile_health_max_age_ns(10.0) == 20 * 1_000_000_000

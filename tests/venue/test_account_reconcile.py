@@ -1452,3 +1452,105 @@ def test_demo_reconcile_labels_and_fault_text_are_pinned(tmp_path: Path) -> None
         reconciler.client = Client(command_id, venue_positions=positions)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match=re.escape(message)):
             reconciler.reconcile_once()
+
+
+class _CountingFlatClient(_NoOpenOrdersClient):
+    demo = True
+    realm = "demo"
+
+    def __init__(self) -> None:
+        self.position_reads = 0
+
+    def get_positions(self, **params: object):
+        assert params == {"settle_coin": "USDT"}
+        self.position_reads += 1
+        return []
+
+
+class _StubFeed:
+    """Stands in for the background thread without starting one."""
+
+    def __init__(self, rows: tuple[dict[str, str], ...], observed_ns: int) -> None:
+        self._latest = (rows, observed_ns)
+
+    def latest(self):
+        return self._latest
+
+
+def test_a_quiet_pass_uses_the_warm_feed_instead_of_blocking_on_the_venue(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="warm-feed", clock=clock)
+    client = _CountingFlatClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={},
+        clock=clock,
+    )
+    first = reconciler.reconcile_once()
+    assert client.position_reads == 1
+
+    feed_observed_ns = first.observed_ts_ns + 500_000_000
+    reconciler.position_feed = _StubFeed((), feed_observed_ns)  # type: ignore[assignment]
+    clock.advance_ns(1_000_000_000)
+    second = reconciler.reconcile_once()
+
+    # The pass made no venue call, and it aged position truth from the moment
+    # the feed received it -- not from the moment the loop asked.
+    assert client.position_reads == 1
+    assert second.observed_ts_ns == feed_observed_ns
+
+
+def test_a_pass_that_recovered_rows_still_reads_positions_inline(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    client = Client(command_id)
+    reads: list[int] = []
+    original = client.get_positions
+
+    def counted(**params: object):
+        reads.append(1)
+        return original(**params)
+
+    client.get_positions = counted  # type: ignore[method-assign]
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    # A feed snapshot far in the future would be taken if the guard were gone.
+    stale_rows = ({"symbol": "BUSDT", "side": "Buy", "size": "1"},)
+    reconciler.position_feed = _StubFeed(stale_rows, 9_000_000_000)  # type: ignore[assignment]
+
+    report = reconciler.reconcile_once()
+
+    # This pass applied a fill and an order transition, so a snapshot taken
+    # before them cannot be trusted to describe the book they produced.
+    assert report.execution_rows_observed == 1
+    assert len(reads) == 1
+    assert report.observed_ts_ns != 9_000_000_000
+
+
+def test_a_stalled_feed_falls_back_to_reading_the_venue(tmp_path: Path) -> None:
+    clock = VirtualClock(current_wall_ns=1_000_000_000, current_monotonic_ns=10)
+    kernel = AccountExecutionKernel(tmp_path, account_id="stalled-feed", clock=clock)
+    client = _CountingFlatClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={},
+        clock=clock,
+    )
+    first = reconciler.reconcile_once()
+
+    # Frozen at a stamp the published report already carries: re-serving it
+    # would re-certify an old observation as this pass's freshness.
+    reconciler.position_feed = _StubFeed((), first.observed_ts_ns)  # type: ignore[assignment]
+    clock.advance_ns(1_000_000_000)
+    second = reconciler.reconcile_once()
+
+    assert client.position_reads == 2
+    assert second.observed_ts_ns > first.observed_ts_ns

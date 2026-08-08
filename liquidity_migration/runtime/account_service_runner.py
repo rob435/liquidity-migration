@@ -45,6 +45,7 @@ from liquidity_migration.venue.account_reconcile import (
     AccountReconciliationStaleError,
     BybitAccountFundingReconciler,
     BybitAccountReconciler,
+    VenuePositionFeed,
 )
 from liquidity_migration.account.account_route import derive_account_route, ensure_account_route
 from liquidity_migration.core.artifact_snapshot import read_stable_file
@@ -357,6 +358,19 @@ def notification_position_truth(
 #: itself before it is reported as a fault, and the floor for that bound.
 POSITION_TRUTH_SETTLE_RECONCILE_PASSES = 15
 POSITION_TRUTH_SETTLE_FLOOR_NS = 30 * 1_000_000_000
+#: How old venue truth may be at the reduction-admission gate. Derived from
+#: twice the reconcile cadence, which read 4s while that cadence was 2s. The
+#: cadence is now free to run faster, and this bound must not silently tighten
+#: with it: it governs whether an EXIT is allowed, and every member of the
+#: health chain is aged against it. Held at what it has always been.
+RECONCILE_HEALTH_MAX_AGE_FLOOR_NS = 4 * 1_000_000_000
+
+
+def reconcile_health_max_age_ns(reconcile_seconds: float) -> int:
+    return max(
+        int(reconcile_seconds * 2 * 1_000_000_000),
+        RECONCILE_HEALTH_MAX_AGE_FLOOR_NS,
+    )
 
 
 class PositionTruthSettling:
@@ -703,7 +717,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicit full-position native stop distance used when components have no stop.",
     )
     parser.add_argument("--account-id", default="bybit-demo-unified")
-    parser.add_argument("--reconcile-seconds", type=float, default=2.0)
+    # Was 2.0, when a pass meant a blocking ~175 ms venue read on the owner
+    # loop. The read is now warm (--position-feed-seconds), so a steady-state
+    # pass makes no REST call at all and the cadence only has to buy CPU. This
+    # is what venue position truth is aged against everywhere downstream.
+    parser.add_argument("--reconcile-seconds", type=float, default=0.5)
+    parser.add_argument(
+        "--position-feed-seconds",
+        type=float,
+        default=0.25,
+        help="How often the background thread refreshes venue position truth.",
+    )
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
         "--request-market-warmup-timeout-seconds",
@@ -1061,6 +1085,16 @@ def main(argv: list[str] | None = None) -> int:
                     report=startup_reconciliation,
                 )
             )
+    # Startup reconciliation is strict and inline above; only now does the
+    # position read move to its own thread, where it stops blocking the loop.
+    position_feed = VenuePositionFeed(
+        client=private_client,
+        settle_coin=reconciler.settle_coin,
+        clock=reconciler.clock,
+        interval_seconds=args.position_feed_seconds,
+    )
+    position_feed.start()
+    reconciler.position_feed = position_feed
     health_chain = AccountHealthChain(
         (
             private_stream_supervisor,
@@ -1156,7 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
         required_rules_environment=realm.value,
         health_provider=health_chain,
         position_truth_provider=reconciler,
-        max_health_age_ns=max(int(args.reconcile_seconds * 2 * 1_000_000_000), 1),
+        max_health_age_ns=reconcile_health_max_age_ns(args.reconcile_seconds),
         # A tripped ceiling refuses queued risk at admission. Health already
         # stops producers publishing, but a cycle that published seconds before
         # the trip has a request in the queue that health cannot reach.
@@ -1640,12 +1674,9 @@ def main(argv: list[str] | None = None) -> int:
                     notification_health_errors.append(
                         "fresh L2 midpoint unavailable: " + ", ".join(sorted(unavailable_midpoint_symbols))
                     )
-                reconcile_health_max_age_ns = max(
-                    int(args.reconcile_seconds * 2 * 1_000_000_000),
-                    1,
-                )
+                notification_max_age_ns = reconcile_health_max_age_ns(args.reconcile_seconds)
                 try:
-                    health_chain.require_recent_healthy(max_age_ns=reconcile_health_max_age_ns)
+                    health_chain.require_recent_healthy(max_age_ns=notification_max_age_ns)
                 except Exception as exc:  # noqa: BLE001 - rendered hourly, not spammed per cycle
                     notification_health_errors.append(str(exc)[:240])
                 # Narrower than owner health: a missing native stop blocks
@@ -1659,7 +1690,7 @@ def main(argv: list[str] | None = None) -> int:
                     reconciler=reconciler,
                     kernel=kernel,
                     report=latest_reconcile_report,
-                    max_age_ns=reconcile_health_max_age_ns,
+                    max_age_ns=notification_max_age_ns,
                 )
                 # Reporting only; the admission gate calls the reconciler.
                 (
@@ -1726,6 +1757,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        position_feed.close()
         execution_consumer.close()
         public_stream.close()
         recorder.close()
