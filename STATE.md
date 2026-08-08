@@ -11,13 +11,13 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `acee4bf`, whole fleet green**: all nine units
-  on/active/enabled, receipt `staged-ok commit=acee4bf profile=operational`,
+- **Host runs `05f34c7`, whole fleet green**: all nine units
+  on/active/enabled, receipt `staged-ok commit=05f34c7 profile=operational`,
   `verify-ok … mainnet=armed`. Zero error-level lines on the funded owner since
   restart.
-- **The funded owner loop runs at 139 ms per iteration (7.19 Hz), measured, at
-  6.3% of one core.** It was 284 ms (3.52 Hz). Venue position truth is 0.39 s
-  old at the health write, down from 1.37 s. A steady-state reconcile pass now
+- **The funded owner loop runs at 69 ms per iteration (14.56 Hz), measured, at
+  8.2% of one core.** It was 284 ms (3.52 Hz) at 6.2%. Venue position truth is
+  0.23 s old at the health write, down from 1.37 s. A steady-state reconcile pass now
   makes **no REST call at all**: `get_positions` and the two `get_open_orders`
   ownership queries are served by a background read-only feed (250 ms and 2 s
   respectively). The main thread profiles as parked in the idle sleep, so the

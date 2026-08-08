@@ -17,7 +17,7 @@ edit STATE.md to match.
 > 2026-07-31 in `cdb6e61`.
 
 - **2026-08-08 — The 200 ms target, met by profiling instead of designing.
-  Owner loop 284 ms → 139 ms → ~89 ms; venue truth 1.37 s → 0.39 s.** After the
+  Owner loop 284 ms → 69 ms; venue truth 1.37 s → 0.23 s.** After the
   clever design below failed review, the win came from the dull question: what
   is the loop actually waiting on? Three REST reads ran on *every* reconcile
   pass with nothing gating them — one `get_positions`, and the two paged
@@ -45,9 +45,11 @@ edit STATE.md to match.
     (3.52 Hz) at 6.2% of one core — 6% CPU with 65% of the iteration blocked
     said "network, not compute", and `py-spy dump` named the exact frame
     (`get_open_orders` ← `inspect_bybit_order_ownership` ← `reconcile_once`).
-    After: 139 ms/iteration (7.19 Hz), 6.3% CPU, main thread parked in the idle
-    sleep, venue-fact age at health write 0.387 s. Steady-state reconcile now
-    makes no REST call at all. Commits `6f9d091`, `acee4bf`.
+    After the reads moved: 139 ms/iteration (7.19 Hz), 6.3% CPU, main thread
+    parked in the idle sleep rather than a socket, venue-fact age 0.387 s. With
+    the tick then halved: **69 ms/iteration (14.56 Hz), 8.2% CPU, venue-fact age
+    0.228 s.** Steady-state reconcile makes no REST call at all. Commits
+    `6f9d091`, `acee4bf`, `05f34c7`.
   - Remaining floor: a signed Bybit round trip is ~175 ms of geography and no
     amount of ticking shortens it, which is why the tick stops at 50 ms.
 
