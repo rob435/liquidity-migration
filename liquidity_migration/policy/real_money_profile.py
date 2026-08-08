@@ -174,13 +174,21 @@ def _validate_dials(dials: RealMoneyDials) -> None:
 def render_real_money_profile_json(
     dials: RealMoneyDials | None = None,
     *,
-    capital_reference_usdt: float = 2_500.0,
+    capital_reference_usdt: float = _EQUITY_FLOOR_USDT,
 ) -> dict[str, Any]:
     """Build the profile document. ``capital_reference_usdt`` is only a scale.
 
     It is the starting scale for the load-time proof, not a limit:
     ``capital_reference.mode = account_equity`` makes the runtime reference
     track the wallet, and every number below is a ratio of it.
+
+    The default is the equity FLOOR, not some larger invented figure. The scale
+    cancels out the moment the wallet is read, so the only thing the declared
+    number can ever do is size the caps in the instant before that read — and at
+    the floor those caps are the smallest the runtime can ever hold. A bigger
+    declared scale can only ever be wrong in the expensive direction: the funded
+    account ran with a declared 2,500 against an observed 355, which is a 7x
+    envelope for anything served before the first rebase.
     """
 
     dials = RealMoneyDials() if dials is None else dials
@@ -288,7 +296,7 @@ def render_real_money_profile_json(
 def render_real_money_profile(
     dials: RealMoneyDials | None = None,
     *,
-    capital_reference_usdt: float = 2_500.0,
+    capital_reference_usdt: float = _EQUITY_FLOOR_USDT,
 ) -> tuple[bytes, OperationalProfile]:
     """Render, prove, and return the exact bytes to install."""
 

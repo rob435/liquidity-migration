@@ -395,9 +395,29 @@ def test_snapshot_provider_names_the_realm_in_its_wallet_faults() -> None:
     with pytest.raises(
         RuntimeError,
         match=r"Bybit mainnet wallet snapshot has nonpositive equity "
-        r"or negative available margin \(equity=0\.00 USDT, available=1\.00 USDT\)",
+        r"\(equity=0\.00 USDT, available=1\.00 USDT\)",
     ):
         provider.current(batch_id="b1")
+
+
+def test_a_negative_available_margin_is_a_reading_not_a_fault() -> None:
+    """The owner hand-trades this account, and a hand-opened position absorbing
+    the wallet as position margin takes available margin below zero every time
+    the mark moves. Refusing the snapshot there blocked the whole owner — so it
+    could not close its own book — and paged the operator on every crossing.
+    The kernel already refuses new risk on a negative available margin while
+    letting reductions through, so the number is passed to it verbatim."""
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=0)
+    provider = BybitAccountSnapshotProvider(
+        _MainnetWalletClient({"totalEquity": "340.37", "totalAvailableBalance": "-1.89"}),
+        clock=clock,
+    )
+
+    snapshot = provider.current(batch_id="b1")
+
+    assert snapshot.equity_usdt == pytest.approx(340.37)
+    assert snapshot.available_margin_usdt == pytest.approx(-1.89)
 
 
 def test_snapshot_provider_reads_the_coin_row_when_aggregates_blank() -> None:

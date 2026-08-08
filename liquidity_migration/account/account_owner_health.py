@@ -219,8 +219,14 @@ class AccountOwnerHealth:
             raise ValueError("account-owner health journal_state_hash must be lowercase SHA-256")
         if not math.isfinite(self.equity_usdt) or self.equity_usdt <= 0.0:
             raise ValueError("account-owner health equity_usdt must be finite and positive")
-        if not math.isfinite(self.available_margin_usdt) or self.available_margin_usdt < 0.0:
-            raise ValueError("account-owner health available_margin_usdt must be finite and non-negative")
+        # Negative is allowed: a fully deployed account, or one carrying the
+        # owner's own hand-placed positions, reports available margin below zero
+        # whenever the mark moves against it. That is a real reading, not a
+        # broken one, and the kernel already refuses new risk on it while
+        # letting reductions through. Rejecting it here turned an ordinary
+        # number into a blocked owner and a paging alert.
+        if not math.isfinite(self.available_margin_usdt):
+            raise ValueError("account-owner health available_margin_usdt must be finite")
         if not isinstance(self.requested_symbols_ready, bool):
             raise ValueError("account-owner health requested_symbols_ready must be boolean")
         if type(self.venue_facts_at_ns) is not int or self.venue_facts_at_ns <= 0:

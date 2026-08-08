@@ -296,15 +296,22 @@ class BybitAccountSnapshotProvider:
 
         equity = _account_equity(account, realm=self.realm)
         available = _available_margin(account, realm=self.realm)
-        if equity <= 0.0 or available < 0.0:
-            # Carry the numbers: a hand-opened isolated-margin position can
-            # absorb the whole wallet as position margin, and the bare message
-            # gave the operator nothing to diagnose that with (2026-08-06).
+        if equity <= 0.0:
+            # Nonpositive equity is not a reading, it is a failed one: nothing
+            # can be sized against it and the envelope divides by it.
             raise RuntimeError(
                 f"Bybit {self.realm.value} wallet snapshot has nonpositive equity "
-                f"or negative available margin "
                 f"(equity={equity:.2f} USDT, available={available:.2f} USDT)"
             )
+        # A NEGATIVE available margin is passed through, not refused. It is a
+        # true and ordinary reading: the owner hand-trades this account, and a
+        # hand-opened position absorbing the wallet as position margin takes
+        # available below zero every time the mark moves. Refusing the snapshot
+        # here made that state unreachable by the kernel, which already handles
+        # it exactly right — ``account_kernel`` rejects new risk on a negative
+        # available margin but lets reductions through. Refusing instead blocked
+        # the whole owner, so the bot could not close its own book, and paged
+        # the operator every few minutes as the number crossed zero.
         material = {
             "batch_id": batch_id,
             "equity_usdt": equity,

@@ -133,13 +133,14 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **One code commit is deliberately undeployed**: the envelope is now anchored
-  on the bootstrap wallet before the first request is served, closing a
-  startup window in which the caps were ratios of the declared 2,500 reference
-  rather than observed equity (~355 USDT). It bites only during owner startup,
-  and the running owner is past that and correctly anchored, so it waits for
-  the next deploy rather than justifying its own restart. Otherwise the host
-  runs the tip of `main` (`0a6c0e0`). The host's `bybit-mainnet.env` carries
+- **Code is committed and undeployed** (host runs `0a6c0e0`): the envelope is
+  now anchored on the bootstrap wallet before the first request is served; the
+  declared capital reference defaults to the equity floor instead of an
+  invented 2,500, so the pre-read instant is the smallest envelope rather than
+  a 7x one; and a negative available margin is passed to the kernel as the real
+  reading it is instead of failing the wallet snapshot. **That last one is what
+  was paging you while hand-trading** — it is live-affecting and wants the next
+  deploy. The host's `bybit-mainnet.env` carries
   the four new dial names (read
   directly 2026-08-06; the earlier retired-names warning was stale), and the
   installed risk profile is the render of those dials.

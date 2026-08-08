@@ -16,6 +16,37 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 (fourth pass) — The alert that pages you for hand-trading, and
+  the end of the declared capital.**
+  1. **A negative available margin was being treated as a broken wallet read.**
+     `_snapshot_from_account` raised on `available < 0.0`, which failed the
+     whole snapshot, blocked the owner, and fired a CRITICAL Telegram alert from
+     the liveness watchdog. On the funded account it flapped every few minutes —
+     `equity=340.37, available=-1.89` at 16:25, cleared 16:28, `available=-6.92`
+     at 16:31 — because the owner hand-trades this account and a hand-opened
+     position absorbing the wallet as position margin takes available below zero
+     each time the mark moves. It is a true and ordinary reading. **The kernel
+     already handles it exactly right**: `account_kernel.py:2365` refuses new
+     risk on a negative available margin *but lets reductions through*. Two
+     upstream guards — the snapshot builder and the health-record validator —
+     made that state unreachable, so instead of "no new entries" the outcome was
+     "owner blocked, cannot close its own book, page the operator". Both now
+     pass the number through; only a nonpositive *equity* still fails the read,
+     because nothing can be sized against it.
+  2. **The declared capital reference is gone as an invented number.** The
+     render defaulted to 2,500 USDT — pure scaffolding, since
+     `capital_reference.mode = account_equity` makes the runtime reference track
+     the wallet and every figure in the profile is a ratio of it. But the scale
+     is live until the first wallet read, and 2,500 against an observed 355 is a
+     7x envelope. The default is now the equity **floor** the owner already
+     sets (100 USDT), so the declared number is no longer invented and the
+     pre-read instant is the smallest envelope the runtime can hold rather than
+     the largest. `configs/operational.mainnet.json` is regenerated: every cap
+     scaled by exactly 1/25 with all ratios identical, and the host's own dials
+     (carry 2.0, long 1.88, loss 0.25) re-render to the same shape — verified
+     ratio by ratio against the live profile. Runtime behaviour after the first
+     read is unchanged.
+
 - **2026-08-08 15:28 UTC — Deployed `0a6c0e0`: the second and third audit
   passes reach the host.** `deploy_everything.command`, which is `deploy staged
   --profile operational --stop-first`. The fleet was down 15:26:52 → 15:28:53

@@ -338,6 +338,42 @@ def test_demo_publisher_binds_wallet_capital_to_current_kernel_state(tmp_path: P
     assert read_account_owner_health(tmp_path) == published
 
 
+def test_a_fully_deployed_account_stays_healthy_at_negative_available_margin(
+    tmp_path: Path,
+) -> None:
+    """Available margin goes below zero whenever the mark moves against a fully
+    deployed account, or against the owner's own hand-placed positions. The
+    owner has to stay healthy through it: a blocked owner cannot close its own
+    book, and the watchdog pages on every crossing."""
+
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo-account")
+    snapshot = AccountRiskSnapshot(
+        equity_usdt=340.37,
+        available_margin_usdt=-1.89,
+        snapshot_key="wallet-1",
+        snapshot_ts_ns=30_000,
+    )
+
+    published = publish_demo_owner_health(
+        kernel=kernel,
+        account_root=tmp_path,
+        account_id="demo-account",
+        risk_snapshot=snapshot,
+        status=AccountOwnerHealthStatus.HEALTHY,
+        observed_ts_ns=31_000,
+        loop_sequence=2,
+        requested_symbols_ready=True,
+        venue_facts_at_ns=30_500,
+        venue_facts_healthy=True,
+        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
+        last_batch_id="batch-1",
+    )
+
+    assert published.available_margin_usdt == -1.89
+    assert published.status == AccountOwnerHealthStatus.HEALTHY
+    assert read_account_owner_health(tmp_path) == published
+
+
 def test_owner_health_republishes_each_journal_head_without_wallet_rest_burst() -> None:
     health_signature = ("healthy", "", True)
     journal_signature = (10, "a" * 64)
@@ -797,7 +833,7 @@ def test_a_zero_window_reports_immediately() -> None:
         ("requested_symbols_ready", 1, "must be boolean"),
         ("invocation_id", int("1" * 32), "lowercase hexadecimal"),
         ("equity_usdt", float("nan"), "finite and positive"),
-        ("available_margin_usdt", -1.0, "finite and non-negative"),
+        ("available_margin_usdt", float("nan"), "must be finite"),
         ("journal_state_hash", "not-a-hash", "lowercase SHA-256"),
     ],
 )
