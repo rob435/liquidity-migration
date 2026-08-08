@@ -1391,6 +1391,7 @@ class AccountExecutionService:
         max_convergence_retries: int = 3,
         inbox_retry_budget_ns: int = 600_000_000_000,
         resting_entry_quotes: Callable[[str], bool] | None = None,
+        new_risk_halt: Callable[[], str] | None = None,
     ) -> None:
         self.route = _require_verified_account_route(route)
         kernel_root = str(kernel.journal.root.expanduser().resolve(strict=False))
@@ -1431,6 +1432,11 @@ class AccountExecutionService:
         # answered by the entry quote manager. None means entries are market
         # orders and every working order ages against the normal grace.
         self.resting_entry_quotes = resting_entry_quotes
+        # Returns why the account may take no new risk, or "" when it may.
+        # Owner health already stops a producer PUBLISHING new risk, but a cycle
+        # that published seconds before the halt has a request sitting in the
+        # queue, and admission is the only place left to refuse it.
+        self.new_risk_halt = new_risk_halt
         # First monotonic instant each inbox file started failing, cleared on
         # success or retirement. The 2026-08-01 outage was a head request
         # bouncing pending<->claimed every ~2s for two days: a request that
@@ -1647,6 +1653,41 @@ class AccountExecutionService:
             )
         return targets
 
+    @staticmethod
+    def request_carries_new_risk(request: AccountTargetRequest) -> bool:
+        """Whether serving this request could leave the account holding more.
+
+        Deliberately coarse: any nonzero target counts, including one that would
+        only reduce a position. Deciding that properly needs a book and a wallet
+        read, and the callers of this are the paths that must refuse without
+        touching either. Refusing a reduction that a queued all-flat will take
+        to zero anyway costs nothing; the mistake in the other direction opens
+        exposure the account has already been halted for.
+        """
+
+        return any(float(item.intent.signed_notional_usdt) != 0.0 for item in request.intents)
+
+    def _new_risk_halt_reason(self, request: AccountTargetRequest, *, committed: bool) -> str:
+        """Why this request must not be admitted, or "" to proceed.
+
+        A batch already in the journal is exempt for the same reason expiry
+        exempts it: its commands may be half-submitted at the venue, and
+        refusing the replay strands them working with no way to flatten what
+        they opened. Halting stops the NEXT risk, it does not abandon risk
+        already taken.
+        """
+
+        if self.new_risk_halt is None or committed:
+            return ""
+        if not self.request_carries_new_risk(request):
+            return ""
+        return self.new_risk_halt()
+
+    def halted_for_new_risk(self) -> str:
+        """The current new-risk halt reason, or "" — for admission ordering."""
+
+        return "" if self.new_risk_halt is None else self.new_risk_halt()
+
     def handle(self, request: AccountTargetRequest) -> AccountServiceReceipt:
         request.require_route(self.route)
         # Expiry is an admission rule for never-committed work. Once the batch
@@ -1681,6 +1722,25 @@ class AccountExecutionService:
                 execution_event_ids=(),
                 final_state_hash=state.state_hash(),
                 disposition="expired",
+            )
+        halt_reason = self._new_risk_halt_reason(request, committed=batch_already_committed)
+        if halt_reason:
+            state = self.kernel._state_ref()
+            _logger.critical(
+                "refused request %s: the account may take no new risk (%s)",
+                request.request_id,
+                halt_reason,
+            )
+            return AccountServiceReceipt(
+                request_id=request.request_id,
+                request_hash=request.content_hash(),
+                batch_id=request.batch_id,
+                accepted=False,
+                rejection_keys=("account-service:new-risk-halted",),
+                command_ids=(),
+                execution_event_ids=(),
+                final_state_hash=state.state_hash(),
+                disposition="halted",
             )
         requested_symbols = {item.intent.symbol.upper() for item in request.intents}
         exit_market_fallbacks: dict[str, MarketInputRef] = {}

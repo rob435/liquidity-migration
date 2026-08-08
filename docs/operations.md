@@ -188,17 +188,18 @@ multiple:
 | --- | --- | --- |
 | `RM_CARRY_LEVERAGE` | 1.0 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 1.0 → names up to 10% of equity, book up to 100%. |
 | `RM_LONG_LEVERAGE` | 0.75 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.75 → ~4% per entry, 1.88 → ~10%. |
-| `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily realised-loss halt. Trips a flatten. |
+| `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily loss halt against the day's opening **wallet equity**, so an open position's paper loss counts. Trips a flatten, refuses queued entries at admission, never clears on its own. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
 The two leverage dials may total at most 9.9 (the retired-CONTINUOUS token
 share keeps its 1% of a 10× ceiling). Past a total of ~2 the venue margin
 leverage the producers request rises with the dials — gross above
 `entry leverage × wallet` is physically unreachable — and the honest
-protection picture changes: the daily loss halt fires on realised loss only,
-so an open book's drawdown meets the venue's liquidation engine first (at
-10× gross, a ~10% adverse move is the wallet), and some symbols' own venue
-leverage limits may bind. Everything the old dial surface exposed (account
+protection picture changes: the daily loss halt reads wallet equity, so it
+does see an open book's paper loss, but it only gets to act once per owner
+pass and a fast enough drawdown still meets the venue's liquidation engine
+first (at 10× gross, a ~10% adverse move is the wallet), and some symbols'
+own venue leverage limits may bind. Everything the old dial surface exposed (account
 caps, the sleeve partition, margin ceilings, entry leverage, the equity
 floor) is derived from the dials and still proved at render; a retired
 `RM_*` variable left in the env file is refused by name. `scripts/ops.sh real-money render-profile` turns the dials

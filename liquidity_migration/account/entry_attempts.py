@@ -19,6 +19,29 @@ def entry_attempt_key(target_key: str) -> str:
     return f"entry-attempt/{normalized}"
 
 
+def signal_scoped_entry_attempt_key(attempt_key: str, metadata: Mapping[str, Any]) -> str:
+    """Narrow an attempt key to the exact signal instant it was minted from.
+
+    An attempt key is a pure function of its target key, so it matches forever.
+    That is what a *rejection* wants — it is bounded by the signal window it
+    carries — but an *expiry* is only ever recorded once the window has already
+    passed, so bounding it the same way would never suppress anything, and
+    leaving it unbounded retired the symbol for the life of the journal.
+
+    The signal instant is the bound that fits: a republication of the same
+    decision matches and stays suppressed, and the next closed bar mints a
+    different instant that gets to stand or fall on its own.
+    """
+
+    try:
+        signal_ts_ms = int(metadata[SIGNAL_TS_METADATA_KEY])
+    except (KeyError, TypeError, ValueError):
+        # No usable signal instant means nothing can be scoped to it, so the
+        # unscoped key is returned and the caller's plain comparison decides.
+        return attempt_key
+    return f"{attempt_key}@{signal_ts_ms}"
+
+
 def entry_signal_expiry_rejection(
     *,
     decision_key: str,

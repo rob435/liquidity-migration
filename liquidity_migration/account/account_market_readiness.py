@@ -45,6 +45,9 @@ class RequestedMarketReadiness:
 
     ``timed_out`` says the head has been unservable for longer than the warmup
     timeout right now. It is a symptom reported for health, not a latch.
+
+    ``carries_new_risk`` is read off the head's own targets, so a halted account
+    can refuse it without first waiting for books it will never look at.
     """
 
     request_id: str
@@ -52,6 +55,7 @@ class RequestedMarketReadiness:
     ready: bool
     timed_out: bool
     detail: str
+    carries_new_risk: bool = False
 
 
 @dataclass(slots=True)
@@ -84,6 +88,7 @@ class RequestedMarketWarmupGate:
         reason: str,
         elapsed: float,
         overdue: bool,
+        carries_new_risk: bool,
     ) -> RequestedMarketReadiness:
         detail = reason
         if overdue:
@@ -91,7 +96,7 @@ class RequestedMarketWarmupGate:
                 f"; queue head has been unservable for {elapsed:.1f}s "
                 f"(warmup timeout {self.timeout_seconds:g}s) and remains pending"
             )
-        return RequestedMarketReadiness(request_id, symbols, False, overdue, detail)
+        return RequestedMarketReadiness(request_id, symbols, False, overdue, detail, carries_new_risk)
 
     def evaluate(
         self,
@@ -114,6 +119,7 @@ class RequestedMarketWarmupGate:
             self._request_id = request.request_id
             self._started_monotonic = now_monotonic
         symbols = tuple(sorted({item.intent.symbol.upper() for item in request.intents}))
+        carries_new_risk = AccountExecutionService.request_carries_new_risk(request)
         elapsed = max(now_monotonic - self._started_monotonic, 0.0)
         overdue = elapsed >= self.timeout_seconds
         missing_rules = sorted(set(symbols) - verified_rule_symbols)
@@ -124,6 +130,7 @@ class RequestedMarketWarmupGate:
                 reason="queue head lacks venue-verified rules: " + ", ".join(missing_rules),
                 elapsed=elapsed,
                 overdue=overdue,
+                carries_new_risk=carries_new_risk,
             )
 
         issues: list[str] = []
@@ -149,6 +156,7 @@ class RequestedMarketWarmupGate:
                 reason="waiting for queue-head market data: " + ", ".join(issues),
                 elapsed=elapsed,
                 overdue=overdue,
+                carries_new_risk=carries_new_risk,
             )
         return RequestedMarketReadiness(
             request.request_id,
@@ -156,6 +164,7 @@ class RequestedMarketWarmupGate:
             True,
             False,
             "",
+            carries_new_risk,
         )
 
 
@@ -170,12 +179,19 @@ def run_ready_request_or_converge(
     Warmup governs the newly queued request, not retries already committed to
     the journal, so an absent or stale book on an unrelated head must not
     starve an earlier convergence plan.
+
+    One head is claimed while still unservable: a risk-carrying request on a
+    halted account. Its refusal reads no book, and leaving it at the head would
+    park the account's own all-flat behind a request that can never be served.
     """
 
     safety_receipt = service.run_safety_flat_once(inbox)
     if safety_receipt is not None:
         return safety_receipt
-    if readiness.request_id and readiness.ready:
+    refusable_head = (
+        not readiness.ready and readiness.carries_new_risk and bool(service.halted_for_new_risk())
+    )
+    if readiness.request_id and (readiness.ready or refusable_head):
         return service.run_once(
             inbox,
             expected_request_id=readiness.request_id,

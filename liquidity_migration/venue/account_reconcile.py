@@ -131,6 +131,7 @@ class BybitAccountReconciler:
         settle_coin: str = "USDT",
         health_max_age_floor_ns: int = POSITION_HEALTH_MAX_AGE_FLOOR_NS,
         auto_resolve_wedges: bool | None = None,
+        venue_leverage_observer: Callable[[Mapping[str, float]], None] | None = None,
     ) -> None:
         self.realm = require_named_realm(client, label="account reconciler")
         if int(health_max_age_floor_ns) <= 0:
@@ -142,6 +143,10 @@ class BybitAccountReconciler:
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self.settle_coin = settle_coin
         self.native_protection_manager = native_protection_manager
+        # Told the leverage every open position actually carries, once a pass.
+        # The execution adapter caches what it last set, and this account has a
+        # second party — the owner, by hand — who can change it underneath.
+        self.venue_leverage_observer = venue_leverage_observer
         # Every realm terminalizes dead commands itself, on the same evidence
         # ladder: a live order, an unreadable venue, or fills this book has not
         # reduced still refuse. Leaving mainnet to classify only meant a wedge
@@ -380,12 +385,18 @@ class BybitAccountReconciler:
         position_rows = _validated_venue_position_rows(raw_positions, realm=self.realm)
         venue_positions: dict[str, float] = {}
         active_sides: dict[str, set[str]] = {}
-        for _row, symbol, side, size in position_rows:
+        venue_leverage: dict[str, float] = {}
+        for row, symbol, side, size in position_rows:
             if size == 0.0:
                 continue
             signed = size if side == "buy" else -size
             venue_positions[symbol] = math.fsum((venue_positions.get(symbol, 0.0), signed))
             active_sides.setdefault(symbol, set()).add(side)
+            leverage = _finite_or_zero(row.get("leverage"))
+            if leverage > 0.0:
+                venue_leverage[symbol] = leverage
+        if self.venue_leverage_observer is not None:
+            self.venue_leverage_observer(venue_leverage)
         reconstructed = {
             symbol: position.signed_qty
             for symbol, position in self.kernel._state_ref().positions.items()

@@ -34,6 +34,7 @@ from liquidity_migration.account.account_intent_client import (
     CompletedEntryAttemptCursor,
     completed_expired_entry_attempt_keys,
 )
+from liquidity_migration.account.entry_attempts import signal_scoped_entry_attempt_key
 from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
 from liquidity_migration.account.account_route import AccountRoute
 from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
@@ -347,7 +348,16 @@ def suppress_target_intents(
             if on_entry_suppression is not None:
                 on_entry_suppression(intent, "unresolved_account_target")
             continue
-        if str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "") in terminal_entry_attempts:
+        attempt_key = str(intent.intent.metadata.get(ENTRY_ATTEMPT_METADATA_KEY) or "")
+        # Two forms, because the two halves of the terminal set are bounded
+        # differently: an account rejection matches the bare key for as long as
+        # the signal it carried is valid, while a service expiry matches only
+        # the signal instant it expired on.
+        if attempt_key and (
+            attempt_key in terminal_entry_attempts
+            or signal_scoped_entry_attempt_key(attempt_key, intent.intent.metadata)
+            in terminal_entry_attempts
+        ):
             terminal_entry += 1
             if on_entry_suppression is not None:
                 on_entry_suppression(intent, "terminal_entry_attempt")

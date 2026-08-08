@@ -125,6 +125,49 @@ def test_rest_reconcile_recovers_dropped_execution_then_matches_venue_truth(tmp_
     reconciler.require_recent_symbols_consistent(["BUSDT"], max_age_ns=1)
 
 
+def test_reconcile_reports_the_leverage_every_open_position_actually_carries(
+    tmp_path: Path,
+) -> None:
+    """Authenticated position truth is what tells the adapter its cache went stale."""
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    observed: list[dict[str, float]] = []
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(
+            command_id,
+            venue_positions=[{"symbol": "BUSDT", "side": "Buy", "size": "1", "leverage": "10"}],
+        ),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+        venue_leverage_observer=lambda mapping: observed.append(dict(mapping)),
+    )
+
+    reconciler.reconcile_once()
+
+    assert observed == [{"BUSDT": 10.0}]
+
+
+def test_reconcile_reports_an_empty_book_so_stale_leverage_cannot_survive_a_close(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    observed: list[dict[str, float]] = []
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=Client(command_id, venue_positions=[]),
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+        venue_leverage_observer=lambda mapping: observed.append(dict(mapping)),
+    )
+
+    reconciler.reconcile_once()
+
+    assert observed == [{}]
+
+
 def test_reconcile_records_and_fails_on_position_mismatch(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
     kernel, command_id = _kernel(tmp_path, clock)

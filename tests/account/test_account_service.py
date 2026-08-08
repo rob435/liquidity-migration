@@ -37,6 +37,7 @@ from liquidity_migration.strategy.account_strategy_state import (
     canonical_strategy_trade_rows,
     target_reservation_rows,
 )
+from liquidity_migration.strategy.strategy_planning import suppress_target_intents
 from liquidity_migration.marketdata.bybit_errors import BybitSubmissionUncertain
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.core.deterministic_runtime import VirtualClock
@@ -368,6 +369,7 @@ def _service(
     convergence_health_grace_ns: int = 30_000_000_000,
     max_convergence_retries: int = 3,
     resting_entry_quotes=None,
+    new_risk_halt=None,
 ) -> AccountExecutionService:
     route = _route(root.parent)
     clock = clock or VirtualClock(current_wall_ns=NOW_NS, current_monotonic_ns=100)
@@ -393,6 +395,7 @@ def _service(
         convergence_health_grace_ns=convergence_health_grace_ns,
         max_convergence_retries=max_convergence_retries,
         resting_entry_quotes=resting_entry_quotes,
+        new_risk_halt=new_risk_halt,
     )
 
 
@@ -960,11 +963,13 @@ def test_expired_entry_is_completed_before_inputs_or_kernel_and_survives_restart
     assert not receipt.accepted
     assert service.kernel.state().events_applied == 0
     assert adapter.submit_calls == 0
+    # Scoped to the signal instant, so the same target minted from a later bar
+    # is a new decision rather than a symbol retired for the journal's life.
     assert completed_expired_entry_attempt_keys(
         inbox,
         sleeve=SleeveAdapterKind.LONG,
         strategy_ids=("long-v1",),
-    ) == frozenset({f"entry-attempt/{target_key}"})
+    ) == frozenset({f"entry-attempt/{target_key}@500"})
 
     restarted = _service(root, adapter, clock=clock)
     assert inbox.submit(request).parent.name == "completed"
@@ -982,6 +987,136 @@ def test_expired_entry_is_completed_before_inputs_or_kernel_and_survives_restart
             sleeve=SleeveAdapterKind.LONG,
             strategy_ids=("long-v1",),
         )
+
+
+def test_new_risk_halt_refuses_a_queued_entry_without_reading_a_book(tmp_path: Path) -> None:
+    """The queue is the gap owner health cannot cover.
+
+    A producer reads health once at the top of its cycle and publishes minutes
+    later. A request written just before a loss-ceiling trip is already in the
+    queue by the time health goes blocked, and admission is the last place that
+    can still refuse it.
+    """
+
+    target_key = "long/long-v1/halted/BUSDT"
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="entry-after-trip",
+            batch_id="entry-after-trip",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1100/entry/halted",
+            metadata={
+                "entry_attempt_key": f"entry-attempt/{target_key}",
+                "signal_ts_ms": 1_000,
+                "signal_valid_until_ms": NOW_NS // 1_000_000 + 60_000,
+            },
+        )
+    )
+    adapter = CountingTwin()
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        new_risk_halt=lambda: "account daily loss ceiling: -120.00 USDT",
+    )
+    # No book at all: the refusal must not depend on one.
+    service.market_provider.market = None
+
+    receipt = service.run_once(inbox)
+
+    assert receipt is not None
+    assert not receipt.accepted
+    assert receipt.disposition == "halted"
+    assert receipt.rejection_keys == ("account-service:new-risk-halted",)
+    assert adapter.submit_calls == 0
+    assert service.kernel.state().events_applied == 0
+    assert len(list((inbox.root / "completed").glob("*.json"))) == 1
+
+
+def test_new_risk_halt_still_lets_an_exit_through(tmp_path: Path) -> None:
+    """Halting stops the next risk; it must never block closing what is open."""
+
+    adapter = CountingTwin()
+    service = _service(
+        tmp_path / "account",
+        adapter,
+        new_risk_halt=lambda: "account daily loss ceiling: -120.00 USDT",
+    )
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="entry-before-trip",
+            batch_id="entry-before-trip",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key="long/long-v1/open/BUSDT",
+        )
+    )
+    service.new_risk_halt = None
+    assert service.run_once(inbox) is not None
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+
+    service.new_risk_halt = lambda: "account daily loss ceiling: -120.00 USDT"
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="flatten-after-trip",
+            batch_id="flatten-after-trip",
+            kind=SleeveAdapterKind.RISK,
+            notional=0.0,
+            target_key="long/long-v1/open/BUSDT",
+        )
+    )
+    receipt = service.run_once(inbox)
+
+    assert receipt is not None and receipt.accepted
+    assert receipt.disposition == "processed"
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(0.0)
+
+
+def test_new_risk_halt_does_not_abandon_a_batch_already_in_the_journal(tmp_path: Path) -> None:
+    """A committed batch replays past the halt, exactly as it replays past expiry.
+
+    Its commands may be half-submitted at the venue; refusing the replay would
+    strand them working with no way to flatten what they opened.
+    """
+
+    root = tmp_path / "account"
+    inbox = _inbox(tmp_path)
+    target_key = "long/long-v1/halt-mid-flight/BUSDT"
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="entry-crash-then-halt",
+            batch_id="entry-crash-then-halt",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1100/entry/halt-mid-flight",
+            metadata={
+                "entry_attempt_key": f"entry-attempt/{target_key}",
+                "signal_ts_ms": 1_000,
+                "signal_valid_until_ms": NOW_NS // 1_000_000 + 60_000,
+            },
+        )
+    )
+    adapter = ScriptedExecutionAdapter("crash", "fill")
+    service = _service(root, adapter)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_once(inbox)
+    assert "entry-crash-then-halt" in service.kernel.state().processed_batches
+
+    service.new_risk_halt = lambda: "account daily loss ceiling: -120.00 USDT"
+    receipt = service.run_once(inbox)
+
+    assert receipt is not None and receipt.accepted
+    assert receipt.disposition == "processed"
+    assert adapter.submit_calls == 2
 
 
 def test_committed_entry_resumes_after_crash_even_if_signal_expires(tmp_path: Path) -> None:
@@ -1246,7 +1381,83 @@ def test_expired_batch_receipt_terminalizes_only_the_expired_entry_attempt(
         inbox,
         sleeve=SleeveAdapterKind.LONG,
         strategy_ids=("long-v1",),
-    ) == frozenset({f"entry-attempt/{expired_key}"})
+    ) == frozenset({f"entry-attempt/{expired_key}@500"})
+
+
+def test_expiry_suppresses_its_own_signal_but_not_the_next_one(tmp_path: Path) -> None:
+    """One expiry must not retire the symbol for the life of the journal.
+
+    The attempt key is a pure function of the target key, so before this the
+    next cycle minted the identical key and suppressed itself forever — however
+    fresh the decision behind it.
+    """
+
+    target_key = "long/long-v1/signal-1/BUSDT"
+    attempt_key = f"entry-attempt/{target_key}"
+    inbox = _inbox(tmp_path)
+    inbox.submit(
+        _request(
+            _route(tmp_path),
+            request_id="expired-entry-1",
+            batch_id="expired-entry-1",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            created_ts_ns=1_000_000_000,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1000/entry/signal-1",
+            metadata={
+                "entry_attempt_key": attempt_key,
+                "signal_ts_ms": 500,
+                "signal_valid_until_ms": 1_000,
+            },
+        )
+    )
+    service = _service(
+        tmp_path / "account",
+        CountingTwin(),
+        clock=VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100),
+    )
+    assert service.run_once(inbox) is not None
+
+    terminal = completed_expired_entry_attempt_keys(
+        inbox,
+        sleeve=SleeveAdapterKind.LONG,
+        strategy_ids=("long-v1",),
+    )
+
+    def entry(signal_ts_ms: int) -> RequestedIntent:
+        return _request(
+            _route(tmp_path),
+            request_id=f"republished-{signal_ts_ms}",
+            batch_id=f"republished-{signal_ts_ms}",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=target_key,
+            decision_key="long-target/long-v1/1000/entry/signal-1",
+            metadata={
+                "entry_attempt_key": attempt_key,
+                "signal_ts_ms": signal_ts_ms,
+                "signal_valid_until_ms": signal_ts_ms + 500,
+            },
+        ).intents[0]
+
+    same_signal = suppress_target_intents(
+        exit_intents=(),
+        entry_intents=(entry(500),),
+        unresolved_target_keys=frozenset(),
+        terminal_entry_attempts=terminal,
+    )
+    assert same_signal.entry_intents == []
+    assert same_signal.terminal_entry_attempt_suppressions == 1
+
+    later_signal = suppress_target_intents(
+        exit_intents=(),
+        entry_intents=(entry(3_600_000),),
+        unresolved_target_keys=frozenset(),
+        terminal_entry_attempts=terminal,
+    )
+    assert len(later_signal.entry_intents) == 1
+    assert later_signal.terminal_entry_attempt_suppressions == 0
 
 
 def test_target_request_forbids_mixing_exit_and_entry(tmp_path: Path) -> None:

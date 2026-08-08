@@ -153,6 +153,88 @@ def test_read_dataset_handles_schema_evolution_across_partitions(tmp_path: Path)
     assert stored.filter(pl.col("symbol") == "ETHUSDT").row(0, named=True)["mark_price"] == 99.5
 
 
+def _evolved_funding_root(tmp_path: Path) -> Path:
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_700_000_000_000, "symbol": "BTCUSDT", "funding_rate": 0.001}]),
+        tmp_path,
+        "funding",
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": 1_700_086_400_000,
+                    "symbol": "ETHUSDT",
+                    "funding_rate": 0.002,
+                    "funding_event_kind": "settlement",
+                }
+            ]
+        ),
+        tmp_path,
+        "funding",
+    )
+    return tmp_path
+
+
+def test_evolved_schemas_are_unioned_in_one_scan_not_read_file_by_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Bybit funding root is 600k parts; per-file reads cost ~158s against ~59s.
+
+    Declaring the union of the on-disk schemas keeps the whole thing on one
+    scan. Failing the per-file call outright is the only way to prove the fast
+    path is the one taken.
+    """
+
+    root = _evolved_funding_root(tmp_path)
+
+    def refuse(*args: object, **kwargs: object) -> pl.DataFrame:
+        raise AssertionError("per-file read is the last resort, not the schema-drift path")
+
+    monkeypatch.setattr(pl, "read_parquet", refuse)
+    stored = read_dataset(root, "funding")
+
+    assert stored.height == 2
+    assert stored.filter(pl.col("symbol") == "BTCUSDT").row(0, named=True)["funding_event_kind"] is None
+    assert (
+        stored.filter(pl.col("symbol") == "ETHUSDT").row(0, named=True)["funding_event_kind"]
+        == "settlement"
+    )
+
+
+def test_evolved_schemas_honour_a_column_projection(tmp_path: Path) -> None:
+    root = _evolved_funding_root(tmp_path)
+
+    stored = storage.read_dataset_columns(
+        root, "funding", columns=["symbol", "funding_event_kind"]
+    )
+
+    assert stored.columns == ["symbol", "funding_event_kind"]
+    assert sorted(stored.get_column("symbol").to_list()) == ["BTCUSDT", "ETHUSDT"]
+    assert set(stored.get_column("funding_event_kind").to_list()) == {"settlement", None}
+
+
+def test_conflicting_dtypes_across_partitions_still_read_file_by_file(tmp_path: Path) -> None:
+    """A union cannot describe one column carrying two types; that case keeps its fallback."""
+
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_700_000_000_000, "symbol": "BTCUSDT", "funding_rate": 1}]),
+        tmp_path,
+        "funding",
+    )
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_700_086_400_000, "symbol": "ETHUSDT", "funding_rate": 0.002}]),
+        tmp_path,
+        "funding",
+    )
+
+    stored = read_dataset(tmp_path, "funding")
+
+    assert stored.height == 2
+    assert sorted(stored.get_column("funding_rate").to_list()) == [0.002, 1.0]
+
+
 def test_exclusive_file_lock_persists_same_single_link_inode(tmp_path: Path) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
 

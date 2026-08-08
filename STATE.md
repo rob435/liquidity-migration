@@ -31,6 +31,17 @@ match; never append history to this file.
   `/var/lib/liquidity-migration/account-mainnet/account_loss_guard.json`,
   first written 13:43 UTC. Before it, a restart re-anchored the day's loss
   budget to an already-drawn-down equity and forgot a trip.
+- **A tripped loss ceiling now refuses queued risk, not just new publishing.**
+  Committed but **not yet deployed** at the time of writing. Admission drops
+  any uncommitted request carrying a nonzero target while the ceiling is
+  tripped, before reading a book, and a halted owner claims an unservable head
+  rather than letting its own all-flat queue behind it. Exits, and any batch
+  already in the journal, are untouched. See CHANGELOG 2026-08-08 (later).
+- **No copy of the funded API key remains on the laptop.** `deploy/.env` is
+  deleted; `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only
+  copy and the only authority (`REAL_MONEY=true`, carry 2.0, long 1.88, daily
+  loss 0.25). The key was readable in plaintext on the Desktop from 2026-08-05
+  to 2026-08-08, so **rotation is still owed and is the owner's act.**
 - **The owner was hand-trading through the deploy** (KAITOUSDT, filled
   13:22–13:23 UTC). The bot left the position and both its conditional orders
   strictly alone, before and after the restart — the separate-books policy

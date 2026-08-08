@@ -125,7 +125,29 @@ class BybitDemoExecutionAdapter:
         # most of the delay between deciding to trade and the order leaving.
         # Starts empty each process, so the first entry per symbol still sets
         # it, and any rejected create drops the symbol back to unknown.
+        # ``retain_confirmed_leverage`` keeps only what authenticated position
+        # truth still agrees with, because this is not the only party that
+        # changes leverage on the account.
         self._venue_leverage: dict[str, float] = {}
+
+    def retain_confirmed_leverage(self, venue_leverage: Mapping[str, float]) -> None:
+        """Forget any cached leverage the venue no longer confirms.
+
+        The owner hand-trades this same account, so a leverage they set by hand
+        supersedes what this process last sent. Skipping ``set_leverage`` on a
+        stale cache would then size an entry at their number instead of the
+        sleeve's. A symbol absent from the snapshot is flat, and its next entry
+        pays one ``set_leverage`` — the round trip the cache saves is on the
+        scale-ins into a position that is already open and still confirmed.
+        """
+
+        confirmed = {str(symbol).upper(): float(value) for symbol, value in venue_leverage.items()}
+        for symbol in [
+            symbol
+            for symbol, cached in self._venue_leverage.items()
+            if confirmed.get(symbol) != cached
+        ]:
+            del self._venue_leverage[symbol]
 
     @staticmethod
     def _entry_protection_metadata(command: OrderCommand) -> dict[str, Any]:

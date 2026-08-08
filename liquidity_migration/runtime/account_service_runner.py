@@ -1120,6 +1120,42 @@ def main(argv: list[str] | None = None) -> int:
         if args.entry_quote_window_seconds > 0.0
         else None
     )
+    execution_adapter = BybitDemoExecutionAdapter(
+        private_client,
+        # Read position truth back at the create boundary instead of
+        # trusting atomic arming until the next reconcile.
+        entry_stop_verifier=native_protection.verify_entry_attached_stop,
+        max_unsubmitted_exposure_age_ns=int(
+            args.max_unsubmitted_exposure_age_seconds * 1_000_000_000
+        ),
+        entry_quotes=entry_quotes,
+    )
+    # Every reconcile pass hands back the leverage the venue actually holds, so
+    # a value the owner changed by hand cannot survive in the adapter's cache
+    # and size the next entry.
+    reconciler.venue_leverage_observer = execution_adapter.retain_confirmed_leverage
+    # Account-level daily loss halt; the ceiling rides on the risk policy.
+    # Absent or zero leaves the machinery running and observable but never
+    # tripping.
+    loss_guard = AccountLossGuard(
+        max_daily_loss_usdt=(
+            policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
+        )
+    )
+    loss_guard_state_path = Path(route.account_path) / "account_loss_guard.json"
+    # Fail closed on NEW RISK, not on closing. This process is the only thing
+    # that submits exits, runs convergence and maintains the native stops, and
+    # its unit is Restart=always — so exiting here would crash-loop the account
+    # with its positions behind the venue stop alone. Block instead: health goes
+    # BLOCKED every pass, which stops producers opening risk while exits and
+    # convergence keep running, and the operator sees the file named.
+    loss_guard_state_detail = ""
+    try:
+        loss_guard.restore(_read_loss_guard_state(loss_guard_state_path))
+    except RuntimeError as exc:
+        loss_guard_state_detail = str(exc)
+        _logger.error("%s", exc)
+    last_loss_guard_state: Mapping[str, Any] | None = loss_guard.snapshot()
     service = AccountExecutionService(
         route=route,
         kernel=kernel,
@@ -1127,16 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_provider=snapshot_provider,
         rules_provider=VerifiedBybitDemoRulesProvider(rules, environment=realm.value),
         risk_policy=policy,
-        execution_adapter=BybitDemoExecutionAdapter(
-            private_client,
-            # Read position truth back at the create boundary instead of
-            # trusting atomic arming until the next reconcile.
-            entry_stop_verifier=native_protection.verify_entry_attached_stop,
-            max_unsubmitted_exposure_age_ns=int(
-                args.max_unsubmitted_exposure_age_seconds * 1_000_000_000
-            ),
-            entry_quotes=entry_quotes,
-        ),
+        execution_adapter=execution_adapter,
         resting_entry_quotes=(
             entry_quotes.symbol_has_active_quote if entry_quotes is not None else None
         ),
@@ -1145,6 +1172,14 @@ def main(argv: list[str] | None = None) -> int:
         health_provider=health_chain,
         position_truth_provider=reconciler,
         max_health_age_ns=max(int(args.reconcile_seconds * 2 * 1_000_000_000), 1),
+        # A tripped ceiling refuses queued risk at admission. Health already
+        # stops producers publishing, but a cycle that published seconds before
+        # the trip has a request in the queue that health cannot reach.
+        new_risk_halt=lambda: (
+            f"account daily loss ceiling: {loss_guard.tripped_detail}"
+            if loss_guard.tripped
+            else ""
+        ),
     )
     inbox = AccountIntentInbox(route)
     market_warmup_gate = RequestedMarketWarmupGate(
@@ -1196,28 +1231,6 @@ def main(argv: list[str] | None = None) -> int:
     last_request_failure_signature = ""
     latest_reconcile_report = reconciler.last_report
     last_capital_snapshot = snapshot_provider.current(batch_id="owner-health/bootstrap")
-    # Account-level daily loss halt; the ceiling rides on the risk policy.
-    # Absent or zero leaves the machinery running and observable but never
-    # tripping.
-    loss_guard = AccountLossGuard(
-        max_daily_loss_usdt=(
-            policy.max_daily_loss_usdt if policy.max_daily_loss_usdt > 0.0 else None
-        )
-    )
-    loss_guard_state_path = Path(route.account_path) / "account_loss_guard.json"
-    # Fail closed on NEW RISK, not on closing. This process is the only thing
-    # that submits exits, runs convergence and maintains the native stops, and
-    # its unit is Restart=always — so exiting here would crash-loop the account
-    # with its positions behind the venue stop alone. Block instead: health goes
-    # BLOCKED every pass, which stops producers opening risk while exits and
-    # convergence keep running, and the operator sees the file named.
-    loss_guard_state_detail = ""
-    try:
-        loss_guard.restore(_read_loss_guard_state(loss_guard_state_path))
-    except RuntimeError as exc:
-        loss_guard_state_detail = str(exc)
-        _logger.error("%s", exc)
-    last_loss_guard_state: Mapping[str, Any] | None = loss_guard.snapshot()
     envelope_rebase_detail = ""
     # The component set the loss-ceiling flatten last asked to close. Not a
     # latch: it only suppresses re-publishing an unchanged plan.

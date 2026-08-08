@@ -86,6 +86,12 @@ class AccountLossGuard:
         return bool(self._tripped_detail)
 
     @property
+    def tripped_detail(self) -> str:
+        """Why the ceiling tripped, or "". Survives a restart via ``restore``."""
+
+        return self._tripped_detail
+
+    @property
     def opening_equity(self) -> float | None:
         return self._opening_equity
 

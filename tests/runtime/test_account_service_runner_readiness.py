@@ -86,6 +86,7 @@ def _request(
     *,
     request_id: str,
     symbols: tuple[str, ...],
+    signed_notional_usdt: float = 10.0,
 ) -> AccountTargetRequest:
     return AccountTargetRequest(
         request_id=request_id,
@@ -96,14 +97,16 @@ def _request(
         environment=inbox.route.environment,
         intents=tuple(
             RequestedIntent(
-                adapter_kind=SleeveAdapterKind.LONG,
+                adapter_kind=(
+                    SleeveAdapterKind.LONG if signed_notional_usdt else SleeveAdapterKind.RISK
+                ),
                 intent=SleeveTargetIntent(
                     decision_key=f"decision:{request_id}:{symbol}",
                     target_key=f"long/test/{symbol}",
                     strategy_id="test",
                     component_id=symbol.lower(),
                     symbol=symbol,
-                    signed_notional_usdt=10.0,
+                    signed_notional_usdt=signed_notional_usdt,
                     leverage=2.0,
                     reason="readiness-test",
                 ),
@@ -244,6 +247,23 @@ def test_gap_or_stale_queue_head_book_remains_warming(tmp_path: Path) -> None:
     stale = _evaluate(gate, inbox, recorder, now_monotonic=2.0)
     assert stale.ready is False
     assert "AUSDT:stale_book" in stale.detail
+
+
+def test_readiness_reports_whether_the_head_carries_new_risk(tmp_path: Path) -> None:
+    """Read off the head's own targets, so a halted owner can refuse it unserved."""
+
+    recorder = _Recorder({"AUSDT": _book("AUSDT", sequence_gap=True)})
+    gate = RequestedMarketWarmupGate(timeout_seconds=10.0)
+
+    entry_inbox = _inbox(tmp_path / "entry")
+    entry_inbox.submit(_request(entry_inbox, request_id="entry-head", symbols=("AUSDT",)))
+    assert _evaluate(gate, entry_inbox, recorder, now_monotonic=1.0).carries_new_risk is True
+
+    exit_inbox = _inbox(tmp_path / "exit")
+    exit_inbox.submit(
+        _request(exit_inbox, request_id="exit-head", symbols=("AUSDT",), signed_notional_usdt=0.0)
+    )
+    assert _evaluate(gate, exit_inbox, recorder, now_monotonic=1.0).carries_new_risk is False
 
 
 def test_book_update_after_caller_clock_sample_is_not_misclassified_as_future(
@@ -396,10 +416,14 @@ def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
 
 
 class _CycleService:
-    def __init__(self) -> None:
+    def __init__(self, *, halt_reason: str = "") -> None:
         self.run_request_ids: list[str | None] = []
         self.safety_calls = 0
         self.convergence_calls = 0
+        self.halt_reason = halt_reason
+
+    def halted_for_new_risk(self) -> str:
+        return self.halt_reason
 
     def run_safety_flat_once(self, inbox: AccountIntentInbox) -> None:
         del inbox
@@ -522,6 +546,93 @@ def test_safety_flat_runs_even_when_ordinary_queue_head_is_unready(
     assert receipt == "safety-receipt"
     assert service.run_request_ids == []
     assert service.convergence_calls == 0
+
+
+def test_halted_account_claims_an_unservable_risk_head_instead_of_parking_behind_it(
+    tmp_path: Path,
+) -> None:
+    """The account's own all-flat must not queue behind a head it cannot serve.
+
+    A halted account will refuse that head without reading a book, so waiting
+    for books it will never look at leaves the flatten stuck behind it — for as
+    long as the head's symbol has no healthy market, which on a delisted or
+    unsubscribed symbol is forever.
+    """
+
+    service = _CycleService(halt_reason="account daily loss ceiling: -120.00 USDT")
+    inbox = _inbox(tmp_path)
+    request = _request(inbox, request_id="entry-behind-flatten", symbols=("AUSDT",))
+    inbox.submit(request)
+
+    receipt = run_ready_request_or_converge(
+        service=service,  # type: ignore[arg-type]
+        inbox=inbox,
+        readiness=RequestedMarketReadiness(
+            request_id=request.request_id,
+            symbols=("AUSDT",),
+            ready=False,
+            timed_out=True,
+            detail="waiting for queue-head market data: AUSDT:no_snapshot",
+            carries_new_risk=True,
+        ),
+    )
+
+    assert receipt == "receipt"
+    assert service.run_request_ids == [request.request_id]
+    assert service.convergence_calls == 0
+
+
+def test_unservable_head_still_waits_for_books_when_the_account_is_not_halted(
+    tmp_path: Path,
+) -> None:
+    service = _CycleService()
+    inbox = _inbox(tmp_path)
+    request = _request(inbox, request_id="ordinary-entry", symbols=("AUSDT",))
+    inbox.submit(request)
+
+    receipt = run_ready_request_or_converge(
+        service=service,  # type: ignore[arg-type]
+        inbox=inbox,
+        readiness=RequestedMarketReadiness(
+            request_id=request.request_id,
+            symbols=("AUSDT",),
+            ready=False,
+            timed_out=True,
+            detail="waiting for queue-head market data: AUSDT:no_snapshot",
+            carries_new_risk=True,
+        ),
+    )
+
+    assert receipt is None
+    assert service.run_request_ids == []
+    assert service.convergence_calls == 1
+    assert inbox.peek_next() == request
+
+
+def test_halted_account_leaves_an_unservable_exit_head_to_warm_up(tmp_path: Path) -> None:
+    """A zero-target head is the flatten itself: it waits for its book, as always."""
+
+    service = _CycleService(halt_reason="account daily loss ceiling: -120.00 USDT")
+    inbox = _inbox(tmp_path)
+    request = _request(inbox, request_id="flatten-head", symbols=("AUSDT",))
+    inbox.submit(request)
+
+    receipt = run_ready_request_or_converge(
+        service=service,  # type: ignore[arg-type]
+        inbox=inbox,
+        readiness=RequestedMarketReadiness(
+            request_id=request.request_id,
+            symbols=("AUSDT",),
+            ready=False,
+            timed_out=True,
+            detail="waiting for queue-head market data: AUSDT:no_snapshot",
+            carries_new_risk=False,
+        ),
+    )
+
+    assert receipt is None
+    assert service.run_request_ids == []
+    assert service.convergence_calls == 1
 
 
 def test_startup_allows_only_typed_native_breach_recovery() -> None:

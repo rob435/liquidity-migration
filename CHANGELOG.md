@@ -16,6 +16,64 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 (later) — The six items the audit passes named and left open.**
+  All six closed, with the measurements that justify each.
+  1. **The loss ceiling now refuses queued risk at admission.** Health going
+     BLOCKED stops a producer *publishing*, but a cycle that published seconds
+     before the trip already has its request in the queue, and nothing looked
+     at the ceiling again before that request was filled. Admission now refuses
+     any not-yet-committed request carrying a nonzero target while the ceiling
+     is tripped — before it reads a book or a wallet — and completes it
+     `disposition="halted"`. **This is a risk change, not a refactor**: on a
+     tripped account an in-flight entry that used to fill is now dropped. Two
+     exemptions, both deliberate: a batch already in the journal replays (its
+     commands may be half-submitted at the venue), and a zero target is an
+     exit, which the ceiling exists to encourage.
+  2. **The ceiling's own all-flat can no longer park behind a head it cannot
+     serve.** The flatten is an ordinary FIFO request, so an unservable head —
+     a symbol with no healthy book, which on a delisted or unsubscribed name is
+     forever — held it back indefinitely. A halted owner now claims that head
+     anyway: refusing it reads no market data, so the queue drains and the
+     flatten reaches the front.
+  3. **One expiry no longer retires a symbol for the life of the journal.**
+     The attempt key is a pure function of the target key, so the next cycle
+     minted the identical key and suppressed itself — for ever, however fresh
+     the decision behind it. The *rejected* half was bounded by its signal
+     window in an earlier pass; the *expired* half could not use that bound,
+     because an expiry is only ever recorded once the window has already
+     passed. It is now scoped to the signal instant it expired on. All three
+     sleeves align `signal_ts_ms` to a closed bar (carry to 00:00 UTC, LONG and
+     CONTINUOUS to the kline), so the republished decision still matches and
+     stays suppressed, and the next bar is free.
+  4. **Leverage the owner changed by hand is no longer trusted from cache.**
+     The adapter caches what it last sent, to save a ~175 ms round trip ahead
+     of every entry — but this account has a second writer. Each reconcile pass
+     now hands back the leverage every open position actually carries, and any
+     cached value the venue does not confirm is dropped, including for a symbol
+     that has gone flat. A re-entry into a flat symbol pays one `set_leverage`
+     again; a scale-in into a confirmed position still does not.
+  5. **The funding root reads in one scan again.** `funding_event_kind` and
+     `source` were added in 2026-07, leaving 592,837 narrow parts and 7,804
+     wide ones, and a mismatched scan fell back to reading all 600,641 files
+     individually. Declaring the union of the on-disk schemas keeps it on one
+     scan: **157.6s → 59.0s** for the collect, frames proved identical
+     (same shape, dtypes, `equals()`), all 8 columns and all 37,475 non-null
+     `funding_event_kind` rows preserved. End to end through `read_dataset`,
+     including the 36s glob and a doomed first scan, **~229s → 131s**. A part
+     whose column types genuinely conflict still falls back per file.
+  6. **The stale local copy of the funded API key is deleted.** `deploy/.env`
+     held the live mainnet key and secret in plaintext on the laptop since
+     2026-08-05, and had drifted from the host anyway (carry 1.0 vs 2.0, long
+     0.75 vs 1.88, daily loss 0.1 vs 0.25). The host file is authoritative and
+     complete. **Rotation is still owed** — the key sat readable for three
+     days — and only the owner can do it.
+
+  Also corrected: the daily loss halt was described in
+  `deploy/bybit-mainnet.env.template` and `docs/operations.md` as firing on
+  **realised** loss. It reads `totalEquity` (or `totalWalletBalance +
+  totalPerpUPL`), so an open position's paper loss has always counted. The
+  docs understated the control's reach.
+
 - **2026-08-08 — Two audit passes over the trading hot path, and the second
   one found six faults in the first one's own work.** An eight-agent
   adversarial review of the (then uncommitted) hot-path changes, with every

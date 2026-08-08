@@ -24,7 +24,11 @@ from liquidity_migration.account.account_service import (
 from liquidity_migration.account.account_route import AccountRoute, require_account_route
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
-from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
+from liquidity_migration.account.entry_attempts import (
+    ENTRY_ATTEMPT_METADATA_KEY,
+    entry_attempt_key,
+    signal_scoped_entry_attempt_key,
+)
 from liquidity_migration.account.strategy_runtime import SleeveTargetIntent
 
 
@@ -215,7 +219,12 @@ def _expired_entry_attempt_keys(
     sleeve: SleeveAdapterKind | str,
     strategy_ids: Sequence[str] = (),
 ) -> set[str]:
-    """Terminal entry-attempt keys carried by these completed rows."""
+    """Terminal entry-attempt keys carried by these completed rows.
+
+    Scoped to the signal instant each attempt was minted from — see
+    :func:`signal_scoped_entry_attempt_key` for why an expiry cannot use the
+    bare key.
+    """
 
     normalized_sleeve = SleeveAdapterKind(sleeve).value
     prefix = f"{normalized_sleeve}/"
@@ -245,7 +254,7 @@ def _expired_entry_attempt_keys(
             if observed != expected:
                 raise RuntimeError(f"expired entry request {request.request_id!r} has invalid attempt identity")
             if any(rejection.endswith(f":{observed}") for rejection in receipt.rejection_keys):
-                attempts.add(observed)
+                attempts.add(signal_scoped_entry_attempt_key(observed, metadata))
     return attempts
 
 

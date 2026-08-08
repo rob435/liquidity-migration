@@ -309,6 +309,45 @@ def test_leverage_is_set_once_per_symbol_not_once_per_entry() -> None:
     assert len(client.leverage_calls) == 2
 
 
+def test_leverage_the_owner_changed_by_hand_is_not_trusted_from_cache() -> None:
+    """The owner hand-trades this account, so this process is not the only writer.
+
+    Bybit keeps a symbol's leverage until someone changes it — and "someone" is
+    the owner as often as it is this process. Skipping ``set_leverage`` on a
+    cached value they have since overridden would size the next entry at their
+    number instead of the sleeve's.
+    """
+
+    client = FakeClient()
+    adapter, _ = build_adapter(client, with_quotes=False)
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # Reconciliation confirms exactly what this process set: still cached.
+    adapter.retain_confirmed_leverage({"LAUSDT": 2.0})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # The owner moves it by hand; the next entry must re-assert the sleeve's.
+    adapter.retain_confirmed_leverage({"LAUSDT": 10.0})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 2
+    assert float(client.leverage_calls[-1]["buy_leverage"]) == 2.0
+
+
+def test_a_symbol_absent_from_position_truth_is_no_longer_confirmed() -> None:
+    """Flat means nothing on the venue vouches for the cached number any more."""
+
+    client = FakeClient()
+    adapter, _ = build_adapter(client, with_quotes=False)
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    adapter.retain_confirmed_leverage({"OTHERUSDT": 2.0})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 2
+
+
 def test_a_refused_create_forgets_the_leverage_it_believed() -> None:
     client = FakeClient()
     adapter, _ = build_adapter(client, with_quotes=False)
