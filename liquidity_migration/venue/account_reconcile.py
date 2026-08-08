@@ -131,7 +131,7 @@ class BybitAccountReconciler:
         settle_coin: str = "USDT",
         health_max_age_floor_ns: int = POSITION_HEALTH_MAX_AGE_FLOOR_NS,
         auto_resolve_wedges: bool | None = None,
-        venue_leverage_observer: Callable[[Mapping[str, float]], None] | None = None,
+        venue_leverage_observer: Callable[..., None] | None = None,
     ) -> None:
         self.realm = require_named_realm(client, label="account reconciler")
         if int(health_max_age_floor_ns) <= 0:
@@ -396,7 +396,11 @@ class BybitAccountReconciler:
             if leverage > 0.0:
                 venue_leverage[symbol] = leverage
         if self.venue_leverage_observer is not None:
-            self.venue_leverage_observer(venue_leverage)
+            # Both arguments: a symbol whose row omitted a usable leverage is
+            # no evidence, and must not read as a contradiction.
+            self.venue_leverage_observer(
+                venue_leverage, positioned_symbols=frozenset(venue_positions)
+            )
         reconstructed = {
             symbol: position.signed_qty
             for symbol, position in self.kernel._state_ref().positions.items()

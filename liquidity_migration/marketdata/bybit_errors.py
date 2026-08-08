@@ -6,6 +6,7 @@ exception identities without strategy imports pulling in mutation authority.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -48,10 +49,36 @@ def _renders_ret_code(text: str, code: int) -> bool:
     prices and ``orderLinkId`` included. A bare scan for ``170146`` read an
     "insufficient balance" refusal on a stop price of ``100025.5`` as "not now",
     and a definite reject retried as transient leaves a live command to wedge.
-    pybit renders the code as ``(ErrCode: 110007)``, so anchor on that.
+
+    Three renderings reach here, and each is anchored to a position the code
+    occupies rather than to its digits. pybit writes ``(ErrCode: 110007)``;
+    this package's own ``_call_once`` stringifies the response dict, so the
+    code arrives as ``'retCode': 110007``; and some clients put it at the head
+    of the message, ``110043: leverage not modified``. The last is bounded on
+    the left so a price cannot supply the digits — inside a request body a
+    number is followed by a quote or a comma, never by a colon and a space.
     """
 
-    return f"errcode: {code}" in text
+    return (
+        f"errcode: {code}" in text
+        or f"'retcode': {code}" in text
+        or f"'retcode': '{code}'" in text
+        or re.search(rf"(?<![\d.]){code}:\s", text) is not None
+    )
+
+
+def renders_ret_code(value: Any, code: int) -> bool:
+    """Public form: does this payload or error name ``code`` as its ret code?
+
+    Callers that treat one specific code as a converged no-op need exactly this
+    and must not scan free text for the digits — a stop price of ``134040``
+    contains ``34040``, and reading a refused stop install as "already
+    installed" records an unprotected position as protected.
+    """
+
+    if isinstance(value, dict):
+        return _safe_int(value.get("retCode")) == code
+    return _renders_ret_code(str(value).lower(), code)
 
 
 #: Venue-side conditions that say "not now" rather than "no". Retrying the same

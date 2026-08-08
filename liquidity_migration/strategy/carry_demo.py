@@ -121,14 +121,13 @@ DEFAULT_CARRY_STRATEGY_PROFILE = "v4"
 class CarryStrategyProfile:
     """One registered CARRY deployment: journaled profile name + rule file."""
 
-    name: str
     profile_name: str
     config_path: Path
 
 
 _CARRY_STRATEGY_PROFILES: dict[str, CarryStrategyProfile] = {
-    "v3": CarryStrategyProfile("v3", "carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
-    "v4": CarryStrategyProfile("v4", "carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
+    "v3": CarryStrategyProfile("carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
+    "v4": CarryStrategyProfile("carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
 }
 
 
@@ -162,17 +161,11 @@ class CarryDecision:
     replay_days: int
     gross: float
 
-    @property
-    def is_flat(self) -> bool:
-        return not self.weights
-
 
 def decide_book(
     view: pl.DataFrame,
     cfg: CarryHoldConfig,
     decision_ts_ms: int,
-    *,
-    min_decision_symbols: int = MIN_DECISION_SYMBOLS,
 ) -> CarryDecision:
     """Replay the registered state machine and return the decision-bar book.
 
@@ -213,10 +206,10 @@ def decide_book(
     grid = daily_grid(prepare_decision(view.filter(pl.col("bar_ts_ms") <= decision_ts_ms)))
     universe = top_n_universe(grid, cfg.universe_top_n)
     at_bar = universe.filter(pl.col("bar_ts_ms") == decision_ts_ms)
-    if at_bar.height < min_decision_symbols:
+    if at_bar.height < MIN_DECISION_SYMBOLS:
         raise CarrySleeveError(
             f"decision bar carries {at_bar.height} universe symbols "
-            f"(< {min_decision_symbols}); refusing to decide on a broken build"
+            f"(< {MIN_DECISION_SYMBOLS}); refusing to decide on a broken build"
         )
     book = carry_hold_weights(universe, cfg).filter(pl.col("bar_ts_ms") == decision_ts_ms)
     weights = {str(s): float(w) for s, w in zip(book["symbol"], book["w"], strict=True)}
@@ -905,8 +898,8 @@ def _carry_target_plan(
     # target every cycle. It still counts for ADMISSION, so the name is not
     # re-entered underneath its own unconverged target. Resolving it needs an
     # operator (``scripts/ops.sh wedged-command``), hence the count.
-    stranded_symbols = sorted(
-        symbol for symbol, (_notional, qty, _sid) in standing_rows.items() if qty == 0.0
+    stranded_count = sum(
+        1 for _symbol, (_notional, qty, _sid) in standing_rows.items() if qty == 0.0
     )
     # A standing component is revised under the filing id it was born with;
     # only NEW components file under CARRY_STRATEGY_ID.
@@ -1042,7 +1035,7 @@ def _carry_target_plan(
         entry_validity_expired_skips=entry_validity_expired_skips,
         entry_dust_skips=entry_dust_skips,
         entry_blocked_reason=entry_blocked_reason,
-        stranded_zero_quantity_reservations=len(stranded_symbols),
+        stranded_zero_quantity_reservations=stranded_count,
     )
 
 

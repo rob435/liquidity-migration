@@ -92,10 +92,6 @@ class WedgeEvidence:
     query_errors: tuple[str, ...] = ()
     detail: str = ""
 
-    @property
-    def resolvable_without_authorization(self) -> bool:
-        return self.classification == "terminal"
-
     def as_metadata(self) -> dict[str, Any]:
         return {
             "classification": self.classification,

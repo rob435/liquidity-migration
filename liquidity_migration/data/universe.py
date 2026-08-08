@@ -7,7 +7,7 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core.config import UniverseConfig
-from liquidity_migration.core._common import MS_PER_DAY, safe_name
+from liquidity_migration.core._common import MS_PER_DAY
 
 _logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ def format_universe_report(payload: dict[str, Any]) -> str:
             f"{('$' + format(oi, ',.0f')) if oi is not None else 'n/a'} | "
             f"{format(funding, '.4%') if funding is not None else 'n/a'} |"
         )
-    lines.extend([""])
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -227,7 +227,3 @@ def _age_filter_label(config: dict[str, Any]) -> str:
     if max_age:
         return f"<= {max_age} days"
     return "disabled"
-
-
-def _safe_name(name: str) -> str:
-    return safe_name(name)

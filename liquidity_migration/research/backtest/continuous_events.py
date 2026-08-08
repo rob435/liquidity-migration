@@ -392,6 +392,20 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
     return k
 
 
+# Panel columns carried from the decile build through to the fresh-entry frame.
+# One definition so the two select lists cannot drift apart.
+_PANEL_CARRY_COLS = (
+    "composite", "turnover_quote", "signal_bar_close_ts_ms", "decision_ts_ms", "feature_ts_ms",
+    "data_available_ts_ms", "rmom_source_day_ts_ms", "rmom_data_available_ts_ms",
+    "residual_momentum", "residual_momentum_rank", "liquidity_rank",
+)
+_PANEL_EVENT_COLS = (
+    "rv_168h", "vov", "dist_low", "xsret7", "xsret3", "ret1", "max_ret168",
+    "prior6_ret1_max", "giveback_from_prior6_high", "turnover_spike_168h",
+    "turnover_24h", "turnover_zscore_168h",
+)
+
+
 def cross_sectional_decile(
     k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5,
     feature_set: tuple[str, ...] = FEATURES,
@@ -487,37 +501,8 @@ def cross_sectional_decile(
     k = k.with_columns(
         (((pl.col("composite").rank().over("ts_ms") - 1) * 10) // pl.len().over("ts_ms")).clip(0, 9).alias("decile")
     )
-    cols = [
-        "symbol",
-        "ts_ms",
-        "decile",
-        "composite",
-        "turnover_quote",
-        "signal_bar_close_ts_ms",
-        "decision_ts_ms",
-        "feature_ts_ms",
-        "data_available_ts_ms",
-        "rmom_source_day_ts_ms",
-        "rmom_data_available_ts_ms",
-        "residual_momentum",
-        "residual_momentum_rank",
-        "liquidity_rank",
-    ]
-    event_cols = [
-        "rv_168h",
-        "vov",
-        "dist_low",
-        "xsret7",
-        "xsret3",
-        "ret1",
-        "max_ret168",
-        "prior6_ret1_max",
-        "giveback_from_prior6_high",
-        "turnover_spike_168h",
-        "turnover_24h",
-        "turnover_zscore_168h",
-    ]
-    return k.select(cols + [c for c in event_cols if c in k.columns]).sort(["symbol", "ts_ms"])
+    cols = ["symbol", "ts_ms", "decile", *_PANEL_CARRY_COLS]
+    return k.select(cols + [c for c in _PANEL_EVENT_COLS if c in k.columns]).sort(["symbol", "ts_ms"])
 
 
 def continuous_source_decile_panel(
@@ -695,33 +680,7 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
         ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) > MS_PER_HOUR).fill_null(True).alias("fresh")
     )
     d = d.filter(pl.col("fresh")).filter(pl.col("turnover_quote") >= config.liq_turnover_min)
-    keep_cols = [
-        "symbol",
-        "ts_ms",
-        "composite",
-        "turnover_quote",
-        "signal_bar_close_ts_ms",
-        "decision_ts_ms",
-        "feature_ts_ms",
-        "data_available_ts_ms",
-        "rmom_source_day_ts_ms",
-        "rmom_data_available_ts_ms",
-        "residual_momentum",
-        "residual_momentum_rank",
-        "liquidity_rank",
-        "rv_168h",
-        "vov",
-        "dist_low",
-        "xsret7",
-        "xsret3",
-        "ret1",
-        "max_ret168",
-        "prior6_ret1_max",
-        "giveback_from_prior6_high",
-        "turnover_spike_168h",
-        "turnover_24h",
-        "turnover_zscore_168h",
-    ]
+    keep_cols = ["symbol", "ts_ms", *_PANEL_CARRY_COLS, *_PANEL_EVENT_COLS]
     return d.select([c for c in keep_cols if c in d.columns]).sort(["ts_ms", "symbol"])
 
 
@@ -987,12 +946,6 @@ def _run_trades(
             ),
         )
 
-    def _record_finalized(
-        position: _ContinuousHistoricalOpen,
-        trade: dict[str, Any],
-    ) -> None:
-        rows.append(trade)
-
     def _advance_positions(through_ts_ms: int) -> None:
         closed_keys: list[str] = []
         closed: list[tuple[str, _ContinuousHistoricalOpen, dict[str, Any]]] = []
@@ -1047,8 +1000,7 @@ def _run_trades(
                         "historical account kernel rejected a strategy exit batch: "
                         + ", ".join(rejection_keys)
                     )
-            for position, trade in items:
-                _record_finalized(position, trade)
+            rows.extend(trade for _position, trade in items)
         for key in closed_keys:
             del open_positions[key]
 

@@ -16,23 +16,14 @@ class ContinuousComponentSource:
     root: Path
     cell: str
 
-def component_source_paths(
-    spec: ContinuousComponentSource,
-    venue: str,
-) -> tuple[Path, Path, Path]:
-    cell = spec.root / venue / spec.cell
-    return (
-        cell / "continuous_report.json",
-        cell / "continuous_trades.csv",
-        cell / "continuous_mtm_equity.csv",
-    )
-
-
 def load_continuous_component_source(
     spec: ContinuousComponentSource,
     venue: str,
 ) -> tuple[ContinuousRebalanceComponents, int, dict[str, Any]]:
-    report_path, trades_path, mtm_path = component_source_paths(spec, venue)
+    cell = spec.root / venue / spec.cell
+    report_path = cell / "continuous_report.json"
+    trades_path = cell / "continuous_trades.csv"
+    mtm_path = cell / "continuous_mtm_equity.csv"
     if not report_path.exists() or not trades_path.exists() or not mtm_path.exists():
         raise FileNotFoundError(f"missing source artifacts: {report_path.parent}")
     payload = json.loads(report_path.read_text(encoding="utf-8"))

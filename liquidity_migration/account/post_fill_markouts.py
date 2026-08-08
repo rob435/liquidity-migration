@@ -25,7 +25,6 @@ MAX_PENDING_FILL_REGISTRATIONS = max(
     MAX_PENDING_POST_FILL_MARKOUTS // len(DEFAULT_POST_FILL_MARKOUT_HORIZONS_NS),
     1,
 )
-MAX_RECENT_FILL_REGISTRATIONS = MAX_PENDING_FILL_REGISTRATIONS
 MAX_FILL_REGISTRATIONS_PER_DRAIN = 128
 
 
@@ -139,7 +138,7 @@ class PostFillMarkoutObserver:
                 )
             self._registered[execution_id] = None
             self._registered.move_to_end(execution_id)
-            while len(self._registered) > MAX_RECENT_FILL_REGISTRATIONS:
+            while len(self._registered) > MAX_PENDING_FILL_REGISTRATIONS:
                 self._registered.popitem(last=False)
             registered += 1
         return MarkoutDrainReport(

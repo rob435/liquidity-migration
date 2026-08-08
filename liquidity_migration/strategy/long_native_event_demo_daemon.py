@@ -51,11 +51,6 @@ from liquidity_migration.marketdata.ws_state_cache import TickerCache
 _logger = logging.getLogger("liquidity_migration.strategy.long_native_event_demo_daemon")
 
 
-def _ensure_default_log_handler() -> None:
-    """Attach a package stderr handler when the process has no logging setup."""
-    ensure_default_log_handler()
-
-
 def _validate_long_daemon_startup(
     config: LongNativeDemoCycleConfig,
     strategy_config: LongNativeConfig | None = None,
@@ -63,12 +58,6 @@ def _validate_long_daemon_startup(
     """Fail before resources unless LONG has one complete account-target route."""
 
     _validate_long_demo_config(config, strategy_config)
-    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
-    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
-    if not has_account_inbox or not has_account_execution_root:
-        raise ValueError(
-            "LONG daemon startup is target-only and requires account_intent_inbox_root and account_execution_root"
-        )
 
 
 class LongNativeDemoDaemon:
@@ -184,9 +173,8 @@ class LongNativeDemoDaemon:
         # WS-driven kline manager: the 90-day lookback bootstrap is paid once at
         # startup rather than re-paid as a per-cycle REST burst.
         self._kline_stream_manager: Any | None = kline_stream_manager
-        self._kline_stream_manager_factory = _select_long_kline_stream_manager_factory(
-            resolved_demo_config,
-            kline_stream_manager_factory,
+        self._kline_stream_manager_factory = (
+            kline_stream_manager_factory or _default_long_kline_stream_manager_factory
         )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
@@ -250,7 +238,7 @@ class LongNativeDemoDaemon:
             _validate_long_daemon_startup(self.demo_config, self._strategy_config)
         # Same reasoning as EventDemoDaemon.run: attach the package stderr
         # handler before bootstrap so the operator can see progress.
-        _ensure_default_log_handler()
+        ensure_default_log_handler()
         _logger.info(
             "long_native_event_demo_daemon starting data_root=%s interval_seconds=%.1f "
             "execution_environment=%s profile=%s notional_x=%.1f leverage=%.1f",
@@ -701,10 +689,7 @@ class LongNativeDemoDaemon:
                     testnet=self.config.exchange.testnet,
                 )
             market_client = self._seed_market_client
-        _seed_long_public_ticker_cache(
-            market_client=market_client,
-            ticker_cache=self._ticker_cache,
-        )
+        self._ticker_cache.replace_with_rest_snapshot(market_client.get_tickers())
 
     def _start_kline_stream_manager(self) -> None:
         if not self.demo_config.ws_klines_enabled:
@@ -842,16 +827,6 @@ def _default_long_kline_stream_manager_factory(
     )
 
 
-def _select_long_kline_stream_manager_factory(
-    demo_config: LongNativeDemoCycleConfig,
-    explicit: Callable[..., Any] | None,
-) -> Callable[..., Any]:
-    del demo_config
-    if explicit is not None:
-        return explicit
-    return _default_long_kline_stream_manager_factory
-
-
 def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTickerStream:
     """Public ticker stream tuned for the long sleeve. ``demo=False`` because
     the public ticker endpoint is shared across environments."""
@@ -862,6 +837,3 @@ def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTi
     )
 
 
-def _seed_long_public_ticker_cache(*, market_client: Any, ticker_cache: TickerCache) -> None:
-    """Refresh the public ticker cache."""
-    ticker_cache.replace_with_rest_snapshot(market_client.get_tickers())

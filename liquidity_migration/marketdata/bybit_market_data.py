@@ -322,29 +322,19 @@ class BybitMarketData:
     def get_mark_price_klines(
         self, symbol: str, interval: str, start: int, end: int, limit: int = 1000
     ) -> list[dict[str, Any]]:
-        return self._get_price_index_klines("get_mark_price_kline", symbol, interval, start, end, limit=limit)
+        return self._paged_window_klines("get_mark_price_kline", symbol, interval, start, end, limit=limit)
 
     def get_index_price_klines(
         self, symbol: str, interval: str, start: int, end: int, limit: int = 1000
     ) -> list[dict[str, Any]]:
-        return self._get_price_index_klines("get_index_price_kline", symbol, interval, start, end, limit=limit)
+        return self._paged_window_klines("get_index_price_kline", symbol, interval, start, end, limit=limit)
 
     def get_premium_index_klines(
         self, symbol: str, interval: str, start: int, end: int, limit: int = 1000
     ) -> list[dict[str, Any]]:
-        return self._get_price_index_klines("get_premium_index_price_kline", symbol, interval, start, end, limit=limit)
-
-    def _get_price_index_klines(
-        self,
-        method_name: str,
-        symbol: str,
-        interval: str,
-        start: int,
-        end: int,
-        *,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        return self._paged_window_klines(method_name, symbol, interval, start, end, limit=limit)
+        return self._paged_window_klines(
+            "get_premium_index_price_kline", symbol, interval, start, end, limit=limit
+        )
 
     def _paged_time_range(self, method_name: str, timestamp_key: str, **params: Any) -> list[dict[str, Any]]:
         rows_by_ts: dict[int, dict[str, Any]] = {}
@@ -577,17 +567,14 @@ def _patch_pybit_daemon_ping_timer() -> None:
     """Ensure pybit's ping timer is a daemon thread that does not block shutdown.
 
     pybit 5.16.0 already creates a daemon ``custom_ping_timer`` and cancels the
-    prior one via ``_stop_custom_ping_timer`` on every (re)connect, so the patch
-    is redundant against that version. We keep it as defense-in-depth against an
-    older/forked pybit whose ``_send_initial_ping`` left a non-daemon timer (the
-    timer thread then blocks process exit). The patched version is written so it
-    is SAFE on reconnect: it cancels any prior timer (stock ``custom_ping_timer``
-    or our own ``_agc_ping_timer``) before installing a new one, so reconnects
-    cannot accumulate orphan Timer threads — the bug the earlier patch had, where
-    each reconnect overwrote ``_agc_ping_timer`` without cancelling it. It also
-    mirrors the timer onto BOTH ``custom_ping_timer`` (so pybit's own
-    ``exit()``/``_stop_custom_ping_timer`` cancels it) and ``_agc_ping_timer`` (so
-    ``_close_ws_client`` cancels it regardless of which attribute pybit reads).
+    prior one on every (re)connect, so this is redundant against that version
+    and kept only against an older/forked pybit whose ``_send_initial_ping``
+    left a non-daemon timer blocking process exit. It cancels any prior timer
+    before installing a new one, because the earlier patch overwrote
+    ``_agc_ping_timer`` per reconnect and accumulated orphan Timer threads, and
+    it mirrors the timer onto both ``custom_ping_timer`` (cancelled by pybit's
+    own ``exit()``) and ``_agc_ping_timer`` (cancelled by ``_close_ws_client``)
+    so either path kills it.
     """
     try:
         _websocket_stream = importlib.import_module("pybit._websocket_stream")
@@ -735,27 +722,13 @@ class BybitKlineStreamPool:
     "connection" each, since pybit's WebSocket abstraction owns its own thread
     + reconnect loop). Re-routes the per-bar callbacks into a single
     ``on_bar(symbol, bar, confirmed)`` interface that the store consumes.
+    Connections open with a small delay between them: Bybit allows 500
+    connects/IP/5min on public.
 
-    Operations:
-
-    * ``subscribe(symbols, on_bar)``: partitions the symbol set across
-      ``topics_per_connection`` slices, opens one connection per slice with a
-      small inter-connection delay (Bybit allows 500 connects/IP/5min on
-      public), then subscribes each slice's symbols.
-    * ``update_subscriptions(new_symbols)``: diffs against the current
-      assignment, unsubscribes removed symbols (per-connection), adds new
-      symbols to existing connections with capacity, and creates fresh
-      connections when capacity is exhausted.
-    * Watchdog: a background thread monitors per-connection
-      ``last_message_monotonic``. A connection with no message in
-      ``stale_warning_seconds`` is logged; one with no message in
-      ``stale_reconnect_seconds`` is torn down and rebuilt with its same
-      slice (the WS subscription is re-issued from scratch).
-    * ``close()``: stops the watchdog and closes every connection.
-
-    The pool is dependency-injectable: ``websocket_factory`` builds the
-    underlying client (default uses pybit's ``WebSocket``); tests pass a fake
-    factory so they can synthesise bar events without a live connection.
+    The watchdog thread monitors per-connection ``last_message_monotonic``: a
+    connection silent for ``stale_warning_seconds`` is logged, one silent for
+    ``stale_reconnect_seconds`` is torn down and rebuilt with its same slice,
+    re-issuing the WS subscription from scratch.
     """
 
     DEFAULT_TOPICS_PER_CONNECTION = 180

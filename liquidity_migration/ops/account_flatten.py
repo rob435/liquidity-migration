@@ -584,9 +584,7 @@ def _await_flat(
     return residual, "timed_out", "; ".join(reasons) or "account did not reach flat"
 
 
-# --------------------------------------------------------------------------
 # Operator entry point
-# --------------------------------------------------------------------------
 
 
 def _parser() -> Any:

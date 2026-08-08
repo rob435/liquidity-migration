@@ -10,6 +10,7 @@ a hash-chained input tape; strategy callbacks do not read ambient time.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,8 +203,6 @@ class JsonlStrategyEventTape:
 
 def load_strategy_event_tape_bytes(data: bytes) -> tuple[tuple[StrategyEvent, ...], str]:
     """Parse and fully verify captured strategy-event tape bytes."""
-
-    import json
 
     events: list[StrategyEvent] = []
     tape_hash = _GENESIS_HASH

@@ -20,6 +20,7 @@ from liquidity_migration.core.venue_realm import (
     venue_realm,
 )
 from liquidity_migration.marketdata.bybit_errors import (
+    renders_ret_code,
     BybitDataError,
     BybitRequestRejected,
     BybitSubmissionUncertain,
@@ -554,20 +555,15 @@ class BybitPrivateClient:
     ) -> list[dict[str, Any]]:
         """Closed-PnL records for the account.
 
-        Used by the orphan reconciler to backfill exit_price / realized_pnl on
-        trades where the open position vanished from Bybit without our cycle
-        recording the close (eg. a manual close on the venue, a stop-loss that
-        fired between cycles, or a cycle crash mid-place-order whose order_link_id
-        we lost). Without this backfill the reconciler closes the ledger row with
-        no exit price and no PnL — accurate that the position is gone, but the
-        ledger loses the trade outcome.
+        The orphan reconciler backfills exit_price / realized_pnl from these
+        when a position vanished from Bybit without a cycle recording the close
+        (a manual close on the venue, a stop that fired between cycles, a crash
+        mid-place-order that lost the order_link_id). Without the backfill the
+        ledger row closes with no exit price and no PnL.
 
-        Bybit caps closed-PnL at <=100 rows/page; a symbol re-entered several
-        times over the reconciliation lookback can exceed one page, so follow
-        ``nextPageCursor`` to the end. Without
-        this the backfill could miss the actual closing record for a re-entered
-        symbol. Returns the result.list rows (empty on a missing
-        endpoint); ``max_pages`` bounds the loop defensively.
+        Bybit caps closed-PnL at 100 rows/page and a symbol re-entered several
+        times over the reconciliation lookback can exceed one page, so the
+        cursor is followed to the end or the actual closing record is missed.
         """
         base_params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 100))}
         if symbol:
@@ -712,8 +708,9 @@ class BybitPrivateClient:
                     sellLeverage=_leverage_text(effective_sell),
                 )
             except BybitDataError as exc:
-                message = str(exc).lower()
-                if "110043" in message or "not modified" in message:
+                # Anchored on the venue's own code, never a bare digit scan:
+                # the rendered error carries the whole request body.
+                if renders_ret_code(exc, 110043):
                     return {
                         "symbol": symbol,
                         "buyLeverage": _leverage_text(buy_leverage),
@@ -772,8 +769,12 @@ class BybitPrivateClient:
             # ErrCode 34040 "not modified": the requested stop levels are
             # already installed, so this is a converged no-op, not a failure --
             # the same classification set_leverage gives its 110043 twin.
-            message = str(exc).lower()
-            if "34040" not in message and "not modified" not in message:
+            # Anchored on the code, never a bare digit scan: the rendered error
+            # ends with the request body, so a stop price of 134040 or
+            # 0.0034040 made every refusal of that install a silent success --
+            # and the caller journals "active" and clears the breach latch on
+            # it, recording a naked position as protected.
+            if not renders_ret_code(exc, 34040):
                 raise
             return {"symbol": symbol, "retCode": 34040}
         return payload.get("result", {})

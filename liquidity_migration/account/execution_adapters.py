@@ -976,8 +976,7 @@ class KernelExecutionDriver:
                     # more executions. Execution WS/REST recovery will establish
                     # the fills first; do not manufacture them from cumExecQty.
                     continue
-                status_recorded = order.terminal_status_recorded
-                if not status_recorded:
+                if not order.terminal_status_recorded:
                     events.extend(self.kernel.record_order_status(
                         command_id=observation.command_id,
                         status=observation.status,

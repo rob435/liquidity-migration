@@ -15,6 +15,7 @@ pre-empted locally.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import time
 from typing import Any, Iterable, Mapping
@@ -174,8 +175,6 @@ def load_venue_rules_bytes(
 
     selected = venue_realm(realm)
     try:
-        import json
-
         payload = json.loads(data)
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("venue rules file is not valid UTF-8 JSON") from exc

@@ -98,15 +98,11 @@ def selected_environment_payload(
     return bytes(payload)
 
 
-def _parser() -> argparse.ArgumentParser:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", required=True)
     parser.add_argument("--name", action="append", required=True)
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    args = parser.parse_args(argv)
     try:
         values = load_private_systemd_environment(args.path)
         payload = selected_environment_payload(values, names=args.name)

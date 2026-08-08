@@ -16,11 +16,15 @@ import polars as pl
 
 from liquidity_migration.core._common import (
     MS_PER_HOUR,
+    _date_range,
+    _exclude_symbols,
+    _iso_date,
+    _iso_month,
     calendar_roll,
     calendar_shift,
-    finite_float,
     date_ms,
     exact_duration_ms,
+    finite_float,
     is_weekend_ms,
     pct,
 )
@@ -32,6 +36,7 @@ from liquidity_migration.research.panels.momentum_signals import daily_bars, add
 from liquidity_migration.research.backtest.run_diagnostics import diagnose, is_tainted, render
 from liquidity_migration.data.storage import read_dataset, read_dataset_columns
 from liquidity_migration.data.trade_lifecycle import (
+    _empty_trades as _lifecycle_empty_trades,
     _funding_lookup,
     _perp_funding_return,
     build_equity_curve,
@@ -53,7 +58,6 @@ from liquidity_migration.research.backtest.long_identity import (
     long_trade_id,
 )
 from liquidity_migration.account.strategy_targets import component_target_intent
-from liquidity_migration.core._common import _date_range, _exclude_symbols, _iso_date, _iso_month
 from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart
 from liquidity_migration.data.volume_events_pit import (
     _covered_kline_date_symbol_set,
@@ -468,8 +472,7 @@ def _long_equity_chart_metrics(summary: dict[str, Any], equity: pl.DataFrame) ->
     return metrics
 
 
-def _long_kernel_strategy_id(config: LongNativeConfig, costs: CostConfig) -> str:
-    del costs
+def _long_kernel_strategy_id(config: LongNativeConfig) -> str:
     strategy_id = config.execution_strategy_id.strip()
     if strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
         raise ValueError(
@@ -504,7 +507,7 @@ def run_long_native_research(
     pit_required_date_symbols = inputs["pit_required_date_symbols"]
     pit_filter_receipt = inputs["pit_filter_receipt"]
 
-    lifecycle_strategy_id = _long_kernel_strategy_id(cfg, costs)
+    lifecycle_strategy_id = _long_kernel_strategy_id(cfg)
     lifecycle_root = output_dir / "common_kernel_execution"
     replay_policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
@@ -966,7 +969,7 @@ def _run_long_pipeline(
     if not math.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
         raise ValueError("long-native execution_leverage must be finite and positive")
     window_end_ts_ms = date_ms(config.end_date) if config.end_date else None
-    kernel_strategy_id = _long_kernel_strategy_id(config, costs)
+    kernel_strategy_id = _long_kernel_strategy_id(config)
 
     def _target_component_id(pos: dict[str, Any]) -> str:
         return long_trade_id(
@@ -1434,42 +1437,10 @@ def _finalize_trade(
 
 
 def _empty_trades() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "trade_id": pl.Series([], dtype=pl.String),
-            "basket_id": pl.Series([], dtype=pl.String),
-            "entry_signal_ts_ms": pl.Series([], dtype=pl.Int64),
-            "entry_ts_ms": pl.Series([], dtype=pl.Int64),
-            "exit_ts_ms": pl.Series([], dtype=pl.Int64),
-            "entry_date": pl.Series([], dtype=pl.String),
-            "exit_date": pl.Series([], dtype=pl.String),
-            "exit_month": pl.Series([], dtype=pl.String),
-            "symbol": pl.Series([], dtype=pl.String),
-            "side": pl.Series([], dtype=pl.String),
-            "score": pl.Series([], dtype=pl.Float64),
-            "rank": pl.Series([], dtype=pl.Int64),
-            "entry_price": pl.Series([], dtype=pl.Float64),
-            "exit_price": pl.Series([], dtype=pl.Float64),
-            "exit_reason": pl.Series([], dtype=pl.String),
-            "planned_exit_ts_ms": pl.Series([], dtype=pl.Int64),
-            "stop_price": pl.Series([], dtype=pl.Float64),
-            "take_profit_price": pl.Series([], dtype=pl.Float64),
-            "notional_weight": pl.Series([], dtype=pl.Float64),
-            "position_weight": pl.Series([], dtype=pl.Float64),
-            "gross_trade_return": pl.Series([], dtype=pl.Float64),
-            "gross_return": pl.Series([], dtype=pl.Float64),
-            "cost_return": pl.Series([], dtype=pl.Float64),
-            "funding_return": pl.Series([], dtype=pl.Float64),
-            "funding_mode": pl.Series([], dtype=pl.String),
-            "funding_event_count": pl.Series([], dtype=pl.Int64),
-            "net_return": pl.Series([], dtype=pl.Float64),
-            "mae": pl.Series([], dtype=pl.Float64),
-            "mfe": pl.Series([], dtype=pl.Float64),
-            "bars_held": pl.Series([], dtype=pl.Int64),
-            "hold_hours": pl.Series([], dtype=pl.Float64),
-            "actual_entry_delay_hours": pl.Series([], dtype=pl.Float64),
-            "pattern": pl.Series([], dtype=pl.String),
-        }
+    """The shared lifecycle trade schema plus the two LONG-only columns."""
+    return _lifecycle_empty_trades().with_columns(
+        pl.Series("actual_entry_delay_hours", [], dtype=pl.Float64),
+        pl.Series("pattern", [], dtype=pl.String),
     )
 
 

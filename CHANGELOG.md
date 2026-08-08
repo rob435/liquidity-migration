@@ -16,6 +16,95 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 (third pass) — Seven agents, and the sharpest one was pointed at
+  the previous two hours of my own work.** Four adversarial/audit agents reading
+  and four compaction agents editing disjoint directories. Net **−313 source
+  lines** with 2,976 tests green. What it found that touches money:
+  1. **A refused stop install was reported as success whenever the stop price
+     contained the digits `34040`.** `set_trading_stop` scanned the whole error
+     text for that code to recognise Bybit's "not modified" no-op — and the
+     rendered error ends with the request body, stop price included. So a stop
+     at `134040` (BTC) or `0.0034040` (an alt) turned **every** refusal of that
+     install into a silent success. The caller then journals
+     `status="active"`, clears the breach latch and blanks `last_error`:
+     a naked position recorded as protected. The refusal that matters most —
+     "the stop has already crossed the mark" — is exactly the one it swallowed.
+     This is the same defect class fixed in `bybit_errors.py` earlier today;
+     `set_trading_stop` and `set_leverage` were never converted. Both now
+     anchor on the code's position, not its digits.
+  2. **One ambiguous entry submission took convergence down for five minutes,
+     every pass — including reduce-only exits for every other symbol.** The
+     step-over used a 300-second age bound, but the driver refuses to resend an
+     exposure command from the instant its submission attempt is journaled. For
+     those five minutes `converge_once` returned on that plan and raised. That
+     is the shape of the recorded nine-hour funded block. The predicate is now
+     the union of the two conditions — a never-dispatched command still replays
+     promptly, which is the case the step-over must not eat.
+  3. **A protection stop/TP that reached `failed/` could never be republished,
+     and took every later component's stop with it.** The retirement of a failed
+     copy existed but sat *after* the immutability comparison, and a protection
+     request keeps a stable id while rebuilding its body each pass with a fresh
+     timestamp — so the comparison raised out of the engine's evaluate loop
+     before the retirement could run. Retirement now happens first: a copy in
+     `failed/` is not an in-force publication and its content promises nothing.
+  4. **An accounting fault blocked exits.** Funding and position reconciliation
+     shared one attempt, funding ran first, and the funding reconciler raises on
+     every row it cannot account for. Position truth then stopped refreshing,
+     and within 15s that is a stale-position error on the reduction gate — the
+     admission check for *closing* a position. Its bookmark only advances on a
+     clean pass, so it never cleared itself. The two now fail independently in
+     one direction: funding can no longer stop position truth.
+  5. **The account-wide health latch was cleared by evidence about a different
+     symbol.** Any terminal status on any flat symbol blanked `last_error`,
+     which is a single field written by several unrelated conditions and gates
+     all new exposure. A live warning that some other symbol held an unverified
+     stop was thrown away, and health passed. It now clears only a message its
+     own symbol's flatness disproves.
+  6. **The late-window entry escalation was structurally unreachable.** The
+     amend budget shipped as 8 when a reprice was every 15s — exactly one
+     window. When the cadence went to 3s the same 8 covered the first 24s of a
+     120s window, so a quote whose touch moved early could never reach the
+     urgency ladder (join at half the window, improve at 85%) that the same
+     commit added and justified at −0.36 bp/entry over 199,785 paired attempts.
+     The outcome was not a stranded order: it was a would-be maker fill
+     degraded to a taker cross at the deadline. Past the join threshold the
+     escalation now outranks the budget. **A change point, not a refactor.**
+  7. **The leverage-cache invalidation added this morning was too eager.** It
+     read "venue reported no leverage" as "venue contradicts the cache" — and
+     Bybit blanks fields per margin mode (it did exactly that to the
+     account-wide wallet totals on 2026-08-04). Every symbol would have been
+     dropped on every 2s pass, handing back the 175 ms round trip the cache
+     exists to avoid. It now distinguishes contradicted, unvouched-for, and
+     no-evidence.
+  8. **The morning's own halt had a hole, found before any agent reported it.**
+     `halted_for_new_risk` ignored whether a batch was committed while the
+     refusal exempted committed batches, so a halted owner could claim an
+     unready head that nothing then refused. Worse than a wasted pass: an
+     adversarial reproduction showed a committed *reducing* batch executing off
+     a stale book, and a committed entry retiring to `failed/` after the 600s
+     retry budget. The two predicates now agree.
+  9. **Two storage faults in the morning's own union-schema fix.** The parallel
+     footer read created one future per path — ~1.0 GB of transient objects on
+     the 600k-part funding root, and `chunksize` is inert on a thread pool; it
+     is batched now. And first-wins dtype merging meant one all-null part
+     sorting first declared `Null` for the whole scan, silently dropping the
+     read back to the 158s path with no signal.
+
+  **Two agent recommendations were wrong and were rejected after checking.** The
+  convergence fix was proposed as *replacing* the age predicate, which drops a
+  behaviour an existing test pins (a never-dispatched command must replay
+  promptly) — it had to be a union. And moving `quote.verified = True` after the
+  verifier call would retry a raising verifier at `advance()`'s 10 Hz, a REST
+  storm; reconciliation already re-covers that fill on its own cadence.
+
+  Still open and deliberately not built, because they need a decision rather
+  than a fix: the ceiling has no vote over **convergence** (a target accepted
+  before the trip keeps being pursued), an unservable **exit** head still parks
+  a queued flatten behind it (both are reducing the same book, so it delays
+  rather than contradicts), and a halted refusal is visible only in journald.
+  Measured but unfixed: the 2s reconciler makes three serial signed reads where
+  one is a strict subset of another, ~26% of wall clock.
+
 - **2026-08-08 (later) — The six items the audit passes named and left open.**
   All six closed, with the measurements that justify each.
   1. **The loss ceiling now refuses queued risk at admission.** Health going

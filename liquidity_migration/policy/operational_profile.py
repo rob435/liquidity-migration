@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -199,9 +199,7 @@ class OperationalProfile:
     source_path: Path | None = None
     schema_version: int = OPERATIONAL_PROFILE_SCHEMA_VERSION
     kind: str = OPERATIONAL_PROFILE_KIND
-    capital_reference: CapitalReferenceSettings = field(
-        default_factory=CapitalReferenceSettings
-    )
+    capital_reference: CapitalReferenceSettings = CapitalReferenceSettings()
 
 
 def _parse_sleeve_limits(value: object, *, risk: AccountRiskSettings) -> tuple[SleeveLimitSettings, ...]:
@@ -379,7 +377,7 @@ def _parse_continuous(value: object) -> ContinuousOperationalSettings:
     return ContinuousOperationalSettings(
         max_active=max_active,
         max_new_entries_per_cycle=max_new,
-        btc_trend_gate=str(gate),
+        btc_trend_gate=gate,
         entry_leverage=_positive_float(
             row["entry_leverage"], label="continuous.entry_leverage"
         ),
@@ -490,14 +488,13 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
         order_notional_pct_equity=profile.long.order_notional_pct_equity,
         max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )
-    long_projection = projected_long_initial_margin_pct_equity(
-        long_config, long_v11a_profile()
-    )
+    long_strategy = long_v11a_profile()
+    long_projection = projected_long_initial_margin_pct_equity(long_config, long_strategy)
     long_single = (
         profile.capital_reference_usdt
         * long_projection["worst_case_order_notional_pct_equity"]
     )
-    long_gross = long_single * long_v11a_profile().max_concurrent_positions
+    long_gross = long_single * long_strategy.max_concurrent_positions
     long_margin = long_gross / profile.long.entry_leverage
     if (
         long_projection["full_book_initial_margin_pct_equity"]

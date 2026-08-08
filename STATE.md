@@ -31,6 +31,13 @@ match; never append history to this file.
   `/var/lib/liquidity-migration/account-mainnet/account_loss_guard.json`,
   first written 13:43 UTC. Before it, a restart re-anchored the day's loss
   budget to an already-drawn-down equity and forgot a trip.
+- **Two further audit passes are committed and NOT deployed.** The host still
+  runs `91f6dab`. The undeployed work includes six money-affecting fixes — a
+  refused stop that could report success, a five-minute convergence outage from
+  one ambiguous submission, a protection stop that could never be republished,
+  an accounting fault that blocked exits, an account-wide health latch cleared
+  by unrelated evidence, and an entry escalation that was unreachable. See
+  CHANGELOG 2026-08-08 (later) and (third pass).
 - **A tripped loss ceiling now refuses queued risk, not just new publishing.**
   Committed but **not yet deployed** at the time of writing. Admission drops
   any uncommitted request carrying a nonzero target while the ceiling is

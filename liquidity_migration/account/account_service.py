@@ -806,7 +806,26 @@ class AccountIntentInbox:
             for existing in (completed, pending, processing, failed):
                 if not existing.exists():
                     continue
-                if existing.parent.name in {"completed", "failed"}:
+                if existing.parent.name == "failed":
+                    # Retire the old copy before re-queueing, and BEFORE the
+                    # immutability comparison below. Leaving it meant the
+                    # request had two durable files, and the next
+                    # ``require_durable_request`` raised — out of the
+                    # protection engine's evaluate loop, which stopped
+                    # stop-loss and take-profit evaluation for every component
+                    # until someone deleted the file by hand. Comparing first
+                    # did not fix that: a protection request keeps a stable
+                    # request_id but rebuilds its body every pass with a fresh
+                    # ``created_ts_ns`` and trigger price, so the comparison
+                    # raised the same ValueError out of the same loop. A copy
+                    # in ``failed`` is by definition not an in-force
+                    # publication, so its content promises nothing. The arrival
+                    # sidecar goes with it so the retry queues at the back
+                    # rather than reclaiming its old place.
+                    existing.unlink(missing_ok=True)
+                    self._arrival_path(filename).unlink(missing_ok=True)
+                    continue
+                if existing.parent.name == "completed":
                     payload = json.loads(existing.read_bytes())
                     stored_request = payload.get("request") if isinstance(payload, Mapping) else None
                     if not isinstance(stored_request, Mapping):
@@ -814,18 +833,6 @@ class AccountIntentInbox:
                     parsed_request = self._request_from_payload(stored_request)
                     if parsed_request.to_dict() != request.to_dict():
                         raise ValueError(f"immutable request_id {request.request_id!r} changed content")
-                    if existing.parent.name == "failed":
-                        # Retire the old copy before re-queueing. Leaving it
-                        # meant the request had two durable files, and the next
-                        # ``require_durable_request`` raised — out of the
-                        # protection engine's evaluate loop, which stopped
-                        # stop-loss and take-profit evaluation for every
-                        # component until someone deleted the file by hand.
-                        # The arrival sidecar goes with it so the retry queues
-                        # at the back rather than reclaiming its old place.
-                        existing.unlink(missing_ok=True)
-                        self._arrival_path(filename).unlink(missing_ok=True)
-                        continue
                 else:
                     parsed_request = self._request_from_payload(json.loads(existing.read_bytes()))
                     if parsed_request.to_dict() != request.to_dict():
@@ -1615,9 +1622,7 @@ class AccountExecutionService:
                 snapshot = AccountRiskSnapshot(
                     equity_usdt=0.0,
                     available_margin_usdt=0.0,
-                    snapshot_key=(
-                    f"{_UNAVAILABLE_SNAPSHOT_PREFIX}{reason}:observed={observed_key}:batch={batch_id}"
-                ),
+                    snapshot_key=f"{_UNAVAILABLE_SNAPSHOT_PREFIX}{reason}:observed={observed_key}:batch={batch_id}",
                     snapshot_ts_ns=now_ns,
                 )
             else:
@@ -1629,12 +1634,6 @@ class AccountExecutionService:
         return market_inputs, snapshot, rules
 
     @staticmethod
-    def _prepared_request_intents(
-        request: AccountTargetRequest,
-    ) -> list[tuple[RequestedIntent, SleeveTargetIntent]]:
-        return list(prepare_account_request_intents(request))
-
-    @staticmethod
     def _adapt_request_targets(
         request: AccountTargetRequest,
         *,
@@ -1642,7 +1641,7 @@ class AccountExecutionService:
         rules: Mapping[str, InstrumentRules],
     ) -> list[DesiredTarget]:
         targets: list[DesiredTarget] = []
-        for item, intent in AccountExecutionService._prepared_request_intents(request):
+        for item, intent in prepare_account_request_intents(request):
             symbol = intent.symbol.upper()
             targets.append(
                 item.adapter().desired_target(
@@ -1683,10 +1682,21 @@ class AccountExecutionService:
             return ""
         return self.new_risk_halt()
 
-    def halted_for_new_risk(self) -> str:
-        """The current new-risk halt reason, or "" — for admission ordering."""
+    def halted_for_new_risk(self, *, batch_id: str = "") -> str:
+        """Why a request for ``batch_id`` would be refused unserved, or "".
 
-        return "" if self.new_risk_halt is None else self.new_risk_halt()
+        Admission ordering asks this before claiming a head whose books are not
+        ready, so it must agree exactly with ``_new_risk_halt_reason``: a
+        committed batch is exempt there, and answering otherwise here would
+        claim a head nothing then refuses — leaving it to fail on the missing
+        book every pass until the inbox retry budget retired it to ``failed/``.
+        """
+
+        if self.new_risk_halt is None:
+            return ""
+        if batch_id and batch_id in self.kernel._state_ref().processed_batches:
+            return ""
+        return self.new_risk_halt()
 
     def handle(self, request: AccountTargetRequest) -> AccountServiceReceipt:
         request.require_route(self.route)
@@ -1819,7 +1829,7 @@ class AccountExecutionService:
                     else None
                 ),
             )
-        adapted = [AdaptedIntent(item.adapter(), intent) for item, intent in self._prepared_request_intents(request)]
+        adapted = [AdaptedIntent(item.adapter(), intent) for item, intent in prepare_account_request_intents(request)]
         result = self.runtime.process_cycle(
             batch_id=request.batch_id,
             intents=adapted,
@@ -1938,15 +1948,6 @@ class AccountExecutionService:
                 retry_head_symbol=retry_head_symbol,
             )
             self._convergence_scan_memo = (scan_key, scan)
-        newest_activity_ns = scan.newest_activity_ns
-        newest_fill_sequence = scan.newest_fill_sequence
-        retry_rows_by_symbol = scan.retry_rows_by_symbol
-        retry_risk_rows_by_symbol = scan.retry_risk_rows_by_symbol
-        retry_rows_unmapped = scan.retry_rows_unmapped
-        retry_risk_rows_unmapped = scan.retry_risk_rows_unmapped
-        retry_batches_by_symbol = scan.retry_batches_by_symbol
-        retry_batches_unmapped = scan.retry_batches_unmapped
-
         plans: list[_ConvergencePlan] = []
         for symbol in sorted(symbols):
             target_qty = float(state.aggregate_targets.get(symbol, 0.0))
@@ -2021,17 +2022,17 @@ class AccountExecutionService:
             generation = hashlib.sha256(canonical_json(generation_material)).hexdigest()[:20]
             prefix = f"{retry_root}{symbol}/{generation}/"
             attempts = 0
-            for retry_batches in (retry_batches_by_symbol.get(symbol, ()), retry_batches_unmapped):
+            for retry_batches in (scan.retry_batches_by_symbol.get(symbol, ()), scan.retry_batches_unmapped):
                 attempts += sum(1 for batch_id in retry_batches if batch_id.startswith(prefix))
             # Attempts since the newest fill: the number that budgets and
             # backs off retries. Total ``attempts`` keeps naming batches.
-            newest_fill_seq = newest_fill_sequence.get(symbol, 0)
+            newest_fill_seq = scan.newest_fill_sequence.get(symbol, 0)
             attempts_since_fill = attempts
             if attempts and newest_fill_seq:
                 progressed: set[str] = set()
                 for risk_rows in (
-                    retry_risk_rows_by_symbol.get(symbol, ()),
-                    retry_risk_rows_unmapped,
+                    scan.retry_risk_rows_by_symbol.get(symbol, ()),
+                    scan.retry_risk_rows_unmapped,
                 ):
                     for risk_correlation_id, risk_sequence in risk_rows:
                         if risk_sequence > newest_fill_seq and risk_correlation_id.startswith(prefix):
@@ -2044,10 +2045,10 @@ class AccountExecutionService:
                 else self._orphan_observed_since_ns(events, symbol=symbol, fallback=now_ns)
             )
             retry_anchor_ns = desired_since_ns
-            newest_activity = newest_activity_ns.get(symbol)
+            newest_activity = scan.newest_activity_ns.get(symbol)
             if newest_activity is not None and newest_activity > retry_anchor_ns:
                 retry_anchor_ns = newest_activity
-            for retry_rows in (retry_rows_by_symbol.get(symbol, ()), retry_rows_unmapped):
+            for retry_rows in (scan.retry_rows_by_symbol.get(symbol, ()), scan.retry_rows_unmapped):
                 for retry_correlation_id, retry_sequence, retry_wall_ts_ns in retry_rows:
                     if (
                         retry_wall_ts_ns > retry_anchor_ns
@@ -2278,7 +2279,7 @@ class AccountExecutionService:
     ) -> TargetBatchResult:
         requested_symbols = {plan.item.symbol}
         market_inputs, snapshot, rules = self._execution_inputs(
-            requested_symbols={plan.item.symbol},
+            requested_symbols=requested_symbols,
             batch_id=batch_id,
             require_external_health=False,
             account_wide=False,
@@ -2449,24 +2450,45 @@ class AccountExecutionService:
             ]
             if not commanded_orders:
                 continue
-            unresendable = [
-                wedge
+            # Two ways an exposure command cannot be replayed, and the union
+            # matters. Age is one: a never-dispatched command is legitimately
+            # in flight until `wedged_commands` calls it wedged at 300s, and
+            # stepping over it before that would abandon work the venue never
+            # saw. A durable submission attempt is the other, and it is true
+            # from the instant it is journaled — the driver raises
+            # `AmbiguousExposureSubmission` on exactly that predicate. Waiting
+            # out the age bound for THAT case cost five minutes in which this
+            # loop returned on the first such plan and raised, taking
+            # reduce-only exits for every other symbol down with it, on every
+            # pass. That is the shape of the recorded nine-hour funded block.
+            wedged_by_age = {
+                wedge.command_id: wedge.describe()
                 for wedge in wedged_commands(commanded_orders, now_ns=now_ns)
-                # Reduce-only work is retryable and must not be stepped over.
                 if not wedge.reduce_only
+            }
+            unresendable = [
+                order
+                for order in commanded_orders
+                # Reduce-only work is retryable and must not be stepped over.
+                if not order.reduce_only
+                and (order.submission_attempts > 0 or order.command_id in wedged_by_age)
             ]
             if unresendable:
-                # Replaying this plan raises AmbiguousExposureSubmission every
-                # pass, and this loop returns on the first commanded plan, so
-                # one wedged symbol would starve the rest of the book. Step
-                # over it and keep converging; the reconciler's automatic
+                # Step over it and keep converging; the reconciler's automatic
                 # wedge pass terminalizes it on venue evidence (on mainnet,
                 # `ops.sh wedged-command` is the operator path).
                 _logger.error(
-                    "convergence skipped wedged batch %s (%s) until the wedge "
+                    "convergence skipped unresendable batch %s (%s) until it "
                     "terminalizes on venue evidence",
                     batch_id,
-                    "; ".join(wedge.describe() for wedge in unresendable),
+                    "; ".join(
+                        wedged_by_age.get(
+                            order.command_id,
+                            f"{order.symbol}:ambiguous_submission:"
+                            f"command={order.command_id}:attempts={order.submission_attempts}",
+                        )
+                        for order in unresendable
+                    ),
                 )
                 continue
             return self._submit_convergence_plan(

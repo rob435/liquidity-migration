@@ -200,13 +200,12 @@ def _position_size(row: Mapping[str, Any]) -> float:
 
 
 def _position_notional(row: Mapping[str, Any]) -> float:
-    for key in ("positionValue",):
-        try:
-            value = abs(float(row.get(key) or 0.0))
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > 0.0:
-            return value
+    try:
+        value = abs(float(row.get("positionValue") or 0.0))
+    except (TypeError, ValueError):
+        value = 0.0
+    if value > 0.0:
+        return value
     size = _position_size(row)
     for key in ("markPrice", "avgPrice"):
         try:

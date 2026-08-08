@@ -56,6 +56,7 @@ class RequestedMarketReadiness:
     timed_out: bool
     detail: str
     carries_new_risk: bool = False
+    batch_id: str = ""
 
 
 @dataclass(slots=True)
@@ -89,6 +90,7 @@ class RequestedMarketWarmupGate:
         elapsed: float,
         overdue: bool,
         carries_new_risk: bool,
+        batch_id: str,
     ) -> RequestedMarketReadiness:
         detail = reason
         if overdue:
@@ -96,7 +98,9 @@ class RequestedMarketWarmupGate:
                 f"; queue head has been unservable for {elapsed:.1f}s "
                 f"(warmup timeout {self.timeout_seconds:g}s) and remains pending"
             )
-        return RequestedMarketReadiness(request_id, symbols, False, overdue, detail, carries_new_risk)
+        return RequestedMarketReadiness(
+            request_id, symbols, False, overdue, detail, carries_new_risk, batch_id
+        )
 
     def evaluate(
         self,
@@ -131,6 +135,7 @@ class RequestedMarketWarmupGate:
                 elapsed=elapsed,
                 overdue=overdue,
                 carries_new_risk=carries_new_risk,
+                batch_id=request.batch_id,
             )
 
         issues: list[str] = []
@@ -157,6 +162,7 @@ class RequestedMarketWarmupGate:
                 elapsed=elapsed,
                 overdue=overdue,
                 carries_new_risk=carries_new_risk,
+                batch_id=request.batch_id,
             )
         return RequestedMarketReadiness(
             request.request_id,
@@ -165,6 +171,7 @@ class RequestedMarketWarmupGate:
             False,
             "",
             carries_new_risk,
+            request.batch_id,
         )
 
 
@@ -189,7 +196,9 @@ def run_ready_request_or_converge(
     if safety_receipt is not None:
         return safety_receipt
     refusable_head = (
-        not readiness.ready and readiness.carries_new_risk and bool(service.halted_for_new_risk())
+        not readiness.ready
+        and readiness.carries_new_risk
+        and bool(service.halted_for_new_risk(batch_id=readiness.batch_id))
     )
     if readiness.request_id and (readiness.ready or refusable_head):
         return service.run_once(

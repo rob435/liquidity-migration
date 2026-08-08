@@ -204,23 +204,21 @@ def exclusive_file_lock(
     *,
     stale_seconds: float = 600,
     poll_seconds: float = 0.05,
-    invalid_lock_stale_seconds: float = 30.0,
 ) -> Iterator[None]:
     """Serialize a critical section across threads and local POSIX processes.
 
     The lock leaf is persistent and never unlinked during normal operation.
     Kernel ``flock`` ownership ends automatically on descriptor close or process
     death, so recovery never infers liveness from a pathname, PID, payload, or
-    wall-clock age. ``stale_seconds`` and ``invalid_lock_stale_seconds`` remain
-    compatibility no-ops; ``poll_seconds`` still controls nonblocking wait
-    cadence.
+    wall-clock age. ``stale_seconds`` remains a compatibility no-op;
+    ``poll_seconds`` still controls nonblocking wait cadence.
 
     This protocol requires a local flock-capable filesystem and a quiescent
     migration from the retired create/unlink implementation. Explicitly forking
     inside the yielded critical section is unsupported; fork/exec helpers and
     forks from other threads are cleaned up by the module's at-fork handler.
     """
-    del stale_seconds, invalid_lock_stale_seconds
+    del stale_seconds
     lock_path = Path(path).expanduser()
     _ensure_lock_directory(lock_path)
     poll = max(float(poll_seconds), 0.0)
@@ -974,6 +972,15 @@ def _collect_files(
 
 
 #: A scan over parts whose schemas disagree raises one of these rather than
+#: Footer reads per submitted work item, so a 600k-part root costs ~600 futures
+#: instead of 600k.
+_SCHEMA_PROBE_BATCH = 1024
+
+
+def _read_parquet_schemas(paths: list[str]) -> list[dict[str, pl.DataType]]:
+    return [pl.read_parquet_schema(path) for path in paths]
+
+
 #: unioning them itself.
 _SCHEMA_UNION_ERRORS = (
     pl.exceptions.SchemaError,
@@ -1004,10 +1011,26 @@ def _collect_evolved_schema_files(
     """
 
     union: dict[str, pl.DataType] = {}
+    # Batched, because ``ThreadPoolExecutor.map`` ignores ``chunksize`` (that is
+    # a process-pool parameter) and submits every item eagerly: one future and
+    # one work item per path, which on the 600k-part funding root peaked at
+    # ~1.0 GB of transient objects before a single footer had been read.
+    batches = [
+        file_paths[start : start + _SCHEMA_PROBE_BATCH]
+        for start in range(0, len(file_paths), _SCHEMA_PROBE_BATCH)
+    ]
     with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4) * 2)) as pool:
-        for schema in pool.map(pl.read_parquet_schema, file_paths, chunksize=256):
-            for name, dtype in schema.items():
-                union.setdefault(name, dtype)
+        for schemas in pool.map(_read_parquet_schemas, batches):
+            for schema in schemas:
+                for name, dtype in schema.items():
+                    known = union.get(name)
+                    # First-wins, EXCEPT over Null. Polars writes an all-null
+                    # column as dtype Null; declaring that for the whole scan
+                    # makes every part holding a real value a type mismatch, so
+                    # one all-null part sorting first silently dropped the read
+                    # back to the per-file path — 59s to 158s, no signal.
+                    if known is None or known == pl.Null:
+                        union[name] = dtype
     # Left out of the declared schema and thereby ignored, matching the hidden
     # month-partition column's treatment on the fast path.
     union.pop(_LEDGER_MONTH_COL, None)

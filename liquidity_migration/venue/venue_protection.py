@@ -1575,47 +1575,45 @@ class BybitNativeProtectionManager:
             self.observed_entry_stop_order_ids.setdefault(symbol, {})[
                 venue_order_id
             ] = candidate.command_id
-            if not matches_active and candidate is not None:
-                active_before = self._activate_entry_attached_stop(
+            if not matches_active:
+                self._activate_entry_attached_stop(
                     candidate,
                     venue_order_id=venue_order_id,
                     observed_ts_ns=self.clock.wall_time_ns(),
                 )
                 matches_active = True
-        if symbol and venue_order_id:
-            if matches_active:
-                self.observed_native_order_ids[symbol] = venue_order_id
-            raw_status = str(row.get("orderStatus") or row.get("order_status") or "").lower().replace("_", "")
-            cumulative = _finite_or_zero(row.get("cumExecQty") or row.get("cum_exec_qty"))
-            if raw_status in {"cancelled", "canceled", "deactivated", "rejected"} and (cumulative <= 0.0):
-                active = self.active(symbol)
-                if active is not None and matches_active:
-                    prior = active[1]
-                    status = "rejected_unfilled" if raw_status == "rejected" else "cancelled_unfilled"
-                    self.kernel.record_protection(
-                        protection_key=active[0],
-                        symbol=symbol,
-                        status=status,
-                        stop_price=_optional_float(prior.get("stop_price")),
-                        take_profit_price=_optional_float(prior.get("take_profit_price")),
-                        exchange_ts_ns=_timestamp_ns(row.get("updatedTime") or row.get("updated_time")),
-                        local_receive_ts_ns=self.clock.wall_time_ns(),
-                        metadata={
-                            **dict(prior.get("metadata") or {}),
-                            "venue_order_id": venue_order_id,
-                            "terminal_order_status": str(row.get("orderStatus") or ""),
-                        },
-                    )
-                    self.last_error = (
-                        f"native protection {status.replace('_', ' ')} for {symbol}: orderId={venue_order_id}"
-                    )[:1000]
-            elif raw_status in {"cancelled", "canceled", "deactivated", "filled"} and (cumulative > 0.0):
+        if matches_active:
+            self.observed_native_order_ids[symbol] = venue_order_id
+        raw_status = str(row.get("orderStatus") or row.get("order_status") or "").lower().replace("_", "")
+        cumulative = _finite_or_zero(row.get("cumExecQty") or row.get("cum_exec_qty"))
+        if raw_status in {"cancelled", "canceled", "deactivated", "rejected"} and (cumulative <= 0.0):
+            active = self.active(symbol)
+            if active is not None and matches_active:
+                prior = active[1]
+                status = "rejected_unfilled" if raw_status == "rejected" else "cancelled_unfilled"
+                self.kernel.record_protection(
+                    protection_key=active[0],
+                    symbol=symbol,
+                    status=status,
+                    stop_price=_optional_float(prior.get("stop_price")),
+                    take_profit_price=_optional_float(prior.get("take_profit_price")),
+                    exchange_ts_ns=_timestamp_ns(row.get("updatedTime") or row.get("updated_time")),
+                    local_receive_ts_ns=self.clock.wall_time_ns(),
+                    metadata={
+                        **dict(prior.get("metadata") or {}),
+                        "venue_order_id": venue_order_id,
+                        "terminal_order_status": str(row.get("orderStatus") or ""),
+                    },
+                )
                 self.last_error = (
-                    f"native protection terminal execution recovery pending for {symbol}: "
-                    f"orderId={venue_order_id} cumulative_qty={cumulative:g}"
+                    f"native protection {status.replace('_', ' ')} for {symbol}: orderId={venue_order_id}"
                 )[:1000]
-            return True
-        return False
+        elif raw_status in {"cancelled", "canceled", "deactivated", "filled"} and (cumulative > 0.0):
+            self.last_error = (
+                f"native protection terminal execution recovery pending for {symbol}: "
+                f"orderId={venue_order_id} cumulative_qty={cumulative:g}"
+            )[:1000]
+        return True
 
     @_serialized_manager_method
     def observe_terminal_status(self, *, command_id: str, status: str) -> None:
@@ -1626,7 +1624,17 @@ class BybitNativeProtectionManager:
             order = state.orders.get(command_id)
             position = state.positions.get(order.symbol) if order is not None else None
             if order is not None and (position is None or abs(position.signed_qty) <= 1e-12):
-                self.last_error = ""
+                # Only the message this symbol's own flatness disproves.
+                # ``last_error`` is one account-wide field written by several
+                # unrelated conditions — an adoption failure, an entry whose
+                # stop could not be verified, a pending native-terminal
+                # recovery — and it gates all new exposure. Blanking it here
+                # let any terminal status on any FLAT symbol clear a live
+                # warning about a DIFFERENT symbol that still holds an
+                # unproven stop, and health then passed.
+                symbol = str(order.symbol).upper()
+                if symbol and symbol in self.last_error.upper():
+                    self.last_error = ""
             return
         state = self.kernel._state_ref()
         order = state.orders.get(command_id)

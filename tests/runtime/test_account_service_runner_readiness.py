@@ -9,6 +9,7 @@ import pytest
 from liquidity_migration.venue.account_reconcile import AccountReconciliationReport
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.account.account_service import (
+    AccountExecutionService,
     AccountIntentInbox,
     AccountTargetRequest,
     RequestedIntent,
@@ -416,13 +417,18 @@ def test_owner_market_set_includes_every_pending_and_active_symbol() -> None:
 
 
 class _CycleService:
-    def __init__(self, *, halt_reason: str = "") -> None:
+    def __init__(self, *, halt_reason: str = "", committed_batches: frozenset[str] = frozenset()) -> None:
         self.run_request_ids: list[str | None] = []
         self.safety_calls = 0
         self.convergence_calls = 0
         self.halt_reason = halt_reason
+        self.committed_batches = committed_batches
 
-    def halted_for_new_risk(self) -> str:
+    def halted_for_new_risk(self, *, batch_id: str = "") -> str:
+        # Mirrors the real predicate: a committed batch replays, so it is never
+        # refused and must never be claimed early.
+        if batch_id and batch_id in self.committed_batches:
+            return ""
         return self.halt_reason
 
     def run_safety_flat_once(self, inbox: AccountIntentInbox) -> None:
@@ -609,13 +615,25 @@ def test_unservable_head_still_waits_for_books_when_the_account_is_not_halted(
     assert inbox.peek_next() == request
 
 
-def test_halted_account_leaves_an_unservable_exit_head_to_warm_up(tmp_path: Path) -> None:
-    """A zero-target head is the flatten itself: it waits for its book, as always."""
+def test_halted_account_does_not_claim_an_unservable_head_it_will_not_refuse(
+    tmp_path: Path,
+) -> None:
+    """A committed batch replays past the halt, so claiming it early buys nothing.
 
-    service = _CycleService(halt_reason="account daily loss ceiling: -120.00 USDT")
+    Claiming it would leave a head nothing refuses and nothing can serve: it
+    fails on the missing book every pass until the inbox retry budget retires
+    it to failed/. Before the two halt predicates were made to agree, this is
+    exactly what a tripped ceiling did to a batch that crashed mid-execution
+    while its book was cold.
+    """
+
     inbox = _inbox(tmp_path)
-    request = _request(inbox, request_id="flatten-head", symbols=("AUSDT",))
+    request = _request(inbox, request_id="committed-and-cold", symbols=("AUSDT",))
     inbox.submit(request)
+    service = _CycleService(
+        halt_reason="account daily loss ceiling: -120.00 USDT",
+        committed_batches=frozenset({request.batch_id}),
+    )
 
     receipt = run_ready_request_or_converge(
         service=service,  # type: ignore[arg-type]
@@ -626,13 +644,56 @@ def test_halted_account_leaves_an_unservable_exit_head_to_warm_up(tmp_path: Path
             ready=False,
             timed_out=True,
             detail="waiting for queue-head market data: AUSDT:no_snapshot",
-            carries_new_risk=False,
+            carries_new_risk=True,
+            batch_id=request.batch_id,
         ),
     )
 
     assert receipt is None
     assert service.run_request_ids == []
     assert service.convergence_calls == 1
+    assert inbox.peek_next() == request
+
+
+def test_halted_account_leaves_an_unservable_exit_head_to_warm_up(tmp_path: Path) -> None:
+    """A zero-target head waits for its book — claiming it early would strand it.
+
+    `_execution_inputs` raises on an absent book even for a reduction (only an
+    authenticated native-breach mark substitutes), so an exit claimed early
+    fails every pass and retires to failed/ once the inbox retry budget is
+    spent. This is the residual case the halt does NOT cover: an unservable
+    exit still parks a queued flatten behind it. Both are reducing the same
+    book, so it delays the flatten rather than contradicting it.
+    """
+
+    service = _CycleService(halt_reason="account daily loss ceiling: -120.00 USDT")
+    inbox = _inbox(tmp_path)
+    request = _request(
+        inbox, request_id="flatten-head", symbols=("AUSDT",), signed_notional_usdt=0.0
+    )
+    inbox.submit(request)
+    # Read off the request, not hand-passed: the point is that a real zero
+    # target reports carries_new_risk=False.
+    assert AccountExecutionService.request_carries_new_risk(request) is False
+
+    receipt = run_ready_request_or_converge(
+        service=service,  # type: ignore[arg-type]
+        inbox=inbox,
+        readiness=RequestedMarketReadiness(
+            request_id=request.request_id,
+            symbols=("AUSDT",),
+            ready=False,
+            timed_out=True,
+            detail="waiting for queue-head market data: AUSDT:no_snapshot",
+            carries_new_risk=AccountExecutionService.request_carries_new_risk(request),
+            batch_id=request.batch_id,
+        ),
+    )
+
+    assert receipt is None
+    assert service.run_request_ids == []
+    assert service.convergence_calls == 1
+    assert inbox.peek_next() == request
 
 
 def test_startup_allows_only_typed_native_breach_recovery() -> None:
@@ -1093,6 +1154,37 @@ def test_periodic_reconciliation_survives_transient_venue_read_failure(
         "periodic account reconciliation failed" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_a_funding_fault_no_longer_stops_position_truth_refreshing() -> None:
+    """Accounting must not block exits.
+
+    The funding reconciler raises on every per-row problem it cannot account
+    for, and its bookmark only advances on a clean pass — so one anomalous
+    settlement row used to stop position truth being refreshed at all, forever.
+    Inside the 15s floor that is AccountReconciliationStaleError on the
+    reduction gate, which is the admission check for closing a position.
+    """
+
+    from liquidity_migration.runtime.account_service_runner import run_periodic_reconciliation
+
+    position = object()
+
+    class UnbookableFundingReconciler:
+        def reconcile_once(self):
+            raise RuntimeError("funding row has no owned quantity at settlement")
+
+    class HealthyReconciler:
+        def reconcile_once(self):
+            return position
+
+    report, funding_report = run_periodic_reconciliation(
+        reconciler=HealthyReconciler(),  # type: ignore[arg-type]
+        funding_reconciler=UnbookableFundingReconciler(),  # type: ignore[arg-type]
+    )
+
+    assert report is position
+    assert funding_report is None
 
 
 def test_published_venue_facts_stay_pinned_when_the_venue_loop_wedges(

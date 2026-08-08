@@ -344,6 +344,47 @@ def test_reprice_chases_only_toward_the_market() -> None:
     assert len(client.amends) == 1
 
 
+def test_a_spent_amend_budget_cannot_hide_the_late_window_urgency_ladder() -> None:
+    """The budget spanned the window at 15s reprices; at 3s it spans a fifth of it.
+
+    A quote whose touch keeps moving spends all 8 amends inside the first 24s,
+    and before this the escalations at half (join) and 85% (improve) of the
+    window were then structurally unreachable — `_desired_price` was never even
+    called. The outcome was not a stranded order but a would-be maker fill
+    degraded to a taker cross at the deadline.
+    """
+
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+
+    # Spend the whole budget chasing a rising touch inside the first 24s.
+    price = 0.0376
+    for _ in range(manager.config.max_amends):
+        price += 0.0001
+        client.tickers["LAUSDT"] = (price, price + 0.0004)
+        clock.tick(manager.config.reprice_seconds)
+        manager.advance()
+    assert len(client.amends) == manager.config.max_amends
+
+    # Still early in the window: the budget holds and nothing further amends.
+    price += 0.0001
+    client.tickers["LAUSDT"] = (price, price + 0.0004)
+    clock.tick(manager.config.reprice_seconds)
+    manager.advance()
+    assert len(client.amends) == manager.config.max_amends
+
+    # Past the join threshold the escalation outranks the spent budget.
+    clock.tick(manager.config.window_seconds * manager.config.urgency_join_frac)
+    price += 0.0001
+    client.tickers["LAUSDT"] = (price, price + 0.0004)
+    manager.advance()
+    assert len(client.amends) == manager.config.max_amends + 1
+    assert client.amends[-1]["price"] == f"{price:.4f}"
+
+
 def test_deadline_crosses_at_a_bounded_price_then_cancels_the_remainder() -> None:
     manager, client, kernel, clock = build_manager()
     order = working_entry()

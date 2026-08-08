@@ -715,20 +715,8 @@ def _normalize_binance_klines(symbol: str, rows: list, *, source: str) -> list[d
 
 
 def _normalize_binance_price_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
-    output = []
-    for row in rows:
-        output.append(
-            {
-                "ts_ms": int(row[0]),
-                "symbol": symbol,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "source": source,
-            }
-        )
-    return sorted(output, key=lambda item: item["ts_ms"])
+    # Binance mark/index klines carry the same leading (ts, o, h, l, c) columns as Bybit's.
+    return _normalize_price_index_klines(symbol, rows, source=source)
 
 
 def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:

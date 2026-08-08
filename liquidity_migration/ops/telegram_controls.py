@@ -134,9 +134,7 @@ def load_config_from_environment(repo_dir: Path) -> ControlsConfig | None:
     )
 
 
-# --------------------------------------------------------------------------
 # Pure pieces: sleeve-file rewrites and authorization
-# --------------------------------------------------------------------------
 
 
 def _strip_managed_lines(text: str) -> list[str]:
@@ -191,9 +189,7 @@ def callback_authorized(callback: Mapping[str, Any], config: ControlsConfig) -> 
     return str(from_id) == config.chat_id
 
 
-# --------------------------------------------------------------------------
 # Telegram transport
-# --------------------------------------------------------------------------
 
 
 class TelegramApi:
@@ -254,9 +250,7 @@ class TelegramApi:
             logger.warning("answerCallbackQuery failed", exc_info=True)
 
 
-# --------------------------------------------------------------------------
 # Host actions (systemctl, sleeve resolve, flatten)
-# --------------------------------------------------------------------------
 
 
 class VpsFleet:
@@ -472,9 +466,7 @@ def _describe_flatten(environment: str, returncode: int, outcome: dict[str, Any]
     return f"🚨 {label} market close did not finish cleanly ({status or f'exit {returncode}'}): {detail[:300]}"
 
 
-# --------------------------------------------------------------------------
 # The panel
-# --------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -611,9 +603,7 @@ class ControlPanel:
             return f"🚨 That action failed: {type(exc).__name__}: {str(exc)[:300]}"
 
 
-# --------------------------------------------------------------------------
 # Offset persistence and the poll loop
-# --------------------------------------------------------------------------
 
 
 def _load_offset(path: Path) -> int | None:

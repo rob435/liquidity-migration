@@ -16,6 +16,7 @@ from liquidity_migration.account.account_contracts import (
     AccountEventType,
     AccountRiskPolicy,
     AccountRiskSnapshot,
+    AccountState,
     InstrumentRules,
     MarketInputRef,
     PositionState,
@@ -32,8 +33,9 @@ from liquidity_migration.account.account_service import (
     prepare_account_request_intents,
 )
 from liquidity_migration.core.deterministic_runtime import VirtualClock
-from liquidity_migration.account.execution_adapters import ExecutionTwinConfig, L2BookSnapshot, MarketOrderExecutionTwin
-from liquidity_migration.account.execution_adapters import BookLevel
+from liquidity_migration.account.execution_adapters import (
+    BookLevel, ExecutionTwinConfig, L2BookSnapshot, MarketOrderExecutionTwin,
+)
 from liquidity_migration.account.strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
@@ -339,6 +341,18 @@ def synthetic_historical_rules_for_symbols(
         )
         for symbol in sorted({str(value).strip().upper() for value in symbols if str(value).strip()})
     }
+
+
+def _active_kernel_symbols(state: AccountState) -> set[str]:
+    """Symbols the kernel still owns a desired target, exposure, or working order on."""
+    symbols = {
+        str(target.get("symbol") or "").upper()
+        for target in state.component_targets.values()
+        if abs(float(target.get("signed_qty") or 0.0)) > 0.0
+    }
+    symbols.update(symbol for symbol, position in state.positions.items() if abs(position.signed_qty) > 0.0)
+    symbols.update(state.working_symbols())
+    return symbols
 
 
 class HistoricalAccountSession:
@@ -704,18 +718,7 @@ class HistoricalAccountSession:
             if self.kernel is not None:
                 # Internal read-only view. A deep copy per decision would make
                 # a durable historical replay quadratic in prior orders.
-                state = self.kernel._state_ref()
-                required_symbols.update(
-                    str(target.get("symbol") or "").upper()
-                    for target in state.component_targets.values()
-                    if abs(float(target.get("signed_qty") or 0.0)) > 0.0
-                )
-                required_symbols.update(
-                    symbol
-                    for symbol, position in state.positions.items()
-                    if abs(position.signed_qty) > 0.0
-                )
-                required_symbols.update(state.working_symbols())
+                required_symbols.update(_active_kernel_symbols(self.kernel._state_ref()))
             prices = {
                 str(symbol).upper(): float(price)
                 for symbol, price in (market_prices or {}).items()
@@ -907,22 +910,8 @@ class HistoricalAccountSession:
             )
         account_service = self.account_service
         request.require_route(self.route)
-        state = self.kernel._state_ref()
-        required_symbols = {
-            item.intent.symbol.upper()
-            for item in request.intents
-        }
-        required_symbols.update(
-            str(target.get("symbol") or "").upper()
-            for target in state.component_targets.values()
-            if abs(float(target.get("signed_qty") or 0.0)) > 0.0
-        )
-        required_symbols.update(
-            symbol
-            for symbol, position in state.positions.items()
-            if abs(position.signed_qty) > 0.0
-        )
-        required_symbols.update(state.working_symbols())
+        required_symbols = {item.intent.symbol.upper() for item in request.intents}
+        required_symbols.update(_active_kernel_symbols(self.kernel._state_ref()))
         missing_prices = sorted(required_symbols - set(normalized_prices))
         if missing_prices:
             raise ValueError(

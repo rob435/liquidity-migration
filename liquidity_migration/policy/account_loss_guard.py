@@ -59,7 +59,6 @@ class AccountLossGuard:
         "_day",
         "_opening_equity",
         "_tripped_detail",
-        "_last_equity",
     )
 
     def __init__(
@@ -77,9 +76,6 @@ class AccountLossGuard:
         self._day: str | None = None
         self._opening_equity: float | None = None
         self._tripped_detail: str = ""
-        self._last_equity: float | None = None
-
-    # -- state ---------------------------------------------------------------
 
     @property
     def tripped(self) -> bool:
@@ -120,8 +116,6 @@ class AccountLossGuard:
         self._day = None
         self._opening_equity = None
 
-    # -- evaluation ----------------------------------------------------------
-
     def evaluate(
         self,
         *,
@@ -152,7 +146,6 @@ class AccountLossGuard:
                 f"account equity is {age_ns / 1_000_000_000:.0f}s stale",
             )
 
-        self._last_equity = float(equity_usdt)
         day = _utc_day(int(equity_ts_ns))
         if self._day != day or self._opening_equity is None:
             self._day = day

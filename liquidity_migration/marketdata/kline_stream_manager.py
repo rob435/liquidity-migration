@@ -9,19 +9,9 @@ Wires four components into a single lifecycle:
   delistings and reconciles the pool's subscriptions
 
 The cycle's ``_download_recent_1h_klines`` consumes the store via
-``manager.store()`` rather than calling this module. The store is the contract;
-the manager is the wiring that keeps it fresh.
-
-Lifecycle:
-
-  1. ``start()``: recover from the flush file, trim to the universe, bootstrap
-     the last ``lookback_days`` for uncovered symbols (blocking until
-     ``bootstrap_completion_threshold`` or timeout), subscribe the WS pool, then
-     start the flush, watchdog, and universe-refresh threads.
-  2. The cycle reads via ``manager.store()``; REST fallback covers any symbol
-     not yet present.
-  3. ``stop()`` tears down refresh thread, watchdog, flush thread, and pool,
-     then flushes once so the next process restart recovers the latest state.
+``manager.store()`` rather than calling this module, and REST fallback covers
+any symbol not yet present. The store is the contract; the manager is the
+wiring that keeps it fresh.
 """
 
 from __future__ import annotations
@@ -30,7 +20,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -244,12 +234,9 @@ class KlineStreamManager:
             _logger.warning("final flush failed: %s", exc)
 
     def universe_symbols(self) -> list[str]:
-        """Return the manager's current universe as a sorted list.
-
-        Used by daemons that want to keep their ticker WS subscriptions
-        in sync with the kline universe (e.g. long sleeve scopes both to
-        the top-N rather than all USDT-perps). Snapshot taken under the
-        lock so concurrent universe_refresh doesn't tear the view."""
+        """The current universe, sorted. Daemons keep their ticker WS
+        subscriptions in sync with it. Snapshot taken under the lock so a
+        concurrent universe refresh cannot tear the view."""
         with self._lock:
             return sorted(self._universe)
 
@@ -632,7 +619,6 @@ def _as_completed_with_deadline(
     while remaining:
         timeout = max(deadline - time.monotonic(), 0.0)
         timeout = min(timeout, 1.0)
-        from concurrent.futures import wait, FIRST_COMPLETED
         done, _ = wait(remaining, timeout=timeout, return_when=FIRST_COMPLETED)
         if not done:
             # Poll tick. Surface shutdown immediately by stopping the

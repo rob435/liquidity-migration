@@ -545,8 +545,8 @@ def _download_recent_1h_klines(
         stats["output_rows"] = store_frame.height
         return store_frame, stats
 
-    # 2) On-disk caches still apply to symbols not yet in the store, so the
-    # The compact cache remains useful during the bootstrap window.
+    # 2) On-disk caches still cover symbols not yet in the store, so the
+    # compact cache remains useful during the bootstrap window.
     cached = _read_demo_kline_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms)
     if not cached.is_empty():
         stats["cache_rows"] = cached.height
@@ -591,10 +591,7 @@ def _download_recent_1h_klines(
             now_ms=end_ms,
         )
 
-    frames = [frame for frame in (store_frame, cached, fetched) if not frame.is_empty()]
-    output = _dedupe_recent_klines(
-        pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines()
-    )
+    output = _concat_recent_klines(store_frame, cached, fetched)
     if write_compact_cache:
         _write_demo_kline_compact_cache(
             cache_root,

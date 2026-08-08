@@ -902,6 +902,67 @@ def test_bybit_private_client_treats_pybit_existing_leverage_exception_as_succes
     assert result == {"symbol": "BTCUSDT", "buyLeverage": "1", "sellLeverage": "1", "retCode": 110043}
 
 
+def test_a_refused_stop_whose_price_contains_the_no_op_code_still_raises(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    """34040 means "already installed". A price containing 34040 does not.
+
+    The rendered refusal ends with the whole request body, stop price included,
+    so a bare digit scan read every refusal of a stop at 134040 as a converged
+    no-op. The caller journals that as ``status="active"``, clears the breach
+    latch and blanks ``last_error`` — recording a naked position as protected,
+    and the refusal that matters most is "the stop already crossed the mark".
+    """
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_trading_stop(self, **params):
+            return {
+                "retCode": 34036,
+                "retMsg": "the stop loss price is invalid",
+                "result": {},
+                "request": {"symbol": params["symbol"], "stopLoss": "134040"},
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+
+    with pytest.raises(bybit_errors.BybitDataError):
+        client.set_trading_stop(symbol="BTCUSDT", stop_loss="134040")
+
+
+def test_a_genuine_not_modified_stop_is_still_a_converged_no_op(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_trading_stop(self, **params):
+            del params
+            raise RuntimeError("34040: not modified")
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+
+    assert client.set_trading_stop(symbol="BTCUSDT", stop_loss="0.5") == {
+        "symbol": "BTCUSDT",
+        "retCode": 34040,
+    }
+
+
 def test_bybit_private_client_wraps_trading_stop(monkeypatch, held_demo_mutation_lease) -> None:
     class FakeHTTP:
         def __init__(self, **kwargs):

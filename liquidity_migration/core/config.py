@@ -61,15 +61,12 @@ class TradeLifecycleConfig:
     # Breakeven trailing stop: once MFE >= breakeven_arm_pct, exit if close
     # returns to or past entry price. Disabled when 0.0.
     breakeven_arm_pct: float = 0.0
-    min_symbols: int = 4
     cost_multiplier: float = 1.0
     side_mode: str = "long_high_short_low"
     rank_exit_enabled: bool = False
     rank_exit_threshold: float = 0.50
     # Deterministic market-independent exit probability; zero disables it.
     hash_exit_prob: float = 0.0
-    universe_min_daily_turnover: float = 0.0
-    exclude_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

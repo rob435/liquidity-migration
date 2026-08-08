@@ -123,9 +123,7 @@ class CompletedCycleObservation:
     row: dict[str, Any]
 
 
-# --------------------------------------------------------------------------- #
 # Pure decision logic (no I/O)
-# --------------------------------------------------------------------------- #
 def evaluate_cycle_liveness(
     *, latest_cycle_ts_ms: int | None, now_ms: int, max_age_minutes: float, label: str
 ) -> Alert | None:
@@ -544,9 +542,7 @@ def select_alerts_to_send(
     return to_send, sorted(resolved_keys), new_state
 
 
-# --------------------------------------------------------------------------- #
 # I/O at the edges
-# --------------------------------------------------------------------------- #
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
 

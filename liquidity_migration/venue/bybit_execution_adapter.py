@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from typing import AbstractSet, Any, Iterable, Mapping
 
 from liquidity_migration.account.account_contracts import (
     MarketInputRef,
@@ -14,21 +14,7 @@ from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.execution_adapters import ExecutionObservation, ExecutionObservationType
-from liquidity_migration.venue.entry_quote_manager import EntryQuoteManager
-
-if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a protection import cycle
-    from typing import Protocol
-
-    class EntryStopVerifier(Protocol):
-        def __call__(
-            self,
-            *,
-            symbol: str,
-            expected_stop_price: float,
-            command_id: str,
-        ) -> str: ...
-else:  # pragma: no cover - runtime alias
-    EntryStopVerifier = object
+from liquidity_migration.venue.entry_quote_manager import EntryQuoteManager, EntryStopVerifier
 
 
 def bybit_private_execution_metadata(
@@ -130,22 +116,38 @@ class BybitDemoExecutionAdapter:
         # changes leverage on the account.
         self._venue_leverage: dict[str, float] = {}
 
-    def retain_confirmed_leverage(self, venue_leverage: Mapping[str, float]) -> None:
-        """Forget any cached leverage the venue no longer confirms.
+    def retain_confirmed_leverage(
+        self,
+        venue_leverage: Mapping[str, float],
+        *,
+        positioned_symbols: AbstractSet[str],
+    ) -> None:
+        """Forget cached leverage the venue contradicts, or no longer vouches for.
 
         The owner hand-trades this same account, so a leverage they set by hand
         supersedes what this process last sent. Skipping ``set_leverage`` on a
         stale cache would then size an entry at their number instead of the
-        sleeve's. A symbol absent from the snapshot is flat, and its next entry
-        pays one ``set_leverage`` — the round trip the cache saves is on the
-        scale-ins into a position that is already open and still confirmed.
+        sleeve's.
+
+        Three cases, and the middle one is why this takes two arguments.
+        A symbol the venue reports with a DIFFERENT leverage is contradicted:
+        drop it. A symbol with no open position is flat, nothing vouches for
+        the cache, and its next entry pays one ``set_leverage`` — cheap, since
+        that entry is opening a position anyway. A symbol that IS positioned
+        but whose ``leverage`` field did not parse is no evidence either way,
+        so the cache stands: Bybit blanks fields per margin mode (it did
+        exactly that to the account-wide wallet totals on 2026-08-04), and
+        treating blank as contradiction would drop every symbol on every 2s
+        pass and hand back the 175 ms round trip this cache exists to avoid.
         """
 
         confirmed = {str(symbol).upper(): float(value) for symbol, value in venue_leverage.items()}
+        positioned = {str(symbol).upper() for symbol in positioned_symbols}
         for symbol in [
             symbol
             for symbol, cached in self._venue_leverage.items()
-            if confirmed.get(symbol) != cached
+            if symbol not in positioned
+            or (symbol in confirmed and confirmed[symbol] != cached)
         ]:
             del self._venue_leverage[symbol]
 
@@ -231,9 +233,6 @@ class BybitDemoExecutionAdapter:
         """
 
         entry_protection_metadata = self._entry_protection_metadata(command)
-        # Build the deterministic request fields before the durable attempt.
-        # The command is immutable, so ``submit_prepared``'s rebuild matches.
-        self._order_params(command)
         if not command.reduce_only and self._venue_leverage.get(command.symbol) != float(
             command.leverage
         ):

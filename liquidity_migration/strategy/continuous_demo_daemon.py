@@ -113,7 +113,7 @@ def _validate_continuous_daemon_startup(
             "account_intent_inbox_root and account_execution_root must be "
             "configured together"
         )
-    if not has_account_inbox or not has_account_execution_root:
+    if not has_account_inbox:
         raise ValueError(
             "CONTINUOUS daemon startup is target-only and requires "
             "account_intent_inbox_root and account_execution_root"
@@ -132,7 +132,6 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     """
 
     _sleeve_label = "continuous"
-    _daemon_label = "continuous-fade"
 
     def _strategy_profile_name(self) -> str:
         return CONTINUOUS_V2_PROFILE

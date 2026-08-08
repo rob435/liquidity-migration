@@ -233,8 +233,8 @@ def target_long_order_notional_pct_equity(
 ) -> float:
     """Per-position notional fraction of equity, scaled by notional_multiplier.
 
-    Mirror of event_demo.target_order_notional_pct_equity but with the
-    multiplier the long sleeve applies (10× by owner pick).
+    Mirror of event_demo.target_order_notional_pct_equity but with the long
+    sleeve's configured notional_multiplier.
     """
     if demo_config.order_notional_pct_equity > 0.0:
         return demo_config.order_notional_pct_equity
@@ -312,12 +312,6 @@ def run_long_native_demo_cycle(
     strategy = strategy_config or long_v11a_profile()
     strategy_id = strategy.execution_strategy_id
     _validate_long_demo_config(demo, strategy)
-    kernel_target_route = bool(str(demo.account_intent_inbox_root or "").strip())
-    if not kernel_target_route:
-        raise ValueError(
-            "LONG forward cycles are target-only and require account_intent_inbox_root "
-            "and account_execution_root; local dry-run fills and direct venue execution are retired"
-        )
     owner_environment = execution_environment(demo.execution_environment).value
     route = require_account_route(
         account_id=account_id_for_environment(owner_environment),
@@ -580,8 +574,8 @@ def run_long_native_demo_cycle(
             # used by the active demo daemons.
             "ticker_source": ticker_source,
             "account_state_source": account_state_source,
-            "feature_rows": features.height if not features.is_empty() else 0,
-            "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
+            "feature_rows": features.height,
+            "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "entry_candidates": entry_candidates,
             "entry_targets_queued": published_entry_intents,
             "exit_candidates": len(exit_plans),
@@ -678,17 +672,12 @@ def _apply_median_universe_selection(
     backtest's median-rank universe; a non-zero count is surfaced as cycle telemetry."""
     if features.is_empty() or "turnover_median_90d" not in features.columns:
         return features, 0
-    # Re-select on the latest CLOSED bar, not the unconditional max: a daily feature
     # Daily rows are end-stamped; exclude a still-forming future-stamped day.
     closed = features.filter(pl.col("ts_ms") <= snapshot_ts_ms)
     if closed.is_empty():
         return features, 0
     latest_ts = closed["ts_ms"].max()
-    if latest_ts is None:
-        return features, 0
     today = closed.filter(pl.col("ts_ms") == latest_ts)
-    if today.is_empty():
-        return features, 0
     finite = today.filter(pl.col("turnover_median_90d").is_finite()).sort(
         ["turnover_median_90d", "symbol"], descending=[True, False]
     )
@@ -742,8 +731,6 @@ def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
     # carries target_pending, excluded here because accepted desire is not fill
     # evidence; admission reserves those via _long_target_reservations.
     open_only = trades.filter(pl.col("status") == "open")
-    if open_only.is_empty():
-        return open_only
     if "side" in open_only.columns:
         return open_only.filter(pl.col("side") == "long")
     return open_only
@@ -753,8 +740,6 @@ def _long_target_reservations(trades: pl.DataFrame) -> pl.DataFrame:
     """Long rows that reserve admission without asserting a confirmed fill."""
 
     reserved = target_reservation_rows(trades)
-    if reserved.is_empty():
-        return reserved
     if "side" in reserved.columns:
         return reserved.filter(pl.col("side") == "long")
     return reserved
@@ -870,8 +855,6 @@ def _select_long_entry_candidates(
         rows_today = rows_by_ts.get(ts, [])
         for row in rows_today:
             pattern, stop_pct, tp_pct, hold_days = _classify_entry(row, strategy)
-            if pattern is None:
-                continue
             if pattern != "fomo_chase":
                 # v11a is FC-only — defensive, in case strategy config drifts
                 continue
@@ -1130,8 +1113,6 @@ def _plan_time_stop_exits(
     armed either way — a missing live price or fill anchor just defers the
     check to a later cycle with that wider stop still in place.
     """
-    if all_trades.is_empty():
-        return []
     open_long = _open_long_trades(all_trades)
     if open_long.is_empty():
         return []
@@ -1142,7 +1123,7 @@ def _plan_time_stop_exits(
         if not symbol:
             continue
         qty = str(trade.get("qty") or "")
-        if not qty or _float(qty) <= 0.0:
+        if _float(qty) <= 0.0:
             continue
         deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
         if deadline > 0 and now_ms >= deadline:

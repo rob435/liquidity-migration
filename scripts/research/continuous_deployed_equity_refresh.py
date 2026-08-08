@@ -805,8 +805,6 @@ def run_venue(
     data_root: Path | None = None,
     chart_leverage: float | None = 4.0,
     backtest_leverage: float = 1.0,
-    exit_data_end_date: str | None = None,
-    strict_hedge_coverage: bool = False,
     research_disable_btc_gate: bool = False,
 ) -> dict[str, Any]:
     if research_disable_btc_gate:
@@ -819,15 +817,12 @@ def run_venue(
             )
     out_dir = output_root / venue
     out_dir.mkdir(parents=True, exist_ok=True)
-    if exit_data_end_date is not None and exit_data_end_date < end_date:
-        raise ValueError("exit_data_end_date must be >= the signal end_date")
-    market_data_end_date = exit_data_end_date or end_date
     if render_only:
         csv_path = out_dir / "continuous_equity.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"--render-only needs an existing {csv_path}")
         df = pl.read_csv(csv_path).select(["ts_ms", "basket_return", "equity"])
-        panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
+        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
         venue_summary: dict[str, Any] = {}
     else:
         component_meta = run_components(
@@ -846,14 +841,13 @@ def run_venue(
             comp, _n, _cfg = load_continuous_component_source(refreshed, venue)
             pieces[component] = comp
         combined = combine_continuous_components(pieces, WINNER_WEIGHTS)
-        panel = load_extended_panel(venue, end_date=market_data_end_date, root=data_root)
+        panel = load_extended_panel(venue, end_date=end_date, root=data_root)
         btc_ret, btc_fund = instrument_inputs(
             venue,
             combined.days,
             "BTCUSDT",
             panel,
             data_root=data_root,
-            strict_coverage=strict_hedge_coverage,
         )
         eth_ret, eth_fund = instrument_inputs(
             venue,
@@ -861,7 +855,6 @@ def run_venue(
             "ETHUSDT",
             panel,
             data_root=data_root,
-            strict_coverage=strict_hedge_coverage,
         )
         df = apply_rebalance_rule(
             combined,
@@ -881,8 +874,8 @@ def run_venue(
             "profile_revision": CONTINUOUS_PROFILE_REVISION,
             "backtest_leverage": backtest_leverage,
             "signal_end_date": end_date,
-            "market_data_end_date": market_data_end_date,
-            "strict_hedge_coverage": strict_hedge_coverage,
+            "market_data_end_date": end_date,
+            "strict_hedge_coverage": False,
             "research_disable_btc_gate": research_disable_btc_gate,
         }
     raw_klines = (
@@ -898,7 +891,7 @@ def run_venue(
         out_dir=out_dir,
         df=df,
         raw_klines=raw_klines,
-        end_date=market_data_end_date,
+        end_date=end_date,
         venue_summary=venue_summary,
         monthly_trades=monthly_trade_counts(output_root=output_root, venue=venue),
         leverage=chart_leverage,
@@ -915,7 +908,7 @@ def run_venue(
         df=df,
         chart_leverage=chart_leverage,
         backtest_leverage=backtest_leverage,
-        market_data_end_date=market_data_end_date,
+        market_data_end_date=end_date,
         research_disable_btc_gate=research_disable_btc_gate,
     )
     return venue_summary

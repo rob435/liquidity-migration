@@ -572,14 +572,34 @@ class EntryQuoteManager:
             if against_bp >= 2.0 * (half_spread_bp + self.config.drift_cross_fee_bp):
                 self._cross(quote, now_ns)
                 return
-        if quote.amend_count >= self.config.max_amends:
-            return
         new_price = self._desired_price(quote, now_ns, tick, bid, ask, bid_qty, ask_qty)
         if new_price is None or abs(float(new_price) - quote.price) < tick * 0.5:
+            return
+        # The budget is a schedule, not a protection. It shipped as 8 when a
+        # reprice was every 15s, so it spanned the whole 120s window; when the
+        # cadence went to 3s the same 8 covered only the first 24s, and a quote
+        # whose touch moved early could never reach the urgency ladder — join
+        # at half the window, improve at 85% — that the same commit added and
+        # justified at -0.36 bp/entry. Past the join threshold the escalation
+        # outranks the budget. Bounded: only a real >=half-tick move amends at
+        # all, and only the window's last half can spend past 8.
+        if (
+            quote.amend_count >= self.config.max_amends
+            and self._elapsed_fraction(quote, now_ns) < self.config.urgency_join_frac
+        ):
             return
         if self._amend(quote, new_price):
             quote.price = float(new_price)
             quote.amend_count += 1
+
+    def _elapsed_fraction(self, quote: _QuoteState, now_ns: int) -> float:
+        """How far through its window this quote is, clamped to [0, 1]."""
+
+        window_ns = int(self.config.window_seconds * 1e9)
+        if window_ns <= 0:
+            return 1.0
+        start_ns = quote.window_start_ns or (quote.deadline_ns - window_ns)
+        return min(1.0, max(0.0, (now_ns - start_ns) / window_ns))
 
     def _desired_price(
         self,
@@ -603,11 +623,7 @@ class EntryQuoteManager:
         touch = bid if quote.is_buy else ask
         can_improve = (ask - bid) >= MIN_SPREAD_TICKS * tick
         improved = bid + tick if quote.is_buy else ask - tick
-        window_ns = int(self.config.window_seconds * 1e9)
-        start_ns = quote.window_start_ns or (quote.deadline_ns - window_ns)
-        elapsed = (
-            min(1.0, max(0.0, (now_ns - start_ns) / window_ns)) if window_ns > 0 else 1.0
-        )
+        elapsed = self._elapsed_fraction(quote, now_ns)
         lean = self._lean(quote.is_buy, bid_qty, ask_qty)
         half = tick * 0.5
         ahead = quote.price > touch + half if quote.is_buy else quote.price < touch - half

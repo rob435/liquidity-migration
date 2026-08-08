@@ -41,11 +41,6 @@ ACTIVE_HEDGE_RULE = active_hedge_rule()
 # live book's actual gross-short fraction relative to that reference.
 REFERENCE_GROSS_SHORT_FRAC = 0.5
 HEDGE_MODEL_PRIOR_KIND = "immutable_historical_model_prior"
-HEDGE_MODEL_PRIOR_LIMITATIONS = (
-    "coefficients_are_not_extended_with_live_book_returns",
-    "account_equity_and_current_targets_do_not_reconstruct_per_unit_book_returns",
-    "not_current_calibration_or_performance_evidence",
-)
 _MODEL_PRIOR_COLUMNS = (
     "date",
     "unit_ret",

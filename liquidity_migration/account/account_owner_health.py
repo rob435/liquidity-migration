@@ -88,9 +88,9 @@ def require_systemd_invocation_id(
     """Read and strictly validate the current service generation from systemd.
 
     Run by hand there is no ``INVOCATION_ID``. A funded owner must be the one
-    systemd supervises, so mainnet still refuses to start without it. Demo and
-    paper synthesize a generation id of the same shape and say so loudly: the
-    id only has to be unique per process for health and capture to be bound to
+    systemd supervises, so mainnet still refuses to start without it. Demo
+    synthesizes a generation id of the same shape and says so loudly: the id
+    only has to be unique per process for health and capture to be bound to
     one generation.
 
     A present but malformed value is a fault either way and still raises.

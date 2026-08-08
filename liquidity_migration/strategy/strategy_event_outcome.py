@@ -155,10 +155,9 @@ class JsonlStrategyEventDecisionTape:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         loaded, self._tape_hash = load_strategy_event_decision_tape(self.path)
-        # A list appends in O(1); the tuple rebuild made every append O(tape
-        # age), quadratic over a long-lived daemon.
-        self._outcomes: list[StrategyEventDecisionOutcome] = list(loaded)
-        self._seen = {outcome.event_id for outcome in self._outcomes}
+        # A set adds in O(1); rebuilding it per append was O(tape age),
+        # quadratic over a long-lived daemon.
+        self._seen = {outcome.event_id for outcome in loaded}
 
     @property
     def tape_hash(self) -> str:
@@ -180,7 +179,6 @@ class JsonlStrategyEventDecisionTape:
             "outcome": outcome.to_dict(),
         }
         _append_private_line(self.path, canonical_json(record) + b"\n")
-        self._outcomes.append(outcome)
         self._seen.add(outcome.event_id)
         self._tape_hash = tape_hash
         return outcome

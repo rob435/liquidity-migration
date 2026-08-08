@@ -22,17 +22,15 @@ import polars as pl
 from liquidity_migration.account.account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     AccountTargetPublisher,
+    CompletedEntryAttemptCursor,
     UnresolvedTargetSnapshot,
+    completed_expired_entry_attempt_keys,
     unresolved_target_snapshot,
 )
 from liquidity_migration.account.account_owner_health import (
     AccountOwnerHealthHeadPending,
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_account_owner_health,
-)
-from liquidity_migration.account.account_intent_client import (
-    CompletedEntryAttemptCursor,
-    completed_expired_entry_attempt_keys,
 )
 from liquidity_migration.account.entry_attempts import signal_scoped_entry_attempt_key
 from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
@@ -86,7 +84,6 @@ def account_owner_equity_or_error(
         except (OSError, RuntimeError, ValueError) as exc:
             return 0.0, f"{type(exc).__name__}: {exc}"[:500]
         return float(owner_health.equity_usdt), ""
-    assert last_pending is not None
     return 0.0, f"{type(last_pending).__name__}: {last_pending}"[:500]
 
 

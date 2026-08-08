@@ -313,11 +313,12 @@ def owner_market_readiness_path(root: str | Path) -> Path:
     return Path(root).expanduser() / OWNER_MARKET_READINESS_FILENAME
 
 
-def _atomic_write_owner_capture_readiness(
-    root: str | Path,
-    sidecar: OwnerCaptureReadinessSidecar,
-) -> Path:
-    path = owner_capture_readiness_path(root)
+def _atomic_write_readiness_sidecar(
+    path: Path,
+    sidecar: OwnerCaptureReadinessSidecar | OwnerMarketReadinessSidecar,
+    *,
+    label: str,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -330,7 +331,7 @@ def _atomic_write_owner_capture_readiness(
             while offset < len(data):
                 written = os.write(descriptor, view[offset:])
                 if written <= 0:
-                    raise OSError("owner-capture readiness write made no progress")
+                    raise OSError(f"{label} write made no progress")
                 offset += written
             os.fsync(descriptor)
         finally:
@@ -347,44 +348,6 @@ def _atomic_write_owner_capture_readiness(
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
-    return path
-
-
-def _atomic_write_owner_market_readiness(
-    root: str | Path,
-    sidecar: OwnerMarketReadinessSidecar,
-) -> Path:
-    path = owner_market_readiness_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(str(temporary), flags, 0o600)
-        try:
-            data = canonical_json(sidecar.to_dict()) + b"\n"
-            view = memoryview(data)
-            offset = 0
-            while offset < len(data):
-                written = os.write(descriptor, view[offset:])
-                if written <= 0:
-                    raise OSError("owner-market readiness write made no progress")
-                offset += written
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, path)
-        directory_descriptor = os.open(
-            str(path.parent),
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return path
 
 
 def _remove_owner_market_readiness(root: str | Path) -> None:
@@ -915,7 +878,11 @@ class SequenceAwareMarketRecorder:
         # Latch before I/O so a post-replace fsync error cannot create an
         # unbounded retry/write loop inside the same publication interval.
         self._last_market_readiness_publish_monotonic_ns = now_monotonic_ns
-        _atomic_write_owner_market_readiness(self.store.root, sidecar)
+        _atomic_write_readiness_sidecar(
+            owner_market_readiness_path(self.store.root),
+            sidecar,
+            label="owner-market readiness",
+        )
 
     def _publish_owner_readiness(
         self,
@@ -952,7 +919,11 @@ class SequenceAwareMarketRecorder:
         # same interval; the row is synced before the pointer to it is published.
         self._last_readiness_publish_monotonic_ns = now_monotonic_ns
         self.store.sync(location)
-        _atomic_write_owner_capture_readiness(self.store.root, sidecar)
+        _atomic_write_readiness_sidecar(
+            owner_capture_readiness_path(self.store.root),
+            sidecar,
+            label="owner-capture readiness",
+        )
 
     def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> list[dict[str, Any]]:
         local_ns = int(local_receive_ts_ns or self.clock.wall_time_ns())

@@ -152,13 +152,30 @@ def run_periodic_reconciliation(
     requirement fails closed on its own if refreshes keep failing, whereas
     dying here would take down execution, protection, and health publishing
     together. Startup reconciliation stays strict and skips this wrapper.
+
+    The failure coupling is deliberately one-way, in the order
+    :func:`_run_reconciliation_cycle` documents.
+
+    A funding failure no longer takes position truth with it. Sharing one
+    attempt meant a funding row this book could not account for — an accounting
+    fault, and the funding reconciler signals every per-row problem by raising —
+    stopped position truth from being refreshed at all. Within the 15s floor
+    that becomes ``AccountReconciliationStaleError`` on the reduction gate, so
+    an accounting anomaly blocked EXITS; and the funding bookmark only advances
+    on a clean pass, so it never cleared itself.
+
+    A position failure still discards the whole cycle, including a funding
+    result taken moments earlier: position truth is what the rest of the cycle
+    is keyed to.
     """
 
+    funding_report: AccountFundingReconciliationReport | None = None
     try:
-        return _run_reconciliation_cycle(
-            reconciler=reconciler,
-            funding_reconciler=funding_reconciler,
-        )
+        funding_report = funding_reconciler.reconcile_once()
+    except Exception:  # noqa: BLE001 - accounting must not block position truth
+        _logger.exception("periodic funding reconciliation failed; retrying next interval")
+    try:
+        return reconciler.reconcile_once(), funding_report
     except Exception:  # noqa: BLE001 - transient venue read failure must not kill the owner
         _logger.exception("periodic account reconciliation failed; retrying next interval")
         return None, None
@@ -177,8 +194,7 @@ def require_startup_reconciliation_safe(
 
     if report.healthy:
         return
-    recoverable = report.native_protection_breach_only
-    if not recoverable:
+    if not report.native_protection_breach_only:
         report.require_healthy()
 
 
@@ -548,37 +564,6 @@ def require_order_submit_permission(client: Any) -> Mapping[str, Any]:
     if not allowed:
         raise RuntimeError(f"Bybit demo API key cannot submit orders: {reason}")
     return api_key_info
-
-
-def _live_gross_notional_usdt(kernel: Any, recorder: Any) -> float:
-    """Gross notional of the reconstructed book at the freshest observed marks.
-
-    From *positions*, not target quantities: targets cannot see exposure the
-    book acquired outside the kernel's own commands.
-    """
-
-    total = 0.0
-    for symbol, position in kernel._state_ref().positions.items():
-        if position.signed_qty == 0.0:
-            continue
-        price = 0.0
-        book, _observed_ns = recorder.current_book_with_observed_wall_ns(symbol)
-        if book is not None:
-            try:
-                price = float(
-                    book.market_ref(
-                        input_key=f"ceiling:{symbol}:{book.sequence}",
-                        source="bybit_raw_l2",
-                    ).reference_price
-                )
-            except ValueError:
-                price = 0.0
-        if price <= 0.0:
-            # No usable mark: fall back to the position's own entry basis
-            # rather than silently valuing an open position at zero.
-            price = abs(float(position.average_price or 0.0))
-        total = math.fsum((total, abs(position.signed_qty) * price))
-    return total
 
 
 def _load_equity_anchored_envelope(path: str) -> EquityAnchoredEnvelope | None:

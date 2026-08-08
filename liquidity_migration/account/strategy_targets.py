@@ -33,12 +33,7 @@ def component_target_intent(
     reason: str,
     metadata: Mapping[str, Any] | None = None,
 ) -> RequestedIntent:
-    """Build one replacement target with the repository's sole key grammar.
-
-    Signal selection and sizing remain strategy responsibilities. This helper
-    makes their resulting component identity identical in historical,
-    and demo for identical inputs.
-    """
+    """Build one replacement target with the repository's sole key grammar."""
 
     sleeve = adapter_kind.value
     normalized_action = str(action).strip().lower()

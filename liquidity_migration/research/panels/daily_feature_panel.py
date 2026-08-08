@@ -40,9 +40,7 @@ from liquidity_migration.data.volume_events_pit import filter_klines_to_pit_memb
 TRADING_DAYS_PER_YEAR = 365  # crypto trades 7 days/week; annualisation is calendar-day-based
 
 
-# ============================================================================
 # Public dataclasses
-# ============================================================================
 
 
 @dataclass(frozen=True)
@@ -75,9 +73,7 @@ class FeatureContext:
     universe_min_daily_turnover: float = 0.0
 
 
-# ============================================================================
 # Data loading + daily aggregators
-# ============================================================================
 
 
 def _read_window(
@@ -272,9 +268,7 @@ def _attach_daily_returns(daily_klines: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-# ============================================================================
 # Cross-sectional helpers
-# ============================================================================
 
 
 def _xs_rank(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFrame:
@@ -304,9 +298,7 @@ def _xs_zscore(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFram
     )
 
 
-# ============================================================================
 # 20 feature builders. Each returns (symbol, ts_ms, <name>).
-# ============================================================================
 
 
 def _select_cols(df: pl.DataFrame, *cols: str) -> pl.DataFrame:
@@ -704,9 +696,7 @@ def resolve_feature_specs(specs: "Iterable[FeatureSpec] | str") -> list[FeatureS
     return resolved
 
 
-# ============================================================================
 # Forward returns
-# ============================================================================
 
 
 def _attach_forward_returns(
@@ -758,9 +748,7 @@ def _attach_forward_returns(
     return result.select(exprs)
 
 
-# ============================================================================
 # Public API — panel build
-# ============================================================================
 
 
 def _autodetect_dataset_names(data_root: Path | str) -> dict[str, str]:

@@ -172,7 +172,7 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
 
 
 def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
-    declared = sorted(key for key in dial_environment_keys() if key in values)
+    declared = sum(1 for key in dial_environment_keys() if key in values)
     try:
         dials = parse_real_money_dials(values)
     except ValueError as exc:
@@ -204,7 +204,7 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
             "dials",
             True,
             (
-                f"{len(declared)} set explicitly, rest defaulted; "
+                f"{declared} set explicitly, rest defaulted; "
                 f"leverage {profile.account_risk.max_leverage:g}, "
                 f"gross {profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt:g}x "
                 f"equity, partition {shares}"

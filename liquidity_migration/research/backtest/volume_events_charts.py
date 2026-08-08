@@ -9,9 +9,6 @@ from typing import Any
 
 import polars as pl
 
-# Splits live exclusively on VolumeEventResearchConfig.splits (default ()), so
-# the default has no internal validation split.
-
 from liquidity_migration.core._common import _float_or_nan, _parse_day
 from liquidity_migration.data.trade_lifecycle import _has_columns
 

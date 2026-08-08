@@ -182,7 +182,6 @@ def _iso_month(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m")
 
 
-
 def _exclude_symbols(frame: pl.DataFrame, symbols: tuple[str, ...]) -> pl.DataFrame:
     if frame.is_empty() or "symbol" not in frame.columns or not symbols:
         return frame

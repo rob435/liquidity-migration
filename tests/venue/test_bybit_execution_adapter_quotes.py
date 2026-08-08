@@ -324,12 +324,18 @@ def test_leverage_the_owner_changed_by_hand_is_not_trusted_from_cache() -> None:
     assert len(client.leverage_calls) == 1
 
     # Reconciliation confirms exactly what this process set: still cached.
-    adapter.retain_confirmed_leverage({"LAUSDT": 2.0})
+    adapter.retain_confirmed_leverage({"LAUSDT": 2.0}, positioned_symbols={"LAUSDT"})
+    tuple(adapter.prepare_submission(entry_command(), market_input()))
+    assert len(client.leverage_calls) == 1
+
+    # Positioned, but the venue blanked the field: no evidence either way, so
+    # the cache stands rather than costing a round trip on every 2s pass.
+    adapter.retain_confirmed_leverage({}, positioned_symbols={"LAUSDT"})
     tuple(adapter.prepare_submission(entry_command(), market_input()))
     assert len(client.leverage_calls) == 1
 
     # The owner moves it by hand; the next entry must re-assert the sleeve's.
-    adapter.retain_confirmed_leverage({"LAUSDT": 10.0})
+    adapter.retain_confirmed_leverage({"LAUSDT": 10.0}, positioned_symbols={"LAUSDT"})
     tuple(adapter.prepare_submission(entry_command(), market_input()))
     assert len(client.leverage_calls) == 2
     assert float(client.leverage_calls[-1]["buy_leverage"]) == 2.0
@@ -343,7 +349,7 @@ def test_a_symbol_absent_from_position_truth_is_no_longer_confirmed() -> None:
     tuple(adapter.prepare_submission(entry_command(), market_input()))
     assert len(client.leverage_calls) == 1
 
-    adapter.retain_confirmed_leverage({"OTHERUSDT": 2.0})
+    adapter.retain_confirmed_leverage({"OTHERUSDT": 2.0}, positioned_symbols={"OTHERUSDT"})
     tuple(adapter.prepare_submission(entry_command(), market_input()))
     assert len(client.leverage_calls) == 2
 

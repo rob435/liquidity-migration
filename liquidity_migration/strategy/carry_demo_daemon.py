@@ -65,8 +65,8 @@ def _default_carry_kline_stream_manager_factory(
         testnet=config.exchange.testnet,
     )
 
-    def universe_fetcher(m: BybitMarketData = market) -> list[str]:
-        return top_turnover_kline_universe(m, top_n=CARRY_FETCH_UNIVERSE_TOP_N, label="carry")
+    def universe_fetcher() -> list[str]:
+        return top_turnover_kline_universe(market, top_n=CARRY_FETCH_UNIVERSE_TOP_N, label="carry")
 
     return KlineStreamManager(
         market_data=market,
@@ -85,7 +85,6 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
     """Target-only CARRY producer built on the long daemon scaffolding."""
 
     _sleeve_label = "carry"
-    _daemon_label = "carry-hold"
 
     def _strategy_profile_name(self) -> str:
         profile = cast("CarryDemoCycleConfig", self.demo_config).strategy_profile

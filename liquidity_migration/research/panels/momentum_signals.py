@@ -10,10 +10,8 @@ from liquidity_migration.core._common import MS_PER_DAY, calendar_shift
 def daily_bars(klines_1h: pl.DataFrame, *, min_hourly_bars: int = 20) -> pl.DataFrame:
     """Resample 1h klines to daily OHLCV bars.
 
-    ``ts_ms`` of the output represents the day-end (UTC midnight of the
-    following day) — matches the convention used by
-    ``volume_features._daily_bars`` so downstream lookups against the 1h
-    ``bar_end_ts_ms`` are stable.
+    ``ts_ms`` of the output is the day-END (UTC midnight of the following day),
+    so lookups against the 1h ``bar_end_ts_ms`` line up.
     """
     if klines_1h.is_empty():
         return _empty_daily_bars()

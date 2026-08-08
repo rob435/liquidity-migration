@@ -141,12 +141,14 @@ def test_reconcile_reports_the_leverage_every_open_position_actually_carries(
         ),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
         clock=clock,
-        venue_leverage_observer=lambda mapping: observed.append(dict(mapping)),
+        venue_leverage_observer=lambda mapping, *, positioned_symbols: observed.append(
+            (dict(mapping), set(positioned_symbols))
+        ),
     )
 
     reconciler.reconcile_once()
 
-    assert observed == [{"BUSDT": 10.0}]
+    assert observed == [({"BUSDT": 10.0}, {"BUSDT"})]
 
 
 def test_reconcile_reports_an_empty_book_so_stale_leverage_cannot_survive_a_close(
@@ -160,12 +162,14 @@ def test_reconcile_reports_an_empty_book_so_stale_leverage_cannot_survive_a_clos
         client=Client(command_id, venue_positions=[]),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
         clock=clock,
-        venue_leverage_observer=lambda mapping: observed.append(dict(mapping)),
+        venue_leverage_observer=lambda mapping, *, positioned_symbols: observed.append(
+            (dict(mapping), set(positioned_symbols))
+        ),
     )
 
     reconciler.reconcile_once()
 
-    assert observed == [{}]
+    assert observed == [({}, set())]
 
 
 def test_reconcile_records_and_fails_on_position_mismatch(tmp_path: Path) -> None:

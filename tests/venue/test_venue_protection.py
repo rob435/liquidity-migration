@@ -2351,3 +2351,44 @@ def test_a_hand_placed_close_larger_than_the_book_reduces_it_to_flat(tmp_path: P
     state = kernel.state()
     assert state.positions["BUSDT"].signed_qty == 0.0
     assert not state.working_order_ids
+
+
+def test_a_flat_symbol_clears_only_its_own_health_message(tmp_path: Path) -> None:
+    """``last_error`` is one account-wide field written by several conditions.
+
+    It gates all new exposure. Clearing it because SOME terminal status landed
+    on SOME flat symbol threw away a live warning about a different symbol that
+    still held an unproven stop — and health then passed, admitting fresh risk.
+    """
+
+    kernel, clock = _open_position(tmp_path, signed_qty=2.0)
+    manager, _client = _manager(kernel, clock)
+    manager.adopt_execution(
+        {
+            "symbol": "BUSDT",
+            "orderId": "hand-placed-close",
+            "orderLinkId": "",
+            "side": "Sell",
+            "execQty": "2",
+            "execPrice": "10.5",
+            "execId": "flatten-exec-1",
+            "execTime": "2000",
+        },
+        local_receive_ts_ns=clock.wall_time_ns(),
+    )
+    assert kernel.state().positions["BUSDT"].signed_qty == 0.0
+    flat_command = next(
+        command_id
+        for command_id, order in kernel.state().orders.items()
+        if order.symbol == "BUSDT"
+    )
+
+    # A warning about a different symbol survives BUSDT going terminal.
+    manager.last_error = "entry-attached stop unverified for ZUSDT: position_not_visible"
+    manager.observe_terminal_status(command_id=flat_command, status="cancelled")
+    assert manager.last_error == "entry-attached stop unverified for ZUSDT: position_not_visible"
+
+    # Its own symbol's message is still cleared by its own flatness.
+    manager.last_error = "native protection cancelled unfilled for BUSDT: orderId=venue-9"
+    manager.observe_terminal_status(command_id=flat_command, status="cancelled")
+    assert manager.last_error == ""

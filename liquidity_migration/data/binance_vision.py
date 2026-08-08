@@ -104,9 +104,7 @@ def validate_usdm_usdt_symbols(
         raise RuntimeError(str(exc)) from exc
 
 
-# --------------------------------------------------------------------------
 # Discovery
-# --------------------------------------------------------------------------
 
 
 def parse_s3_listing_page(
@@ -308,9 +306,7 @@ def discover(
     return result
 
 
-# --------------------------------------------------------------------------
 # Download
-# --------------------------------------------------------------------------
 
 
 def parse_month_csv(symbol: str, raw: bytes) -> list[dict]:
@@ -570,9 +566,7 @@ def topup_binance_daily_klines(
     }
 
 
-# --------------------------------------------------------------------------
 # Manifest coverage validation and coverage-derived manifest maintenance
-# --------------------------------------------------------------------------
 
 
 def validate_pit_manifest_coverage(
@@ -774,9 +768,7 @@ def rewrite_manifest_to_coverage(
     return manifest.height
 
 
-# --------------------------------------------------------------------------
 # End-to-end OOS root build
-# --------------------------------------------------------------------------
 
 FAILED_JOBS_ARTIFACT = "binance_vision_failed_jobs.json"
 DAILY_FAILED_JOBS_ARTIFACT = "binance_vision_daily_failed_jobs.json"
@@ -1605,9 +1597,7 @@ def build_binance_oos(
             shutil.rmtree(backup_root, ignore_errors=True)
 
 
-# --------------------------------------------------------------------------
 # CLI
-# --------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:

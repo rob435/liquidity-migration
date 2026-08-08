@@ -215,6 +215,47 @@ def test_evolved_schemas_honour_a_column_projection(tmp_path: Path) -> None:
     assert set(stored.get_column("funding_event_kind").to_list()) == {"settlement", None}
 
 
+def test_an_all_null_column_does_not_poison_the_declared_union(tmp_path: Path) -> None:
+    """Polars writes an all-null column as dtype Null.
+
+    First-wins over the sorted paths would declare Null for the whole scan, and
+    every part holding a real value then mismatches — dropping a 600k-part read
+    back to the per-file path with no signal at all, 59s to 158s.
+    """
+
+    write_dataset(
+        pl.DataFrame(
+            [{"ts_ms": 1_700_000_000_000, "symbol": "BTCUSDT", "funding_rate": 0.001}],
+        ).with_columns(pl.lit(None).alias("funding_event_kind")),
+        tmp_path,
+        "funding",
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": 1_700_086_400_000,
+                    "symbol": "ETHUSDT",
+                    "funding_rate": 0.002,
+                    "funding_event_kind": "settlement",
+                }
+            ]
+        ),
+        tmp_path,
+        "funding",
+    )
+
+    def refuse(*args: object, **kwargs: object) -> pl.DataFrame:
+        raise AssertionError("an all-null part must not force the per-file path")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pl, "read_parquet", refuse)
+        stored = read_dataset(tmp_path, "funding")
+
+    assert stored.height == 2
+    assert set(stored.get_column("funding_event_kind").to_list()) == {"settlement", None}
+
+
 def test_conflicting_dtypes_across_partitions_still_read_file_by_file(tmp_path: Path) -> None:
     """A union cannot describe one column carrying two types; that case keeps its fallback."""
 
@@ -273,7 +314,6 @@ def test_exclusive_file_lock_adopts_legacy_payload_without_unlink(
         lock_path,
         stale_seconds=0,
         poll_seconds=0.0,
-        invalid_lock_stale_seconds=0.0,
     ):
         assert lock_path.read_text(encoding="utf-8") == legacy
 
@@ -315,7 +355,6 @@ def test_exclusive_file_lock_never_unlinks_malformed_legacy_leaf(
         lock_path,
         stale_seconds=0,
         poll_seconds=0.0,
-        invalid_lock_stale_seconds=0.01,
     ):
         assert lock_path.read_bytes() == b""
 

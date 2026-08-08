@@ -357,7 +357,6 @@ _LIVE_STATE_EVENT_COLUMNS = (
     "giveback_from_prior6_high",
     "turnover_spike_168h",
 )
-# Prefix for the previous confirmed bar's copy of the same columns.
 PRIOR_BAR_COLUMN_PREFIX = "prior_bar_"
 
 
@@ -616,7 +615,7 @@ class LivePanelCache:
         if self._cur_ts != cur_ts or self._sig != sig or not self._carry:
             self._refresh(klines_recent, cur_ts, config)
             self._sig = sig
-        return self._live_panel(current_prices, rmom, cur_ts, config)
+        return self._live_panel(current_prices, rmom, cur_ts)
 
     def _refresh(self, klines_recent: pl.DataFrame, cur_ts: int, config: ContinuousDemoCycleConfig) -> None:
         """HEAVY (once per bar close): compute the per-symbol confirmed-bar carry needed to
@@ -665,7 +664,6 @@ class LivePanelCache:
         current_prices: dict[str, float],
         rmom: pl.DataFrame,
         cur_ts: int,
-        config: ContinuousDemoCycleConfig,
     ) -> pl.DataFrame:
         """CHEAP (per wake): per-symbol current-bar features from cached carry + live price, then the
         SHARED cross-sectional decile. Mirrors the synthetic-bar arithmetic of
@@ -1634,17 +1632,11 @@ def _btc_trend_gate_value(
     klines: pl.DataFrame,
     *,
     signal_ts_ms: int,
-    config: ContinuousDemoCycleConfig | None = None,
-    trend_lookup: dict[int, float] | None = None,
+    config: ContinuousDemoCycleConfig,
 ) -> float | None:
-    cfg = config or ContinuousDemoCycleConfig()
-    lookup = (
-        trend_lookup
-        if trend_lookup is not None
-        else _btc_trend_returns(
-            klines,
-            lookback_days=max(int(cfg.btc_trend_lookback_days), 1),
-        )
+    lookup = _btc_trend_returns(
+        klines,
+        lookback_days=max(int(config.btc_trend_lookback_days), 1),
     )
     signal_day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
     return lookup.get(signal_day)
@@ -1733,19 +1725,6 @@ def _continuous_vol_weight_multiplier(config: ContinuousDemoCycleConfig, entry_v
     return min(max(float(config.target_vol_per_name) / rv, 1.0 / clamp), clamp)
 
 
-def _build_btc_risk_sizer(config: ContinuousDemoCycleConfig, root: Path) -> BtcRiskLiveSizer | None:
-    if not getattr(config, "entry_btc_risk_sizing_enabled", False):
-        return None
-    return BtcRiskLiveSizer(
-        Path(root) / "btc_risk_sizing_state.parquet",
-        low=float(config.entry_btc_risk_low),
-        high=float(config.entry_btc_risk_high),
-        tail_mult=float(config.entry_btc_risk_tail_mult),
-        min_prior=int(config.entry_btc_risk_min_prior),
-        arm_id=str(config.entry_btc_risk_arm_id),
-    )
-
-
 def _btc_risk_policy(config: ContinuousDemoCycleConfig) -> dict[str, float | int]:
     return {
         "low": float(config.entry_btc_risk_low),
@@ -1771,12 +1750,10 @@ def _apply_btc_risk_sizing(
     accepted_target_rows: pl.DataFrame | None = None,
     unresolved_entry_requests: int = 0,
     accepted_state_authority: bool = True,
-    synchronization_error: str = "",
-    btc_context: dict[int, dict[str, float | None]] | None = None,
 ) -> dict[str, Any]:
     stats: dict[str, Any] = {
-        "enabled": bool(getattr(config, "entry_btc_risk_sizing_enabled", False)),
-        "arm_id": getattr(config, "entry_btc_risk_arm_id", ""),
+        "enabled": bool(config.entry_btc_risk_sizing_enabled),
+        "arm_id": config.entry_btc_risk_arm_id,
         "candidate_rows": len(candidates),
         "scored": 0,
         "duplicates": 0,
@@ -1799,15 +1776,15 @@ def _apply_btc_risk_sizing(
         stats["entry_blocked"] = True
         stats["blocking_reason"] = "account_accepted_state_unavailable"
         return stats
-    if synchronization_error:
-        stats["error"] = 1
-        stats["entry_blocked"] = True
-        stats["blocking_reason"] = f"account_state_sync_failed:{synchronization_error}"[:500]
-        return stats
     try:
-        sizer = _build_btc_risk_sizer(config, root)
-        if sizer is None:
-            raise RuntimeError("BTC-risk sizer unexpectedly disabled")
+        sizer = BtcRiskLiveSizer(
+            Path(root) / "btc_risk_sizing_state.parquet",
+            low=float(config.entry_btc_risk_low),
+            high=float(config.entry_btc_risk_high),
+            tail_mult=float(config.entry_btc_risk_tail_mult),
+            min_prior=int(config.entry_btc_risk_min_prior),
+            arm_id=str(config.entry_btc_risk_arm_id),
+        )
         ingestion = sizer.reconcile_authoritative_accepted_decisions(
             () if accepted_target_rows is None else accepted_target_rows.to_dicts()
         )
@@ -1838,11 +1815,7 @@ def _apply_btc_risk_sizing(
     try:
         lookup, score_stats = sizer.score_decisions(
             candidates,
-            btc_context=(
-                btc_context
-                if btc_context is not None
-                else btc_context_by_day(btc_klines)
-            ),
+            btc_context=btc_context_by_day(btc_klines),
         )
     except Exception as exc:  # noqa: BLE001 - stale/base sizing is not a safe fallback
         _logger.exception("BTC-risk sizing failed; blocking new entries")
@@ -2149,13 +2122,6 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     return snapshot.table if snapshot is not None else None
 
 
-def _signal_source_root(config: ContinuousDemoCycleConfig, own_root: Path) -> Path:
-    """Return the market-data root that owns the causal RMOM table."""
-
-    del config
-    return Path(own_root).expanduser()
-
-
 def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
     """Render one concise target-producer status line for stdout/journald."""
     sizing = ""
@@ -2390,7 +2356,7 @@ def run_continuous_demo_cycle(
                 kline_store=kline_store,
             )
 
-        rmom_snapshot = _load_rmom_snapshot(_signal_source_root(demo, root))
+        rmom_snapshot = _load_rmom_snapshot(Path(root).expanduser())
         rmom = rmom_snapshot.table if rmom_snapshot is not None else None
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         live_state = pl.DataFrame()
