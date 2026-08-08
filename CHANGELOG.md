@@ -16,6 +16,35 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 15:28 UTC — Deployed `0a6c0e0`: the second and third audit
+  passes reach the host.** `deploy_everything.command`, which is `deploy staged
+  --profile operational --stop-first`. The fleet was down 15:26:52 → 15:28:53
+  UTC, about two minutes, with the funded book covered only by its venue-side
+  stops — the same posture as the 13:44 deploy, and for the same reason: a
+  guarded `rollout` wants a flat account, and flattening would close live
+  positions. Receipt `staged-ok commit=0a6c0e0 profile=operational`, then
+  `verify-ok … mainnet=armed` with all nine units on/active/enabled, and no
+  drift on a re-verify five minutes later.
+
+  Everything came back clean. The funded owner logged **zero** error-level
+  lines, resumed at journal sequence 4,699, rebased its envelope from the
+  declared 2,500 reference down to observed equity (**359.96 USDT** — it tracks
+  the wallet), and left the owner's two hand-placed ENAUSDT conditionals
+  strictly alone, before and after the restart. Both funded producers
+  bootstrapped their kline stores and cycle with `err=none` / `owner=healthy`.
+  No loss-guard trip, no admission halt, nothing wedged
+  (`wedged-command report` → `{"wedged": []}`).
+
+  Two things seen on the way through that are **not** deploy damage. The carry
+  producer reads `frozen=False` on its first cycle after any restart and `True`
+  after — the day's decision is held in memory, so a restart pays one panel
+  rebuild. And the funded carry sleeve still carries `stranded=1`: one standing
+  reservation whose accepted quantity is zero. It is inert on every path but
+  counts for admission, so that one name cannot be re-entered underneath its
+  own unconverged target. It predates this deploy and no order command is
+  wedged, so `ops.sh wedged-command resolve` — the remedy the code comment
+  names — has nothing to act on. Owner's call.
+
 - **2026-08-08 (third pass) — Seven agents, and the sharpest one was pointed at
   the previous two hours of my own work.** Four adversarial/audit agents reading
   and four compaction agents editing disjoint directories. Net **−313 source

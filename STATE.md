@@ -11,39 +11,43 @@ match; never append history to this file.
 
 ## Now (recorded 2026-08-08)
 
-- **Host runs `91f6dab`, whole fleet green since 2026-08-08 13:44 UTC**: all
-  nine units on/active/enabled, receipt `staged-ok commit=91f6dab
-  profile=operational`, `verify-ok … mainnet=armed`. This deploy carried the
-  two-pass hot-path audit (CHANGELOG 2026-08-08) — the loss ceiling that now
-  actually closes the book, the venue error classifier that no longer reads a
-  definite refusal as retryable, the market-window tail check that stops a
-  stale price reaching a decision, and the per-component isolation of
-  protection evaluation.
-- **It was deployed `staged --stop-first`, not `rollout`, over an open book.**
-  The guarded rollout refused correctly: the bot held **HOMEUSDT 13,120** and
-  **HFTUSDT 11,243**, both long, each behind its venue-side conditional stop.
-  Flattening to satisfy the guard would have closed two live positions, so the
-  owner chose to stop, install, and restart instead. The funded owner was down
-  for about two minutes with both positions covered only by those venue-side
-  stops. It came back with **zero** error-level lines, reconciled both
-  positions without a mismatch, and reads `healthy` with an empty detail.
+- **Host runs `0a6c0e0`, whole fleet green since 2026-08-08 15:28 UTC**: all
+  nine units on/active/enabled, receipt `staged-ok commit=0a6c0e0
+  profile=operational`, `verify-ok … mainnet=armed`, and no drift on a
+  re-verify five minutes later. This deploy carried the second and third audit
+  passes — six money-affecting fixes: a refused stop that could report success,
+  a five-minute convergence outage from one ambiguous submission, a protection
+  stop that could never be republished, an accounting fault that blocked exits,
+  an account-wide health latch cleared by unrelated evidence, and an entry
+  escalation that was unreachable. See CHANGELOG 2026-08-08 (later) and
+  (third pass).
+- **It went out through `deploy_everything.command` (`staged --stop-first`)
+  over an open funded book.** The whole fleet was down 15:26:52 → 15:28:53 UTC,
+  about two minutes, positions covered only by their venue-side stops. Every
+  unit came back clean: the funded owner logged zero error-level lines, rebased
+  its envelope to observed equity (359.96 USDT), and left the owner's two
+  hand-placed ENAUSDT conditionals strictly alone; both funded producers
+  bootstrapped and cycle with `err=none` and `owner=healthy`.
+- **The 13:44 UTC deploy of `91f6dab`** carried the two-pass hot-path audit
+  (CHANGELOG 2026-08-08) — the loss ceiling that now actually closes the book,
+  the venue error classifier that no longer reads a definite refusal as
+  retryable, the market-window tail check that stops a stale price reaching a
+  decision, and the per-component isolation of protection evaluation. It went
+  `staged --stop-first` too, and for a reason worth keeping: the guarded
+  rollout refused correctly, because the bot held **HOMEUSDT 13,120** and
+  **HFTUSDT 11,243**, both long, each behind its venue-side conditional stop,
+  and flattening to satisfy the guard would have closed two live positions.
 - **The loss-guard day anchor now survives a restart.** New file
   `/var/lib/liquidity-migration/account-mainnet/account_loss_guard.json`,
   first written 13:43 UTC. Before it, a restart re-anchored the day's loss
   budget to an already-drawn-down equity and forgot a trip.
-- **Two further audit passes are committed and NOT deployed.** The host still
-  runs `91f6dab`. The undeployed work includes six money-affecting fixes — a
-  refused stop that could report success, a five-minute convergence outage from
-  one ambiguous submission, a protection stop that could never be republished,
-  an accounting fault that blocked exits, an account-wide health latch cleared
-  by unrelated evidence, and an entry escalation that was unreachable. See
-  CHANGELOG 2026-08-08 (later) and (third pass).
-- **A tripped loss ceiling now refuses queued risk, not just new publishing.**
-  Committed but **not yet deployed** at the time of writing. Admission drops
-  any uncommitted request carrying a nonzero target while the ceiling is
-  tripped, before reading a book, and a halted owner claims an unservable head
-  rather than letting its own all-flat queue behind it. Exits, and any batch
-  already in the journal, are untouched. See CHANGELOG 2026-08-08 (later).
+- **A tripped loss ceiling now refuses queued risk, not just new publishing** —
+  live since 15:28 UTC. Admission drops any uncommitted request carrying a
+  nonzero target while the ceiling is tripped, before reading a book, and a
+  halted owner claims an unservable head rather than letting its own all-flat
+  queue behind it. Exits, and any batch already in the journal, are untouched.
+  It still has **no vote over convergence**: a target accepted before the trip
+  keeps being pursued. See CHANGELOG 2026-08-08 (later).
 - **No copy of the funded API key remains on the laptop.** `deploy/.env` is
   deleted; `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only
   copy and the only authority (`REAL_MONEY=true`, carry 2.0, long 1.88, daily
@@ -129,11 +133,11 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **No code is committed-but-undeployed**; `main` is one docs-only commit
-  ahead of the host (`6b59f25` vs the running `a67e035`), which the next
-  deploy carries. The host's `bybit-mainnet.env` carries the four new dial
-  names (read directly 2026-08-06; the earlier retired-names warning was
-  stale), and the installed risk profile is the render of those dials.
+- **No code is committed-but-undeployed**; the host runs the tip of `main`
+  (`0a6c0e0`), and the only thing ahead of it is this file's own deploy
+  receipt. The host's `bybit-mainnet.env` carries the four new dial names (read
+  directly 2026-08-06; the earlier retired-names warning was stale), and the
+  installed risk profile is the render of those dials.
 
 ## Topology
 
