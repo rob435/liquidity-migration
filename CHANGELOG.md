@@ -16,6 +16,38 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-08 — End-to-end order latency, measured with real demo orders.
+  Exit ~260–320 ms, entry ~1.0–1.2 s, and the difference is one `set_leverage`
+  plus a cold-symbol book.** Six orders placed and closed on the demo account
+  (SOLUSDT, $30, target key `carry/latency_probe/…`, published through
+  `AccountTargetPublisher` exactly as a sleeve does). Demo book returned to its
+  prior state each time — HOMEUSDT/HFTUSDT untouched, no working orders.
+  Timings are wall-clock on the host, from the inbox write to the receipt, with
+  the middle stages taken from the journal the owner writes.
+
+  | stage | exit (reduce-only) | first entry into a flat symbol | entry while already held |
+  | --- | --- | --- | --- |
+  | publish → intent durable in inbox | 10–14 ms | 8–11 ms | 11 ms |
+  | intent durable → order commanded | 17–72 ms | 229–429 ms | 23 ms |
+  | order commanded → REST send begins | 12–16 ms | 188–194 ms | 11 ms |
+  | **total, publish → receipt** | **259–322 ms** | **983–1202 ms** | **606 ms** |
+
+  - **The entry penalty is not general slowness.** A second entry placed while
+    the position was still held paid **11 ms** where the first paid **188 ms** —
+    that step is `set_leverage`, which `bybit_execution_adapter.py:237` runs
+    before every non-reduce-only order whose cached venue leverage does not
+    match. Exits are reduce-only and skip it. The cache is deliberately dropped
+    for a flat symbol (`retain_confirmed_leverage` keeps only what an
+    authenticated position row confirms), because the owner hand-trades the same
+    account and can change leverage underneath — so **every fresh entry pays one
+    round trip by design.** Left alone; changing it is an owner decision about
+    the shared-account policy, not a latency fix.
+  - A genuinely cold symbol (never streamed) cost **2171 ms** on its first
+    entry — book warmup, paid once per symbol.
+  - **The exit path is what matters for risk, and it is ~300 ms against a
+    ~190 ms physical floor**: one signed Bybit round trip. Roughly 50 ms to
+    notice, 190 ms of geography, 60 ms to confirm the fill.
+
 - **2026-08-08 — The 200 ms target, met by profiling instead of designing.
   Owner loop 284 ms → 69 ms; venue truth 1.37 s → 0.23 s.** After the
   clever design below failed review, the win came from the dull question: what
