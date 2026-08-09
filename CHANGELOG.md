@@ -16,6 +16,64 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-09 — The order path stops queueing behind the owner's own venue
+  reads. Entry 345 ms → 276 ms median, exit 277 ms → 252 ms; our own software
+  time 83.9 ms → 21 ms median, 11.6 ms best.** Commits `c94862d`, `9263a7e`,
+  `24a2734`, `e8b4ff5`, `0ce028d`, `9ab90eb`, `bdf396c`. Same probe, same
+  symbol (SOLUSDT), same host throughout.
+  - **The order path now runs first in the pass.** A live profile: 73.3% idle,
+    20.2% inside the reconcile's blocking REST reads, everything else under
+    1.5% — and the order path ran tenth, *after* that reconcile. Two orderings
+    were preserved on purpose: the private-stream supervisor still runs first,
+    so a stream that stopped delivering fills refuses new exposure in the pass
+    that notices; and protection still reaches the venue in the pass that saw
+    the breach, by serving its published flat explicitly.
+  - **The wake-up had a 50 ms hole.** The sleep read the pending directory's
+    mtime when it *began sleeping*, so an intent that arrived while the
+    previous pass was still running had already moved it, looked like no
+    change, and waited out the whole interval. inotify queues arrivals while
+    the pass works and returns them at once, in microseconds rather than on a
+    4 ms poll slice. Polling remains the fallback off Linux, with the baseline
+    corrected either way.
+  - **The largest single item was not what it looked like.** After the
+    reorder, 18.55% of all wall clock was `get_positions`, read *inline*
+    despite a warm feed existing to prevent exactly that. The feed was being
+    bypassed by a test for "newer than the report I last published"; it runs
+    one thread over three ~172 ms reads, so a position refresh lands every
+    ~420 ms and lost that test constantly against a 500 ms cadence. Freshness
+    is the right test and is what everything downstream consumes. Blocking
+    venue reads on the loop: **19.2% → 1.3%**, idle 73.3% → 82.3%.
+  - **That fix broke exits, and the next measurement caught it.** Within a
+    second of a fill the warm snapshot still describes the old book, and the
+    reduction gate reads that as the venue contradicting the kernel —
+    `venue=0:reconstructed=0.3`. The gate was right; the input was wrong. An
+    exit published straight after an entry waited ~1.1 s, on the
+    risk-reducing side of the book. A warm snapshot may now never *declare* a
+    disagreement: any disagreement is confirmed at the venue, so a mismatch is
+    only ever declared on truth read just now. The feed also re-reads
+    positions the moment a fill is seen, off the loop, so by the time an exit
+    arrives the snapshot already agrees.
+  - **Smaller, measured:** the journal projection stopped fsyncing (it is
+    rebuildable, the transaction segment is the commit point and still syncs)
+    and stopped re-reading its own tail on every commit; pending-order
+    confirmation and funding recovery now stand aside for a waiting intent,
+    bounded at 5 s so the drop-recovery backstop cannot be starved.
+  - **Where it stops, and why.** What is left is two durable journal commits
+    and almost nothing else — sizing an order measures 0.02–0.1 ms. One commit
+    is 5–7 ms at best: ~1.3 ms disk sync on a virtualized device (`fdatasync`
+    is no faster) plus CPython hashing and canonical JSON on a 2-core
+    2015-era Xeon. The second commit is `record_submission_attempt`, the
+    single-winner guard that stops a crash submitting the same exposure twice;
+    it is deliberately the last durable act before the wire and was left
+    alone. **Sub-10 ms needs one commit instead of two, a faster CPU, or a
+    faster sync — not more loop tuning.**
+  - **Two corrections to earlier readings.** An isolated fsync probe reported
+    0.007 ms for a directory sync; in the real workload it is ~1.07 ms — the
+    probe was re-syncing an already-clean directory. And lowering Python's GIL
+    switch interval, which looked promising against a saturating stub decoder
+    (63 ms → 49 ms), made things *worse* at the real 17% decode duty
+    (16.8 → 18.9 ms). It was not shipped.
+
 - **2026-08-09 — Three blocking venue reads leave the order path. Entry
   881 ms → 345 ms median, exit 286 ms → 277 ms.** Commits `bdc705b`,
   `021edd4`, `d5836bd`, `f7544ce`. Measured with the same probe, same

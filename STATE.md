@@ -64,17 +64,39 @@ match; never append history to this file.
   `--shared-leverage-authority` to the account owner and redeploy — otherwise
   an entry can be sized against a leverage somebody else changed. A venue value
   that contradicts the cache still drops it either way.
-- **End-to-end order latency, measured on demo (2026-08-09, n=6 cycles):**
-  entry **345 ms median, 266 ms best**; exit **277 ms median, 251 ms best**.
-  Entry was 881 ms and exit 286 ms before the three blocking venue reads came
-  off the path (wallet, and the two the entry-stop verifier made). Entries rest
-  at the touch, so on a real book time-to-fill is queue economics.
-- **The floor here is ~250 ms and it is one round trip.** A warm entry is ~10 ms
-  publish, 25–40 ms to command, ~15 ms to the socket, then **172 ms of venue
-  round trip**. What holds the median above the floor is loop scheduling: when
-  the pass is mid-reconcile as the intent lands, `durable → commanded` runs
-  250–408 ms instead of 25–40 ms. That is the next lever in software; the
-  172 ms needs the host to move.
+- **End-to-end order latency, measured on demo (2026-08-09, n=16 cycles):**
+  entry **276 ms median, 250 ms best**; exit **252 ms median, 228 ms best**.
+  Entry was 881 ms and exit 286 ms before the blocking venue reads came off the
+  path. Entries rest at the touch, so on a real book time-to-fill is queue
+  economics.
+- **Our own software time — durable intent to bytes on the wire — is now
+  21 ms at the median and 11.6 ms at best.** Split: `durable → commanded`
+  22.1 ms median / 10.3 ms best on an entry and 10.4 / 5.0 on an exit;
+  `commanded → send` 12.3 / 7.1 and 10.6 / 6.6. It was 83.9 ms median to
+  command alone. The rest of the wall clock is the 172 ms venue round trip.
+- **What is left is two durable journal commits, and almost nothing else.**
+  Sizing an order measures 0.02–0.1 ms. One commit measured 5–7 ms at best and
+  9–25 ms typical: ~1.3 ms of that is the disk sync (this is a virtualized
+  block device; `fdatasync` is no faster, and an isolated probe understates it
+  because it re-syncs a clean directory — in the real workload the directory
+  sync alone is ~1.07 ms), and the remainder is CPython hashing and canonical
+  JSON on a 2-core 2015-era Xeon. The order path takes two: the plan, then
+  `record_submission_attempt`, which is the single-winner guard that makes a
+  crash unable to submit the same exposure twice. It is deliberately the last
+  durable act before the wire and it is not a latency knob.
+- **Sub-10 ms is therefore not reachable on this host without changing what
+  durability costs.** Three things would do it, none of them loop scheduling:
+  one pre-wire commit instead of two (blocked by the guard above), a faster
+  CPU for the serialize-and-hash, or a disk whose sync is tens of
+  microseconds rather than 1.3 ms.
+- **Blocking venue reads on the owner loop: 19.2% of wall clock → 1.3%.**
+  Idle went 73.3% → 82.3%. The one that mattered was `get_positions` at 18.55%,
+  read inline because the warm feed's snapshot was tested for being *newer than
+  the last report* rather than *fresh*; against a 500 ms cadence and a feed
+  that refreshes every ~420 ms it lost that test constantly. During trading the
+  reconcile still rises to ~17%, because a pass that applied fills re-reads
+  positions inline by design — that guard is the next lever and it is a
+  position-truth question, not a performance one.
 - **That ~190 ms floor is geography, and it is now priced.** TCP connect to
   `api.bybit.com` is 7.2 ms and the TLS handshake 18.1 ms, but a full request is
   187.6 ms — so ~180 ms of every round trip is the Frankfurt CloudFront edge
