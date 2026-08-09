@@ -1539,3 +1539,44 @@ def test_a_rest_tickers_read_prices_a_symbol_no_socket_is_carrying() -> None:
     assert touch is not None
     assert (touch.bid_price, touch.ask_price, touch.bid_qty) == (180.10, 180.12, 40.0)
     assert cache.latest("JUNKUSDT") is None
+
+
+def test_a_raw_frame_arrives_as_bytes_and_a_malformed_one_still_raises() -> None:
+    """``skip_utf8_validation`` hands the handler bytes; nothing may assume str.
+
+    A profile of the ticker stream's thread put roughly a third of its awake
+    time in websocket-client's pure-Python UTF-8 validator and decoder, which
+    hold the GIL the order path needs. Skipping them changes the frame's type,
+    not its validity: ``json.loads`` decodes UTF-8 strictly either way.
+    """
+
+    seen: list[Mapping[str, Any]] = []
+    stream = BybitRawPublicMarketStream(
+        topic_kind="tickers",
+        include_public_trades=False,
+        on_message=seen.append,
+    )
+    socket = object()
+    stream._socket = socket
+    stream._socket_open = True
+    stream._active_connection_generation = None
+    stream._symbols = {"BTCUSDT"}
+
+    payload = {"topic": "tickers.BTCUSDT", "data": {"symbol": "BTCUSDT", "bid1Price": "60000.5"}}
+    stream._on_message(socket, json.dumps(payload).encode("utf-8"))
+    assert seen and seen[-1]["topic"] == "tickers.BTCUSDT"
+
+    # A frame that is not valid UTF-8 must not become a message. The handler
+    # logs and drops rather than killing the stream, so the check is that
+    # nothing new was accepted.
+    before = len(seen)
+    stream._on_message(socket, b'{"topic":"tickers.BTCUSDT","data":{"s":"\xff\xfe"}}')
+    assert len(seen) == before
+
+
+def test_the_public_stream_asks_the_library_to_skip_its_utf8_revalidation() -> None:
+    """The switch is the point; without it the pure-Python validator runs."""
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "liquidity_migration" / "account" / "market_capture.py").read_text(encoding="utf-8")
+    assert "run_forever(ping_interval=20, ping_timeout=10, skip_utf8_validation=True)" in source
