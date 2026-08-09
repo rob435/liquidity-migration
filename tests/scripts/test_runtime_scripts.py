@@ -36,6 +36,20 @@ def _unit(name: str) -> str:
     return _read(SYSTEMD / name)
 
 
+def _section(unit_text: str, section: str) -> str:
+    """One ``[Section]`` body. systemd reads most directives in exactly one
+    section and silently ignores them elsewhere, so a substring check over the
+    whole file proves nothing about whether a directive is in effect."""
+
+    # Anchored to the start of a line: a section name also appears inside the
+    # comments, and an unanchored search lands in the middle of one.
+    header = f"[{section}]\n"
+    start = unit_text.index(header) if unit_text.startswith(header) else unit_text.index(f"\n{header}")
+    rest = unit_text[start + len(header) :].lstrip("\n")
+    end = rest.find("\n[")
+    return rest if end < 0 else rest[:end]
+
+
 def _environment(name: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in _unit(name).splitlines():
@@ -233,8 +247,9 @@ def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -
     assert "TimeoutStartSec=" not in fragment
     assert "Restart=always" in fragment
     assert "RestartSec=5" in fragment
-    # No rate limiter: a limiter that trips leaves the owner stopped, which is
-    # the outcome this whole change exists to prevent.
+    # No limiter directive, and none is needed: the default 5-starts-in-10s
+    # window still applies here, but RestartSec=5 spaces five restarts over
+    # ~20 s, so it cannot trip.
     assert "StartLimit" not in fragment
     # The mainnet owner is deliberately untouched: it gates, and it may.
     mainnet = _unit("liquidity-migration-account-execution-mainnet.service")
@@ -244,9 +259,14 @@ def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -
     ) in mainnet
     assert "TimeoutStartSec=240" in mainnet
     assert "RestartSec=2" in mainnet
-    # Same no-limiter reasoning as the demo owner: the default limiter would
-    # latch the real-money owner failed after five fast transient failures.
-    assert "StartLimitIntervalSec=0" in mainnet
+    # RestartSec=2 puts five restarts inside the 10 s window, so the mainnet
+    # owner really can latch failed and leave real exposure unsupervised. The
+    # directive that disables the limiter is only read in [Unit]: it sat in
+    # [Service] until 2026-08-09, where systemd ignored it and said so in the
+    # journal. Assert the section, not the substring -- the substring was
+    # present for weeks while the limiter was live.
+    assert _section(mainnet, "Unit").count("StartLimitIntervalSec=0") == 1
+    assert "StartLimit" not in _section(mainnet, "Service")
 
 
 def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:

@@ -2,6 +2,14 @@
 Description=liquidity-migration single Bybit MAINNET real-money account execution owner
 Wants=network-online.target
 After=network-online.target
+# The default limiter (5 starts / 10s) would latch the owner failed after five
+# fast transient failures (a venue blip on the startup permission probe); a
+# latched real-money owner leaves exposure unsupervised -- the exact outcome
+# Restart=always exists to prevent. RestartSec=2 puts five restarts inside the
+# 10 s window, so this owner really would latch. It must live in [Unit]:
+# systemd ignores it in [Service] and says so in the journal, which is how it
+# sat here doing nothing until 2026-08-09.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -24,11 +32,6 @@ ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidi
 # exposure, so Restart=always is a recovery path, not a crash loop.
 Restart=always
 RestartSec=2
-# The default limiter (5 starts / 10s) would latch the owner failed after five
-# fast transient failures (a venue blip on the startup permission probe); a
-# latched real-money owner leaves exposure unsupervised — the exact outcome
-# Restart=always exists to prevent. No limiter, matching the demo owner.
-StartLimitIntervalSec=0
 TimeoutStartSec=240
 KillMode=control-group
 TimeoutStopSec=180
