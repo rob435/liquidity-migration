@@ -201,21 +201,6 @@ class IntentArrivalWatch:
         current = self._mtime_ns()
         return current is not None and self._last_mtime_ns is not None and current != self._last_mtime_ns
 
-    def consume(self) -> None:
-        """Forget the pending arrival, having acted on it.
-
-        Without this, a caller that reacts to ``arrival_pending`` and loops
-        would see the same queued event again and spin: the signal is only
-        cleared by reading it.
-        """
-
-        if self._watch is not None:
-            self._watch.drain()
-            return
-        current = self._mtime_ns()
-        if current is not None:
-            self._last_mtime_ns = current
-
     def wait(self, timeout_seconds: float) -> bool:
         if self._watch is None:
             self._watch = self._try_watch()

@@ -281,14 +281,6 @@ def degrade_or_raise(
 PROTECTION_MAX_BOOK_AGE_NS = 15 * 1_000_000_000
 
 
-#: How long the component software stop may go without evaluating while the
-#: owner keeps standing aside to serve arriving intents. It normally runs every
-#: pass, about 20 Hz. Three times that is the ceiling: past it the pass
-#: completes even with an intent waiting, so a burst of orders cannot hold the
-#: stop off indefinitely.
-PROTECTION_YIELD_MAX_DEFER_SECONDS = 0.15
-
-
 def protection_market_refs(
     recorder: Any,
     symbols: Iterable[str],
@@ -1441,8 +1433,6 @@ def main(argv: list[str] | None = None) -> int:
     # The component set the loss-ceiling flatten last asked to close. Not a
     # latch: it only suppresses re-publishing an unchanged plan.
     loss_ceiling_flattened_keys: frozenset[str] = frozenset()
-    # Stamped by the protection block below, read by the yield above it.
-    last_protection_evaluated = time.monotonic()
     intent_watch = IntentArrivalWatch(inbox.root / "pending")
     if not intent_watch.using_inotify:
         _logger.warning(
@@ -1585,44 +1575,6 @@ def main(argv: list[str] | None = None) -> int:
                     if funding_report is not None and not funding_report.healthy:
                         _logger.error("account funding reconcile blocked new intents")
                 last_reconcile = time.monotonic()
-            # An intent that landed while the reconcile above was running has
-            # been waiting for it, and the rest of this pass -- quote
-            # maintenance, protection, health, notifications -- is in front of
-            # it too. Going back to the top serves it now: the order path is
-            # the first thing a pass does.
-            #
-            # This defers the rest of *this* pass, so it is bounded by how long
-            # protection has gone without evaluating. Protection normally runs
-            # every pass at roughly 20 Hz; under a burst of orders this lets it
-            # slip to the bound below and no further. The reconcile above has
-            # already run, so nothing skips it either.
-            #
-            # Only for a request the gate is actually willing to serve. Yielding
-            # on the bare arrival signal cost 29 ms of median when it was tried:
-            # the signal stays raised until it is read, so it had to be consumed
-            # to stop the loop spinning on a request that was not ready -- and
-            # consuming a wake-up for an intent that then did not get served
-            # left nothing to wake on, so the pass ended by sleeping the full
-            # idle interval. Asking the gate costs one inbox read, and only when
-            # something has actually arrived.
-            #
-            # Nothing is consumed here. A ready head is served by the top of the
-            # next pass and leaves the queue; an unready one leaves the signal
-            # raised, which is exactly what the wait at the bottom expects.
-            if (
-                intent_watch.arrival_pending()
-                and time.monotonic() - last_protection_evaluated
-                < PROTECTION_YIELD_MAX_DEFER_SECONDS
-            ):
-                mid_pass_readiness = market_warmup_gate.evaluate(
-                    inbox=inbox,
-                    recorder=recorder,
-                    verified_rule_symbols=set(rules),
-                    now_monotonic=time.monotonic(),
-                    max_market_age_ns=service.max_market_age_ns,
-                )
-                if mid_pass_readiness.request_id and mid_pass_readiness.ready:
-                    continue
             if entry_quotes is not None:
                 # Advance resting entry quotes on the loop cadence: reprice
                 # toward a moved touch, cross at the window deadline, verify
@@ -1719,7 +1671,6 @@ def main(argv: list[str] | None = None) -> int:
                         protection_evaluation_error,
                         f"component protection evaluation failed: {type(exc).__name__}: {exc}",
                     )
-            last_protection_evaluated = time.monotonic()
             # Both protection paths above publish their flat into the inbox, and
             # the order path that used to serve it now runs above them. Serve it
             # here so a breach still reaches the venue in the pass that saw it
