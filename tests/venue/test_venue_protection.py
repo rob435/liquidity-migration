@@ -2392,3 +2392,122 @@ def test_a_flat_symbol_clears_only_its_own_health_message(tmp_path: Path) -> Non
     manager.last_error = "native protection cancelled unfilled for BUSDT: orderId=venue-9"
     manager.observe_terminal_status(command_id=flat_command, status="cancelled")
     assert manager.last_error == ""
+
+
+def _protection_row(
+    *,
+    symbol: str | None,
+    status: str,
+    native: bool,
+    ts_ns: int,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {"native_exchange": native}
+    if symbol is not None:
+        metadata["symbol"] = symbol
+    return {"status": status, "local_receive_ts_ns": ts_ns, "metadata": metadata}
+
+
+def _reference_active(state, symbol: str):
+    """The scan the per-symbol index replaced, kept here as the oracle."""
+
+    matches = [
+        (key, protection)
+        for key, protection in state.protections.items()
+        if str(protection.get("status") or "") in {"active", "triggering"}
+        and bool((protection.get("metadata") or {}).get("native_exchange"))
+        and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
+    ]
+    return matches[-1] if matches else None
+
+
+def _reference_latest(state, symbol: str):
+    matches = [
+        (key, protection)
+        for key, protection in state.protections.items()
+        if bool((protection.get("metadata") or {}).get("native_exchange"))
+        and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: int(item[1].get("local_receive_ts_ns") or 0))
+
+
+def _state_with(rows: dict[str, dict[str, object]]):
+    from liquidity_migration.account.account_contracts import AccountState
+
+    state = AccountState()
+    state.protections.update(rows)
+    return state
+
+
+def test_the_native_protection_index_answers_exactly_what_the_scan_did() -> None:
+    """Protections are never pruned, so both lookups grew without bound.
+
+    1,391 of them on the demo book after a day of trading, against 200 that
+    morning, and a profile of the reconcile put 16% of its time in these two
+    scans. The index has to return the identical row, including which one wins
+    a tie -- ``active`` takes the last in state order, ``latest`` takes the
+    newest timestamp.
+    """
+
+    rows: dict[str, dict[str, object]] = {}
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    for i in range(240):
+        symbol = symbols[i % len(symbols)]
+        rows[f"p{i:04d}"] = _protection_row(
+            symbol=symbol,
+            status=["active", "triggering", "cancelled", "software_flat_requested"][i % 4],
+            native=(i % 5 != 0),
+            ts_ns=1_000 + (i * 7) % 991,
+        )
+    state = _state_with(rows)
+
+    for symbol in [*symbols, "ABSENTUSDT"]:
+        assert (
+            BybitNativeProtectionManager._active_from_state(state, symbol)
+            == _reference_active(state, symbol)
+        ), symbol
+        assert (
+            BybitNativeProtectionManager._latest_native_protection_from_state(state, symbol)
+            == _reference_latest(state, symbol)
+        ), symbol
+
+
+def test_a_native_protection_without_its_own_symbol_falls_back_to_the_scan() -> None:
+    """Such a row matches whichever symbol is asked about, which no bucket can hold.
+
+    Not expected to occur; the index detects it and stands down rather than
+    quietly answering a different question.
+    """
+
+    from liquidity_migration.venue.venue_protection import _native_protection_index
+
+    rows = {
+        "with-symbol": _protection_row(symbol="BTCUSDT", status="active", native=True, ts_ns=10),
+        "no-symbol": _protection_row(symbol=None, status="active", native=True, ts_ns=20),
+    }
+    state = _state_with(rows)
+
+    assert _native_protection_index(state) is None, "the index must refuse this state"
+    for symbol in ("BTCUSDT", "ETHUSDT"):
+        assert (
+            BybitNativeProtectionManager._active_from_state(state, symbol)
+            == _reference_active(state, symbol)
+        )
+        assert (
+            BybitNativeProtectionManager._latest_native_protection_from_state(state, symbol)
+            == _reference_latest(state, symbol)
+        )
+
+
+def test_the_index_is_rebuilt_when_the_committed_state_moves() -> None:
+    """It is keyed on state identity; a commit publishes a new state object."""
+
+    first = _state_with({"a": _protection_row(symbol="BTCUSDT", status="active", native=True, ts_ns=1)})
+    assert BybitNativeProtectionManager._active_from_state(first, "BTCUSDT") is not None
+
+    second = _state_with({"b": _protection_row(symbol="BTCUSDT", status="cancelled", native=True, ts_ns=2)})
+    assert BybitNativeProtectionManager._active_from_state(second, "BTCUSDT") is None, (
+        "a stale index would still be reporting the previous state's protection"
+    )
+    assert BybitNativeProtectionManager._active_from_state(first, "BTCUSDT") is not None

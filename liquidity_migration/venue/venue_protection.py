@@ -72,6 +72,50 @@ class NativeProtectionPlan:
     target_keys: tuple[str, ...]
 
 
+
+#: One committed state's native protections, bucketed by symbol, and the state
+#: it was built from. A commit publishes a *new* committed state object rather
+#: than mutating the old one, so identity is the right key.
+#:
+#: Worth building: both lookups below filtered every protection the account has
+#: ever recorded, per symbol, on every reconcile pass. Protections are never
+#: pruned -- 1,391 of them on the demo book after a day of trading, against 200
+#: that morning -- and a profile of the reconcile put 16% of its time in these
+#: two scans alone, growing.
+_NATIVE_INDEX_LOCK = RLock()
+_NATIVE_INDEX_STATE: Any = None
+_NATIVE_INDEX: dict[str, list[tuple[str, Mapping[str, Any]]]] | None = None
+
+
+def _native_protection_index(state: AccountState) -> dict[str, list[tuple[str, Mapping[str, Any]]]] | None:
+    """Native protections per symbol, in the order the state holds them.
+
+    Returns ``None`` when the index cannot represent this state exactly, and
+    the callers fall back to the scan they always did. That happens when a
+    native protection carries no symbol of its own: the filters below read such
+    a row as matching *whichever* symbol is being asked about, which no
+    per-symbol bucket can reproduce. It is not expected to occur, and this
+    stays correct if it ever does.
+    """
+
+    global _NATIVE_INDEX_STATE, _NATIVE_INDEX
+    with _NATIVE_INDEX_LOCK:
+        if _NATIVE_INDEX_STATE is state:
+            return _NATIVE_INDEX
+        index: dict[str, list[tuple[str, Mapping[str, Any]]]] | None = {}
+        for key, protection in state.protections.items():
+            metadata = protection.get("metadata") or {}
+            if not bool(metadata.get("native_exchange")):
+                continue
+            symbol = str(metadata.get("symbol") or "").upper()
+            if not symbol:
+                index = None
+                break
+            index.setdefault(symbol, []).append((key, protection))
+        _NATIVE_INDEX_STATE = state
+        _NATIVE_INDEX = index
+        return index
+
 @dataclass(frozen=True, slots=True)
 class NativeProtectionBreach:
     """Authenticated evidence that an absent desired stop is already crossed."""
@@ -444,13 +488,23 @@ class BybitNativeProtectionManager:
         state: AccountState,
         symbol: str,
     ) -> tuple[str, Mapping[str, Any]] | None:
-        matches = [
-            (key, protection)
-            for key, protection in state.protections.items()
-            if str(protection.get("status") or "") in {"active", "triggering"}
-            and bool((protection.get("metadata") or {}).get("native_exchange"))
-            and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
-        ]
+        index = _native_protection_index(state)
+        if index is not None:
+            # Same order the state holds them in, so ``matches[-1]`` still
+            # means the same protection it always did.
+            matches = [
+                item
+                for item in index.get(symbol, ())
+                if str(item[1].get("status") or "") in {"active", "triggering"}
+            ]
+        else:
+            matches = [
+                (key, protection)
+                for key, protection in state.protections.items()
+                if str(protection.get("status") or "") in {"active", "triggering"}
+                and bool((protection.get("metadata") or {}).get("native_exchange"))
+                and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
+            ]
         return matches[-1] if matches else None
 
     @staticmethod
@@ -1897,12 +1951,16 @@ class BybitNativeProtectionManager:
         state: AccountState,
         symbol: str,
     ) -> tuple[str, Mapping[str, Any]] | None:
-        matches = [
-            (key, protection)
-            for key, protection in state.protections.items()
-            if bool((protection.get("metadata") or {}).get("native_exchange"))
-            and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
-        ]
+        index = _native_protection_index(state)
+        if index is not None:
+            matches = index.get(symbol, ())
+        else:
+            matches = [
+                (key, protection)
+                for key, protection in state.protections.items()
+                if bool((protection.get("metadata") or {}).get("native_exchange"))
+                and str((protection.get("metadata") or {}).get("symbol") or symbol).upper() == symbol
+            ]
         if not matches:
             return None
         return max(
