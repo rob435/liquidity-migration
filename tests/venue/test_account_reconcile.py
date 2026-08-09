@@ -1561,16 +1561,27 @@ def test_a_stalled_feed_falls_back_to_reading_the_venue(tmp_path: Path) -> None:
         instrument_rules={},
         clock=clock,
     )
+    reconciler.position_feed_trust_age_ns = 1_000_000_000
     first = reconciler.reconcile_once()
 
-    # Frozen at a stamp the published report already carries: re-serving it
-    # would re-certify an old observation as this pass's freshness.
+    # Frozen at a stamp the published report already carries. Inside the trust
+    # window that is fine to serve -- the report carries the feed's own
+    # observation time, so it states an older observation rather than
+    # re-certifying it as this pass's freshness.
     reconciler.position_feed = _StubFeed((), first.observed_ts_ns)  # type: ignore[assignment]
-    clock.advance_ns(1_000_000_000)
+    clock.advance_ns(500_000_000)
     second = reconciler.reconcile_once()
+    assert client.position_reads == 1, "a snapshot half a second old is worth using"
+    assert second.observed_ts_ns == first.observed_ts_ns
+    assert second.observed_ts_ns < clock.wall_time_ns(), "must not claim to be current"
+
+    # Past the window the feed is treated as stalled and the venue is read, so
+    # one frozen snapshot cannot be served indefinitely.
+    clock.advance_ns(1_000_000_000)
+    third = reconciler.reconcile_once()
 
     assert client.position_reads == 2
-    assert second.observed_ts_ns > first.observed_ts_ns
+    assert third.observed_ts_ns > first.observed_ts_ns
 
 
 def test_a_quiet_pass_classifies_ownership_without_the_two_open_order_reads(
@@ -1918,3 +1929,62 @@ def test_the_reconcile_pass_itself_skips_its_venue_reads_for_a_waiting_intent(
     reconciler.reconcile_once()
 
     assert client.reads == 0, "a waiting intent must not queue behind these reads"
+
+
+class _StubPositionFeed:
+    """Only what ``_venue_positions`` reads off the warm feed."""
+
+    def __init__(self, rows, observed_ns: int) -> None:
+        self._latest = (tuple(rows), observed_ns)
+
+    def latest(self):
+        return self._latest
+
+    def latest_open_orders(self):
+        return None
+
+
+def test_a_warm_position_snapshot_is_used_while_it_is_fresh_not_only_while_it_is_newer(
+    tmp_path: Path,
+) -> None:
+    """The strictly-newer test sent a fifth of the owner's wall clock inline.
+
+    The feed runs one thread over three ~172 ms reads, so a position refresh
+    lands every ~420 ms and later when the others interleave. Against a 500 ms
+    reconcile that regularly produced a snapshot that was not *newer* than the
+    last report but was only a few hundred milliseconds old -- and the pass
+    paid a blocking round trip rather than use it.
+    """
+
+    clock = VirtualClock(current_wall_ns=10_000_000_000, current_monotonic_ns=100)
+    kernel, _command_id = _kernel(tmp_path, clock)
+    client = _PollCountingClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.position_feed_trust_age_ns = 1_000_000_000
+    rows = [{"symbol": "BUSDT", "size": "2.0", "side": "Buy"}]
+
+    # A snapshot taken 400 ms ago: not newer than a report stamped just now,
+    # but well inside the trust window.
+    fresh_ns = clock.wall_time_ns() - 400_000_000
+    reconciler.position_feed = _StubPositionFeed(rows, fresh_ns)
+    served, observed_ns = reconciler._venue_positions(recovered_rows=False)
+    assert observed_ns == fresh_ns, "the report must carry the feed's own observation time"
+    assert list(served) == rows
+
+    # A stalled feed falls back to the inline read, exactly as before the feed
+    # existed, so a dead thread cannot serve one snapshot forever.
+    stale_ns = clock.wall_time_ns() - 30_000_000_000
+    reconciler.position_feed = _StubPositionFeed(rows, stale_ns)
+    _served, observed_ns = reconciler._venue_positions(recovered_rows=False)
+    assert observed_ns == clock.wall_time_ns()
+
+    # And a pass that just applied fills always re-reads: a snapshot taken
+    # before they landed shows the venue behind a book that has moved.
+    reconciler.position_feed = _StubPositionFeed(rows, clock.wall_time_ns())
+    _served, observed_ns = reconciler._venue_positions(recovered_rows=True)
+    assert observed_ns == clock.wall_time_ns()

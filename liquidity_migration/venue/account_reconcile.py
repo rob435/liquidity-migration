@@ -91,6 +91,10 @@ PENDING_ORDER_POLLS_PER_PASS = 5
 #: before it goes ahead regardless. Five seconds is ten times the reconcile
 #: cadence and well inside the ten-second poll interval each order already has.
 PENDING_ORDER_POLL_DEFERRAL_CEILING_NS = 5 * 1_000_000_000
+#: Default age at which a warm position snapshot stops being trusted and the
+#: reconcile reads inline instead. One second is the venue-fact freshness bound
+#: at the default 0.5 s cadence, and twice the interval the feed refreshes on.
+DEFAULT_POSITION_FEED_TRUST_AGE_NS = 1_000_000_000
 
 
 class AccountReconciliationStaleError(RuntimeError):
@@ -331,6 +335,10 @@ class BybitAccountReconciler:
         # the backstop off indefinitely.
         self.pending_poll_deferral: Callable[[], bool] | None = None
         self._pending_polls_deferred_since_ns = 0
+        # How old a warm position snapshot may be and still be used instead of
+        # a blocking inline read. The owner sets it from its own venue-fact
+        # freshness bound; the default is the same bound at the default cadence.
+        self.position_feed_trust_age_ns = DEFAULT_POSITION_FEED_TRUST_AGE_NS
         self._wedge_last_classification: dict[str, str] = {}
         self.consumer = BybitAccountExecutionConsumer(
             kernel=kernel,
@@ -358,9 +366,22 @@ class BybitAccountReconciler:
         recovery read is interval-gated, so nothing changes on almost every
         pass and the warm read is used.
 
-        Not newer than the published report -- a stalled feed would otherwise
-        re-stamp an old snapshot as this pass's observation, and freshness is
-        what the reduction gate consumes.
+        Older than the trust window -- a stalled feed must not have its snapshot
+        re-served indefinitely, because freshness is what the reduction gate
+        consumes. The window, not "newer than the last report", is the test.
+
+        That distinction was worth 18.55% of the owner's wall clock. The feed
+        runs one thread over three reads -- positions, wallet, open orders --
+        at roughly 172 ms each against a Frankfurt edge, scheduled from
+        completion, so a position refresh lands every ~420 ms and later still
+        when the other two interleave. Against a 500 ms reconcile cadence, the
+        strictly-newer test failed often enough that a live profile found the
+        owner blocked in this inline read for nearly a fifth of all time, with
+        a warm snapshot sitting unused a few hundred milliseconds old.
+
+        Timestamps stay honest either way: the report carries the feed's own
+        observation time, never this pass's clock, so a lagging feed still ages
+        out through the freshness bounds downstream instead of looking current.
         """
 
         feed = self.position_feed
@@ -368,8 +389,8 @@ class BybitAccountReconciler:
             latest = feed.latest()
             if latest is not None:
                 rows, observed_ns = latest
-                previous = self.last_report
-                if previous is None or observed_ns > previous.observed_ts_ns:
+                age_ns = self.clock.wall_time_ns() - observed_ns
+                if 0 <= age_ns <= self.position_feed_trust_age_ns:
                     return rows, observed_ns
         raw = self.client.get_positions(settle_coin=self.settle_coin)
         return raw, self.clock.wall_time_ns()

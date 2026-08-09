@@ -1226,6 +1226,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     position_feed.start()
     reconciler.position_feed = position_feed
+    # The same bound the owner ages every other venue fact against. Inside it
+    # the warm snapshot is used; outside it the reconcile reads inline, which
+    # is the behaviour that shipped before the feed existed.
+    reconciler.position_feed_trust_age_ns = reconcile_health_max_age_ns(args.reconcile_seconds)
     health_chain = AccountHealthChain(
         (
             private_stream_supervisor,
