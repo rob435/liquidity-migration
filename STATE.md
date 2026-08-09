@@ -110,11 +110,21 @@ match; never append history to this file.
   `record_submission_attempt`, which is the single-winner guard that makes a
   crash unable to submit the same exposure twice. It is deliberately the last
   durable act before the wire and it is not a latency knob.
-- **Sub-10 ms is therefore not reachable on this host without changing what
-  durability costs.** Three things would do it, none of them loop scheduling:
-  one pre-wire commit instead of two (blocked by the guard above), a faster
-  CPU for the serialize-and-hash, or a disk whose sync is tens of
-  microseconds rather than 1.3 ms.
+- **A sub-10 ms median needs owner decisions, not more tuning. The menu is
+  measured.** The pre-wire path is ~21 ms live: about 5.1 ms of disk sync,
+  about 8 ms of Python (`transact` is 1.95 ms each on this CPU, and the claim,
+  readiness gate and planning together are ~5.4 ms per order), and the rest is
+  GIL contention. Against that:
+  | change | saves | what it costs |
+  | --- | --- | --- |
+  | issue the two segment syncs concurrently, one directory sync for both | **2.0 ms** (5.08 → 3.07 median, 6.92 → 4.66 p90) | a cross-transaction durability barrier: `transact` would have to defer its directory sync and something must flush before the wire |
+  | merge the two pre-wire commits | **~4.2 ms** | every crash between commit and send becomes non-retryable — the second commit is late *precisely* so an un-attempted command can be retried and an attempted one cannot |
+  | drop the 509-symbol ticker feed | **~3 ms** of GIL contention | cold-symbol entries go from ~216 ms back toward ~1000 ms; the REST ticker rescue still bounds them at one round trip |
+  | a faster host CPU | **~7 ms** | hardware |
+  | a disk whose sync is tens of µs, not 1.3 ms | **~4.5 ms** | hardware |
+
+  Nothing on that list is a micro-optimisation, and no single item reaches
+  10 ms on its own.
 - **Blocking venue reads on the owner loop: 19.2% of wall clock → 1.3% idle,
   6.5% during live trading.** Idle went 73.3% → 82.3%. The one that mattered
   was `get_positions` at 18.55%, read inline because the warm feed's snapshot
