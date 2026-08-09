@@ -1140,11 +1140,21 @@ def main(argv: list[str] | None = None) -> int:
     # cache falls back to REST, so a dead wallet topic costs speed and nothing
     # else.
     wallet_cache = BybitWalletStreamCache()
+    # The feed is built further down, after the reconciler it serves, so the
+    # fill hook reaches it through here rather than by construction order.
+    warm_position_feed: list[Any] = [None]
+
+    def observe_fill(execution_id: str) -> bool:
+        feed = warm_position_feed[0]
+        if feed is not None:
+            feed.refresh_positions_soon()
+        return markout_observer.notify(execution_id)
+
     execution_consumer = BybitAccountExecutionConsumer(
         kernel=kernel,
         private_stream=private_stream,
         native_protection_manager=native_protection,
-        fill_observer=markout_observer.notify,
+        fill_observer=observe_fill,
         wallet_cache=wallet_cache,
         position_cache=position_cache,
     )
@@ -1160,7 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
         client=private_client,
         instrument_rules=rules,
         native_protection_manager=native_protection,
-        fill_observer=markout_observer.notify,
+        fill_observer=observe_fill,
     )
     # Bootstrap venue truth before any request is claimed. Venue exposure with
     # an empty kernel is a hard mismatch, never auto-adopted.
@@ -1230,6 +1240,11 @@ def main(argv: list[str] | None = None) -> int:
     # the warm snapshot is used; outside it the reconcile reads inline, which
     # is the behaviour that shipped before the feed existed.
     reconciler.position_feed_trust_age_ns = reconcile_health_max_age_ns(args.reconcile_seconds)
+    # A fill is when the warm snapshot stops describing the book, and when an
+    # exit is most likely to arrive. Refreshing it off this thread the moment a
+    # fill is seen is what stops the next reconcile finding a snapshot that
+    # disagrees and paying a blocking confirmation read here.
+    warm_position_feed[0] = position_feed
     health_chain = AccountHealthChain(
         (
             private_stream_supervisor,

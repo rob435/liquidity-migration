@@ -167,6 +167,7 @@ class VenuePositionFeed:
         "_lock",
         "_stop",
         "_thread",
+        "_refresh_positions",
     )
 
     def __init__(
@@ -197,6 +198,7 @@ class VenuePositionFeed:
         self._orders: tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], int] | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._refresh_positions = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -216,6 +218,19 @@ class VenuePositionFeed:
     def latest(self) -> tuple[tuple[dict[str, Any], ...], int] | None:
         with self._lock:
             return self._positions
+
+    def refresh_positions_soon(self) -> None:
+        """Bring the next position read forward, from any thread.
+
+        A fill is exactly when the warm snapshot stops describing the book, and
+        exactly when an exit is most likely to arrive. Waiting out the ordinary
+        interval leaves the reconcile with a snapshot that disagrees, which
+        costs it a blocking confirmation read on the owner's own thread. This
+        asks for the refresh the moment the fill is seen, on this thread, so
+        the snapshot is already current when the exit turns up.
+        """
+
+        self._refresh_positions.set()
 
     def latest_open_orders(
         self,
@@ -257,7 +272,7 @@ class VenuePositionFeed:
             now = time.monotonic()
             due = (
                 ("positions", self._read_positions)
-                if now >= next_positions
+                if now >= next_positions or self._refresh_positions.is_set()
                 else ("wallet", self._read_wallet)
                 if wallet_enabled and now >= next_wallet
                 else ("open orders", self._read_open_orders)
@@ -265,9 +280,17 @@ class VenuePositionFeed:
                 else None
             )
             if due is None:
-                self._stop.wait(0.02)
+                # Waits on the fill request as well as the clock, so a book
+                # that just moved is re-read at once rather than up to an
+                # interval later.
+                self._refresh_positions.wait(0.02)
                 continue
             label, read = due
+            if label == "positions":
+                # Cleared before the read, not after: a fill landing while this
+                # read is in flight must schedule another, not be swallowed by
+                # the one that was already running when it happened.
+                self._refresh_positions.clear()
             try:
                 read()
             except Exception:  # noqa: BLE001 - the caller reads synchronously instead

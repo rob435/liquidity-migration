@@ -2060,3 +2060,49 @@ def test_a_warm_snapshot_that_disagrees_with_the_book_is_confirmed_at_the_venue(
     reconciler.position_feed = _StubPositionFeed(stale_view, fresh_ns)
     _rows, observed_ns = reconciler._venue_positions(recovered_rows=False)
     assert observed_ns == clock.wall_time_ns(), "a disagreement must be read from the venue"
+
+
+def test_a_fill_brings_the_next_position_read_forward(tmp_path: Path) -> None:
+    """The feed re-reads on a fill instead of waiting out its interval.
+
+    A fill is exactly when the warm snapshot stops describing the book, and
+    exactly when an exit is most likely to arrive. Left to the ordinary
+    interval, the next reconcile finds a snapshot that disagrees and pays a
+    blocking confirmation read on the owner's own thread.
+    """
+
+    reads = threading.Event()
+    read_count = [0]
+
+    class _Client:
+        demo = True
+        realm = "demo"
+
+        def get_positions(self, **_params: object):
+            read_count[0] += 1
+            reads.set()
+            return []
+
+        def get_open_orders(self, **_params: object):
+            return []
+
+    feed = VenuePositionFeed(
+        client=_Client(),
+        settle_coin="USDT",
+        clock=SystemClock(),
+        # An interval long enough that any prompt read can only be the fill.
+        interval_seconds=30.0,
+        order_interval_seconds=30.0,
+    )
+    feed.start()
+    try:
+        assert reads.wait(5.0), "the feed should read once at start"
+        reads.clear()
+        before = read_count[0]
+
+        feed.refresh_positions_soon()
+
+        assert reads.wait(5.0), "a fill must not wait out the 30s interval"
+        assert read_count[0] > before
+    finally:
+        feed.close()
