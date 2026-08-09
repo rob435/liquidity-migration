@@ -187,6 +187,28 @@ edit STATE.md to match.
     entries measured 266 ms with exits at 251 ms. The median is held above it
     by loop scheduling: when the pass is mid-reconcile as the intent lands,
     `durable → commanded` runs 250–408 ms instead of 25–40 ms.
+  - **Deployed `b0870b1` at 10:17 UTC** (`staged --stop-first`, the funded book
+    flat before each stop), after `2aa7f36` at 10:01. Both owners, both demo
+    sleeves, both funded sleeves and the two liveness timers came back active
+    and enabled; zero errors on any unit since.
+    - **The deploy restarted the two funded producer sleeves**, which had been
+      stopped cleanly at 02:12 UTC and left down for eight hours — the funded
+      owner was brought back alone at 09:50. `activate` starts the whole fleet
+      whenever real money is armed and the sleeve toggles say on, so the
+      funded account went from managed-but-not-trading to trading at 10:01:24.
+      Flagged for the owner rather than reverted: the toggles are the
+      configured intent, and `verify-units` reads producers-running as correct.
+  - **The real-money owner's restart limiter had never actually been
+    disabled.** `StartLimitIntervalSec=0` sat in `[Service]`, where systemd
+    ignores it and says so on every start ("Unknown key name ... ignoring");
+    `systemctl show` read the default 5-starts-in-10s window. With
+    `RestartSec=2`, five restarts fall inside that window, so a venue blip on
+    the startup permission probe could latch the funded owner failed and leave
+    exposure unsupervised — the outcome `Restart=always` exists to prevent.
+    Moved to `[Unit]`; `StartLimitIntervalUSec=0` now reads back from the host.
+    The test asserted only that the substring appeared somewhere in the file,
+    so it passed the whole time the limiter was live; it now asserts the
+    section and fails against the old unit.
   - **The owner can no longer be started without the ticker touch feed.**
     Deleting the `--no-touch-feed` flag and the `ACCOUNT_TOUCH_FEED` wrapper
     case removes the only configuration that made a cold entry wait ~790 ms.
