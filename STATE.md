@@ -119,12 +119,19 @@ match; never append history to this file.
   | --- | --- | --- |
   | issue the two segment syncs concurrently, one directory sync for both | **2.0 ms** (5.08 → 3.07 median, 6.92 → 4.66 p90) | a cross-transaction durability barrier: `transact` would have to defer its directory sync and something must flush before the wire |
   | merge the two pre-wire commits | **~4.2 ms** | every crash between commit and send becomes non-retryable — the second commit is late *precisely* so an un-attempted command can be retried and an attempted one cannot |
-  | drop the 509-symbol ticker feed | **~3 ms** of GIL contention | cold-symbol entries go from ~216 ms back toward ~1000 ms; the REST ticker rescue still bounds them at one round trip |
+  | drop the 509-symbol ticker feed | **2.1 ms**, measured live with `ACCOUNT_TOUCH_FEED=0` — median 26.1 → 24.0 | cold-symbol entries go from ~216 ms back toward ~1000 ms; the REST ticker rescue still bounds them at one round trip |
   | a faster host CPU | **~7 ms** | hardware |
   | a disk whose sync is tens of µs, not 1.3 ms | **~4.5 ms** | hardware |
 
-  Nothing on that list is a micro-optimisation, and no single item reaches
-  10 ms on its own.
+  **All three software items together land near 18 ms, not 10.** That is
+  measured, not projected: removing the biggest GIL contender entirely — the
+  ticker feed, switched off live — moved the median only 26.1 → 24.0 ms, and
+  the best sample only to 10.0 ms. Micro-optimising the rest is worth perhaps
+  2–3 ms of the 13.2 ms of order-path Python: after the fast paths already
+  landed, `json_safe` and `iterencode` are still 4.07 ms per order, pathlib
+  construction 1.86 ms across 200+ `Path` objects, and 105 stats plus 53 opens
+  another 1.4 ms. **A sub-10 ms median needs a faster host, not more
+  software.**
 - **Blocking venue reads on the owner loop: 19.2% of wall clock → 1.3% idle,
   6.5% during live trading.** Idle went 73.3% → 82.3%. The one that mattered
   was `get_positions` at 18.55%, read inline because the warm feed's snapshot
