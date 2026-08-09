@@ -119,7 +119,7 @@ match; never append history to this file.
   | --- | --- | --- |
   | issue the two segment syncs concurrently, one directory sync for both | **2.0 ms** (5.08 → 3.07 median, 6.92 → 4.66 p90) | a cross-transaction durability barrier: `transact` would have to defer its directory sync and something must flush before the wire |
   | merge the two pre-wire commits | **~4.2 ms** | every crash between commit and send becomes non-retryable — the second commit is late *precisely* so an un-attempted command can be retried and an attempted one cannot |
-  | drop the 509-symbol ticker feed | **2.1 ms**, measured live with `ACCOUNT_TOUCH_FEED=0` — median 26.1 → 24.0 | cold-symbol entries go from ~216 ms back toward ~1000 ms; the REST ticker rescue still bounds them at one round trip |
+  | ~~drop the 509-symbol ticker feed~~ **not an option** | 2.1 ms, measured live with `ACCOUNT_TOUCH_FEED=0` (median 26.1 → 24.0) | ~790 ms on every cold entry (216 ms → 1002 ms), and carry trades a rotating universe so a cold symbol is the normal case for a new entry. Measured only to prove the median was not hiding behind it. The feed stays on. |
   | a faster host CPU | **~7 ms** | hardware |
   | a disk whose sync is tens of µs, not 1.3 ms | **~4.5 ms** | hardware |
 
