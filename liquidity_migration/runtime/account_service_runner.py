@@ -12,7 +12,6 @@ import argparse
 import json
 import logging
 import math
-import os
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from liquidity_migration.account.account_contracts import (
     NativeDisasterProtectionPolicy,
 )
 from liquidity_migration.account.account_kernel import AccountExecutionKernel
+from liquidity_migration.runtime.intent_arrival import IntentArrivalWatch
 from liquidity_migration.account.account_market_readiness import (
     RequestedMarketWarmupGate,
     require_registered_request_market_warmup_timeout,
@@ -279,38 +279,6 @@ def degrade_or_raise(
 #: only delays a stop decision the venue-native stop still backstops. Sits above
 #: ordinary reconnect jitter and well below the scale of a real outage.
 PROTECTION_MAX_BOOK_AGE_NS = 15 * 1_000_000_000
-
-
-def sleep_until_intent_or(seconds: float, *, inbox_pending: Path, slice_seconds: float = 0.004) -> bool:
-    """Sleep the idle interval, but return the moment a new intent lands.
-
-    The owner used to sleep a flat interval between passes, so an intent that
-    arrived just after a pass waited out the whole of it before anything even
-    looked. That is pure latency on the order path and it costs nothing to
-    remove: a new request is a new file in ``pending``, which moves the
-    directory's mtime, and one ``stat`` every few milliseconds is far cheaper
-    than shortening the interval for every pass.
-
-    Returns True when it woke early for an arrival.
-    """
-
-    deadline = time.monotonic() + max(seconds, 0.0)
-    try:
-        baseline = os.stat(inbox_pending).st_mtime_ns
-    except OSError:
-        # No directory to watch: keep the plain sleep rather than spin.
-        time.sleep(max(seconds, 0.0))
-        return False
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            return False
-        time.sleep(min(slice_seconds, remaining))
-        try:
-            if os.stat(inbox_pending).st_mtime_ns != baseline:
-                return True
-        except OSError:
-            return False
 
 
 def protection_market_refs(
@@ -1446,11 +1414,127 @@ def main(argv: list[str] | None = None) -> int:
     # The component set the loss-ceiling flatten last asked to close. Not a
     # latch: it only suppresses re-publishing an unchanged plan.
     loss_ceiling_flattened_keys: frozenset[str] = frozenset()
+    intent_watch = IntentArrivalWatch(inbox.root / "pending")
+    if not intent_watch.using_inotify:
+        _logger.warning(
+            "intent arrivals are polled, not watched: expect a slice of extra order latency"
+        )
     try:
         while True:
             now = time.monotonic()
             loop_sequence += 1
             markout_observer.drain()
+            # Stays above the order path: a private execution stream that has
+            # stopped delivering fills must refuse new exposure in the pass that
+            # notices, not the one after. It reads local socket state, so it
+            # costs the order path nothing to keep here.
+            private_stream_status = private_stream_supervisor.check(now_monotonic=now)
+            # The order path runs first, before anything that touches the
+            # venue. It used to run tenth, behind a reconcile that is blocked
+            # on REST reads a fifth of all wall-clock time, so an intent that
+            # landed during one waited out the remainder before the owner even
+            # looked at it. Nothing above this point blocks: the readiness gate
+            # reads memory and the local inbox.
+            market_readiness = market_warmup_gate.evaluate(
+                inbox=inbox,
+                recorder=recorder,
+                verified_rule_symbols=set(rules),
+                now_monotonic=now,
+                max_market_age_ns=service.max_market_age_ns,
+            )
+            # Nothing is carrying this symbol yet -- no reconstructed book and
+            # no pushed touch. One tickers read bounds that at a round trip;
+            # waiting for a subscription to warm has no bound at all. Only
+            # reached when the gate already refuses, so it delays no order that
+            # could otherwise have gone.
+            if (
+                touch_cache is not None
+                and not market_readiness.ready
+                and "no_snapshot" in market_readiness.detail
+                and now - last_touch_rescue >= args.touch_rescue_seconds
+            ):
+                last_touch_rescue = now
+                rescued = 0
+                for symbol in market_readiness.symbols:
+                    if touch_cache.latest(symbol) is not None:
+                        continue
+                    try:
+                        rescued += touch_cache.absorb_rest_rows(
+                            private_client.get_tickers(symbol=symbol)
+                        )
+                    except Exception:  # noqa: BLE001 - the gate just keeps waiting
+                        _logger.warning("tickers rescue read failed for %s", symbol)
+                if rescued:
+                    market_readiness = market_warmup_gate.evaluate(
+                        inbox=inbox,
+                        recorder=recorder,
+                        verified_rule_symbols=set(rules),
+                        now_monotonic=now,
+                        max_market_age_ns=service.max_market_age_ns,
+                    )
+            requested_symbols_ready = market_readiness.ready
+            symbol_health_detail = market_readiness.detail
+            head_symbols = {symbol.upper() for symbol in market_readiness.symbols}
+            receipt = None
+            # Health is assembled further down, after the venue work this pass
+            # still owes. The order path reports its faults through here rather
+            # than writing the status directly.
+            request_health_error = ""
+            try:
+                receipt = run_ready_request_or_converge(
+                    service=service,
+                    inbox=inbox,
+                    readiness=market_readiness,
+                )
+                if receipt is not None:
+                    last_batch_id = receipt.batch_id
+                    last_request_failure_signature = ""
+                    try:
+                        native_protection.sync_symbols(
+                            [
+                                symbol
+                                for symbol, position in kernel._state_ref().positions.items()
+                                if position.signed_qty != 0.0
+                            ]
+                        )
+                    except Exception as exc:  # noqa: BLE001 - receipt is already durable
+                        # Do not report a completed request as returned to
+                        # pending just because native protection is still
+                        # converging; reconciliation owns the next proof.
+                        _logger.error(
+                            "account request completed but native protection remains unhealthy: %s: %s",
+                            type(exc).__name__,
+                            exc,
+                        )
+                        request_health_error = (
+                            f"post-request native protection unhealthy: {type(exc).__name__}: {exc}"
+                        )
+                    _logger.info(
+                        "account request complete batch=%s accepted=%s commands=%d state=%s",
+                        receipt.batch_id,
+                        receipt.accepted,
+                        len(receipt.command_ids),
+                        receipt.final_state_hash[:12],
+                    )
+            except Exception as exc:  # noqa: BLE001 - request was released for retry
+                # A blocked request retries every few seconds: one traceback
+                # per distinct cause, one line per pass.
+                failure_signature = f"{type(exc).__name__}: {exc}"[:500]
+                if failure_signature != last_request_failure_signature:
+                    last_request_failure_signature = failure_signature
+                    if isinstance(exc, StaleEntryRequestExpired):
+                        _logger.exception(
+                            "account request retired to failed/ (every entry signal expired)"
+                        )
+                    else:
+                        _logger.exception("account request failed and was returned to pending")
+                else:
+                    _logger.error(
+                        "account request failed again (traceback suppressed, unchanged cause): %s",
+                        failure_signature,
+                    )
+                request_health_error = f"{type(exc).__name__}: {exc}"
+                time.sleep(max(min(args.reconcile_seconds, 5.0), 0.5))
             if now - last_reconcile >= max(args.reconcile_seconds, 0.1):
                 report, funding_report = run_periodic_reconciliation(
                     reconciler=reconciler,
@@ -1471,7 +1555,6 @@ def main(argv: list[str] | None = None) -> int:
                 # toward a moved touch, cross at the window deadline, verify
                 # the attached stop on fill. Never raises.
                 entry_quotes.advance()
-            private_stream_status = private_stream_supervisor.check(now_monotonic=now)
             # The queue head's symbols are known every tick, from the readiness
             # gate below, but subscribing them waited on this interval -- so a
             # request for a symbol the stream did not already carry sat up to
@@ -1521,44 +1604,6 @@ def main(argv: list[str] | None = None) -> int:
                 public_stream.update_symbols(desired)
                 subscribed_symbols = set(desired)
                 last_symbol_refresh = now
-            market_readiness = market_warmup_gate.evaluate(
-                inbox=inbox,
-                recorder=recorder,
-                verified_rule_symbols=set(rules),
-                now_monotonic=now,
-                max_market_age_ns=service.max_market_age_ns,
-            )
-            # Nothing is carrying this symbol yet -- no reconstructed book and
-            # no pushed touch. One tickers read bounds that at a round trip;
-            # waiting for a subscription to warm has no bound at all.
-            if (
-                touch_cache is not None
-                and not market_readiness.ready
-                and "no_snapshot" in market_readiness.detail
-                and now - last_touch_rescue >= args.touch_rescue_seconds
-            ):
-                last_touch_rescue = now
-                rescued = 0
-                for symbol in market_readiness.symbols:
-                    if touch_cache.latest(symbol) is not None:
-                        continue
-                    try:
-                        rescued += touch_cache.absorb_rest_rows(
-                            private_client.get_tickers(symbol=symbol)
-                        )
-                    except Exception:  # noqa: BLE001 - the gate just keeps waiting
-                        _logger.warning("tickers rescue read failed for %s", symbol)
-                if rescued:
-                    market_readiness = market_warmup_gate.evaluate(
-                        inbox=inbox,
-                        recorder=recorder,
-                        verified_rule_symbols=set(rules),
-                        now_monotonic=now,
-                        max_market_age_ns=service.max_market_age_ns,
-                    )
-            requested_symbols_ready = market_readiness.ready
-            symbol_health_detail = market_readiness.detail
-            head_symbols = {symbol.upper() for symbol in market_readiness.symbols}
             protection_markets, protection_skipped = protection_market_refs(
                 recorder,
                 {
@@ -1601,6 +1646,27 @@ def main(argv: list[str] | None = None) -> int:
                         protection_evaluation_error,
                         f"component protection evaluation failed: {type(exc).__name__}: {exc}",
                     )
+            # Both protection paths above publish their flat into the inbox, and
+            # the order path that used to serve it now runs above them. Serve it
+            # here so a breach still reaches the venue in the pass that saw it
+            # rather than the pass after.
+            try:
+                protection_receipt = service.run_safety_flat_once(inbox)
+            except Exception as exc:  # noqa: BLE001 - blocks health, never the owner
+                _logger.exception("protection safety flat failed")
+                protection_evaluation_error = _append_health_error(
+                    protection_evaluation_error,
+                    f"protection safety flat failed: {type(exc).__name__}: {exc}",
+                )
+            else:
+                if protection_receipt is not None:
+                    last_batch_id = protection_receipt.batch_id
+                    _logger.info(
+                        "protection safety flat complete batch=%s accepted=%s commands=%d",
+                        protection_receipt.batch_id,
+                        protection_receipt.accepted,
+                        len(protection_receipt.command_ids),
+                    )
             # From the reconciler, not from this loop's clock: last_report is
             # only replaced by a pass that actually reached the venue, so a
             # loop whose REST reads keep failing keeps publishing health while
@@ -1617,12 +1683,14 @@ def main(argv: list[str] | None = None) -> int:
                     and reconcile_healthy
                     and private_stream_status is True
                     and not protection_evaluation_error
+                    and not request_health_error
                 )
                 else AccountOwnerHealthStatus.BLOCKED
             )
             health_details = [
                 symbol_health_detail if not requested_symbols_ready else "",
                 protection_evaluation_error,
+                request_health_error,
             ]
             if not reconcile_healthy and latest_reconcile_report is not None:
                 health_details.append(
@@ -1645,64 +1713,6 @@ def main(argv: list[str] | None = None) -> int:
                     health_status = AccountOwnerHealthStatus.BLOCKED
                     health_details.extend(item.describe() for item in startup_degradations)
             health_detail = "; ".join(detail for detail in health_details if detail)[:1000]
-            receipt = None
-            try:
-                receipt = run_ready_request_or_converge(
-                    service=service,
-                    inbox=inbox,
-                    readiness=market_readiness,
-                )
-                if receipt is not None:
-                    last_batch_id = receipt.batch_id
-                    last_request_failure_signature = ""
-                    try:
-                        native_protection.sync_symbols(
-                            [
-                                symbol
-                                for symbol, position in kernel._state_ref().positions.items()
-                                if position.signed_qty != 0.0
-                            ]
-                        )
-                    except Exception as exc:  # noqa: BLE001 - receipt is already durable
-                        # Do not report a completed request as returned to
-                        # pending just because native protection is still
-                        # converging; reconciliation owns the next proof.
-                        _logger.error(
-                            "account request completed but native protection remains unhealthy: %s: %s",
-                            type(exc).__name__,
-                            exc,
-                        )
-                        health_status = AccountOwnerHealthStatus.BLOCKED
-                        health_detail = (f"post-request native protection unhealthy: {type(exc).__name__}: {exc}")[
-                            :1000
-                        ]
-                    _logger.info(
-                        "account request complete batch=%s accepted=%s commands=%d state=%s",
-                        receipt.batch_id,
-                        receipt.accepted,
-                        len(receipt.command_ids),
-                        receipt.final_state_hash[:12],
-                    )
-            except Exception as exc:  # noqa: BLE001 - request was released for retry
-                # A blocked request retries every few seconds: one traceback
-                # per distinct cause, one line per pass.
-                failure_signature = f"{type(exc).__name__}: {exc}"[:500]
-                if failure_signature != last_request_failure_signature:
-                    last_request_failure_signature = failure_signature
-                    if isinstance(exc, StaleEntryRequestExpired):
-                        _logger.exception(
-                            "account request retired to failed/ (every entry signal expired)"
-                        )
-                    else:
-                        _logger.exception("account request failed and was returned to pending")
-                else:
-                    _logger.error(
-                        "account request failed again (traceback suppressed, unchanged cause): %s",
-                        failure_signature,
-                    )
-                health_status = AccountOwnerHealthStatus.BLOCKED
-                health_detail = f"{type(exc).__name__}: {exc}"[:1000]
-                time.sleep(max(min(args.reconcile_seconds, 5.0), 0.5))
             try:
                 convergence_report = service.convergence_report()
             except Exception as exc:  # noqa: BLE001 - corrupt convergence state blocks health
@@ -1980,13 +1990,11 @@ def main(argv: list[str] | None = None) -> int:
                 # never evaluate. Every other cadence here is stamped the same
                 # way, after its work.
                 last_notification_poll = time.monotonic()
-            sleep_until_intent_or(
-                max(args.idle_seconds, 0.01),
-                inbox_pending=inbox.root / "pending",
-            )
+            intent_watch.wait(max(args.idle_seconds, 0.01))
     except KeyboardInterrupt:
         return 0
     finally:
+        intent_watch.close()
         position_feed.close()
         execution_consumer.close()
         public_stream.close()

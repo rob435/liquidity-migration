@@ -30,11 +30,11 @@ from liquidity_migration.account.account_owner_health import (
 from liquidity_migration.policy.account_execution_config import (
     require_registered_demo_rule_max_age_hours,
 )
+from liquidity_migration.runtime.intent_arrival import IntentArrivalWatch
 from liquidity_migration.runtime.account_service_runner import (
     account_has_open_exposure,
     degrade_or_raise,
     require_startup_reconciliation_safe,
-    sleep_until_intent_or,
 )
 from liquidity_migration.account.execution_adapters import BookLevel, L2BookSnapshot
 from liquidity_migration.account.market_capture import (
@@ -1075,6 +1075,42 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     assert '"${continuous_cycle_args[@]}"' in wrapper
 
 
+def test_the_order_path_runs_before_the_venue_reads_it_used_to_queue_behind() -> None:
+    """The order path is the first thing the pass does, ahead of the reconcile.
+
+    A live profile put the owner inside ``run_periodic_reconciliation`` for
+    20.2% of all wall-clock time, on blocking REST reads of ~172 ms each, and
+    that stage used to run eighth of the ten stages ahead of the order path. An
+    intent that landed during one waited out the remainder before the owner
+    even looked at it.
+
+    Two orderings have to survive the move, and both are the reason this is a
+    source-order test rather than a timing one:
+
+    * the private-stream supervisor still runs first, so a stream that has
+      stopped delivering fills refuses new exposure in the pass that notices;
+    * protection still reaches the venue in the pass that saw the breach --
+      it publishes its flat into the inbox, and the order path no longer runs
+      after it, so the pass has to serve that flat explicitly.
+    """
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
+    loop = source[source.index("        while True:") :]
+
+    order_path = loop.index("run_ready_request_or_converge(")
+    reconcile = loop.index("run_periodic_reconciliation(")
+    quotes = loop.index("entry_quotes.advance()")
+    protection = loop.index("protection_engine.evaluate(protection_markets)")
+    safety_flat = loop.index("service.run_safety_flat_once(inbox)")
+    supervisor = loop.index("private_stream_supervisor.check(")
+
+    assert supervisor < order_path, "a dead private stream must block admission"
+    assert order_path < reconcile, "the order path must not queue behind the reconcile's venue reads"
+    assert order_path < quotes, "the order path must not queue behind quote maintenance"
+    assert protection < safety_flat, "protection's flat must be served in the pass that planned it"
+
+
 def test_protection_market_refs_skips_gapped_books_instead_of_raising() -> None:
     """A dropped L2 delta must cost one protection cycle, never the owner process:
     ``market_ref`` raises for gapped books and the runner's protection loop has no
@@ -1396,6 +1432,7 @@ def test_a_faster_reconcile_cadence_does_not_tighten_the_reduction_gate() -> Non
 def test_the_owner_stops_sleeping_the_moment_an_intent_lands(tmp_path: Path) -> None:
     pending = tmp_path / "pending"
     pending.mkdir()
+    watch = IntentArrivalWatch(pending, slice_seconds=0.002)
 
     def land() -> None:
         time.sleep(0.05)
@@ -1404,20 +1441,77 @@ def test_the_owner_stops_sleeping_the_moment_an_intent_lands(tmp_path: Path) -> 
     worker = threading.Thread(target=land)
     started = time.monotonic()
     worker.start()
-    woke_early = sleep_until_intent_or(2.0, inbox_pending=pending, slice_seconds=0.002)
+    try:
+        woke_early = watch.wait(2.0)
+    finally:
+        worker.join()
+        watch.close()
     elapsed = time.monotonic() - started
-    worker.join()
 
     assert woke_early
     assert elapsed < 1.0, f"slept {elapsed:.2f}s through an arrival"
 
 
+def test_an_intent_that_landed_during_the_pass_is_not_slept_through(tmp_path: Path) -> None:
+    """The whole point of the watch: arrivals queue while the owner works.
+
+    The mtime baseline this replaced was read when the sleep began, so a
+    request that landed while the previous pass was still running had already
+    moved it and the owner slept the interval out before looking.
+    """
+
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    watch = IntentArrivalWatch(pending, slice_seconds=0.002)
+    try:
+        # One quiet wait, so any poll fallback has recorded its baseline.
+        assert not watch.wait(0.02)
+        # The arrival happens while the owner is "working", before it waits.
+        (pending / "request.json").write_text("{}", encoding="utf-8")
+        started = time.monotonic()
+        woke_early = watch.wait(2.0)
+        elapsed = time.monotonic() - started
+    finally:
+        watch.close()
+
+    assert woke_early
+    assert elapsed < 0.5, f"slept {elapsed:.2f}s through an arrival that preceded the wait"
+
+
+def test_a_claimed_request_is_not_reported_as_a_new_arrival(tmp_path: Path) -> None:
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    processing = tmp_path / "processing"
+    processing.mkdir()
+    watch = IntentArrivalWatch(pending, slice_seconds=0.002)
+    landed = pending / "request.json"
+    try:
+        assert not watch.wait(0.02)
+        landed.write_text("{}", encoding="utf-8")
+        assert watch.wait(1.0)
+        # Claiming renames the file out of pending. That is consumed work, not
+        # new work, and must not wake the next wait.
+        landed.rename(processing / "request.json")
+        started = time.monotonic()
+        woke_early = watch.wait(0.05)
+        elapsed = time.monotonic() - started
+    finally:
+        watch.close()
+
+    if watch.using_inotify:
+        assert not woke_early
+        assert elapsed >= 0.045
+
+
 def test_a_quiet_inbox_still_sleeps_the_whole_interval(tmp_path: Path) -> None:
     pending = tmp_path / "pending"
     pending.mkdir()
-
+    watch = IntentArrivalWatch(pending, slice_seconds=0.002)
     started = time.monotonic()
-    woke_early = sleep_until_intent_or(0.05, inbox_pending=pending, slice_seconds=0.002)
+    try:
+        woke_early = watch.wait(0.05)
+    finally:
+        watch.close()
     elapsed = time.monotonic() - started
 
     assert not woke_early
@@ -1425,8 +1519,12 @@ def test_a_quiet_inbox_still_sleeps_the_whole_interval(tmp_path: Path) -> None:
 
 
 def test_a_missing_inbox_directory_still_sleeps_rather_than_spinning(tmp_path: Path) -> None:
+    watch = IntentArrivalWatch(tmp_path / "absent")
     started = time.monotonic()
-    woke_early = sleep_until_intent_or(0.05, inbox_pending=tmp_path / "absent")
+    try:
+        woke_early = watch.wait(0.05)
+    finally:
+        watch.close()
     elapsed = time.monotonic() - started
 
     assert not woke_early

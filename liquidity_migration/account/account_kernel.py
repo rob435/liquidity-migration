@@ -1188,7 +1188,13 @@ def _append_jsonl_projection(
                 if written <= 0:
                     raise OSError("account journal projection append made no progress")
                 offset += written
-        os.fsync(descriptor)
+        # Deliberately not fsynced. This projection is rebuildable and is not
+        # the commit point -- the transaction segment above it is, and that one
+        # is still synced before anything acts on it. Syncing here cost a
+        # measured 1.02 ms on every commit, twice on the path between a durable
+        # intent and the order reaching the venue, to protect a file that a
+        # machine crash can already only leave torn and that the hash check at
+        # the top of this function rebuilds when it is.
     finally:
         os.close(descriptor)
     if created:
