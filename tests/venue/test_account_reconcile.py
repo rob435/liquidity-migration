@@ -2011,3 +2011,52 @@ def test_funding_recovery_also_stands_aside_for_a_waiting_intent() -> None:
 
     waiting[0] = False
     assert reconciler._defer_query(now + PENDING_ORDER_POLL_DEFERRAL_CEILING_NS + 1) is False
+
+
+def test_a_warm_snapshot_that_disagrees_with_the_book_is_confirmed_at_the_venue(
+    tmp_path: Path,
+) -> None:
+    """A snapshot older than a fill must never be read as the venue contradicting us.
+
+    Measured on the demo fleet: an exit published straight after an entry
+    filled was refused for ~1.1 s with
+    "venue=0:reconstructed=0.3:unbacked=0.3", because the warm snapshot was
+    taken before the fill. The gate was right to refuse -- the input was wrong.
+    Disagreement now costs a live read, on the risk-reducing side of the book.
+    """
+
+    clock = VirtualClock(current_wall_ns=10_000_000_000, current_monotonic_ns=100)
+    kernel, command_id = _kernel(tmp_path, clock)
+    kernel.record_fill(
+        command_id=command_id,
+        execution_id="exec-warm-1",
+        signed_qty=2.0,
+        price=10.0,
+        fee_usdt=0.0,
+        exchange_ts_ns=1_200,
+        local_receive_ts_ns=1_201,
+    )
+    client = _PollCountingClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+    reconciler.position_feed_trust_age_ns = 1_000_000_000
+    held = kernel.state().positions["BUSDT"].signed_qty
+    assert held != 0.0
+    fresh_ns = clock.wall_time_ns() - 400_000_000
+
+    # Agreeing and fresh: the warm snapshot stands, no venue read.
+    agreeing = [{"symbol": "BUSDT", "size": str(abs(held)), "side": "Buy"}]
+    reconciler.position_feed = _StubPositionFeed(agreeing, fresh_ns)
+    _rows, observed_ns = reconciler._venue_positions(recovered_rows=False)
+    assert observed_ns == fresh_ns
+
+    # Same age, but it shows the book as it was before the fill landed. That is
+    # a stale input, not venue truth, and it must be confirmed live.
+    stale_view = [{"symbol": "BUSDT", "size": "0", "side": "Buy"}]
+    reconciler.position_feed = _StubPositionFeed(stale_view, fresh_ns)
+    _rows, observed_ns = reconciler._venue_positions(recovered_rows=False)
+    assert observed_ns == clock.wall_time_ns(), "a disagreement must be read from the venue"

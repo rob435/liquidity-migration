@@ -23,6 +23,7 @@ from liquidity_migration.account.account_contracts import (
     AccountEvent,
     AccountEventType,
     InstrumentRules,
+    quantity_tolerance,
 )
 from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.account.wedged_command_watch import (
@@ -390,10 +391,51 @@ class BybitAccountReconciler:
             if latest is not None:
                 rows, observed_ns = latest
                 age_ns = self.clock.wall_time_ns() - observed_ns
-                if 0 <= age_ns <= self.position_feed_trust_age_ns:
+                if (
+                    0 <= age_ns <= self.position_feed_trust_age_ns
+                    and self._warm_rows_agree_with_book(rows)
+                ):
                     return rows, observed_ns
         raw = self.client.get_positions(settle_coin=self.settle_coin)
         return raw, self.clock.wall_time_ns()
+
+    def _warm_rows_agree_with_book(self, rows: Any) -> bool:
+        """Whether a warm snapshot may stand as this pass's venue truth.
+
+        A warm snapshot is never allowed to *declare* a disagreement. Within a
+        second of a fill it still describes the book as it was, and the
+        reduction gate reads that as the venue contradicting the kernel -- which
+        it does not; the snapshot is simply older than the fill. Measured, that
+        held an exit published straight after an entry for about 1.1 s, on the
+        risk-reducing side of the book.
+
+        So the warm read is used only while it agrees, and any disagreement
+        sends this pass to the venue for a live answer. In the ordinary case
+        the book is quiet and the snapshot agrees, which is what keeps the read
+        off the loop; when a fill has just moved the book the pass pays the
+        round trip it would have paid anyway, and the mismatch that follows --
+        if any -- is declared on truth read just now.
+
+        Only symbols this book knows are compared. Venue exposure the account
+        does not own is reported, never traded, and never a mismatch.
+        """
+
+        try:
+            parsed = _validated_venue_position_rows(rows, realm=self.realm)
+        except Exception:  # noqa: BLE001 - unparseable warm rows are not truth
+            return False
+        warm: dict[str, float] = {}
+        for _row, symbol, side, size in parsed:
+            if size == 0.0:
+                continue
+            warm[symbol] = math.fsum((warm.get(symbol, 0.0), size if side == "buy" else -size))
+        book = self.kernel._state_ref().positions
+        for symbol, position in book.items():
+            reconstructed = float(position.signed_qty)
+            observed = warm.get(symbol, 0.0)
+            if abs(observed - reconstructed) > quantity_tolerance(reconstructed):
+                return False
+        return True
 
     def _warm_open_orders(
         self, *, recovered_rows: bool
