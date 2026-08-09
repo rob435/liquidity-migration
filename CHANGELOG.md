@@ -117,7 +117,18 @@ edit STATE.md to match.
         interval. Asking the readiness gate first fixed that mechanism and
         still measured worse (**32.3 ms**), because a pass that yields pays
         its top-of-pass work twice. Removed.
-      - **What actually moves the median is the account getting older.** Over
+      - **Three O(history) costs removed, and the reconcile fell 21.1% ->
+        3.7% of the loop; the owner is now 89.6% idle.** The largest was the
+        anchor projection, which replayed the entire event history on every
+        call despite existing -- per its own docstring -- so that protection
+        checks would not. It is memoized on the `(events_applied,
+        rolling_state_hash)` pair it already validates. `_snapshot_ref` was
+        copying all 16,059 events into a fresh tuple per call, and every
+        protection check asks for one. Both native-protection lookups filtered
+        the whole protection map per symbol per pass. All three are keyed on an
+        identity a commit necessarily moves, and each has a test that fails
+        against a cache that does not invalidate.
+      - **What made the median grow is the account getting older.** Over
         this one day of testing the demo book went from 129 orders and 200
         protections to 965 and 1,463, and the reconcile's share of the owner
         loop went **7.4% → 21.1% with no code change**. Nothing prunes any of

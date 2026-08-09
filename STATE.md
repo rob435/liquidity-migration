@@ -74,20 +74,29 @@ match; never append history to this file.
   alone. Split at the median: `durable → commanded` 17.9 ms on an entry and
   11.9 on an exit; `commanded → send` 10.9 and 11.0. The rest of the wall
   clock is the 172 ms venue round trip.
-- **Sub-10 ms happens, but it is not typical.** Measured on three separate
-  runs: 9.2 ms, 9.1 ms, 9.7 ms — roughly 1 order in 50. The distribution is
-  bimodal: a fast group at 9–17 ms when the intent lands while the owner is
-  idle, and a slow group at 20–40 ms when it lands mid-pass and waits out the
-  rest of it.
-- **Per-pass cost grows with the account's lifetime state, and nothing prunes
-  it. This is the finding that matters most.** Protections, orders, decisions
-  and executions all accumulate for the life of the account. Over one day of
-  latency testing the demo book went from 129 orders and 200 protections to
+- **Sub-10 ms happens, but it is not typical.** Measured on four separate
+  runs: 9.2, 9.1, 9.7, 9.7 ms — roughly 1 order in 50. With the owner now
+  89.6% idle, the median is no longer waiting for the loop; it is the order
+  path's own cost, and that is two durable journal commits. Four disk syncs
+  sit in it (file and directory, twice), at 1.3 ms each at the median and
+  2.5 ms at p90 — so the sync tail alone spans 5–10 ms of a ~26 ms median.
+- **Per-pass cost grew with the account's lifetime state, and that was the
+  real cause of the median.** Protections, orders, decisions and executions all
+  accumulate for the life of the account and nothing prunes them. Over one day
+  of latency testing the demo book went from 129 orders and 200 protections to
   965 and 1,463, and **the reconcile's share of the owner loop went from 7.4%
-  to 21.1% with no code change at all** — the same code simply measures slower
-  on an older account. Two of the scans behind that are now indexed on the
-  committed state; the rest, in `account_strategy_state`, still walk the event
-  history every pass and are the next lever.
+  to 21.1% with no code change at all**. Three O(history) costs are now
+  removed, all keyed on an identity a commit necessarily changes:
+  - the anchor projection replayed the entire event history on every call,
+    despite existing (per its own docstring) to avoid exactly that — memoized
+    on `(events_applied, rolling_state_hash)`, the pair it already validates;
+  - `_snapshot_ref` copied every event into a fresh tuple per call, and every
+    protection check asks for one;
+  - both native-protection lookups filtered the whole protection map, per
+    symbol, per pass.
+
+  **The reconcile is now 3.7% of the loop and the owner is 89.6% idle**
+  (from 21.1% and 73.8%). Loop scheduling is no longer what holds the median.
 - **Cross-session latency comparisons in this repo are confounded by that
   growth.** A number measured on a fresh epoch is not comparable to the same
   number a week later. Compare within a run, or reset the epoch first.
