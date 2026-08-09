@@ -1419,6 +1419,11 @@ def main(argv: list[str] | None = None) -> int:
         _logger.warning(
             "intent arrivals are polled, not watched: expect a slice of extra order latency"
         )
+    # Confirming pending orders is the drop-recovery backstop behind the private
+    # stream, and it is the one thing left on this thread that blocks on the
+    # venue. It stands aside while an intent is waiting rather than making it
+    # queue behind up to ten round trips.
+    reconciler.pending_poll_deferral = intent_watch.arrival_pending
     try:
         while True:
             now = time.monotonic()

@@ -17,6 +17,7 @@ from liquidity_migration.account.account_kernel import (
     MarketInputRef,
 )
 from liquidity_migration.venue.account_reconcile import (
+    PENDING_ORDER_POLL_DEFERRAL_CEILING_NS,
     POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
     AccountReconciliationStaleError,
@@ -1798,3 +1799,122 @@ def test_the_wait_gives_up_so_the_venue_read_still_runs() -> None:
 
     assert row is None
     assert 0.045 <= elapsed < 1.0
+
+
+class _CountingPollClient:
+    """Records the pending-order confirmation reads a reconcile pass makes."""
+
+    def __init__(self) -> None:
+        self.trade_history_calls = 0
+        self.order_history_calls = 0
+
+    def get_trade_history(self, **_kwargs: object) -> list[dict[str, object]]:
+        self.trade_history_calls += 1
+        return []
+
+    def get_order_history(self, **_kwargs: object) -> list[dict[str, object]]:
+        self.order_history_calls += 1
+        return []
+
+
+def _poll_reconciler(waiting: "list[bool]") -> object:
+    """A reconciler carrying only what ``_defer_pending_poll`` reads."""
+
+    reconciler = BybitAccountReconciler.__new__(BybitAccountReconciler)
+    reconciler.pending_poll_deferral = lambda: waiting[0]
+    reconciler._pending_polls_deferred_since_ns = 0
+    return reconciler
+
+
+def test_pending_order_polls_stand_aside_while_an_intent_is_waiting() -> None:
+    """Two REST reads per order, five orders a pass: an intent must not queue there."""
+
+    waiting = [True]
+    reconciler = _poll_reconciler(waiting)
+    now = 1_000_000_000_000
+
+    assert reconciler._defer_pending_poll(now) is True
+    assert reconciler._defer_pending_poll(now + 1_000_000_000) is True
+
+    waiting[0] = False
+    assert reconciler._defer_pending_poll(now + 2_000_000_000) is False
+
+
+def test_a_steady_stream_of_intents_cannot_defer_the_backstop_forever() -> None:
+    """Deferral is bounded: the drop-recovery read is how a missed fill is found."""
+
+    waiting = [True]
+    reconciler = _poll_reconciler(waiting)
+    now = 1_000_000_000_000
+
+    assert reconciler._defer_pending_poll(now) is True
+    just_inside = now + PENDING_ORDER_POLL_DEFERRAL_CEILING_NS - 1
+    assert reconciler._defer_pending_poll(just_inside) is True
+    at_ceiling = now + PENDING_ORDER_POLL_DEFERRAL_CEILING_NS
+    assert reconciler._defer_pending_poll(at_ceiling) is False
+    # And the clock restarts, so it stands aside again rather than latching open.
+    assert reconciler._defer_pending_poll(at_ceiling + 1) is True
+
+
+def test_a_broken_deferral_hint_never_blocks_the_backstop() -> None:
+    def explode() -> bool:
+        raise RuntimeError("watch descriptor died")
+
+    reconciler = BybitAccountReconciler.__new__(BybitAccountReconciler)
+    reconciler.pending_poll_deferral = explode
+    reconciler._pending_polls_deferred_since_ns = 0
+
+    assert reconciler._defer_pending_poll(1_000_000_000_000) is False
+
+
+class _PollCountingClient(_NoOpenOrdersClient):
+    """Counts the pending-order confirmation reads, returning nothing."""
+
+    demo = True
+    realm = "demo"
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def get_positions(self, **_params: object):
+        return [{"symbol": "BUSDT", "size": "2.0", "side": "Buy"}]
+
+    def get_trade_history(self, **_kwargs: object):
+        self.reads += 1
+        return []
+
+    def get_order_history(self, **_kwargs: object):
+        self.reads += 1
+        return []
+
+
+def test_the_reconcile_pass_itself_skips_its_venue_reads_for_a_waiting_intent(
+    tmp_path: Path,
+) -> None:
+    """The loop must honour the deferral, not just the predicate.
+
+    Each pending order costs two signed REST reads at ~172 ms. A pass polls up
+    to five of them, so an intent landing mid-pass can wait out ten round
+    trips. With one waiting, the pass makes no confirmation reads at all.
+    """
+
+    clock = VirtualClock(current_wall_ns=10_000, current_monotonic_ns=100)
+    kernel, _command_id = _kernel(tmp_path, clock)
+    client = _PollCountingClient()
+    reconciler = BybitAccountReconciler(
+        kernel=kernel,
+        client=client,
+        instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
+        clock=clock,
+    )
+
+    reconciler.reconcile_once()
+    without_deferral = client.reads
+    assert without_deferral > 0, "the pass should confirm its pending order"
+
+    client.reads = 0
+    reconciler._last_pending_poll_ns.clear()
+    reconciler.pending_poll_deferral = lambda: True
+    reconciler.reconcile_once()
+
+    assert client.reads == 0, "a waiting intent must not queue behind these reads"

@@ -95,6 +95,15 @@ class _InotifyWatch:
                 if name and not name.startswith("."):
                     arrived = True
 
+    def peek(self) -> bool:
+        """True when an arrival is already queued, without consuming it."""
+
+        try:
+            ready, _, _ = select.select([self._fd], [], [], 0)
+        except (OSError, ValueError):  # pragma: no cover - descriptor died
+            return False
+        return bool(ready)
+
     def wait(self, timeout_seconds: float) -> bool:
         if self.drain():
             return True
@@ -179,6 +188,18 @@ class IntentArrivalWatch:
             if current != self._last_mtime_ns:
                 self._last_mtime_ns = current
                 return True
+
+    def arrival_pending(self) -> bool:
+        """True when an intent is waiting, without consuming the wake-up.
+
+        Cheap enough to ask between venue reads: it is a zero-timeout select on
+        the inotify descriptor, or one stat on the fallback.
+        """
+
+        if self._watch is not None:
+            return self._watch.peek()
+        current = self._mtime_ns()
+        return current is not None and self._last_mtime_ns is not None and current != self._last_mtime_ns
 
     def wait(self, timeout_seconds: float) -> bool:
         if self._watch is None:

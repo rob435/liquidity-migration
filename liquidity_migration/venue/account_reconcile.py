@@ -87,6 +87,10 @@ WEDGE_PROBES_PER_PASS = 5
 #: it.
 PENDING_ORDER_POLL_INTERVAL_NS = 10 * 1_000_000_000
 PENDING_ORDER_POLLS_PER_PASS = 5
+#: How long confirming pending orders may stand aside for arriving intents
+#: before it goes ahead regardless. Five seconds is ten times the reconcile
+#: cadence and well inside the ten-second poll interval each order already has.
+PENDING_ORDER_POLL_DEFERRAL_CEILING_NS = 5 * 1_000_000_000
 
 
 class AccountReconciliationStaleError(RuntimeError):
@@ -317,6 +321,16 @@ class BybitAccountReconciler:
         self._wedge_probe_last_ns: dict[str, int] = {}
         self._last_trade_history_recovery_ns: dict[str, int] = {}
         self._last_pending_poll_ns: dict[str, int] = {}
+        # Set by the owner to "an intent is already waiting". Confirming pending
+        # orders costs two REST reads each, five orders a pass -- up to ten
+        # blocking round trips of ~172 ms, and a live profile put the owner
+        # inside this call for 23.2% of all wall-clock time. An intent that
+        # lands mid-pass waits out whatever is left of that. Deferred orders
+        # roll to the next pass least-recently-polled first, so none starves,
+        # and the ceiling below stops a steady stream of intents from putting
+        # the backstop off indefinitely.
+        self.pending_poll_deferral: Callable[[], bool] | None = None
+        self._pending_polls_deferred_since_ns = 0
         self._wedge_last_classification: dict[str, str] = {}
         self.consumer = BybitAccountExecutionConsumer(
             kernel=kernel,
@@ -385,6 +399,31 @@ class BybitAccountReconciler:
         all_kinds, conditional, _observed_ns = latest
         return all_kinds, conditional
 
+    def _defer_pending_poll(self, now_ns: int) -> bool:
+        """Stand aside for a waiting intent, but never past the ceiling."""
+
+        deferral = self.pending_poll_deferral
+        if deferral is None:
+            self._pending_polls_deferred_since_ns = 0
+            return False
+        try:
+            waiting = bool(deferral())
+        except Exception:  # noqa: BLE001 - a broken hint never blocks the backstop
+            waiting = False
+        if not waiting:
+            self._pending_polls_deferred_since_ns = 0
+            return False
+        if self._pending_polls_deferred_since_ns == 0:
+            self._pending_polls_deferred_since_ns = now_ns
+            return True
+        if now_ns - self._pending_polls_deferred_since_ns >= PENDING_ORDER_POLL_DEFERRAL_CEILING_NS:
+            # Long enough. Confirming pending orders is how a fill the private
+            # stream missed is recovered; it does not queue behind order flow
+            # forever.
+            self._pending_polls_deferred_since_ns = 0
+            return False
+        return True
+
     def reconcile_once(self) -> AccountReconciliationReport:
         pending_statuses = {"commanded", "acknowledged", "partially_filled"}
         # Cache snapshots are immutable after publication, so this
@@ -416,6 +455,8 @@ class BybitAccountReconciler:
                 continue
             due.append(order)
         for order in due[:PENDING_ORDER_POLLS_PER_PASS]:
+            if self._defer_pending_poll(poll_now_ns):
+                break
             venue_identified_external = order.batch_id.startswith(EXTERNAL_BATCH_PREFIXES) and bool(
                 order.venue_order_id
             )
