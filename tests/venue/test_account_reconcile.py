@@ -1887,8 +1887,10 @@ class _PollCountingClient(_NoOpenOrdersClient):
 
     def __init__(self) -> None:
         self.reads = 0
+        self.position_reads = 0
 
     def get_positions(self, **_params: object):
+        self.position_reads += 1
         return [{"symbol": "BUSDT", "size": "2.0", "side": "Buy"}]
 
     def get_trade_history(self, **_kwargs: object):
@@ -1984,11 +1986,6 @@ def test_a_warm_position_snapshot_is_used_while_it_is_fresh_not_only_while_it_is
     _served, observed_ns = reconciler._venue_positions(recovered_rows=False)
     assert observed_ns == clock.wall_time_ns()
 
-    # And a pass that just applied fills always re-reads: a snapshot taken
-    # before they landed shows the venue behind a book that has moved.
-    reconciler.position_feed = _StubPositionFeed(rows, clock.wall_time_ns())
-    _served, observed_ns = reconciler._venue_positions(recovered_rows=True)
-    assert observed_ns == clock.wall_time_ns()
 
 
 def test_funding_recovery_also_stands_aside_for_a_waiting_intent() -> None:
@@ -2060,6 +2057,22 @@ def test_a_warm_snapshot_that_disagrees_with_the_book_is_confirmed_at_the_venue(
     reconciler.position_feed = _StubPositionFeed(stale_view, fresh_ns)
     _rows, observed_ns = reconciler._venue_positions(recovered_rows=False)
     assert observed_ns == clock.wall_time_ns(), "a disagreement must be read from the venue"
+
+    # A pass that just applied fills is no longer a reason on its own. It sent
+    # every such pass straight to the venue, and during live trading a profile
+    # put the owner inside that inline read for 20.8% of wall clock -- on
+    # exactly the passes where orders are flowing. What matters is whether the
+    # snapshot describes the book those fills produced.
+    reconciler.position_feed = _StubPositionFeed(agreeing, fresh_ns)
+    before_reads = client.position_reads
+    _rows, observed_ns = reconciler._venue_positions(recovered_rows=True)
+    assert observed_ns == fresh_ns
+    assert client.position_reads == before_reads, "an agreeing snapshot needs no round trip"
+
+    reconciler.position_feed = _StubPositionFeed(stale_view, fresh_ns)
+    _rows, observed_ns = reconciler._venue_positions(recovered_rows=True)
+    assert observed_ns == clock.wall_time_ns()
+    assert client.position_reads == before_reads + 1
 
 
 def test_a_fill_brings_the_next_position_read_forward(tmp_path: Path) -> None:

@@ -382,13 +382,19 @@ class BybitAccountReconciler:
 
         Two conditions send the read back inline, and both matter:
 
-        ``recovered_rows`` -- this pass applied fills, orders or a wedge
-        terminalization to the kernel. A feed snapshot taken before those
-        landed shows the venue behind a book that has moved, which is not drift
-        but reads exactly like it, and a drift mismatch blocks new risk. Passes
-        that changed nothing cannot have that problem. In steady state every
-        recovery read is interval-gated, so nothing changes on almost every
-        pass and the warm read is used.
+        Disagreement with this book -- see ``_warm_rows_agree_with_book``. This
+        subsumes the older ``recovered_rows`` condition, which sent every pass
+        that had applied fills, orders or a wedge terminalization straight to
+        the venue on the grounds that a snapshot taken before those landed
+        shows the venue behind a book that has moved. That is true, and it is
+        exactly what the agreement test detects: a snapshot older than the
+        fills cannot agree with the book those fills produced. The difference
+        is precision. ``recovered_rows`` also fired on rows that change no
+        position at all, and during live trading a profile put the owner inside
+        this inline read for 20.8% of wall clock -- the largest single thing in
+        front of an arriving intent, on exactly the passes where orders are
+        flowing. The argument is kept for the open-orders path, which has no
+        equivalent test.
 
         Older than the trust window -- a stalled feed must not have its snapshot
         re-served indefinitely, because freshness is what the reduction gate
@@ -408,8 +414,9 @@ class BybitAccountReconciler:
         out through the freshness bounds downstream instead of looking current.
         """
 
+        del recovered_rows  # the agreement test below is the precise form of it
         feed = self.position_feed
-        if feed is not None and not recovered_rows:
+        if feed is not None:
             latest = feed.latest()
             if latest is not None:
                 rows, observed_ns = latest
