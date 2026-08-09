@@ -317,7 +317,7 @@ match; never append history to this file.
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
 - **No code change is committed-but-undeployed**; the host runs `b0870b1`,
-  deployed 2026-08-09 10:17 UTC, and anything on `main` after it is
+  deployed 2026-08-09 10:09 UTC, and anything on `main` after it is
   documentation. Note that installing requires
   stopping the funded fleet: with real money armed and a `-mainnet` unit up,
   `resolve_stop_first` turns stop-first off and `require_quiescent` refuses

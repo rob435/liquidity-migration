@@ -187,10 +187,11 @@ edit STATE.md to match.
     entries measured 266 ms with exits at 251 ms. The median is held above it
     by loop scheduling: when the pass is mid-reconcile as the intent lands,
     `durable → commanded` runs 250–408 ms instead of 25–40 ms.
-  - **Deployed `b0870b1` at 10:17 UTC** (`staged --stop-first`, the funded book
-    flat before each stop), after `2aa7f36` at 10:01. Both owners, both demo
-    sleeves, both funded sleeves and the two liveness timers came back active
-    and enabled; zero errors on any unit since.
+  - **Deployed `b0870b1`, units up at 10:09:46 UTC** (`staged --stop-first`,
+    the funded book flat before each stop), after `2aa7f36` at 10:01:24. Both
+    owners, both demo sleeves, both funded sleeves and the two liveness timers
+    came back active and enabled; both owners publish `healthy` with an empty
+    detail and there are zero errors on any unit since.
     - **The deploy restarted the two funded producer sleeves**, which had been
       stopped cleanly at 02:12 UTC and left down for eight hours — the funded
       owner was brought back alone at 09:50. `activate` starts the whole fleet
