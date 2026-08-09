@@ -1556,7 +1556,7 @@ def test_the_pass_stands_aside_for_an_arrival_but_never_past_the_stop() -> None:
 
     order_path = loop.index("run_ready_request_or_converge(")
     reconcile = loop.index("run_periodic_reconciliation(")
-    yield_point = loop.index("intent_watch.consume()")
+    yield_point = loop.index("mid_pass_readiness = market_warmup_gate.evaluate(")
     protection = loop.index("protection_engine.evaluate(protection_markets)")
     stamp = loop.index("last_protection_evaluated = time.monotonic()")
 
@@ -1569,8 +1569,12 @@ def test_the_pass_stands_aside_for_an_arrival_but_never_past_the_stop() -> None:
     assert "arrival_pending()" in guard
     assert "last_protection_evaluated" in guard
     assert "PROTECTION_YIELD_MAX_DEFER_SECONDS" in guard
-    # And it consumes the arrival, or the raised signal spins the loop hot.
-    assert "intent_watch.consume()" in loop[yield_point : yield_point + 80]
+    # And it only yields for a head the gate will actually serve. Yielding on
+    # the bare signal cost 29 ms of median: it had to be consumed to stop the
+    # loop spinning on an unready request, and consuming a wake-up for an
+    # intent that then did not get served left nothing to wake on.
+    assert "mid_pass_readiness.request_id and mid_pass_readiness.ready" in loop
+    assert "intent_watch.consume()" not in loop
     assert 0.0 < PROTECTION_YIELD_MAX_DEFER_SECONDS <= 0.25
 
 

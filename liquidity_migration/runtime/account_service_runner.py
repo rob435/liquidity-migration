@@ -1597,16 +1597,32 @@ def main(argv: list[str] | None = None) -> int:
             # slip to the bound below and no further. The reconcile above has
             # already run, so nothing skips it either.
             #
-            # The arrival is consumed before looping. The signal stays raised
-            # until it is read, so a queued request that the readiness gate is
-            # not yet willing to serve would otherwise spin this loop hot.
+            # Only for a request the gate is actually willing to serve. Yielding
+            # on the bare arrival signal cost 29 ms of median when it was tried:
+            # the signal stays raised until it is read, so it had to be consumed
+            # to stop the loop spinning on a request that was not ready -- and
+            # consuming a wake-up for an intent that then did not get served
+            # left nothing to wake on, so the pass ended by sleeping the full
+            # idle interval. Asking the gate costs one inbox read, and only when
+            # something has actually arrived.
+            #
+            # Nothing is consumed here. A ready head is served by the top of the
+            # next pass and leaves the queue; an unready one leaves the signal
+            # raised, which is exactly what the wait at the bottom expects.
             if (
                 intent_watch.arrival_pending()
                 and time.monotonic() - last_protection_evaluated
                 < PROTECTION_YIELD_MAX_DEFER_SECONDS
             ):
-                intent_watch.consume()
-                continue
+                mid_pass_readiness = market_warmup_gate.evaluate(
+                    inbox=inbox,
+                    recorder=recorder,
+                    verified_rule_symbols=set(rules),
+                    now_monotonic=time.monotonic(),
+                    max_market_age_ns=service.max_market_age_ns,
+                )
+                if mid_pass_readiness.request_id and mid_pass_readiness.ready:
+                    continue
             if entry_quotes is not None:
                 # Advance resting entry quotes on the loop cadence: reprice
                 # toward a moved touch, cross at the window deadline, verify
