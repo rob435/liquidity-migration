@@ -2569,6 +2569,72 @@ def test_native_breach_priority_path_flattens_without_l2_and_leaves_older_entry_
     assert adapter.submit_calls == 2
 
 
+def test_a_breach_published_after_a_quiet_pass_is_still_flattened(tmp_path: Path) -> None:
+    """The authorized-flat set is cached on the committed state; it must invalidate.
+
+    Building it walks every protection the account has ever recorded -- 200 on
+    the demo book, growing all session -- and it ran on every owner pass ahead
+    of every request, which a profile put at ~46% of all order-path time that
+    was not the venue round trip. It is now rebuilt only when the journal head
+    moves. The thing that must not break is this: a quiet pass first, a breach
+    second, and the flat still reaches the venue.
+    """
+
+    adapter = ScriptedExecutionAdapter("fill", "fill")
+    service = _service(tmp_path / "account", adapter)
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    current_key = "long/main/BUSDT"
+    inbox.submit(
+        _request(
+            route,
+            request_id="open-current",
+            batch_id="open-current",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+            target_key=current_key,
+        )
+    )
+    opened = service.run_once(inbox)
+    assert opened is not None and opened.accepted
+    assert service.kernel.state().positions["BUSDT"].signed_qty == pytest.approx(2.0)
+
+    # Quiet passes first: these are what populate the cache with "no breach".
+    for _ in range(3):
+        assert service.run_safety_flat_once(inbox) is None
+
+    protection_engine = AccountProtectionEngine(
+        kernel=service.kernel,
+        inbox=inbox,
+        instrument_rules={"BUSDT": replace(_rules()["BUSDT"], tick_size=0.1)},
+    )
+    published = protection_engine.evaluate_native_breaches(
+        (
+            NativeProtectionBreach(
+                plan=NativeProtectionPlan(
+                    protection_key="native-disaster:BUSDT:test",
+                    symbol="BUSDT",
+                    signed_qty=2.0,
+                    stop_price=9.0,
+                    stop_source="test",
+                    target_keys=(current_key,),
+                ),
+                observed_mark=8.9,
+                evidence_source="authenticated_position_snapshot",
+                detail="BUSDT native stop absent and crossed",
+                observed_ts_ns=NOW_NS,
+            ),
+        )
+    )
+    assert len(published) == 1
+
+    receipt = service.run_safety_flat_once(inbox)
+
+    assert receipt is not None, "a stale authorized-flat set would leave the book open"
+    assert receipt.request_id == published[0].request_id and receipt.accepted
+    assert service.kernel.state().positions["BUSDT"].signed_qty == 0.0
+
+
 def test_inbox_fifo_uses_durable_arrival_order_across_mixed_producer_timestamps(
     tmp_path: Path,
 ) -> None:

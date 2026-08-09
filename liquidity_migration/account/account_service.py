@@ -1450,6 +1450,10 @@ class AccountExecutionService:
         # cannot succeed inside this budget retires to failed/ and the
         # producer's next cycle publishes a fresh one.
         self._inbox_failure_first_ns: dict[str, int] = {}
+        # The authorized native-breach flat set, and the committed state object
+        # it was derived from. Recomputed only when the journal head moves.
+        self._safety_flat_state: Any = None
+        self._safety_flat_hashes: dict[str, str] = {}
         # First wall time each symbol was seen unconverged, cleared when it
         # converges. Revision-based ages re-arm on every republication, so
         # re-asserting an unchanged target could suppress the grace-based health
@@ -2718,14 +2722,28 @@ class AccountExecutionService:
         if inbox.route != self.route:
             raise ValueError("account service and inbox routes do not match")
         state = self.kernel._state_ref()
-        authorized_request_hashes = {
-            request_id: str((row.get("metadata") or {}).get("request_hash") or "")
-            for request_id, row in state.protections.items()
-            if str(row.get("status") or "") == "software_flat_requested"
-            and isinstance(row.get("metadata") or {}, Mapping)
-            and (row.get("metadata") or {}).get("native_exchange") is False
-            and str((row.get("metadata") or {}).get("reason") or "") == "native_disaster_stop_breached"
-        }
+        # Rebuilt only when the journal head moves. This is a pure function of
+        # ``state.protections``, and a commit publishes a *new* committed state
+        # object rather than mutating the old one, so identity is exactly the
+        # right cache key.
+        #
+        # It is worth caching: protections accumulate for the life of the
+        # account -- 200 of them on the demo book -- and this ran on every owner
+        # pass, ahead of every request. A profile of the order path put 24.5% of
+        # its time in this comprehension alone, which is about 46% of everything
+        # that is not the venue round trip, all of it to rediscover that no
+        # native breach is outstanding.
+        if self._safety_flat_state is not state:
+            self._safety_flat_state = state
+            self._safety_flat_hashes = {
+                request_id: str((row.get("metadata") or {}).get("request_hash") or "")
+                for request_id, row in state.protections.items()
+                if str(row.get("status") or "") == "software_flat_requested"
+                and isinstance(row.get("metadata") or {}, Mapping)
+                and (row.get("metadata") or {}).get("native_exchange") is False
+                and str((row.get("metadata") or {}).get("reason") or "") == "native_disaster_stop_breached"
+            }
+        authorized_request_hashes = self._safety_flat_hashes
         claimed = inbox.claim_next_safety_flat(
             # Read-only: the claim only tests membership, and a commit replaces
             # the committed state object rather than mutating it, so the live
