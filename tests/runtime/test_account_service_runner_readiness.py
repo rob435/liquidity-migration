@@ -32,6 +32,7 @@ from liquidity_migration.policy.account_execution_config import (
 )
 from liquidity_migration.runtime.intent_arrival import IntentArrivalWatch
 from liquidity_migration.runtime.account_service_runner import (
+    PROTECTION_YIELD_MAX_DEFER_SECONDS,
     account_has_open_exposure,
     degrade_or_raise,
     require_startup_reconciliation_safe,
@@ -1529,3 +1530,65 @@ def test_a_missing_inbox_directory_still_sleeps_rather_than_spinning(tmp_path: P
 
     assert not woke_early
     assert elapsed >= 0.045
+
+
+def test_the_pass_stands_aside_for_an_arrival_but_never_past_the_stop() -> None:
+    """The yield that closes the median, and the bound that keeps it honest.
+
+    The order path is the first thing a pass does, so an intent that lands
+    while the loop is idle is served at once. One that lands mid-pass was
+    waiting out everything left in that pass -- quote maintenance, protection,
+    health, notifications -- which is what left the software path bimodal:
+    9-17 ms when the intent caught an idle loop, 20-40 ms when it did not.
+
+    Going back to the top serves it now. Two things must hold, and both are
+    source-order facts about the loop rather than timings:
+
+    * the yield sits *after* the reconcile and *after* protection has been
+      stamped, so neither is what gets skipped;
+    * it is bounded by how long the component software stop has gone without
+      evaluating, so a burst of orders cannot hold that stop off.
+    """
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "liquidity_migration" / "runtime" / "account_service_runner.py").read_text(encoding="utf-8")
+    loop = source[source.index("        while True:") :]
+
+    order_path = loop.index("run_ready_request_or_converge(")
+    reconcile = loop.index("run_periodic_reconciliation(")
+    yield_point = loop.index("intent_watch.consume()")
+    protection = loop.index("protection_engine.evaluate(protection_markets)")
+    stamp = loop.index("last_protection_evaluated = time.monotonic()")
+
+    assert order_path < reconcile, "the order path still runs first"
+    assert reconcile < yield_point, "the reconcile must not be what the yield skips"
+    assert protection < stamp, "protection is stamped only after it has evaluated"
+
+    # The yield is guarded by the protection deadline, not taken unconditionally.
+    guard = loop[yield_point - 400 : yield_point]
+    assert "arrival_pending()" in guard
+    assert "last_protection_evaluated" in guard
+    assert "PROTECTION_YIELD_MAX_DEFER_SECONDS" in guard
+    # And it consumes the arrival, or the raised signal spins the loop hot.
+    assert "intent_watch.consume()" in loop[yield_point : yield_point + 80]
+    assert 0.0 < PROTECTION_YIELD_MAX_DEFER_SECONDS <= 0.25
+
+
+def test_consuming_an_arrival_stops_it_being_reported_again() -> None:
+    """Without this the yield above would spin on its own signal."""
+
+    import tempfile
+
+    pending = Path(tempfile.mkdtemp()) / "pending"
+    pending.mkdir()
+    watch = IntentArrivalWatch(pending, slice_seconds=0.002)
+    try:
+        assert not watch.wait(0.02)
+        (pending / "request.json").write_text("{}", encoding="utf-8")
+        assert watch.arrival_pending()
+        watch.consume()
+        assert not watch.arrival_pending(), "a consumed arrival must not be reported twice"
+        (pending / "second.json").write_text("{}", encoding="utf-8")
+        assert watch.arrival_pending(), "a genuinely new arrival still registers"
+    finally:
+        watch.close()
