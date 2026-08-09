@@ -74,15 +74,23 @@ match; never append history to this file.
   alone. Split at the median: `durable → commanded` 17.9 ms on an entry and
   11.9 on an exit; `commanded → send` 10.9 and 11.0. The rest of the wall
   clock is the 172 ms venue round trip.
-- **Sub-10 ms happens, but it is not typical.** One order in sixty measured
-  9.1 ms end to end in software, reproduced at 9.2 ms in the run before. The
-  distribution is bimodal: a fast group at 9–17 ms when the intent lands while
-  the owner is idle, and a slow group at 20–40 ms when it lands mid-pass and
-  waits out the rest of it. Closing that gap means less work per pass, and
-  what is left per pass is cadence owned by safety: the software stop
-  evaluates every pass at ~20 Hz, and the reconcile runs at 0.5 s because
-  that is what venue position truth is aged against everywhere downstream.
-  Neither is a latency dial.
+- **Sub-10 ms happens, but it is not typical.** Measured on three separate
+  runs: 9.2 ms, 9.1 ms, 9.7 ms — roughly 1 order in 50. The distribution is
+  bimodal: a fast group at 9–17 ms when the intent lands while the owner is
+  idle, and a slow group at 20–40 ms when it lands mid-pass and waits out the
+  rest of it.
+- **Per-pass cost grows with the account's lifetime state, and nothing prunes
+  it. This is the finding that matters most.** Protections, orders, decisions
+  and executions all accumulate for the life of the account. Over one day of
+  latency testing the demo book went from 129 orders and 200 protections to
+  965 and 1,463, and **the reconcile's share of the owner loop went from 7.4%
+  to 21.1% with no code change at all** — the same code simply measures slower
+  on an older account. Two of the scans behind that are now indexed on the
+  committed state; the rest, in `account_strategy_state`, still walk the event
+  history every pass and are the next lever.
+- **Cross-session latency comparisons in this repo are confounded by that
+  growth.** A number measured on a fresh epoch is not comparable to the same
+  number a week later. Compare within a run, or reset the epoch first.
 - **What is left is two durable journal commits, and almost nothing else.**
   Sizing an order measures 0.02–0.1 ms. One commit measured 5–7 ms at best and
   9–25 ms typical: ~1.3 ms of that is the disk sync (this is a virtualized

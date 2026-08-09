@@ -104,6 +104,31 @@ edit STATE.md to match.
       machinery. Verified byte-identical over 60,000 generated structures
       (enums, IntEnum, `.item()` scalars, non-string and mixed keys, NaN/inf)
       and over every event in the live journal.
+    - **Third pass: the median is an ageing problem, not a scheduling one.**
+      Commits `b921ae6`, and the reverted `c9fbfbb`/`3837cfe`/`d3e8906`.
+      - **The mid-pass yield was tried twice and reverted twice.** Having the
+        pass go back to the top when an intent is waiting — where the order
+        path runs first — should have closed the bimodal gap. Yielding on the
+        bare arrival signal took the median from 25.7 ms to **54.1** (exits
+        23.6 → 101.9): the signal stays raised until read, so it had to be
+        consumed to stop the loop spinning on an unready request, and
+        consuming a wake-up for an intent that then did not get served left
+        nothing to wake on — the pass ended by sleeping the whole idle
+        interval. Asking the readiness gate first fixed that mechanism and
+        still measured worse (**32.3 ms**), because a pass that yields pays
+        its top-of-pass work twice. Removed.
+      - **What actually moves the median is the account getting older.** Over
+        this one day of testing the demo book went from 129 orders and 200
+        protections to 965 and 1,463, and the reconcile's share of the owner
+        loop went **7.4% → 21.1% with no code change**. Nothing prunes any of
+        it. The two native-protection lookups were filtering the whole
+        protection map per symbol per pass — 16% of the reconcile — and are
+        now indexed on the committed state object, taking the reconcile back
+        to 17.2%. The `account_strategy_state` scans behind the rest still
+        walk the event history every pass.
+      - **This confounds every cross-session latency number here.** The same
+        code measures slower on an older account, so a figure from a fresh
+        epoch is not comparable to one a week later.
     - **Not taken, and why.** Dropping `sort_keys` from `canonical_json` is
       provably redundant (0 mismatches in 40,000 cases) and worth 0.05 ms of
       0.51 — not worth touching a hash chain for. Thinning the capture store's
