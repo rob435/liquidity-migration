@@ -34,6 +34,7 @@ from liquidity_migration.account.account_kernel import (
     read_account_journal_head,
     verify_account_journal,
 )
+from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
 from liquidity_migration.core.deterministic_runtime import VirtualClock
@@ -4537,3 +4538,46 @@ def test_an_exit_always_sizes_off_the_live_price() -> None:
 
     assert target.reference_price == 10.0
     assert target.metadata["sizing_price_source"] == "live_market"
+
+
+def test_a_projection_touched_behind_this_process_is_still_repaired(tmp_path: Path) -> None:
+    """The cached tail must never let a changed file go unnoticed.
+
+    The continuity check reads the end of ``events.jsonl`` on every commit to
+    learn a hash this process just wrote. It is now skipped while a ``stat``
+    agrees on the size, which is what makes it cheap -- so the thing worth
+    testing is the case the cache must not swallow: someone else changed the
+    file underneath it. Any size the cache did not produce sends it back to the
+    read, and a mismatch there rebuilds the projection from the segments.
+    """
+
+    kernel = _kernel(tmp_path)
+
+    def commit(decision: str, qty: float) -> None:
+        kernel.submit_targets(
+            batch_id=f"batch-{decision}",
+            market_inputs=[_market()],
+            targets=[_target(decision=decision, key="continuous/main/BUSDT", sleeve="continuous", qty=qty)],
+            risk_snapshot=_snapshot(),
+            risk_policy=_policy(),
+            instrument_rules=_rules(),
+        )
+
+    commit("d1", -2.0)
+    path = account_journal_path(tmp_path)
+    healthy = path.read_bytes()
+    commit("d2", -3.0)
+    # Warm run: the projection keeps growing and stays a faithful rendering of
+    # the authoritative segments.
+    assert path.read_bytes().splitlines() == [
+        canonical_json(event.to_dict()) for event in read_account_journal(tmp_path, verify=True)
+    ]
+
+    # Now truncate it behind this process, exactly as an interrupted write would.
+    path.write_bytes(healthy)
+    commit("d3", -4.0)
+
+    rebuilt = path.read_bytes().splitlines()
+    authoritative = read_account_journal(tmp_path, verify=True)
+    assert rebuilt == [canonical_json(event.to_dict()) for event in authoritative]
+    assert len(authoritative) > 3

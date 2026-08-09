@@ -1123,7 +1123,9 @@ def _write_transaction(root: str | Path, events: Sequence[AccountEvent]) -> Path
 
 def _write_jsonl_projection(root: str | Path, events: Sequence[AccountEvent]) -> None:
     data = b"".join(canonical_json(event.to_dict()) + b"\n" for event in events)
-    _atomic_replace(account_journal_path(root), data)
+    path = account_journal_path(root)
+    _PROJECTION_TAIL.pop(str(path), None)
+    _atomic_replace(path, data)
 
 
 def _projection_last_event_hash(path: Path) -> str:
@@ -1153,6 +1155,32 @@ def _projection_last_event_hash(path: Path) -> str:
     return ""
 
 
+#: Per-projection ``(size_bytes, last_event_hash)`` as this process last left the
+#: file. The continuity check below is a seek-to-end plus a backward read on
+#: every commit -- twice on the path between a durable intent and the venue --
+#: purely to learn a hash this process just wrote. A ``stat`` that agrees on the
+#: size proves nothing else has appended since, and costs a hundredth of the
+#: read. Any disagreement, any miss, and the file is read exactly as before.
+_PROJECTION_TAIL: dict[str, tuple[int, str]] = {}
+
+
+def _projection_previous_hash(path: Path) -> str:
+    """The projection's last event hash, from a cached tail when it still holds."""
+
+    key = str(path)
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        _PROJECTION_TAIL.pop(key, None)
+        return ""
+    cached = _PROJECTION_TAIL.get(key)
+    if cached is not None and cached[0] == size:
+        return cached[1]
+    actual = _projection_last_event_hash(path)
+    _PROJECTION_TAIL[key] = (size, actual)
+    return actual
+
+
 def _append_jsonl_projection(
     root: str | Path,
     *,
@@ -1168,17 +1196,25 @@ def _append_jsonl_projection(
     if not appended:
         return
     path = account_journal_path(root)
-    actual_previous = _projection_last_event_hash(path) if path.exists() else ""
+    # One stat answers all three questions this used to ask separately: whether
+    # the file exists, whether the cached tail still describes it, and whether
+    # the parent needs syncing for a fresh inode.
+    actual_previous = _projection_previous_hash(path)
     if actual_previous != expected_previous_hash:
+        _PROJECTION_TAIL.pop(str(path), None)
         # Repair path only: reading the segments back here keeps the ordinary
         # append from carrying a copy of the whole prior event list.
         _write_jsonl_projection(root, read_account_journal(root, verify=True))
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     created = not path.exists()
+    if created:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    _PROJECTION_TAIL.pop(str(path), None)
     descriptor = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    written_bytes = 0
     try:
         os.fchmod(descriptor, 0o600)
+        start_size = os.fstat(descriptor).st_size
         for event in appended:
             data = canonical_json(event.to_dict()) + b"\n"
             view = memoryview(data)
@@ -1188,6 +1224,7 @@ def _append_jsonl_projection(
                 if written <= 0:
                     raise OSError("account journal projection append made no progress")
                 offset += written
+            written_bytes += len(data)
         # Deliberately not fsynced. This projection is rebuildable and is not
         # the commit point -- the transaction segment above it is, and that one
         # is still synced before anything acts on it. Syncing here cost a
@@ -1195,6 +1232,10 @@ def _append_jsonl_projection(
         # intent and the order reaching the venue, to protect a file that a
         # machine crash can already only leave torn and that the hash check at
         # the top of this function rebuilds when it is.
+        _PROJECTION_TAIL[str(path)] = (
+            start_size + written_bytes,
+            appended[-1].event_hash,
+        )
     finally:
         os.close(descriptor)
     if created:
