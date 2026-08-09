@@ -73,6 +73,46 @@ edit STATE.md to match.
     switch interval, which looked promising against a saturating stub decoder
     (63 ms → 49 ms), made things *worse* at the real 17% decode duty
     (16.8 → 18.9 ms). It was not shipped.
+  - **Second pass, after the above proved too early to stop.** Commits
+    `e954831`, `77a987d`, `5441be6`, `63e20ca`. Software path **22 ms → 25.7 ms
+    median but 11.6 ms → 9.1 ms best**, with the first orders measured entirely
+    under 10 ms (9.2 ms, then 9.1 ms in the next run, 1 in 60).
+    - **The WebSocket library was re-proving UTF-8 in Python.** A profile of
+      the ticker stream's own thread: 87.6% idle in select, and roughly a third
+      of what is left in `websocket-client`'s `_validate_utf8` and `_decode`,
+      against 0.6% in this repo's frame handler. Pure-Python byte loops holding
+      the GIL the order path needs. `skip_utf8_validation=True` took that
+      thread from 19.8% CPU to 14.4%; frames now arrive as bytes and go to
+      `json.loads`, which decodes UTF-8 strictly exactly as the library's own
+      decode did.
+    - **The order path rebuilt two things on every pass.** The authorized
+      native-breach flat set walked every protection ever recorded — 200 on the
+      demo book, growing all session — ahead of every request, at 24.5% of
+      order-path time (about 46% of everything that was not the network). And
+      the journal rebuilt its own directory paths from the root, through
+      `expanduser`, about fifteen times per order. Both are now remembered.
+    - **`recovered_rows` was replaced by the test it was approximating.** Any
+      pass that had applied fills skipped the warm feed entirely — 20.8% of
+      wall clock during live trading, on exactly the passes where orders flow.
+      A snapshot older than the fills cannot agree with the book they produced,
+      so the agreement check already detects it, and detects it precisely.
+      Blocking venue reads during trading: 20.8% → 6.5%, and what is left is
+      the genuine ~172 ms window after each fill.
+    - **`json_safe` got exact-type fast paths** — it is the hottest function on
+      the order path at 2,315 calls per order, and its general chain reached
+      `isinstance(value, Mapping)` on the `typing` alias, so every dict paid ABC
+      machinery. Verified byte-identical over 60,000 generated structures
+      (enums, IntEnum, `.item()` scalars, non-string and mixed keys, NaN/inf)
+      and over every event in the live journal.
+    - **Not taken, and why.** Dropping `sort_keys` from `canonical_json` is
+      provably redundant (0 mismatches in 40,000 cases) and worth 0.05 ms of
+      0.51 — not worth touching a hash chain for. Thinning the capture store's
+      per-record free-disk check (~1% of CPU) would weaken a fail-closed
+      control. And merging the two pre-wire commits, which would roughly halve
+      the software path, would make every crash between commit and send
+      non-retryable: the second commit is late *precisely* so an un-attempted
+      command can be safely retried and an attempted one cannot. That is an
+      owner decision, not a performance one.
 
 - **2026-08-09 — Three blocking venue reads leave the order path. Entry
   881 ms → 345 ms median, exit 286 ms → 277 ms.** Commits `bdc705b`,

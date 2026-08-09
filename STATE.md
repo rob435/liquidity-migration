@@ -69,11 +69,20 @@ match; never append history to this file.
   Entry was 881 ms and exit 286 ms before the blocking venue reads came off the
   path. Entries rest at the touch, so on a real book time-to-fill is queue
   economics.
-- **Our own software time — durable intent to bytes on the wire — is now
-  21 ms at the median and 11.6 ms at best.** Split: `durable → commanded`
-  22.1 ms median / 10.3 ms best on an entry and 10.4 / 5.0 on an exit;
-  `commanded → send` 12.3 / 7.1 and 10.6 / 6.6. It was 83.9 ms median to
-  command alone. The rest of the wall clock is the 172 ms venue round trip.
+- **Our own software time — durable intent to bytes on the wire — is 25.7 ms
+  at the median and 9.1 ms at best (n=60).** It was 83.9 ms median to command
+  alone. Split at the median: `durable → commanded` 17.9 ms on an entry and
+  11.9 on an exit; `commanded → send` 10.9 and 11.0. The rest of the wall
+  clock is the 172 ms venue round trip.
+- **Sub-10 ms happens, but it is not typical.** One order in sixty measured
+  9.1 ms end to end in software, reproduced at 9.2 ms in the run before. The
+  distribution is bimodal: a fast group at 9–17 ms when the intent lands while
+  the owner is idle, and a slow group at 20–40 ms when it lands mid-pass and
+  waits out the rest of it. Closing that gap means less work per pass, and
+  what is left per pass is cadence owned by safety: the software stop
+  evaluates every pass at ~20 Hz, and the reconcile runs at 0.5 s because
+  that is what venue position truth is aged against everywhere downstream.
+  Neither is a latency dial.
 - **What is left is two durable journal commits, and almost nothing else.**
   Sizing an order measures 0.02–0.1 ms. One commit measured 5–7 ms at best and
   9–25 ms typical: ~1.3 ms of that is the disk sync (this is a virtualized
@@ -89,14 +98,28 @@ match; never append history to this file.
   one pre-wire commit instead of two (blocked by the guard above), a faster
   CPU for the serialize-and-hash, or a disk whose sync is tens of
   microseconds rather than 1.3 ms.
-- **Blocking venue reads on the owner loop: 19.2% of wall clock → 1.3%.**
-  Idle went 73.3% → 82.3%. The one that mattered was `get_positions` at 18.55%,
-  read inline because the warm feed's snapshot was tested for being *newer than
-  the last report* rather than *fresh*; against a 500 ms cadence and a feed
-  that refreshes every ~420 ms it lost that test constantly. During trading the
-  reconcile still rises to ~17%, because a pass that applied fills re-reads
-  positions inline by design — that guard is the next lever and it is a
-  position-truth question, not a performance one.
+- **Blocking venue reads on the owner loop: 19.2% of wall clock → 1.3% idle,
+  6.5% during live trading.** Idle went 73.3% → 82.3%. The one that mattered
+  was `get_positions` at 18.55%, read inline because the warm feed's snapshot
+  was tested for being *newer than the last report* rather than *fresh*;
+  against a 500 ms cadence and a feed that refreshes every ~420 ms it lost that
+  test constantly. What remains during trading is the ~172 ms window after each
+  fill in which the warm snapshot legitimately disagrees with the book and the
+  pass confirms at the venue — that one is correctness, not waste.
+- **The order path no longer rebuilds things it can remember.** The authorized
+  native-breach flat set walked every protection the account has ever recorded
+  (200 on the demo book, growing all session) on every pass ahead of every
+  request — 24.5% of order-path time, about 46% of everything that was not the
+  network. It is cached on the committed state object, which a commit replaces
+  rather than mutates. The journal's own paths were rebuilt from the root, with
+  an `expanduser`, about fifteen times per order.
+- **The WebSocket library was re-proving UTF-8 in Python.** A profile of the
+  ticker stream's thread put roughly a third of its awake time in
+  `websocket-client`'s `_validate_utf8` and `_decode`, against 0.6% in this
+  repo's own frame handler — pure-Python byte loops holding the GIL the order
+  path needs. `skip_utf8_validation=True` cut that thread from 19.8% CPU to
+  14.4%. Frames now arrive as bytes and go straight to `json.loads`, which
+  decodes UTF-8 strictly and rejects a malformed frame exactly as before.
 - **That ~190 ms floor is geography, and it is now priced.** TCP connect to
   `api.bybit.com` is 7.2 ms and the TLS handshake 18.1 ms, but a full request is
   187.6 ms — so ~180 ms of every round trip is the Frankfurt CloudFront edge
