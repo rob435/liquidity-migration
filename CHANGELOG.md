@@ -187,6 +187,16 @@ edit STATE.md to match.
     entries measured 266 ms with exits at 251 ms. The median is held above it
     by loop scheduling: when the pass is mid-reconcile as the intent lands,
     `durable → commanded` runs 250–408 ms instead of 25–40 ms.
+  - **The owner can no longer be started without the ticker touch feed.**
+    Deleting the `--no-touch-feed` flag and the `ACCOUNT_TOUCH_FEED` wrapper
+    case removes the only configuration that made a cold entry wait ~790 ms.
+    The switch existed because the feed costs ~16% of one core; the A/B settled
+    that trade the other way, so keeping the loser reachable only left a way to
+    be slow by accident. Owner-directed: *"remove the slower version
+    permanently, strip it out."* The optional `touch_cache` on
+    `SequenceAwareMarketRecorder` stays, because the standalone bulk-capture
+    CLI records L2 and prices nothing — but no account owner can reach that
+    shape.
 
 - **2026-08-08 — A symbol no longer has to have a book before it can be
   priced.** Commit `a2db3c1`, deployed 22:26 UTC, both realms.
@@ -215,8 +225,9 @@ edit STATE.md to match.
     it off, because the loop is sleep-bound and the feed runs on its own
     thread. An earlier note in this entry claimed the loop went 69 → 80 ms
     because of the feed; the A/B disproves that, and the drift from 69 ms is
-    the journal growing. `ACCOUNT_TOUCH_FEED=0` turns the feed off with a unit
-    restart.
+    the journal growing. `ACCOUNT_TOUCH_FEED=0` turned the feed off with a unit
+    restart — **superseded 2026-08-09: that switch and the `--no-touch-feed`
+    flag behind it were deleted, so the variable now does nothing.**
   - **A symbol keeps its subscription for 10 minutes after its work clears**
     (`--symbol-warm-seconds`), so a repeat entry never re-warms; and a queue
     head no socket is carrying yet is priced by one REST tickers read rather

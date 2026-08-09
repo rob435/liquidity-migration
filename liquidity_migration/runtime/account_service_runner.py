@@ -766,16 +766,6 @@ def main(argv: list[str] | None = None) -> int:
     # subscribed forces a refresh on the next tick regardless of this.
     parser.add_argument("--symbol-refresh-seconds", type=float, default=5.0)
     parser.add_argument(
-        "--no-touch-feed",
-        dest="touch_feed",
-        action="store_false",
-        help=(
-            "Stop subscribing every candidate symbol's top of book. Without it "
-            "a target on a symbol the L2 stream does not already carry waits "
-            "for a book to arrive before it can be priced."
-        ),
-    )
-    parser.add_argument(
         "--producer-price-max-age-seconds",
         type=float,
         default=0.0,
@@ -1099,8 +1089,11 @@ def main(argv: list[str] | None = None) -> int:
     # naming a symbol the L2 stream has never carried is priceable at once
     # instead of waiting for a book. Measured on this host: 509 symbols cost
     # ~500 frames/s and ~16% of one core, nearly all of it the websocket
-    # library's own frame handling rather than parsing.
-    touch_cache = BybitTickerTouchCache() if args.touch_feed else None
+    # library's own frame handling rather than parsing -- against ~790 ms on
+    # every entry into a symbol the depth stream has not already warmed, which
+    # for a rotating universe is the ordinary case. There is no switch for it:
+    # an owner that cannot price a named symbol on demand is not an owner.
+    touch_cache = BybitTickerTouchCache()
     recorder = SequenceAwareMarketRecorder(
         args.capture_root,
         config=MarketCaptureConfig(
@@ -1116,20 +1109,15 @@ def main(argv: list[str] | None = None) -> int:
         include_public_trades=args.persist_raw_market,
         on_message=recorder_callback(recorder),
     )
-    touch_stream = (
-        BybitRawPublicMarketStream(
-            testnet=False,
-            topic_kind="tickers",
-            include_public_trades=False,
-            on_message=ticker_cache_callback(touch_cache),
-        )
-        if touch_cache is not None
-        else None
+    touch_stream = BybitRawPublicMarketStream(
+        testnet=False,
+        topic_kind="tickers",
+        include_public_trades=False,
+        on_message=ticker_cache_callback(touch_cache),
     )
     recorder.set_required_symbols(live_symbols)
     public_stream.start(live_symbols)
-    if touch_stream is not None:
-        touch_stream.start(symbols)
+    touch_stream.start(symbols)
     markout_observer = PostFillMarkoutObserver(
         kernel=kernel,
         recorder=recorder,
@@ -1473,8 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
             # reached when the gate already refuses, so it delays no order that
             # could otherwise have gone.
             if (
-                touch_cache is not None
-                and not market_readiness.ready
+                not market_readiness.ready
                 and "no_snapshot" in market_readiness.detail
                 and now - last_touch_rescue >= args.touch_rescue_seconds
             ):
@@ -2023,8 +2010,7 @@ def main(argv: list[str] | None = None) -> int:
         position_feed.close()
         execution_consumer.close()
         public_stream.close()
-        if touch_stream is not None:
-            touch_stream.close()
+        touch_stream.close()
         recorder.close()
         owner_lease.close()
 

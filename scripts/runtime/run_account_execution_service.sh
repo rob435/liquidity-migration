@@ -95,14 +95,6 @@ case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
     *) raw_market_args=(--no-persist-raw-market) ;;
 esac
 
-# Every candidate symbol's pushed top of book, so a target on a symbol the L2
-# stream does not carry is priceable at once. It costs ~16% of one core per
-# owner, so it is switchable without a code change.
-case "${ACCOUNT_TOUCH_FEED:-1}" in
-    0) touch_feed_args=(--no-touch-feed) ;;
-    *) touch_feed_args=() ;;
-esac
-
 # A notification channel never keeps the account owner down: misconfigured
 # Telegram degrades to no Telegram, and the owner still executes and protects.
 telegram_args=()
@@ -138,6 +130,5 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     --private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS" \
     "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
-    "${touch_feed_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     "${telegram_args[@]}"

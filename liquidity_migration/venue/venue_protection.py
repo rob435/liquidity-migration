@@ -102,19 +102,22 @@ def _native_protection_index(state: AccountState) -> dict[str, list[tuple[str, M
     with _NATIVE_INDEX_LOCK:
         if _NATIVE_INDEX_STATE is state:
             return _NATIVE_INDEX
-        index: dict[str, list[tuple[str, Mapping[str, Any]]]] | None = {}
+        index: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+        indexable = True
         for key, protection in state.protections.items():
             metadata = protection.get("metadata") or {}
             if not bool(metadata.get("native_exchange")):
                 continue
             symbol = str(metadata.get("symbol") or "").upper()
             if not symbol:
-                index = None
+                indexable = False
                 break
             index.setdefault(symbol, []).append((key, protection))
+        result = index if indexable else None
         _NATIVE_INDEX_STATE = state
-        _NATIVE_INDEX = index
-        return index
+        _NATIVE_INDEX = result
+        return result
+
 
 @dataclass(frozen=True, slots=True)
 class NativeProtectionBreach:

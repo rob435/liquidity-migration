@@ -26,10 +26,12 @@ match; never append history to this file.
   owner** (29.8% vs 15.5%), nearly all of it the websocket library's frame
   handling rather than parsing. It does **not** slow the owner loop: 76 ms on
   versus 77 ms off, because the loop is sleep-bound and the feed runs on its
-  own thread. `ACCOUNT_TOUCH_FEED=0` turns it off with a unit restart. A traded
-  symbol also keeps its subscription for 10 minutes after its work clears, and
-  a head no socket is carrying yet is priced by one REST read rather than
-  waiting.
+  own thread. **There is no switch for it.** The `--no-touch-feed` flag and the
+  `ACCOUNT_TOUCH_FEED` variable were deleted on 2026-08-09: the owner has one
+  market shape, and a slower alternate kept around for configurability is a way
+  to be slow by accident. A traded symbol also keeps its subscription for 10
+  minutes after its work clears, and a head no socket is carrying yet is priced
+  by one REST read rather than waiting.
 - **A ticker touch is a price, not a book.** Callers opt in per read; markout
   grading and raw capture still refuse anything but real L2; a decision priced
   from it records `book_source=bybit_ticker_touch`. Subscribed depth stays at
@@ -119,7 +121,7 @@ match; never append history to this file.
   | --- | --- | --- |
   | issue the two segment syncs concurrently, one directory sync for both | **2.0 ms** (5.08 → 3.07 median, 6.92 → 4.66 p90) | a cross-transaction durability barrier: `transact` would have to defer its directory sync and something must flush before the wire |
   | merge the two pre-wire commits | **~4.2 ms** | every crash between commit and send becomes non-retryable — the second commit is late *precisely* so an un-attempted command can be retried and an attempted one cannot |
-  | ~~drop the 509-symbol ticker feed~~ **not an option** | 2.1 ms, measured live with `ACCOUNT_TOUCH_FEED=0` (median 26.1 → 24.0) | ~790 ms on every cold entry (216 ms → 1002 ms), and carry trades a rotating universe so a cold symbol is the normal case for a new entry. Measured only to prove the median was not hiding behind it. The feed stays on. |
+  | ~~drop the 509-symbol ticker feed~~ **deleted from the menu and from the code** | 2.1 ms, measured live before the switch was removed (median 26.1 → 24.0) | ~790 ms on every cold entry (216 ms → 1002 ms), and carry trades a rotating universe so a cold symbol is the normal case for a new entry. Measured only to prove the median was not hiding behind it; the off-path is now gone, not merely defaulted off. |
   | a faster host CPU | **~7 ms** | hardware |
   | a disk whose sync is tens of µs, not 1.3 ms | **~4.5 ms** | hardware |
 
