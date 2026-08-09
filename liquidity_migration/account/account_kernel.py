@@ -1258,6 +1258,12 @@ class AccountJournal:
     ) -> None:
         self.root = Path(root).expanduser()
         self.account_id = account_id
+        # ``root`` is fixed for the life of this journal, so these are constants.
+        # They were rebuilt from it on every call -- each one a ``Path``
+        # construction plus ``expanduser`` -- and ``_storage_signature`` alone
+        # asks for them about fifteen times per order, ahead of the venue.
+        self._transactions_dir = account_transactions_path(self.root)
+        self._projection_path = account_journal_path(self.root)
         # Writers are serialized across processes by the transaction segments.
         # This lock protects the in-process cache as one immutable committed
         # snapshot; prospective state is installed only after the durable
@@ -1288,7 +1294,7 @@ class AccountJournal:
                 # change this directory is the transaction publishing below, so
                 # serve the prior cache until all fields advance together.
                 return self._cached_signature
-            transaction_dir = account_transactions_path(self.root)
+            transaction_dir = self._transactions_dir
             if transaction_dir.is_dir():
                 try:
                     mtime = transaction_dir.stat().st_mtime_ns
@@ -1303,7 +1309,7 @@ class AccountJournal:
                 paths = sorted(transaction_dir.glob("*.json"))
                 if paths:
                     return ("transactions", mtime, len(paths), paths[-1].name)
-            projection = account_journal_path(self.root)
+            projection = self._projection_path
             try:
                 stat = projection.stat()
             except OSError:
