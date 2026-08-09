@@ -1270,6 +1270,12 @@ class AccountJournal:
         # segment replace.
         self._cache_lock = threading.RLock()
         self._cached_events: list[AccountEvent] | None = None
+        # The immutable view handed to snapshot readers, and the list it was
+        # taken from. Rebuilding it per call copied every event in the account
+        # -- 16,059 of them on the demo book after a day of trading -- and
+        # every protection check and the order path ask for one.
+        self._cached_events_snapshot: tuple[AccountEvent, ...] | None = None
+        self._cached_events_snapshot_source: list[AccountEvent] | None = None
         self._cached_events_by_id: dict[str, AccountEvent] | None = None
         self._cached_signature: tuple[object, ...] | None = None
         self._cached_state: AccountState | None = None
@@ -1354,7 +1360,19 @@ class AccountJournal:
             events = self._cached_events
             if events is None:  # pragma: no cover - guarded by _state_ref
                 raise AccountJournalIntegrityError("account snapshot cache is unavailable")
-            return tuple(events), state
+            snapshot = self._cached_events_snapshot
+            # A commit either extends this list in place or replaces it, so the
+            # identity and the length together detect every change to it.
+            # Nothing ever truncates or rewrites an element.
+            if (
+                snapshot is None
+                or self._cached_events_snapshot_source is not events
+                or len(snapshot) != len(events)
+            ):
+                snapshot = tuple(events)
+                self._cached_events_snapshot = snapshot
+                self._cached_events_snapshot_source = events
+            return snapshot, state
 
     def replay(self) -> AccountState:
         with self._cache_lock:

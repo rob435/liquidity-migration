@@ -4581,3 +4581,43 @@ def test_a_projection_touched_behind_this_process_is_still_repaired(tmp_path: Pa
     authoritative = read_account_journal(tmp_path, verify=True)
     assert rebuilt == [canonical_json(event.to_dict()) for event in authoritative]
     assert len(authoritative) > 3
+
+
+def test_the_snapshot_view_is_reused_until_the_journal_moves(tmp_path: Path) -> None:
+    """Every protection check and the order path ask for one of these.
+
+    It used to copy the whole account into a fresh tuple each time -- 16,059
+    events on the demo book after a day of trading, and history is never
+    pruned, so the cost grew with the account's age. What must hold is that a
+    commit still produces a new view: a stale one would let a reader act on a
+    journal head that has moved.
+    """
+
+    kernel = _kernel(tmp_path)
+
+    def commit(decision: str, qty: float) -> None:
+        kernel.submit_targets(
+            batch_id=f"snapshot-{decision}",
+            market_inputs=[_market()],
+            targets=[_target(decision=decision, key="continuous/main/BUSDT", sleeve="continuous", qty=qty)],
+            risk_snapshot=_snapshot(),
+            risk_policy=_policy(),
+            instrument_rules=_rules(),
+        )
+
+    commit("d1", -2.0)
+    first_events, first_state = kernel.journal._snapshot_ref()
+    again_events, again_state = kernel.journal._snapshot_ref()
+
+    assert again_events is first_events, "an unchanged journal must not be recopied"
+    assert again_state is first_state
+
+    commit("d2", -3.0)
+    moved_events, moved_state = kernel.journal._snapshot_ref()
+
+    assert moved_events is not first_events, "a commit must produce a new view"
+    assert len(moved_events) > len(first_events)
+    assert moved_events[: len(first_events)] == first_events
+    # The view still describes one coherent head, which is what its readers check.
+    assert moved_state.events_applied == len(moved_events)
+    assert moved_state.rolling_state_hash == moved_events[-1].state_hash
