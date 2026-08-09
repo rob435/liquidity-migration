@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -960,9 +961,19 @@ def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
     assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner
 
 
-def _mainnet_harness(armed: str, preflight_status: int) -> str:
+def _mainnet_harness(
+    armed: str,
+    preflight_status: int,
+    *,
+    rules_file: str = "/fake/etc/venue-rules.json",
+    rule_age_status: int = 0,
+) -> str:
     """The real mainnet functions over stub systemctl/python, so behavior is exercised
     rather than pattern-matched. ``armed`` pre-seeds the cached switch state.
+
+    ``rules_file`` is the receipt the route env binds; point it at a real path to
+    exercise the renewal branch. ``rule_age_status`` is what the staleness probe
+    exits with -- 4 is the past-half-life reading the deploy must act on.
     """
 
     text = _read(DEPLOY)
@@ -971,6 +982,9 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         "set -u\n"
         f"PYTHON=fake_python\n"
         f"PREFLIGHT_STATUS={preflight_status}\n"
+        f"RULE_AGE_STATUS={rule_age_status}\n"
+        f"RULES_FILE={shlex.quote(rules_file)}\n"
+        "EXPECTED_COMMIT=00112233445566778899\n"
         'fail() { echo "fail:$*"; exit 9; }\n'
         "require_checkout() { :; }\n"
         "load_authorization() { :; }\n"
@@ -984,6 +998,7 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         "fake_python() {\n"
         '    printf "python:%s\\n" "$*"\n'
         '    case "$*" in *preflight*) return "$PREFLIGHT_STATUS" ;; esac\n'
+        '    case "$*" in "- $RULES_FILE") return "$RULE_AGE_STATUS" ;; esac\n'
         "    return 0\n"
         "}\n"
         'install() { printf "install:%s\\n" "$*"; }\n'
@@ -995,7 +1010,7 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         '    printf "load:%s\\n" "$*"\n'
         "    ACCOUNT_RISK_POLICY_FILE=/fake/etc/risk-policy.json\n"
         "    ACCOUNT_SYMBOLS_FILE=/fake/etc/candidate-universe.json\n"
-        "    ACCOUNT_DEMO_RULES_FILE=/fake/etc/venue-rules.json\n"
+        '    ACCOUNT_DEMO_RULES_FILE="$RULES_FILE"\n'
         "    BYBIT_REAL_API_KEY=fake-key\n"
         "    BYBIT_REAL_API_SECRET=fake-secret\n"
         "    return 0\n"
@@ -1011,6 +1026,85 @@ def _mainnet_harness(armed: str, preflight_status: int) -> str:
         ]
         + f"MAINNET_ARMED_STATE={armed}\n"
     )
+
+
+def test_mainnet_venue_rules_are_renewed_past_half_life(tmp_path: Path) -> None:
+    """A receipt frozen once and never renewed becomes a hard refusal to start.
+
+    The funded owner enforces the registered 168-hour ceiling and cannot be given
+    a larger one, so nothing about an existing file makes it usable. Freezing only
+    when the path is absent leaves the funded account one expiry away from an
+    owner that will not start with exposure already on the book.
+    """
+
+    rules_file = tmp_path / "venue-rules.json"
+    rules_file.write_text("{}", encoding="utf-8")
+
+    fresh = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _mainnet_harness("armed", 0, rules_file=str(rules_file), rule_age_status=0)
+            + "\nprovision_mainnet_prerequisites\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = fresh.stdout + fresh.stderr
+    assert fresh.returncode == 0, combined
+    assert "mainnet-venue-rule-plan path=reuse reason=fresh" in combined
+    # A fresh receipt is left exactly as it is: no venue read, no rebind.
+    assert "freeze_venue_instrument_rules.py" not in combined, combined
+
+    stale = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _mainnet_harness("armed", 0, rules_file=str(rules_file), rule_age_status=4)
+            + "\nprovision_mainnet_prerequisites\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = stale.stdout + stale.stderr
+    assert stale.returncode == 0, combined
+    assert "mainnet-venue-rule-plan path=freeze reason=refresh-due-past-half-life" in combined
+    # Renewal is a new artifact plus a rebind: the freeze refuses to overwrite,
+    # and an unbound receipt would leave the owner reading the expired one.
+    assert "freeze_venue_instrument_rules.py --realm mainnet" in combined, combined
+    refreshed = re.search(
+        r"--output (/var/lib/liquidity-migration/mainnet-venue-rule-receipts/\S+)",
+        combined,
+    )
+    assert refreshed is not None, combined
+    assert str(rules_file) != refreshed.group(1)
+    assert (
+        f"python:- /etc/liquidity-migration/account-execution-mainnet.env "
+        f"{refreshed.group(1)} /fake/etc/candidate-universe.json" in combined
+    ), combined
+    assert "mainnet-venue-rule-refresh-ok" in combined
+    # The renewal reads the venue; it never places an order, so it needs no
+    # stopped window and must not be gated behind one.
+    assert "probe_bybit_demo_rules.py" not in combined
+
+    # An unreadable or future-dated receipt is not an age question, and must not
+    # be answered by silently freezing over it.
+    for broken in (3, 5):
+        refused = subprocess.run(
+            [
+                "bash",
+                "-c",
+                _mainnet_harness(
+                    "armed", 0, rules_file=str(rules_file), rule_age_status=broken
+                )
+                + "\nprovision_mainnet_prerequisites\n",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        combined = refused.stdout + refused.stderr
+        assert refused.returncode != 0, combined
+        assert "fail:installed mainnet venue-rule receipt failed validation" in combined
 
 
 def test_mainnet_start_creates_roots_then_gates_on_preflight() -> None:

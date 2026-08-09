@@ -1307,7 +1307,110 @@ provision_mainnet_prerequisites() {
         lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
             --realm mainnet --symbols-file "$universe_file" --output "$rules_file" \
             || fail "mainnet venue-rules freeze failed"
+    else
+        refresh_stale_mainnet_venue_rules "$universe_file" "$rules_file"
     fi
+}
+
+# Frozen once is not frozen forever. The funded owner enforces the registered
+# 168-hour ceiling and cannot be given a larger one, so a receipt nothing
+# renews becomes a hard refusal to start with exposure already on the book.
+# Renew in the receipt's back half, the same policy the demo probe follows;
+# unlike that probe this places no orders, so it needs no stopped window.
+refresh_stale_mainnet_venue_rules() {
+    local universe_file="$1" rules_file="$2" status=0 refreshed receipt_dir
+    "$PYTHON" - "$rules_file" <<'PY' || status=$?
+import json
+import sys
+import time
+from pathlib import Path
+
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.ops.candidate_rule_coverage import (
+    REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
+)
+from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes
+
+# The demo classifier refuses a mainnet receipt outright -- it validates
+# through load_demo_rules_bytes, which requires environment=demo -- so the
+# same age question is asked here against the loader that does admit one.
+snapshot = read_stable_file(
+    Path(sys.argv[1]),
+    label="mainnet venue-rule receipt",
+    require_single_link=False,
+)
+load_venue_rules_bytes(snapshot.data, realm="mainnet", max_age_seconds=None)
+age_ns = time.time_ns() - int(json.loads(snapshot.data).get("verified_ts_ns") or 0)
+if age_ns < 0:
+    raise SystemExit(5)
+if age_ns > REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS * 1_000_000_000:
+    raise SystemExit(4)
+PY
+    case "$status" in
+        0) echo "mainnet-venue-rule-plan path=reuse reason=fresh"; return 0 ;;
+        4) echo "mainnet-venue-rule-plan path=freeze reason=refresh-due-past-half-life" ;;
+        *) fail "installed mainnet venue-rule receipt failed validation for a reason other than age" ;;
+    esac
+
+    # The freeze refuses to overwrite, so a renewal is a new artifact plus a
+    # rebind; the superseded receipt stays on disk as the evidence it is.
+    receipt_dir=/var/lib/liquidity-migration/mainnet-venue-rule-receipts
+    install -d -o root -g root -m 0700 "$receipt_dir"
+    refreshed="$receipt_dir/venue-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+    lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
+        --realm mainnet --symbols-file "$universe_file" --output "$refreshed" \
+        || fail "mainnet venue-rules refresh failed"
+
+    "$PYTHON" - "$MAINNET_ROUTE_ENV" "$refreshed" "$universe_file" <<'PY' \
+        || fail "mainnet venue-rule rebind of the account execution environment failed"
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.ops.candidate_rule_coverage import (
+    REGISTERED_MAX_RULE_AGE_SECONDS,
+    build_candidate_rule_coverage,
+)
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
+from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes
+
+path = Path(sys.argv[1])
+rules = Path(sys.argv[2]).resolve(strict=True)
+candidate = Path(sys.argv[3]).resolve(strict=True)
+load_venue_rules_bytes(
+    read_stable_file(
+        rules, label="mainnet venue instrument rules", require_single_link=False
+    ).data,
+    realm="mainnet",
+    max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
+)
+# One accepted rule per frozen symbol, or the owner starts against a universe
+# its rules do not cover.
+build_candidate_rule_coverage(candidate, rules, realm="mainnet")
+values = load_private_systemd_environment(path)
+values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
+descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        for key, value in sorted(values.items()):
+            handle.write(f"{key}={shlex.quote(value)}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+    printf 'mainnet-venue-rule-refresh-ok path=%s candidate=%s\n' "$refreshed" "$universe_file"
 }
 
 ensure_mainnet_state_roots() {
