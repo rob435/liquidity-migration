@@ -1036,6 +1036,14 @@ class BybitAccountFundingReconciler:
         self.overlap_ms = int(overlap_ms)
         self.health_max_age_floor_ns = int(health_max_age_floor_ns)
         self.query_interval_ns = int(query_interval_ns)
+        # Same contract as the position reconciler's: "an intent is already
+        # waiting". Funding recovery is paginated REST against a Frankfurt
+        # edge, so a due pass costs round trips an arriving order would queue
+        # behind. It is already gated to once a minute against a 24-hour
+        # overlap window, so standing aside for a few hundred milliseconds
+        # cannot miss a settlement -- it can only delay noticing one.
+        self.query_deferral: Callable[[], bool] | None = None
+        self._query_deferred_since_ns = 0
         self._last_query_ns: int | None = None
         self._next_query_start_ms: int | None = None
         self.last_report: AccountFundingReconciliationReport | None = None
@@ -1080,6 +1088,28 @@ class BybitAccountFundingReconciler:
             self._funding_index_tail_hash = events[-1].event_hash
         return self._funding_index
 
+    def _defer_query(self, now_ns: int) -> bool:
+        """Stand aside for a waiting intent, but never past the ceiling."""
+
+        deferral = self.query_deferral
+        if deferral is None:
+            self._query_deferred_since_ns = 0
+            return False
+        try:
+            waiting = bool(deferral())
+        except Exception:  # noqa: BLE001 - a broken hint never blocks recovery
+            waiting = False
+        if not waiting:
+            self._query_deferred_since_ns = 0
+            return False
+        if self._query_deferred_since_ns == 0:
+            self._query_deferred_since_ns = now_ns
+            return True
+        if now_ns - self._query_deferred_since_ns >= PENDING_ORDER_POLL_DEFERRAL_CEILING_NS:
+            self._query_deferred_since_ns = 0
+            return False
+        return True
+
     def reconcile_once(self) -> AccountFundingReconciliationReport:
         # AccountJournal caches a verified read and invalidates it on any
         # storage-signature change, so this does not re-read every segment.
@@ -1098,6 +1128,8 @@ class BybitAccountFundingReconciler:
             or observed_ns - self._last_query_ns >= self.query_interval_ns
             or (observed_ms // 3_600_000) != (self._last_query_ns // 1_000_000 // 3_600_000)
         )
+        if due and self._defer_query(observed_ns) and prior_report is not None:
+            due = False
         if not due and prior_report is not None:
             # Nothing was asked, so the recovered-through bound is carried
             # forward unchanged; only liveness advances.

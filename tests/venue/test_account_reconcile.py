@@ -21,6 +21,7 @@ from liquidity_migration.venue.account_reconcile import (
     POSITION_HEALTH_MAX_AGE_FLOOR_NS,
     VENUE_SNAPSHOT_CHECKPOINT_INTERVAL_NS,
     AccountReconciliationStaleError,
+    BybitAccountFundingReconciler,
     BybitAccountReconciler,
     VenuePositionFeed,
 )
@@ -1988,3 +1989,25 @@ def test_a_warm_position_snapshot_is_used_while_it_is_fresh_not_only_while_it_is
     reconciler.position_feed = _StubPositionFeed(rows, clock.wall_time_ns())
     _served, observed_ns = reconciler._venue_positions(recovered_rows=True)
     assert observed_ns == clock.wall_time_ns()
+
+
+def test_funding_recovery_also_stands_aside_for_a_waiting_intent() -> None:
+    """Paginated REST against a Frankfurt edge, on the owner's own thread.
+
+    It is gated to once a minute against a 24-hour overlap window, so standing
+    aside for a moment cannot miss a settlement -- only delay noticing one.
+    """
+
+    reconciler = BybitAccountFundingReconciler.__new__(BybitAccountFundingReconciler)
+    waiting = [True]
+    reconciler.query_deferral = lambda: waiting[0]
+    reconciler._query_deferred_since_ns = 0
+    now = 1_000_000_000_000
+
+    assert reconciler._defer_query(now) is True
+    assert reconciler._defer_query(now + 1_000_000_000) is True
+    # Bounded, exactly like the pending-order backstop.
+    assert reconciler._defer_query(now + PENDING_ORDER_POLL_DEFERRAL_CEILING_NS) is False
+
+    waiting[0] = False
+    assert reconciler._defer_query(now + PENDING_ORDER_POLL_DEFERRAL_CEILING_NS + 1) is False

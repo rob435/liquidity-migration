@@ -8,9 +8,7 @@ to :class:`AccountExecutionKernel`.
 
 from __future__ import annotations
 
-import logging
 import math
-import time
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Mapping, Protocol, Sequence
@@ -27,8 +25,6 @@ from liquidity_migration.account.account_contracts import (
 )
 from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.account.execution_adapters import KernelExecutionDriver
-
-_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +283,6 @@ class AccountKernelRuntime:
         require_strict_risk_reduction: bool = False,
         request_content_hash: str | None = None,
     ) -> AccountCycleResult:
-        _t_enter = time.perf_counter_ns()  # TEMPORARY latency instrumentation
         targets: list[DesiredTarget] = []
         for adapted in intents:
             symbol = adapted.intent.symbol.upper()
@@ -298,7 +293,6 @@ class AccountKernelRuntime:
             if rules is None:
                 raise ValueError(f"missing instrument rules for {symbol}")
             targets.append(adapted.adapter.desired_target(adapted.intent, market, rules))
-        _t_size = time.perf_counter_ns()  # TEMPORARY latency instrumentation
         result = self.kernel.submit_targets(
             batch_id=batch_id,
             market_inputs=tuple(market_inputs.values()),
@@ -311,22 +305,11 @@ class AccountKernelRuntime:
             require_strict_risk_reduction=require_strict_risk_reduction,
             request_content_hash=request_content_hash,
         )
-        _t_plan = time.perf_counter_ns()  # TEMPORARY latency instrumentation
         execution_events: tuple[AccountEvent, ...] = ()
         if result.accepted and result.commands and execution_adapter is not None:
             execution_events = self.driver.execute_batch(
                 result,
                 market_inputs=market_inputs,
                 adapter=execution_adapter,
-            )
-        # TEMPORARY latency instrumentation -- remove once the split is read.
-        if result.commands:
-            _t_exec = time.perf_counter_ns()
-            _logger.info(
-                "LATSPLIT size_us=%d plan_commit_us=%d execute_us=%d commands=%d",
-                (_t_size - _t_enter) // 1000,
-                (_t_plan - _t_size) // 1000,
-                (_t_exec - _t_plan) // 1000,
-                len(result.commands),
             )
         return AccountCycleResult(target_result=result, execution_events=execution_events)

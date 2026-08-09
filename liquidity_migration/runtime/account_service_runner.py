@@ -1428,6 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
     # venue. It stands aside while an intent is waiting rather than making it
     # queue behind up to ten round trips.
     reconciler.pending_poll_deferral = intent_watch.arrival_pending
+    funding_reconciler.query_deferral = intent_watch.arrival_pending
     try:
         while True:
             now = time.monotonic()
