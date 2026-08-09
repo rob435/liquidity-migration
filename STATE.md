@@ -72,13 +72,19 @@ match; never append history to this file.
   the three hand-placed LAUSDT rows (one regular, two conditional, all with no
   `orderLinkId`) alone, which is the designed behaviour for orders this book
   did not place.
-- **The owner stopped hand-trading the funded account on 2026-08-08.** This is
-  a live dependency, not a note: the execution adapter now keeps a symbol's
-  cached leverage when the symbol goes flat, which removes one ~190 ms round
-  trip before every fresh entry. If hand-trading resumes, pass
-  `--shared-leverage-authority` to the account owner and redeploy — otherwise
-  an entry can be sized against a leverage somebody else changed. A venue value
-  that contradicts the cache still drops it either way.
+- **Hand-trading of the funded account resumed, and the cached-leverage fast
+  path is off again as of 2026-08-09.** The owner reported setting leverage on
+  the account by hand, so this process is no longer its sole writer. The
+  mainnet owner unit now carries
+  `Environment=ACCOUNT_SHARED_LEVERAGE_AUTHORITY=1`, which passes
+  `--shared-leverage-authority`: a symbol that goes flat forgets its cached
+  leverage and its next entry pays one `set_leverage` round trip, measured at
+  188–194 ms. That is the cost of not sizing an entry against a leverage
+  somebody else changed, and it is the same behaviour the fleet had before
+  2026-08-08. Demo is unaffected — nothing else writes leverage there, the
+  variable is unset, and unset means off. A venue value that contradicts the
+  cache still drops it under either setting; that is what protects sizing and
+  it was never relaxed.
 - **End-to-end order latency, measured on demo (2026-08-09, n=16 cycles):**
   entry **276 ms median, 250 ms best**; exit **252 ms median, 228 ms best**.
   Entry was 881 ms and exit 286 ms before the blocking venue reads came off the

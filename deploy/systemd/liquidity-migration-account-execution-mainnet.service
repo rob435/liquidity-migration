@@ -24,6 +24,12 @@ EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
 Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=ACCOUNT_VENUE_REALM=mainnet
 Environment=CONFIRM_DEMO_ORDERS=1
+# The owner trades this account by hand and sets leverage on it, so this process
+# is not the sole writer of leverage: a flat symbol must forget its cached value
+# and re-assert it on the next entry. Costs one set_leverage round trip (~190 ms)
+# per fresh entry. Set after hand-set leverage was reported on 2026-08-09; drop
+# it back to 0 only when hand-trading stops again.
+Environment=ACCOUNT_SHARED_LEVERAGE_AUTHORITY=1
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-account-execution-mainnet.service main

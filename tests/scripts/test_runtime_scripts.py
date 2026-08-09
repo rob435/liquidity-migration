@@ -321,6 +321,32 @@ def test_owner_runner_degrades_rather_than_refusing_to_start() -> None:
     assert "--confirm-demo-orders" not in script
 
 
+def test_hand_traded_mainnet_owner_gives_up_the_cached_leverage_fast_path() -> None:
+    """The owner trades the funded account by hand and sets leverage on it, so
+    that owner is not the sole writer of leverage: a flat symbol must forget its
+    cached value and re-assert it on the next entry. The demo account has no
+    second hand on it and keeps the fast path.
+    """
+
+    script = _read("scripts/runtime/run_account_execution_service.sh")
+
+    # Unset means off, and the toggle never keeps the owner down.
+    assert 'ACCOUNT_SHARED_LEVERAGE_AUTHORITY="${ACCOUNT_SHARED_LEVERAGE_AUTHORITY:-0}"' in script
+    leverage = script[script.index('case "$ACCOUNT_SHARED_LEVERAGE_AUTHORITY"') :]
+    leverage = leverage[: leverage.index("esac")]
+    assert "--shared-leverage-authority" in leverage
+    assert "exit 2" not in leverage
+
+    # Reading the variable is worthless if the flag never reaches the runner.
+    assert '"${leverage_authority_args[@]}"' in script[script.index("\nexec ") :]
+
+    mainnet = _environment("liquidity-migration-account-execution-mainnet.service")
+    assert mainnet["ACCOUNT_SHARED_LEVERAGE_AUTHORITY"] == "1"
+    assert "ACCOUNT_SHARED_LEVERAGE_AUTHORITY" not in _environment(
+        "liquidity-migration-account-execution.service"
+    )
+
+
 def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
     """Two tri-state parsers with eight accepted spellings each, plus an
     EXECUTION_ENVIRONMENT x latch consistency matrix, only re-derived values the unit

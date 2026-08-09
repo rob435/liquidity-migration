@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-09 — Hand-trading resumed on the funded account, so the funded
+  owner gives back the cached-leverage fast path.** The owner reported setting
+  leverage by hand. That makes this process one of two writers of leverage on
+  the account, which is exactly the condition the fast path assumed away when
+  it was taken on 2026-08-08 (`960c17c`).
+  - **What changed.** `run_account_execution_service.sh` had no route for the
+    flag at all — `--shared-leverage-authority` existed in the Python runner
+    and in the adapter, and nothing on the host could reach it. It now reads
+    `ACCOUNT_SHARED_LEVERAGE_AUTHORITY`, unset meaning off, wired the same way
+    as the raw-market diagnostic dial; the mainnet owner unit sets it to 1.
+  - **What it costs.** A symbol that goes flat forgets its cached leverage, so
+    its next entry pays one `set_leverage` round trip, 188–194 ms measured. The
+    entry path therefore returns to roughly its pre-`960c17c` cost on a fresh
+    symbol. This is a deliberate trade of latency for correct sizing, not a
+    regression.
+  - **Scope.** Mainnet only. The demo account has no second hand on it, leaves
+    the variable unset, and keeps the fast path. A venue value that
+    *contradicts* the cache still drops it under either setting — that is what
+    protects sizing and it was not touched.
+  - **Deployed from a flat funded book.** `ops.sh flatten --environment
+    mainnet` reported `already_flat` (journal sequence 4958, no positions, no
+    orphans) immediately before the owner restart, so no exposure sat
+    unsupervised across it.
+
 - **2026-08-09 19:36 UTC — Deployed `d3c7b5c`. Both trading-rule receipts
   renewed; the funded one had no renewal path at all.** The demo watchdog
   warned that its receipt expired in 18 hours. Chasing it found a second

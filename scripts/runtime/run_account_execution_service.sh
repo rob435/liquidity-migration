@@ -19,6 +19,7 @@ MAX_DEMO_RULE_AGE_HOURS="${MAX_DEMO_RULE_AGE_HOURS:-168}"
 ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS:-30}"
 ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"
+ACCOUNT_SHARED_LEVERAGE_AUTHORITY="${ACCOUNT_SHARED_LEVERAGE_AUTHORITY:-0}"
 CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
 CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
@@ -95,6 +96,16 @@ case "$ACCOUNT_RAW_MARKET_PERSISTENCE" in
     *) raw_market_args=(--no-persist-raw-market) ;;
 esac
 
+# Set this when somebody else also changes leverage on the account -- the owner
+# trading the same account by hand. The adapter then drops a symbol's cached
+# leverage when the symbol goes flat, so the next entry re-asserts it and pays
+# one set_leverage round trip (~190 ms) rather than sizing against a leverage
+# this process did not set. Unset means off, as it has been since 2026-08-08.
+leverage_authority_args=()
+case "$ACCOUNT_SHARED_LEVERAGE_AUTHORITY" in
+    1) leverage_authority_args=(--shared-leverage-authority) ;;
+esac
+
 # A notification channel never keeps the account owner down: misconfigured
 # Telegram degrades to no Telegram, and the owner still executes and protects.
 telegram_args=()
@@ -130,5 +141,6 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     --private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS" \
     "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
+    "${leverage_authority_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     "${telegram_args[@]}"
