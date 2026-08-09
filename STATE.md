@@ -59,6 +59,13 @@ match; never append history to this file.
   it always had — it is pinned by a floor rather than derived from the cadence.
 - **The `-21 USDT` available margin on the funded account is the owner trading
   by hand and is read correctly**, not a fault.
+- **The funded owner is running again, up since 2026-08-09 09:50 UTC**, equity
+  398.48 USDT. It started degraded — bootstrap reconciliation refused because a
+  reconstructed-flat LAUSDT contradicted an authenticated venue size of
+  33,621.2 — and the degradation cleared on the first healthy pass. It leaves
+  the three hand-placed LAUSDT rows (one regular, two conditional, all with no
+  `orderLinkId`) alone, which is the designed behaviour for orders this book
+  did not place.
 - **The owner stopped hand-trading the funded account on 2026-08-08.** This is
   a live dependency, not a note: the execution adapter now keeps a symbol's
   cached leverage when the symbol goes flat, which removes one ~190 ms round
@@ -309,7 +316,15 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **No code is committed-but-undeployed**; the host runs the tip of `main`.
+- **The host is at `1802c2a`; `main` is two commits ahead, and neither changes
+  what the host does.** `fecd1e3` is documentation only, and `03a3b50` deletes
+  the ticker-feed off switch — a switch that is set nowhere on the host
+  (checked 2026-08-09 in `/etc/liquidity-migration/` and the unit files), so
+  the running owners already behave exactly as the new code does. They ship on
+  the next deploy. Installing cannot happen while the funded owner runs: with
+  real money armed and a `-mainnet` unit up, `resolve_stop_first` turns
+  stop-first off and `require_quiescent` refuses rather than stopping the
+  fleet. That is the owner's stop to make, not a deploy's.
   The host's `bybit-mainnet.env` carries
   the four new dial names (read
   directly 2026-08-06; the earlier retired-names warning was stale), and the
