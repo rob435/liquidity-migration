@@ -1394,3 +1394,55 @@ def test_native_stop_reduction_retains_pending_fee_and_funding_provenance(
     assert row["exit_ts_ms"] == 3_000
     assert row["cooldown_start_ts_ms"] == 3_000
     assert row["exit_reason"] == "native_protection_triggered"
+
+
+def test_the_anchor_memo_follows_the_snapshot_it_was_built_from(tmp_path: Path) -> None:
+    """The memo key is the identity this function already validates.
+
+    Without it, every call replayed the whole event history -- which is exactly
+    what the docstring says the snapshot form exists to avoid. History is never
+    pruned, so the cost grows with the account's age; on a demo book after a day
+    of trading this was the largest single item left in the reconcile.
+
+    What must hold is that a commit invalidates it. Both halves of the key move
+    when the journal head does.
+    """
+
+    import liquidity_migration.strategy.account_strategy_state as module
+
+    kernel = AccountExecutionKernel(tmp_path, account_id="demo")
+    _submit(kernel, batch="b1", qty=2.0, reason="entry")
+    events, state = kernel._snapshot_ref()
+
+    module._SNAPSHOT_ANCHOR_MEMO = None
+    first = component_execution_anchors_from_snapshot(events, state=state)
+    memo = module._SNAPSHOT_ANCHOR_MEMO
+    assert memo is not None and memo[0] == (state.events_applied, state.rolling_state_hash)
+
+    # Same snapshot: identical answer, served from the memo.
+    assert component_execution_anchors_from_snapshot(events, state=state) == first
+
+    # A commit moves the journal head, so the memo must not answer for it.
+    _submit(
+        kernel,
+        batch="b2",
+        qty=5.0,
+        reason="entry",
+        target_key="long/strategy/trade-2/BUSDT",
+        component_id="trade-2",
+    )
+    moved_events, moved_state = kernel._snapshot_ref()
+    assert (moved_state.events_applied, moved_state.rolling_state_hash) != memo[0]
+
+    moved = component_execution_anchors_from_snapshot(moved_events, state=moved_state)
+    assert {anchor.target_key for anchor in moved} > {anchor.target_key for anchor in first}, (
+        "a stale memo would still be answering for the previous snapshot"
+    )
+
+    # And the filtered forms are the filter applied to the same projection.
+    everything = component_execution_anchors_from_snapshot(moved_events, state=moved_state)
+    long_only = component_execution_anchors_from_snapshot(
+        moved_events, state=moved_state, sleeve="long"
+    )
+    assert long_only == tuple(a for a in everything if a.sleeve == "long")
+    assert long_only, "the fixture is a long sleeve; an empty filter proves nothing"

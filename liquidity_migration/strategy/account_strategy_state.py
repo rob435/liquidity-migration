@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -410,6 +411,13 @@ def canonical_component_execution_anchors(
     )
 
 
+#: The newest ``(events_applied, rolling_state_hash)`` projected, and its
+#: anchors in projection order. One entry: every caller asks about the current
+#: snapshot, and a commit invalidates it by moving both halves of the key.
+_SNAPSHOT_ANCHOR_LOCK = threading.Lock()
+_SNAPSHOT_ANCHOR_MEMO: tuple[tuple[int, str], tuple["CanonicalComponentExecutionAnchor", ...]] | None = None
+
+
 def component_execution_anchors_from_snapshot(
     events: Sequence[AccountEvent],
     *,
@@ -433,22 +441,47 @@ def component_execution_anchors_from_snapshot(
         or state.rolling_state_hash != event_snapshot[-1].state_hash
     ):
         raise RuntimeError("component anchor event/state snapshot is inconsistent")
-    accepted_batches = _accepted_batches(event_snapshot)
-    anchors = _component_execution_anchors_from_events(
-        event_snapshot,
-        state=state,
-        accepted_batches=accepted_batches,
-        tolerance=_latest_account_quantity_tolerance(event_snapshot),
-        batch_fill_index=_build_batch_fill_index(event_snapshot, state=state),
-    )
+    # The pair just validated is a complete identity for this projection, so it
+    # is also the right memo key: the same snapshot always yields the same
+    # anchors. Without it this replayed the whole event history on every call,
+    # which is what the docstring above says it exists to avoid -- and history
+    # is never pruned, so the cost grew with the account's age. Measured on a
+    # book after a day of trading it was the largest single item left in the
+    # reconcile. ``protection_engine`` already kept this memo for its own two
+    # call sites; the reconcile's path through ``venue_protection`` did not,
+    # and holding it here covers every caller.
+    #
+    # Sorting is part of the projection, not of the filter, so it is cached
+    # too. The filter runs per call over the ordered anchors, which preserves
+    # the original order exactly.
+    memo_key = (state.events_applied, state.rolling_state_hash)
+    global _SNAPSHOT_ANCHOR_MEMO
+    with _SNAPSHOT_ANCHOR_LOCK:
+        memo = _SNAPSHOT_ANCHOR_MEMO
+    if memo is not None and memo[0] == memo_key:
+        ordered = memo[1]
+    else:
+        accepted_batches = _accepted_batches(event_snapshot)
+        anchors = _component_execution_anchors_from_events(
+            event_snapshot,
+            state=state,
+            accepted_batches=accepted_batches,
+            tolerance=_latest_account_quantity_tolerance(event_snapshot),
+            batch_fill_index=_build_batch_fill_index(event_snapshot, state=state),
+        )
+        ordered = tuple(
+            sorted(
+                anchors.values(),
+                key=lambda item: (item.entry_target_sequence, item.target_key),
+            )
+        )
+        with _SNAPSHOT_ANCHOR_LOCK:
+            _SNAPSHOT_ANCHOR_MEMO = (memo_key, ordered)
     wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     return tuple(
         anchor
-        for anchor in sorted(
-            anchors.values(),
-            key=lambda item: (item.entry_target_sequence, item.target_key),
-        )
+        for anchor in ordered
         if (not wanted_sleeve or anchor.sleeve == wanted_sleeve)
         and (not wanted_strategies or anchor.strategy_id in wanted_strategies)
     )
