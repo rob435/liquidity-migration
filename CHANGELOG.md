@@ -16,6 +16,60 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-09 19:36 UTC — Deployed `d3c7b5c`. Both trading-rule receipts
+  renewed; the funded one had no renewal path at all.** The demo watchdog
+  warned that its receipt expired in 18 hours. Chasing it found a second
+  receipt expiring ten hours after that, which nothing watched and nothing
+  renewed.
+  - **The funded account's rules were frozen once, on 2026-08-03, and never
+    again.** `provision_mainnet_prerequisites` wrote
+    `account-execution-mainnet/venue-rules.json` only `if [ ! -f ... ]`, so
+    every later deploy skipped it. The demo receipt has been renewed by any
+    deploy past half its life since 2026-07-27; the funded one had no such
+    path. It would have expired 2026-08-10 21:55 UTC.
+  - **That is the receipt that cannot be waived.** `enforce_registered_ceiling`
+    is passed the mainnet flag, so the funded owner is held to 168 hours and
+    demo is not. With `Restart=always`, `RestartSec=2` and the restart limiter
+    now genuinely disabled (`b0870b1`), expiry turns any crash or reboot into
+    an endless two-second restart loop failing at rule loading — with exposure
+    on the book. Nothing pages on it: the age check in
+    `check_fleet_liveness.py` is gated on the demo scope, and the funded
+    receipt would fail the demo loader that check uses.
+  - **Fixed by renewing it in the receipt's back half**, the same policy the
+    demo probe follows. This one reads the venue's declared rules and places no
+    orders, so it needs no stopped window. The freeze refuses to overwrite, so
+    a renewal is a new artifact under
+    `/var/lib/liquidity-migration/mainnet-venue-rule-receipts/` plus a rebind of
+    `ACCOUNT_DEMO_RULES_FILE`; the superseded receipt stays as evidence. An
+    unreadable or future-dated receipt is not an age question and still fails
+    the deploy. The test drives the real function over stubs and fails against
+    the previous script, which did nothing when the file existed.
+  - **The rollout was tried first and aborted on its own gate.** `rollout`
+    proves the **demo** account flat — it loads the demo root and demo
+    credentials, and `mainnet_armed` only decides whether that proof is a hard
+    gate or a warning. The demo book held `LAUSDT` 1959, so the pre-stop proof
+    refused with the whole fleet still running and untouched. Its first phase
+    also verifies topology, which requires every sleeve-on producer up, so
+    there is no way to hold the book flat and pass topology at once.
+  - **`staged --stop-first --refresh-demo-rules` is the path that works** when
+    the book has to be quiet first, and it is what the operations guide already
+    names for a deploy that died inside rule maintenance. Producers stopped,
+    both books flattened (demo `LAUSDT` 1959 closed, journal 19142 → 19156;
+    funded already flat), then one deploy: demo probe 510 symbols in ~22 min,
+    funded freeze 509, both rebound, all nine units back active and enabled.
+  - **Receipts.** Demo `demo-rules-20260809T191337Z`, funded
+    `venue-rules-20260809T193602Z`, both verified 2026-08-09 and expiring
+    2026-08-16. The demo candidate universe grew 509 → 510, which is why the
+    plan was a full probe rather than a projection. Zero error-level lines on
+    any of the six services since; both liveness scopes report no active
+    alerts, and the demo watchdog prints `cleared: demo_rules_age`.
+  - **Left open, owner to decide:** nothing pages on funded rule age. Renewal
+    by deploy is now the only thing keeping it fresh, so a fleet that goes a
+    week without a deploy would reach expiry unwarned. Also unchanged: the
+    funded candidate universe is frozen only when absent, so it never grows —
+    which looks deliberate, since what the funded account may trade is a
+    trading decision rather than maintenance.
+
 - **2026-08-09 — The order path stops queueing behind the owner's own venue
   reads. Entry 345 ms → 276 ms median, exit 277 ms → 252 ms; our own software
   time 83.9 ms → 21 ms median, 11.6 ms best.** Commits `c94862d`, `9263a7e`,

@@ -9,12 +9,18 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-08)
+## Now (recorded 2026-08-09)
 
-- **Host runs `05f34c7`, whole fleet green**: all nine units
-  on/active/enabled, receipt `staged-ok commit=05f34c7 profile=operational`,
-  `verify-ok … mainnet=armed`. Zero error-level lines on the funded owner since
-  restart.
+- **Host runs `d3c7b5c`, whole fleet green**: all nine units
+  on/active/enabled, receipt `staged-ok commit=d3c7b5c profile=operational`,
+  `verify-ok … mainnet=armed`. Zero error-level lines on any of the six services
+  since the 19:36 UTC restart, and both liveness scopes report no active alerts.
+- **Both trading-rule receipts were renewed 2026-08-09 and expire 2026-08-16.**
+  Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
+  funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.
+  The demo candidate universe grew 509 → 510, which is why the deploy chose a
+  full probe over a projection. The funded universe is frozen only when absent
+  and still holds its own 509.
 - **No symbol waits for a book to be priced.** All 509 candidate symbols carry
   a pushed top of book (`tickers`), which is exactly what the order path reads;
   the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a
@@ -316,8 +322,8 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **No code change is committed-but-undeployed**; the host runs `b0870b1`,
-  deployed 2026-08-09 10:09 UTC, and anything on `main` after it is
+- **No code change is committed-but-undeployed**; the host runs `d3c7b5c`,
+  deployed 2026-08-09 19:36 UTC, and anything on `main` after it is
   documentation. Note that installing requires
   stopping the funded fleet: with real money armed and a `-mainnet` unit up,
   `resolve_stop_first` turns stop-first off and `require_quiescent` refuses
@@ -384,11 +390,20 @@ meets the venue's liquidation engine before the halt.
 - **A guarded rollout proves the account venue-flat**; since the 2026-08-03
   de-friction purge the proof binds on mainnet and is advisory off it. A
   failed verification is not permission to hand-start a partial fleet.
-- **Demo rule receipt freshness is a side effect of deploying, not a
-  deadline.** A rollout past half the age bound re-probes; only mainnet holds
-  the registered 168-hour ceiling. The watchdog warns in the final 24 hours
-  but refreshes nothing itself. The other registered startup ceilings (warmup
+- **Both trading-rule receipts are a side effect of deploying, not a
+  deadline.** Any deploy past half the 168-hour age bound renews them: the demo
+  receipt by the order-placing probe, and since 2026-08-09 the funded account's
+  receipt by the read-only instruments-info freeze, which places no orders and
+  needs no stopped window. Before that the funded receipt was frozen only when
+  its file was absent, so it never renewed at all — and only mainnet holds the
+  registered 168-hour ceiling as a hard one, so its expiry would have been an
+  owner that refuses to start. The other registered startup ceilings (warmup
   timeout, INVOCATION_ID, stray-order gate) also bind mainnet only.
+- **The watchdog watches only the demo receipt.** The age check is gated on the
+  demo scope ([`check_fleet_liveness.py`](scripts/runtime/check_fleet_liveness.py)),
+  and the funded receipt would fail the demo loader it uses, so nothing pages on
+  funded rule age. Renewal-by-deploy is now the only thing keeping it fresh.
+  Proposed, owner to decide.
 - **Unknown safety-critical state fails closed.**
 - **Deploy is one command from the primary checkout** (`scripts/ops.sh deploy
   staged|rollout`). The manual GitHub workflow exposes `rollout`, `install`,
