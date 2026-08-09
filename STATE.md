@@ -316,8 +316,9 @@ match; never append history to this file.
   `positionIdx 0` and the protection layer refuses nonzero-index rows, so
   enabling the venue's hedge mode would reject every fleet order. No startup
   check pins either mode — proposed, owner to decide.
-- **No code is committed-but-undeployed**; the host runs the tip of `main`,
-  `b0870b1`, deployed 2026-08-09 10:17 UTC. Note that installing requires
+- **No code change is committed-but-undeployed**; the host runs `b0870b1`,
+  deployed 2026-08-09 10:17 UTC, and anything on `main` after it is
+  documentation. Note that installing requires
   stopping the funded fleet: with real money armed and a `-mainnet` unit up,
   `resolve_stop_first` turns stop-first off and `require_quiescent` refuses
   unless `--stop-first` is passed explicitly.
