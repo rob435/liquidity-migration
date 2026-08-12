@@ -893,10 +893,23 @@ class KernelExecutionDriver:
         if len(eligible) < 2:
             return frozenset()
 
-        def check_freshness() -> None:
+        def fresh_only(
+            rows: list[tuple[int, OrderCommand, MarketInputRef]],
+        ) -> list[tuple[int, OrderCommand, MarketInputRef]]:
+            """Drop stale entries instead of aborting the whole batch.
+
+            The single path raises for a stale entry, which here would hold
+            every sibling — fresh exits included — hostage to one dead
+            command. Dropped commands fall to the single path, which still
+            raises for them after the batch's commands are served.
+            """
+
             now_ns = self.kernel.clock.wall_time_ns()
-            for _, command, _ in eligible:
+            fresh: list[tuple[int, OrderCommand, MarketInputRef]] = []
+            for row in rows:
+                command = row[1]
                 if command.reduce_only:
+                    fresh.append(row)
                     continue
                 if type(max_unsubmitted_age_ns) is not int or max_unsubmitted_age_ns <= 0:
                     raise ValueError(
@@ -908,15 +921,13 @@ class KernelExecutionDriver:
                     or now_ns < command.created_ts_ns
                     or now_ns - command.created_ts_ns > max_unsubmitted_age_ns
                 ):
-                    raise StaleUnsubmittedExposureCommand(
-                        "refusing to submit a stale exposure-increasing command: "
-                        f"command={command.command_id} "
-                        f"created_ts_ns={command.created_ts_ns} "
-                        f"now_ts_ns={now_ns} "
-                        f"max_age_ns={max_unsubmitted_age_ns}"
-                    )
+                    continue
+                fresh.append(row)
+            return fresh
 
-        check_freshness()
+        eligible = fresh_only(eligible)
+        if len(eligible) < 2:
+            return frozenset()
         handled: set[str] = set()
         remaining: list[tuple[int, OrderCommand, MarketInputRef]] = []
         prepare_submission = getattr(adapter, "prepare_submission", None)
@@ -931,14 +942,14 @@ class KernelExecutionDriver:
                     handled.add(command.command_id)
                     continue
             remaining.append((command_index, command, market))
+        # Preparation was provider round trips (leverage negotiation), so
+        # recheck freshness at the exposure boundary, exactly as the single
+        # path does.
+        remaining = fresh_only(remaining)
         if len(remaining) < 2:
             # Too few left to be worth a batch request; the single path,
             # which already owns one-command semantics, takes them.
             return frozenset(handled)
-        # Preparation was provider round trips (leverage negotiation), so
-        # recheck freshness at the exposure boundary, exactly as the single
-        # path does.
-        check_freshness()
         try:
             self.kernel.record_submission_attempt_batch(
                 claims=tuple(
@@ -955,7 +966,6 @@ class KernelExecutionDriver:
         self.kernel.journal.barrier()
         reduces = [row for row in remaining if row[1].reduce_only]
         entries = [row for row in remaining if not row[1].reduce_only]
-        by_command: dict[str, list[ExecutionObservation]] = {}
         for group in (reduces, entries):
             for chunk_start in range(0, len(group), 20):
                 chunk = group[chunk_start : chunk_start + 20]
@@ -964,16 +974,22 @@ class KernelExecutionDriver:
                 observations = self._normalize_observations(
                     submit_batch([(command, market) for _, command, market in chunk])
                 )
+                by_command: dict[str, list[ExecutionObservation]] = {}
                 for observation in observations:
                     by_command.setdefault(observation.command_id, []).append(observation)
-        for command_index, command, _ in remaining:
-            handled.add(command.command_id)
-            normalized = tuple(by_command.get(command.command_id, ()))
-            if normalized:
-                dispatch(command_index, command, normalized)
-            # A command with no observations had an unknown individual
-            # outcome: it stays claimed and the reconciler's orderLinkId
-            # probes resolve it, exactly like a lost single-order answer.
+                # Dispatch this chunk's outcomes before the next chunk's
+                # venue round trip: a later failure must not discard acks
+                # whose side effects (quote registration, stop verification)
+                # already ran inside the adapter.
+                for command_index, command, _ in chunk:
+                    handled.add(command.command_id)
+                    normalized = tuple(by_command.get(command.command_id, ()))
+                    if normalized:
+                        dispatch(command_index, command, normalized)
+                    # A command with no observations had an unknown
+                    # individual outcome: it stays claimed and the
+                    # reconciler's orderLinkId probes resolve it, exactly
+                    # like a lost single-order answer.
         return frozenset(handled)
 
     @staticmethod

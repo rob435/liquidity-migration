@@ -1676,6 +1676,24 @@ def test_is_duplicate_order_link_matches_documented_code_and_both_wordings() -> 
         "Bybit place_order failed: {'retCode': 110089, 'retMsg': 'Exceeds the maximum risk limit level'}"
     )
     assert not bybit._is_duplicate_order_link("retCode 110007 insufficient balance")
+    # Echoed request bodies must never classify: a pybit reject ends with the
+    # whole order body, so the digits can be a BTC stop price and
+    # 'orderLinkId' appears in every reject text.
+    assert not bybit._is_duplicate_order_link(
+        "Bybit place_order failed: (ErrCode: 110007) insufficient balance. "
+        "Request → POST /v5/order/create: {'stopLoss': '110072.5', 'orderLinkId': 'abc'}"
+    )
+    assert not bybit._is_duplicate_order_link(
+        "Bybit place_order failed: (ErrCode: 110007) no position exists to reduce. "
+        "Request → POST /v5/order/create: {'orderLinkId': 'abc'}"
+    )
+    assert bybit._is_duplicate_order_link(
+        "Bybit place_order failed: (ErrCode: 110072) OrderLinkedID is duplicate. "
+        "Request → POST /v5/order/create: {'orderLinkId': 'abc'}"
+    )
+    # Batch rows classify by their own code, as a payload, not by digits.
+    assert bybit._is_duplicate_order_link({"retCode": 110072, "retMsg": ""})
+    assert not bybit._is_duplicate_order_link({"retCode": 110007, "retMsg": "insufficient"})
 
 
 def test_place_orders_batch_parses_rows_and_refuses_unmapped_responses(

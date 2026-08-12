@@ -89,18 +89,25 @@ replay. Implementation: [`account_kernel.py`](../liquidity_migration/account/acc
 **isolated** committed state (general callers get a deep copy; only kernel-owned trusted
 read-only builders share the reducer's prospective copy — a builder that mutates what it is
 handed corrupts persisted event and state hashes), validates and reduces every proposed
-event, writes one immutable transaction segment by atomic replacement and fsync, then
-publishes every in-process cache field together. A crash exposes the prior segment set or
-the whole new one — never half a target batch. Between segment replace and cache
-publication, in-process readers are deliberately held on the prior coherent cache by
+event, writes one immutable transaction segment by atomic replacement, then publishes
+every in-process cache field together. A crash exposes the prior segment set or the whole
+new one — never half a target batch. Since the write-behind default (branch
+`engine/fast-order-path`), the rename is the visibility point and the segment's disk
+syncs run on one background flusher thread in strict commit order; the order path makes
+them durable with one `journal.barrier()` between the durable attempt claim and the venue
+send, so nothing reaches the venue before its plan and claim are power-loss durable.
+`ACCOUNT_JOURNAL_WRITE_BEHIND=0` restores inline fsyncs per commit; ops tools and
+research code stay synchronous writers and defensively sync the newest segments when a
+write-behind owner's marker is present. Between segment replace and cache publication,
+in-process readers are deliberately held on the prior coherent cache by
 `_local_transaction_publish_in_progress`: a reader that instead re-stat'ed the changed
 directory and treated the new segment as an external commit would replay the whole
 immutable history while holding `_cache_lock`, stalling the writer that still owns the
 cross-process lock. Never add a cache-refresh or `_storage_signature` shortcut that re-reads
 during a local commit window. A failed publication clears the guard in a `finally`, so the
-next reader reconstructs the already-durable segments rather than hiding a committed
-transaction. The JSONL projection is written after the guard clears; a projection-write
-failure cannot roll back or replace the committed transaction.
+next reader reconstructs the segments rather than hiding a committed transaction. The
+JSONL projection is written after the guard clears (by the flusher, in write-behind mode);
+a projection-write failure cannot roll back or replace the committed transaction.
 
 Where segments exist, readers ignore the projection as an authority source. A non-empty
 `events.jsonl` with no segments is rejected, never migrated — "account journal has

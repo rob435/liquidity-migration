@@ -10,7 +10,11 @@ from liquidity_migration.account.account_contracts import (
     MarketInputRef,
     OrderCommand,
 )
-from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
+from liquidity_migration.marketdata.bybit_errors import (
+    BybitRequestRejected,
+    BybitSubmissionUncertain,
+    is_transient_venue_fault,
+)
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.execution_adapters import ExecutionObservation, ExecutionObservationType
@@ -498,9 +502,32 @@ class BybitDemoExecutionAdapter:
             )
 
         send_ts_ns = self.clock.wall_time_ns()
-        rows = self.client.place_orders_batch([params for _, _, params, _, _, _ in prepared])
+        try:
+            rows = self.client.place_orders_batch(
+                [params for _, _, params, _, _, _ in prepared]
+            )
+        except BybitRequestRejected:
+            # The batch envelope itself was refused — per the venue contract
+            # no rows were created, and if any were, each row's orderLinkId
+            # makes the resend below idempotent (duplicate-link probe). A
+            # broken batch endpoint therefore costs latency, never orders:
+            # degrade to the sequential single-order path.
+            observations = []
+            for command, market_input, params, quote_price, clip_qty, protection in prepared:
+                observation = self._place_single_row(
+                    command,
+                    market_input,
+                    params,
+                    send_ts_ns=send_ts_ns,
+                    quote_price=quote_price,
+                    clip_qty=clip_qty,
+                    entry_protection_metadata=protection,
+                )
+                if observation is not None:
+                    observations.append(observation)
+            return tuple(observations)
 
-        observations: list[ExecutionObservation] = []
+        observations = []
         for (command, market_input, _, quote_price, clip_qty, protection), row in zip(
             prepared, rows
         ):
@@ -520,41 +547,30 @@ class BybitDemoExecutionAdapter:
                     )
                 )
                 continue
+            if is_transient_venue_fault(
+                {"retCode": row_code, "retMsg": row.get("_row_msg", "")}
+            ):
+                # "Not now" is not "no": a timed-out row's order may still
+                # exist at the venue. Emit nothing — the command stays
+                # claimed and the orderLinkId probe ladder resolves it,
+                # exactly as the single path does for an uncertain answer.
+                continue
             if quote_price is not None:
                 # A clean venue reject of the limit row leaves no order under
                 # this link id, so the market order the fleet always sent is
                 # still available and still protected.
-                try:
-                    fallback = self.client.place_order(**self._order_params(command))
-                except BybitRequestRejected as exc:
-                    observations.append(
-                        self._batch_reject_ack(
-                            command,
-                            error_type=type(exc).__name__,
-                            error=str(exc)[:500],
-                            send_ts_ns=send_ts_ns,
-                            execution_style="market_after_quote_reject",
-                            entry_protection_metadata=protection,
-                        )
-                    )
-                    continue
-                except BybitSubmissionUncertain:
-                    # This one command's outcome is unknown; it stays claimed
-                    # and unresolved for the probe ladder while the rest of
-                    # the batch keeps flowing.
-                    continue
-                observations.append(
-                    self._batch_success_ack(
-                        command,
-                        market_input,
-                        fallback,
-                        send_ts_ns=send_ts_ns,
-                        execution_style="market_after_quote_reject",
-                        quote_price=None,
-                        clip_qty=None,
-                        entry_protection_metadata=protection,
-                    )
+                observation = self._place_single_row(
+                    command,
+                    market_input,
+                    self._order_params(command),
+                    send_ts_ns=send_ts_ns,
+                    quote_price=None,
+                    clip_qty=None,
+                    entry_protection_metadata=protection,
+                    execution_style="market_after_quote_reject",
                 )
+                if observation is not None:
+                    observations.append(observation)
                 continue
             observations.append(
                 self._batch_reject_ack(
@@ -567,6 +583,60 @@ class BybitDemoExecutionAdapter:
                 )
             )
         return tuple(observations)
+
+    def _place_single_row(
+        self,
+        command: OrderCommand,
+        market_input: MarketInputRef,
+        params: Mapping[str, Any],
+        *,
+        send_ts_ns: int,
+        quote_price: str | None,
+        clip_qty: str | None,
+        entry_protection_metadata: Mapping[str, Any],
+        execution_style: str | None = None,
+    ) -> ExecutionObservation | None:
+        """One batch row placed individually, keeping batch-row semantics.
+
+        Returns None when the outcome is unknown: the command stays claimed
+        for the probe ladder rather than aborting its siblings.
+        """
+
+        style = execution_style or ("resting_quote" if quote_price is not None else "market")
+        try:
+            result = self.client.place_order(**dict(params))
+        except BybitRequestRejected as exc:
+            if quote_price is not None:
+                return self._place_single_row(
+                    command,
+                    market_input,
+                    self._order_params(command),
+                    send_ts_ns=send_ts_ns,
+                    quote_price=None,
+                    clip_qty=None,
+                    entry_protection_metadata=entry_protection_metadata,
+                    execution_style="market_after_quote_reject",
+                )
+            return self._batch_reject_ack(
+                command,
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+                send_ts_ns=send_ts_ns,
+                execution_style=style,
+                entry_protection_metadata=entry_protection_metadata,
+            )
+        except BybitSubmissionUncertain:
+            return None
+        return self._batch_success_ack(
+            command,
+            market_input,
+            result,
+            send_ts_ns=send_ts_ns,
+            execution_style=style,
+            quote_price=quote_price,
+            clip_qty=clip_qty,
+            entry_protection_metadata=entry_protection_metadata,
+        )
 
     def _batch_success_ack(
         self,

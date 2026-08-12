@@ -34,6 +34,7 @@ from liquidity_migration.account.execution_adapters import (
     OrderCommand,
 )
 from liquidity_migration.core.deterministic_runtime import VirtualClock
+from liquidity_migration.marketdata.bybit_errors import BybitSubmissionUncertain
 from liquidity_migration.venue.bybit_execution_adapter import BybitDemoExecutionAdapter
 
 
@@ -116,11 +117,17 @@ class _BatchAdapter:
     submission_outcome_can_be_ambiguous = True
     max_unsubmitted_exposure_age_ns = 5_000_000_000
 
-    def __init__(self, *, silent_command_ids: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        silent_command_ids: frozenset[str] = frozenset(),
+        fail_batch_call: int = 0,
+    ) -> None:
         self.batch_calls: list[list[str]] = []
         self.single_calls: list[str] = []
         self.ordering: list[str] = []
         self.silent_command_ids = silent_command_ids
+        self.fail_batch_call = fail_batch_call
 
     def prepare_submission(self, command, market):  # noqa: ANN001
         return ()
@@ -136,6 +143,8 @@ class _BatchAdapter:
     def submit_prepared_batch(self, items):  # noqa: ANN001
         self.ordering.append("send")
         self.batch_calls.append([command.command_id for command, _ in items])
+        if self.fail_batch_call and len(self.batch_calls) == self.fail_batch_call:
+            raise BybitSubmissionUncertain("injected batch transport failure")
         return tuple(
             self._ack(command)
             for command, _ in items
@@ -308,6 +317,149 @@ def test_adapter_batch_maps_rows_to_acks_and_definite_rejects(tmp_path: Path) ->
     # A refused create forgets the cached leverage so the next entry
     # re-asserts it — same contract as the single path.
     assert "BUSDT" not in adapter._venue_leverage
+
+
+def test_stale_entries_are_excluded_before_any_claim(tmp_path: Path) -> None:
+    """A stale entry falls out of the batch instead of aborting siblings.
+
+    Nothing is claimed for it by the batch path, and the single path still
+    raises for it — the outer refusal semantics are unchanged."""
+
+    kernel = _kernel(tmp_path)
+    result = _chunked_entry_result(kernel)
+    # Age the whole batch past the adapter's 5s unsubmitted-exposure bound.
+    kernel.clock.advance_to_wall_ns(kernel.clock.wall_time_ns() + 10_000_000_000)
+    adapter = _BatchAdapter()
+
+    from liquidity_migration.account.execution_adapters import (
+        StaleUnsubmittedExposureCommand,
+    )
+
+    with pytest.raises(StaleUnsubmittedExposureCommand):
+        KernelExecutionDriver(kernel).execute_batch(
+            result,
+            market_inputs={"BUSDT": _market()},
+            adapter=adapter,
+        )
+    # The batch path never engaged and never claimed an attempt.
+    assert adapter.batch_calls == []
+    state = kernel.state()
+    for command in result.commands:
+        assert state.orders[command.command_id].submission_attempts == 0
+
+
+def test_mid_chunk_failure_keeps_earlier_chunk_outcomes(tmp_path: Path) -> None:
+    """Chunk outcomes dispatch as they land: a later chunk's failure cannot
+    discard acks whose side effects already ran."""
+
+    kernel = _kernel(tmp_path)
+    result = _chunked_entry_result(kernel, qty=42.0)
+    assert len(result.commands) == 21  # chunks of 20 + 1
+    adapter = _BatchAdapter(fail_batch_call=2)
+
+    import pytest as _pytest
+
+    from liquidity_migration.marketdata.bybit_errors import BybitSubmissionUncertain
+
+    with _pytest.raises(BybitSubmissionUncertain):
+        KernelExecutionDriver(kernel).execute_batch(
+            result,
+            market_inputs={"BUSDT": _market()},
+            adapter=adapter,
+        )
+    assert [len(call) for call in adapter.batch_calls] == [20, 1]
+    state = kernel.state()
+    first_chunk = {command_id for command_id in adapter.batch_calls[0]}
+    for command in result.commands:
+        order = state.orders[command.command_id]
+        assert order.submission_attempts == 1
+        if command.command_id in first_chunk:
+            assert order.status == "acknowledged"
+        else:
+            # The failed chunk's command stays claimed for the probe ladder.
+            assert order.status == "commanded"
+
+
+def test_transient_row_code_stays_claimed_for_the_probe_ladder(tmp_path: Path) -> None:
+    """A "not now" row (timeout, busy engine) must not terminalize: the order
+    may still exist at the venue. The command emits nothing and the probe
+    ladder resolves it — the recorded incident where a busy matching engine
+    terminalized a close whose stop had fired must stay impossible."""
+
+    kernel = _kernel(tmp_path)
+    result = _chunked_entry_result(kernel)
+    commands = result.commands
+
+    class DemoClient:
+        demo = True
+
+        def place_orders_batch(self, rows):  # noqa: ANN001
+            merged = []
+            for index, row in enumerate(rows):
+                if index == 1:
+                    merged.append({"_row_code": 170146, "_row_msg": "order creation timeout"})
+                    continue
+                merged.append(
+                    {
+                        "orderId": f"venue-{index}",
+                        "orderLinkId": row["orderLinkId"],
+                        "_row_code": 0,
+                        "_row_msg": "OK",
+                    }
+                )
+            return merged
+
+    adapter = BybitDemoExecutionAdapter(
+        DemoClient(),
+        clock=VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=50),
+    )
+    observations = adapter.submit_prepared_batch(
+        [(command, _market()) for command in commands]
+    )
+    observed_ids = {observation.command_id for observation in observations}
+    assert commands[1].command_id not in observed_ids
+    assert all(observation.accepted for observation in observations)
+    assert len(observations) == 2
+
+
+def test_top_level_batch_reject_degrades_to_sequential_singles(tmp_path: Path) -> None:
+    """A refused batch envelope costs latency, never orders: every row is
+    placed individually under its own orderLinkId, which keeps the resend
+    idempotent even if the venue had accepted rows despite the reject."""
+
+    from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
+
+    kernel = _kernel(tmp_path)
+    result = _chunked_entry_result(kernel)
+    commands = result.commands
+
+    class DemoClient:
+        demo = True
+
+        def __init__(self) -> None:
+            self.single_orders: list[dict] = []
+
+        def place_orders_batch(self, rows):  # noqa: ANN001
+            raise BybitRequestRejected("Bybit place_batch_order failed: bad envelope")
+
+        def place_order(self, **params):  # noqa: ANN003
+            self.single_orders.append(dict(params))
+            return {"orderId": f"venue-{len(self.single_orders)}", "_response_time_ms": "2000"}
+
+    client = DemoClient()
+    adapter = BybitDemoExecutionAdapter(
+        client,
+        clock=VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=50),
+    )
+    observations = adapter.submit_prepared_batch(
+        [(command, _market()) for command in commands]
+    )
+    assert len(client.single_orders) == 3
+    assert [order["orderLinkId"] for order in client.single_orders] == [
+        command.command_id for command in commands
+    ]
+    assert all(observation.accepted for observation in observations)
+    assert len(observations) == 3
 
 
 # The BybitPrivateClient-level batch parsing tests live in

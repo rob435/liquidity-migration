@@ -354,7 +354,7 @@ class BybitPrivateClient:
             category=self.category,
             request=[dict(row) for row in rows],
         )
-        result_rows = payload.get("result", {}).get("list") or []
+        result_rows = (payload.get("result") or {}).get("list") or []
         status_rows = (payload.get("retExtInfo") or {}).get("list") or []
         if len(result_rows) != len(rows) or len(status_rows) != len(rows):
             # The two response lists are index-aligned with the request by
@@ -374,7 +374,9 @@ class BybitPrivateClient:
             row["_row_msg"] = message
             if response_time_ms is not None:
                 row["_response_time_ms"] = response_time_ms
-            if code not in (0, None) and _is_duplicate_order_link(f"{code} {message}"):
+            if code not in (0, None) and _is_duplicate_order_link(
+                {"retCode": code, "retMsg": message}
+            ):
                 existing = self._lookup_order_by_link(
                     symbol=str(request_row.get("symbol") or "") or None,
                     order_link_id=str(request_row["orderLinkId"]),
@@ -957,16 +959,23 @@ def _is_duplicate_order_link(value: Any) -> bool:
     """True for Bybit's duplicate-orderLinkId reject.
 
     The official error table lists 110072 ("OrderLinkedID is duplicate");
-    traffic has also carried an "orderLinkID exists" wording. Matched on the
-    documented code plus message text covering both wordings — and nothing
-    else. A bare code with no duplicate wording must NOT classify: 110089 in
-    particular is documented as "Exceeds the maximum risk limit level", and
-    classifying a risk-limit refusal as a maybe-duplicate turned a definite
-    reject into an uncertain outcome that wedged the command."""
-    text = str(value).lower()
-    if "110072" in text:
+    traffic has also carried an "orderLinkID exists" wording. Never a bare
+    digit or fragment scan: a pybit reject echoes the whole request body, so
+    ``110072`` can be a BTC stop price and ``orderLinkId`` appears in every
+    reject text. The code must render as the venue's own ret code
+    (``renders_ret_code``) and the wording must be the venue's message
+    phrase. A code with no duplicate meaning must NOT classify: 110089 is
+    documented as a risk-limit refusal, and classifying it as a
+    maybe-duplicate turned a definite reject into an uncertain outcome that
+    wedged the command."""
+    if renders_ret_code(value, 110072):
         return True
-    return "orderlink" in text and ("exist" in text or "duplicate" in text)
+    text = str(value).lower()
+    return (
+        "orderlinkid exists" in text
+        or "orderlinkedid is duplicate" in text
+        or "orderlinkid is duplicate" in text
+    )
 
 
 @dataclass(slots=True)
