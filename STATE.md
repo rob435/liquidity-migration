@@ -9,8 +9,23 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-09)
+## Now (recorded 2026-08-12; unmarked bullets below are from 2026-08-09)
 
+- **The daily loss halt tripped 2026-08-10 and was reset 2026-08-12 19:13 UTC
+  by owner instruction.** The trip: hand-trading drawdown took account equity
+  450.08 → 306.06 on 2026-08-10, crossing the 76.52 USDT ceiling; the bot's
+  book was flat and it refused new risk for the two days between. The reset
+  archived the anchor file beside itself
+  (`account_loss_guard.json.tripped-20260810.reset-20260812T191330Z.bak`) and
+  restarted the funded owner, which re-anchored the day cleanly (CHANGELOG
+  2026-08-12).
+- **The funded account is near-empty: equity ≈0.04 USDT** (owner health read
+  19:14 UTC: equity 0.0398, available 0.0073, `healthy`, no positions). It
+  went 306.06 → ~0 after the 2026-08-10 trip, entirely outside the bot's
+  halted book — hand trading and/or funds moved off; cause not independently
+  confirmed. No entry can size against it (6 USDT floor), so the fleet
+  decides cash until the account is funded. Earlier equity figures below are
+  historical.
 - **Host runs `d3c7b5c`, whole fleet green**: all nine units
   on/active/enabled, receipt `staged-ok commit=d3c7b5c profile=operational`,
   `verify-ok … mainnet=armed`. Zero error-level lines on any of the six services

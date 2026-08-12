@@ -16,6 +16,80 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-12 — The fast-execution engine merged to main
+  (`engine/fast-order-path`, `c5985a8..d929bfb`, nine commits): journal disk
+  syncs off the order path, batched venue orders, tick-driven quote
+  repricing, deadline-driven exits.** Every piece was adversarially reviewed
+  by independent agents before merge; all confirmed findings were fixed on
+  the branch. Change points, each in its own commit message:
+  - **Write-behind journal, default on** (`c5985a8`, `bc0a6aa`): a commit is
+    visible at the rename; the disk syncs run on one background thread in
+    commit order, and the order path pays one fail-closed barrier before
+    bytes leave for the venue. Steady-state commit measured 5.3 → 1.1 ms
+    with VPS-class disk-sync latency injected. `ACCOUNT_JOURNAL_WRITE_BEHIND=0`
+    is the opt-out. A crashed owner's torn tail is quarantined and settled at
+    the next start.
+  - **Batch venue submission** (`f50ae8a`, `3172339`): two or more
+    never-attempted commands pay one claim transaction, one disk sync, and
+    one venue request per 20 rows instead of one each. Exits and entries go
+    in separate requests; a row the venue answers ambiguously stays claimed
+    for the existing probe ladder; a refused batch envelope degrades to the
+    old one-at-a-time path. Found and fixed in passing: the duplicate-order
+    detector matched the wrong venue error code (110089, a risk-limit code,
+    instead of 110072).
+  - **Tick-driven quote repricing** (`8bfe7a4`, `c54c75f`, `d929bfb`): the
+    market stream thread wakes the owner the moment a quoted symbol's touch
+    moves (at most once per 200 ms per symbol, healthy books only), and that
+    wake bypasses the 3-second reprice clock for one pass — the clock stays
+    as the backstop, and cross/cancel pacing is untouched. A wake pass reads
+    memory only; a symbol whose book is dark keeps its blocking REST
+    fallback on the 3-second clock. Basis: the 2026-08-04 quote-forge
+    cadence check measured faster evaluation as strictly better.
+  - **Deadline-driven exits** (`d57632a`, `6ae01eb`) — a strategy change
+    point: each producer cycle reports the earliest instant a time rule can
+    change its book (LONG max-hold stop or decayed-stop arming, CARRY's
+    daily 00:20 UTC decision), and the daemon cuts its wait short at that
+    instant. A known-in-advance exit fires within seconds of its deadline
+    instead of up to a full 60-second grid interval late (mean ~30 s). A
+    fired deadline hands any retry back to the grid, so a suppressed exit
+    can never hot-loop a producer. Persisted cycle dataset schemas are
+    unchanged.
+  - **Not built, on purpose:** journal epoch snapshots (bounding replay by
+    restoring state at a checkpoint) were audited and refused — the event
+    log is load-bearing memory for protection anchors, funding dedup, and
+    strategy cooldowns, and truncating it would disarm stops for the oldest
+    positions. Measured costs today are small (~3 s replay per 100k events
+    at startup; ~2.6 ms per order-path claim at 50k orders). The audit and
+    the migration program it would take are in the session record.
+  - **Open measurement:** at the 200 ms wake floor a fast market can spend
+    the 8-amend budget in ~1.6 s (it spanned 24 s at the 3 s cadence). The
+    drift cross and window-end cross still bound every entry; re-sizing the
+    budget is a quote-forge replay question, queued.
+
+- **2026-08-12 19:13 UTC — The funded account's tripped daily loss halt was
+  reset by owner instruction, and the account is near-empty.**
+  - **The trip.** 2026-08-10 09:24 UTC: `daily loss 144.02 USDT reached the
+    76.52 ceiling (2026-08-10 open 450.08 -> 306.06)`. The ceiling rides on
+    the equity-rescaled risk policy (0.25 × the ~306 post-drawdown equity).
+    The bot's own book was flat and it was refused new risk from the trip
+    until this reset — the drawdown was the owner's hand trading; the halt
+    reads account-wide wallet equity, so it sees hand losses too, by design.
+  - **The reset.** The owner asked for a complete reset. The mainnet owner
+    unit was stopped, the anchor file archived beside itself as
+    `account_loss_guard.json.tripped-20260810.reset-20260812T191330Z.bak`,
+    and the unit started at 19:13:37 UTC. Deleting the file is the deliberate
+    re-anchor path the reader documents (`_read_loss_guard_state`); the
+    guard's own `reset()` has no wired operator command.
+  - **After.** Owner `healthy`, empty detail, zero error-level lines; guard
+    re-anchored day 2026-08-12 with a clean trip field.
+  - **Finding: the account holds ≈0.04 USDT** (equity 0.0398, available
+    margin 0.0073, venue facts healthy, no positions). Between the trip at
+    306.06 and this reset the account went to ~zero entirely outside the
+    bot's halted book — continued hand trading and/or funds moved off the
+    account; cause not independently confirmed from here. At this equity no
+    entry can size (the 6 USDT entry floor exceeds the whole wallet), so the
+    fleet will decide cash until the account is funded again.
+
 - **2026-08-09 — Hand-trading resumed on the funded account, so the funded
   owner gives back the cached-leverage fast path.** The owner reported setting
   leverage by hand. That makes this process one of two writers of leverage on
