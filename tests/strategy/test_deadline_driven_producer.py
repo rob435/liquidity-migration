@@ -86,6 +86,7 @@ def test_next_time_deadline_includes_the_decay_arming_clock() -> None:
                 stop_decay_after_ms=48 * MS_PER_HOUR,
                 decayed_stop_loss_pct=0.05,
                 entry_ts_ms=now - 47 * MS_PER_HOUR,
+                entry_price=100.0,
             ),
         ]
     )
@@ -106,6 +107,15 @@ def test_next_time_deadline_ignores_trades_a_pass_could_not_act_on() -> None:
                 stop_decay_after_ms=MS_PER_HOUR,
                 decayed_stop_loss_pct=0.05,
                 entry_ts_ms=0,
+            ),
+            # Fill timestamp without a fill price: the decay exit itself
+            # requires the price anchor, so this pass could not act either.
+            _open_trade(
+                "priceless",
+                stop_decay_after_ms=MS_PER_HOUR,
+                decayed_stop_loss_pct=0.05,
+                entry_ts_ms=now - MS_PER_HOUR,
+                entry_price=0.0,
             ),
         ]
     )
@@ -274,3 +284,25 @@ def test_timer_wait_cuts_short_for_a_deadline_without_a_spurious_overrun(tmp_pat
     daemon._wait_for_next_cycle_timer()
     assert daemon._pending_cycle_kind == "timer"
     assert daemon._cycle_overruns == 0
+
+
+def test_a_deadline_cycle_crossing_its_slot_is_not_an_overrun(tmp_path: Path) -> None:
+    """A deadline pass late in a slot legitimately spends the remainder; the
+    next timer wait must not alarm as if the cycle outran its interval."""
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000_000_000_000)
+    daemon = _build_daemon(tmp_path, interval_seconds=0.2, event_driven_cycle=False, clock=clock)
+    daemon._next_cycle_at = time.monotonic()
+    daemon._next_wake_deadline_ts_ms = 2_000_000_000_000  # due right now
+
+    daemon._wait_for_next_cycle_timer()
+    assert daemon._pending_cycle_kind == "market_boundary"
+    # The deadline cycle runs long enough to cross the 0.2s slot boundary.
+    time.sleep(0.25)
+    daemon._wait_for_next_cycle_timer()
+    assert daemon._cycle_overruns == 0, "borrowed slot time is not a cycle overrun"
+
+    # A plain cycle crossing its slot still alarms.
+    time.sleep(0.25)
+    daemon._wait_for_next_cycle_timer()
+    assert daemon._cycle_overruns == 1

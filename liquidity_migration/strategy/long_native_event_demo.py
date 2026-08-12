@@ -1201,7 +1201,13 @@ def _next_time_deadline_ts_ms(all_trades: pl.DataFrame, *, now_ms: int) -> int |
         decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
         decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
         entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
-        if decay_after_ms > 0 and 0.0 < decayed_stop_loss_pct < 1.0 and entry_ts_ms > 0:
+        entry_price = _float(trade.get("entry_price"))
+        if (
+            decay_after_ms > 0
+            and 0.0 < decayed_stop_loss_pct < 1.0
+            and entry_ts_ms > 0
+            and entry_price > 0.0
+        ):
             decay_deadline_ts_ms = entry_ts_ms + decay_after_ms
             if decay_deadline_ts_ms > now_ms:
                 deadlines.append(decay_deadline_ts_ms)

@@ -175,6 +175,10 @@ class LongNativeDemoDaemon:
         # grid retries it — never a deadline-paced hot loop.
         self._deadline_fired_ts_ms = 0
         self._cycles_deadline_triggered = 0
+        # A deadline pass borrows the tail of its grid slot; when its cycle
+        # crosses the slot boundary, the next timer wait must not read that
+        # as the cycle overrunning the interval.
+        self._deadline_borrowed_slot = False
         self._cycles_run = 0
         self._cycle_errors = 0
         self._cycle_overruns = 0
@@ -787,8 +791,13 @@ class LongNativeDemoDaemon:
         """Fixed-interval fallback grid, cut short by a known time deadline."""
         self._next_cycle_at += self.interval_seconds
         sleep_for = self._next_cycle_at - time.monotonic()
+        borrowed = self._deadline_borrowed_slot
+        self._deadline_borrowed_slot = False
         if sleep_for < 0.0:
-            if self.interval_seconds > 0.0:
+            # A deadline pass late in the previous slot legitimately spends
+            # its remainder; only a cycle that outran its own interval is an
+            # overrun worth alarming on.
+            if self.interval_seconds > 0.0 and not borrowed:
                 self._cycle_overruns += 1
                 _logger.warning(
                     "long cycle overran the %.0fs interval by %.1fs; next cycle starts immediately (overrun #%d)",
@@ -811,10 +820,13 @@ class LongNativeDemoDaemon:
             if fired is not None:
                 self._deadline_fired_ts_ms = fired
                 self._cycles_deadline_triggered += 1
+                self._deadline_borrowed_slot = True
                 self._pending_cycle_kind = "market_boundary"
                 return
-            # Only reachable if the wall clock stepped backwards under the
-            # sleep: restore the slot and fall through to the plain grid.
+            # Reachable when the wall clock lost ground against the
+            # monotonic sleep (a backward step, or NTP slew over a long
+            # interval): restore the slot and fall through to the plain
+            # grid, which plans the due exit regardless of the wake's name.
             self._next_cycle_at += self.interval_seconds
             sleep_for = max(0.0, self._next_cycle_at - time.monotonic())
         self._cycles_timer_triggered += 1
