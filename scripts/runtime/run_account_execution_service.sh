@@ -108,10 +108,10 @@ esac
 
 # Journal fsyncs move to a background thread; the order path syncs the disk
 # once, right before an order leaves for the venue, instead of twice inline.
-# Unset means off (every commit fsyncs inline, as it always has).
-journal_args=()
-case "${ACCOUNT_JOURNAL_WRITE_BEHIND:-0}" in
-    1) journal_args=(--journal-write-behind) ;;
+# On unless explicitly disabled: set 0 to restore inline fsyncs per commit.
+case "${ACCOUNT_JOURNAL_WRITE_BEHIND:-1}" in
+    0) journal_args=(--no-journal-write-behind) ;;
+    *) journal_args=(--journal-write-behind) ;;
 esac
 
 # A notification channel never keeps the account owner down: misconfigured

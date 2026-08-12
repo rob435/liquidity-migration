@@ -871,13 +871,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--idle-seconds", type=float, default=0.05)
     parser.add_argument(
         "--journal-write-behind",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Move journal fsyncs to a background thread. Commits stay visible "
             "immediately; the order path syncs the disk exactly once, right "
             "before an order leaves for the venue, instead of twice inline. "
             "A crash can cost only post-venue observation events, which the "
-            "reconciler re-derives from the venue. Off by default."
+            "reconciler re-derives from the venue. On by default; "
+            "--no-journal-write-behind restores inline fsyncs."
         ),
     )
     parser.add_argument(
