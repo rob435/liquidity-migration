@@ -16,6 +16,23 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 — The amend-budget question is answered: keep 8; the tick
+  cadence itself is the measured win.** The quote-forge replay (evening tape,
+  22 symbols, 2,901 paired attempts per world, the fleet's real 45 s window,
+  conservative fill bound; sim taught the fleet's budget semantics, forge
+  commit `4baef96`) found the 8-amend budget binds on 0.4% of attempts —
+  the recipe itself wants only ~1.6 reprices per attempt (95th percentile 5)
+  even evaluating on every book event, so the feared burn-and-freeze is a
+  tail case with no measurable cost, and a budget of 24 is bit-identical to
+  unlimited. **No config change.** The finding that matters: tick-driven
+  evaluation beats the 3-second clock by **0.29 bp per entry (t = +5.5),
+  +4.0 fill points, −4.0 deadline-cross points** at the 45 s window — the
+  2026-08-12 tick-wake change is now directly measured at its deployed
+  window, a larger edge than the recipe-vs-control gap itself. Caveats
+  recorded in the forge findings: one evening tape (the recipe's own
+  assembly tape, though no arm was ever tuned toward amend demand),
+  conservative bound, flat maker fee.
+
 - **2026-08-12 — The fast-execution engine merged to main
   (`engine/fast-order-path`, `c5985a8..d929bfb`, nine commits): journal disk
   syncs off the order path, batched venue orders, tick-driven quote
