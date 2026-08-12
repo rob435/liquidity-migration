@@ -531,6 +531,20 @@ def carry_decision_ts_ms(now_ms: int) -> int:
     return day_ts - DAY_MS
 
 
+def next_carry_decision_deadline_ts_ms(now_ms: int) -> int:
+    """The next instant a NEW daily decision becomes computable (00:20 UTC).
+
+    The daemon cuts its timer wait short at this instant, so the day's
+    exit-first diff runs when the decision bar lands instead of up to a full
+    grid interval later. Between boundaries every pass is an idempotent diff
+    against the frozen decision, so no other instant is worth a wake.
+    """
+
+    day_ts = (int(now_ms) // DAY_MS) * DAY_MS
+    candidate = day_ts + DECISION_KLINE_LAG_MS
+    return candidate if int(now_ms) < candidate else candidate + DAY_MS
+
+
 def _empty_venue_view() -> pl.DataFrame:
     return pl.DataFrame(
         schema={
@@ -1664,6 +1678,10 @@ def run_carry_demo_cycle(
             cycles_dataset,
             partition_by=("date",),
         )
+        # For the daemon only, added after the dataset write above so the
+        # persisted cycle schema does not change: the next instant a new
+        # daily decision exists, where the daemon cuts its timer wait short.
+        payload["next_time_deadline_ts_ms"] = next_carry_decision_deadline_ts_ms(cycle_now_ms)
     return PublishedTargetCyclePayload(
         payload,
         publication=publication,

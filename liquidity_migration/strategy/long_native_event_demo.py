@@ -615,6 +615,11 @@ def run_long_native_demo_cycle(
             "account_target_requests": account_target_requests,
             "candidates": candidates,
             "planned_exits": exit_plans,
+            # The daemon bounds its next wait at this instant, so a time
+            # stop fires on its deadline instead of on the polling grid.
+            "next_time_deadline_ts_ms": _next_time_deadline_ts_ms(
+                all_trades, now_ms=cycle_now_ms
+            ),
             "data_sources": {
                 "ticker_source": ticker_source,
                 "account_state_source": account_state_source,
@@ -1170,6 +1175,37 @@ def _plan_time_stop_exits(
             }
         )
     return plans
+
+
+def _next_time_deadline_ts_ms(all_trades: pl.DataFrame, *, now_ms: int) -> int | None:
+    """The earliest future instant a time rule can change an open LONG trade.
+
+    Two clocks qualify: a max-hold time stop coming due, and a v12 decayed
+    stop arming (``entry_ts_ms + stop_decay_after_ms``). The daemon cuts its
+    wait short at this instant, so a time-based exit fires when its deadline
+    passes instead of when the next grid pass happens to run. Only trades a
+    ``_plan_time_stop_exits`` pass could actually act on contribute: no
+    symbol, no quantity, or no attributed entry fill means no wake.
+    """
+
+    open_long = _open_long_trades(all_trades)
+    if open_long.is_empty():
+        return None
+    deadlines: list[int] = []
+    for trade in open_long.to_dicts():
+        if not str(trade.get("symbol", "")) or _float(str(trade.get("qty") or "")) <= 0.0:
+            continue
+        hold_deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
+        if hold_deadline > now_ms:
+            deadlines.append(hold_deadline)
+        decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
+        decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
+        entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
+        if decay_after_ms > 0 and 0.0 < decayed_stop_loss_pct < 1.0 and entry_ts_ms > 0:
+            decay_deadline_ts_ms = entry_ts_ms + decay_after_ms
+            if decay_deadline_ts_ms > now_ms:
+                deadlines.append(decay_deadline_ts_ms)
+    return min(deadlines) if deadlines else None
 
 
 def _long_exit_target_intents(

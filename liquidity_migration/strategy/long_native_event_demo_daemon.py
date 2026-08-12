@@ -12,7 +12,7 @@ import signal
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from liquidity_migration.account.account_owner_health import validate_systemd_invocation_id
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitPublicTickerStream
@@ -165,6 +165,16 @@ class LongNativeDemoDaemon:
         self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
         self._cycles_kline_triggered = 0
         self._cycles_timer_triggered = 0
+        # Deadline-driven passes: each cycle reports the earliest future
+        # instant a time rule can change its book (a max-hold stop coming
+        # due, carry's daily decision boundary), and the wait below is cut
+        # short at that instant instead of letting the grid pace it.
+        self._next_wake_deadline_ts_ms: int | None = None
+        # A deadline fires one cycle. If that cycle cannot clear it (an exit
+        # suppressed behind an unresolved target, a publish failure), the
+        # grid retries it — never a deadline-paced hot loop.
+        self._deadline_fired_ts_ms = 0
+        self._cycles_deadline_triggered = 0
         self._cycles_run = 0
         self._cycle_errors = 0
         self._cycle_overruns = 0
@@ -291,14 +301,15 @@ class LongNativeDemoDaemon:
         _logger.info(
             "long_native_event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
-            "cycles_timer_triggered=%d reconciles_total=%d reconcile_errors=%d "
-            "ws_ticker_stale_ticks=%d",
+            "cycles_timer_triggered=%d cycles_deadline_triggered=%d "
+            "reconciles_total=%d reconcile_errors=%d ws_ticker_stale_ticks=%d",
             self._cycles_run,
             self._cycle_errors,
             self._cycle_overruns,
             self._max_cycle_seconds,
             self._cycles_kline_triggered,
             self._cycles_timer_triggered,
+            self._cycles_deadline_triggered,
             self._reconciles_total,
             self._reconcile_errors,
             self._ws_ticker_stale_ticks,
@@ -310,6 +321,7 @@ class LongNativeDemoDaemon:
             "max_cycle_seconds": self._max_cycle_seconds,
             "cycles_kline_triggered": self._cycles_kline_triggered,
             "cycles_timer_triggered": self._cycles_timer_triggered,
+            "cycles_deadline_triggered": self._cycles_deadline_triggered,
             "reconciles_total": self._reconciles_total,
             "reconcile_errors": self._reconcile_errors,
             "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
@@ -344,6 +356,7 @@ class LongNativeDemoDaemon:
         payload = self._event_clock.dispatch(event, self._execute_cycle_event)
         if payload is None:
             return
+        self._note_time_deadline(payload)
         try:
             capture = self._target_capture_recorder.append_from_cycle(
                 event,
@@ -740,8 +753,38 @@ class LongNativeDemoDaemon:
             return
         self._shutdown.wait(timeout=seconds)
 
+    def _note_time_deadline(self, payload: Mapping[str, Any]) -> None:
+        """Adopt the cycle's reported next time deadline, if it carries one.
+
+        A failed cycle keeps the previous deadline: the retry runs on the
+        grid, and a stale deadline is defused by the fired latch below.
+        """
+
+        value = payload.get("next_time_deadline_ts_ms")
+        self._next_wake_deadline_ts_ms = value if type(value) is int and value > 0 else None
+
+    def _seconds_until_time_deadline(self) -> float | None:
+        """Seconds to the next unfired time deadline, or None when no wake
+        is owed. A deadline fires at most one cycle; the grid owns retries."""
+
+        deadline = self._next_wake_deadline_ts_ms
+        if deadline is None or deadline <= self._deadline_fired_ts_ms:
+            return None
+        now_ms = self._clock.wall_time_ns() // 1_000_000
+        return max(0.0, (deadline - now_ms) / 1000.0)
+
+    def _time_deadline_reached(self) -> int | None:
+        """The deadline that is due right now and not yet fired, else None."""
+
+        deadline = self._next_wake_deadline_ts_ms
+        if deadline is None or deadline <= self._deadline_fired_ts_ms:
+            return None
+        if self._clock.wall_time_ns() // 1_000_000 >= deadline:
+            return deadline
+        return None
+
     def _wait_for_next_cycle_timer(self) -> None:
-        """Fixed-interval fallback grid."""
+        """Fixed-interval fallback grid, cut short by a known time deadline."""
         self._next_cycle_at += self.interval_seconds
         sleep_for = self._next_cycle_at - time.monotonic()
         if sleep_for < 0.0:
@@ -755,27 +798,56 @@ class LongNativeDemoDaemon:
                 )
             self._next_cycle_at = time.monotonic()
             sleep_for = 0.0
+        deadline_wait = self._seconds_until_time_deadline()
+        if deadline_wait is not None and deadline_wait < sleep_for:
+            # Wake early for the deadline, and roll the grid anchor back so
+            # the next wait returns to this same slot instead of reading the
+            # early wake as an overrun.
+            self._next_cycle_at -= self.interval_seconds
+            self._sleep_interruptible(deadline_wait)
+            if self._shutdown.is_set():
+                return
+            fired = self._time_deadline_reached()
+            if fired is not None:
+                self._deadline_fired_ts_ms = fired
+                self._cycles_deadline_triggered += 1
+                self._pending_cycle_kind = "market_boundary"
+                return
+            # Only reachable if the wall clock stepped backwards under the
+            # sleep: restore the slot and fall through to the plain grid.
+            self._next_cycle_at += self.interval_seconds
+            sleep_for = max(0.0, self._next_cycle_at - time.monotonic())
         self._cycles_timer_triggered += 1
         self._sleep_interruptible(sleep_for)
         self._pending_cycle_kind = "timer"
 
     def _wait_for_next_cycle_event(self) -> None:
-        """WS-event-driven wait: wake on a new confirmed-bar boundary, the
-        safety heartbeat, or shutdown, with a min-interval debounce floor."""
+        """WS-event-driven wait: wake on a new confirmed-bar boundary, a due
+        time deadline, the safety heartbeat, or shutdown, with a min-interval
+        debounce floor."""
         if self._min_cycle_interval_seconds > 0.0:
             self._sleep_interruptible(self._min_cycle_interval_seconds)
             if self._shutdown.is_set():
                 return
         remaining = max(0.0, self._max_idle_seconds - self._min_cycle_interval_seconds)
+        deadline_wait = self._seconds_until_time_deadline()
+        if deadline_wait is not None:
+            remaining = min(remaining, deadline_wait)
         woke = self._bar_event.wait(timeout=remaining)
         if self._shutdown.is_set():
             return
         if woke:
             self._cycles_kline_triggered += 1
             self._pending_cycle_kind = "confirmed_bar"
-        else:
-            self._cycles_timer_triggered += 1
-            self._pending_cycle_kind = "timer"
+            return
+        fired = self._time_deadline_reached()
+        if fired is not None:
+            self._deadline_fired_ts_ms = fired
+            self._cycles_deadline_triggered += 1
+            self._pending_cycle_kind = "market_boundary"
+            return
+        self._cycles_timer_triggered += 1
+        self._pending_cycle_kind = "timer"
 
 
 # The strategy trades a 50-name median-turnover universe drawn from this
