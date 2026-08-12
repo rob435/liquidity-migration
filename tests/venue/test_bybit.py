@@ -1659,11 +1659,109 @@ def test_place_order_duplicate_link_ignores_wrong_history_link(
         )
 
 
-def test_is_duplicate_order_link_matches_code_and_message() -> None:
-    """Classify by retCode 110089 AND by message text, so a re-worded retMsg still resolves as a duplicate."""
-    assert bybit._is_duplicate_order_link("Bybit place_order failed: {'retCode': 110089}")
+def test_is_duplicate_order_link_matches_documented_code_and_both_wordings() -> None:
+    """Classify by the documented 110072 code and by either duplicate wording.
+
+    A bare 110089 must NOT classify: the official error table lists it as
+    "Exceeds the maximum risk limit level", and treating a risk-limit refusal
+    as a maybe-duplicate converted a definite reject into an uncertain
+    outcome that wedged the command."""
+    assert bybit._is_duplicate_order_link(
+        "Bybit place_order failed: {'retCode': 110072, 'retMsg': 'OrderLinkedID is duplicate'}"
+    )
+    assert bybit._is_duplicate_order_link("Bybit place_order failed: {'retCode': 110072}")
     assert bybit._is_duplicate_order_link("orderLinkID exists, duplicate")
+    assert bybit._is_duplicate_order_link("OrderLinkedID is duplicate")
+    assert not bybit._is_duplicate_order_link(
+        "Bybit place_order failed: {'retCode': 110089, 'retMsg': 'Exceeds the maximum risk limit level'}"
+    )
     assert not bybit._is_duplicate_order_link("retCode 110007 insufficient balance")
+
+
+def test_place_orders_batch_parses_rows_and_refuses_unmapped_responses(
+    monkeypatch, held_demo_mutation_lease
+) -> None:
+    """Per-row outcomes come from retExtInfo.list, index-aligned with the
+    request; a response that cannot be mapped row-for-row is ambiguous for
+    every order and must refuse rather than guess."""
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.batch_bodies: list[dict] = []
+
+        def place_batch_order(self, **kwargs):
+            self.batch_bodies.append(kwargs)
+            request = kwargs["request"]
+            return {
+                "retCode": 0,
+                "retMsg": "OK",
+                "time": 1_700_000_000_000,
+                "result": {
+                    "list": [
+                        {"orderId": f"venue-{index}", "orderLinkId": row["orderLinkId"]}
+                        for index, row in enumerate(request)
+                    ]
+                },
+                "retExtInfo": {
+                    "list": [
+                        {"code": 0, "msg": "OK"}
+                        if index != 1
+                        else {"code": 110007, "msg": "insufficient balance"}
+                        for index in range(len(request))
+                    ]
+                },
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(
+        api_key="key",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key"),
+    )
+
+    rows = client.place_orders_batch(
+        [
+            {"symbol": "BUSDT", "side": "Buy", "orderType": "Market", "qty": "1", "orderLinkId": "cmd-1"},
+            {"symbol": "BUSDT", "side": "Buy", "orderType": "Market", "qty": "1", "orderLinkId": "cmd-2"},
+        ]
+    )
+    assert client._client.batch_bodies[0]["category"] == "linear"
+    assert rows[0]["_row_code"] == 0
+    assert rows[0]["orderId"] == "venue-0"
+    assert rows[0]["_response_time_ms"] == 1_700_000_000_000
+    assert rows[1]["_row_code"] == 110007
+
+    with pytest.raises(ValueError, match="at most 20"):
+        client.place_orders_batch(
+            [{"symbol": "BUSDT", "orderLinkId": f"cmd-{index}"} for index in range(21)]
+        )
+    with pytest.raises(ValueError, match="orderLinkId is required"):
+        client.place_orders_batch([{"symbol": "BUSDT"}])
+
+    class MismatchedHTTP(FakeHTTP):
+        def place_batch_order(self, **kwargs):
+            return {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {"list": [{}]},
+                "retExtInfo": {"list": []},
+            }
+
+    monkeypatch.setattr(bybit, "HTTP", MismatchedHTTP)
+    mismatched = bybit.BybitPrivateClient(
+        api_key="key2",
+        api_secret="secret",
+        demo=True,
+        mutation_lease=held_demo_mutation_lease("key2"),
+    )
+    with pytest.raises(bybit.BybitSubmissionUncertain, match="do not match"):
+        mismatched.place_orders_batch(
+            [
+                {"symbol": "BUSDT", "orderLinkId": "cmd-1"},
+                {"symbol": "BUSDT", "orderLinkId": "cmd-2"},
+            ]
+        )
 
 
 def test_safe_int_degrades_on_malformed_error_code() -> None:

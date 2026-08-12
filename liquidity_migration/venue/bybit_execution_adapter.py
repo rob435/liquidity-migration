@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from typing import AbstractSet, Any, Iterable, Mapping
+from typing import AbstractSet, Any, Iterable, Mapping, Sequence
 
 from liquidity_migration.account.account_contracts import (
     MarketInputRef,
     OrderCommand,
 )
-from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected
+from liquidity_migration.marketdata.bybit_errors import BybitRequestRejected, BybitSubmissionUncertain
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.venue_realm import client_venue_realm
 from liquidity_migration.account.execution_adapters import ExecutionObservation, ExecutionObservationType
@@ -451,6 +451,232 @@ class BybitDemoExecutionAdapter:
                 venue_order_id=str(result.get("orderId") or ""),
                 metadata=metadata,
             ),
+        )
+
+    def submit_prepared_batch(
+        self,
+        items: Sequence[tuple[OrderCommand, MarketInputRef]],
+    ) -> tuple[ExecutionObservation, ...]:
+        """One venue request creates every order in the batch.
+
+        Same per-command semantics as ``submit_prepared``, paid once: a
+        successful row acks with quote registration or stop verification, a
+        rejected resting-quote row falls back to its market order, a rejected
+        market row becomes an unaccepted ack, and a row whose individual
+        fallback outcome is unknown emits nothing — the command stays claimed
+        and the reconciler's orderLinkId probes resolve it. A transport
+        failure of the whole request raises BybitSubmissionUncertain for
+        every row, which is exactly what the durable attempt claims are for.
+        """
+
+        prepared: list[tuple[OrderCommand, MarketInputRef, dict[str, Any], str | None, str | None, dict[str, Any]]] = []
+        for command, market_input in items:
+            entry_protection_metadata = self._entry_protection_metadata(command)
+            params = self._order_params(command)
+            quote_price = self._entry_quote_price(command, market_input)
+            clip_qty: str | None = None
+            if quote_price is not None:
+                if self.entry_quotes is not None:
+                    try:
+                        clip_qty = self.entry_quotes.plan_entry_clip(
+                            symbol=command.symbol,
+                            is_buy=command.signed_qty > 0.0,
+                            command_qty=command.qty,
+                            price=float(quote_price),
+                            bid_qty=market_input.bid_qty,
+                            ask_qty=market_input.ask_qty,
+                        )
+                    except Exception:  # noqa: BLE001 - clipping must never block an entry
+                        clip_qty = None
+                params.update(
+                    {"orderType": "Limit", "price": quote_price, "timeInForce": "GTC"}
+                )
+                if clip_qty is not None:
+                    params["qty"] = clip_qty
+            prepared.append(
+                (command, market_input, params, quote_price, clip_qty, entry_protection_metadata)
+            )
+
+        send_ts_ns = self.clock.wall_time_ns()
+        rows = self.client.place_orders_batch([params for _, _, params, _, _, _ in prepared])
+
+        observations: list[ExecutionObservation] = []
+        for (command, market_input, _, quote_price, clip_qty, protection), row in zip(
+            prepared, rows
+        ):
+            row_code = row.get("_row_code")
+            if row_code in (0, None) or row.get("_idempotent_existing_order"):
+                style = "resting_quote" if quote_price is not None else "market"
+                observations.append(
+                    self._batch_success_ack(
+                        command,
+                        market_input,
+                        row,
+                        send_ts_ns=send_ts_ns,
+                        execution_style=style,
+                        quote_price=quote_price,
+                        clip_qty=clip_qty,
+                        entry_protection_metadata=protection,
+                    )
+                )
+                continue
+            if quote_price is not None:
+                # A clean venue reject of the limit row leaves no order under
+                # this link id, so the market order the fleet always sent is
+                # still available and still protected.
+                try:
+                    fallback = self.client.place_order(**self._order_params(command))
+                except BybitRequestRejected as exc:
+                    observations.append(
+                        self._batch_reject_ack(
+                            command,
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:500],
+                            send_ts_ns=send_ts_ns,
+                            execution_style="market_after_quote_reject",
+                            entry_protection_metadata=protection,
+                        )
+                    )
+                    continue
+                except BybitSubmissionUncertain:
+                    # This one command's outcome is unknown; it stays claimed
+                    # and unresolved for the probe ladder while the rest of
+                    # the batch keeps flowing.
+                    continue
+                observations.append(
+                    self._batch_success_ack(
+                        command,
+                        market_input,
+                        fallback,
+                        send_ts_ns=send_ts_ns,
+                        execution_style="market_after_quote_reject",
+                        quote_price=None,
+                        clip_qty=None,
+                        entry_protection_metadata=protection,
+                    )
+                )
+                continue
+            observations.append(
+                self._batch_reject_ack(
+                    command,
+                    error_type="BybitBatchRowRejected",
+                    error=f"code={row_code} msg={row.get('_row_msg', '')}"[:500],
+                    send_ts_ns=send_ts_ns,
+                    execution_style="market",
+                    entry_protection_metadata=protection,
+                )
+            )
+        return tuple(observations)
+
+    def _batch_success_ack(
+        self,
+        command: OrderCommand,
+        market_input: MarketInputRef,
+        result: Mapping[str, Any],
+        *,
+        send_ts_ns: int,
+        execution_style: str,
+        quote_price: str | None,
+        clip_qty: str | None,
+        entry_protection_metadata: Mapping[str, Any],
+    ) -> ExecutionObservation:
+        """Mirror of the single-path success ack for one batch row."""
+
+        local_ack_ts_ns = self.clock.wall_time_ns()
+        idempotent_existing_order = bool(result.get("_idempotent_existing_order"))
+        exchange_ack_ms = 0
+        if not idempotent_existing_order:
+            exchange_ack_ms = result.get("_response_time_ms") or result.get("time") or 0
+        try:
+            exchange_ack_ts_ns = int(float(exchange_ack_ms) * 1_000_000)
+        except (TypeError, ValueError):
+            exchange_ack_ts_ns = 0
+        if quote_price is not None:
+            verification = "deferred_resting_quote"
+            if self.entry_quotes is not None and not idempotent_existing_order:
+                decision_mid = None
+                if (
+                    market_input.bid_price is not None
+                    and market_input.ask_price is not None
+                    and market_input.bid_price > 0.0
+                    and market_input.ask_price > market_input.bid_price
+                ):
+                    decision_mid = (market_input.bid_price + market_input.ask_price) / 2.0
+                self.entry_quotes.register(
+                    command_id=command.command_id,
+                    symbol=command.symbol,
+                    is_buy=command.signed_qty > 0.0,
+                    price=float(quote_price),
+                    decision_mid=decision_mid,
+                )
+        else:
+            verification = self._verify_entry_attached_stop(
+                command,
+                acknowledged_ts_ns=local_ack_ts_ns,
+            )
+        metadata: dict[str, Any] = {
+            "local_socket_send_ts_ns": send_ts_ns,
+            "exchange_ack_ts_status": "observed" if exchange_ack_ts_ns else "unavailable",
+            "exchange_ack_ts_source": (
+                "bybit_v5_response_envelope_time" if exchange_ack_ts_ns else "unavailable"
+            ),
+            "idempotent_existing_order": idempotent_existing_order,
+            "requested_leverage": command.leverage,
+            "entry_attached_stop_verification": verification,
+            "execution_style": execution_style,
+            "batch_submission": True,
+            **entry_protection_metadata,
+        }
+        if quote_price is not None:
+            metadata["entry_quote_price"] = quote_price
+            metadata["entry_quote_window_seconds"] = (
+                self.entry_quotes.config.window_seconds if self.entry_quotes is not None else 0.0
+            )
+            if clip_qty is not None:
+                metadata["entry_clip_qty"] = clip_qty
+                metadata["entry_commanded_qty"] = command.qty
+        return ExecutionObservation(
+            observation_type=ExecutionObservationType.ACK,
+            command_id=command.command_id,
+            exchange_ts_ns=exchange_ack_ts_ns,
+            local_receive_ts_ns=local_ack_ts_ns,
+            accepted=True,
+            venue_order_id=str(result.get("orderId") or ""),
+            metadata=metadata,
+        )
+
+    def _batch_reject_ack(
+        self,
+        command: OrderCommand,
+        *,
+        error_type: str,
+        error: str,
+        send_ts_ns: int,
+        execution_style: str,
+        entry_protection_metadata: Mapping[str, Any],
+    ) -> ExecutionObservation:
+        """Mirror of the single-path definite-reject ack for one batch row."""
+
+        # A refused create means what this process believes about the symbol
+        # may be wrong; forget the leverage so the next attempt re-asserts it.
+        self._venue_leverage.pop(command.symbol, None)
+        return ExecutionObservation(
+            observation_type=ExecutionObservationType.ACK,
+            command_id=command.command_id,
+            exchange_ts_ns=0,
+            local_receive_ts_ns=self.clock.wall_time_ns(),
+            accepted=False,
+            rejection_key=f"bybit-demo:{command.command_id}:place_order_failed",
+            metadata={
+                "local_socket_send_ts_ns": send_ts_ns,
+                "exchange_ack_ts_status": "unavailable",
+                "error_type": error_type,
+                "error": error,
+                "requested_leverage": command.leverage,
+                "execution_style": execution_style,
+                "batch_submission": True,
+                **entry_protection_metadata,
+            },
         )
 
     def _verify_entry_attached_stop(

@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from liquidity_migration.account.account_contracts import (
     AccountEvent,
@@ -712,6 +712,24 @@ class KernelExecutionDriver:
             events.extend(self.kernel.record_order_status_batch(statuses))
             synchronous.clear()
 
+        def dispatch(
+            command_index: int,
+            command: OrderCommand,
+            normalized: tuple[ExecutionObservation, ...],
+        ) -> None:
+            if self._is_complete_synchronous(command, normalized):
+                synchronous.append((command_index, command, normalized))
+                return
+            flush_synchronous()
+            events.extend(self.ingest(normalized))
+
+        batch_handled = self._submit_prepared_as_batch(
+            result,
+            market_inputs=market_inputs,
+            adapter=adapter,
+            dispatch=dispatch,
+        )
+
         for command_index, command in enumerate(result.commands):
             order = self.kernel._state_ref().orders.get(command.command_id)
             if order is None:
@@ -719,6 +737,8 @@ class KernelExecutionDriver:
             if order.status != "commanded":
                 # Crash replay: an already acknowledged/filled/rejected command
                 # must not be submitted again.
+                continue
+            if command.command_id in batch_handled:
                 continue
             market = market_inputs.get(command.symbol)
             if market is None:
@@ -830,6 +850,131 @@ class KernelExecutionDriver:
             events.extend(self.ingest(normalized))
         flush_synchronous()
         return tuple(events)
+
+    def _submit_prepared_as_batch(
+        self,
+        result: TargetBatchResult,
+        *,
+        market_inputs: Mapping[str, MarketInputRef],
+        adapter: Any,
+        dispatch: Callable[[int, OrderCommand, tuple[ExecutionObservation, ...]], None],
+    ) -> frozenset[str]:
+        """Claim and send eligible commands as one venue batch.
+
+        Returns the command ids this path fully handled. Engages only for an
+        ambiguous provider implementing ``submit_prepared_batch`` with at
+        least two never-attempted commands; everything else stays on the
+        proven single-order path. One journal transaction claims every
+        attempt and one barrier makes them durable, so an N-slice batch pays
+        one commit, one disk sync, and one venue request instead of N of
+        each. Chunks are partitioned by reduce-only because Bybit does not
+        document mixing them in one batch, and exits go first.
+        """
+
+        submit_batch = getattr(adapter, "submit_prepared_batch", None)
+        if not callable(submit_batch):
+            return frozenset()
+        if not bool(getattr(adapter, "submission_outcome_can_be_ambiguous", False)):
+            return frozenset()
+        max_unsubmitted_age_ns = getattr(adapter, "max_unsubmitted_exposure_age_ns", None)
+        state_orders = self.kernel._state_ref().orders
+        eligible: list[tuple[int, OrderCommand, MarketInputRef]] = []
+        for command_index, command in enumerate(result.commands):
+            order = state_orders.get(command.command_id)
+            if order is None or order.status != "commanded":
+                continue
+            if order.submission_attempts > 0:
+                # Re-attempts carry ambiguity semantics the single path owns.
+                continue
+            market = market_inputs.get(command.symbol)
+            if market is None:
+                continue
+            eligible.append((command_index, command, market))
+        if len(eligible) < 2:
+            return frozenset()
+
+        def check_freshness() -> None:
+            now_ns = self.kernel.clock.wall_time_ns()
+            for _, command, _ in eligible:
+                if command.reduce_only:
+                    continue
+                if type(max_unsubmitted_age_ns) is not int or max_unsubmitted_age_ns <= 0:
+                    raise ValueError(
+                        "ambiguous provider adapter requires a positive integer "
+                        "max_unsubmitted_exposure_age_ns"
+                    )
+                if (
+                    command.created_ts_ns <= 0
+                    or now_ns < command.created_ts_ns
+                    or now_ns - command.created_ts_ns > max_unsubmitted_age_ns
+                ):
+                    raise StaleUnsubmittedExposureCommand(
+                        "refusing to submit a stale exposure-increasing command: "
+                        f"command={command.command_id} "
+                        f"created_ts_ns={command.created_ts_ns} "
+                        f"now_ts_ns={now_ns} "
+                        f"max_age_ns={max_unsubmitted_age_ns}"
+                    )
+
+        check_freshness()
+        handled: set[str] = set()
+        remaining: list[tuple[int, OrderCommand, MarketInputRef]] = []
+        prepare_submission = getattr(adapter, "prepare_submission", None)
+        for command_index, command, market in eligible:
+            if callable(prepare_submission):
+                prepared_observations = self._normalize_observations(
+                    prepare_submission(command, market)
+                )
+                if prepared_observations:
+                    # A definite leverage reject: its acks flow, no create runs.
+                    dispatch(command_index, command, prepared_observations)
+                    handled.add(command.command_id)
+                    continue
+            remaining.append((command_index, command, market))
+        if len(remaining) < 2:
+            # Too few left to be worth a batch request; the single path,
+            # which already owns one-command semantics, takes them.
+            return frozenset(handled)
+        # Preparation was provider round trips (leverage negotiation), so
+        # recheck freshness at the exposure boundary, exactly as the single
+        # path does.
+        check_freshness()
+        try:
+            self.kernel.record_submission_attempt_batch(
+                claims=tuple(
+                    (command.command_id, command.reduce_only)
+                    for _, command, _ in remaining
+                ),
+                adapter_name=str(getattr(adapter, "name", "provider")),
+            )
+        except AmbiguousSubmissionAttemptError as exc:
+            # The journal transaction, not the stale preflight read, owns the
+            # single-winner guarantee under concurrency.
+            raise AmbiguousExposureSubmission(str(exc)) from exc
+        # One durable boundary for the whole batch, immediately before send.
+        self.kernel.journal.barrier()
+        reduces = [row for row in remaining if row[1].reduce_only]
+        entries = [row for row in remaining if not row[1].reduce_only]
+        by_command: dict[str, list[ExecutionObservation]] = {}
+        for group in (reduces, entries):
+            for chunk_start in range(0, len(group), 20):
+                chunk = group[chunk_start : chunk_start + 20]
+                if not chunk:
+                    continue
+                observations = self._normalize_observations(
+                    submit_batch([(command, market) for _, command, market in chunk])
+                )
+                for observation in observations:
+                    by_command.setdefault(observation.command_id, []).append(observation)
+        for command_index, command, _ in remaining:
+            handled.add(command.command_id)
+            normalized = tuple(by_command.get(command.command_id, ()))
+            if normalized:
+                dispatch(command_index, command, normalized)
+            # A command with no observations had an unknown individual
+            # outcome: it stays claimed and the reconciler's orderLinkId
+            # probes resolve it, exactly like a lost single-order answer.
+        return frozenset(handled)
 
     @staticmethod
     def _normalize_observations(

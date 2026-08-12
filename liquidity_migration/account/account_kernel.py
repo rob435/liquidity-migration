@@ -3206,8 +3206,33 @@ class AccountExecutionKernel:
     ) -> tuple[AccountEvent, ...]:
         """Commit the durable boundary before an exposure-capable provider call."""
 
-        if not command_id:
-            raise ValueError("submission attempt command_id is required")
+        return self.record_submission_attempt_batch(
+            claims=((command_id, allow_repeat),),
+            adapter_name=adapter_name,
+        )
+
+    def record_submission_attempt_batch(
+        self,
+        *,
+        claims: Sequence[tuple[str, bool]],
+        adapter_name: str,
+    ) -> tuple[AccountEvent, ...]:
+        """Commit the durable boundary for a whole batch in one transaction.
+
+        One serialized transaction claims every command's attempt, so a
+        batched venue call keeps the per-command single-winner guarantee while
+        paying one commit and one barrier instead of one per order. ``claims``
+        is ``(command_id, allow_repeat)`` pairs; any invalid claim aborts the
+        whole transaction and nothing is claimed.
+        """
+
+        if not claims:
+            raise ValueError("submission attempt batch is empty")
+        if len({command_id for command_id, _ in claims}) != len(claims):
+            raise ValueError("submission attempt batch repeats a command_id")
+        for command_id, _ in claims:
+            if not command_id:
+                raise ValueError("submission attempt command_id is required")
         normalized_adapter = str(adapter_name).strip()
         if not normalized_adapter:
             raise ValueError("submission attempt adapter_name is required")
@@ -3215,43 +3240,46 @@ class AccountExecutionKernel:
         now_mono = self.clock.monotonic_ns()
 
         def build(state: AccountState) -> list[AccountEventSpec]:
-            order = state.orders.get(command_id)
-            if order is None:
-                raise AccountTransitionError(
-                    f"unknown submission command {command_id!r}"
+            specs: list[AccountEventSpec] = []
+            for command_id, allow_repeat in claims:
+                order = state.orders.get(command_id)
+                if order is None:
+                    raise AccountTransitionError(
+                        f"unknown submission command {command_id!r}"
+                    )
+                if order.status != "commanded":
+                    raise AccountTransitionError(
+                        f"submission command {command_id} is {order.status}, not commanded"
+                    )
+                if order.submission_attempts > 0 and not allow_repeat:
+                    raise AmbiguousSubmissionAttemptError(
+                        "exposure-increasing submission command already has a durable "
+                        f"attempt: command={command_id} "
+                        f"attempts={order.submission_attempts}"
+                    )
+                attempt = order.submission_attempts + 1
+                specs.append(
+                    AccountEventSpec(
+                        event_type=AccountEventType.SUBMISSION_ATTEMPT,
+                        idempotency_key=(
+                            f"submission-attempt:{command_id}:{attempt:04d}"
+                        ),
+                        correlation_id=order.batch_id,
+                        causation_id=command_id,
+                        account_id=self.account_id,
+                        sleeve="account_execution",
+                        symbol=order.symbol,
+                        wall_ts_ns=now_wall,
+                        monotonic_ns=now_mono,
+                        payload={
+                            "command_id": command_id,
+                            "attempt": attempt,
+                            "adapter_name": normalized_adapter,
+                            "local_start_ts_ns": now_wall,
+                        },
+                    )
                 )
-            if order.status != "commanded":
-                raise AccountTransitionError(
-                    f"submission command {command_id} is {order.status}, not commanded"
-                )
-            if order.submission_attempts > 0 and not allow_repeat:
-                raise AmbiguousSubmissionAttemptError(
-                    "exposure-increasing submission command already has a durable "
-                    f"attempt: command={command_id} "
-                    f"attempts={order.submission_attempts}"
-                )
-            attempt = order.submission_attempts + 1
-            return [
-                AccountEventSpec(
-                    event_type=AccountEventType.SUBMISSION_ATTEMPT,
-                    idempotency_key=(
-                        f"submission-attempt:{command_id}:{attempt:04d}"
-                    ),
-                    correlation_id=order.batch_id,
-                    causation_id=command_id,
-                    account_id=self.account_id,
-                    sleeve="account_execution",
-                    symbol=order.symbol,
-                    wall_ts_ns=now_wall,
-                    monotonic_ns=now_mono,
-                    payload={
-                        "command_id": command_id,
-                        "attempt": attempt,
-                        "adapter_name": normalized_adapter,
-                        "local_start_ts_ns": now_wall,
-                    },
-                )
-            ]
+            return specs
 
         return tuple(
             self.journal.transact(build, trusted_readonly_builder=True)

@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -260,11 +260,12 @@ class BybitPrivateClient:
         try:
             payload = self._call_once("place_order", category=self.category, **params)
         except BybitDataError as exc:
-            # A duplicate-orderLinkId reject (110089) means Bybit already
-            # accepted an order under this idempotency key, normally our own
-            # prior submit whose ack was lost. Resubmitting would double the
-            # order and raising would orphan a live position, so probe by
-            # orderLinkId and return the existing order.
+            # A duplicate-orderLinkId reject (110072, "OrderLinkedID is
+            # duplicate") means Bybit already accepted an order under this
+            # idempotency key, normally our own prior submit whose ack was
+            # lost. Resubmitting would double the order and raising would
+            # orphan a live position, so probe by orderLinkId and return the
+            # existing order.
             if not _is_duplicate_order_link(exc):
                 raise
             existing = self._lookup_order_by_link(
@@ -323,6 +324,73 @@ class BybitPrivateClient:
             ):
                 return dict(row)
         return None
+
+    def place_orders_batch(self, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Create up to 20 orders in one signed request, with per-row outcomes.
+
+        Returns one dict per request row, index-aligned: the venue's result
+        row plus ``_row_code``/``_row_msg`` from the per-row status list and
+        the envelope timestamp as ``_response_time_ms``. Bybit answers a
+        partial failure with top-level retCode 0 and per-row codes, so pybit
+        raises nothing for failed rows — callers read ``_row_code``. A
+        duplicate-link row is probed by orderLinkId and returned as the
+        existing order tagged ``_idempotent_existing_order``, exactly like
+        the single-order path. The request itself is single-shot: a transport
+        failure leaves every row's outcome unknown and raises
+        BybitSubmissionUncertain. Rate limits count the rows, not the request,
+        so batching buys latency, never quota.
+        """
+
+        if not rows:
+            raise ValueError("cannot place an empty order batch")
+        if len(rows) > 20:
+            raise ValueError(f"Bybit accepts at most 20 linear orders per batch, got {len(rows)}")
+        for row in rows:
+            if "orderLinkId" not in row:
+                raise ValueError("orderLinkId is required on every batch row")
+        self._assert_submit_allowed("place_batch_order")
+        payload = self._call_once(
+            "place_batch_order",
+            category=self.category,
+            request=[dict(row) for row in rows],
+        )
+        result_rows = payload.get("result", {}).get("list") or []
+        status_rows = (payload.get("retExtInfo") or {}).get("list") or []
+        if len(result_rows) != len(rows) or len(status_rows) != len(rows):
+            # The two response lists are index-aligned with the request by
+            # contract; anything else means we cannot map outcomes to orders.
+            raise BybitSubmissionUncertain(
+                "Bybit batch response rows do not match the request, so every "
+                f"row's outcome is unknown: sent {len(rows)}, "
+                f"result {len(result_rows)}, status {len(status_rows)}"
+            )
+        response_time_ms = payload.get("time")
+        merged: list[dict[str, Any]] = []
+        for request_row, result_row, status_row in zip(rows, result_rows, status_rows):
+            row = dict(result_row)
+            code = status_row.get("code")
+            message = str(status_row.get("msg") or "")
+            row["_row_code"] = code
+            row["_row_msg"] = message
+            if response_time_ms is not None:
+                row["_response_time_ms"] = response_time_ms
+            if code not in (0, None) and _is_duplicate_order_link(f"{code} {message}"):
+                existing = self._lookup_order_by_link(
+                    symbol=str(request_row.get("symbol") or "") or None,
+                    order_link_id=str(request_row["orderLinkId"]),
+                )
+                if existing is None:
+                    raise BybitSubmissionUncertain(
+                        "Bybit reports duplicate orderLinkId "
+                        f"{request_row['orderLinkId']!r} in a batch row, but the "
+                        "existing order is not yet observable"
+                    )
+                row = dict(existing)
+                row["_idempotent_existing_order"] = True
+                row["_row_code"] = 0
+                row["_row_msg"] = message
+            merged.append(row)
+        return merged
 
     def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, Any]:
         self._assert_submit_allowed("cancel_order")
@@ -886,14 +954,19 @@ def _leverage_text(value: float) -> str:
 
 
 def _is_duplicate_order_link(value: Any) -> bool:
-    """True for Bybit's duplicate-orderLinkId reject (retCode 110089).
+    """True for Bybit's duplicate-orderLinkId reject.
 
-    Bybit returns 110089 / "orderLinkID exists" when an order has already been
-    accepted under the same idempotency key. Treated as idempotent success at
-    the submit layer, not a failure. Matched by code AND message text so a
-    re-worded retMsg still classifies."""
+    The official error table lists 110072 ("OrderLinkedID is duplicate");
+    traffic has also carried an "orderLinkID exists" wording. Matched on the
+    documented code plus message text covering both wordings — and nothing
+    else. A bare code with no duplicate wording must NOT classify: 110089 in
+    particular is documented as "Exceeds the maximum risk limit level", and
+    classifying a risk-limit refusal as a maybe-duplicate turned a definite
+    reject into an uncertain outcome that wedged the command."""
     text = str(value).lower()
-    return "110089" in text or ("orderlinkid" in text and "exist" in text)
+    if "110072" in text:
+        return True
+    return "orderlink" in text and ("exist" in text or "duplicate" in text)
 
 
 @dataclass(slots=True)
