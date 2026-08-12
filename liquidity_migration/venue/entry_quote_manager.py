@@ -430,10 +430,12 @@ class EntryQuoteManager:
         return self.kernel._state_ref().orders.get(command_id)
 
     def _touch(
-        self, symbol: str
+        self, symbol: str, *, allow_rest: bool = True
     ) -> tuple[float | None, float | None, float | None, float | None]:
         """(bid, ask, bid_qty, ask_qty). The owner's own reconstructed book
-        first (free, carries sizes); REST tickers as the fallback (no sizes)."""
+        first (free, carries sizes); REST tickers as the fallback (no sizes).
+        ``allow_rest=False`` keeps the read memory-only — the caller pays no
+        blocking venue round trip and just gets None when the book is dark."""
 
         if self.touch_source is not None:
             try:
@@ -449,6 +451,8 @@ class EntryQuoteManager:
                     and ask > bid
                 ):
                     return bid, ask, bid_qty, ask_qty
+        if not allow_rest:
+            return None, None, None, None
         try:
             rows = self.client.get_tickers(symbol=symbol)
         except Exception:  # noqa: BLE001 - a failed read just skips this reprice
@@ -598,15 +602,27 @@ class EntryQuoteManager:
         # The periodic gate, bypassed on a tick wake: the wake exists because
         # the book moved, and the price logic below already refuses to amend
         # a quote whose desired price came out where it rests.
-        if not reprice_now and now_ns - quote.last_reprice_ns < int(self.config.reprice_seconds * 1e9):
+        gate_open = now_ns - quote.last_reprice_ns >= int(self.config.reprice_seconds * 1e9)
+        if not gate_open and not reprice_now:
             return
-        quote.last_reprice_ns = now_ns
+        if gate_open:
+            # The periodic schedule stamps before the read, exactly as it did
+            # before tick wakes existed, so a failing touch read stays paced
+            # on the reprice cadence.
+            quote.last_reprice_ns = now_ns
         tick = self.tick_size(quote.symbol)
         if tick <= 0.0:
             return
-        bid, ask, bid_qty, ask_qty = self._touch(quote.symbol)
+        # A tick-wake pass inside the periodic interval reads memory only.
+        # The wake proves SOME quoted book moved, not this one, and a symbol
+        # whose own book is dark must keep paying its blocking REST read on
+        # the 3s clock — not once per wake on the owner loop.
+        bid, ask, bid_qty, ask_qty = self._touch(quote.symbol, allow_rest=gate_open)
         if bid is None or ask is None:
             return
+        if not gate_open:
+            # A successful tick-driven reprice resets the periodic clock.
+            quote.last_reprice_ns = now_ns
         # The market has already run past the price of crossing: stop paying
         # for patience and take the far touch now, bounded exactly like the
         # window-end cross.

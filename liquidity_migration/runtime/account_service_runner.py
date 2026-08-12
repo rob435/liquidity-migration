@@ -1594,8 +1594,11 @@ def main(argv: list[str] | None = None) -> int:
                 # only exists because a watched touch moved — while cross and
                 # cancel retries keep their own pacing.
                 entry_quotes.advance(reprice_now=intent_watch.pop_book_tick())
-                # Publish the touch this pass acted on, so the stream thread
-                # wakes the loop only when a quoted book moves off it.
+                # Publish the current touch of every still-resting quote, so
+                # the stream thread wakes the loop only when a quoted book
+                # moves off it. This read can be fresher than what the pass
+                # above acted on; a move inside that window wakes nothing,
+                # and the 3s periodic pass is the backstop that covers it.
                 quote_tick_watch: dict[str, tuple[float, float]] = {}
                 for quoted_symbol in entry_quotes.active_resting_symbols():
                     quoted_touch = _recorder_touch(quoted_symbol)

@@ -54,8 +54,11 @@ class FakeClient:
         self.cancel_error: Exception | None = None
         # Counts refused attempts too, which ``amends`` cannot.
         self.amend_attempts = 0
+        # Every REST tickers read, hit or miss: the blocking round trips.
+        self.ticker_reads = 0
 
     def get_tickers(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        self.ticker_reads += 1
         if symbol and symbol in self.tickers:
             bid, ask = self.tickers[symbol]
             return [{"symbol": symbol, "bid1Price": str(bid), "ask1Price": str(ask)}]
@@ -684,16 +687,22 @@ def test_the_cross_retry_is_paced_so_a_refusing_venue_is_not_hammered() -> None:
 
 def test_a_tick_wake_reprices_inside_the_periodic_interval() -> None:
     """``reprice_now`` is the tick-driven bypass: the caller saw the quoted
-    book actually move, so the 3 s gate has nothing left to protect."""
+    book actually move, so the 3 s gate has nothing left to protect. The
+    bypass reads the in-memory book only — production always wires the
+    recorder as the touch source, and the ticked symbol's touch is by
+    definition readable there."""
 
-    manager, client, kernel, clock = build_manager()
+    touch: dict[str, tuple[float, float, float, float]] = {}
+    manager, client, kernel, clock = build_manager(
+        touch_source=lambda symbol: touch.get(symbol)
+    )
     order = working_entry()
     kernel.state.orders[order.command_id] = order
     kernel.state.working_order_ids.add(order.command_id)
     manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
 
     # Touch moved up 1 s after registration: the plain pass holds...
-    client.tickers["LAUSDT"] = (0.0378, 0.0384)
+    touch["LAUSDT"] = (0.0378, 0.0384, 100.0, 100.0)
     clock.tick(1.0)
     manager.advance()
     assert client.amends == []
@@ -765,3 +774,31 @@ def test_active_resting_symbols_drops_terminal_orders_and_disabled_config() -> N
 
     disabled, _, _, _ = build_manager(window=0.0)
     assert disabled.active_resting_symbols() == set()
+
+
+def test_a_tick_wake_never_pays_a_rest_read_for_a_dark_book() -> None:
+    """The wake proves SOME quoted book moved. A quote whose own book is
+    unreadable must keep its blocking REST fallback on the 3 s clock — one
+    read per interval — not one per wake on the owner loop."""
+
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    # No touch_source and no REST rows: the book is dark either way.
+
+    # Wakes arrive at the floor rate inside the periodic interval: no reads.
+    for _ in range(5):
+        clock.tick(0.2)
+        manager.advance(reprice_now=True)
+    assert client.ticker_reads == 0
+
+    # The periodic schedule still pays its one read per interval.
+    clock.tick(manager.config.reprice_seconds)
+    manager.advance()
+    assert client.ticker_reads == 1
+
+    # And a failed read stays paced: the very next wake reads nothing.
+    manager.advance(reprice_now=True)
+    assert client.ticker_reads == 1

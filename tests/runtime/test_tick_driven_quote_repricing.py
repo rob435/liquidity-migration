@@ -241,10 +241,12 @@ def test_an_unwatched_symbol_never_wakes(tmp_path: Path) -> None:
 
 
 def test_a_gapped_book_never_wakes_even_when_its_frozen_touch_differs(tmp_path: Path) -> None:
-    """A gapped reconstruction freezes its touch. When the owner's published
-    pair comes from the ticker fallback instead, the frozen book touch can
-    differ from it forever — without the health gate every delta until the
-    next exchange snapshot would wake the owner at the floor rate."""
+    """A gapped reconstruction freezes its touch, so a wake computed from it
+    is about a book nothing can act on. Today's runner republishes the watch
+    without the gapped symbol on the very next pass (its touch reads as
+    unavailable), bounding the exposure to about one wasted wake — this gate
+    is the defense in depth that keeps that true whatever publishes the
+    watch or however stale it is."""
 
     clock = VirtualClock(current_wall_ns=1_800_000_000_000_000_000, current_monotonic_ns=1)
     recorder = _recorder(tmp_path, clock)
