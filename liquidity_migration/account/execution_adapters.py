@@ -811,6 +811,11 @@ class KernelExecutionDriver:
                         # The journal transaction, not the stale preflight read,
                         # owns the single-winner guarantee under concurrency.
                         raise AmbiguousExposureSubmission(str(exc)) from exc
+                    # The plan and the attempt claim must be power-loss durable
+                    # before bytes can leave for the venue. On a write-behind
+                    # journal this is the single place the order path waits for
+                    # a disk sync; on a synchronous journal it is free.
+                    self.kernel.journal.barrier()
                     normalized = self._normalize_observations(
                         submit_effect(command, market)
                     )

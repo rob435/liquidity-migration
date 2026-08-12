@@ -870,6 +870,17 @@ def main(argv: list[str] | None = None) -> int:
     # very little.
     parser.add_argument("--idle-seconds", type=float, default=0.05)
     parser.add_argument(
+        "--journal-write-behind",
+        action="store_true",
+        help=(
+            "Move journal fsyncs to a background thread. Commits stay visible "
+            "immediately; the order path syncs the disk exactly once, right "
+            "before an order leaves for the venue, instead of twice inline. "
+            "A crash can cost only post-venue observation events, which the "
+            "reconciler re-derives from the venue. Off by default."
+        ),
+    )
+    parser.add_argument(
         "--confirm-demo-orders",
         action="store_true",
         help=(
@@ -1026,7 +1037,11 @@ def main(argv: list[str] | None = None) -> int:
         api_secret=api_secret,
         mutation_lease=owner_lease,
     )
-    kernel = AccountExecutionKernel(route.account_path, account_id=route.account_id)
+    kernel = AccountExecutionKernel(
+        route.account_path,
+        account_id=route.account_id,
+        journal_write_behind=args.journal_write_behind,
+    )
     native_protection_policy = NativeDisasterProtectionPolicy(
         fallback_stop_fraction=args.disaster_stop_fraction,
     )
@@ -2009,6 +2024,9 @@ def main(argv: list[str] | None = None) -> int:
         intent_watch.close()
         position_feed.close()
         execution_consumer.close()
+        # After the last journal writer above is closed: drain deferred
+        # durability work so a clean shutdown loses nothing.
+        kernel.journal.close()
         public_stream.close()
         touch_stream.close()
         recorder.close()

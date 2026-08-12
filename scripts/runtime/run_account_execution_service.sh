@@ -106,6 +106,14 @@ case "$ACCOUNT_SHARED_LEVERAGE_AUTHORITY" in
     1) leverage_authority_args=(--shared-leverage-authority) ;;
 esac
 
+# Journal fsyncs move to a background thread; the order path syncs the disk
+# once, right before an order leaves for the venue, instead of twice inline.
+# Unset means off (every commit fsyncs inline, as it always has).
+journal_args=()
+case "${ACCOUNT_JOURNAL_WRITE_BEHIND:-0}" in
+    1) journal_args=(--journal-write-behind) ;;
+esac
+
 # A notification channel never keeps the account owner down: misconfigured
 # Telegram degrades to no Telegram, and the owner still executes and protects.
 telegram_args=()
@@ -142,5 +150,6 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
     "${leverage_authority_args[@]}" \
+    "${journal_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     "${telegram_args[@]}"

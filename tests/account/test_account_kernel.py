@@ -1196,12 +1196,14 @@ def test_account_journal_reader_sees_only_committed_state_while_write_is_blocked
     def blocking_write_transaction(
         root: str | Path,
         events: list[account_kernel_module.AccountEvent],
+        *,
+        durable: bool = True,
     ) -> Path:
         if any(event.correlation_id == "prospective" for event in events):
             write_entered.set()
             if not release_write.wait(timeout=5.0):
                 raise TimeoutError("test did not release blocked account write")
-        return real_write_transaction(root, events)
+        return real_write_transaction(root, events, durable=durable)
 
     monkeypatch.setattr(
         account_kernel_module,
@@ -1281,8 +1283,10 @@ def test_account_journal_reader_does_not_replay_history_between_segment_commit_a
     def committed_then_blocked_write(
         root: str | Path,
         events: list[account_kernel_module.AccountEvent],
+        *,
+        durable: bool = True,
     ) -> Path:
-        path = real_write_transaction(root, events)
+        path = real_write_transaction(root, events, durable=durable)
         if any(event.correlation_id == "prospective-after-segment" for event in events):
             segment_committed.set()
             if not release_cache_publication.wait(timeout=5.0):
@@ -1500,8 +1504,10 @@ def test_account_journal_failed_write_does_not_publish_prospective_state(
     def fail_write_transaction(
         root: str | Path,
         events: list[account_kernel_module.AccountEvent],
+        *,
+        durable: bool = True,
     ) -> Path:
-        del root, events
+        del root, events, durable
         raise OSError("injected transaction write failure")
 
     monkeypatch.setattr(

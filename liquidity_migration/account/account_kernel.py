@@ -19,12 +19,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
@@ -60,6 +62,8 @@ from liquidity_migration.core.deterministic_runtime import Clock, DeterministicI
 from liquidity_migration.account.native_protection_math import round_native_stop
 from liquidity_migration.data.storage import exclusive_file_lock
 from liquidity_migration.account.wedged_command_watch import wedged_commands
+
+_logger = logging.getLogger(__name__)
 
 
 ACCOUNT_JOURNAL_DIRECTORY = "account_journal"
@@ -1076,7 +1080,7 @@ def verify_account_journal(root: str | Path) -> dict[str, Any]:
     }
 
 
-def _atomic_replace(path: Path, data: bytes) -> None:
+def _atomic_replace(path: Path, data: bytes, *, durable: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
@@ -1088,10 +1092,17 @@ def _atomic_replace(path: Path, data: bytes) -> None:
             if count <= 0:
                 raise OSError("atomic account write made no progress")
             written += count
-        os.fsync(fd)
+        if durable:
+            os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
+    if not durable:
+        # The rename alone makes the file visible to every reader — page cache
+        # is coherent across processes. The skipped syncs buy only power-loss
+        # durability, which the caller owes via a later fsync of this file and
+        # its directory, in commit order.
+        return
     dir_fd = os.open(str(path.parent), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -1099,7 +1110,12 @@ def _atomic_replace(path: Path, data: bytes) -> None:
         os.close(dir_fd)
 
 
-def _write_transaction(root: str | Path, events: Sequence[AccountEvent]) -> Path:
+def _write_transaction(
+    root: str | Path,
+    events: Sequence[AccountEvent],
+    *,
+    durable: bool = True,
+) -> Path:
     if not events:
         raise ValueError("cannot write an empty account transaction")
     payload: dict[str, Any] = {
@@ -1117,7 +1133,7 @@ def _write_transaction(root: str | Path, events: Sequence[AccountEvent]) -> Path
         if existing != payload:
             raise AccountJournalIntegrityError(f"immutable transaction path changed: {path}")
         return path
-    _atomic_replace(path, canonical_json(payload) + b"\n")
+    _atomic_replace(path, canonical_json(payload) + b"\n", durable=durable)
     return path
 
 
@@ -1246,6 +1262,262 @@ def _append_jsonl_projection(
             os.close(directory)
 
 
+def _fsync_path(path: Path) -> None:
+    """fsync a file or directory by path; the flusher's one durability primitive."""
+
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+#: Marker a write-behind journal leaves beside its transactions directory. A
+#: synchronous writer that sees it fsyncs the newest few segments before
+#: appending its own, so its durable segment can never outlive an unsynced
+#: earlier one after a power loss (a hole in the middle of the chain).
+_WRITE_BEHIND_MARKER = "write_behind.owner"
+
+#: How many trailing segments that defensive fsync covers. The owner's flusher
+#: keeps the unsynced tail to the last few milliseconds of commits, so a small
+#: constant is enough, and fsyncing an already-durable file is nearly free.
+_DEFENSIVE_TAIL_SEGMENTS = 8
+
+
+class _JournalDurabilityFlusher:
+    """Background fsync engine for a write-behind journal.
+
+    ``transact`` renames each segment into place synchronously — that is what
+    makes a commit visible to every reader, in this process and others — and
+    hands the power-loss work (file fsync, directory fsync, projection append)
+    to this one thread, which performs it strictly in commit order.
+    ``barrier()`` returns only once everything enqueued before it is durable,
+    so the order path pays for exactly one disk sync, right before bytes leave
+    for the venue, instead of every commit paying inline.
+
+    Accounting is fail-closed and item-exact: ``enqueued`` always equals
+    ``completed`` plus in-flight plus queued, an item leaves the books only by
+    completing, and a failed item goes back to the head of the queue. A
+    barrier that cannot prove its target durable raises instead of returning,
+    so an order path that cannot prove its claim durable never sends. The one
+    accepted hang: an fsync stuck in the kernel blocks a barrier exactly as it
+    would have blocked the synchronous inline fsync it replaced.
+
+    Because syncs happen in commit order, a power loss can only cost a suffix
+    of commits. Renamed-but-unsynced tail files may survive torn on some
+    filesystems; journal init settles that case by quarantining a strictly
+    trailing unreadable suffix (see ``_settle_write_behind_crash``).
+    """
+
+    def __init__(self, *, flush_interval_seconds: float = 0.005) -> None:
+        self._condition = threading.Condition()
+        self._queue: deque[tuple[Any, ...]] = deque()
+        self._enqueued = 0
+        self._completed = 0
+        self._inflight = 0
+        self._pending_segments = 0
+        self._dead = False
+        self._stopping = False
+        self._flush_interval_seconds = float(flush_interval_seconds)
+        self._thread = threading.Thread(
+            target=self._run,
+            name="account-journal-flusher",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def healthy(self) -> bool:
+        return not self._dead and self._thread.is_alive()
+
+    def pending_segments(self) -> int:
+        """Segments not yet durable; bounds the tail a power loss can cost."""
+
+        with self._condition:
+            return self._pending_segments
+
+    def enqueue_segment(self, path: Path, data: bytes) -> None:
+        """Queue a renamed segment for durability.
+
+        ``data`` is the exact bytes just written: the failed-fsync retry
+        rewrites them through fresh pages, because after an fsync error the
+        kernel may drop the dirty pages and let a bare retry falsely succeed.
+        """
+
+        with self._condition:
+            self._queue.append(("segment", path, data))
+            self._enqueued += 1
+            self._pending_segments += 1
+            self._condition.notify_all()
+
+    def enqueue_projection(
+        self,
+        root: str | Path,
+        expected_previous_hash: str,
+        appended: tuple[AccountEvent, ...],
+    ) -> None:
+        with self._condition:
+            self._queue.append(("projection", root, expected_previous_hash, appended))
+            self._enqueued += 1
+            self._condition.notify_all()
+
+    def barrier(self) -> None:
+        """Block until every commit enqueued before this call is durable.
+
+        Fail closed: raises if the work cannot be completed, and never
+        double-counts or drops an item another draining thread has in flight.
+        """
+
+        with self._condition:
+            target = self._enqueued
+            self._condition.notify_all()
+        while True:
+            item: tuple[Any, ...] | None = None
+            with self._condition:
+                if self._completed >= target:
+                    return
+                worker_can_progress = not self._dead and self._thread.is_alive()
+                if not worker_can_progress and self._queue:
+                    item = self._queue.popleft()
+                    self._inflight += 1
+                elif not worker_can_progress and not self._queue and self._inflight == 0:
+                    raise AccountJournalIntegrityError(
+                        "journal durability accounting lost items: "
+                        f"completed {self._completed} of {target} with nothing queued"
+                    )
+                else:
+                    # A live worker, or another thread's in-flight item, will
+                    # move ``completed``; wait for it.
+                    self._condition.wait(0.05)
+                    continue
+            self._finish_item(item)
+
+    def close(self) -> None:
+        """Drain everything and stop; called on clean shutdown."""
+
+        with self._condition:
+            self._stopping = True
+            self._condition.notify_all()
+        self._thread.join(timeout=10.0)
+        self.barrier()
+
+    def _finish_item(self, item: tuple[Any, ...]) -> None:
+        """Process one checked-out item; on failure re-queue it and raise."""
+
+        try:
+            _process_durability_item(item)
+        except BaseException:
+            with self._condition:
+                self._inflight -= 1
+                self._queue.appendleft(item)
+                self._dead = True
+                self._condition.notify_all()
+            raise
+        with self._condition:
+            self._inflight -= 1
+            self._completed += 1
+            if item[0] == "segment":
+                self._pending_segments -= 1
+            self._condition.notify_all()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._queue and not self._stopping:
+                    self._condition.wait(self._flush_interval_seconds)
+                if not self._queue:
+                    return
+                item = self._queue.popleft()
+                self._inflight += 1
+            try:
+                self._finish_item(item)
+            except BaseException:
+                _logger.exception(
+                    "account journal flusher failed; durability falls back to the committing thread"
+                )
+                return
+
+
+def _process_durability_item(item: tuple[Any, ...]) -> None:
+    """Make one queued commit durable: file sync, then its directory."""
+
+    if item[0] == "segment":
+        _, path, data = item
+        try:
+            _fsync_path(path)
+            _fsync_path(path.parent)
+        except OSError as exc:
+            # After a failed fsync the kernel may mark the dirty pages clean
+            # without writing them, so retrying the same fsync can "succeed"
+            # while proving nothing. Rewriting the identical bytes through
+            # fresh pages, fully synced, is the retry that actually proves
+            # durability. If this raises too, the failure propagates and the
+            # barrier fails closed.
+            _logger.warning(
+                "account segment fsync failed (%s); rewriting %s through fresh pages",
+                exc,
+                path.name,
+            )
+            _atomic_replace(path, data, durable=True)
+    else:
+        _, root, expected_previous_hash, appended = item
+        _append_jsonl_projection(
+            root,
+            expected_previous_hash=expected_previous_hash,
+            appended=appended,
+        )
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _settle_write_behind_crash(root: str | Path) -> None:
+    """Settle a journal whose write-behind owner died without a clean close.
+
+    A power loss can leave the unsynced tail as renamed-but-torn files. The
+    flusher syncs in commit order, so unreadable segments are legitimate only
+    as a strict suffix: quarantine those to ``<name>.torn`` and make the
+    surviving tail durable. An unreadable segment with a readable one after it
+    is real corruption and stays a hard error.
+    """
+
+    directory = account_transactions_path(root)
+    if not directory.is_dir():
+        return
+    torn: list[str] = []
+    for name in _transaction_segment_names(root):
+        path = directory / name
+        try:
+            _parse_transaction_segment(name, path.read_bytes())
+        except (OSError, AccountJournalIntegrityError, AccountTransitionError):
+            torn.append(name)
+            continue
+        if torn:
+            raise AccountJournalIntegrityError(
+                f"unreadable account segment {torn[0]} precedes readable segment {name}; "
+                "that is corruption, not a write-behind crash tail — refusing to repair"
+            )
+    for name in torn:
+        _logger.error("quarantining torn write-behind tail segment %s -> %s.torn", name, name)
+        path = directory / name
+        os.replace(path, path.with_name(name + ".torn"))
+    survivors = _transaction_segment_names(root)[-_DEFENSIVE_TAIL_SEGMENTS:]
+    for name in survivors:
+        _fsync_path(directory / name)
+    _fsync_path(directory)
+
+
 class AccountJournal:
     """Serialized append-only account store with transactional event building."""
 
@@ -1255,6 +1527,7 @@ class AccountJournal:
         *,
         account_id: str,
         unsafe_single_process_inplace_research: bool = False,
+        write_behind: bool = False,
     ) -> None:
         self.root = Path(root).expanduser()
         self.account_id = account_id
@@ -1289,6 +1562,107 @@ class AccountJournal:
         self._unsafe_single_process_inplace_research = bool(unsafe_single_process_inplace_research)
         if not account_id:
             raise ValueError("account_id is required")
+        # Write-behind durability: commits stay visible immediately (the
+        # rename), fsyncs move to one background thread, and the order path
+        # calls ``barrier()`` once before bytes leave for the venue.
+        self._write_behind = bool(write_behind)
+        self._flusher: _JournalDurabilityFlusher | None = None
+        self._write_behind_fallback_logged = False
+        self._defensive_sync_logged = False
+        marker_path = self._transactions_dir.parent / _WRITE_BEHIND_MARKER
+        marker_pid = self._write_behind_marker_pid(marker_path)
+        if marker_pid is not None and not _pid_alive(marker_pid):
+            # A write-behind owner died without a clean close. Quarantine a
+            # torn tail, make the survivors durable, and retire the marker so
+            # synchronous runs stop paying the defensive tail sync forever.
+            _settle_write_behind_crash(self.root)
+            marker_path.unlink(missing_ok=True)
+            marker_pid = None
+        if self._write_behind:
+            if self._unsafe_single_process_inplace_research:
+                raise ValueError("write-behind durability cannot combine with in-place research mode")
+            if marker_pid is not None and marker_pid != os.getpid():
+                raise AccountKernelError(
+                    f"another live write-behind journal owner (pid {marker_pid}) holds "
+                    f"{marker_path}; verify it is gone and remove the marker before starting"
+                )
+            self._flusher = _JournalDurabilityFlusher()
+            _atomic_replace(
+                marker_path,
+                canonical_json({"pid": os.getpid(), "account_id": account_id}) + b"\n",
+            )
+
+    @staticmethod
+    def _write_behind_marker_pid(marker_path: Path) -> int | None:
+        """The marker's pid; None when absent; -1 when present but unreadable.
+
+        A torn marker means the owner died in the same power loss that may
+        have torn the journal tail, so "unreadable" must settle, not pass.
+        """
+
+        if not marker_path.exists():
+            return None
+        try:
+            payload = json.loads(marker_path.read_bytes())
+        except (OSError, json.JSONDecodeError):
+            return -1
+        pid = payload.get("pid") if isinstance(payload, Mapping) else None
+        return pid if type(pid) is int and pid > 0 else -1
+
+    def barrier(self) -> None:
+        """Block until every committed transaction is power-loss durable.
+
+        Synchronous journals are always durable, so this is free there; the
+        one caller that must wait is the order path immediately before an
+        exposure-capable venue call.
+        """
+
+        flusher = self._flusher
+        if flusher is not None:
+            flusher.barrier()
+
+    def close(self) -> None:
+        """Drain deferred durability work and retire the write-behind marker."""
+
+        flusher = self._flusher
+        if flusher is not None:
+            flusher.close()
+            (self._transactions_dir.parent / _WRITE_BEHIND_MARKER).unlink(missing_ok=True)
+
+    def _write_behind_flusher(self) -> _JournalDurabilityFlusher | None:
+        """The healthy flusher, or None once durability fell back to inline."""
+
+        flusher = self._flusher
+        if flusher is None:
+            return None
+        if flusher.healthy:
+            return flusher
+        if not self._write_behind_fallback_logged:
+            self._write_behind_fallback_logged = True
+            _logger.error(
+                "account journal write-behind flusher is dead; committing synchronously from now on"
+            )
+        # Drain whatever the dead flusher left behind before any synchronous
+        # commit, so the new durable segment cannot outlive an unsynced
+        # predecessor. Idempotent and near-free once drained.
+        flusher.barrier()
+        return None
+
+    def _fsync_trailing_segments(self) -> None:
+        """Defensively sync the newest segments before a synchronous append.
+
+        Run by synchronous writers when a write-behind owner's marker is
+        present: their durable segment must never outlive an unsynced earlier
+        one, or a power loss could leave a hole in the middle of the chain.
+        """
+
+        if not self._transactions_dir.is_dir():
+            return
+        tail = sorted(self._transactions_dir.glob("*.json"))[-_DEFENSIVE_TAIL_SEGMENTS:]
+        for path in tail:
+            _fsync_path(path)
+        if tail:
+            _fsync_path(self._transactions_dir)
 
     def _storage_signature(self) -> tuple[object, ...]:
         with self._cache_lock:
@@ -1483,10 +1857,33 @@ class AccountJournal:
                 next_sequence += 1
                 prev_hash = event.event_hash
             if appended:
+                flusher = self._write_behind_flusher()
+                if flusher is None and self._flusher is None and not self._write_behind:
+                    # A synchronous writer beside a write-behind owner must not
+                    # let its durable segment outlive the owner's unsynced tail.
+                    if (self._transactions_dir.parent / _WRITE_BEHIND_MARKER).exists():
+                        if not self._defensive_sync_logged:
+                            self._defensive_sync_logged = True
+                            _logger.warning(
+                                "write-behind owner marker present; defensively syncing "
+                                "the newest segments before a synchronous append"
+                            )
+                        self._fsync_trailing_segments()
                 with self._cache_lock:
                     self._local_transaction_publish_in_progress = True
                 try:
-                    transaction_path = _write_transaction(self.root, appended)
+                    transaction_path = _write_transaction(
+                        self.root,
+                        appended,
+                        durable=flusher is None,
+                    )
+                    if flusher is not None:
+                        # Read back the exact bytes just written (still in the
+                        # page cache, immutable, under the journal lock): the
+                        # failed-fsync retry rewrites them through fresh pages.
+                        flusher.enqueue_segment(
+                            transaction_path, transaction_path.read_bytes()
+                        )
                     appended_by_id = {event.event_id: event for event in appended}
                     try:
                         transaction_mtime = transaction_path.parent.stat().st_mtime_ns
@@ -1534,11 +1931,23 @@ class AccountJournal:
                         self._local_transaction_publish_in_progress = False
                 # Rebuildable tooling projection; a failure here leaves the
                 # transaction and published cache agreeing on committed truth.
-                _append_jsonl_projection(
-                    self.root,
-                    expected_previous_hash=(existing_last_event_hash if existing_count else ""),
-                    appended=appended,
-                )
+                if flusher is not None:
+                    flusher.enqueue_projection(
+                        self.root,
+                        existing_last_event_hash if existing_count else "",
+                        tuple(appended),
+                    )
+                    # Keep the unsynced tail within the bound the defensive
+                    # tail sync covers. A stalled disk turns this into
+                    # synchronous-style pacing — the correct degrade.
+                    if flusher.pending_segments() >= _DEFENSIVE_TAIL_SEGMENTS:
+                        flusher.barrier()
+                else:
+                    _append_jsonl_projection(
+                        self.root,
+                        expected_previous_hash=(existing_last_event_hash if existing_count else ""),
+                        appended=appended,
+                    )
             return appended
 
 
@@ -2045,11 +2454,13 @@ class AccountExecutionKernel:
         clock: Clock | None = None,
         id_seed: str = "account-kernel-v1",
         unsafe_single_process_inplace_research: bool = False,
+        journal_write_behind: bool = False,
     ) -> None:
         self.journal = AccountJournal(
             root,
             account_id=account_id,
             unsafe_single_process_inplace_research=unsafe_single_process_inplace_research,
+            write_behind=journal_write_behind,
         )
         self.account_id = account_id
         self.clock = clock or SystemClock()
