@@ -30,7 +30,12 @@ replaced the 15 s staleness reprice after a 34-symbol full-night replay of
 recorded books (199,785 paired attempts, queue-honest fill bounds) measured
 it 0.36 bp/entry cheaper than the join-and-reprice control (t = -11) with
 deadline crosses halved, and a cadence check showed 89% of that edge
-survives a 3 s evaluation loop — this loop. The original 2026-08-03
+survives a 3 s evaluation loop — this loop. Change point 2026-08-12: the
+market stream thread wakes the owner the moment a quoted symbol's touch
+moves, and that wake bypasses the periodic gate for one pass
+(``advance(reprice_now=True)``), moving evaluation toward the continuous
+end the cadence check measured as strictly better; the 3 s clock stays as
+the backstop. The original 2026-08-03
 overnight-lab numbers for the control (70.4% fill, median 41.6 s, 1.9 bp
 vs the 7.78 bp taker basis) understate GTC reality: that lab ran PostOnly
 into the demo realm's phantom internal liquidity.
@@ -369,10 +374,18 @@ class EntryQuoteManager:
     # ------------------------------------------------------------------
     # The per-pass lifecycle driver.
 
-    def advance(self) -> None:
+    def advance(self, *, reprice_now: bool = False) -> None:
         """One pass: adopt, verify fills, reprice, cross, cancel. Never raises;
         a persistently failing pass leaves quotes past their window, which the
-        convergence health bound then surfaces on its own."""
+        convergence health bound then surfaces on its own.
+
+        ``reprice_now`` is the tick-driven bypass of the periodic reprice
+        gate: the caller saw a quoted symbol's book actually move, so waiting
+        out the rest of ``reprice_seconds`` buys nothing. It bypasses only
+        that gate — cross and cancel retries keep their own pacing, which
+        exists to stop a refusing venue becoming a hot loop, and a quote
+        whose touch did not move still amends nothing because the desired
+        price comes out unchanged."""
 
         if not self.config.enabled:
             return
@@ -382,11 +395,34 @@ class EntryQuoteManager:
             _logger.exception("resting entry quote adoption failed")
         for command_id in list(self._quotes):
             try:
-                self._advance_one(command_id)
+                self._advance_one(command_id, reprice_now=reprice_now)
             except Exception:  # noqa: BLE001 - one bad quote must not stall the rest
                 _logger.exception(
                     "resting entry quote pass failed for command %s", command_id
                 )
+
+    def active_resting_symbols(self) -> set[str]:
+        """Symbols whose book ticks are worth waking the owner for: a quote
+        still resting inside its window. Crossed and cancelling quotes move
+        on their own paced clocks, and terminal ones are only retained for
+        the convergence probe."""
+
+        if not self.config.enabled:
+            return set()
+        symbols: set[str] = set()
+        for command_id, quote in self._quotes.items():
+            if quote.cross_deadline_ns or quote.cancel_requested:
+                continue
+            order = self._order_state(command_id)
+            if order is None or order.status in {
+                "filled",
+                "cancelled",
+                "rejected",
+                "partially_filled_cancelled",
+            }:
+                continue
+            symbols.add(quote.symbol)
+        return symbols
 
     # ------------------------------------------------------------------
 
@@ -497,7 +533,7 @@ class EntryQuoteManager:
         if len(self._adoption_probe_ns) > 10_000:
             self._adoption_probe_ns.clear()
 
-    def _advance_one(self, command_id: str) -> None:
+    def _advance_one(self, command_id: str, *, reprice_now: bool = False) -> None:
         quote = self._quotes[command_id]
         order = self._order_state(command_id)
         if order is None:
@@ -559,7 +595,10 @@ class EntryQuoteManager:
         if now_ns >= quote.deadline_ns:
             self._cross(quote, now_ns)
             return
-        if now_ns - quote.last_reprice_ns < int(self.config.reprice_seconds * 1e9):
+        # The periodic gate, bypassed on a tick wake: the wake exists because
+        # the book moved, and the price logic below already refuses to amend
+        # a quote whose desired price came out where it rests.
+        if not reprice_now and now_ns - quote.last_reprice_ns < int(self.config.reprice_seconds * 1e9):
             return
         quote.last_reprice_ns = now_ns
         tick = self.tick_size(quote.symbol)

@@ -47,6 +47,11 @@ OWNER_CAPTURE_READINESS_KIND = "account_owner_capture_readiness"
 OWNER_CAPTURE_READINESS_SCHEMA_VERSION = 1
 OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS = 1_000_000_000
 MAX_OWNER_CAPTURE_RECORD_BYTES = 4 * 1024 * 1024
+# One tick wake per watched symbol at most this often. A resting quote's
+# reprice work is an owner pass ending in a ~175 ms signed amend, so waking
+# faster than this buys nothing, and the floor is what stops a book that will
+# not sit still from spinning the owner loop.
+BOOK_TICK_WAKE_FLOOR_NS = 200_000_000
 OWNER_MARKET_READINESS_FILENAME = "account_owner_market_readiness.json"
 OWNER_MARKET_READINESS_KIND = "account_owner_market_readiness"
 OWNER_MARKET_READINESS_SCHEMA_VERSION = 2
@@ -801,6 +806,14 @@ class SequenceAwareMarketRecorder:
         self.books: dict[str, BookReconstruction] = {}
         self._post_fill_schedules: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._pending_post_fill_markouts: dict[tuple[str, int], PendingPostFillMarkout] = {}
+        # Tick-driven quote repricing: the owner publishes, each pass, the
+        # touch its resting quotes last acted on; the stream thread wakes it
+        # the moment a watched symbol's touch moves off that. The observer
+        # runs under self._lock on the stream thread, so it must be nothing
+        # but one non-blocking self-pipe write.
+        self.book_tick_observer: Callable[[], None] | None = None
+        self._book_tick_watch: dict[str, tuple[float, float]] = {}
+        self._book_tick_last_wake_ns: dict[str, int] = {}
         self._lock = threading.RLock()
 
     def register_post_fill_markouts(
@@ -931,6 +944,25 @@ class SequenceAwareMarketRecorder:
             self._last_market_readiness_publish_monotonic_ns = None
             if self.owner_invocation_id is not None:
                 _remove_owner_market_readiness(self.store.root)
+
+    def set_book_tick_watch(self, watch: Mapping[str, tuple[float, float]] | None) -> None:
+        """Publish symbol -> (bid, ask): the touch each resting quote's owner
+        last acted on. The stream thread wakes the owner when a watched
+        symbol's touch moves off its published pair.
+
+        Called from the owner thread without the recorder lock: the dict is
+        replaced wholesale, never mutated, and a stream-thread read of the old
+        reference costs at worst one extra wake.
+        """
+
+        self._book_tick_watch = (
+            {
+                str(symbol).upper(): (float(bid), float(ask))
+                for symbol, (bid, ask) in watch.items()
+            }
+            if watch
+            else {}
+        )
 
     def _persist(
         self,
@@ -1143,6 +1175,22 @@ class SequenceAwareMarketRecorder:
         state.exchange_system_ts_ns = system_ns
         state.exchange_engine_ts_ns = engine_ns
         state.local_receive_ts_ns = local_ns
+        # Tick-driven quote repricing, placed right after the state commit so
+        # the wake does not queue behind persistence. Nearly every message
+        # misses the one dict probe; a watched symbol pays a touch read and at
+        # most one non-blocking self-pipe write, floored per symbol.
+        observer = self.book_tick_observer
+        if observer is not None:
+            published = self._book_tick_watch.get(symbol)
+            if published is not None and state.bids and state.asks:
+                best_bid = max(state.bids)
+                best_ask = min(state.asks)
+                if best_bid < best_ask and (best_bid, best_ask) != published:
+                    wake_ns = self.clock.monotonic_ns()
+                    last_wake_ns = self._book_tick_last_wake_ns.get(symbol)
+                    if last_wake_ns is None or wake_ns - last_wake_ns >= BOOK_TICK_WAKE_FLOOR_NS:
+                        self._book_tick_last_wake_ns[symbol] = wake_ns
+                        observer()
         record = {
             "kind": "orderbook_snapshot" if is_snapshot else "orderbook_delta",
             "symbol": symbol,

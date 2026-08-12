@@ -1449,6 +1449,13 @@ def main(argv: list[str] | None = None) -> int:
     # queue behind up to ten round trips.
     reconciler.pending_poll_deferral = intent_watch.arrival_pending
     funding_reconciler.query_deferral = intent_watch.arrival_pending
+    if entry_quotes is not None:
+        # Tick-driven quote repricing: the stream thread nudges the watch's
+        # self-pipe the moment a quoted symbol's touch moves, so a resting
+        # quote chases the market when it actually moved instead of on the
+        # 3-second clock. The wake is a wake only — the reprice itself stays
+        # on this thread, inside ``entry_quotes.advance`` below.
+        recorder.book_tick_observer = intent_watch.tick_wakeup.wake
     try:
         while True:
             now = time.monotonic()
@@ -1582,8 +1589,19 @@ def main(argv: list[str] | None = None) -> int:
             if entry_quotes is not None:
                 # Advance resting entry quotes on the loop cadence: reprice
                 # toward a moved touch, cross at the window deadline, verify
-                # the attached stop on fill. Never raises.
-                entry_quotes.advance()
+                # the attached stop on fill. Never raises. A book tick on a
+                # quoted symbol bypasses the periodic reprice gate — the wake
+                # only exists because a watched touch moved — while cross and
+                # cancel retries keep their own pacing.
+                entry_quotes.advance(reprice_now=intent_watch.pop_book_tick())
+                # Publish the touch this pass acted on, so the stream thread
+                # wakes the loop only when a quoted book moves off it.
+                quote_tick_watch: dict[str, tuple[float, float]] = {}
+                for quoted_symbol in entry_quotes.active_resting_symbols():
+                    quoted_touch = _recorder_touch(quoted_symbol)
+                    if quoted_touch is not None:
+                        quote_tick_watch[quoted_symbol] = (quoted_touch[0], quoted_touch[1])
+                recorder.set_book_tick_watch(quote_tick_watch)
             # The queue head's symbols are known every tick, from the readiness
             # gate below, but subscribing them waited on this interval -- so a
             # request for a symbol the stream did not already carry sat up to
@@ -2023,6 +2041,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        # Stop asking for tick wakes before the pipe goes away; a stream
+        # thread already inside ``wake`` is safe against the close.
+        recorder.book_tick_observer = None
         intent_watch.close()
         position_feed.close()
         execution_consumer.close()

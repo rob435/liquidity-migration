@@ -1100,7 +1100,7 @@ def test_the_order_path_runs_before_the_venue_reads_it_used_to_queue_behind() ->
 
     order_path = loop.index("run_ready_request_or_converge(")
     reconcile = loop.index("run_periodic_reconciliation(")
-    quotes = loop.index("entry_quotes.advance()")
+    quotes = loop.index("entry_quotes.advance(")
     protection = loop.index("protection_engine.evaluate(protection_markets)")
     safety_flat = loop.index("service.run_safety_flat_once(inbox)")
     supervisor = loop.index("private_stream_supervisor.check(")

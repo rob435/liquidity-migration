@@ -680,3 +680,88 @@ def test_the_cross_retry_is_paced_so_a_refusing_venue_is_not_hammered() -> None:
     # Paced on reprice_seconds (3 s), so about one attempt per 3 s of grace,
     # not one per pass.
     assert 1 <= client.amend_attempts <= 8, client.amend_attempts
+
+
+def test_a_tick_wake_reprices_inside_the_periodic_interval() -> None:
+    """``reprice_now`` is the tick-driven bypass: the caller saw the quoted
+    book actually move, so the 3 s gate has nothing left to protect."""
+
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+
+    # Touch moved up 1 s after registration: the plain pass holds...
+    client.tickers["LAUSDT"] = (0.0378, 0.0384)
+    clock.tick(1.0)
+    manager.advance()
+    assert client.amends == []
+
+    # ...and the tick-driven pass chases at once.
+    manager.advance(reprice_now=True)
+    assert client.amends == [{"symbol": "LAUSDT", "orderLinkId": "cmd-1", "price": "0.0378"}]
+
+    # An unmoved touch amends nothing even with the gate bypassed.
+    manager.advance(reprice_now=True)
+    assert len(client.amends) == 1
+
+
+def test_a_tick_wake_does_not_bypass_cross_or_cancel_pacing() -> None:
+    """The pacing on cross and cancel retries exists to stop a refusing venue
+    becoming a hot loop; a book tick must not reopen that."""
+
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+    client.amend_error = BybitRequestRejected("amend refused")
+
+    # Window over: the cross attempt fails and starts the grace clock.
+    clock.tick(manager.config.window_seconds + 1.0)
+    manager.advance()
+    assert client.amend_attempts == 1
+
+    # Inside the cross-retry pacing a tick wake changes nothing.
+    clock.tick(1.0)
+    manager.advance(reprice_now=True)
+    assert client.amend_attempts == 1
+
+    # Grace over: the cancel is attempted and refused once.
+    client.cancel_error = BybitRequestRejected("cancel refused")
+    clock.tick(manager.config.cross_grace_seconds)
+    manager.advance()
+    assert client.cancels == ["cmd-1"]
+
+    # Inside the cancel pacing a tick wake changes nothing either.
+    clock.tick(1.0)
+    manager.advance(reprice_now=True)
+    assert client.cancels == ["cmd-1"]
+
+
+def test_active_resting_symbols_tracks_only_quotes_still_resting() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry()
+    kernel.state.orders[order.command_id] = order
+    kernel.state.working_order_ids.add(order.command_id)
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    assert manager.active_resting_symbols() == {"LAUSDT"}
+
+    # Crossing at the deadline moves the quote to its own paced clock.
+    client.tickers["LAUSDT"] = (0.0376, 0.0380)
+    clock.tick(manager.config.window_seconds + 1.0)
+    manager.advance()
+    assert manager.active_resting_symbols() == set()
+
+
+def test_active_resting_symbols_drops_terminal_orders_and_disabled_config() -> None:
+    manager, client, kernel, clock = build_manager()
+    order = working_entry(status="filled", filled=100.0)
+    kernel.state.orders[order.command_id] = order
+    manager.register(command_id=order.command_id, symbol="LAUSDT", is_buy=True, price=0.0376)
+    assert manager.active_resting_symbols() == set()
+
+    disabled, _, _, _ = build_manager(window=0.0)
+    assert disabled.active_resting_symbols() == set()
