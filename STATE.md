@@ -26,10 +26,18 @@ match; never append history to this file.
   confirmed. No entry can size against it (6 USDT floor), so the fleet
   decides cash until the account is funded. Earlier equity figures below are
   historical.
-- **Host runs `d3c7b5c`, whole fleet green**: all nine units
-  on/active/enabled, receipt `staged-ok commit=d3c7b5c profile=operational`,
-  `verify-ok … mainnet=armed`. Zero error-level lines on any of the six services
-  since the 19:36 UTC restart, and both liveness scopes report no active alerts.
+- **Host runs `cf0c20a` — the fast-execution engine — whole fleet green**
+  (deployed 2026-08-12 23:03 UTC, receipt `staged-ok commit=cf0c20a
+  profile=operational`, `verify-ok … mainnet=armed`, stop-first staged from
+  main). All nine units on/active/enabled, zero error-level lines on the
+  owners and producers after the restart. Both account owners run the
+  write-behind journal (marker `account_journal/write_behind.owner` present
+  on the demo root and the mainnet root); batched venue submission,
+  tick-driven quote repricing, and deadline-driven exits are live. The first
+  multi-order batch receipt and the first deadline-fired (`market_boundary`)
+  producer cycle are the two engine proofs to read off the host; carry's
+  00:20 UTC decision is the natural first occasion for both. CHANGELOG
+  2026-08-12 has the change points.
 - **Both trading-rule receipts were renewed 2026-08-09 and expire 2026-08-16.**
   Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
   funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.
