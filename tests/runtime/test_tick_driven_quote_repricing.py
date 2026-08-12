@@ -240,6 +240,35 @@ def test_an_unwatched_symbol_never_wakes(tmp_path: Path) -> None:
         recorder.close()
 
 
+def test_a_gapped_book_never_wakes_even_when_its_frozen_touch_differs(tmp_path: Path) -> None:
+    """A gapped reconstruction freezes its touch. When the owner's published
+    pair comes from the ticker fallback instead, the frozen book touch can
+    differ from it forever — without the health gate every delta until the
+    next exchange snapshot would wake the owner at the floor rate."""
+
+    clock = VirtualClock(current_wall_ns=1_800_000_000_000_000_000, current_monotonic_ns=1)
+    recorder = _recorder(tmp_path, clock)
+    wakes: list[int] = []
+    recorder.book_tick_observer = lambda: wakes.append(1)
+    try:
+        recorder.on_message(_orderbook_message(bid="10.0", ask="10.1"))
+        # A cross-sequence regression marks the book unhealthy, and later
+        # deltas cannot repair it — only the next exchange snapshot can.
+        recorder.on_message(
+            _orderbook_message(update_id=101, seq=900, message_type="delta")
+        )
+        # The owner publishes a ticker-served pair that differs from the
+        # unhealthy book's touch.
+        recorder.set_book_tick_watch({"BUSDT": (10.5, 10.6)})
+        clock.advance_ns(BOOK_TICK_WAKE_FLOOR_NS)
+        recorder.on_message(
+            _orderbook_message(update_id=102, seq=901, message_type="delta")
+        )
+        assert not wakes
+    finally:
+        recorder.close()
+
+
 def test_a_crossed_book_does_not_wake(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=1_800_000_000_000_000_000, current_monotonic_ns=1)
     recorder = _recorder(tmp_path, clock)

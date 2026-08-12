@@ -1182,7 +1182,11 @@ class SequenceAwareMarketRecorder:
         observer = self.book_tick_observer
         if observer is not None:
             published = self._book_tick_watch.get(symbol)
-            if published is not None and state.bids and state.asks:
+            # Only a healthy reconstruction wakes: a gapped book's touch is
+            # frozen and unactionable, and comparing it against a published
+            # pair served from the ticker fallback would wake at the floor
+            # rate until the next exchange snapshot heals the book.
+            if published is not None and state.healthy and state.bids and state.asks:
                 best_bid = max(state.bids)
                 best_ask = min(state.asks)
                 if best_bid < best_ask and (best_bid, best_ask) != published:
