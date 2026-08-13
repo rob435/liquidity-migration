@@ -126,6 +126,33 @@ async fn a_limit_order_carries_price_and_time_in_force() {
 }
 
 #[tokio::test]
+async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
+    // Bybit: "When reduceOnly is true, take profit/stop loss cannot be set" —
+    // rendering the stop would reject the whole exit, exactly when exiting
+    // matters most. The earlier version of this test set stop: None, which
+    // proved nothing.
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-9"}"#)).await;
+    let mut gw = gateway(&server);
+
+    let request = OrderRequest {
+        client_order_id: "eng-9".to_string(),
+        strategy: StrategyId(1),
+        symbol: SymbolId(1),
+        side: Side::Sell,
+        qty: 1.5,
+        kind: OrderKind::Market,
+        stop: Some(engine_types::StopSpec { trigger_px: 2900.0 }),
+        reduce_only: true,
+    };
+    gw.send_order(&request).await.unwrap();
+
+    let body = server.only("/v5/order/create").json();
+    assert_eq!(body["reduceOnly"], true);
+    assert!(body.get("stopLoss").is_none(), "stopLoss on a reduce-only order");
+    assert!(body.get("tpslMode").is_none(), "tpslMode on a reduce-only order");
+}
+
+#[tokio::test]
 async fn a_non_zero_retcode_is_a_rejection() {
     let server = TestServer::start(|_, _| {
         (200, r#"{"retCode":110007,"retMsg":"ab not enough for new order","result":{}}"#.to_string())

@@ -67,4 +67,13 @@ pub trait RiskKernel {
     /// Bind an engine-minted client order id to the intent it approved, so
     /// later fills can be attributed per strategy. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}
+    /// Control state that must outlive the process (the loss guard's daily
+    /// anchor and trip). `Some` exactly when it changed since last taken;
+    /// the engine writes it to the log and makes it durable. Default: none.
+    fn take_control_anchor(&mut self) -> Option<String> {
+        None
+    }
+    /// Restore from the newest anchor found in the log, before the first
+    /// evaluation. Default: ignore.
+    fn restore_control_anchor(&mut self, _state: &str) {}
 }

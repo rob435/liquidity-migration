@@ -15,6 +15,9 @@ pub struct Kernel {
     envelope: Envelope,
     book: Book,
     wall_ns: Option<u64>,
+    /// The anchor as last handed to the engine for the log, so
+    /// `take_control_anchor` reports only real changes.
+    taken_anchor: Option<LossGuardAnchor>,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -41,6 +44,7 @@ impl Kernel {
             envelope,
             book: Book::default(),
             wall_ns: None,
+            taken_anchor: None,
         })
     }
 
@@ -328,6 +332,28 @@ impl RiskKernel for Kernel {
 
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
         Kernel::register_order(self, client_order_id, intent, approved_qty);
+    }
+
+    fn take_control_anchor(&mut self) -> Option<String> {
+        let current = self.guard.anchor();
+        if current == LossGuardAnchor::default() && self.taken_anchor.is_none() {
+            return None;
+        }
+        if self.taken_anchor.as_ref() == Some(&current) {
+            return None;
+        }
+        let state = serde_json::to_string(&current).ok()?;
+        self.taken_anchor = Some(current);
+        Some(state)
+    }
+
+    fn restore_control_anchor(&mut self, state: &str) {
+        // An unreadable anchor restores nothing: the log's checksums make
+        // this unreachable short of a hand-edited record.
+        if let Ok(anchor) = serde_json::from_str::<LossGuardAnchor>(state) {
+            self.taken_anchor = Some(anchor.clone());
+            self.guard.restore(anchor);
+        }
     }
 }
 

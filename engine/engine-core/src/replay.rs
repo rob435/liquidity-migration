@@ -114,6 +114,9 @@ pub fn one_line(record: &WalRecord) -> String {
             pretty(*wire_p99_ns)
         ),
         WalRecord::Note { source, text } => format!("note       [{source}] {text}"),
+        WalRecord::ControlAnchor { source, state } => {
+            format!("anchor     [{source}] {state}")
+        }
     }
 }
 

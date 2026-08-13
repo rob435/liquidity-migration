@@ -49,6 +49,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::OrderUpdate { .. } => "order_update",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
         WalRecord::Note { .. } => "note",
+        WalRecord::ControlAnchor { .. } => "control_anchor",
     }
     .to_string()
 }
@@ -213,6 +214,8 @@ impl VenueGateway for MockVenue {
 struct MockRisk {
     verdict: RiskVerdict,
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
+    restored: Rc<RefCell<Vec<String>>>,
+    anchor_script: VecDeque<String>,
 }
 
 impl MockRisk {
@@ -223,6 +226,8 @@ impl MockRisk {
             MockRisk {
                 verdict,
                 seen: seen.clone(),
+                restored: Rc::new(RefCell::new(Vec::new())),
+                anchor_script: VecDeque::new(),
             },
             seen,
         )
@@ -239,6 +244,14 @@ impl RiskKernel for MockRisk {
 
     fn on_update(&mut self, update: &OrderUpdate) {
         self.seen.borrow_mut().push(update.clone());
+    }
+
+    fn take_control_anchor(&mut self) -> Option<String> {
+        self.anchor_script.pop_front()
+    }
+
+    fn restore_control_anchor(&mut self, state: &str) {
+        self.restored.borrow_mut().push(state.to_string());
     }
 }
 
@@ -639,6 +652,135 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     assert!(h.sends.borrow().is_empty());
     let note = note_saying(&h.records, "not sent");
     assert!(note.contains("smallest tradable size"), "{note}");
+}
+
+#[tokio::test]
+async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
+    // A restart must never hand the day a fresh loss budget or clear a
+    // latched trip — the newest anchor in the log is the guard's memory.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let replayed = vec![
+        WalRecord::ControlAnchor { source: "risk".into(), state: "{\"old\":true}".into() },
+        WalRecord::Note { source: "engine".into(), text: "unrelated".into() },
+        WalRecord::ControlAnchor { source: "risk".into(), state: "{\"newest\":true}".into() },
+    ];
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let restored = risk.restored.clone();
+    let engine = Engine::boot(
+        &settings(true),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await
+    .expect("boot");
+    drop(engine);
+    assert_eq!(*restored.borrow(), vec!["{\"newest\":true}".to_string()]);
+}
+
+#[tokio::test]
+async fn a_changed_control_anchor_is_written_and_made_durable() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    engine.risk.anchor_script.push_back("{\"day\":1}".to_string());
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let records = h.records.borrow();
+    let anchor_at = records.iter().position(
+        |r| matches!(r, WalRecord::ControlAnchor { state, .. } if state == "{\"day\":1}"),
+    );
+    assert!(anchor_at.is_some(), "the changed anchor never reached the log");
+    let tape = h.tape.borrow();
+    let write = tape
+        .iter()
+        .position(|s| matches!(s, Step::Append(k) if k == "control_anchor"))
+        .expect("append step");
+    assert!(
+        tape[write..].contains(&Step::Barrier),
+        "the anchor was written but never made durable"
+    );
+}
+
+/// Emits one reduce-only exit that (wrongly) still carries a stop.
+struct SloppyExiter {
+    symbol: String,
+    sent: bool,
+}
+
+impl Strategy for SloppyExiter {
+    fn name(&self) -> &str {
+        "sloppy-exiter"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        if let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event {
+            if !self.sent {
+                self.sent = true;
+                ctx.emit(Intent {
+                    strategy: StrategyId(0),
+                    symbol: *symbol,
+                    side: Side::Sell,
+                    qty: 0.01,
+                    kind: OrderKind::Market,
+                    stop: Some(StopSpec {
+                        trigger_px: quote.bid_px * 0.99,
+                    }),
+                    reduce_only: true,
+                    tag: "sloppy-exit".into(),
+                    decided_ns: ctx.now_ns(),
+                });
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
+    // The venue rejects a reduce-only order carrying stop fields, and the
+    // log must record what was actually sent — so the stop comes off at
+    // request build, not just at the venue boundary.
+    let exiter = SloppyExiter { symbol: "BTCUSDT".into(), sent: false };
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].reduce_only);
+    assert!(sends[0].stop.is_none(), "the wire saw a stop on an exit");
+    for record in h.records.borrow().iter() {
+        if let WalRecord::OrderSent { request, .. } = record {
+            assert!(request.stop.is_none(), "the log saw a stop on an exit");
+        }
+    }
 }
 
 #[tokio::test]

@@ -116,10 +116,14 @@ impl VenueGateway for BybitGateway {
             }
         }
         // The stop rides along with the entry, so one round trip leaves the
-        // position protected rather than two.
+        // position protected rather than two. Never on an exit: Bybit
+        // rejects a reduce-only order that carries stop-loss fields, and a
+        // rejected exit is the one rejection that hurts.
         if let Some(stop) = req.stop {
-            body.insert("tpslMode".into(), "Full".into());
-            body.insert("stopLoss".into(), venue_num(stop.trigger_px)?.into());
+            if !req.reduce_only {
+                body.insert("tpslMode".into(), "Full".into());
+                body.insert("stopLoss".into(), venue_num(stop.trigger_px)?.into());
+            }
         }
 
         let envelope = self.rest.post_signed(PATH_ORDER_CREATE, &Value::Object(body)).await?;

@@ -304,6 +304,48 @@ fn a_non_positive_ceiling_is_rejected_at_construction() {
 }
 
 #[test]
+// The anchor must outlive the process: a crash-loop that re-anchors every
+// boot is unlimited daily loss, and a restart must never clear a trip.
+fn the_anchor_travels_through_the_control_anchor_hooks() {
+    let mut kernel = kernel_at(DAY1);
+    assert_eq!(
+        RiskKernel::take_control_anchor(&mut kernel),
+        None,
+        "nothing to persist before the first anchor"
+    );
+    assess(&mut kernel, 250_000.0, SEC);
+    let anchored = RiskKernel::take_control_anchor(&mut kernel).expect("the anchor changed");
+    assert_eq!(
+        RiskKernel::take_control_anchor(&mut kernel),
+        None,
+        "unchanged since last taken"
+    );
+    assess(&mut kernel, 249_000.0, 2 * SEC);
+    let tripped = RiskKernel::take_control_anchor(&mut kernel).expect("the trip changed it");
+
+    // Restored from the tripped state: still tripped, full recovery or not.
+    let mut reborn = kernel_at(DAY1);
+    RiskKernel::restore_control_anchor(&mut reborn, &tripped);
+    assert!(matches!(
+        assess(&mut reborn, 260_000.0, 3 * SEC),
+        RiskVerdict::Deny {
+            reason: DenyReason::LossGuardTripped { .. }
+        }
+    ));
+
+    // Restored from the pre-trip state: the day's opening still anchors the
+    // budget, so the same loss still trips.
+    let mut reborn = kernel_at(DAY1);
+    RiskKernel::restore_control_anchor(&mut reborn, &anchored);
+    assert!(matches!(
+        assess(&mut reborn, 249_000.0, 3 * SEC),
+        RiskVerdict::Deny {
+            reason: DenyReason::LossGuardTripped { .. }
+        }
+    ));
+}
+
+#[test]
 // The exit exemption is only for GENUINE reductions: a reduce_only flag on
 // an order that reduces nothing is unknown state, tripped or not.
 fn a_tripped_guard_still_refuses_an_exit_that_reduces_nothing() {

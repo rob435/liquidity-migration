@@ -47,6 +47,14 @@ pub enum WalRecord {
         source: String,
         text: String,
     },
+    /// Control state that must outlive the process — above all the loss
+    /// guard's daily anchor and trip latch. Written (and made durable) the
+    /// moment it changes; the newest one is restored at boot, so a restart
+    /// can never hand the day a fresh loss budget or clear a trip.
+    ControlAnchor {
+        source: String,
+        state: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

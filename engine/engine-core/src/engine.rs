@@ -37,8 +37,8 @@ use std::time::Duration;
 use engine_types::{
     quantize, AccountView, EngineEvent, InstrumentRule, Intent, MarketEvent, MarketFeed,
     MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate, RiskKernel, RiskVerdict,
-    Strategy, StrategyId, Subscription, SymbolId, VenueError, VenueGateway, Wal, WalError,
-    WalRecord,
+    StopSpec, Strategy, StrategyId, Subscription, SymbolId, VenueError, VenueGateway, Wal,
+    WalError, WalRecord,
 };
 
 use crate::clock;
@@ -191,6 +191,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // sent for that symbol. Say so now rather than at the first
             // intent.
             tracing::warn!(symbols = ?missing, "no instrument rules; these symbols cannot trade");
+        }
+
+        // The newest control anchor in the log is the loss guard's memory:
+        // restored before anything is judged, so a restart can neither
+        // refresh the day's loss budget nor clear a latched trip.
+        if let Some(state) = replayed.iter().rev().find_map(|record| match record {
+            WalRecord::ControlAnchor { state, .. } => Some(state.as_str()),
+            _ => None,
+        }) {
+            risk.restore_control_anchor(state);
         }
 
         let account = venue.account_view().await?;
@@ -426,7 +436,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Err(e) => tracing::warn!(error = %e, "could not refresh the account reading"),
             }
         }
-        Ok(())
+        self.persist_control_anchor()
     }
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
@@ -444,6 +454,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 break;
             }
             self.process_intent(intent, origin_ns).await?;
+        }
+        self.persist_control_anchor()
+    }
+
+    /// Write a changed control anchor down and force it to disk. Rare (a
+    /// day roll or a trip), and a trip that is not durable is a trip a
+    /// crash-loop can forget.
+    fn persist_control_anchor(&mut self) -> Result<(), EngineError> {
+        if let Some(state) = self.risk.take_control_anchor() {
+            self.wal.append(&WalRecord::ControlAnchor {
+                source: "risk".into(),
+                state,
+            })?;
+            self.wal.barrier()?;
         }
         Ok(())
     }
@@ -543,7 +567,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             side: intent.side,
             qty,
             kind,
-            stop: intent.stop,
+            // The venue rejects a reduce-only order that carries stop
+            // fields, so an exit sheds its stop here — the log records what
+            // is actually sent. An entry's stop is quantized against the
+            // instrument tick, rounded toward triggering sooner.
+            stop: if intent.reduce_only {
+                None
+            } else {
+                intent.stop.map(|s| StopSpec {
+                    trigger_px: quantize::quantize_px(s.trigger_px, intent.side.flipped(), &rule),
+                })
+            },
             reduce_only: intent.reduce_only,
         };
 
