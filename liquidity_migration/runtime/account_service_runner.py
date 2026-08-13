@@ -9,6 +9,7 @@ flag cannot leave any of them pointing at the other account.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import math
@@ -125,6 +126,73 @@ _logger = logging.getLogger(__name__)
 
 #: How long before a boundary anchor the owner loop goes quiet, in seconds.
 PRE_BOUNDARY_QUIESCE_WINDOW_SECONDS = 2.0
+
+#: Young-generation allocations tolerated between the owner's own collections.
+#: High enough that automatic collection does not fire inside a pass, low
+#: enough to stay a working backstop if the owner's own collection stops.
+OWNER_GC_YOUNG_THRESHOLD = 50_000
+
+
+@dataclass
+class OwnerGcPolicy:
+    """Keep tidying-up pauses (garbage collection) off the order path.
+
+    Python tidies up in the middle of whatever is allocating when a generation
+    fills, so a sweep lands inside an order pass as readily as anywhere else.
+    Measured against this repo's own object churn, the worst automatic pause
+    was 13.7-14.1 ms across three runs of 20,000 passes.
+
+    Three moves, all at the end of a pass, where nothing is waiting on them:
+
+    * ``gc.freeze()`` once the process is warm puts the startup graph
+      (~67,000 objects, measured by importing this module) into the permanent
+      generation, which no later sweep walks. On its own this took the worst
+      pause to 6.6-8.8 ms.
+    * a raised young threshold stops automatic sweeps firing mid-pass. On its
+      own this is *worse* than doing nothing -- rarer but bigger pauses, 6.1
+      ms -- so it is only useful with the next item.
+    * a full collect at the end of every pass, which does the work at a
+      moment we choose. Together: worst pause 0.14-0.24 ms, and less total
+      collection time per pass than the default (0.031 ms against 0.051 ms).
+
+    Automatic collection stays switched on, and that is the whole safety
+    argument: if ``settle`` stops being called, the interpreter still sweeps
+    at the raised threshold. Measured over 20,000 passes that leaves 37,163
+    live tracked objects and 112.0 MB, against the untouched default's 72,976
+    and 118.5 MB -- bounded, and no worse than today.
+
+    A young-generation-only collect here would NOT be safe. It resets the
+    counter that drives the older generations, so nothing ever sweeps them:
+    measured 1,200,038 live objects and 1,811 MB against 118 MB. That is why
+    this runs a full collect and not a cheap one.
+    """
+
+    young_threshold: int = OWNER_GC_YOUNG_THRESHOLD
+    warm: bool = False
+
+    def settle(self, *, defer: bool = False) -> bool:
+        """Run at the very end of a pass. True when a collection ran.
+
+        ``defer`` skips the collection when an intent is already waiting, so
+        the queued order starts its pass a few tenths of a millisecond
+        earlier. It never skips the one-time warm-up, and skipping only ever
+        falls back on the automatic collector described above.
+        """
+
+        if not self.warm:
+            # Collect BEFORE freezing: freezing keeps whatever is tracked at
+            # that instant for the life of the process, so the startup pass's
+            # rubbish has to be gone first.
+            gc.collect()
+            gc.freeze()
+            _, generation1, generation2 = gc.get_threshold()
+            gc.set_threshold(self.young_threshold, generation1, generation2)
+            self.warm = True
+            return True
+        if defer:
+            return False
+        gc.collect()
+        return True
 
 
 def parse_pre_boundary_anchors(spec: str) -> tuple[tuple[int, int], ...]:
@@ -1561,6 +1629,7 @@ def main(argv: list[str] | None = None) -> int:
 
     reconciler.pending_poll_deferral = _intent_imminent_or_pending
     funding_reconciler.query_deferral = _intent_imminent_or_pending
+    gc_policy = OwnerGcPolicy()
     if entry_quotes is not None:
         # Tick-driven quote repricing: the stream thread nudges the watch's
         # self-pipe the moment a quoted symbol's touch moves, so a resting
@@ -2173,6 +2242,12 @@ def main(argv: list[str] | None = None) -> int:
                 # never evaluate. Every other cadence here is stamped the same
                 # way, after its work.
                 last_notification_poll = time.monotonic()
+            # The end of the maintenance tail, and the last thing the pass
+            # does: collect this pass's rubbish here, at a moment nothing is
+            # waiting on, instead of letting the interpreter collect it in the
+            # middle of the next order path. Stands aside for an intent that is
+            # already waiting, the same way the pending poll above does.
+            gc_policy.settle(defer=intent_watch.arrival_pending())
             intent_watch.wait(max(args.idle_seconds, 0.01))
     except KeyboardInterrupt:
         return 0
