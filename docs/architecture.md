@@ -9,6 +9,16 @@ drifts; deployed state is [`STATE.md`](../STATE.md).
 Strategy processes publish absolute component targets. They hold no venue credentials and
 never submit, adopt, repair, or close an order.
 
+Each producer is a plug on the resident strategy host
+([`strategy_host.py`](../liquidity_migration/strategy/strategy_host.py), plug contract in
+its module docstring; since 2026-08-13). The host is event-driven: a pass runs when a
+confirmed bar lands, when the account journal commits (a fill, receipt, or protection
+event — an inotify watch on the transaction segments, so producers react in ~2s instead
+of on the next grid pass), when a time deadline comes due (a max-hold stop, carry's 00:20
+UTC decision boundary — never delayed by the debounce), and at least once per 60s idle
+floor, which keeps every quiet-time cadence contract (health receipts for the liveness
+watchdog, the hourly funding sweep, entry republication) where the old fixed grid had it.
+
 | Role | Units | Mutates a venue |
 | --- | --- | --- |
 | Account owner, demo | `account-execution` | Yes — sole Bybit demo mutator |

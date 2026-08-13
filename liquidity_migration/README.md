@@ -48,9 +48,13 @@ the code belongs somewhere else.
   file, and grep finds every caller.
 - A module's package is chosen by what it *is*, not by who calls it. `market_capture`
   is in `account/` because only account owners use it, not in `marketdata/`.
-- `strategy/` is flat at 17 modules; filename prefixes (`carry_*`, `continuous_*`,
+- `strategy/` is flat at 18 modules; filename prefixes (`carry_*`, `continuous_*`,
   `long_*`) already group them. The next sleeve pushes it past 20 — split
   per-sleeve then, not on a new axis.
+- A sleeve daemon is a plug on `strategy/strategy_host.py`: the host owns the
+  market planes, wake machinery (bar, account-journal commit, time deadline,
+  idle floor), evidence tapes, and health receipts; a new strategy supplies the
+  plug surface documented in the host's module docstring plus one CLI wiring.
 
 ## Entry points
 
