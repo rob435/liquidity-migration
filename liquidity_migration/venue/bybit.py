@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import threading
 import time
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -163,7 +165,10 @@ def api_key_allows_order_submit(api_key_info: Mapping[str, Any]) -> tuple[bool, 
     return True, ""
 
 
-@dataclass(slots=True)
+# ``weakref_slot`` exists for the keep-warm thread: it holds only a weak
+# reference to the client, so a client discarded without close() is collected
+# normally and the thread ends itself on its next wake.
+@dataclass(slots=True, weakref_slot=True)
 class BybitPrivateClient:
     category: str = "linear"
     testnet: bool = False
@@ -180,7 +185,21 @@ class BybitPrivateClient:
     # Read-only clients need no lease. Every state-changing call needs a held
     # canonical lease bound to the authenticated account, credential, and realm.
     mutation_lease: DemoAccountMutationLease | None = None
+    # The venue edge closes an idle HTTPS connection after tens of seconds, so
+    # the first order after a quiet spell pays a full TLS handshake before the
+    # venue even sees it. A small background thread re-touches the connection
+    # every ~35s with pybit's unsigned public server-time read, which travels
+    # through the same connection pool as every private request. On for demo
+    # and mainnet alike: the ping is credential-free and reads no account state.
+    keep_session_warm: bool = True
+    keep_warm_interval_seconds: float = 35.0
+    keep_warm_jitter_seconds: float = 5.0
     _client: Any = field(init=False, repr=False)
+    _warm_stop: threading.Event = field(init=False, repr=False)
+    _warm_lock: threading.Lock = field(init=False, repr=False)
+    _warm_thread: threading.Thread | None = field(init=False, repr=False, default=None)
+    _warm_pings: int = field(init=False, repr=False, default=0)
+    _warm_ping_failures: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self) -> None:
         self.realm = VenueRealm.DEMO if self.realm is None else venue_realm(self.realm)
@@ -208,6 +227,25 @@ class BybitPrivateClient:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
+        # Strip pybit's own sleep-and-retry loop. pybit 5.16.0 retries retCodes
+        # {10002, 10006, 30034, 30035, 130035, 130150} inside _submit_request,
+        # sleeping between attempts (the rate-limit sleep waits for the venue's
+        # reset timestamp, up to max_retries=3) -- on the order path that blocks
+        # the very request our own classification should answer at once: a
+        # venue "not now" becomes BybitSubmissionUncertain and the reconciler
+        # probes it, while reads carry their own short retry ladder in _call.
+        # These must be assigned after construction: pybit's __post_init__
+        # replaces a falsy retry_codes with its default table, so the
+        # constructor cannot express "retry nothing". max_retries=1 is the
+        # backstop so the request loop stays single-shot even if a retryable
+        # path drifts back in. If a pybit upgrade renames either attribute
+        # this block becomes a silent no-op;
+        # test_pybit_retry_attributes_still_exist_and_default_to_sleep_retries
+        # pins the names against pybit 5.16.0.
+        self._client.retry_codes = set()
+        self._client.max_retries = 1
+        self._warm_stop = threading.Event()
+        self._warm_lock = threading.Lock()
         _require_realm_endpoint(self._client, "BybitPrivateClient", realm=self.realm)
 
     def _assert_submit_allowed(self, action: str) -> None:
@@ -228,6 +266,53 @@ class BybitPrivateClient:
             environment=realm.value,
             action=action,
         )
+
+    def _ensure_session_warm_keeper(self) -> None:
+        """Start the keep-warm thread on the first real request.
+
+        Started here rather than in the constructor for two reasons: building
+        a client stays network-silent (tests and probes construct clients they
+        never use), and the request that reaches this point is itself about to
+        touch the connection, so the first re-touch is only due one interval
+        later -- the loop waits before its first ping.
+        """
+
+        if not self.keep_session_warm or self._warm_thread is not None:
+            return
+        with self._warm_lock:
+            if self._warm_thread is not None or self._warm_stop.is_set():
+                return
+            thread = threading.Thread(
+                target=_keep_session_warm_loop,
+                args=(
+                    weakref.ref(self),
+                    self._warm_stop,
+                    self.keep_warm_interval_seconds,
+                    self.keep_warm_jitter_seconds,
+                ),
+                name="bybit-session-warm",
+                daemon=True,
+            )
+            try:
+                thread.start()
+            except Exception:  # noqa: BLE001 - the accelerator must never break a request
+                # Could not spawn the thread (for example an OS thread limit).
+                # Run without the accelerator instead of re-trying on every
+                # request; the stop flag keeps this branch from repeating.
+                self._warm_stop.set()
+                _logger_account.debug("bybit keep-warm thread failed to start", exc_info=True)
+                return
+            self._warm_thread = thread
+
+    def close(self) -> None:
+        """Stop the keep-warm thread. Idempotent. The client stays usable for
+        plain requests afterwards; it just stops re-touching the connection."""
+
+        self._warm_stop.set()
+        thread = self._warm_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        self._warm_thread = None
 
     def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT") -> dict[str, Any]:
         payload = self._call("get_wallet_balance", accountType=account_type, coin=coin)
@@ -859,6 +944,7 @@ class BybitPrivateClient:
         # Every single-shot private call is state-changing, so the capability
         # check lives here too and not only on the public method.
         self._assert_submit_allowed(method_name)
+        self._ensure_session_warm_keeper()
         method = getattr(self._client, method_name)
         try:
             if self.rate_limiter is not None:
@@ -895,6 +981,7 @@ class BybitPrivateClient:
         requires_mutation_lease = method_name not in _PRIVATE_READ_ONLY_METHODS
         if requires_mutation_lease:
             self._assert_submit_allowed(method_name)
+        self._ensure_session_warm_keeper()
         method = getattr(self._client, method_name)
         last_error: Exception | None = None
         for attempt in range(self.retries):
@@ -947,6 +1034,54 @@ _PRIVATE_READ_ONLY_METHODS = frozenset(
         "get_wallet_balance",
     }
 )
+
+
+def _keep_warm_wait_seconds(interval_seconds: float, jitter_seconds: float) -> float:
+    """One keep-warm cycle's wait: the interval plus a uniform +/- jitter.
+
+    Floored at 10ms so a misconfigured pair can never busy-spin the thread.
+    The jitter keeps a fleet of clients from pinging the venue in lockstep.
+    """
+
+    jitter = random.uniform(-jitter_seconds, jitter_seconds) if jitter_seconds > 0.0 else 0.0
+    return max(interval_seconds + jitter, 0.01)
+
+
+def _keep_session_warm_loop(
+    client_ref: weakref.ref[BybitPrivateClient],
+    stop: threading.Event,
+    interval_seconds: float,
+    jitter_seconds: float,
+) -> None:
+    """Re-touch the venue connection so an order never pays the TLS handshake.
+
+    The ping is pybit's unsigned public server-time read, which goes through
+    the same requests.Session -- and so the same open connection -- as every
+    private call (pinned by test_pybit_server_time_ping_goes_through_the_same_
+    requests_session against pybit 5.16.0). It deliberately skips the repo
+    rate limiter: that limiter budgets the signed per-key quota, and the ping
+    must neither consume order-path budget nor block behind it.
+
+    A module function holding only a weak reference on purpose: a client
+    discarded without close() gets collected normally, and the next wake ends
+    the thread. A failed ping is counted and logged at debug level only -- the
+    next real request then pays the handshake itself, which is exactly the
+    cost this thread exists to avoid, and nothing worse.
+    """
+
+    while not stop.wait(_keep_warm_wait_seconds(interval_seconds, jitter_seconds)):
+        client = client_ref()
+        if client is None:
+            return
+        try:
+            client._client.get_server_time()
+            client._warm_pings += 1
+        except Exception:  # noqa: BLE001 - a ping failure must never leave the thread
+            client._warm_ping_failures += 1
+            _logger_account.debug("bybit keep-warm ping failed", exc_info=True)
+        # Drop the strong reference before sleeping again, or a discarded
+        # client would be pinned in memory for a whole interval.
+        del client
 
 
 def _leverage_text(value: float) -> str:
