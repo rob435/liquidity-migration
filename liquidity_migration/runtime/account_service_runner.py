@@ -122,6 +122,82 @@ from liquidity_migration.core.venue_realm import REALM_CREDENTIAL_VARIABLES, Ven
 
 _logger = logging.getLogger(__name__)
 
+#: How long before a boundary anchor the owner loop goes quiet, in seconds.
+PRE_BOUNDARY_QUIESCE_WINDOW_SECONDS = 2.0
+
+
+def parse_pre_boundary_anchors(spec: str) -> tuple[tuple[int, int], ...]:
+    """Parse '"HH:MM[,HH:MM...]"' UTC anchors; empty string means none."""
+
+    anchors: list[tuple[int, int]] = []
+    for part in str(spec).split(","):
+        text = part.strip()
+        if not text:
+            continue
+        pieces = text.split(":")
+        if len(pieces) != 2:
+            raise ValueError(f"boundary anchor {text!r} is not HH:MM")
+        try:
+            hour, minute = int(pieces[0]), int(pieces[1])
+        except ValueError as exc:
+            raise ValueError(f"boundary anchor {text!r} is not HH:MM") from exc
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"boundary anchor {text!r} is out of range")
+        anchors.append((hour, minute))
+    return tuple(sorted(set(anchors)))
+
+
+class PreBoundaryQuiescence:
+    """True inside the last W seconds before any configured daily UTC anchor.
+
+    The owner has no wall-clock housekeeping of its own, but the daily intent
+    lands at a known boundary (00:20 UTC on this fleet) and hits a pass that
+    is mid-Telegram-send or mid-wallet-read roughly one boundary in ten. This
+    predicate arms the existing intent-arrival deferrals AND skips starting
+    the wallet refresh and Telegram send for the window, so the boundary
+    lands on an idle loop. The window is strictly BEFORE the anchor —
+    [anchor - W, anchor) — because once the intent file lands,
+    ``arrival_pending`` takes over; and deliberately NOT a mid-pass yield,
+    which was tried twice and made latency worse.
+    """
+
+    def __init__(
+        self,
+        anchors: Sequence[tuple[int, int]],
+        *,
+        window_seconds: float = PRE_BOUNDARY_QUIESCE_WINDOW_SECONDS,
+        wall_clock: Any = time.time,
+    ) -> None:
+        if window_seconds <= 0.0 or not math.isfinite(window_seconds):
+            raise ValueError("quiescence window must be positive and finite")
+        if window_seconds > 10.0:
+            # The window suppresses the wallet refresh the loss guard
+            # evaluates and every Telegram send; an oversized value would
+            # silently hold both down all day.
+            raise ValueError("quiescence window cannot exceed 10 seconds")
+        self._anchor_seconds = tuple(
+            hour * 3600 + minute * 60 for hour, minute in anchors
+        )
+        self._window_seconds = float(window_seconds)
+        self._wall_clock = wall_clock
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._anchor_seconds)
+
+    def active(self, now_ts: float | None = None) -> bool:
+        if not self._anchor_seconds:
+            return False
+        now = self._wall_clock() if now_ts is None else now_ts
+        # UTC second-of-day; day rollover is the modulo (an anchor at 00:00
+        # is 30s away at 23:59:30, not -86370s).
+        second_of_day = now % 86400.0
+        for anchor in self._anchor_seconds:
+            until_anchor = (anchor - second_of_day) % 86400.0
+            if 0.0 < until_anchor <= self._window_seconds:
+                return True
+        return False
+
 
 class _PositionTruthChecker(Protocol):
     def require_recent_symbols_consistent(
@@ -476,8 +552,9 @@ def publish_loss_ceiling_flatten(
     not queue a redundant flatten per pass. Pass an empty set to force a retry.
 
     ``unpublished_target_keys`` non-empty means the book is still partly open:
-    each exit is published independently, so one refusal leaves the others
-    standing and the caller must come back.
+    exits publish as one grouped request that falls back to per-exit
+    publication on failure, so one refusal leaves the others standing and the
+    caller must come back.
     """
 
     # The owner already holds committed state in memory; re-reading the journal
@@ -862,6 +939,24 @@ def main(argv: list[str] | None = None) -> int:
             "cannot stretch one entry into hundreds of windows."
         ),
     )
+    parser.add_argument(
+        "--pre-boundary-quiesce",
+        default="",
+        help=(
+            "Comma-separated daily UTC anchors (e.g. \"00:20\") before which "
+            "the owner loop goes quiet: for the last "
+            f"{PRE_BOUNDARY_QUIESCE_WINDOW_SECONDS:g}s before each anchor the "
+            "pending-order confirm polls and funding queries defer exactly as "
+            "they do for an already-arrived intent, and the health wallet "
+            "refresh and Telegram send do not start. Empty disables."
+        ),
+    )
+    parser.add_argument(
+        "--pre-boundary-quiesce-window-seconds",
+        type=float,
+        default=PRE_BOUNDARY_QUIESCE_WINDOW_SECONDS,
+        help="How long before each anchor the quiet window opens.",
+    )
     # With the venue reads warm the loop is sleep-bound, and this is what sets
     # how fast a software stop or a queued target is noticed. Measured on the
     # funded owner: 139 ms per iteration at 0.1, 6.3% of one core. Halving it
@@ -931,6 +1026,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
         parser.error("--private-ws-reconnect-seconds must be positive and finite")
+    try:
+        pre_boundary_quiesce = PreBoundaryQuiescence(
+            parse_pre_boundary_anchors(args.pre_boundary_quiesce),
+            window_seconds=args.pre_boundary_quiesce_window_seconds,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     realm = venue_realm(args.realm)
     # Mainnet holds every registered startup bound. Demo only needs values that
     # are finite and positive, so a stale rule receipt or a slow reconnecting
@@ -974,6 +1076,10 @@ def main(argv: list[str] | None = None) -> int:
         realm=realm,
         api_key=api_key,
         api_secret=api_secret,
+        # One probe call at startup, then this client is never used again;
+        # a keep-warm thread would ping the venue for the process lifetime
+        # for a session nothing reads.
+        keep_session_warm=False,
     )
     api_key_info = require_order_submit_permission(credential_client)
     demo_identity = DemoAccountIdentity.from_api_key_info(
@@ -1446,9 +1552,14 @@ def main(argv: list[str] | None = None) -> int:
     # Confirming pending orders is the drop-recovery backstop behind the private
     # stream, and it is the one thing left on this thread that blocks on the
     # venue. It stands aside while an intent is waiting rather than making it
-    # queue behind up to ten round trips.
-    reconciler.pending_poll_deferral = intent_watch.arrival_pending
-    funding_reconciler.query_deferral = intent_watch.arrival_pending
+    # queue behind up to ten round trips — and, when configured, for the last
+    # couple of seconds before a known daily boundary, so the boundary intent
+    # lands on an idle loop instead of mid-round-trip.
+    def _intent_imminent_or_pending() -> bool:
+        return intent_watch.arrival_pending() or pre_boundary_quiesce.active()
+
+    reconciler.pending_poll_deferral = _intent_imminent_or_pending
+    funding_reconciler.query_deferral = _intent_imminent_or_pending
     if entry_quotes is not None:
         # Tick-driven quote repricing: the stream thread nudges the watch's
         # self-pipe the moment a quoted symbol's touch moves, so a resting
@@ -1798,6 +1909,11 @@ def main(argv: list[str] | None = None) -> int:
                 last_capital_refresh_monotonic=last_capital_refresh,
                 health_interval_seconds=args.health_interval_seconds,
             )
+            if refresh_capital and pre_boundary_quiesce.active():
+                # Do not START a wallet round trip in the quiet window before
+                # a boundary; the refresh stays due and runs next pass. The
+                # rest of health publishing is local and proceeds.
+                refresh_capital = False
             if publish_health:
                 if refresh_capital:
                     try:
@@ -1937,7 +2053,14 @@ def main(argv: list[str] | None = None) -> int:
                     published_health.journal_sequence,
                     published_health.journal_state_hash,
                 )
-            if notifier is not None and now - last_notification_poll >= max(args.notification_poll_seconds, 0.25):
+            if (
+                notifier is not None
+                and now - last_notification_poll >= max(args.notification_poll_seconds, 0.25)
+                # A Telegram send can hold this thread for the transport's own
+                # timeout; do not start one in the quiet window before a
+                # boundary. It sends next pass, after the window.
+                and not pre_boundary_quiesce.active()
+            ):
                 notification_now_ns = time.time_ns()
                 midpoint_by_symbol: dict[str, float] = {}
                 unavailable_midpoint_symbols: list[str] = []

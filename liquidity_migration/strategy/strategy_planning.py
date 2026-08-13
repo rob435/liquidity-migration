@@ -47,6 +47,27 @@ from liquidity_migration.strategy.account_strategy_state import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerHealthReading:
+    """One owner-health observation taken off a producer's hot path.
+
+    A producer that must not pay the health read (or its head-retry sleeps) on
+    a latency-critical wake takes the reading on an earlier ordinary cycle and
+    hands it back to :func:`account_owner_equity_or_error`, which serves it
+    only while it is inside the same freshness bound a live read enforces.
+    ``error`` is served too: a fresh-but-unusable reading blocks entries
+    exactly as the live failure it recorded would.
+    """
+
+    equity_usdt: float
+    error: str
+    read_wall_ts_ns: int
+
+    def is_fresh(self, *, now_ns: int, max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS) -> bool:
+        age_ns = int(now_ns) - int(self.read_wall_ts_ns)
+        return 0 <= age_ns <= int(max_age_ns)
+
+
 def account_owner_equity_or_error(
     route: AccountRoute,
     *,
@@ -54,18 +75,45 @@ def account_owner_equity_or_error(
     max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     head_retry_attempts: int = 4,
     head_retry_seconds: float = 1.0,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
+    stored_reading: OwnerHealthReading | None = None,
+    now_ns: int | None = None,
+    stored_max_age_ns: int | None = None,
 ) -> tuple[float, str]:
     """Return (equity_usdt, "") from fresh owner health, or (0.0, error).
 
     A missing or stale owner-health receipt never fails the cycle; the caller
     records the error and plans entries as blocked.
+
+    A ``stored_reading`` (judged against the caller's ``now_ns``) whose age is
+    within ``stored_max_age_ns`` — defaulting to ``max_age_ns`` — is served
+    as-is, value and error, without touching the filesystem or sleeping. The
+    served value carries whatever the live read enforced WHEN IT WAS TAKEN
+    (owner-receipt age and exact head binding); its own age is the only bound
+    applied here, so a caller widening ``stored_max_age_ns`` is accepting
+    reading-age on top of that, and must say so where it stores the reading.
+    A stale or absent reading falls through to the live read, whose
+    head-retry ladder may sleep; ``max_age_ns`` bounds only that live read's
+    owner-receipt age, exactly as before stored readings existed.
     """
 
     if head_retry_attempts <= 0:
         raise ValueError("owner-health head retry attempts must be positive")
     if head_retry_seconds < 0.0:
         raise ValueError("owner-health head retry delay cannot be negative")
+    if (
+        stored_reading is not None
+        and now_ns is not None
+        and stored_reading.is_fresh(
+            now_ns=now_ns,
+            max_age_ns=max_age_ns if stored_max_age_ns is None else stored_max_age_ns,
+        )
+    ):
+        return float(stored_reading.equity_usdt), str(stored_reading.error)
+    if sleep is None:
+        # Bound at call time, not definition time, so a test can observe the
+        # ladder's sleeps through the module's ``time``.
+        sleep = time.sleep
     last_pending: AccountOwnerHealthHeadPending | None = None
     for attempt in range(head_retry_attempts):
         try:

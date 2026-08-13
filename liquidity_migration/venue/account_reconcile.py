@@ -672,10 +672,11 @@ class BybitAccountReconciler:
 
         # A command the venue demonstrably does not hold can only be freed by a
         # terminal journal transition — no venue row will ever arrive for it.
-        # This pass performs that transition automatically on the CLI's own
-        # evidence ladder (a live order or unreduced fills always refuse). On
-        # mainnet it only classifies, so the wedge is visible in health while
-        # the transition stays an operator act.
+        # This pass performs that transition automatically in BOTH realms, on
+        # the CLI's own evidence ladder (a live order or unreduced fills always
+        # refuse); ``auto_resolve_wedges=False`` restores classify-only, where
+        # the wedge stays visible in health and the transition is an operator
+        # act.
         wedge_now_ns = self.clock.wall_time_ns()
         post_wedge_orders = list(self.kernel._state_ref().orders.values())
         open_wedges = (

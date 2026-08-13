@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -1303,6 +1303,15 @@ class _JournalDurabilityFlusher:
     accepted hang: an fsync stuck in the kernel blocks a barrier exactly as it
     would have blocked the synchronous inline fsync it replaced.
 
+    ``barrier()`` waits on SEGMENTS only. The projection items interleaved
+    with them are a rebuildable tooling file, explicitly not the commit point
+    (see ``_append_jsonl_projection``): the queue still runs them strictly in
+    commit order, and every projection enqueued before the newest awaited
+    segment completes first anyway, but a trailing projection append no
+    longer holds the order path. If the worker dies with trailing projections
+    queued, the on-disk projection goes stale and the hash check at the top
+    of ``_append_jsonl_projection`` rebuilds it on the next append.
+
     Because syncs happen in commit order, a power loss can only cost a suffix
     of commits. Renamed-but-unsynced tail files may survive torn on some
     filesystems; journal init settles that case by quarantining a strictly
@@ -1316,6 +1325,8 @@ class _JournalDurabilityFlusher:
         self._completed = 0
         self._inflight = 0
         self._pending_segments = 0
+        self._enqueued_segments = 0
+        self._completed_segments = 0
         self._dead = False
         self._stopping = False
         self._flush_interval_seconds = float(flush_interval_seconds)
@@ -1347,6 +1358,7 @@ class _JournalDurabilityFlusher:
         with self._condition:
             self._queue.append(("segment", path, data))
             self._enqueued += 1
+            self._enqueued_segments += 1
             self._pending_segments += 1
             self._condition.notify_all()
 
@@ -1362,19 +1374,22 @@ class _JournalDurabilityFlusher:
             self._condition.notify_all()
 
     def barrier(self) -> None:
-        """Block until every commit enqueued before this call is durable.
+        """Block until every segment enqueued before this call is durable.
 
         Fail closed: raises if the work cannot be completed, and never
         double-counts or drops an item another draining thread has in flight.
+        Projections are excluded from the wait target (rebuildable, see the
+        class docstring); a drain still processes them in commit order on the
+        way to the awaited segment.
         """
 
         with self._condition:
-            target = self._enqueued
+            target = self._enqueued_segments
             self._condition.notify_all()
         while True:
             item: tuple[Any, ...] | None = None
             with self._condition:
-                if self._completed >= target:
+                if self._completed_segments >= target:
                     return
                 worker_can_progress = not self._dead and self._thread.is_alive()
                 if not worker_can_progress and self._queue:
@@ -1383,11 +1398,12 @@ class _JournalDurabilityFlusher:
                 elif not worker_can_progress and not self._queue and self._inflight == 0:
                     raise AccountJournalIntegrityError(
                         "journal durability accounting lost items: "
-                        f"completed {self._completed} of {target} with nothing queued"
+                        f"completed {self._completed_segments} of {target} "
+                        "segments with nothing queued"
                     )
                 else:
                     # A live worker, or another thread's in-flight item, will
-                    # move ``completed``; wait for it.
+                    # move the completed count; wait for it.
                     self._condition.wait(0.05)
                     continue
             self._finish_item(item)
@@ -1418,6 +1434,7 @@ class _JournalDurabilityFlusher:
             self._completed += 1
             if item[0] == "segment":
                 self._pending_segments -= 1
+                self._completed_segments += 1
             self._condition.notify_all()
 
     def _run(self) -> None:
@@ -2443,6 +2460,76 @@ def _order_commands_from_events(events: Iterable[AccountEvent]) -> tuple[OrderCo
     return tuple(commands)
 
 
+@dataclass(slots=True)
+class SubmitSpanLedger:
+    """One inbox request's order-path milestones, wall-clock nanoseconds.
+
+    Written along the pass and copied into the completed/ receipt after the
+    wire, so every boundary self-reports its own tick-to-trade without new
+    events or files. Zero means "not reached this pass"; the two ``*_wait_ns``
+    durations are monotonic-clock differences and -1 means "not measured".
+    For a multi-command batch ``wire_sent_ts_ns`` keeps the EARLIEST send and
+    ``ack_received_ts_ns`` the LATEST acknowledgement, so the pair brackets
+    the whole batch's venue exchange.
+    """
+
+    inbox_claimed_ts_ns: int = 0
+    inbox_claimed_monotonic_ns: int = 0
+    plan_committed_ts_ns: int = 0
+    leverage_done_ts_ns: int = 0
+    attempt_claimed_ts_ns: int = 0
+    barrier_done_ts_ns: int = 0
+    wire_sent_ts_ns: int = 0
+    ack_received_ts_ns: int = 0
+    leverage_wait_ns: int = -1
+    barrier_wait_ns: int = -1
+
+    def spans(self) -> dict[str, int]:
+        """The stamped milestones plus measured waits, for the receipt."""
+
+        result = {
+            name: value
+            for name in (
+                "inbox_claimed_ts_ns",
+                "plan_committed_ts_ns",
+                "leverage_done_ts_ns",
+                "attempt_claimed_ts_ns",
+                "barrier_done_ts_ns",
+                "wire_sent_ts_ns",
+                "ack_received_ts_ns",
+            )
+            if (value := getattr(self, name)) > 0
+        }
+        if self.leverage_wait_ns >= 0:
+            result["leverage_wait_ns"] = self.leverage_wait_ns
+        if self.barrier_wait_ns >= 0:
+            result["barrier_wait_ns"] = self.barrier_wait_ns
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionFusionSpec:
+    """Caller-supplied facts that let ``submit_targets`` claim attempts inline.
+
+    ``batch_id`` names the ONE batch the spec was armed for: consumption
+    discards a spec whose batch does not match, so an exception between
+    arming and the armed batch's own submit (a market-input gap, a zero
+    reference price) can never hand the claim to whatever batch submits next
+    — the convergence retry inside the same failed pass being the proven
+    consumer. ``leverage_satisfied`` maps symbol to the leverage the
+    execution adapter has already confirmed at the venue; an entry command
+    fuses only when its exact leverage is in this map, so the driver's later
+    prepare step is a guaranteed no-op for every fused command.
+    ``adapter_name`` is journaled in the fused SUBMISSION_ATTEMPT exactly as
+    the separate claim would have.
+    """
+
+    adapter_name: str
+    batch_id: str
+    leverage_satisfied: Mapping[str, float] = field(default_factory=dict)
+    leverage_wait_ns: int = -1
+
+
 class AccountExecutionKernel:
     """Pure account portfolio/risk sequencer plus immutable journal boundary."""
 
@@ -2465,6 +2552,24 @@ class AccountExecutionKernel:
         self.account_id = account_id
         self.clock = clock or SystemClock()
         self.ids = DeterministicIds(f"{id_seed}:{account_id}")
+        # Milestone sink for the current owner pass, set and cleared by the
+        # account service around one request. Owner-loop thread only.
+        self.span_ledger: SubmitSpanLedger | None = None
+        # One-shot fusion arming for the NEXT submit_targets call, set by the
+        # account service when the execution adapter's claims can be fused
+        # into the plan commit. Consumed (and cleared) unconditionally at the
+        # top of submit_targets, so a raised or replayed batch cannot leak an
+        # armed spec into an unrelated later batch. Owner-loop thread only.
+        self._armed_submission_fusion: SubmissionFusionSpec | None = None
+
+    def arm_submission_fusion(self, spec: SubmissionFusionSpec) -> None:
+        """Arm gated commit fusion for exactly the named batch's submit."""
+
+        if not str(spec.adapter_name).strip():
+            raise ValueError("submission fusion requires an adapter_name")
+        if not str(spec.batch_id).strip():
+            raise ValueError("submission fusion requires the batch_id it is armed for")
+        self._armed_submission_fusion = spec
 
     def state(self) -> AccountState:
         return self.journal.replay()
@@ -2519,6 +2624,14 @@ class AccountExecutionKernel:
             raise ValueError("batch_id is required")
         if not targets:
             raise ValueError("at least one target is required")
+        # One-shot: consumed whatever happens next, so an armed spec can never
+        # outlive the batch it was armed for — and it fuses ONLY that batch.
+        # If the armed batch never reached its own submit (an exception in
+        # between), the next submitter discards the spec instead of
+        # inheriting a claim it never opted into.
+        fusion, self._armed_submission_fusion = self._armed_submission_fusion, None
+        if fusion is not None and fusion.batch_id != batch_id:
+            fusion = None
         market_by_symbol = {item.symbol.upper(): item for item in market_inputs}
         rules_by_symbol = {symbol.upper(): rules for symbol, rules in instrument_rules.items()}
         normalized_command_symbols = (
@@ -2683,9 +2796,27 @@ class AccountExecutionKernel:
                             payload=asdict(command),
                         )
                     )
+                specs.extend(
+                    self._fused_submission_attempt_specs(
+                        fusion=fusion,
+                        batch_id=batch_id,
+                        commands=commands,
+                        now_wall=now_wall,
+                        now_mono=now_mono,
+                    )
+                )
             return specs
 
         appended = self.journal.transact(build, trusted_readonly_builder=True)
+        if appended and self.span_ledger is not None:
+            committed_wall = self.clock.wall_time_ns()
+            self.span_ledger.plan_committed_ts_ns = committed_wall
+            if any(
+                event.event_type == AccountEventType.SUBMISSION_ATTEMPT.value
+                for event in appended
+            ):
+                # The fused claim commits in the same transaction as the plan.
+                self.span_ledger.attempt_claimed_ts_ns = committed_wall
         # A freshly appended batch is already its own complete event set, so
         # the O(history) journal scan is only for the idempotent-replay path.
         if appended:
@@ -2709,6 +2840,90 @@ class AccountExecutionKernel:
             events=tuple(appended),
             state_hash=state_hash,
         )
+
+    def _fused_submission_attempt_specs(
+        self,
+        *,
+        fusion: SubmissionFusionSpec | None,
+        batch_id: str,
+        commands: Sequence[OrderCommand],
+        now_wall: int,
+        now_mono: int,
+    ) -> list[AccountEventSpec]:
+        """Claim every command's first submission attempt inside the plan commit.
+
+        Saves the separate claim transaction (one commit plus one lock round)
+        on the boundary order path. Gated so crash semantics only change where
+        declared:
+
+        - A batch whose every command is reduce-only fuses ALWAYS: the driver
+          re-claims reduce-only attempts with ``allow_repeat`` after a crash,
+          so an unsent claimed close retries exactly as it does today.
+        - An entry/resize command fuses ONLY when the arming caller proved its
+          exact leverage already held at the venue at commit time, making the
+          driver's prepare step a guaranteed no-op. Any command failing that
+          keeps the batch on today's two-commit sequence, unfused.
+
+        DECLARED TRADE for fused entry batches: a crash (or a barrier
+        failure, or a sibling create-reject that invalidates the leverage
+        cache mid-batch) between this commit and the wire leaves the command
+        with a durable attempt, so the ``never_submitted`` quick-retry
+        classification (``wedged_command_resolution``) and the 120s
+        retry-if-fresh window no longer apply to it. Replay refuses the
+        resend (``AmbiguousExposureSubmission``), the command wedges, the
+        reconciler probes its orderLinkId, and an absent order
+        auto-terminalizes in both realms — the entry is lost for ~5-6 minutes
+        with zero double-send risk (orderLinkId = command_id idempotency).
+        That trade buys a milliseconds-wide crash window; reduce-only
+        commands are exempt throughout because their claims stay repeatable.
+
+        The reducer applies these specs against prospective state inside the
+        same transaction, so ordering and content are constrained: they must
+        follow the ORDER_COMMAND specs, ``attempt`` must be exactly 1, and
+        ``local_start_ts_ns`` must equal the batch's shared ``now_wall``.
+        """
+
+        if fusion is None or not commands:
+            return []
+        satisfied = {
+            str(symbol).upper(): float(value)
+            for symbol, value in fusion.leverage_satisfied.items()
+        }
+        if not all(
+            command.reduce_only
+            or satisfied.get(command.symbol.upper()) == float(command.leverage)
+            for command in commands
+        ):
+            return []
+        adapter_name = str(fusion.adapter_name).strip()
+        specs: list[AccountEventSpec] = []
+        for command in commands:
+            specs.append(
+                AccountEventSpec(
+                    event_type=AccountEventType.SUBMISSION_ATTEMPT,
+                    idempotency_key=(
+                        f"submission-attempt:{command.command_id}:0001"
+                    ),
+                    correlation_id=batch_id,
+                    causation_id=command.command_id,
+                    account_id=self.account_id,
+                    sleeve="account_execution",
+                    symbol=command.symbol,
+                    wall_ts_ns=now_wall,
+                    monotonic_ns=now_mono,
+                    payload={
+                        "command_id": command.command_id,
+                        "attempt": 1,
+                        "adapter_name": adapter_name,
+                        "local_start_ts_ns": now_wall,
+                        "claimed_ts_ns": now_wall,
+                        "plan_committed_ts_ns": now_wall,
+                        "leverage_wait_ns": int(fusion.leverage_wait_ns),
+                        "fused_with_plan_commit": True,
+                    },
+                )
+            )
+        return specs
 
     def _evaluate_batch(
         self,
@@ -3203,12 +3418,16 @@ class AccountExecutionKernel:
         command_id: str,
         adapter_name: str,
         allow_repeat: bool = False,
+        plan_committed_ts_ns: int = 0,
+        leverage_wait_ns: int = -1,
     ) -> tuple[AccountEvent, ...]:
         """Commit the durable boundary before an exposure-capable provider call."""
 
         return self.record_submission_attempt_batch(
             claims=((command_id, allow_repeat),),
             adapter_name=adapter_name,
+            plan_committed_ts_ns=plan_committed_ts_ns,
+            leverage_wait_ns=leverage_wait_ns,
         )
 
     def record_submission_attempt_batch(
@@ -3216,6 +3435,8 @@ class AccountExecutionKernel:
         *,
         claims: Sequence[tuple[str, bool]],
         adapter_name: str,
+        plan_committed_ts_ns: int = 0,
+        leverage_wait_ns: int = -1,
     ) -> tuple[AccountEvent, ...]:
         """Commit the durable boundary for a whole batch in one transaction.
 
@@ -3276,14 +3497,23 @@ class AccountExecutionKernel:
                             "attempt": attempt,
                             "adapter_name": normalized_adapter,
                             "local_start_ts_ns": now_wall,
+                            # Span-ledger siblings. Replay-safe: every attempt
+                            # number is claimed at most once, so this event id
+                            # is never rebuilt with different timings.
+                            "claimed_ts_ns": now_wall,
+                            "plan_committed_ts_ns": int(plan_committed_ts_ns),
+                            "leverage_wait_ns": int(leverage_wait_ns),
                         },
                     )
                 )
             return specs
 
-        return tuple(
+        appended = tuple(
             self.journal.transact(build, trusted_readonly_builder=True)
         )
+        if appended and self.span_ledger is not None:
+            self.span_ledger.attempt_claimed_ts_ns = self.clock.wall_time_ns()
+        return appended
 
     def record_ack(
         self,

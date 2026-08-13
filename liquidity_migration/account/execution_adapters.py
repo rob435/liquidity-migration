@@ -12,13 +12,14 @@ historical snapshots — a replay assumption, not a claim of zero market impact.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Callable, Iterable, Mapping
 
 from liquidity_migration.account.account_contracts import (
     AccountEvent,
+    AccountEventType,
     AmbiguousSubmissionAttemptError,
     InstrumentRules,
     MarketInputRef,
@@ -649,6 +650,28 @@ class KernelExecutionDriver:
     ) -> tuple[AccountEvent, ...]:
         events: list[AccountEvent] = []
         synchronous: list[tuple[int, OrderCommand, tuple[ExecutionObservation, ...]]] = []
+        # Attempts claimed inside THIS pass's plan commit (gated fusion).
+        # ``result.events`` carries only freshly appended events, so a crash
+        # replay sees an empty set here and the ambiguous-resend refusal below
+        # still owns every command whose durable attempt this process did not
+        # just write.
+        fused_command_ids = frozenset(
+            str(event.payload.get("command_id") or "")
+            for event in result.events
+            if event.event_type == AccountEventType.SUBMISSION_ATTEMPT.value
+        )
+
+        def durable_barrier() -> int:
+            """The one fail-closed pre-wire disk sync; returns its wait in ns."""
+
+            started_ns = self.kernel.clock.monotonic_ns()
+            self.kernel.journal.barrier()
+            wait_ns = max(self.kernel.clock.monotonic_ns() - started_ns, 0)
+            ledger = getattr(self.kernel, "span_ledger", None)
+            if ledger is not None:
+                ledger.barrier_wait_ns = max(ledger.barrier_wait_ns, 0) + wait_ns
+                ledger.barrier_done_ts_ns = self.kernel.clock.wall_time_ns()
+            return wait_ns
 
         def flush_synchronous() -> None:
             if not synchronous:
@@ -728,6 +751,8 @@ class KernelExecutionDriver:
             market_inputs=market_inputs,
             adapter=adapter,
             dispatch=dispatch,
+            fused_command_ids=fused_command_ids,
+            durable_barrier=durable_barrier,
         )
 
         for command_index, command in enumerate(result.commands):
@@ -750,10 +775,18 @@ class KernelExecutionDriver:
                     False,
                 )
             )
+            # This pass's plan commit already claimed the attempt (fusion), so
+            # the claim below is skipped and the attempts>0 refusal must not
+            # fire for it. Replay never reaches here with a non-empty set.
+            fused_claim = command.command_id in fused_command_ids
             prepared_observations: tuple[ExecutionObservation, ...] = ()
             submit_effect = adapter.submit
             if ambiguous_provider:
-                if order.submission_attempts > 0 and not order.reduce_only:
+                if (
+                    not fused_claim
+                    and order.submission_attempts > 0
+                    and not order.reduce_only
+                ):
                     raise AmbiguousExposureSubmission(
                         "refusing to resend an exposure-increasing command after "
                         "a durable ambiguous submission attempt: "
@@ -797,10 +830,22 @@ class KernelExecutionDriver:
                         "prepare_submission and submit_prepared"
                     )
                 if callable(prepare_submission) and callable(submit_prepared):
-                    prepared_observations = self._normalize_observations(
-                        prepare_submission(command, market)
-                    )
                     submit_effect = submit_prepared
+                    if not fused_claim:
+                        # A fused command's leverage was proven satisfied at
+                        # commit time, making this a guaranteed no-op there;
+                        # skipping it keeps every venue call after the claim
+                        # unambiguous.
+                        prepare_started_ns = self.kernel.clock.monotonic_ns()
+                        prepared_observations = self._normalize_observations(
+                            prepare_submission(command, market)
+                        )
+                        self._record_leverage_wait(
+                            max(
+                                self.kernel.clock.monotonic_ns() - prepare_started_ns,
+                                0,
+                            )
+                        )
                 if prepared_observations:
                     normalized = prepared_observations
                 else:
@@ -821,23 +866,32 @@ class KernelExecutionDriver:
                                 f"now_ts_ns={now_ns} "
                                 f"max_age_ns={max_unsubmitted_age_ns}"
                             )
-                    try:
-                        self.kernel.record_submission_attempt(
-                            command_id=command.command_id,
-                            adapter_name=str(getattr(adapter, "name", "provider")),
-                            allow_repeat=order.reduce_only,
-                        )
-                    except AmbiguousSubmissionAttemptError as exc:
-                        # The journal transaction, not the stale preflight read,
-                        # owns the single-winner guarantee under concurrency.
-                        raise AmbiguousExposureSubmission(str(exc)) from exc
+                    if not fused_claim:
+                        ledger = getattr(self.kernel, "span_ledger", None)
+                        try:
+                            self.kernel.record_submission_attempt(
+                                command_id=command.command_id,
+                                adapter_name=str(getattr(adapter, "name", "provider")),
+                                allow_repeat=order.reduce_only,
+                                plan_committed_ts_ns=(
+                                    ledger.plan_committed_ts_ns if ledger is not None else 0
+                                ),
+                            )
+                        except AmbiguousSubmissionAttemptError as exc:
+                            # The journal transaction, not the stale preflight
+                            # read, owns the single-winner guarantee under
+                            # concurrency.
+                            raise AmbiguousExposureSubmission(str(exc)) from exc
                     # The plan and the attempt claim must be power-loss durable
                     # before bytes can leave for the venue. On a write-behind
                     # journal this is the single place the order path waits for
                     # a disk sync; on a synchronous journal it is free.
-                    self.kernel.journal.barrier()
-                    normalized = self._normalize_observations(
-                        submit_effect(command, market)
+                    barrier_wait_ns = durable_barrier()
+                    normalized = self._after_wire_observations(
+                        self._normalize_observations(
+                            submit_effect(command, market)
+                        ),
+                        barrier_wait_ns=barrier_wait_ns,
                     )
             else:
                 normalized = self._normalize_observations(
@@ -851,6 +905,66 @@ class KernelExecutionDriver:
         flush_synchronous()
         return tuple(events)
 
+    def _record_leverage_wait(self, wait_ns: int) -> None:
+        """Accumulate driver-side leverage negotiation time into the ledger."""
+
+        ledger = getattr(self.kernel, "span_ledger", None)
+        if ledger is None:
+            return
+        ledger.leverage_wait_ns = max(ledger.leverage_wait_ns, 0) + max(wait_ns, 0)
+        ledger.leverage_done_ts_ns = self.kernel.clock.wall_time_ns()
+
+    def _after_wire_observations(
+        self,
+        observations: tuple[ExecutionObservation, ...],
+        *,
+        barrier_wait_ns: int,
+    ) -> tuple[ExecutionObservation, ...]:
+        """Stamp post-barrier ACKs and record the batch's wire/ack extremes.
+
+        The measured pre-wire barrier wait rides into each ACK's metadata
+        beside the adapter's own ``local_socket_send_ts_ns``; the span ledger
+        keeps the earliest send and the latest acknowledgement so the receipt
+        brackets the whole batch's venue exchange.
+        """
+
+        ledger = getattr(self.kernel, "span_ledger", None)
+        if ledger is None and barrier_wait_ns < 0:
+            return observations
+        stamped: list[ExecutionObservation] = []
+        for observation in observations:
+            if (
+                ExecutionObservationType(observation.observation_type)
+                is ExecutionObservationType.ACK
+            ):
+                metadata = (
+                    observation.metadata
+                    if isinstance(observation.metadata, Mapping)
+                    else {}
+                )
+                if barrier_wait_ns >= 0:
+                    observation = replace(
+                        observation,
+                        metadata={
+                            **dict(metadata),
+                            "barrier_wait_ns": int(barrier_wait_ns),
+                        },
+                    )
+                if ledger is not None:
+                    try:
+                        send_ts_ns = int(metadata.get("local_socket_send_ts_ns") or 0)
+                    except (TypeError, ValueError):
+                        send_ts_ns = 0
+                    if send_ts_ns > 0 and (
+                        ledger.wire_sent_ts_ns == 0
+                        or send_ts_ns < ledger.wire_sent_ts_ns
+                    ):
+                        ledger.wire_sent_ts_ns = send_ts_ns
+                    if observation.local_receive_ts_ns > ledger.ack_received_ts_ns:
+                        ledger.ack_received_ts_ns = int(observation.local_receive_ts_ns)
+            stamped.append(observation)
+        return tuple(stamped)
+
     def _submit_prepared_as_batch(
         self,
         result: TargetBatchResult,
@@ -858,16 +972,20 @@ class KernelExecutionDriver:
         market_inputs: Mapping[str, MarketInputRef],
         adapter: Any,
         dispatch: Callable[[int, OrderCommand, tuple[ExecutionObservation, ...]], None],
+        fused_command_ids: frozenset[str] = frozenset(),
+        durable_barrier: Callable[[], int] | None = None,
     ) -> frozenset[str]:
         """Claim and send eligible commands as one venue batch.
 
         Returns the command ids this path fully handled. Engages only for an
         ambiguous provider implementing ``submit_prepared_batch`` with at
-        least two never-attempted commands; everything else stays on the
-        proven single-order path. One journal transaction claims every
-        attempt and one barrier makes them durable, so an N-slice batch pays
-        one commit, one disk sync, and one venue request instead of N of
-        each. Chunks are partitioned by reduce-only because Bybit does not
+        least two claimable commands; everything else stays on the proven
+        single-order path. One journal transaction claims every attempt and
+        one barrier makes them durable, so an N-slice batch pays one commit,
+        one disk sync, and one venue request instead of N of each — and a
+        batch whose attempts were already fused into the plan commit
+        (``fused_command_ids``) pays no claim transaction here at all.
+        Chunks are partitioned by reduce-only because Bybit does not
         document mixing them in one batch, and exits go first.
         """
 
@@ -878,37 +996,41 @@ class KernelExecutionDriver:
             return frozenset()
         max_unsubmitted_age_ns = getattr(adapter, "max_unsubmitted_exposure_age_ns", None)
         state_orders = self.kernel._state_ref().orders
-        eligible: list[tuple[int, OrderCommand, MarketInputRef]] = []
+        eligible: list[tuple[int, OrderCommand, MarketInputRef, bool]] = []
         for command_index, command in enumerate(result.commands):
             order = state_orders.get(command.command_id)
             if order is None or order.status != "commanded":
                 continue
-            if order.submission_attempts > 0:
+            fused_claim = command.command_id in fused_command_ids
+            if order.submission_attempts > 0 and not fused_claim:
                 # Re-attempts carry ambiguity semantics the single path owns.
                 continue
             market = market_inputs.get(command.symbol)
             if market is None:
                 continue
-            eligible.append((command_index, command, market))
+            eligible.append((command_index, command, market, fused_claim))
         if len(eligible) < 2:
             return frozenset()
 
         def fresh_only(
-            rows: list[tuple[int, OrderCommand, MarketInputRef]],
-        ) -> list[tuple[int, OrderCommand, MarketInputRef]]:
+            rows: list[tuple[int, OrderCommand, MarketInputRef, bool]],
+        ) -> list[tuple[int, OrderCommand, MarketInputRef, bool]]:
             """Drop stale entries instead of aborting the whole batch.
 
             The single path raises for a stale entry, which here would hold
             every sibling — fresh exits included — hostage to one dead
             command. Dropped commands fall to the single path, which still
-            raises for them after the batch's commands are served.
+            raises for them after the batch's commands are served. Fused
+            commands are exempt exactly as the single path exempts attempted
+            commands: their claim is already durable, and dropping one here
+            would strand it claimed-but-unsent.
             """
 
             now_ns = self.kernel.clock.wall_time_ns()
-            fresh: list[tuple[int, OrderCommand, MarketInputRef]] = []
+            fresh: list[tuple[int, OrderCommand, MarketInputRef, bool]] = []
             for row in rows:
                 command = row[1]
-                if command.reduce_only:
+                if command.reduce_only or row[3]:
                     fresh.append(row)
                     continue
                 if type(max_unsubmitted_age_ns) is not int or max_unsubmitted_age_ns <= 0:
@@ -929,10 +1051,16 @@ class KernelExecutionDriver:
         if len(eligible) < 2:
             return frozenset()
         handled: set[str] = set()
-        remaining: list[tuple[int, OrderCommand, MarketInputRef]] = []
+        remaining: list[tuple[int, OrderCommand, MarketInputRef, bool]] = []
         prepare_submission = getattr(adapter, "prepare_submission", None)
-        for command_index, command, market in eligible:
-            if callable(prepare_submission):
+        prepare_started_ns = self.kernel.clock.monotonic_ns()
+        prepare_ran = False
+        for command_index, command, market, fused_claim in eligible:
+            if callable(prepare_submission) and not fused_claim:
+                # Fused commands skip preparation: their leverage was proven
+                # satisfied at commit time, so nothing is left to negotiate
+                # and no venue call may sit between the claim and the wire.
+                prepare_ran = True
                 prepared_observations = self._normalize_observations(
                     prepare_submission(command, market)
                 )
@@ -941,7 +1069,13 @@ class KernelExecutionDriver:
                     dispatch(command_index, command, prepared_observations)
                     handled.add(command.command_id)
                     continue
-            remaining.append((command_index, command, market))
+            remaining.append((command_index, command, market, fused_claim))
+        leverage_wait_ns = -1
+        if prepare_ran:
+            leverage_wait_ns = max(
+                self.kernel.clock.monotonic_ns() - prepare_started_ns, 0
+            )
+            self._record_leverage_wait(leverage_wait_ns)
         # Preparation was provider round trips (leverage negotiation), so
         # recheck freshness at the exposure boundary, exactly as the single
         # path does.
@@ -950,20 +1084,32 @@ class KernelExecutionDriver:
             # Too few left to be worth a batch request; the single path,
             # which already owns one-command semantics, takes them.
             return frozenset(handled)
-        try:
-            self.kernel.record_submission_attempt_batch(
-                claims=tuple(
-                    (command.command_id, command.reduce_only)
-                    for _, command, _ in remaining
-                ),
-                adapter_name=str(getattr(adapter, "name", "provider")),
-            )
-        except AmbiguousSubmissionAttemptError as exc:
-            # The journal transaction, not the stale preflight read, owns the
-            # single-winner guarantee under concurrency.
-            raise AmbiguousExposureSubmission(str(exc)) from exc
+        unfused_claims = tuple(
+            (command.command_id, command.reduce_only)
+            for _, command, _, fused_claim in remaining
+            if not fused_claim
+        )
+        if unfused_claims:
+            ledger = getattr(self.kernel, "span_ledger", None)
+            try:
+                self.kernel.record_submission_attempt_batch(
+                    claims=unfused_claims,
+                    adapter_name=str(getattr(adapter, "name", "provider")),
+                    plan_committed_ts_ns=(
+                        ledger.plan_committed_ts_ns if ledger is not None else 0
+                    ),
+                    leverage_wait_ns=leverage_wait_ns,
+                )
+            except AmbiguousSubmissionAttemptError as exc:
+                # The journal transaction, not the stale preflight read, owns
+                # the single-winner guarantee under concurrency.
+                raise AmbiguousExposureSubmission(str(exc)) from exc
         # One durable boundary for the whole batch, immediately before send.
-        self.kernel.journal.barrier()
+        if durable_barrier is not None:
+            barrier_wait_ns = durable_barrier()
+        else:
+            self.kernel.journal.barrier()
+            barrier_wait_ns = -1
         reduces = [row for row in remaining if row[1].reduce_only]
         entries = [row for row in remaining if not row[1].reduce_only]
         for group in (reduces, entries):
@@ -971,8 +1117,11 @@ class KernelExecutionDriver:
                 chunk = group[chunk_start : chunk_start + 20]
                 if not chunk:
                     continue
-                observations = self._normalize_observations(
-                    submit_batch([(command, market) for _, command, market in chunk])
+                observations = self._after_wire_observations(
+                    self._normalize_observations(
+                        submit_batch([(command, market) for _, command, market, _ in chunk])
+                    ),
+                    barrier_wait_ns=barrier_wait_ns,
                 )
                 by_command: dict[str, list[ExecutionObservation]] = {}
                 for observation in observations:
@@ -981,7 +1130,7 @@ class KernelExecutionDriver:
                 # venue round trip: a later failure must not discard acks
                 # whose side effects (quote registration, stop verification)
                 # already ran inside the adapter.
-                for command_index, command, _ in chunk:
+                for command_index, command, _, _ in chunk:
                     handled.add(command.command_id)
                     normalized = tuple(by_command.get(command.command_id, ()))
                     if normalized:

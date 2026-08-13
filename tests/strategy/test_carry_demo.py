@@ -11,6 +11,7 @@ settlement, so v4's crowding-persistence multiplier stays at full size.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1659,3 +1660,483 @@ class TestFreezeAheadDeadline:
         assert payload["decision_error"] is None
         assert payload["data_build_skipped"] is False
         assert payload["freeze_ahead_frozen"] is True
+
+
+# --- wave-2 boundary anatomy: grouped exits, pre-inbox read elimination, and
+# --- the freeze-time equity anchor (2026-08-13) ---
+
+#: 00:19:50 UTC: still pre-deadline, inside the freeze window, close enough to
+#: the boundary that the reading it re-stamps is fresh at BOUNDARY_NOW.
+REFRESH_NOW = D0 + 20 * 60_000 - 10_000
+
+
+def _standing_frame_two_exits() -> pl.DataFrame:
+    """Standing book with TWO symbols leaving the desired book (F00 and
+    STANDGONE both carry benign funding) plus the resized survivor."""
+
+    def row(symbol: str, qty: float) -> dict[str, Any]:
+        return {
+            "trade_id": CARRY_COMPONENT_ID,
+            "target_key": f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{symbol}",
+            "strategy_id": CARRY_STRATEGY_ID,
+            "symbol": symbol,
+            "status": "open",
+            "signed_qty": qty,
+            "target_reference_price": 100.0,
+        }
+
+    return pl.DataFrame([row("F00USDT", 1.0), row(STANDGONE, 2.0), row(RESIZED, 1.0)])
+
+
+class TestGroupedExitPublication:
+    def test_two_exits_publish_as_one_request_each(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        from liquidity_migration.account.account_service import AccountIntentInbox
+
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=_standing_frame_two_exits())
+
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["exit_targets_queued"] == 2
+        publication = payload.publication
+        # Review probes 2026-08-13: grouping exits removed per-symbol
+        # independence (one dead symbol fails the whole grouped request at
+        # owner admission), so carry publishes one request per exit again.
+        assert publication.exit_publication_mode == "independent"
+        assert len(publication.exit_requests) == 2
+        assert [
+            item.intent.symbol
+            for published in publication.exit_requests
+            for item in published.request.intents
+        ] == ["F00USDT", STANDGONE]
+        assert all(
+            item.intent.signed_notional_usdt == 0.0
+            for published in publication.exit_requests
+            for item in published.request.intents
+        )
+        created = NOW_MS * 1_000_000
+        assert [item.request.created_ts_ns for item in publication.exit_requests] == [
+            created,
+            created + 1,
+        ]
+        # Entries keep their deterministic created stamp after the exits.
+        assert len(publication.entry_requests) == 1
+        assert publication.entry_requests[0].request.created_ts_ns == created + 2
+        # The durable receipt names every exit request with its intent count.
+        receipts = json.loads(payload["account_target_requests_json"])
+        assert receipts["exit_publication_mode"] == "independent"
+        assert receipts["exit_requests"] == [
+            {
+                "request_id": item.request.request_id,
+                "batch_id": item.request.batch_id,
+                "intent_count": 1,
+            }
+            for item in publication.exit_requests
+        ]
+        # Arrival order at the owner: every exit precedes the entry group.
+        inbox = AccountIntentInbox(payload.route)
+        first = inbox.claim_next()
+        second = inbox.claim_next()
+        third = inbox.claim_next()
+        assert first is not None and second is not None and third is not None
+        assert first[1].request_id == publication.exit_requests[0].request.request_id
+        assert second[1].request_id == publication.exit_requests[1].request.request_id
+        assert third[1].request_id == publication.entry_requests[0].request.request_id
+
+
+class TestPreInboxReadElimination:
+    def test_route_verification_is_memoized_after_the_first_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import liquidity_migration.account.account_route as route_module
+
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=_standing_frame())
+        state = CarryCycleState()
+        parses: list[str] = []
+        real_read = route_module._read_manifest
+
+        def counting_read(path, **kwargs):
+            parses.append(str(path))
+            return real_read(path, **kwargs)
+
+        monkeypatch.setattr(route_module, "_read_manifest", counting_read)
+        run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+            cycle_state=state,
+        )
+        first_cycle_parses = len(parses)
+        assert first_cycle_parses > 0  # the first verification is a real read
+
+        parses.clear()
+        second = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS + 60_000,
+            cycle_state=state,
+        )
+
+        # Unchanged manifest files: the second cycle re-verifies by lstat
+        # identity alone and parses ZERO manifests.
+        assert parses == []
+        assert second["decision_error"] is None
+
+    def test_route_memo_reverifies_when_a_manifest_file_changes(self, tmp_path: Path) -> None:
+        import liquidity_migration.account.account_route as route_module
+
+        route = _route(tmp_path / "route")
+        verified = route_module.require_account_route(
+            account_id=route.account_id,
+            environment=route.environment,
+            account_root=route.account_root,
+            inbox_root=route.inbox_root,
+        )
+        assert verified == route
+        manifest = Path(route.account_root) / route_module.ACCOUNT_ROUTE_FILENAME
+        original = manifest.read_bytes()
+        manifest.unlink()
+        manifest.write_bytes(original + b" ")  # non-canonical bytes, new inode
+        manifest.chmod(0o600)
+
+        with pytest.raises(route_module.AccountRouteIntegrityError):
+            route_module.require_account_route(
+                account_id=route.account_id,
+                environment=route.environment,
+                account_root=route.account_root,
+                inbox_root=route.inbox_root,
+            )
+
+    def test_registered_rule_is_parsed_once_across_cycles(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=_standing_frame())
+        monkeypatch.setattr(module, "_REGISTERED_RULE_CACHE", {})
+        loads: list[str] = []
+        real_load = module.load_carry_config
+
+        def counting_load(path=None):
+            loads.append(str(path))
+            return real_load(path)
+
+        monkeypatch.setattr(module, "load_carry_config", counting_load)
+        state = CarryCycleState()
+        for offset in (0, 60_000):
+            payload = run_carry_demo_cycle(
+                tmp_path / "producer",
+                config=ResearchConfig(),
+                demo_config=_routed_config(tmp_path / "route"),
+                market_client=_FakeCarryMarket(),
+                now_ms=NOW_MS + offset,
+                cycle_state=state,
+            )
+            assert payload["decision_error"] is None
+
+        assert len(loads) == 1  # one parse per process per rule file, ever
+
+    def test_open_positions_telemetry_still_lands_in_the_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The open-trades filter moved AFTER the publish call (it feeds only
+        # telemetry); the persisted cycle row must still carry it.
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=_standing_frame())
+
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+        )
+
+        assert payload["open_positions"] == 2
+        cycles = read_dataset(tmp_path / "producer", CARRY_CYCLES_DATASET)
+        assert cycles.get_column("open_positions").to_list() == [2]
+
+
+class _CountingTimeModule:
+    """`time` stand-in for strategy_planning: sleeps counted, rest passed through."""
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(float(seconds))
+
+    def __getattr__(self, name: str) -> Any:
+        import time as real_time
+
+        return getattr(real_time, name)
+
+
+class TestFreezeTimeEquityAnchorAndBoundaryHealth:
+    """A4: the day's equity anchors at the freeze pass (~90s early, declared),
+    and a boundary wake with a fresh freeze-time owner reading performs no
+    health read and none of the head-retry sleeps."""
+
+    def _patch_health(
+        self, monkeypatch: pytest.MonkeyPatch, health: Any
+    ) -> None:
+        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", health)
+        monkeypatch.setattr(
+            planning_module, "canonical_strategy_trade_rows", lambda *_a, **_k: pl.DataFrame()
+        )
+        monkeypatch.setattr(
+            planning_module, "terminal_entry_attempt_keys", lambda *_a, **_k: frozenset()
+        )
+
+    def _run(
+        self,
+        tmp_path: Path,
+        state: CarryCycleState,
+        *,
+        now_ms: int,
+        cycle_kind: str = "timer",
+        freeze_ahead: int | None = None,
+    ) -> PublishedTargetCyclePayload:
+        return run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=now_ms,
+            cycle_state=state,
+            cycle_kind=cycle_kind,
+            freeze_ahead_decision_ts_ms=freeze_ahead,
+        )
+
+    def test_boundary_with_fresh_freeze_reading_does_zero_health_reads_or_sleeps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from liquidity_migration.account.account_owner_health import (
+            AccountOwnerHealthHeadPending,
+        )
+
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        self._patch_health(
+            monkeypatch, lambda *_a, **_k: SimpleNamespace(equity_usdt=EQUITY)
+        )
+        state = CarryCycleState()
+        prewarm = self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
+        assert prewarm["freeze_ahead_frozen"] is True
+        refresh = self._run(tmp_path, state, now_ms=REFRESH_NOW, freeze_ahead=D0)
+        assert refresh["decision_error"] is None
+        reading = state.owner_health_reading
+        assert reading is not None
+        assert reading.read_wall_ts_ns == REFRESH_NOW * 1_000_000
+        assert reading.equity_usdt == pytest.approx(EQUITY)
+
+        # From here the owner-health head is pending: a LIVE read would walk
+        # the retry ladder and sleep. The boundary must never reach it.
+        live_reads: list[str] = []
+
+        def head_pending(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            live_reads.append("read")
+            raise AccountOwnerHealthHeadPending("synthetic head pending")
+
+        self._patch_health(monkeypatch, head_pending)
+        counting_time = _CountingTimeModule()
+        monkeypatch.setattr(planning_module, "time", counting_time)
+
+        # CONTROL — the pre-change boundary path: no stored reading forces the
+        # live read, which retries the pending head and sleeps.
+        control_state = CarryCycleState()
+        control_state.frozen_decisions = dict(state.frozen_decisions)
+        control = self._run(
+            tmp_path, control_state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
+        )
+        assert control["data_build_skipped"] is True
+        assert len(live_reads) == 4  # 4 head attempts
+        assert len(counting_time.sleeps) == 3  # a sleep between each attempt
+        assert control["equity_usdt"] is None
+        assert control["entry_blocked_reason"] == "account_owner_health_unavailable"
+
+        # TREATED — the freeze-window reading is 10.001s old at the boundary,
+        # inside the 30s freshness bound: zero reads, zero sleeps, entries on.
+        live_reads.clear()
+        counting_time.sleeps.clear()
+        boundary = self._run(
+            tmp_path, state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
+        )
+
+        assert boundary["data_build_skipped"] is True
+        assert live_reads == []
+        assert counting_time.sleeps == []
+        assert boundary["equity_usdt"] == pytest.approx(EQUITY)
+        assert boundary["entry_blocked_reason"] == ""
+        assert boundary["entry_targets_queued"] > 0
+
+    def test_the_day_sizes_off_freeze_time_equity_not_boundary_equity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Declared numerical change: freeze-time equity X sizes the day even
+        when boundary-time equity is Y != X; the dead-band absorbs the drift."""
+
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        freeze_equity = 10_000.0
+        boundary_equity = 20_000.0
+        live_equity = {"value": freeze_equity}
+        self._patch_health(
+            monkeypatch,
+            lambda *_a, **_k: SimpleNamespace(equity_usdt=live_equity["value"]),
+        )
+        state = CarryCycleState()
+        prewarm = self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
+        assert prewarm["freeze_ahead_frozen"] is True
+        assert state.sizing_equity_by_decision[D0] == pytest.approx(freeze_equity)
+
+        # Equity doubles before the boundary, and the stored reading ages past
+        # the 95s freeze-window bound — stale — so the boundary live-reads Y,
+        # and the day must STILL size off the freeze-time anchor X.
+        live_equity["value"] = boundary_equity
+        state.owner_health_reading = dataclasses.replace(
+            state.owner_health_reading,
+            read_wall_ts_ns=(BOUNDARY_NOW - 96_500) * 1_000_000,
+        )
+        boundary = self._run(
+            tmp_path, state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
+        )
+
+        assert boundary["decision_error"] is None
+        assert boundary["equity_usdt"] == pytest.approx(boundary_equity)
+        assert boundary["sizing_equity_usdt"] == pytest.approx(freeze_equity)
+        assert boundary["sizing_equity_decision_ts_ms"] == D0
+        entry_intents = [
+            item.intent
+            for item in boundary.publication.entry_requests[0].request.intents
+            if ENTRY_ATTEMPT_METADATA_KEY in item.intent.metadata
+        ]
+        assert entry_intents
+        for intent in entry_intents:
+            weight = float(intent.metadata["target_weight"])
+            assert intent.signed_notional_usdt == pytest.approx(weight * freeze_equity)
+            assert intent.signed_notional_usdt != pytest.approx(weight * boundary_equity)
+
+    def test_a_stale_freeze_reading_falls_back_to_the_live_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        live_reads: list[str] = []
+
+        def live_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            live_reads.append("read")
+            return SimpleNamespace(equity_usdt=EQUITY)
+
+        self._patch_health(monkeypatch, live_health)
+        state = CarryCycleState()
+        self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
+        assert state.owner_health_reading is not None
+
+        live_reads.clear()
+        # Age the stamp past the 95s freeze-window bound: the boundary must
+        # NOT trust it and must read live.
+        state.owner_health_reading = dataclasses.replace(
+            state.owner_health_reading,
+            read_wall_ts_ns=(BOUNDARY_NOW - 96_500) * 1_000_000,
+        )
+        boundary = self._run(
+            tmp_path, state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
+        )
+
+        assert live_reads  # the live read ran
+        assert boundary["equity_usdt"] == pytest.approx(EQUITY)
+        assert boundary["entry_blocked_reason"] == ""
+
+    def test_an_unusable_fresh_freeze_reading_blocks_entries_without_a_live_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+
+        def broken_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            raise RuntimeError("owner health receipt is stale")
+
+        self._patch_health(monkeypatch, broken_health)
+        state = CarryCycleState()
+        self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
+        refresh = self._run(tmp_path, state, now_ms=REFRESH_NOW, freeze_ahead=D0)
+        assert refresh["account_owner_health_error"]
+        reading = state.owner_health_reading
+        assert reading is not None and reading.error
+
+        # The owner heals, but the boundary's authority is the fresh stored
+        # reading: unusable, so entries stay blocked exactly as a live failure
+        # would block them — and no live read runs.
+        live_reads: list[str] = []
+
+        def healed_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            live_reads.append("read")
+            return SimpleNamespace(equity_usdt=EQUITY)
+
+        self._patch_health(monkeypatch, healed_health)
+        boundary = self._run(
+            tmp_path, state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
+        )
+
+        assert live_reads == []
+        assert boundary["equity_usdt"] is None
+        assert boundary["entry_blocked_reason"] == "account_owner_health_unavailable"
+        assert boundary["entry_targets_queued"] == 0
+
+
+class TestBoundaryOnlyStoredHealth:
+    """The stored reading serves ONLY the market boundary; journal wakes and
+    the day's anchor stay live. Review finding 2026-08-13: a journal-change
+    wake fires BECAUSE a fill landed, so serving it stored equity could hand
+    it a number that predates the very fill that woke it — and a reading that
+    anchors a day must have been read live, or age launders into the anchor.
+    """
+
+    _run = TestFreezeTimeEquityAnchorAndBoundaryHealth._run
+    _patch_health = TestFreezeTimeEquityAnchorAndBoundaryHealth._patch_health
+
+    def test_a_journal_change_wake_reads_live_even_with_a_fresh_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails without the fix: journal_change served the stored reading."""
+
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        live_reads: list[str] = []
+
+        def live_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            live_reads.append("read")
+            return SimpleNamespace(equity_usdt=EQUITY)
+
+        self._patch_health(monkeypatch, live_health)
+        state = module.CarryCycleState()
+        self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
+        assert state.owner_health_reading is not None
+
+        live_reads.clear()
+        wake = self._run(
+            tmp_path, state, now_ms=PREWARM_NOW + 5_000, cycle_kind="journal_change"
+        )
+
+        assert live_reads  # the journal wake paid its own live read
+        assert wake["equity_usdt"] == pytest.approx(EQUITY)

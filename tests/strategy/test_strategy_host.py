@@ -206,3 +206,74 @@ def test_a_wake_landing_at_the_deadline_instant_folds_into_the_boundary(tmp_path
     # pending wake is consumed by the boundary cycle itself.
     assert daemon._pending_cycle_kind == "market_boundary"
     assert daemon._deadline_fired_ts_ms == deadline_ms
+
+
+def test_cycle_payload_is_not_decorated_with_ws_plane_stats(tmp_path: Path) -> None:
+    """The post-cycle ws_klines/ws_state attach was computed-and-dropped: every
+    sleeve persists its cycle row inside its own runner, before the host sees
+    the payload, and no formatter, capture, or watchdog column read the keys.
+    The host must neither attach them nor pay the manager stats() call."""
+
+    from liquidity_migration.account.account_intent_client import ExitFirstPublication
+    from liquidity_migration.account.account_route import derive_account_route
+    from liquidity_migration.account.strategy_event_clock import StrategyEvent
+    from liquidity_migration.strategy.strategy_target_replay import (
+        PublishedTargetCyclePayload,
+    )
+
+    class _FakeKlineManager:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def store(self) -> None:
+            return None
+
+        def stats(self) -> dict[str, Any]:
+            self.stats_calls += 1
+            return {"store": {"rows": 1}}
+
+        def start(self, **_kwargs: Any) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    route = derive_account_route(
+        account_id="host-attach-test",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    publication = ExitFirstPublication(exit_requests=(), entry_requests=(), errors=())
+
+    def runner(*_args: Any, **_kwargs: Any) -> PublishedTargetCyclePayload:
+        return PublishedTargetCyclePayload(
+            {"cycle_id": "host-attach-1", "ts_ms": 1},
+            publication=publication,
+            route=route,
+        )
+
+    manager = _FakeKlineManager()
+    daemon = _Host(
+        tmp_path / "host",
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_HostConfig(),
+        cycle_runner=runner,
+        kline_stream_manager=manager,
+        min_cycle_interval_seconds=0.05,
+    )
+    event = StrategyEvent(
+        event_ts_ns=1_000_000_000,
+        ingest_ts_ns=1_000_000_000,
+        source="hosttest:demo",
+        source_sequence=1,
+        kind="startup",
+        payload={"execution_environment": "demo", "strategy_profile": "host-test-profile"},
+    )
+
+    payload = daemon._execute_cycle_event(event)
+
+    assert payload is not None
+    assert "ws_klines" not in payload
+    assert "ws_state" not in payload
+    assert manager.stats_calls == 0

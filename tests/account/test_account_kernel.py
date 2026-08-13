@@ -2553,12 +2553,16 @@ def test_concurrent_provider_entry_submission_has_one_atomic_winner(
         command_id: str,
         adapter_name: str,
         allow_repeat: bool = False,
+        plan_committed_ts_ns: int = 0,
+        leverage_wait_ns: int = -1,
     ) -> tuple[AccountEvent, ...]:
         attempt_barrier.wait(timeout=5.0)
         return original_record_attempt(
             command_id=command_id,
             adapter_name=adapter_name,
             allow_repeat=allow_repeat,
+            plan_committed_ts_ns=plan_committed_ts_ns,
+            leverage_wait_ns=leverage_wait_ns,
         )
 
     monkeypatch.setattr(

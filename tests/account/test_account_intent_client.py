@@ -217,7 +217,7 @@ def test_risk_authored_flat_suppresses_its_continuous_target_key(tmp_path) -> No
     assert snapshot.entry_request_count == 0
 
 
-def test_exit_publications_are_independent_and_failure_blocks_entry(tmp_path) -> None:
+def test_grouped_exit_failure_falls_back_to_independent_exits_and_blocks_entry(tmp_path) -> None:
     route = _route(tmp_path)
     delegate = AccountTargetPublisher(route)
     exit_a = _component_intent(component="a", action="exit", notional=0.0)
@@ -226,12 +226,12 @@ def test_exit_publications_are_independent_and_failure_blocks_entry(tmp_path) ->
 
     class OneBadExitPublisher:
         def __init__(self) -> None:
-            self.attempted: list[str] = []
+            self.attempted: list[tuple[str, ...]] = []
 
         def publish(self, **kwargs):
-            target_key = kwargs["intents"][0].intent.target_key
-            self.attempted.append(target_key)
-            if target_key == exit_a.intent.target_key:
+            keys = tuple(item.intent.target_key for item in kwargs["intents"])
+            self.attempted.append(keys)
+            if exit_a.intent.target_key in keys:
                 raise OSError("simulated exit transport failure")
             return delegate.publish(**kwargs)
 
@@ -242,9 +242,17 @@ def test_exit_publications_are_independent_and_failure_blocks_entry(tmp_path) ->
         exit_intents=(exit_a, exit_b),
         entry_intents=(entry,),
         created_ts_ns=1_700_000_000_000_000_000,
+        group_exits=True,
     )
 
-    assert publisher.attempted == [exit_a.intent.target_key, exit_b.intent.target_key]
+    # Grouped attempt first, then the per-exit fallback in caller order: the
+    # bad exit fails alone and the healthy one still reaches the inbox.
+    assert publisher.attempted == [
+        (exit_a.intent.target_key, exit_b.intent.target_key),
+        (exit_a.intent.target_key,),
+        (exit_b.intent.target_key,),
+    ]
+    assert result.exit_publication_mode == "independent"
     assert len(result.exit_requests) == 1
     assert result.exit_requests[0].request.intents[0] == exit_b
     assert result.entry_requests == ()
@@ -254,7 +262,7 @@ def test_exit_publications_are_independent_and_failure_blocks_entry(tmp_path) ->
     assert queued[0].intents == (exit_b,)
 
 
-def test_exit_first_success_uses_one_request_per_exit_then_one_entry_request(tmp_path) -> None:
+def test_exit_first_success_groups_exits_then_one_entry_request(tmp_path) -> None:
     route = _route(tmp_path)
     publisher = AccountTargetPublisher(route)
     exits = (
@@ -275,23 +283,41 @@ def test_exit_first_success_uses_one_request_per_exit_then_one_entry_request(tmp
             adapter=SleeveAdapterKind.LONG,
         ),
     )
+    created = 1_700_000_000_000_000_000
     result = publish_exit_first_target_requests(
         publisher,
         batch_prefix="continuous-target/cycle-2",
         exit_intents=exits,
         entry_intents=entries,
-        created_ts_ns=1_700_000_000_000_000_000,
+        created_ts_ns=created,
+        group_exits=True,
     )
 
-    assert len(result.exit_request_ids) == 2
-    assert len(set(result.exit_request_ids)) == 2
+    # ONE all-flat request carries every exit of the cycle.
+    assert result.exit_publication_mode == "grouped"
+    assert len(result.exit_requests) == 1
+    exit_request = result.exit_requests[0].request
+    assert exit_request.intents == exits
+    assert exit_request.batch_id == f"continuous-target/cycle-2/exit/{created}"
+    assert exit_request.created_ts_ns == created
     assert len(result.entry_requests) == 1
-    assert result.entry_requests[0].request.intents == entries
-    assert result.entry_request_ids == (result.entry_requests[0].request.request_id,)
+    entry_request = result.entry_requests[0].request
+    assert entry_request.intents == entries
+    # Entries keep the deterministic created + len(exits) stamp, distinct
+    # from the exit group's, so entry request ids do not depend on exit mode.
+    assert entry_request.created_ts_ns == created + len(exits)
+    assert result.entry_request_ids == (entry_request.request_id,)
     for published in (*result.exit_requests, *result.entry_requests):
         _assert_strict_route_identity(published, route)
     queued = publisher.inbox.unresolved_requests()
-    assert sorted(len(request.intents) for request in queued) == [1, 1, 2]
+    assert sorted(len(request.intents) for request in queued) == [2, 2]
+    # Arrival order: the exit group precedes the entry group.
+    first_claim = publisher.inbox.claim_next()
+    assert first_claim is not None
+    assert first_claim[1].request_id == exit_request.request_id
+    second_claim = publisher.inbox.claim_next()
+    assert second_claim is not None
+    assert second_claim[1].request_id == entry_request.request_id
 
 
 def test_independent_entries_publish_one_request_each_in_caller_order(tmp_path) -> None:

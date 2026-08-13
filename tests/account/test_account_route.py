@@ -828,3 +828,28 @@ def test_derived_route_id_matches_frozen_vector() -> None:
         )
         == "account-route-v1-3f7e41e57e08af501c23dd9b32ddfa53a3c2c1e5993bc46fabcdc1b2735e4187"
     )
+
+
+def test_manifest_cache_signature_sees_metadata_only_changes(tmp_path) -> None:
+    """chown/chmod (and mtime-restored rewrites) must bust the verification
+    memo: the kernel bumps ctime on every change and callers cannot set it
+    back, so ctime_ns belongs in the identity. Fails without the fix: the
+    signature was (size, mtime_ns, inode) and a chmod left it unchanged."""
+
+    import os
+    import time as _time
+
+    from liquidity_migration.account.account_route import _manifest_cache_signature
+
+    manifest = tmp_path / "route.json"
+    manifest.write_bytes(b"{}\n")
+    before = _manifest_cache_signature(manifest)
+    assert before is not None
+    stat_before = os.lstat(manifest)
+    # A metadata-only change: same bytes, same mtime (restored), new ctime.
+    _time.sleep(0.02)
+    os.chmod(manifest, 0o604)
+    os.utime(manifest, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    after = _manifest_cache_signature(manifest)
+    assert after is not None
+    assert after != before

@@ -81,6 +81,7 @@ from liquidity_migration.data.storage import (
     write_dataset,
 )
 from liquidity_migration.strategy.strategy_planning import (
+    OwnerHealthReading,
     account_owner_equity_or_error,
     new_planning_journal_cursor,
     sleeve_planning_snapshot,
@@ -149,6 +150,28 @@ class CarrySleeveError(RuntimeError):
 def load_carry_config(path: Path | None = None) -> CarryHoldConfig:
     """The registered rule parameters, byte-identical to the Lane-2 file."""
     return CarryHoldConfig.from_json(str(path or CARRY_CONFIG_PATH))
+
+
+#: Per-process registered-rule memo for the cycle path; see ``_registered_rule``.
+_REGISTERED_RULE_CACHE: dict[str, CarryHoldConfig] = {}
+
+
+def _registered_rule(config_path: Path) -> CarryHoldConfig:
+    """The cycle path's registered rule, parsed once per process per file.
+
+    Never invalidated on purpose: registered rule files are immutable once
+    committed, and changing the deployed rule already requires a producer
+    restart operationally (the profile dial is read at startup), so a disk
+    re-parse every 60-second cycle bought nothing. ``CarryHoldConfig`` is a
+    frozen dataclass, so sharing one instance across cycles is safe.
+    """
+
+    key = str(config_path)
+    rule = _REGISTERED_RULE_CACHE.get(key)
+    if rule is None:
+        rule = load_carry_config(config_path)
+        _REGISTERED_RULE_CACHE[key] = rule
+    return rule
 
 
 @dataclasses.dataclass(frozen=True)
@@ -276,6 +299,11 @@ DECISION_KLINE_LAG_MS = 20 * 60 * 1000
 #: public and cached when it opens; one 60-second grid cycle always lands in
 #: 90 seconds, which is what lets the deadline wake publish instead of compute.
 FREEZE_AHEAD_WINDOW_MS = 90 * 1000
+# The boundary may serve any owner-health reading taken inside the freeze
+# window (that IS the declared freeze-time-equity trade); the slack covers
+# stamp-to-deadline scheduling jitter. Deliberately wider than the live
+# read's 30s owner-receipt bound, and only ever applied to the stored copy.
+_BOUNDARY_STORED_HEALTH_MAX_AGE_NS = (FREEZE_AHEAD_WINDOW_MS + 5_000) * 1_000_000
 #: Entry-signal validity. The decision is a daily state, but an entry request
 #: that has not been accepted within 6h belongs to a stale book; the account
 #: service expires it rather than executing it late.
@@ -347,6 +375,8 @@ class CarryCycleState:
         "funding_swept_hour_ts",
         "journal_cursor",
         "last_successful_decision_ts_ms",
+        "owner_health_reading",
+        "sizing_equity_by_decision",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
     )
@@ -361,6 +391,15 @@ class CarryCycleState:
         self.funding_swept_hour_ts: int | None = None
         self.journal_cursor = new_planning_journal_cursor()
         self.last_successful_decision_ts_ms: int | None = None
+        # Owner-health reading taken off the boundary path (freeze window),
+        # served to boundary/journal wakes while inside the live freshness
+        # bound so those wakes pay no health I/O and no head-retry sleep.
+        self.owner_health_reading: OwnerHealthReading | None = None
+        # Sizing anchors keyed by decision bar, two-day retention for the same
+        # reason as ``frozen_decisions``: the freeze-ahead pass anchors
+        # TOMORROW's equity while cycles before the boundary still size
+        # TODAY's book, and a single slot made each side clobber the other.
+        self.sizing_equity_by_decision: dict[int, float] = {}
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
 
@@ -410,20 +449,31 @@ class CarryCycleState:
         a new decision moves the book. The disaster stop and native protection
         remain the capital-preservation path.
 
+        The first usable call for a decision bar sets that bar's anchor, and
+        since the freeze-ahead pass (2026-08-13) that first call happens ~90
+        seconds BEFORE the boundary by design: the day's equity is the
+        freeze-time mark, not the boundary-time mark, and the resize dead-band
+        absorbs the drift between the two. Anchors keep two-day retention so
+        pre-boundary cycles sizing TODAY cannot evict TOMORROW's freeze-time
+        anchor (or the reverse). Losing the state object re-anchors to the
+        current mark, as before.
+
         An unusable equity read (``<= 0``) passes through unanchored: callers
         already refuse to size on it, and anchoring it would outlive the failure.
         """
 
         if equity_usdt <= 0.0:
             return equity_usdt
-        if (
-            self.sizing_equity_decision_ts_ms != int(decision_ts_ms)
-            or self.sizing_equity_usdt is None
-            or self.sizing_equity_usdt <= 0.0
-        ):
-            self.sizing_equity_decision_ts_ms = int(decision_ts_ms)
-            self.sizing_equity_usdt = float(equity_usdt)
-        return float(self.sizing_equity_usdt)
+        key = int(decision_ts_ms)
+        anchored = self.sizing_equity_by_decision.get(key)
+        if anchored is None or anchored <= 0.0:
+            anchored = float(equity_usdt)
+            self.sizing_equity_by_decision[key] = anchored
+            while len(self.sizing_equity_by_decision) > 2:
+                del self.sizing_equity_by_decision[min(self.sizing_equity_by_decision)]
+        self.sizing_equity_decision_ts_ms = key
+        self.sizing_equity_usdt = float(anchored)
+        return float(anchored)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -434,8 +484,10 @@ class CarryDemoCycleConfig:
     ``declared_stop_loss_fraction``, ``max_new_entries_per_cycle``) are injected
     from the operational profile's ``carry`` block by the CLI; rule parameters
     stay in the registered config the engine loads. The ``ws_klines_*`` block
-    exists only because the shared base daemon reads those fields -- carry runs
-    pure REST and never starts a kline manager.
+    configures carry's WS kline plane, on by default: the daemon installs a
+    carry-scoped kline stream manager (``carry_demo_daemon``) that serves the
+    cycle's close-keyed bars, with REST as the fallback. Settled funding stays
+    REST-only because the venue publishes no funding stream.
     """
 
     # --- environment / wiring ---
@@ -1517,22 +1569,40 @@ def run_carry_demo_cycle(
         reservations = target_reservation_rows(planning.canonical_trades)
         standing_rows = _carry_standing_rows(reservations)
         standing_symbols = set(standing_rows)
-        open_trades = (
-            planning.canonical_trades.filter(pl.col("status") == "open")
-            if not planning.canonical_trades.is_empty()
-            and "status" in planning.canonical_trades.columns
-            else pl.DataFrame()
+        # Only the market-boundary wake serves the owner-health reading the
+        # freeze window stored — that is the declared trade: the day sizes
+        # off freeze-time equity, so the boundary pays no health I/O and none
+        # of the head-retry sleeps. The bound is the freeze window itself
+        # (any reading taken inside it is exactly the freeze-time equity the
+        # trade names), which also means the served value skips the owner
+        # journal-head binding a live read enforces: at worst it reflects
+        # owner state ~2 minutes old (reading age up to ~95s, plus the ~30s
+        # owner-receipt age the live read allowed at stamp time). The resize
+        # dead-band absorbs the drift and the disaster stop never reads this.
+        # A journal-change wake fires BECAUSE the journal moved, so it always
+        # reads live — served equity there could predate the very fill that
+        # woke it. Stale or absent readings fall through to the live read
+        # (the declared degraded path, which may sleep).
+        now_ns = cycle_now_ms * 1_000_000
+        freeze_reading = (
+            state.owner_health_reading if cycle_kind == "market_boundary" else None
         )
         equity_usdt, account_owner_health_error = account_owner_equity_or_error(
             account_route,
             environment=environment,
+            stored_reading=freeze_reading,
+            now_ns=now_ns,
+            stored_max_age_ns=_BOUNDARY_STORED_HEALTH_MAX_AGE_NS,
+        )
+        live_health_read = freeze_reading is None or not freeze_reading.is_fresh(
+            now_ns=now_ns, max_age_ns=_BOUNDARY_STORED_HEALTH_MAX_AGE_NS
         )
 
         decision: CarryDecision | None = None
         decision_error: str | None = None
         decision_frozen = False
         strategy_profile = resolve_carry_strategy_profile(demo.strategy_profile)
-        rule = load_carry_config(strategy_profile.config_path)
+        rule = _registered_rule(strategy_profile.config_path)
         trail_by_symbol: dict[str, float] = {}
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
@@ -1642,6 +1712,33 @@ def run_carry_demo_cycle(
                 replay_days=demo.replay_days,
                 standing_symbols=standing_symbols,
             )
+        if (
+            freeze_ahead_decision_ts_ms is not None
+            and state.frozen_decision(int(freeze_ahead_decision_ts_ms)) is not None
+        ):
+            # The boundary wake must not pay this cycle's health work: every
+            # pre-deadline cycle that finds the upcoming day frozen re-stamps
+            # the owner reading it just took, so the freshest pre-boundary
+            # reading is what the boundary serves. Live reads only — an
+            # injected value keeps its original timestamp, so age can never
+            # launder through a re-stamp. The upcoming day's sizing anchor is
+            # set here too, ~90 seconds before the boundary BY DESIGN: the
+            # day sizes off freeze-time equity and the resize dead-band
+            # absorbs the drift to boundary-time equity.
+            if live_health_read:
+                state.owner_health_reading = OwnerHealthReading(
+                    equity_usdt=float(equity_usdt),
+                    error=str(account_owner_health_error),
+                    read_wall_ts_ns=now_ns,
+                )
+                # The anchor is as live-only as the stamp: a served stored
+                # value must never set the day's sizing equity, or a reading
+                # could anchor a day it was never fresh for.
+                if not account_owner_health_error and equity_usdt > 0.0:
+                    state.sizing_equity(
+                        decision_ts_ms=int(freeze_ahead_decision_ts_ms),
+                        equity_usdt=float(equity_usdt),
+                    )
 
         if decision is not None:
             state.last_successful_decision_ts_ms = max(
@@ -1704,19 +1801,33 @@ def run_carry_demo_cycle(
             entry_intents=[*kept_entries, *kept_resizes],
             created_ts_ns=cycle_now_ms * 1_000_000,
         )
-        published_exit_targets = len(publication.exit_requests)
+        # Exits normally arrive as ONE grouped all-flat request, so queued
+        # exits are counted as intents, not requests; the count is identical
+        # under the per-exit fallback, where each request carries one intent.
+        published_exit_targets = sum(len(item.request.intents) for item in publication.exit_requests)
         # The grouped entry request is all-or-nothing: either every kept entry
         # and resize published, or none did.
         published_entry_targets = len(kept_entries) if publication.entry_requests else 0
         published_resize_targets = len(kept_resizes) if publication.entry_requests else 0
+        # Telemetry only, so it runs after the publish: nothing between the
+        # boundary signal and the inbox needs it.
+        open_trades = (
+            planning.canonical_trades.filter(pl.col("status") == "open")
+            if not planning.canonical_trades.is_empty()
+            and "status" in planning.canonical_trades.columns
+            else pl.DataFrame()
+        )
 
         account_target_requests = {
+            "exit_publication_mode": publication.exit_publication_mode,
             "exit_request_ids": list(publication.exit_request_ids),
             "exit_requests": [
                 {
                     "request_id": item.request.request_id,
                     "batch_id": item.request.batch_id,
-                    "target_key": item.request.intents[0].intent.target_key,
+                    # The grouped request carries every exit; a single
+                    # target_key would silently drop the rest (LONG precedent).
+                    "intent_count": len(item.request.intents),
                 }
                 for item in publication.exit_requests
             ],

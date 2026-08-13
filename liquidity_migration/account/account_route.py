@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -213,6 +214,34 @@ def read_account_route_manifest(root: str | Path) -> AccountRoute:
     return _read_manifest(account_route_manifest_path(root))
 
 
+#: Successful verifications only, keyed by the two resolved manifest paths and
+#: the owner-UID contract; the value binds each manifest file's identity at
+#: verification time to the verified route. Failures are never cached.
+_VERIFIED_ROUTE_CACHE: dict[
+    tuple[str, str, int | None],
+    tuple[tuple[int, int, int, int], tuple[int, int, int, int], AccountRoute],
+] = {}
+_VERIFIED_ROUTE_CACHE_LOCK = threading.Lock()
+
+
+def _manifest_cache_signature(path: Path) -> tuple[int, int, int, int] | None:
+    """File identity for the verification memo: (size, mtime_ns, ctime_ns, inode).
+
+    ``lstat`` on purpose: a manifest swapped for a symlink must present a
+    different identity, so the full read path (which rejects symlinks) runs.
+    ``ctime_ns`` is in the identity because the kernel bumps it on EVERY
+    change — content, ownership, or mode — and a caller cannot set it back:
+    a chown/chmod (whose checks the memo would otherwise skip) and an
+    in-place rewrite with a restored mtime both force the full re-verify.
+    """
+
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return None
+    return (status.st_size, status.st_mtime_ns, status.st_ctime_ns, status.st_ino)
+
+
 def require_account_route(
     *,
     account_id: str,
@@ -226,6 +255,14 @@ def require_account_route(
     Leave ``expected_owner_uid`` unset to require both manifests to belong to
     the current process owner; a root-only observer can instead bind the read
     to another runtime account's established owner UID.
+
+    Repeated verification of the same route is memoized for the life of the
+    process on each manifest file's (size, mtime_ns, inode) identity: the
+    manifests are immutable once written (see :func:`ensure_account_route`),
+    so an unchanged file identity means the earlier full read, canonical-byte,
+    and cross-mirror checks still hold, and the call costs two ``lstat``s. Any
+    change, replacement, or removal of either file re-runs the full
+    verification, and only successful verifications are ever cached.
     """
 
     if expected_owner_uid is not None and (
@@ -244,6 +281,23 @@ def require_account_route(
         inbox_root=inbox_root,
     )
     account_manifest_path, inbox_manifest_path = _manifest_paths(expected)
+    cache_key = (str(account_manifest_path), str(inbox_manifest_path), expected_owner_uid)
+    # Signatures are taken BEFORE the verification reads below: a file that
+    # mutates between signature and read is stored under a signature that no
+    # longer matches it, so the next call re-verifies instead of trusting a
+    # read this cache never saw.
+    account_signature = _manifest_cache_signature(account_manifest_path)
+    inbox_signature = _manifest_cache_signature(inbox_manifest_path)
+    if account_signature is not None and inbox_signature is not None:
+        with _VERIFIED_ROUTE_CACHE_LOCK:
+            cached = _VERIFIED_ROUTE_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and cached[0] == account_signature
+            and cached[1] == inbox_signature
+            and cached[2] == expected
+        ):
+            return expected
     missing = [str(path) for path in (account_manifest_path, inbox_manifest_path) if not os.path.lexists(path)]
     if missing:
         raise AccountRouteMissingError("account route manifest is missing from: " + ", ".join(missing))
@@ -260,6 +314,9 @@ def require_account_route(
         inbox_manifest,
         expected=expected,
     )
+    if account_signature is not None and inbox_signature is not None:
+        with _VERIFIED_ROUTE_CACHE_LOCK:
+            _VERIFIED_ROUTE_CACHE[cache_key] = (account_signature, inbox_signature, expected)
     return expected
 
 

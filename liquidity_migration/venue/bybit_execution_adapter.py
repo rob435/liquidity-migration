@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import Future, ThreadPoolExecutor
 from decimal import Decimal
-from typing import AbstractSet, Any, Iterable, Mapping, Sequence
+from typing import AbstractSet, Any, Callable, Iterable, Mapping, Sequence
 
 from liquidity_migration.account.account_contracts import (
     MarketInputRef,
@@ -125,6 +126,139 @@ class BybitDemoExecutionAdapter:
         # truth still agrees with, because this is not the only party that
         # changes leverage on the account.
         self._venue_leverage: dict[str, float] = {}
+        # Outcomes of the last speculative pre-commit leverage round, per
+        # symbol: ("rejected"|"uncertain", leverage, error, deadline_ns).
+        # Written only at the join (owner thread), consumed once by
+        # ``prepare_submission`` so the stored answer replaces the venue call
+        # it already made — never a second source of truth beyond its short
+        # deadline.
+        self._speculative_leverage_outcomes: dict[
+            str, tuple[str, float, BaseException, int]
+        ] = {}
+
+    #: How long a speculative leverage outcome may substitute for the live
+    #: call. The consuming prepare follows the join within the same pass —
+    #: milliseconds — so this only has to outlive one pass, and an outcome
+    #: nobody consumed (the batch was risk-rejected) must not answer for a
+    #: later, unrelated batch.
+    _SPECULATIVE_OUTCOME_TTL_NS = 5_000_000_000
+
+    def confirmed_venue_leverage(self) -> dict[str, float]:
+        """Leverage facts an ENTRY claim may fuse on: sole authority only.
+
+        Under shared leverage authority the cache still speeds the post-commit
+        prepare step, but it must not license commit fusion for entries:
+        fusing changes the crash window's retry semantics, and the funded
+        hand-traded account keeps today's order flow byte-identical except
+        for reduce-only claims, which are repeatable and fuse everywhere.
+        """
+
+        if not self.sole_leverage_authority:
+            return {}
+        return dict(self._venue_leverage)
+
+    def speculative_leverage_pairs(
+        self, pairs: Sequence[tuple[str, float]]
+    ) -> tuple[tuple[str, float], ...]:
+        """The (symbol, leverage) pairs a speculative round would need to set.
+
+        Empty under shared leverage authority: the owner hand-sets leverage on
+        this account, and a speculative call for a batch the RISK_DECISION
+        then rejects would overwrite a hand-set value on a flat symbol. The
+        post-commit sequence only sets leverage for risk-accepted commands,
+        so shared authority keeps exactly that sequence.
+        """
+
+        if not self.sole_leverage_authority:
+            return ()
+        wanted: dict[str, float] = {}
+        for symbol, leverage in pairs:
+            wanted[str(symbol).upper()] = float(leverage)
+        return tuple(
+            (symbol, leverage)
+            for symbol, leverage in sorted(wanted.items())
+            if self._venue_leverage.get(symbol) != leverage
+        )
+
+    def begin_speculative_leverage(
+        self, pairs: Sequence[tuple[str, float]]
+    ) -> Callable[[], None] | None:
+        """Fire cache-miss ``set_leverage`` calls concurrently, pre-commit.
+
+        Returns a join, or None when there is nothing to do. Workers only
+        RETURN outcomes — every cache and outcome-store mutation happens in
+        the join, on the calling owner thread, so ``_venue_leverage`` never
+        gains a second writer. The join never raises: a definite reject or an
+        uncertain answer is stored per symbol and ``prepare_submission``
+        replays it with exactly the semantics the inline call has today —
+        reject becomes the unaccepted pre-create ACK, uncertain raises before
+        any claim exists.
+        """
+
+        # Round boundary first: answers from a prior round must not outlive
+        # it even when THIS round has nothing to do — an unconsumed outcome
+        # (its target was risk-rejected) could otherwise answer a later,
+        # unrelated batch's prepare within the TTL.
+        self._speculative_leverage_outcomes.clear()
+        plan = self.speculative_leverage_pairs(pairs)
+        if not plan:
+            return None
+
+        def negotiate(symbol: str, leverage: float) -> None:
+            self.client.set_leverage(
+                symbol=symbol,
+                buy_leverage=leverage,
+                sell_leverage=leverage,
+            )
+
+        pool = ThreadPoolExecutor(
+            max_workers=len(plan),
+            thread_name_prefix="account-leverage-speculate",
+        )
+        futures: list[tuple[str, float, Future[None]]] = [
+            (symbol, leverage, pool.submit(negotiate, symbol, leverage))
+            for symbol, leverage in plan
+        ]
+        pool.shutdown(wait=False)
+
+        def join() -> None:
+            deadline_ns = self.clock.wall_time_ns() + self._SPECULATIVE_OUTCOME_TTL_NS
+            for symbol, leverage, future in futures:
+                try:
+                    future.result()
+                except BybitRequestRejected as exc:
+                    self._speculative_leverage_outcomes[symbol] = (
+                        "rejected",
+                        leverage,
+                        exc,
+                        deadline_ns,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - replayed verbatim at prepare
+                    self._speculative_leverage_outcomes[symbol] = (
+                        "uncertain",
+                        leverage,
+                        exc,
+                        deadline_ns,
+                    )
+                else:
+                    self._venue_leverage[symbol] = leverage
+
+        return join
+
+    def _consume_speculative_outcome(
+        self, command: OrderCommand
+    ) -> tuple[str, BaseException] | None:
+        """Pop this command's stored speculative answer, if still current."""
+
+        stored = self._speculative_leverage_outcomes.pop(command.symbol, None)
+        if stored is None:
+            return None
+        kind, leverage, error, deadline_ns = stored
+        if leverage != float(command.leverage) or self.clock.wall_time_ns() > deadline_ns:
+            # The speculation answered a different question, or too long ago:
+            # fall through to the live call.
+            return None
+        return kind, error
 
     def retain_confirmed_leverage(
         self,
@@ -251,7 +385,19 @@ class BybitDemoExecutionAdapter:
         if not command.reduce_only and self._venue_leverage.get(command.symbol) != float(
             command.leverage
         ):
+            speculative = self._consume_speculative_outcome(command)
+            if speculative is not None and speculative[0] == "uncertain":
+                # The pre-commit speculative call already asked the venue this
+                # exact question and got no usable answer. Propagate it here —
+                # before any claim exists — exactly as the inline call below
+                # would have, so the request is released and retried.
+                raise speculative[1]
             try:
+                if speculative is not None:
+                    # A stored definite reject replays without a second round
+                    # trip; the venue already refused this exact leverage
+                    # moments ago.
+                    raise speculative[1]
                 self.client.set_leverage(
                     symbol=command.symbol,
                     buy_leverage=command.leverage,
