@@ -621,3 +621,136 @@ def test_prior_receipt_bound_to_older_candidate_schema_requires_fresh_probe(
             tmp_path / "projected-rules.json",
             validation_now_ns=NOW_NS + 1,
         )
+
+
+def test_projection_retains_held_exposure_symbols(tmp_path: Path) -> None:
+    """A removed symbol the account still holds keeps its rule and evidence.
+
+    The probe alternative cannot serve a held symbol — it requires a flat
+    account — so without retention a universe shrink would strip the very
+    rules the remaining exits need (the owner can neither build nor
+    dust-terminalize an exit for a rules-less symbol).
+    """
+
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="source-candidate.json",
+    )
+    target_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="target-candidate.json",
+    )
+    source_rules = _rules(
+        tmp_path,
+        source_candidate,
+        filename="source-rules.json",
+    )
+    output = tmp_path / "projected-rules.json"
+
+    projected = project_demo_rules_to_candidate_subset(
+        target_candidate,
+        source_rules,
+        output,
+        validation_now_ns=NOW_NS + 1,
+        held_exposure_symbols=["BBBUSDT"],
+    )
+
+    payload = json.loads(projected.read_text(encoding="utf-8"))
+    assert list(payload["rules"]) == ["AAAUSDT", "BBBUSDT"]
+    assert list(payload["evidence"]) == ["AAAUSDT", "BBBUSDT"]
+    declaration = payload["held_exposure_symbols"]["BBBUSDT"]
+    assert declaration["basis"] == "prior_receipt_carryover"
+    assert declaration["source_receipt_sha256"]
+    assert payload["candidate_projection"]["removed_symbols"] == []
+    assert payload["candidate_projection"]["held_exposure_retained"] == ["BBBUSDT"]
+
+    coverage = build_candidate_rule_coverage(
+        target_candidate,
+        projected,
+        created_ts_ns=NOW_NS + 1,
+        validation_now_ns=NOW_NS + 1,
+    )
+    assert coverage["symbols"] == ["AAAUSDT"]
+    assert coverage["held_exposure_symbols"] == ["BBBUSDT"]
+    assert coverage["coverage"]["held_exposure_symbols"] == 1
+
+
+def test_coverage_accepts_declared_extras_and_rejects_relabeled_universe(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(tmp_path)
+    rules_path = _rules(tmp_path, candidate, extra=True)
+    payload = json.loads(rules_path.read_text(encoding="utf-8"))
+
+    # Undeclared extra: refused (the pre-2026-08-13 exactness, still binding).
+    with pytest.raises(ValueError, match="does not exactly cover"):
+        build_candidate_rule_coverage(
+            candidate,
+            rules_path,
+            created_ts_ns=NOW_NS + 1,
+            validation_now_ns=NOW_NS + 1,
+        )
+
+    # The same extra, declared as held exposure: accepted and recorded.
+    declared = dict(payload)
+    declared["held_exposure_symbols"] = {
+        "EXTRAUSDT": {"basis": "live_instruments_info"}
+    }
+    declared["artifact_sha256"] = ""
+    declared["artifact_sha256"] = hashlib.sha256(canonical_json(declared)).hexdigest()
+    declared_path = tmp_path / "rules-declared.json"
+    declared_path.write_text(json.dumps(declared, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(declared_path, 0o600)
+    coverage = build_candidate_rule_coverage(
+        candidate,
+        declared_path,
+        created_ts_ns=NOW_NS + 1,
+        validation_now_ns=NOW_NS + 1,
+    )
+    assert coverage["held_exposure_symbols"] == ["EXTRAUSDT"]
+
+    # Declaring a universe symbol as exposure is a relabel, not coverage.
+    lying = dict(payload)
+    lying["held_exposure_symbols"] = {
+        "AAAUSDT": {"basis": "live_instruments_info"},
+        "EXTRAUSDT": {"basis": "live_instruments_info"},
+    }
+    lying["artifact_sha256"] = ""
+    lying["artifact_sha256"] = hashlib.sha256(canonical_json(lying)).hexdigest()
+    lying_path = tmp_path / "rules-lying.json"
+    lying_path.write_text(json.dumps(lying, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(lying_path, 0o600)
+    with pytest.raises(ValueError, match="declares universe symbols as held exposure"):
+        build_candidate_rule_coverage(
+            candidate,
+            lying_path,
+            created_ts_ns=NOW_NS + 1,
+            validation_now_ns=NOW_NS + 1,
+        )
+
+
+def test_projection_records_exposure_it_cannot_retain(tmp_path: Path) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="source-candidate.json",
+    )
+    target_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="target-candidate.json",
+    )
+    source_rules = _rules(tmp_path, source_candidate, filename="source-rules.json")
+
+    projected = project_demo_rules_to_candidate_subset(
+        target_candidate,
+        source_rules,
+        tmp_path / "projected-rules.json",
+        validation_now_ns=NOW_NS + 1,
+        held_exposure_symbols=["BBBUSDT", "GHOSTUSDT"],
+    )
+    payload = json.loads(projected.read_text(encoding="utf-8"))
+    assert payload["candidate_projection"]["held_exposure_retained"] == ["BBBUSDT"]
+    assert payload["candidate_projection"]["held_exposure_unruled"] == ["GHOSTUSDT"]

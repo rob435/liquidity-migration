@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 
 from liquidity_migration.strategy.account_candidate_universe import (
+    account_exposure_labels,
     build_candidate_universe_artifact,
     enforce_frozen_candidate_frames,
     load_candidate_universe,
     require_scheduled_retirements_flat,
+    scheduled_retirement_exposure,
     write_candidate_universe,
 )
 from liquidity_migration.account.account_intent_client import (
@@ -648,3 +650,147 @@ def test_loader_recomputes_non_crypto_instrument_exclusions(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="excluded instrument rows are inconsistent"):
         load_candidate_universe(path)
+
+
+def _retiring_reconciliation(tmp_path: Path, *, now_ms: int):
+    frozen = load_candidate_universe(
+        write_candidate_universe(tmp_path / "candidate.json", _payload())
+    )
+    delivery_ms = now_ms + 1_000
+    return enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(delivery_ms)),
+            ]
+        ),
+        _normalize_tickers(
+            [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
+        ),
+        frozen,
+        profile="continuous",
+        snapshot_ts_ms=now_ms,
+        context="test CONT",
+        retirement_registry_path=tmp_path / "retirements.json",
+    )
+
+
+def test_retirement_exposure_reports_what_the_raising_form_raises_on(
+    tmp_path: Path,
+) -> None:
+    """The per-cycle report form must see exactly the raising form's exposure.
+
+    A producer cycle consumes the report and keeps running (its own exit
+    publication is what clears the exposure); the raising form stays for
+    callers proving a precondition. Both must read the same account truth.
+    """
+
+    now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
+    reconciliation = _retiring_reconciliation(tmp_path, now_ms=now_ms)
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+
+    assert scheduled_retirement_exposure(reconciliation, route=route) == {}
+
+    publisher = AccountTargetPublisher(route)
+    publisher.publish(
+        batch_id="retired-symbol-risk",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="retired-symbol-risk/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=100.0,
+                leverage=2.0,
+                reason="test",
+            ),
+        ),
+        created_ts_ns=now_ms * 1_000_000,
+    )
+
+    exposure = scheduled_retirement_exposure(reconciliation, route=route)
+    assert exposure == {"BBBUSDT": ("unresolved_nonzero_request",)}
+    with pytest.raises(RuntimeError, match="unresolved_nonzero_request"):
+        require_scheduled_retirements_flat(
+            reconciliation,
+            route=route,
+            context="test CONT",
+        )
+
+
+def test_account_exposure_labels_enumerates_every_exposed_symbol(
+    tmp_path: Path,
+) -> None:
+    """With no symbol filter the scan finds exposure it was not pointed at."""
+
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    assert account_exposure_labels(route=route) == {}
+
+    publisher = AccountTargetPublisher(route)
+    publisher.publish(
+        batch_id="exposed-symbol",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="exposed-symbol/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=100.0,
+                leverage=2.0,
+                reason="test",
+            ),
+        ),
+        created_ts_ns=(SNAPSHOT_NS // 1_000_000 + 1_000) * 1_000_000,
+    )
+
+    assert account_exposure_labels(route=route) == {
+        "BBBUSDT": ("unresolved_nonzero_request",)
+    }
+
+
+def test_a_zero_notional_request_is_exposure_too(tmp_path: Path) -> None:
+    """Every exit and flatten is a queued ZERO target, and the owner must
+    read that symbol's rules to process it — so a receipt frozen without it
+    wedges the request on restart (review finding, 2026-08-13)."""
+
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    AccountTargetPublisher(route).publish(
+        batch_id="flat-symbol-exit",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="flat-symbol-exit/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=0.0,
+                leverage=2.0,
+                reason="exit",
+            ),
+        ),
+        created_ts_ns=(SNAPSHOT_NS // 1_000_000 + 1_000) * 1_000_000,
+    )
+
+    assert account_exposure_labels(route=route) == {
+        "BBBUSDT": ("unresolved_request",)
+    }

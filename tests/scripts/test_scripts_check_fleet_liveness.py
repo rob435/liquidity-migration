@@ -1597,11 +1597,23 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
-    for name, label in (
-        ("gather_account_health_alerts", "reconciliation"),
-        ("gather_demo_rule_alerts", "demo_rules"),
-    ):
-        monkeypatch.setattr(M, name, lambda _label=label, **_kwargs: calls.append((_label, "")) or [])
+    monkeypatch.setattr(
+        M,
+        "gather_account_health_alerts",
+        lambda **_kwargs: calls.append(("reconciliation", "")) or [],
+    )
+    # The rules gather is deliberately NOT skipped on mainnet since
+    # 2026-08-13: only mainnet holds the 168h ceiling as a hard start
+    # refusal, and its receipt expired unwatched until then. The recorder
+    # keeps the realm so the assertion proves the mainnet loader is asked.
+    monkeypatch.setattr(
+        M,
+        "gather_demo_rule_alerts",
+        lambda **kwargs: calls.append(
+            (f"demo_rules:{kwargs['realm']}", Path(kwargs["rules_path"]).name)
+        )
+        or [],
+    )
     # Each gather also reports the root it was handed: a mainnet-labelled call
     # against a demo root is the silent failure this scope exists to avoid.
     monkeypatch.setattr(
@@ -1641,6 +1653,7 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
 
     assert M.main() == 0
     assert calls == [
+        ("demo_rules:mainnet", "demo-rules.json"),
         ("capture", "capture-mainnet"),
         ("gather_account_owner_health_alerts:mainnet", "account-mainnet"),
         ("gather_carry_alerts:mainnet", "bybit-carry-mainnet-event"),
@@ -2218,3 +2231,46 @@ def test_account_health_reads_a_bounded_tail_window_not_the_whole_journal(tmp_pa
         == []
     )
     assert sum(parsed_segments) == 2
+
+
+def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
+    """The funded receipt's expiry pages with the deploy remedy, not the probe.
+
+    Mainnet renewal is a read-only freeze on any deploy; telling the operator
+    to plan a flat-account probe window would be the wrong instruction.
+    """
+
+    hour_ns = 3_600_000_000_000
+    now_ns = 1_800_000_000_000_000_000
+    fresh_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 100) * hour_ns)
+    assert (
+        M.evaluate_demo_rule_age(
+            verified_ts_ns=fresh_ns, now_ns=now_ns, realm="mainnet"
+        )
+        is None
+    )
+
+    warning_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 10) * hour_ns)
+    warning = M.evaluate_demo_rule_age(
+        verified_ts_ns=warning_ns, now_ns=now_ns, realm="mainnet"
+    )
+    assert warning is not None
+    assert warning.key == "venue_rules_age"
+    assert warning.severity == M.WARNING
+    assert "any deploy renews it" in warning.message
+    assert "maintenance window" not in warning.message
+
+    expired_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS + 1) * hour_ns)
+    expired = M.evaluate_demo_rule_age(
+        verified_ts_ns=expired_ns, now_ns=now_ns, realm="mainnet"
+    )
+    assert expired is not None
+    assert expired.key == "venue_rules_age"
+    assert expired.severity == M.CRITICAL
+    assert "the funded owner will refuse to start" in expired.message
+
+    # Demo strings are untouched: same key, same probe remedy.
+    demo = M.evaluate_demo_rule_age(verified_ts_ns=expired_ns, now_ns=now_ns)
+    assert demo is not None
+    assert demo.key == "demo_rules_age"
+    assert "require a full probe" in demo.message

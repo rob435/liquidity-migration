@@ -1037,6 +1037,8 @@ def _mainnet_harness(
         "    ACCOUNT_RISK_POLICY_FILE=/fake/etc/risk-policy.json\n"
         "    ACCOUNT_SYMBOLS_FILE=/fake/etc/candidate-universe.json\n"
         '    ACCOUNT_DEMO_RULES_FILE="$RULES_FILE"\n'
+        "    ACCOUNT_EXECUTION_ROOT=/fake/var/account-mainnet\n"
+        "    ACCOUNT_INTENT_INBOX_ROOT=/fake/var/inbox-mainnet\n"
         "    BYBIT_REAL_API_KEY=fake-key\n"
         "    BYBIT_REAL_API_SECRET=fake-secret\n"
         "    return 0\n"
@@ -1095,8 +1097,15 @@ def test_mainnet_venue_rules_are_renewed_past_half_life(tmp_path: Path) -> None:
     combined = stale.stdout + stale.stderr
     assert stale.returncode == 0, combined
     assert "mainnet-venue-rule-plan path=freeze reason=refresh-due-past-half-life" in combined
-    # Renewal is a new artifact plus a rebind: the freeze refuses to overwrite,
-    # and an unbound receipt would leave the owner reading the expired one.
+    # Renewal freezes a FRESH universe+rules pair (membership follows the
+    # venue — a delisted symbol must leave the universe rather than block
+    # every renewal), each to a new artifact plus one rebind of the pair.
+    fresh_universe = re.search(
+        r"freeze_account_candidate_universe\.py --realm mainnet "
+        r"--output (/var/lib/liquidity-migration/mainnet-candidate-universe-receipts/\S+)",
+        combined,
+    )
+    assert fresh_universe is not None, combined
     assert "freeze_venue_instrument_rules.py --realm mainnet" in combined, combined
     refreshed = re.search(
         r"--output (/var/lib/liquidity-migration/mainnet-venue-rule-receipts/\S+)",
@@ -1104,14 +1113,53 @@ def test_mainnet_venue_rules_are_renewed_past_half_life(tmp_path: Path) -> None:
     )
     assert refreshed is not None, combined
     assert str(rules_file) != refreshed.group(1)
+    # The rules bind the FRESH universe, and the receipt covers what the
+    # account still holds: the exposure scan and the prior receipt travel
+    # with the freeze so a held symbol keeps a rule.
+    assert f"--symbols-file {fresh_universe.group(1)}" in combined, combined
+    assert "--held-exposure-account-root /fake/var/account-mainnet" in combined, combined
+    assert "--held-exposure-inbox-root /fake/var/inbox-mainnet" in combined, combined
+    assert f"--prior-rules-file {rules_file}" in combined, combined
     assert (
         f"python:- /etc/liquidity-migration/account-execution-mainnet.env "
-        f"{refreshed.group(1)} /fake/etc/candidate-universe.json" in combined
+        f"{refreshed.group(1)} {fresh_universe.group(1)}" in combined
     ), combined
     assert "mainnet-venue-rule-refresh-ok" in combined
     # The renewal reads the venue; it never places an order, so it needs no
     # stopped window and must not be gated behind one.
     assert "probe_bybit_demo_rules.py" not in combined
+
+    # A failed re-freeze of EITHER half keeps the installed pair and lets the
+    # deploy finish (2026-08-13: a fatal renewal stranded the mainnet units
+    # stopped). Nothing may rebind on the failed path.
+    for failing_output in (
+        "mainnet-candidate-universe-receipts",
+        "mainnet-venue-rule-receipts",
+    ):
+        # Keyed on the renewal receipt DIRECTORIES so the bootstrap freezes
+        # (which write the /fake/etc paths and rightly hard-fail) stay green.
+        harness = _mainnet_harness(
+            "armed", 0, rules_file=str(rules_file), rule_age_status=4
+        ).replace(
+            "fake_python() {\n",
+            "fake_python() {\n"
+            f'    case "$*" in *freeze*--output*{failing_output}*) '
+            'printf "python:%s\\n" "$*"; return 7 ;; esac\n',
+            1,
+        )
+        survived = subprocess.run(
+            ["bash", "-c", harness + "\nprovision_mainnet_prerequisites\n"],
+            capture_output=True,
+            text=True,
+        )
+        combined = survived.stdout + survived.stderr
+        assert survived.returncode == 0, (failing_output, combined)
+        assert "REFRESH-FAILED-KEEPING-VALID-RECEIPT" in combined, (failing_output, combined)
+        assert "mainnet-venue-rule-refresh-ok" not in combined, (failing_output, combined)
+        assert (
+            "python:- /etc/liquidity-migration/account-execution-mainnet.env"
+            not in combined
+        ), (failing_output, combined)
 
     # An unreadable or future-dated receipt is not an age question, and must not
     # be answered by silently freezing over it.

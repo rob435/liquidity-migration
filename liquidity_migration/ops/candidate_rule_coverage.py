@@ -8,7 +8,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
 from liquidity_migration.core.artifact_snapshot import StableFileSnapshot, read_stable_file
@@ -167,12 +167,20 @@ def project_demo_rules_to_candidate_subset(
     *,
     validation_now_ns: int | None = None,
     max_rule_age_seconds: float = REGISTERED_MAX_RULE_AGE_SECONDS,
+    held_exposure_symbols: Iterable[str] = (),
 ) -> Path:
     """Rebind fresh probe evidence when a new candidate set only removes symbols.
 
     Keeps every empirical timestamp and evidence row, drops the retired symbols,
     and binds the result to the new candidate artifact. Any candidate *addition*
     requires a fresh venue probe.
+
+    ``held_exposure_symbols`` names symbols the account still has exposure on.
+    A removed symbol in that set keeps its prior rule and probe evidence,
+    declared under ``held_exposure_symbols`` in the projected receipt, so the
+    exits that clear the exposure can still be built. The probe alternative
+    cannot serve here: it requires a flat account, and exposure is the one
+    thing these symbols still have.
     """
 
     from liquidity_migration.policy.account_execution_config import load_demo_rules_bytes
@@ -254,6 +262,14 @@ def project_demo_rules_to_candidate_subset(
             + ",".join(additions[:20])
             + ("..." if len(additions) > 20 else "")
         )
+    exposure = {str(symbol).upper() for symbol in held_exposure_symbols}
+    retained_exposure = sorted((exposure & source_symbols) - target_symbols)
+    kept_symbols = sorted(target_symbols | set(retained_exposure))
+    # Exposure with no rule in the source receipt cannot be retained; its
+    # exits stay unbuildable until the venue settles the position. Recorded
+    # in the projected artifact so the condition is visible, matching the
+    # mainnet freeze's held_exposure_unruled warning.
+    exposure_unruled = sorted(exposure - source_symbols - target_symbols)
 
     try:
         target_payload = json.loads(target_snapshot.data)
@@ -274,9 +290,13 @@ def project_demo_rules_to_candidate_subset(
             raise ValueError("projected candidate raw instrument symbols are invalid")
         current_instruments[symbol] = row
     unsafe_structural_drift: list[str] = []
-    for symbol in target.symbols:
+    for symbol in kept_symbols:
         row = current_instruments.get(symbol)
         if row is None:
+            if symbol in exposure and symbol not in target_symbols:
+                # The venue no longer lists it: nothing to drift against; the
+                # retained rule is exactly what lets its exits die properly.
+                continue
             raise ValueError(
                 f"projected candidate lacks raw instrument evidence for {symbol}"
             )
@@ -336,10 +356,17 @@ def project_demo_rules_to_candidate_subset(
         "artifact_self_hash_verified": True,
     }
     projected["rules"] = {
-        symbol: dict(source_rules[symbol]) for symbol in target.symbols
+        symbol: dict(source_rules[symbol]) for symbol in kept_symbols
     }
     projected["evidence"] = {
-        symbol: dict(source_evidence[symbol]) for symbol in target.symbols
+        symbol: dict(source_evidence[symbol]) for symbol in kept_symbols
+    }
+    projected["held_exposure_symbols"] = {
+        symbol: {
+            "basis": "prior_receipt_carryover",
+            "source_receipt_sha256": rules_snapshot.sha256,
+        }
+        for symbol in retained_exposure
     }
     projected["candidate_projection"] = {
         "kind": "fresh_demo_rule_candidate_subset_projection",
@@ -354,8 +381,10 @@ def project_demo_rules_to_candidate_subset(
         ),
         "source_candidate_path": str(source_candidate.path),
         "source_candidate_artifact_sha256": source_candidate.artifact_sha256,
-        "retained_symbol_count": len(target.symbols),
-        "removed_symbols": sorted(source_symbols - target_symbols),
+        "retained_symbol_count": len(kept_symbols),
+        "removed_symbols": sorted(source_symbols - set(kept_symbols)),
+        "held_exposure_retained": retained_exposure,
+        "held_exposure_unruled": exposure_unruled,
         "added_symbols": [],
         "limitation": "projection_does_not_extend_empirical_evidence_freshness",
     }
@@ -474,12 +503,26 @@ def build_candidate_rule_coverage(
         raise RuntimeError("demo-rule receipt changed during validation")
     candidate_symbols = list(candidate.symbols)
     rule_symbols = sorted(rules)
-    if rule_symbols != candidate_symbols:
-        missing = sorted(set(candidate_symbols) - set(rule_symbols))
-        extra = sorted(set(rule_symbols) - set(candidate_symbols))
+    declared_exposure = rules_payload.get("held_exposure_symbols") or {}
+    if not isinstance(declared_exposure, Mapping):
+        raise ValueError("demo-rule receipt held_exposure_symbols must be an object")
+    exposure_symbols = {str(symbol).upper() for symbol in declared_exposure}
+    lying_declarations = sorted(exposure_symbols & set(candidate_symbols))
+    if lying_declarations:
+        # A universe symbol needs no exposure declaration; one that carries it
+        # anyway is a receipt trying to relabel ordinary coverage as carryover.
+        raise ValueError(
+            "demo-rule receipt declares universe symbols as held exposure: "
+            f"{lying_declarations[:20]!r}"
+        )
+    expected_symbols = sorted(set(candidate_symbols) | exposure_symbols)
+    if rule_symbols != expected_symbols:
+        missing = sorted(set(expected_symbols) - set(rule_symbols))
+        extra = sorted(set(rule_symbols) - set(expected_symbols))
         raise ValueError(
             "demo-rule receipt does not exactly cover candidate universe "
-            f"(missing={missing[:20]!r}, extra={extra[:20]!r})"
+            "plus declared held exposure "
+            f"(missing={missing[:20]!r}, undeclared_extra={extra[:20]!r})"
         )
     source = rules_payload.get("symbol_source")
     if not isinstance(source, Mapping):
@@ -523,9 +566,11 @@ def build_candidate_rule_coverage(
             "symbol_count": len(rule_symbols),
         },
         "symbols": candidate_symbols,
+        "held_exposure_symbols": sorted(exposure_symbols),
         "coverage": {
             "candidate_symbols": len(candidate_symbols),
             "rule_symbols": len(rule_symbols),
+            "held_exposure_symbols": len(exposure_symbols),
             "missing": 0,
             "extra": 0,
             "accepted_probe_evidence_per_symbol": True,

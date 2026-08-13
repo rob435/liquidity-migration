@@ -694,7 +694,8 @@ refresh_stale_demo_rules_if_requested() {
         BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE \
+        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     if "$PYTHON" - "$demo_rules" <<'PY'
 import sys
@@ -761,9 +762,14 @@ PY
         # still-fresh venue evidence and timestamp; a candidate addition exits 3
         # and falls through to a complete fresh probe.
         projected_rules="$receipt_dir/demo-rules-projected-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+        # The exposure roots keep a held symbol's rules and probe evidence
+        # through the projection even when the fresh universe drops it — the
+        # probe alternative needs a flat account, which exposure precludes.
         if "$PYTHON" scripts/maintain/project_demo_rules_to_candidate.py \
             --candidate-file "$refreshed_candidate" \
             --prior-rules-file "$demo_rules" \
+            --held-exposure-account-root "$ACCOUNT_EXECUTION_ROOT" \
+            --held-exposure-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
             --output "$projected_rules"; then
             projection_status=0
         else
@@ -1284,12 +1290,16 @@ provision_mainnet_prerequisites() {
         || fail "cannot default the mainnet Telegram pair"
     # Artifact paths come from the route file itself, not from copies here.
     local risk_policy_file="" universe_file="" rules_file=""
+    local exposure_account_root="" exposure_inbox_root=""
     lm_load_private_systemd_environment "$PYTHON" "$MAINNET_ROUTE_ENV" \
         ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
+        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT \
         || fail "cannot read artifact paths from $MAINNET_ROUTE_ENV"
     risk_policy_file="$ACCOUNT_RISK_POLICY_FILE"
     universe_file="$ACCOUNT_SYMBOLS_FILE"
     rules_file="$ACCOUNT_DEMO_RULES_FILE"
+    exposure_account_root="$ACCOUNT_EXECUTION_ROOT"
+    exposure_inbox_root="$ACCOUNT_INTENT_INBOX_ROOT"
     mkdir -p "$(dirname "$risk_policy_file")"
     chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
     # The installed profile is always the render of the current dials, so a
@@ -1297,18 +1307,26 @@ provision_mainnet_prerequisites() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
         --execute --overwrite --output "$risk_policy_file" \
         || fail "mainnet dials do not render a loadable profile"
-    # Frozen inputs only when absent: universe first, then rules bound to it.
+    # Bootstrap only when absent: universe first, then rules bound to it.
+    # Renewal is refresh_stale_mainnet_venue_rules below, which freezes a
+    # FRESH universe+rules pair — membership follows the venue.
     if [ ! -f "$universe_file" ]; then
         "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
             --realm mainnet --output "$universe_file" \
             || fail "mainnet candidate-universe freeze failed"
     fi
     if [ ! -f "$rules_file" ]; then
+        # The exposure scan matters even at bootstrap: a reprovision over a
+        # live account (route env lost, journal intact) must not mint a
+        # receipt missing the held symbols.
         lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
             --realm mainnet --symbols-file "$universe_file" --output "$rules_file" \
+            --held-exposure-account-root "$exposure_account_root" \
+            --held-exposure-inbox-root "$exposure_inbox_root" \
             || fail "mainnet venue-rules freeze failed"
     else
-        refresh_stale_mainnet_venue_rules "$universe_file" "$rules_file"
+        refresh_stale_mainnet_venue_rules "$universe_file" "$rules_file" \
+            "$exposure_account_root" "$exposure_inbox_root"
     fi
 }
 
@@ -1317,8 +1335,20 @@ provision_mainnet_prerequisites() {
 # renews becomes a hard refusal to start with exposure already on the book.
 # Renew in the receipt's back half, the same policy the demo probe follows;
 # unlike that probe this places no orders, so it needs no stopped window.
+#
+# A renewal freezes a FRESH universe and rules as one pair from the live
+# venue (owner directive 2026-08-13: membership follows the venue). A
+# delisted symbol leaves the universe instead of blocking every renewal —
+# VANRYUSDT pinned the old frozen-forever universe against a live venue that
+# no longer listed it, which made every renewal fail until the receipt's
+# 168-hour cliff. Symbols the account still has exposure on keep rules
+# beyond the universe via the freeze script's exposure scan. Nothing rebinds
+# until both freezes and the coverage proof pass, so any failure keeps the
+# installed pair consistent.
 refresh_stale_mainnet_venue_rules() {
     local universe_file="$1" rules_file="$2" status=0 refreshed receipt_dir
+    local exposure_account_root="$3" exposure_inbox_root="$4"
+    local stamp refreshed_universe universe_receipt_dir
     "$PYTHON" - "$rules_file" <<'PY' || status=$?
 import json
 import sys
@@ -1352,21 +1382,37 @@ PY
         *) fail "installed mainnet venue-rule receipt failed validation for a reason other than age" ;;
     esac
 
-    # The freeze refuses to overwrite, so a renewal is a new artifact plus a
-    # rebind; the superseded receipt stays on disk as the evidence it is.
+    # The freezes refuse to overwrite, so a renewal is a new artifact pair
+    # plus a rebind; superseded receipts stay on disk as the evidence they are.
     receipt_dir=/var/lib/liquidity-migration/mainnet-venue-rule-receipts
-    install -d -o root -g root -m 0700 "$receipt_dir"
-    refreshed="$receipt_dir/venue-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
+    universe_receipt_dir=/var/lib/liquidity-migration/mainnet-candidate-universe-receipts
+    install -d -o root -g root -m 0700 "$receipt_dir" "$universe_receipt_dir"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    refreshed="$receipt_dir/venue-rules-$stamp-${EXPECTED_COMMIT:0:12}-$$.json"
+    refreshed_universe="$universe_receipt_dir/candidate-universe-$stamp-${EXPECTED_COMMIT:0:12}-$$.json"
     # This renewal is opportunistic: the installed receipt validated above and
-    # is merely past half-life, so a failed re-freeze keeps the valid receipt
-    # and the deploy continues instead of stopping with the fleet half-down
-    # (2026-08-13: a symbol delisted from mainnet after the universe freeze,
-    # VANRYUSDT, failed the freeze here and stranded the mainnet units
-    # stopped and disabled). The 168-hour ceiling is untouched -- the funded
-    # owner still refuses to start on an expired receipt, and the renewal is
-    # retried on every deploy until it succeeds.
+    # is merely past half-life, so a failed re-freeze keeps the valid
+    # installed PAIR and the deploy continues instead of stopping with the
+    # fleet half-down (2026-08-13: delisted VANRYUSDT failed the freeze here
+    # and stranded the mainnet units stopped and disabled). The 168-hour
+    # ceiling is untouched -- the funded owner still refuses to start on an
+    # expired receipt, and the renewal is retried on every deploy until it
+    # succeeds. An orphaned fresh-universe file from a failed rules freeze is
+    # harmless: nothing references it until the rebind below.
+    if ! "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
+        --realm mainnet --output "$refreshed_universe"; then
+        rm -f "$refreshed_universe"
+        echo "mainnet-venue-rule-plan path=reuse reason=REFRESH-FAILED-KEEPING-VALID-RECEIPT" >&2
+        echo "WARNING: mainnet candidate-universe re-freeze failed; the installed pair is" >&2
+        echo "WARNING: still valid but the rules age toward their 168-hour ceiling. Fix the" >&2
+        echo "WARNING: freeze before expiry or the funded owner will refuse to start." >&2
+        return 0
+    fi
     if ! lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
-        --realm mainnet --symbols-file "$universe_file" --output "$refreshed"; then
+        --realm mainnet --symbols-file "$refreshed_universe" --output "$refreshed" \
+        --held-exposure-account-root "$exposure_account_root" \
+        --held-exposure-inbox-root "$exposure_inbox_root" \
+        --prior-rules-file "$rules_file"; then
         rm -f "$refreshed"
         echo "mainnet-venue-rule-plan path=reuse reason=REFRESH-FAILED-KEEPING-VALID-RECEIPT" >&2
         echo "WARNING: mainnet venue-rules renewal failed; the installed receipt is still" >&2
@@ -1375,7 +1421,7 @@ PY
         return 0
     fi
 
-    "$PYTHON" - "$MAINNET_ROUTE_ENV" "$refreshed" "$universe_file" <<'PY' \
+    "$PYTHON" - "$MAINNET_ROUTE_ENV" "$refreshed" "$refreshed_universe" <<'PY' \
         || fail "mainnet venue-rule rebind of the account execution environment failed"
 import os
 import shlex
@@ -1406,6 +1452,10 @@ load_venue_rules_bytes(
 build_candidate_rule_coverage(candidate, rules, realm="mainnet")
 values = load_private_systemd_environment(path)
 values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
+# The pair rebinds together, and the two universe variables must stay equal
+# (real_money_arming enforces it at preflight).
+values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
+values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
 descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
 try:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -1424,7 +1474,7 @@ except BaseException:
     Path(temporary).unlink(missing_ok=True)
     raise
 PY
-    printf 'mainnet-venue-rule-refresh-ok path=%s candidate=%s\n' "$refreshed" "$universe_file"
+    printf 'mainnet-venue-rule-refresh-ok path=%s candidate=%s\n' "$refreshed" "$refreshed_universe"
 }
 
 ensure_mainnet_state_roots() {

@@ -1817,3 +1817,109 @@ def test_validate_rejects_unregistered_strategy_identity() -> None:
     rogue = replace(long_v12_profile(), execution_strategy_id="long_native_v13_unregistered")
     with pytest.raises(ValueError, match="unsupported LONG execution_strategy_id"):
         _validate_long_demo_config(demo, rogue)
+
+
+class _HealthSentinel(RuntimeError):
+    """Marks that the cycle reached the owner-health read past the gate."""
+
+
+def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled retirement with live exposure must not fail the cycle.
+
+    The pre-2026-08-13 gate raised before exit planning, so the one producer
+    able to publish the flattening exits refused to run — a deadlock broken
+    only by venue settlement or an operator flatten. The cycle now reports the
+    draining symbol and keeps going: with the fix, execution reaches the
+    owner-health read (the sentinel below); without it, the flatness
+    RuntimeError fires first and this test fails.
+    """
+
+    from liquidity_migration.account.account_intent_client import (
+        AccountTargetPublisher,
+        requested_target,
+    )
+    from liquidity_migration.account.account_service import SleeveAdapterKind
+    from liquidity_migration.strategy.account_candidate_universe import (
+        build_candidate_universe_artifact,
+        write_candidate_universe,
+    )
+    from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
+    from tests.strategy.test_account_candidate_universe import (
+        SNAPSHOT_NS,
+        _instrument,
+        _ticker,
+    )
+
+    now_ms = SNAPSHOT_NS // 1_000_000 + 60_000
+    # Both symbols clear every LONG population filter at freeze time, so the
+    # frozen long profile holds both and BBBUSDT's later delivery evidence is
+    # a scheduled retirement rather than a never-member.
+    artifact = write_candidate_universe(
+        tmp_path / "candidate.json",
+        build_candidate_universe_artifact(
+            [_instrument("AAAUSDT"), _instrument("BBBUSDT")],
+            [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "4000000")],
+            snapshot_ts_ns=SNAPSHOT_NS,
+            long_config=LongNativeDemoCycleConfig(),
+            continuous_config=ContinuousDemoCycleConfig(),
+        ),
+    )
+
+    class _PublicClient:
+        def get_instruments_info(self) -> list[dict[str, Any]]:
+            # The venue has announced BBBUSDT's retirement: still trading,
+            # delivery in the future.
+            return [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(now_ms + 86_400_000)),
+            ]
+
+        def get_tickers(self) -> list[dict[str, Any]]:
+            return [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "4000000")]
+
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    AccountTargetPublisher(route).publish(
+        batch_id="bbb-standing-exposure",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="bbb-standing-exposure/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=100.0,
+                leverage=2.0,
+                reason="test",
+            ),
+        ),
+        created_ts_ns=now_ms * 1_000_000,
+    )
+
+    def _sentinel_health(*args: Any, **kwargs: Any) -> Any:
+        raise _HealthSentinel("cycle proceeded past the retirement gate")
+
+    monkeypatch.setattr(lnd, "account_owner_equity_or_error", _sentinel_health)
+
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_execution_root=str(tmp_path / "account"),
+        account_intent_inbox_root=str(tmp_path / "inbox"),
+        candidate_universe_file=str(artifact),
+    )
+    with pytest.raises(_HealthSentinel):
+        run_long_native_demo_cycle(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=demo,
+            market_client=_PublicClient(),
+            now_ms=now_ms,
+        )
