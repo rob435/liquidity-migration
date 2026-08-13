@@ -1,0 +1,27 @@
+# The engine's config. There is no venue address in here on purpose: where
+# the engine trades is fixed in the venue crate (demo only), so no edit to
+# this file can point it somewhere else.
+
+[engine]
+wal_path = "engine.wal"
+# How often buffered log bytes are pushed to the OS. Order records do not
+# wait for this — they are forced to disk before the order goes out.
+group_flush_ms = 250
+# How old an account reading may get before the risk kernel treats it as
+# unknown. The engine refreshes at half this age.
+account_view_max_age_ms = 5000
+# Compute and log orders, send nothing. `--live` flips this; the risk kernel
+# still gates every send either way.
+shadow = true
+
+# Handed to the risk kernel as written. The engine does not read inside it.
+[risk]
+loss_floor_frac = 0.85
+max_position_usdt = 500.0
+
+# One block per strategy. Name and capital are the engine's; everything else
+# belongs to the strategy and is passed through untouched.
+[[strategy]]
+name = "example"
+capital_usdt = 250.0
+symbols = ["BTCUSDT"]
