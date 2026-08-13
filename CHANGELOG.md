@@ -16,6 +16,57 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 ~21:50 UTC — Wave 3 merged to main, NOT deployed: queueing one
+  target request costs one durable file write instead of three, the owner pass
+  parses the queue once instead of twice, a price touch wakes the LONG sleeve
+  in ~2 s instead of up to a minute, the owner's garbage-collector pause
+  shrinks from ~14 ms worst to ~0.2 ms measured, and the market-readiness
+  pointer's file syncs no longer hold the lock the order path takes.** Owner
+  directive: "implement the rest of phase 3 … take any measures to reduce
+  latency." Built by three reviewed agent branches on top of `ea05e1f` (the
+  capture-pointer deferral), then two adversarial reviewers attacked the whole
+  diff; six confirmed faults were fixed in `a9984b8`, each with a test proven
+  to fail on the unfixed code. Full gate 3,198 tests green.
+  - **The inbox** (`4f83667` + fixes): the arrival order rides inside the
+    request's own file (6 fsyncs → 2 per publish, ~11 ms → ~4.4 ms on the
+    deployed host's disk); the counter survives only as an advisory buffered
+    write so numbering keeps climbing across producer rebuilds; a queue file
+    the publish scan cannot read is skipped with a warning instead of blocking
+    a safety exit from queueing (the claim walk still fails closed on it);
+    the parse is memoised per file identity so the readiness peek and the
+    claim share one read; requests queued by the old build still read through
+    their sidecar, so the live fleet's inboxes migrate in place.
+  - **Producer wakes** (`990b1bc` + fixes): LONG cycles carry a stored health
+    reading and a wake reason like carry's, served only while the owner
+    receipt behind it would still pass a live read (ages never stack); the
+    host checks price levels inside the ticker callback (float compares only)
+    with a 2 s debounce and a fired-latch per registration, so a level that
+    cannot clear wakes one cycle and the minute grid owns the retries.
+  - **Owner runtime** (`f6eb634`): collect-then-freeze once warm, raised
+    young-generation threshold, full collect at the end of every pass unless
+    an order is already waiting. Measured (local, Python 3.13): worst pause
+    13.7–14.1 ms → 0.14–0.24 ms, peak memory down 118→97 MB; the stalled-tail
+    case degrades to a bounded 112 MB with automatic collection still armed.
+    Magnitudes want one re-run on the VPS before quoting for that host.
+  - **Deliberately not merged:** the arm/fire trigger module (branch
+    `wave3/arm-fire`, `f76ae52`, fully tested). Carry cannot migrate onto it
+    as a pure refactor — carry freezes a decision and computes intents at the
+    boundary against boundary-time state, so arming intents ~90 s early would
+    change what the sleeve trades — and LONG's exits already ride the new
+    price wake through the normal publish path. The module waits on its
+    branch until a real consumer exists.
+  - **Deploy notes:** forward migration is in place (old inbox files read
+    fine); **rollback is not** — the old build cannot parse new-format queue
+    files, so roll back only with a drained pending/processing queue or an
+    epoch reset. Not deployed tonight so the 00:20 UTC boundary receipts
+    measure the wave-2 code actually running.
+  - **Held by the program's own verdicts:** the journal WAL shape (decide
+    after measuring fsync on the relocation candidate box); WS trade
+    rehearsal and the Bybit institutional-gateway question (owner); the
+    relocation A/B itself (owner green-light); moving the post-ack stop
+    verification off the blocking pass (owner proposal — it is a capital
+    control's timing).
+
 - **2026-08-13 18:25–18:36 UTC — Deployed `4063a87` (wave-2 order path + universe
   resilience) staged stop-first, and the new funded renewal ran live on its
   first try: fresh funded universe and rules without VANRYUSDT, so the
