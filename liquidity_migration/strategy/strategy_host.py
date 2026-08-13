@@ -497,22 +497,13 @@ class StrategyHostDaemon:
             _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
-        if payload is not None and self._kline_stream_manager is not None:
-            try:
-                payload.setdefault("ws_klines", self._kline_stream_manager.stats())
-            except Exception as exc:  # noqa: BLE001
-                _logger.debug("kline_stream_manager stats fetch failed: %s", exc)
-        if payload is not None:
-            ws_state: dict[str, Any] = {
-                "ticker_cache": self._ticker_cache.stats(),
-                "reconciles_total": self._reconciles_total,
-                "reconcile_errors": self._reconcile_errors,
-                "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
-            }
-            stream_stats = getattr(self._ticker_stream, "stats", None)
-            if callable(stream_stats):
-                ws_state["ticker_stream"] = stream_stats()
-            payload.setdefault("ws_state", ws_state)
+        # The payload is NOT decorated with WS-plane stats here: every sleeve
+        # persists its cycle row inside its own runner, before this point, and
+        # no formatter, capture, or watchdog column read the post-persist
+        # attach — it was computed and dropped on every cycle (removed
+        # 2026-08-13; LONG's watchdog column ``kline_store_max_ts_ms`` comes
+        # from the runner's own build stats, and completion health reads a
+        # fresh ``manager.stats()`` in ``_current_ws_kline_store_rows``).
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)

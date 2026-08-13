@@ -342,6 +342,9 @@ class TestFlattenAccount:
         # No owner is running, so it cannot converge; the point is what it queued.
         assert outcome.executed
         assert outcome.status == "timed_out"
+        # One request PER zero target: per-exit independence is the point of
+        # this path — one symbol whose market data went missing must wedge
+        # only its own request while every other close still goes out.
         assert len(outcome.published_request_ids) == 2
 
         queued = [
@@ -349,6 +352,7 @@ class TestFlattenAccount:
             for path in sorted((route.inbox_path / "pending").glob("*.json"))
         ]
         assert len(queued) == 2
+        assert all(len(request["intents"]) == 1 for request in queued)
         for request in queued:
             assert request["environment"] == "demo"
             for intent in request["intents"]:
@@ -553,7 +557,10 @@ class TestLossCeilingFlatten:
             now_ns=1_770_000_000_000_000_002,
             already_published=first_pass.planned_target_keys,
         )
+        # The changed open set republishes BOTH zero targets, one request
+        # each — per-exit independence on the loss-guard path.
         assert len(after.published_request_ids) == 2
+        assert after.planned_target_keys == {first_key, second_key}
         queued = "".join(
             path.read_text() for path in (Path(route.inbox_root) / "pending").glob("*.json")
         )

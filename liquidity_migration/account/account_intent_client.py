@@ -84,6 +84,14 @@ class ExitFirstPublication:
     exit_requests: tuple[PublishedTargetRequest, ...]
     entry_requests: tuple[PublishedTargetRequest, ...]
     errors: tuple[TargetPublicationError, ...]
+    #: How the exits reached the inbox: ``"independent"`` (one request per
+    #: exit, the default), ``"grouped"`` (one all-flat request, opt-in), or
+    #: ``""`` when the cycle had no exits.
+    exit_publication_mode: str = ""
+    #: Non-blocking observation: set when the grouped publish raised after
+    #: its request had already landed durably (the request is in force and
+    #: listed in ``exit_requests``; nothing was retried).
+    exit_publication_note: str = ""
 
     @property
     def exit_request_ids(self) -> tuple[str, ...]:
@@ -117,6 +125,22 @@ class AccountTargetPublisher:
         intents: Sequence[RequestedIntent],
         created_ts_ns: int | None = None,
     ) -> PublishedTargetRequest:
+        request = self.prepare_request(
+            batch_id=batch_id,
+            intents=intents,
+            created_ts_ns=created_ts_ns,
+        )
+        return PublishedTargetRequest(request=request, path=self.inbox.submit(request))
+
+    def prepare_request(
+        self,
+        *,
+        batch_id: str,
+        intents: Sequence[RequestedIntent],
+        created_ts_ns: int | None = None,
+    ) -> AccountTargetRequest:
+        """Build the exact request ``publish`` would submit, without submitting."""
+
         clean_batch = str(batch_id).strip()
         if not clean_batch:
             raise ValueError("batch_id is required")
@@ -134,7 +158,7 @@ class AccountTargetPublisher:
             environment=self.route.environment,
             intents=normalized,
         )
-        request = AccountTargetRequest(
+        return AccountTargetRequest(
             request_id=request_id,
             batch_id=clean_batch,
             created_ts_ns=created,
@@ -143,7 +167,6 @@ class AccountTargetPublisher:
             environment=self.route.environment,
             intents=normalized,
         )
-        return PublishedTargetRequest(request=request, path=self.inbox.submit(request))
 
 
 def account_target_request_id(
@@ -323,15 +346,35 @@ def publish_exit_first_target_requests(
     entry_intents: Sequence[RequestedIntent],
     created_ts_ns: int,
     independent_entry_requests: bool = False,
+    group_exits: bool = False,
 ) -> ExitFirstPublication:
-    """Publish independent risk-reducing exits before entry requests.
+    """Publish risk-reducing exits before entry requests.
 
-    Each exit is a one-intent request, so a malformed exit cannot hold back the
-    others; any exit failure blocks all risk-increasing requests this cycle.
-    Entry intents default to one atomic grouped request;
+    Exits default to ONE REQUEST EACH. Per-exit requests are the independence
+    property capital paths rely on: the account owner admits each exit alone,
+    so one symbol whose market data or instrument rules have gone missing (a
+    delisting is the live precedent) wedges only its own request while every
+    other exit still closes. Review probes showed a grouped all-flat request
+    fails owner admission as a unit in that state, retries out its budget,
+    and — on the loss-guard flatten — the republish latch then never fires,
+    leaving healthy positions open exactly when the loss ceiling is tripped.
+
+    ``group_exits=True`` opts into ONE all-flat request (the schema forbids
+    mixing flat with nonzero, so the group is well-formed) for callers that
+    value the single owner pass over per-exit independence. If the grouped
+    submit fails BEFORE its request landed in the inbox, the exits fall back
+    to one request each; if the failure happened after the request became
+    visible (a post-durability error such as a directory sync), the landed
+    request is in force, so it is reported as published and NO fallback runs
+    — republishing the same exits under new ids would queue every exit twice
+    and leave the group outside the publication's evidence trail.
+
+    Any exit failure blocks all risk-increasing requests this cycle. Entry
+    intents default to one atomic grouped request whose ``created_ts_ns``
+    stays ``created + len(exits)`` in every exit mode;
     ``independent_entry_requests`` publishes one request per intent in caller
-    order and stops at the first error, so a retry can skip target keys already
-    visible in the unresolved snapshot.
+    order and stops at the first error, so a retry can skip target keys
+    already visible in the unresolved snapshot.
     """
 
     normalized_prefix = str(batch_prefix).strip()
@@ -342,32 +385,84 @@ def publish_exit_first_target_requests(
         raise ValueError("created_ts_ns must be positive")
     if type(independent_entry_requests) is not bool:
         raise TypeError("independent_entry_requests must be a bool")
+    if type(group_exits) is not bool:
+        raise TypeError("group_exits must be a bool")
+    normalized_exits = tuple(exit_intents)
+    for intent in normalized_exits:
+        if float(intent.intent.signed_notional_usdt) != 0.0:
+            raise ValueError("exit-first publication requires flat exit intents")
 
     published_exits: list[PublishedTargetRequest] = []
     errors: list[TargetPublicationError] = []
-    for ordinal, intent in enumerate(exit_intents):
-        target = intent.intent
-        if float(target.signed_notional_usdt) != 0.0:
-            raise ValueError("exit-first publication requires flat exit intents")
-        target_key = str(target.target_key)
-        key_digest = hashlib.sha256(target_key.encode("utf-8")).hexdigest()[:16]
+    exit_publication_mode = ""
+    exit_publication_note = ""
+    fall_back_to_independent = bool(normalized_exits) and not group_exits
+    if normalized_exits and group_exits:
+        exit_publication_mode = "grouped"
         try:
             published_exits.append(
                 publisher.publish(
-                    batch_id=(f"{normalized_prefix}/exit/{created}/{ordinal:04d}/{key_digest}"),
-                    intents=(intent,),
-                    created_ts_ns=created + ordinal,
+                    batch_id=f"{normalized_prefix}/exit/{created}",
+                    intents=normalized_exits,
+                    created_ts_ns=created,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - isolate independent exits
-            errors.append(
-                TargetPublicationError(
-                    stage="exit",
-                    target_key=target_key,
-                    error_type=type(exc).__name__,
-                    message=str(exc),
+        except Exception as exc:  # noqa: BLE001 - fallback only if nothing landed
+            # The request id is deterministic, so the landed-or-not question
+            # is answerable after the fact. Fakes without the real publisher
+            # surface simply take the fallback, as every failure did before
+            # the survival check existed.
+            surviving = None
+            grouped_request = None
+            prepare = getattr(publisher, "prepare_request", None)
+            inbox = getattr(publisher, "inbox", None)
+            if callable(prepare) and inbox is not None:
+                grouped_request = prepare(
+                    batch_id=f"{normalized_prefix}/exit/{created}",
+                    intents=normalized_exits,
+                    created_ts_ns=created,
                 )
-            )
+                surviving = inbox.queued_request_path(grouped_request.request_id)
+            if surviving is not None and grouped_request is not None:
+                # The request is durably queued and will be served; the error
+                # hit post-submit bookkeeping. Falling back would double-queue
+                # every exit under new ids and orphan this group from the
+                # publication (and so from capture).
+                published_exits.append(
+                    PublishedTargetRequest(request=grouped_request, path=surviving)
+                )
+                exit_publication_note = (
+                    "grouped exit publish raised after the request landed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                exit_publication_mode = "independent"
+                fall_back_to_independent = True
+    if fall_back_to_independent:
+        if not exit_publication_mode:
+            exit_publication_mode = "independent"
+        for ordinal, intent in enumerate(normalized_exits):
+            target_key = str(intent.intent.target_key)
+            key_digest = hashlib.sha256(target_key.encode("utf-8")).hexdigest()[:16]
+            try:
+                published_exits.append(
+                    publisher.publish(
+                        batch_id=(
+                            f"{normalized_prefix}/exit/{created}/{ordinal:04d}/{key_digest}"
+                        ),
+                        intents=(intent,),
+                        created_ts_ns=created + ordinal,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate independent exits
+                errors.append(
+                    TargetPublicationError(
+                        stage="exit",
+                        target_key=target_key,
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
 
     published_entries: list[PublishedTargetRequest] = []
     if not errors and entry_intents:
@@ -380,7 +475,7 @@ def publish_exit_first_target_requests(
                         publisher.publish(
                             batch_id=(f"{normalized_prefix}/entry/{created}/{ordinal:04d}/{key_digest}"),
                             intents=(intent,),
-                            created_ts_ns=created + len(exit_intents) + ordinal,
+                            created_ts_ns=created + len(normalized_exits) + ordinal,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - retry unresolved target keys
@@ -399,7 +494,7 @@ def publish_exit_first_target_requests(
                     publisher.publish(
                         batch_id=f"{normalized_prefix}/entry/{created}",
                         intents=tuple(entry_intents),
-                        created_ts_ns=created + len(exit_intents),
+                        created_ts_ns=created + len(normalized_exits),
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - next cycle may retry transport failure
@@ -416,6 +511,8 @@ def publish_exit_first_target_requests(
         exit_requests=tuple(published_exits),
         entry_requests=tuple(published_entries),
         errors=tuple(errors),
+        exit_publication_note=exit_publication_note,
+        exit_publication_mode=exit_publication_mode,
     )
 
 
