@@ -54,13 +54,20 @@ match; never append history to this file.
   Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
   funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.
   The demo candidate universe grew 509 → 510, which is why the deploy chose a
-  full probe over a projection. The funded universe is frozen only when absent
-  and still holds its own 509. **The funded renewal is BLOCKED and needs an
-  owner decision before the 2026-08-16 ~19:36 UTC expiry**: VANRYUSDT was
-  delisted 2026-08-12, the frozen universe still lists it, and the rules
-  freeze fails closed on the whole set — after expiry the funded owner
-  refuses to start. Options and the 2026-08-13 outage this caused are in the
-  CHANGELOG; a failed renewal no longer aborts the deploy (`70baf5f`).
+  full probe over a projection. **The funded renewal block is FIXED on `main`
+  (2026-08-13, owner directive "handle an ever-changing universe") but NOT
+  yet deployed — until the next deploy lands, the host still cannot renew
+  and the 2026-08-16 ~19:36 UTC expiry still binds.** The fix: a renewal now
+  freezes a fresh funded universe and rules as one pair from the live venue
+  (the frozen-forever universe is gone — VANRYUSDT's delisting had pinned it
+  against a venue that no longer listed it), rules also cover any symbol the
+  account still has exposure on (live row, or carried from the prior receipt
+  when the venue settled it), and a retiring symbol that is still held no
+  longer wedges the LONG cycle — entries stop, exits keep publishing until
+  flat. The next deploy exercises the new renewal live, since both receipts
+  are past half-life. The 2026-08-13 outage and the old options are in the
+  CHANGELOG; a failed renewal keeps the installed pair and the deploy
+  finishes (`70baf5f`, extended to both halves).
 - **No symbol waits for a book to be priced.** All 509 candidate symbols carry
   a pushed top of book (`tickers`), which is exactly what the order path reads;
   the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a
@@ -445,11 +452,15 @@ meets the venue's liquidation engine before the halt.
   registered 168-hour ceiling as a hard one, so its expiry would have been an
   owner that refuses to start. The other registered startup ceilings (warmup
   timeout, INVOCATION_ID, stray-order gate) also bind mainnet only.
-- **The watchdog watches only the demo receipt.** The age check is gated on the
-  demo scope ([`check_fleet_liveness.py`](scripts/runtime/check_fleet_liveness.py)),
-  and the funded receipt would fail the demo loader it uses, so nothing pages on
-  funded rule age. Renewal-by-deploy is now the only thing keeping it fresh.
-  Proposed, owner to decide.
+- **The watchdog watches both rules receipts** (on `main` since 2026-08-13,
+  deployed with the next deploy). The mainnet liveness scope validates the
+  funded receipt through the loader that admits one and pages WARNING inside
+  24 hours of expiry and CRITICAL past it, under its own `venue_rules_age`
+  key with the deploy-renews-it remedy
+  ([`check_fleet_liveness.py`](scripts/runtime/check_fleet_liveness.py)).
+  Before this the mainnet receipt could reach its 168-hour cliff — the one
+  that makes the funded owner refuse to start — with zero warning, and
+  nearly did while the renewal was blocked.
 - **Unknown safety-critical state fails closed.**
 - **Deploy is one command from the primary checkout** (`scripts/ops.sh deploy
   staged|rollout`). The manual GitHub workflow exposes `rollout`, `install`,

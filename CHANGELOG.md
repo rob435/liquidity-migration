@@ -16,6 +16,76 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 ~19:00 UTC — The system now handles a changing venue universe:
+  delistings and new listings stop breaking renewals, sleeves, and exits.
+  Merged to main after review; NOT yet deployed — rides the next deploy,
+  which will itself exercise the new renewal live (both rules receipts are
+  past half-life). Until that deploy lands, the funded renewal block below
+  and its 2026-08-16 expiry still bind on the host.** Owner directive: "we
+  need to be able handle an ever changing universe." Branch
+  `engine/universe-resilience`, four fixes, each with a test proven to fail
+  without it; gate green at 3,158 tests.
+  - **A retiring symbol that is still held no longer stops the LONG sleeve**
+    (`092be04`). The flatness gate raised before exit planning, so the one
+    producer able to publish the flattening exits refused to run — a
+    deadlock broken only by venue settlement or an operator flatten, and
+    VANRYUSDT's exact shape (announced 2026-08-10, settled 08-12; demo held
+    it for weeks in July and was flat at the announcement by luck). The
+    cycle now reports the draining symbol (warning log + payload field,
+    persisted dataset schema unchanged), entries stay suppressed through
+    the population reconciliation, and exits keep publishing from the
+    account journal — which never needed the universe at all: the max-hold
+    exit is pure clock, and the armed venue-native stop covers the rest.
+    CARRY already did all of this by design and is untouched.
+  - **Rules coverage follows exposure** (`7aadb86`). Exits need per-symbol
+    rules, and the receipt had to equal the entry universe exactly — so a
+    held symbol dropped at renewal left a position the owner could neither
+    exit nor dust-terminalize, wedging the strict-FIFO request queue at its
+    head (every route closed: readiness never claims it, a claimed one
+    fails the rules provider, convergence cannot call a residual dust
+    without the rule; an uncovered HELD symbol also failed every entry
+    account-wide through the account-wide input check). The receipt now
+    covers universe ∪ declared held-exposure symbols: the mainnet freeze
+    scans the account (positions, targets, working orders, unresolved
+    inbox), a symbol the venue settled carries its structural rule forward
+    from the prior receipt so a stale queued exit can still claim and die
+    on the venue's definite reject, and the demo projection retains rules
+    and probe evidence the same way (the probe alternative requires a flat
+    account, which exposure precludes). Coverage stays exact on both parts:
+    an undeclared extra fails, declaring a universe symbol as exposure
+    fails, old receipts load unchanged, and rollback is safe (old code
+    reading a new receipt just sees more rules). The demo order-placing
+    probe is untouched — it proves whole-account flatness first.
+  - **Mainnet renewal freezes a fresh universe every time** (`5529efd`).
+    The funded symbol list was frozen 2026-08-03 and could never re-freeze
+    (one fixed path + create-only writes made it mechanically impossible),
+    so the delisted VANRYUSDT pinned every renewal against a live venue
+    that no longer listed it. A renewal now freezes universe + rules as one
+    pair from the live venue into timestamped receipts, the rebind writes
+    the rules path and both universe variables together, and nothing
+    rebinds until both freezes and the coverage proof pass — any failure
+    keeps the installed pair consistent and the deploy finishes (the
+    70baf5f rule, extended to both halves, now pinned per half). Bootstrap
+    freezes also scan exposure, so a reprovision over a live account cannot
+    mint a receipt missing held symbols. **This resolves the owner decision
+    recorded below as due before 2026-08-16 ~19:36 UTC.**
+  - **The watchdog watches the funded receipt's age** (`f212601`). The
+    mainnet liveness scope had the receipt path in hand and discarded it,
+    so the one receipt whose expiry makes the funded owner refuse to start
+    could hit its 168-hour cliff silently. Now WARNING inside 24h, CRITICAL
+    past expiry, own `venue_rules_age` key, deploy-renews-it remedy text.
+  - Recorded residuals, deliberately not built: the strict-FIFO queue head
+    can still starve behind an unservable request (the ACE-wedge shape;
+    coverage-follows-exposure removes the uncovered-symbol trigger, and
+    `ops.sh wedged-command` remains the operator tool); the LONG cycle
+    still fails on a venue-wide empty universe before exit planning (needs
+    a venue-wide data outage, which fails the cycle earlier anyway); CONT
+    (retired, off) keeps the raising gate. Host clock monitoring was
+    evaluated per the owner's "only if useful" and NOT built: timesyncd is
+    active and synchronized (~17 ms offset measured), and a venue 10002
+    timestamp reject is already classified retry-safe with the venue's own
+    self-describing message.
+
 - **2026-08-13 ~17:30 UTC — Wave 2 built, reviewed, and merged to main:
   the signal→order chain is engineered for under 150 ms once the box moves
   to the venue's region. NOT yet deployed — the deploy waits for tonight's
