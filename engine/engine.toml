@@ -1,0 +1,54 @@
+# The engine's config. There is no venue address in here on purpose: where
+# the engine trades is fixed in the venue crate (demo only), so no edit to
+# this file can point it somewhere else.
+
+[engine]
+wal_path = "engine.wal"
+# How often buffered log bytes are pushed to the OS. Order records do not
+# wait for this — they are forced to disk before the order goes out.
+group_flush_ms = 250
+# How often the engine refreshes its account reading (it refreshes at half
+# this number). The risk kernel's own staleness bound is the separate
+# [risk] max_account_view_age_s below — tighten that one for protection.
+account_view_max_age_ms = 5000
+# Compute and log orders, send nothing. `--live` flips this; the risk kernel
+# still gates every send either way.
+shadow = true
+
+# The four capital controls. Nothing here has a default: every number is
+# written down, and the Python fleet's values are recorded in
+# engine-risk/PORT_NOTES.md.
+[risk]
+max_account_view_age_s = 120
+# Daily loss ceiling against the UTC day's opening equity. Remove the line
+# to run without a ceiling; the guard still refuses on blindness.
+max_daily_loss_usdt = 10.0
+# Account leverage: turns each strategy's capital into its gross share.
+leverage = 2.0
+# An order smaller than this after the partition clamp is refused, not sent.
+min_order_notional_usdt = 1.0
+
+[risk.envelope]
+tracks_equity = true
+# The reference the strategy capitals below were sized against.
+reference_usdt = 100.0
+equity_fraction = 1.0
+floor_usdt = 100.0
+expand_dead_band_fraction = 0.05
+gross_notional_multiple = 2.0
+disaster_stop_fraction = 0.35
+
+# One block per strategy — the plug seam. `name` and `capital_usdt` are the
+# engine's (capital_usdt is this strategy's margin share of the partition;
+# its gross share is capital times leverage). Every other key belongs to the
+# strategy and is handed over as written.
+[[strategy]]
+name = "touch_sniper"
+capital_usdt = 50.0
+symbol = "BTCUSDT"
+side = "buy"
+trigger_px = 60000.0
+qty = 0.001
+stop_px = 59000.0
+take_px = 61000.0
+ttl_s = 3600

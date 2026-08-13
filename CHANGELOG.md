@@ -16,6 +16,42 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 ~07:45 UTC — The program grows a Rust execution engine
+  (`engine/`), merged to main, NOT deployed and NOT trading anywhere.** Owner
+  directive: shift the program to a purpose-built execution system (<100 ms
+  decision to execution, plug-and-play strategies, research kept separate,
+  "lets use rust because we can"; relocation explicitly off the table).
+  [docs/engine.md](docs/engine.md) is the architecture. Measured on this
+  Mac by the engine's own benchmark (real loop, real HMAC signing, the real
+  log's fsync in the chain, pretend venue on the same box): market message →
+  decision **83 ns**; decision → durable on disk and out the socket **3.9 ms
+  median, 4.9 ms p99** — the goal met on our side of the wire with a ~25×
+  margin, the venue's ~175 ms geography unchanged on top. Six Opus-built
+  crates against a contract crate pinned first (one shared clock, one
+  append-only log, one parse of market data, orders out the same
+  single-thread loop); two adversarial reviewers then attacked the tree and
+  found five HIGHs, all fixed with tests proven to fail first: both feeds
+  rebuilt onto worker tasks (the engine's own `select!` cancellations starved
+  every reconnect — proven with an engine-shaped repro that froze for 8 s),
+  the loss guard's daily anchor and trip latch now ride the log durably
+  (restored at boot; a crash-loop could previously re-mint the daily loss
+  budget), reduce-only exits shed their stop fields (Bybit rejects them —
+  the covering test was vacuous), fills newer than the account reading count
+  against the envelope, and a restart re-registers in-flight orders so the
+  partition cannot hand shares out twice. The four capital controls are
+  ported with table-driven parity tests mirroring the Python cases
+  (engine-risk/PORT_NOTES.md maps every rule); NOT ported, by scope: the
+  symbol-notional cap, the component/account gross split, the account
+  initial-margin cap, and the available-margin increase test. Known, chosen
+  differences from the fleet's LONG sleeve: the touch trigger reads bid/ask
+  (not mark), one exit resend (not backoff-until-filled). Safety posture:
+  demo hostnames only, by construction (a self-testing fence scans the venue
+  crate); shadow mode default; no `REAL_MONEY` equivalent exists in the
+  engine. The research seam is
+  `liquidity_migration/research/engine_config.py` → flat `[[strategy]]` TOML
+  blocks. Rust 270 tests + full Python gate 3,212 green. The Python fleet is
+  untouched and still owns everything live.
+
 - **2026-08-13 ~21:50 UTC — Wave 3 merged to main, NOT deployed: queueing one
   target request costs one durable file write instead of three, the owner pass
   parses the queue once instead of twice, a price touch wakes the LONG sleeve
