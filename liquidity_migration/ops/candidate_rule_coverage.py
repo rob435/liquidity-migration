@@ -265,6 +265,11 @@ def project_demo_rules_to_candidate_subset(
     exposure = {str(symbol).upper() for symbol in held_exposure_symbols}
     retained_exposure = sorted((exposure & source_symbols) - target_symbols)
     kept_symbols = sorted(target_symbols | set(retained_exposure))
+    # Exposure with no rule in the source receipt cannot be retained; its
+    # exits stay unbuildable until the venue settles the position. Recorded
+    # in the projected artifact so the condition is visible, matching the
+    # mainnet freeze's held_exposure_unruled warning.
+    exposure_unruled = sorted(exposure - source_symbols - target_symbols)
 
     try:
         target_payload = json.loads(target_snapshot.data)
@@ -379,6 +384,7 @@ def project_demo_rules_to_candidate_subset(
         "retained_symbol_count": len(kept_symbols),
         "removed_symbols": sorted(source_symbols - set(kept_symbols)),
         "held_exposure_retained": retained_exposure,
+        "held_exposure_unruled": exposure_unruled,
         "added_symbols": [],
         "limitation": "projection_does_not_extend_empirical_evidence_freshness",
     }

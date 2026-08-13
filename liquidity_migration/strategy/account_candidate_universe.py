@@ -1244,12 +1244,19 @@ def account_exposure_labels(
         raise TypeError("account exposure requires a verified AccountRoute")
     inbox = AccountIntentInbox(route)  # type: ignore[arg-type]
     unresolved = inbox.unresolved_requests()
-    pending = {
-        item.intent.symbol.upper()
-        for request in unresolved
-        for item in request.intents
-        if abs(float(item.intent.signed_notional_usdt)) > tolerance
-    }
+    # An unresolved request is exposure at ANY notional: the owner must claim
+    # and process it, and processing reads that symbol's rules — a queued
+    # ZERO target (every exit and flatten is one) for an already-flat symbol
+    # was the one runtime rules-consumer the scan could not see, and a
+    # receipt frozen without it wedges the request on restart.
+    pending_any: set[str] = set()
+    pending_nonzero: set[str] = set()
+    for request in unresolved:
+        for item in request.intents:
+            symbol = item.intent.symbol.upper()
+            pending_any.add(symbol)
+            if abs(float(item.intent.signed_notional_usdt)) > tolerance:
+                pending_nonzero.add(symbol)
     if isinstance(journal_cursor, AccountJournalCursor):
         state = journal_cursor.read(account_path).state
     else:
@@ -1272,10 +1279,14 @@ def account_exposure_labels(
                 for target in targets.values()
                 if abs(float(target.get("signed_qty") or 0.0)) > tolerance
             }
-        candidates |= pending
+        candidates |= pending_any
         candidates = {_symbol(symbol) for symbol in candidates if symbol}
     else:
         candidates = {_symbol(symbol) for symbol in symbols}
+    # Per-order, not netted: two live opposite-sign orders net to zero but
+    # each still needs its symbol's rules at the venue, and the owner's own
+    # account-wide input check counts them per order.
+    live_order_symbols = state.working_symbols(tolerance=tolerance)
     problems: dict[str, list[str]] = {symbol: [] for symbol in candidates}
     for symbol in sorted(candidates):
         position = state.positions.get(symbol)
@@ -1283,7 +1294,7 @@ def account_exposure_labels(
             problems[symbol].append("position")
         if abs(float(state.aggregate_targets.get(symbol, 0.0))) > tolerance:
             problems[symbol].append("aggregate_target")
-        if abs(state.working_signed_qty(symbol)) > tolerance:
+        if symbol in live_order_symbols:
             problems[symbol].append("working_order")
         for label, targets in (
             ("component_target", state.component_targets),
@@ -1295,8 +1306,10 @@ def account_exposure_labels(
                 for target in targets.values()
             ):
                 problems[symbol].append(label)
-        if symbol in pending:
+        if symbol in pending_nonzero:
             problems[symbol].append("unresolved_nonzero_request")
+        elif symbol in pending_any:
+            problems[symbol].append("unresolved_request")
     return {
         symbol: tuple(labels) for symbol, labels in problems.items() if labels
     }

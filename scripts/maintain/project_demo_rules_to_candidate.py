@@ -88,11 +88,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    projected = json.loads(Path(output).read_text(encoding="utf-8"))
+    unruled = list(projected.get("candidate_projection", {}).get("held_exposure_unruled") or [])
+    if unruled:
+        print(
+            json.dumps(
+                {
+                    "warning": "held-exposure symbols have no rule in the source receipt",
+                    "held_exposure_unruled": unruled,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
     print(
         json.dumps(
             {
                 "status": "demo_rules_projected",
                 "path": str(output),
+                "held_exposure_retained": list(
+                    projected.get("candidate_projection", {}).get("held_exposure_retained") or []
+                ),
                 "elapsed_seconds": round((time.time_ns() - started_ns) / 1e9, 3),
             },
             sort_keys=True,

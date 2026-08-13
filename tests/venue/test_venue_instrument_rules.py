@@ -246,3 +246,30 @@ def test_a_receipt_frozen_before_the_exposure_key_still_loads() -> None:
     payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
     loaded = load_venue_rules_bytes(canonical_json(payload) + b"\n", realm="mainnet")
     assert sorted(loaded) == ["BUSDT"]
+
+
+def test_a_degenerate_tick_or_step_is_refused_or_skipped() -> None:
+    """A zero tick cannot round an order or a stop. For a universe symbol the
+    freeze fails loud; for an optional (held-exposure) symbol the broken live
+    row is skipped so the prior receipt's good rule carries forward instead.
+    """
+
+    zero_tick = _row("DYINGUSDT")
+    zero_tick["priceFilter"] = {"tickSize": "0"}
+
+    with pytest.raises(RuntimeError, match="no positive tick or qty step"):
+        build_venue_instrument_rules(
+            _ReadOnlyVenue([_row("BUSDT"), dict(zero_tick)]),
+            realm="mainnet",
+            symbols=["BUSDT", "DYINGUSDT"],
+            observed_ts_ns=1_000,
+        )
+
+    rules = build_venue_instrument_rules(
+        _ReadOnlyVenue([_row("BUSDT"), dict(zero_tick)]),
+        realm="mainnet",
+        symbols=["BUSDT", "DYINGUSDT"],
+        observed_ts_ns=1_000,
+        optional_symbols=["DYINGUSDT"],
+    )
+    assert sorted(rules) == ["BUSDT"]

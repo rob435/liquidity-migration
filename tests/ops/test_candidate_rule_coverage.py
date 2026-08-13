@@ -729,3 +729,28 @@ def test_coverage_accepts_declared_extras_and_rejects_relabeled_universe(
             created_ts_ns=NOW_NS + 1,
             validation_now_ns=NOW_NS + 1,
         )
+
+
+def test_projection_records_exposure_it_cannot_retain(tmp_path: Path) -> None:
+    source_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT", "BBBUSDT"),
+        filename="source-candidate.json",
+    )
+    target_candidate = _candidate_symbols(
+        tmp_path,
+        ("AAAUSDT",),
+        filename="target-candidate.json",
+    )
+    source_rules = _rules(tmp_path, source_candidate, filename="source-rules.json")
+
+    projected = project_demo_rules_to_candidate_subset(
+        target_candidate,
+        source_rules,
+        tmp_path / "projected-rules.json",
+        validation_now_ns=NOW_NS + 1,
+        held_exposure_symbols=["BBBUSDT", "GHOSTUSDT"],
+    )
+    payload = json.loads(projected.read_text(encoding="utf-8"))
+    assert payload["candidate_projection"]["held_exposure_retained"] == ["BBBUSDT"]
+    assert payload["candidate_projection"]["held_exposure_unruled"] == ["GHOSTUSDT"]

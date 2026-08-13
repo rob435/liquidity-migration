@@ -760,3 +760,37 @@ def test_account_exposure_labels_enumerates_every_exposed_symbol(
     assert account_exposure_labels(route=route) == {
         "BBBUSDT": ("unresolved_nonzero_request",)
     }
+
+
+def test_a_zero_notional_request_is_exposure_too(tmp_path: Path) -> None:
+    """Every exit and flatten is a queued ZERO target, and the owner must
+    read that symbol's rules to process it — so a receipt frozen without it
+    wedges the request on restart (review finding, 2026-08-13)."""
+
+    route = ensure_account_route(
+        account_id="bybit-demo-unified",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    AccountTargetPublisher(route).publish(
+        batch_id="flat-symbol-exit",
+        intents=(
+            requested_target(
+                adapter_kind=SleeveAdapterKind.HEDGE,
+                decision_key="flat-symbol-exit/BBBUSDT",
+                target_key="hedge/test/bbb/BBBUSDT",
+                strategy_id="test",
+                component_id="bbb",
+                symbol="BBBUSDT",
+                signed_notional_usdt=0.0,
+                leverage=2.0,
+                reason="exit",
+            ),
+        ),
+        created_ts_ns=(SNAPSHOT_NS // 1_000_000 + 1_000) * 1_000_000,
+    )
+
+    assert account_exposure_labels(route=route) == {
+        "BBBUSDT": ("unresolved_request",)
+    }

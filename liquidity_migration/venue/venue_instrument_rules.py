@@ -104,6 +104,20 @@ def build_venue_instrument_rules(
             if symbol in optional:
                 continue
             raise RuntimeError(f"{symbol}: {selected.value} declares no maximum leverage")
+        # A non-positive tick or step cannot round an order or a stop; taking
+        # such a live row for an optional symbol would also replace a good
+        # prior-receipt carryover with a broken rule.
+        if (
+            not math.isfinite(rule.tick_size)
+            or rule.tick_size <= 0.0
+            or not math.isfinite(rule.qty_step)
+            or rule.qty_step <= 0.0
+        ):
+            if symbol in optional:
+                continue
+            raise RuntimeError(
+                f"{symbol}: {selected.value} declares no positive tick or qty step"
+            )
         rules[symbol] = rule
     return rules
 

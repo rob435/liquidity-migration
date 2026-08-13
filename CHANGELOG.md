@@ -74,6 +74,26 @@ edit STATE.md to match.
     so the one receipt whose expiry makes the funded owner refuse to start
     could hit its 168-hour cliff silently. Now WARNING inside 24h, CRITICAL
     past expiry, own `venue_rules_age` key, deploy-renews-it remedy text.
+  - Adversarial review (one reviewer, 5 findings, each re-verified at
+    source): CONFIRMED and fixed — a queued ZERO-notional request (every
+    exit and flatten is one) was invisible to the exposure scan while being
+    a real rules consumer, so a stale exit for an already-flat symbol could
+    lose its rules at renewal and wedge the queue head ~10 min on restart
+    (any unresolved intent now counts, labeled `unresolved_request`);
+    working-order exposure now labels per-order like the owner's own
+    account-wide check, not netted; a live venue row declaring zero
+    tick/step now fails the freeze for a universe symbol and is skipped in
+    favor of the prior receipt's rule for a held one; the demo projection
+    now records exposure it cannot retain (`held_exposure_unruled`) instead
+    of staying silent. Each fix has a test proven to fail without it.
+    ACCEPTED as a documented residual: structural drift on a held,
+    still-listed symbol fails the demo projection into the probe path, and
+    the probe refuses a non-flat account — so that compound state (schema
+    bump forcing a projection + held exposure + unsafe drift on that exact
+    symbol) fails a refresh-demo-rules deploy loudly with the fleet
+    stopped; carrying drifted structural rules would be worse (venue-
+    rejected exits), and the operator remedy is to deploy without the
+    refresh flag or flatten first.
   - Recorded residuals, deliberately not built: the strict-FIFO queue head
     can still starve behind an unservable request (the ACE-wedge shape;
     coverage-follows-exposure removes the uncovered-symbol trigger, and
