@@ -179,3 +179,30 @@ def test_journal_watch_select_failure_degrades_to_poll_pace_not_a_hot_loop(
     # Rebuild-after-failure must run at the poll cadence (~0.25s), never a
     # full-speed construct/select/close spin.
     assert calls["select"] < 10, f"select ran {calls['select']} times in 0.6s - hot loop"
+
+
+def test_a_wake_landing_at_the_deadline_instant_folds_into_the_boundary(tmp_path: Path) -> None:
+    from liquidity_migration.core.deterministic_runtime import VirtualClock
+
+    clock = VirtualClock(current_wall_ns=2_000_000_000_000_000_000)
+    daemon = _host(tmp_path, min_cycle_interval_seconds=0.0, clock=clock)
+    deadline_ms = 2_000_000_000_000 + 100
+    daemon._next_wake_deadline_ts_ms = deadline_ms
+
+    real_wait = daemon._bar_event.wait
+
+    def wake_as_the_deadline_passes(timeout: float | None = None) -> bool:
+        # The journal commit and the deadline instant coincide: by the time
+        # the wait returns for the wake, the deadline is already due.
+        clock.advance_ns(200 * 1_000_000)
+        daemon._journal_wake_pending = True
+        daemon._bar_event.set()
+        return real_wait(0)
+
+    daemon._bar_event.wait = wake_as_the_deadline_passes  # type: ignore[method-assign]
+    daemon._wait_for_next_cycle_event()
+
+    # The boundary must not queue behind a full journal-change cycle; the
+    # pending wake is consumed by the boundary cycle itself.
+    assert daemon._pending_cycle_kind == "market_boundary"
+    assert daemon._deadline_fired_ts_ms == deadline_ms

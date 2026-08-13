@@ -1446,3 +1446,92 @@ def test_the_anchor_memo_follows_the_snapshot_it_was_built_from(tmp_path: Path) 
     )
     assert long_only == tuple(a for a in everything if a.sleeve == "long")
     assert long_only, "the fixture is a long sleeve; an empty filter proves nothing"
+
+
+def _submit_two_symbol_entry_group(
+    kernel: AccountExecutionKernel,
+    *,
+    batch: str,
+    dust_second_symbol: bool,
+    available_margin_usdt: float = 9_000.0,
+) -> TargetBatchResult:
+    """One grouped request: a clean BUSDT entry plus a CUSDT entry that is
+    quantization dust when ``dust_second_symbol`` (qty off the 0.1 step)."""
+
+    now_ns = kernel.clock.wall_time_ns()
+    targets = []
+    for symbol, component, qty in (
+        ("BUSDT", "sig-b", 10.0),
+        ("CUSDT", "sig-c", 10.05 if dust_second_symbol else 10.0),
+    ):
+        target_key = f"long/strategy/{component}/{symbol}"
+        targets.append(
+            DesiredTarget(
+                decision_key=f"decision:{batch}:{component}",
+                target_key=target_key,
+                sleeve="long",
+                strategy_id="strategy",
+                component_id=component,
+                symbol=symbol,
+                signed_qty=qty,
+                reference_price=10.0,
+                leverage=10.0,
+                reason="entry",
+                metadata={
+                    ENTRY_ATTEMPT_METADATA_KEY: entry_attempt_key(target_key),
+                    "signal_ts_ms": 100,
+                    "signal_valid_until_ms": 1_000_000,
+                    "stop_price": 9.0,
+                },
+            )
+        )
+    return kernel.submit_targets(
+        batch_id=batch,
+        market_inputs=[
+            MarketInputRef(f"book:{batch}:BUSDT", "BUSDT", now_ns - 1, now_ns, 10.0),
+            MarketInputRef(f"book:{batch}:CUSDT", "CUSDT", now_ns - 1, now_ns, 10.0),
+        ],
+        targets=targets,
+        risk_snapshot=AccountRiskSnapshot(10_000.0, available_margin_usdt, "wallet", now_ns),
+        risk_policy=AccountRiskPolicy(10_000.0, 10_000.0, 10_000.0, 10_000.0, 10.0),
+        instrument_rules={
+            "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0),
+            "CUSDT": InstrumentRules("CUSDT", 0.1, 0.1, 1.0),
+        },
+    )
+
+
+def test_grouped_sibling_of_a_scoped_rejection_stays_eligible(tmp_path: Path) -> None:
+    root = tmp_path / "account"
+    kernel = AccountExecutionKernel(root, account_id="a")
+    result = _submit_two_symbol_entry_group(kernel, batch="grouped-dust", dust_second_symbol=True)
+    assert not result.accepted
+    assert any(key.endswith(":CUSDT") for key in result.rejection_keys), result.rejection_keys
+    assert not any(key.endswith(":BUSDT") for key in result.rejection_keys), result.rejection_keys
+
+    terminal = terminal_entry_attempt_keys(root, sleeve="long", now_ms=500)
+    # The dust symbol's attempt is what the rejection was about; the healthy
+    # sibling must stay eligible so the next cycle republishes it instead of
+    # writing the day off.
+    assert entry_attempt_key("long/strategy/sig-c/CUSDT") in terminal
+    assert entry_attempt_key("long/strategy/sig-b/BUSDT") not in terminal
+
+
+def test_account_level_rejection_suppresses_the_whole_grouped_batch(tmp_path: Path) -> None:
+    root = tmp_path / "account"
+    kernel = AccountExecutionKernel(root, account_id="a")
+    result = _submit_two_symbol_entry_group(
+        kernel,
+        batch="grouped-margin",
+        dust_second_symbol=False,
+        available_margin_usdt=1.0,
+    )
+    assert not result.accepted
+    # The margin key names no symbol: it refused the batch as a whole.
+    assert any(
+        not key.endswith(":BUSDT") and not key.endswith(":CUSDT") for key in result.rejection_keys
+    ), result.rejection_keys
+
+    terminal = terminal_entry_attempt_keys(root, sleeve="long", now_ms=500)
+    assert entry_attempt_key("long/strategy/sig-b/BUSDT") in terminal
+    assert entry_attempt_key("long/strategy/sig-c/CUSDT") in terminal

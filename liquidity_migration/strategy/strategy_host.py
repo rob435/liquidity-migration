@@ -978,6 +978,16 @@ class StrategyHostDaemon:
         woke = self._bar_event.wait(timeout=remaining)
         if self._shutdown.is_set():
             return
+        # Deadline check BEFORE the wake labeling: a wake landing at the
+        # deadline instant folds into the boundary cycle instead of queuing
+        # the boundary behind a full event cycle. The still-set event and
+        # flag are consumed by that cycle at the loop top.
+        fired = self._time_deadline_reached()
+        if fired is not None:
+            self._deadline_fired_ts_ms = fired
+            self._cycles_deadline_triggered += 1
+            self._pending_cycle_kind = "market_boundary"
+            return
         if woke:
             journal_woke = self._journal_wake_pending
             self._journal_wake_pending = False
@@ -987,12 +997,6 @@ class StrategyHostDaemon:
             else:
                 self._cycles_kline_triggered += 1
                 self._pending_cycle_kind = "confirmed_bar"
-            return
-        fired = self._time_deadline_reached()
-        if fired is not None:
-            self._deadline_fired_ts_ms = fired
-            self._cycles_deadline_triggered += 1
-            self._pending_cycle_kind = "market_boundary"
             return
         self._cycles_timer_triggered += 1
         self._pending_cycle_kind = "timer"

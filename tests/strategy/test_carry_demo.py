@@ -1584,3 +1584,78 @@ class TestFreezeAheadDeadline:
         assert first["freeze_ahead_frozen"] is True
         assert second["freeze_ahead_frozen"] is False
         assert state.frozen_decision(D0) is not None
+
+    def test_a_journal_wake_serves_the_frozen_book_without_a_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CarryCycleState()
+        self._prewarm(tmp_path, monkeypatch, state)
+        mid_day_now = D0 + 25 * 60_000
+        # The hourly funding sweep is fresh for this hour, so the wake owes
+        # no maintenance and reacts on the frozen book alone.
+        state.funding_swept_hour_ts = mid_day_now - mid_day_now % 3_600_000
+
+        def refuse_build(**_kwargs: Any) -> None:
+            raise AssertionError("a maintenance-free journal wake must not rebuild market data")
+
+        monkeypatch.setattr(module, "_build_carry_demo_market_data", refuse_build)
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=mid_day_now,
+            cycle_state=state,
+            cycle_kind="journal_change",
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["data_build_skipped"] is True
+        assert payload["decision_frozen"] is True
+        assert payload["decision_ts_ms"] == D0
+
+    def test_a_journal_wake_still_builds_when_the_funding_sweep_is_due(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CarryCycleState()
+        self._prewarm(tmp_path, monkeypatch, state)
+        mid_day_now = D0 + 25 * 60_000
+        # Sweep stamped for the PREVIOUS hour: this wake owes maintenance.
+        state.funding_swept_hour_ts = (mid_day_now - mid_day_now % 3_600_000) - 3_600_000
+
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=mid_day_now,
+            cycle_state=state,
+            cycle_kind="journal_change",
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["data_build_skipped"] is False
+        assert payload["decision_frozen"] is True
+
+    def test_a_journal_wake_inside_the_freeze_window_still_builds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CarryCycleState()
+        self._prewarm(tmp_path, monkeypatch, state)
+        window_now = D0 + MS_PER_DAY + 19 * 60_000
+        state.funding_swept_hour_ts = window_now - window_now % 3_600_000
+
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=window_now,
+            cycle_state=state,
+            cycle_kind="journal_change",
+            freeze_ahead_decision_ts_ms=D0 + MS_PER_DAY,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["data_build_skipped"] is False
+        assert payload["freeze_ahead_frozen"] is True

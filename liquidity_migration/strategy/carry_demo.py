@@ -1544,9 +1544,18 @@ def run_carry_demo_cycle(
         # the frozen decision cannot read. Timer cycles keep the build (it IS
         # the cache maintenance: WS-store flush and the hourly funding sweep),
         # and an unfrozen deadline falls through to the full path below.
-        prewarmed = (
-            state.frozen_decision(decision_ts_ms) if cycle_kind == "market_boundary" else None
+        # Journal-change wakes exist to react to account news — fills,
+        # rejection receipts — with the same frozen decision, so they skip
+        # the build too UNLESS this cycle owes maintenance: the hourly
+        # funding sweep is due, or the daemon asked it to freeze the next
+        # day ahead of the boundary. Without that carve-out, a stream of
+        # owner commits would starve both.
+        skip_build = cycle_kind == "market_boundary" or (
+            cycle_kind == "journal_change"
+            and freeze_ahead_decision_ts_ms is None
+            and state.funding_swept_hour_ts == cycle_now_ms - cycle_now_ms % HOUR_MS
         )
+        prewarmed = state.frozen_decision(decision_ts_ms) if skip_build else None
         data_build_skipped = prewarmed is not None
         if prewarmed is not None:
             decision, trail_by_symbol, universe_eligible = prewarmed
