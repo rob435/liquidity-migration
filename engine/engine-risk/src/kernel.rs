@@ -107,34 +107,23 @@ impl Kernel {
     }
 
     fn evaluate(&mut self, intent: &Intent, account: &AccountView) -> Result<f64, DenyReason> {
-        // 1. Is the account view evidence about the account now?
+        // 1. A view stamped after the decision is nonsense for everyone.
         if account.observed_ns > intent.decided_ns {
             return Err(unknown("account view is newer than the decision it judges"));
         }
         let age_ns = intent.decided_ns - account.observed_ns;
-        if age_ns > self.cfg.max_account_view_age_ns {
-            return Err(DenyReason::StaleAccountView {
-                age_ns,
-                max_age_ns: self.cfg.max_account_view_age_ns,
-            });
-        }
 
-        // 2. Can the view and the intent be read at all?
+        // 2. Can the view and the intent be read at all? Exits need this
+        //    too: the clamp below sizes against the position rows.
         let view = ViewFacts::read(account, self.cfg.qty_tolerance)?;
         let ask_qty = read_intent_qty(intent)?;
 
-        // 3. The account loss guard.
-        if let Some(trip) = self.guard.observe(view.equity_usdt, self.wall_ns) {
-            return Err(DenyReason::LossGuardTripped {
-                equity_usdt: trip.equity_usdt,
-                floor_usdt: trip.floor_usdt,
-            });
-        }
-        self.envelope.observe_equity(view.equity_usdt);
-
-        // 4. Does this order add risk or take it off? An exit is exempt from
-        //    the stop, envelope, and partition controls, as in the Python
-        //    kernel, and is clamped to the position it claims to reduce.
+        // 3. A genuine exit passes the staleness and trip refusals: the
+        //    fleet lets risk-reducing orders flow under both BLOCKED and
+        //    TRIPPED (a trip's remedy IS exits), and the venue's own
+        //    reduce-only enforcement bounds an exit sized from an old
+        //    reading. Stale or tripped equity is NOT folded into the guard
+        //    or the envelope here — only entries observe.
         let net_qty = view.net_qty(intent.symbol);
         let delta = signed(intent.side, ask_qty);
         let reduces = net_qty.abs() > self.cfg.qty_tolerance && delta * net_qty < 0.0;
@@ -146,6 +135,26 @@ impl Kernel {
             }
             return Ok(ask_qty.min(net_qty.abs()));
         }
+
+        // 4. Entries are judged only against evidence about the account now.
+        if age_ns > self.cfg.max_account_view_age_ns {
+            return Err(DenyReason::StaleAccountView {
+                age_ns,
+                max_age_ns: self.cfg.max_account_view_age_ns,
+            });
+        }
+
+        // 5. The account loss guard.
+        if let Some(trip) = self.guard.observe(view.equity_usdt, self.wall_ns) {
+            return Err(DenyReason::LossGuardTripped {
+                equity_usdt: trip.equity_usdt,
+                floor_usdt: trip.floor_usdt,
+            });
+        }
+        self.envelope.observe_equity(view.equity_usdt);
+
+        // 6. An unflagged reduction is judged as an entry from here on, but
+        //    must not cross through flat to the other side.
         if reduces && ask_qty > net_qty.abs() + self.cfg.qty_tolerance {
             return Err(unknown("intent crosses through flat to the other side"));
         }
@@ -258,15 +267,18 @@ impl Kernel {
 impl RiskKernel for Kernel {
     /// Evaluated in this order, first refusal wins:
     ///
-    /// 1. account view freshness — too old is [`DenyReason::StaleAccountView`],
-    ///    a view from after the decision is unknown state;
+    /// 1. a view stamped after the decision — unknown state;
     /// 2. readability of the view and the intent — anything unreadable is
-    ///    [`DenyReason::UnknownState`];
-    /// 3. the account loss guard — [`DenyReason::LossGuardTripped`];
-    /// 4. exit or entry: an exit is clamped to the position and skips 5-7;
-    /// 5. stop discipline — [`DenyReason::MissingStop`];
-    /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 7. the per-strategy partition, which clamps before it refuses —
+    ///    [`DenyReason::UnknownState`] (the Python guard also puts "no
+    ///    reading" before its age check);
+    /// 3. exit or entry: a genuine exit is clamped to the position and stops
+    ///    here — risk-reducing orders flow even under a stale reading or a
+    ///    tripped guard, exactly as the fleet lets them;
+    /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
+    /// 5. the account loss guard — [`DenyReason::LossGuardTripped`];
+    /// 6. stop discipline — [`DenyReason::MissingStop`];
+    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
+    /// 8. the per-strategy partition, which clamps before it refuses —
     ///    [`DenyReason::PartitionExhausted`].
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
         match self.evaluate(intent, account) {

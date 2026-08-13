@@ -21,6 +21,21 @@ impl<'a> Params<'a> {
         BuildError::InvalidParam { strategy: self.strategy, param, detail: detail.into() }
     }
 
+    /// Refuse any key outside the strategy's read set, naming both the key
+    /// and the set. Call last, after every read succeeded.
+    pub(crate) fn reject_unknown(&self, known: &'static [&'static str]) -> Result<(), BuildError> {
+        for key in self.table.keys() {
+            if !known.contains(&key.as_str()) {
+                return Err(BuildError::UnknownParam {
+                    strategy: self.strategy,
+                    param: key.clone(),
+                    known,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn get(&self, param: &'static str) -> Result<&'a toml::Value, BuildError> {
         self.table
             .get(param)

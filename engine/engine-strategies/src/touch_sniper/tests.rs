@@ -37,6 +37,22 @@ fn entered(side: &str, extra: &str) -> Harness {
 }
 
 #[test]
+fn a_missing_book_side_is_never_a_touch() {
+    // An empty side renders as price 0. Zero is below every buy level, so
+    // without the guard a buy would fire into a book with nothing to hit.
+    let mut h = build("buy", "");
+    h.quote(SYM, 99.0, 0.0);
+    assert!(h.drain().is_empty(), "a buy fired on an empty ask side");
+
+    let mut h = entered("sell", "take_px = 95.0");
+    h.quote(SYM, 96.0, 0.0);
+    assert!(
+        h.drain().is_empty(),
+        "a sell's profit exit fired on an empty ask side"
+    );
+}
+
+#[test]
 fn name_is_the_registry_name() {
     let h = build("buy", "");
     assert_eq!(h.strategy.name(), "touch_sniper");

@@ -56,6 +56,24 @@ fn drop_line(param: &str) -> String {
 }
 
 #[test]
+fn a_typoed_parameter_is_refused_with_its_name() {
+    // "take_price" for "take_px" must not silently mean "no profit level":
+    // the research system and the engine ship from one repo, so an unknown
+    // key is a mistake, not a version gap.
+    let err = build_err(build_strategy(
+        "touch_sniper",
+        ID,
+        &params(&format!("{}take_price = 101.0\n", minimal())),
+    ));
+    let words = err.to_string();
+    assert!(words.contains("take_price"), "the error names the key: {words}");
+    assert!(
+        words.contains("take_px"),
+        "the error lists the keys that exist: {words}"
+    );
+}
+
+#[test]
 fn the_documented_research_block_builds() {
     let doc: toml::Value = params(RESEARCH_BLOCK);
     let blocks = doc.get("strategy").expect("a [[strategy]] array").as_array().expect("an array");

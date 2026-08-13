@@ -40,6 +40,35 @@ fn the_first_reading_of_a_day_sets_the_anchor_and_never_trips() {
 }
 
 #[test]
+// The fleet's answer to a trip is "flatten and stop": risk-reducing orders
+// flow while entries are refused (the owner's flatten IS exits). An engine
+// that blocks the flatten is stricter in the one direction that hurts.
+fn a_tripped_guard_still_lets_a_genuine_exit_through() {
+    let mut kernel = kernel_at(DAY1);
+    assess(&mut kernel, 250_000.0, SEC);
+    assert!(matches!(
+        assess(&mut kernel, 249_000.0, 2 * SEC),
+        RiskVerdict::Deny { .. }
+    ));
+
+    let held = view(
+        249_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        3 * SEC,
+    );
+    let out = kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, 3 * SEC), &held);
+    assert_eq!(out, RiskVerdict::Allow { qty: 5.0 });
+
+    // The trip still stands against new risk.
+    assert!(matches!(
+        assess(&mut kernel, 260_000.0, 4 * SEC),
+        RiskVerdict::Deny {
+            reason: DenyReason::LossGuardTripped { .. }
+        }
+    ));
+}
+
+#[test]
 // test_a_loss_below_the_ceiling_is_not_a_trip
 fn a_loss_below_the_ceiling_is_not_a_trip() {
     let mut kernel = kernel_at(DAY1);
@@ -275,23 +304,19 @@ fn a_non_positive_ceiling_is_rejected_at_construction() {
 }
 
 #[test]
-// The trip has no exemption for exits, which Python's flatten-on-trip does
-// have. PORT_NOTES.md records the difference; this pins the behaviour.
-fn a_tripped_guard_refuses_exits_too() {
+// The exit exemption is only for GENUINE reductions: a reduce_only flag on
+// an order that reduces nothing is unknown state, tripped or not.
+fn a_tripped_guard_still_refuses_an_exit_that_reduces_nothing() {
     let mut kernel = kernel_at(DAY1);
     assess(&mut kernel, 250_000.0, SEC);
     assess(&mut kernel, 249_000.0, 2 * SEC);
 
-    let held = view(
-        249_000.0,
-        vec![position(BUSDT, Side::Buy, 1.0, 10.0, true)],
-        3 * SEC,
-    );
+    let flat_book = flat(249_000.0, 3 * SEC);
     let out = exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, 3 * SEC);
     assert!(matches!(
-        kernel.assess(&out, &held),
+        kernel.assess(&out, &flat_book),
         RiskVerdict::Deny {
-            reason: DenyReason::LossGuardTripped { .. }
+            reason: DenyReason::UnknownState { .. }
         }
     ));
 }

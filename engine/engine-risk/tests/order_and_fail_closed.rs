@@ -11,6 +11,30 @@ use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 
 const NOW: u64 = 300 * SEC;
 
+#[test]
+// Blindness stops new risk, never de-risking: the fleet exits against its
+// reconstructed positions while blocked, and the venue's own reduce-only
+// enforcement bounds a mis-sized exit from a stale reading.
+fn a_stale_reading_still_lets_a_genuine_exit_through() {
+    let mut k = kernel();
+    let held = view(
+        1_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        SEC,
+    );
+    let decided = SEC + MAX_VIEW_AGE_NS + SEC;
+
+    let out = k.assess(&exit(CARRY, BUSDT, Side::Sell, 7.0, 10.0, decided), &held);
+    assert_eq!(out, RiskVerdict::Allow { qty: 5.0 }, "clamped to the position");
+
+    assert!(matches!(
+        k.assess(&entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, decided), &held),
+        RiskVerdict::Deny {
+            reason: DenyReason::StaleAccountView { .. }
+        }
+    ));
+}
+
 fn kernel() -> Kernel {
     let mut kernel = Kernel::new(demo_config()).expect("config");
     kernel.observe_wall_clock_ns(utc_noon(20_664));
@@ -51,13 +75,17 @@ fn staleness_is_reported_before_a_tripped_loss_guard() {
 }
 
 #[test]
-fn staleness_is_reported_before_an_unreadable_equity() {
+// Matches the Python guard's own order: "no account equity reading yet"
+// precedes the age check (account_loss_guard.py evaluates readability
+// first). Readability must also come first here so a genuine exit can be
+// sized from a stale-but-readable view.
+fn an_unreadable_equity_is_reported_even_when_the_view_is_also_stale() {
     let mut kernel = kernel();
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);
     let stale = flat(f64::NAN, NOW - 121 * SEC);
     assert!(matches!(
         deny_reason(kernel.assess(&intent, &stale)),
-        DenyReason::StaleAccountView { .. }
+        DenyReason::UnknownState { .. }
     ));
 }
 

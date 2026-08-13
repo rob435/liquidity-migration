@@ -35,6 +35,9 @@ pub enum BuildError {
     MissingParam { strategy: &'static str, param: &'static str },
     /// A parameter is present but unusable.
     InvalidParam { strategy: &'static str, param: &'static str, detail: String },
+    /// A key the strategy does not read — a typo would otherwise silently
+    /// change behavior (a misspelled take_px means "no profit level").
+    UnknownParam { strategy: &'static str, param: String, known: &'static [&'static str] },
 }
 
 impl fmt::Display for BuildError {
@@ -51,6 +54,13 @@ impl fmt::Display for BuildError {
             }
             BuildError::InvalidParam { strategy, param, detail } => {
                 write!(f, "{strategy}: parameter \"{param}\" is invalid: {detail}")
+            }
+            BuildError::UnknownParam { strategy, param, known } => {
+                write!(
+                    f,
+                    "{strategy}: parameter \"{param}\" is not one it reads (it reads: {})",
+                    known.join(", ")
+                )
             }
         }
     }

@@ -59,6 +59,7 @@ pub struct TouchSniper {
 impl TouchSniper {
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
+        p.reject_unknown(&["symbol", "side", "trigger_px", "qty", "stop_px", "take_px", "ttl_s"])?;
 
         let symbol_name = p.string("symbol")?;
         if symbol_name.is_empty() {
@@ -107,22 +108,24 @@ impl TouchSniper {
         self.symbol
     }
 
-    /// The price we would pay has reached the level.
+    /// The price we would pay has reached the level. An empty book side
+    /// renders as price 0, which is not a price — never a touch.
     fn entry_touched(&self, quote: &Quote) -> bool {
         match self.side {
-            Side::Buy => quote.ask_px <= self.trigger_px,
+            Side::Buy => quote.ask_px > 0.0 && quote.ask_px <= self.trigger_px,
             Side::Sell => quote.bid_px >= self.trigger_px,
         }
     }
 
     /// The price we would get on the way out has reached the profit level.
+    /// Same rule: an empty side is never a touch.
     fn take_touched(&self, quote: &Quote) -> bool {
         let Some(take_px) = self.take_px else {
             return false;
         };
         match self.side {
             Side::Buy => quote.bid_px >= take_px,
-            Side::Sell => quote.ask_px <= take_px,
+            Side::Sell => quote.ask_px > 0.0 && quote.ask_px <= take_px,
         }
     }
 
