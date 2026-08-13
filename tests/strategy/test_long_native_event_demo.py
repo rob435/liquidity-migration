@@ -1180,7 +1180,7 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     assert payload["account_target_requests"]["exit_request_ids"] == []
     pending = list((inbox / "pending").glob("*.json"))
     assert len(pending) == 1
-    request = json.loads(pending[0].read_bytes())
+    request = json.loads(pending[0].read_bytes())["request"]
     intent = request["intents"][0]["intent"]
     assert intent["target_key"].startswith("long/")
     assert intent["signed_notional_usdt"] > 0.0

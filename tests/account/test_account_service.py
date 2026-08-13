@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import dataclasses
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -470,8 +471,12 @@ def test_privileged_inbox_writes_hand_inodes_to_the_directory_owner(
         )
     )
     owner = os.stat(tmp_path / "inbox")
-    # Arrival counter, arrival sidecar, and the request body all hand off.
-    assert len(recorded) == 3
+    # One request body, and nothing else: the arrival counter and the arrival
+    # sidecar used to be written here too, so queueing one request cost three
+    # atomic replaces -- six fsyncs, about eleven milliseconds of the measured
+    # publish-to-pickup time on the deployed host. The order now travels inside
+    # the request's own file, so a publish hands off exactly one inode.
+    assert len(recorded) == 1
     assert set(recorded) == {(owner.st_uid, owner.st_gid)}
 
 
@@ -557,9 +562,12 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
         notional=-20.0,
     )
     inbox.submit(request)
-    arrival_path = inbox.root / "arrival" / inbox._filename(request.request_id)
-    arrival_before = json.loads(arrival_path.read_bytes())
-    assert arrival_before["arrival_sequence"] == 1
+    filename = inbox._filename(request.request_id)
+
+    def _arrival_of(state: str) -> int:
+        return json.loads((inbox.root / state / filename).read_bytes())["arrival_sequence"]
+
+    assert _arrival_of("pending") == 1
     claimed = inbox.claim_next()
     assert claimed is not None
     processing_path, claimed_request = claimed
@@ -572,9 +580,11 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
     assert after_restart == before_crash
     assert adapter.submit_calls == 1
     assert len(list((inbox.root / "completed").glob("*.json"))) == 1
-    assert json.loads(arrival_path.read_bytes()) == arrival_before
+    # The arrival order survives the claim, the crash, the recovery and the
+    # completion: it moves with the request's own file.
+    assert _arrival_of("completed") == 1
     assert inbox.submit(request).parent.name == "completed"
-    assert json.loads(arrival_path.read_bytes()) == arrival_before
+    assert _arrival_of("completed") == 1
 
 
 def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -> None:
@@ -851,7 +861,7 @@ def test_tampered_pending_request_fails_closed_on_every_read_path(
     )
     path = inbox.submit(request)
     payload = json.loads(path.read_bytes())
-    payload["account_id"] = "wrong-account"
+    payload["request"]["account_id"] = "wrong-account"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="unreadable account target request"):
@@ -2661,8 +2671,12 @@ def test_inbox_fifo_uses_durable_arrival_order_across_mixed_producer_timestamps(
     claimed = inbox.claim_next()
 
     assert claimed is not None and claimed[1].request_id == "arrived-first"
-    arrival_rows = [json.loads(path.read_bytes()) for path in (inbox.root / "arrival").glob("*.json")]
-    assert {row["request_id"]: row["arrival_sequence"] for row in arrival_rows} == {
+    arrival_rows = [
+        json.loads(path.read_bytes())
+        for state in ("pending", "processing")
+        for path in (inbox.root / state).glob("*.json")
+    ]
+    assert {row["request"]["request_id"]: row["arrival_sequence"] for row in arrival_rows} == {
         "arrived-first": 1,
         "arrived-second": 2,
     }
@@ -2939,9 +2953,166 @@ def test_risk_flat_is_not_superseded_by_genuinely_later_strategy_reentry(
     assert claimed is not None and claimed[1].request_id == risk_flat.request_id
 
 
-def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
+def test_publishing_one_request_writes_exactly_one_file(tmp_path: Path) -> None:
+    """A publish costs one atomic replace, not three.
+
+    Queueing a request used to write an arrival counter, an arrival sidecar
+    and the request body -- three atomic replaces, six fsyncs, about eleven
+    milliseconds of the measured publish-to-pickup time on the deployed host.
+    The order now rides inside the request's own file.
+    """
+
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+    before = {
+        str(path)
+        for path in inbox.root.rglob("*")
+        if path.is_file() and ".locks" not in path.parts
+    }
+
+    inbox.submit(
+        _request(
+            route,
+            request_id="single-write",
+            batch_id="single-write",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+
+    written = {
+        str(path)
+        for path in inbox.root.rglob("*")
+        if path.is_file() and ".locks" not in path.parts
+    } - before
+    assert written == {str(inbox.root / "pending" / inbox._filename("single-write"))}
+    assert not list((inbox.root / "arrival").glob("*.json"))
+    assert not (inbox.root / "arrival_counter.json").exists()
+
+
+def test_owner_pass_parses_and_hashes_each_pending_file_once(tmp_path: Path) -> None:
+    """The readiness peek and the claim share one parse of the queue.
+
+    The owner looks at the pending queue twice per order pass: once to check
+    the head's market data is warm, once to claim it. Each look used to read,
+    parse and re-hash every pending file.
+    """
+
+    route = _route(tmp_path)
+    producer = AccountIntentInbox(route)
+    for index in range(3):
+        producer.submit(
+            _request(
+                route,
+                request_id=f"parse-once-{index}",
+                batch_id=f"parse-once-{index}",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+    # The owner is a different process from the producer, so it starts a pass
+    # knowing nothing about these files.
+    inbox = AccountIntentInbox(route)
+
+    parses = 0
+    hashes = 0
+    real_from_dict = AccountTargetRequest.from_dict.__func__
+    real_content_hash = AccountTargetRequest.content_hash
+
+    def _counting_from_dict(cls, payload):
+        nonlocal parses
+        parses += 1
+        return real_from_dict(cls, payload)
+
+    def _counting_content_hash(self):
+        nonlocal hashes
+        hashes += 1
+        return real_content_hash(self)
+
+    with mock.patch.object(
+        AccountTargetRequest, "from_dict", classmethod(_counting_from_dict)
+    ), mock.patch.object(AccountTargetRequest, "content_hash", _counting_content_hash):
+        head = inbox.peek_next()
+        assert head is not None
+        claimed = inbox.claim_expected_next(head.request_id)
+
+    assert claimed is not None and claimed[1].request_id == head.request_id
+    # Three pending files, looked at twice, parsed and hashed once each.
+    assert parses == 3
+    assert hashes == 3
+
+
+def test_a_fresh_inbox_never_reorders_or_reuses_a_live_arrival_order(
     tmp_path: Path,
 ) -> None:
+    """A restarted producer keeps queueing behind what is already waiting.
+
+    The arrival order is derived from the unfinished requests themselves, so a
+    producer that starts with no memory of the queue -- a restart, or a second
+    process -- still reads the same shared truth under the same inbox lock.
+    """
+
+    route = _route(tmp_path)
+    first = AccountIntentInbox(route)
+    for index in range(3):
+        first.submit(
+            _request(
+                route,
+                request_id=f"before-restart-{index}",
+                batch_id=f"before-restart-{index}",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+
+    restarted = AccountIntentInbox(route)
+    restarted.submit(
+        _request(
+            route,
+            request_id="after-restart",
+            batch_id="after-restart",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
+
+    orders = {
+        json.loads(path.read_bytes())["request"]["request_id"]: json.loads(path.read_bytes())[
+            "arrival_sequence"
+        ]
+        for path in (restarted.root / "pending").glob("*.json")
+    }
+    assert orders == {
+        "before-restart-0": 1,
+        "before-restart-1": 2,
+        "before-restart-2": 3,
+        "after-restart": 4,
+    }
+    assert len(set(orders.values())) == len(orders)
+    claimed_ids = []
+    while True:
+        claimed = restarted.claim_next()
+        if claimed is None:
+            break
+        claimed_ids.append(claimed[1].request_id)
+    assert claimed_ids == [
+        "before-restart-0",
+        "before-restart-1",
+        "before-restart-2",
+        "after-restart",
+    ]
+
+
+def test_inbox_fails_closed_when_pending_request_loses_its_arrival_order(
+    tmp_path: Path,
+) -> None:
+    """A queued request whose durable order is gone is never served.
+
+    The order used to live in a sidecar file; it now lives in the request's
+    own file. Either way, a pending request the inbox cannot place in the
+    queue must stop the scan, not be guessed at.
+    """
+
     inbox = _inbox(tmp_path)
     request = _request(
         _route(tmp_path),
@@ -2950,8 +3121,10 @@ def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
         kind=SleeveAdapterKind.LONG,
         notional=20.0,
     )
-    inbox.submit(request)
-    (inbox.root / "arrival" / inbox._filename(request.request_id)).unlink()
+    path = inbox.submit(request)
+    stripped = json.loads(path.read_bytes())
+    del stripped["arrival_sequence"]
+    path.write_text(json.dumps(stripped), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="lacks a durable arrival sequence"):
         inbox.claim_next()

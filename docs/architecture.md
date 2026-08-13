@@ -68,9 +68,14 @@ an owner unit breaks lease acquisition. Route mismatch still fails closed after
 acquisition.
 The inbox (`AccountIntentInbox` in
 [`account_service.py`](../liquidity_migration/account/account_service.py)) is a filesystem queue —
-`pending/processing/completed/failed/arrival`, atomic claim, durable arrival sequence — that
+`pending/processing/completed/failed`, atomic claim, durable arrival sequence — that
 coalesces later replacements and carries component revisions, so an older entry cannot
-reopen a component after a newer zero target. A failed request normally releases back to
+reopen a component after a newer zero target. Each queued file carries its own arrival
+order, so queueing one request is a single atomic replace and the order can never be
+torn from the request it belongs to; the order of a new request is one past whatever the
+unfinished requests already claim. (`arrival/` still exists and is still read for
+requests queued by an older build, which kept the order in a sidecar file.)
+A failed request normally releases back to
 `pending/` for retry, with one owner-approved exception (2026-08-03): when the failure is
 the never-attempted stale-command refusal (`StaleUnsubmittedExposureCommand`) and every
 entry intent in the request is past its own declared `signal_valid_until_ms`, the request

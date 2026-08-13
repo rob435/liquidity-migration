@@ -348,7 +348,7 @@ class TestFlattenAccount:
         assert len(outcome.published_request_ids) == 2
 
         queued = [
-            json.loads(path.read_bytes())
+            json.loads(path.read_bytes())["request"]
             for path in sorted((route.inbox_path / "pending").glob("*.json"))
         ]
         assert len(queued) == 2
