@@ -801,7 +801,9 @@ def test_run_cycle_publishes_exit_first_diff_and_is_idempotent(
     assert exit_intent.symbol == STANDGONE
     assert exit_intent.signed_notional_usdt == 0.0
     assert exit_intent.target_key == f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{STANDGONE}"
-    entry_channel = [item.request.intents[0].intent for item in publication.entry_requests]
+    # One grouped request carries every entry and resize of the cycle.
+    assert len(publication.entry_requests) == 1
+    entry_channel = [item.intent for item in publication.entry_requests[0].request.intents]
     # Deepest trailing funding first (DEEP_B at -75 bp/day), then DEEP_A,
     # then the resize revision of the already-standing RESIZED component.
     assert [intent.symbol for intent in entry_channel] == [DEEP_B, DEEP_A, RESIZED]
@@ -1390,9 +1392,10 @@ class TestFreezeAheadDeadline:
         assert boundary["decision_frozen"] is True
         assert boundary["decision_frozen_ahead"] is True
         assert boundary["decision_ts_ms"] == D0
+        assert len(boundary.publication.entry_requests) == 1
         entry_symbols = [
-            item.request.intents[0].intent.symbol
-            for item in boundary.publication.entry_requests
+            item.intent.symbol
+            for item in boundary.publication.entry_requests[0].request.intents
         ]
         assert entry_symbols == [DEEP_B, DEEP_A, RESIZED]
         summary = format_carry_demo_cycle_summary(dict(boundary))

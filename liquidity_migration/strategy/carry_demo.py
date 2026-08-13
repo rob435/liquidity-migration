@@ -1690,19 +1690,16 @@ def run_carry_demo_cycle(
             planning.publisher,
             batch_prefix=f"carry/{cycle_id}",
             exit_intents=kept_exits,
-            # Entries before resizes: under stop-at-first-error, that gives the
-            # per-cycle entry budget publication priority.
+            # One grouped request, entries before resizes: the cycle's whole
+            # risk-increasing side reaches the owner in a single request.
             entry_intents=[*kept_entries, *kept_resizes],
             created_ts_ns=cycle_now_ms * 1_000_000,
-            independent_entry_requests=True,
         )
         published_exit_targets = len(publication.exit_requests)
-        # Independent entry-channel requests publish in caller order and stop at
-        # the first error, so the published list is a prefix of
-        # [entries..., resizes...] and the split is the prefix length.
-        published_entry_channel = len(publication.entry_requests)
-        published_entry_targets = min(published_entry_channel, len(kept_entries))
-        published_resize_targets = published_entry_channel - published_entry_targets
+        # The grouped entry request is all-or-nothing: either every kept entry
+        # and resize published, or none did.
+        published_entry_targets = len(kept_entries) if publication.entry_requests else 0
+        published_resize_targets = len(kept_resizes) if publication.entry_requests else 0
 
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
@@ -1781,7 +1778,9 @@ def run_carry_demo_cycle(
             "exit_targets_queued": published_exit_targets,
             "entry_targets_queued": published_entry_targets,
             "resize_targets_queued": published_resize_targets,
-            "target_intents_queued": published_exit_targets + published_entry_channel,
+            "target_intents_queued": (
+                published_exit_targets + published_entry_targets + published_resize_targets
+            ),
             "unresolved_exit_target_suppressions": suppression.unresolved_exit_suppressions,
             "unresolved_entry_target_suppressions": suppression.unresolved_entry_suppressions,
             "terminal_entry_attempt_suppressions": suppression.terminal_entry_attempt_suppressions,
