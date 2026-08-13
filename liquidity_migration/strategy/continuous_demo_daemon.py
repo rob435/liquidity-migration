@@ -132,6 +132,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     """
 
     _sleeve_label = "continuous"
+    _flat_cycle_payload = True
 
     def _strategy_profile_name(self) -> str:
         return CONTINUOUS_V2_PROFILE

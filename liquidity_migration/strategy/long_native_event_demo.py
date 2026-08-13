@@ -570,6 +570,9 @@ def run_long_native_demo_cycle(
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "kline_store_rows": kline_cache_stats.get("store_rows", 0),
             "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
+            # The fleet watchdog's WS-staleness alarm reads this; without it
+            # the alarm has never been able to fire for LONG.
+            "kline_store_max_ts_ms": kline_cache_stats.get("store_max_ts_ms", 0),
             # WS-vs-REST telemetry with the same cache-vs-fallback contract
             # used by the active demo daemons.
             "ticker_source": ticker_source,

@@ -1544,9 +1544,18 @@ def run_carry_demo_cycle(
         # the frozen decision cannot read. Timer cycles keep the build (it IS
         # the cache maintenance: WS-store flush and the hourly funding sweep),
         # and an unfrozen deadline falls through to the full path below.
-        prewarmed = (
-            state.frozen_decision(decision_ts_ms) if cycle_kind == "market_boundary" else None
+        # Journal-change wakes exist to react to account news — fills,
+        # rejection receipts — with the same frozen decision, so they skip
+        # the build too UNLESS this cycle owes maintenance: the hourly
+        # funding sweep is due, or the daemon asked it to freeze the next
+        # day ahead of the boundary. Without that carve-out, a stream of
+        # owner commits would starve both.
+        skip_build = cycle_kind == "market_boundary" or (
+            cycle_kind == "journal_change"
+            and freeze_ahead_decision_ts_ms is None
+            and state.funding_swept_hour_ts == cycle_now_ms - cycle_now_ms % HOUR_MS
         )
+        prewarmed = state.frozen_decision(decision_ts_ms) if skip_build else None
         data_build_skipped = prewarmed is not None
         if prewarmed is not None:
             decision, trail_by_symbol, universe_eligible = prewarmed
@@ -1690,19 +1699,16 @@ def run_carry_demo_cycle(
             planning.publisher,
             batch_prefix=f"carry/{cycle_id}",
             exit_intents=kept_exits,
-            # Entries before resizes: under stop-at-first-error, that gives the
-            # per-cycle entry budget publication priority.
+            # One grouped request, entries before resizes: the cycle's whole
+            # risk-increasing side reaches the owner in a single request.
             entry_intents=[*kept_entries, *kept_resizes],
             created_ts_ns=cycle_now_ms * 1_000_000,
-            independent_entry_requests=True,
         )
         published_exit_targets = len(publication.exit_requests)
-        # Independent entry-channel requests publish in caller order and stop at
-        # the first error, so the published list is a prefix of
-        # [entries..., resizes...] and the split is the prefix length.
-        published_entry_channel = len(publication.entry_requests)
-        published_entry_targets = min(published_entry_channel, len(kept_entries))
-        published_resize_targets = published_entry_channel - published_entry_targets
+        # The grouped entry request is all-or-nothing: either every kept entry
+        # and resize published, or none did.
+        published_entry_targets = len(kept_entries) if publication.entry_requests else 0
+        published_resize_targets = len(kept_resizes) if publication.entry_requests else 0
 
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
@@ -1719,7 +1725,9 @@ def run_carry_demo_cycle(
                 {
                     "request_id": item.request.request_id,
                     "batch_id": item.request.batch_id,
-                    "target_key": item.request.intents[0].intent.target_key,
+                    # The grouped request carries every entry+resize; a single
+                    # target_key would silently drop the rest (LONG precedent).
+                    "intent_count": len(item.request.intents),
                 }
                 for item in publication.entry_requests
             ],
@@ -1781,7 +1789,9 @@ def run_carry_demo_cycle(
             "exit_targets_queued": published_exit_targets,
             "entry_targets_queued": published_entry_targets,
             "resize_targets_queued": published_resize_targets,
-            "target_intents_queued": published_exit_targets + published_entry_channel,
+            "target_intents_queued": (
+                published_exit_targets + published_entry_targets + published_resize_targets
+            ),
             "unresolved_exit_target_suppressions": suppression.unresolved_exit_suppressions,
             "unresolved_entry_target_suppressions": suppression.unresolved_entry_suppressions,
             "terminal_entry_attempt_suppressions": suppression.terminal_entry_attempt_suppressions,

@@ -1,18 +1,22 @@
 """CARRY account-target producer daemon.
 
-Thin subclass of :class:`LongNativeDemoDaemon`: it reuses the public ticker
-cache, WS kline plane, lifecycle, evidence-capture, and graceful-shutdown
-plumbing and swaps in the carry cycle runner. Two deliberate divergences from
-the other sleeves:
+The CARRY plug on :class:`StrategyHostDaemon`: it reuses the host's public
+ticker cache, WS kline plane, lifecycle, evidence-capture, and
+graceful-shutdown plumbing and supplies the carry cycle runner. Two
+deliberate divergences from the other sleeves:
 
-* PURE TIMER cadence (``event_driven_cycle=False``). The decision is daily and
-  publication is a diff against the standing book, so a confirmed-bar wake has
-  nothing to accelerate; the WS kline store still feeds each cycle's bars so
-  the fixed 60-second grid stops paying a REST burst. The base's daily
-  deadline wake (00:20 UTC) still fires, and cycles inside the pre-deadline
-  window additionally freeze the upcoming day's book ahead of it
-  (``freeze_ahead_decision_ts_ms``), so the deadline pass publishes instead
-  of computing.
+* EVENT-DRIVEN cadence with the 60-second idle floor. The decision is
+  daily, so a wake never changes the registered rule; what wakes carry is
+  account news: a journal commit (a fill, a rejection receipt, a
+  protection event) ends the wait within the debounce so the cycle can
+  republish survivors or absorb drift in seconds instead of on the next
+  grid pass. The idle floor keeps the quiet-time cadence — health
+  receipts, the hourly funding sweep, entry republication — exactly where
+  the fixed grid had it. The host's daily deadline wake (00:20 UTC) still
+  fires precisely, and cycles inside the pre-deadline window additionally
+  freeze the upcoming day's book ahead of it
+  (``freeze_ahead_decision_ts_ms``), so the deadline pass publishes
+  instead of computing.
 * A daemon-owned :class:`CarryCycleState` is threaded into every cycle as an
   operational hint (funding-sweep throttle, decision-staleness clock), never
   decision state: each cycle replays the registered rule from scratch.
@@ -24,7 +28,7 @@ construct a sleeve-private execution stream, router, or cache.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import Any, Callable, cast
 
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
@@ -41,12 +45,8 @@ from liquidity_migration.strategy.carry_demo import (
 )
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
-from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_journal_change_wake_dir
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
-
-if TYPE_CHECKING:
-    # Only for the cast below; the base touches only shared config fields.
-    from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
 
 def _validate_carry_daemon_startup(config: CarryDemoCycleConfig) -> None:
@@ -87,10 +87,11 @@ def _default_carry_kline_stream_manager_factory(
     )
 
 
-class CarryDemoDaemon(LongNativeDemoDaemon):
-    """Target-only CARRY producer built on the long daemon scaffolding."""
+class CarryDemoDaemon(StrategyHostDaemon):
+    """Target-only CARRY producer plugged into the strategy host."""
 
     _sleeve_label = "carry"
+    _flat_cycle_payload = True
 
     def _strategy_profile_name(self) -> str:
         profile = cast("CarryDemoCycleConfig", self.demo_config).strategy_profile
@@ -109,17 +110,17 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
         resolved = demo_config or CarryDemoCycleConfig()
         # This must precede every cache, manager, or thread construction.
         _validate_carry_daemon_startup(resolved)
-        # The base touches only fields shared by the LONG and CARRY configs;
-        # with ws_klines_enabled it builds a kline manager from the factory
-        # below (carry's top-N universe, not LONG's).
+        # With ws_klines_enabled the host builds a kline manager from the
+        # factory below (carry's top-N universe, not LONG's).
         kwargs.setdefault("kline_stream_manager_factory", _default_carry_kline_stream_manager_factory)
+        default_journal_change_wake_dir(kwargs, resolved)
+        kwargs.setdefault("event_driven_cycle", True)
         super().__init__(
             data_root,
             config=config,
-            demo_config=cast("LongNativeDemoCycleConfig", resolved),
+            demo_config=resolved,
             interval_seconds=interval_seconds,
             cycle_runner=cycle_runner,
-            event_driven_cycle=False,
             **kwargs,
         )
         self._carry_cycle_state = CarryCycleState()

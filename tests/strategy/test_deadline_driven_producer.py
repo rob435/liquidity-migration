@@ -249,22 +249,25 @@ def test_a_fired_deadline_never_hot_loops_the_grid(tmp_path: Path) -> None:
     assert daemon._cycles_deadline_triggered == 2
 
 
-def test_a_confirmed_bar_outranks_a_due_deadline(tmp_path: Path) -> None:
+def test_a_due_deadline_outranks_a_pending_confirmed_bar(tmp_path: Path) -> None:
     clock = VirtualClock(current_wall_ns=2_000_000_000_000_000_000)
     daemon = _build_daemon(tmp_path, interval_seconds=30.0, event_driven_cycle=True, clock=clock)
     daemon._next_wake_deadline_ts_ms = 2_000_000_000_000
     daemon._bar_event.set()
 
     daemon._wait_for_next_cycle_event()
-    # The cycle runs either way; the bar names the wake. The unfired deadline
-    # stays armed for the next wait.
-    assert daemon._pending_cycle_kind == "confirmed_bar"
-    assert daemon._cycles_deadline_triggered == 0
+    # The deadline cycle reads the same fresh data the bar announced, so it
+    # goes first at every debounce setting (this daemon runs debounce 0; the
+    # host tests pin the same precedence at the production 2.0s). The set bar
+    # event still ends the next wait.
+    assert daemon._pending_cycle_kind == "market_boundary"
+    assert daemon._cycles_deadline_triggered == 1
 
 
 def test_timer_wait_cuts_short_for_a_deadline_without_a_spurious_overrun(tmp_path: Path) -> None:
-    """The CARRY path: a pure timer grid, woken early at the decision boundary
-    with the grid anchor preserved."""
+    """The timer-grid path (the degraded no-WS mode since carry went
+    event-driven), woken early at the decision boundary with the grid
+    anchor preserved."""
 
     clock = VirtualClock(current_wall_ns=2_000_000_000_000_000_000)
     now_ms = 2_000_000_000_000

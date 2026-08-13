@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.strategy.long_native_event_demo_daemon as base_daemon_module
+import liquidity_migration.strategy.strategy_host as host_module
 from liquidity_migration.account.account_intent_client import ExitFirstPublication
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.strategy.carry_demo import CarryCycleState, CarryDemoCycleConfig, run_carry_demo_cycle
@@ -46,21 +46,28 @@ def _flat_payload() -> dict[str, Any]:
     }
 
 
-def test_constructs_as_one_pure_timer_target_planner(tmp_path: Path) -> None:
+def test_constructs_as_an_event_driven_target_planner_with_a_journal_wake(tmp_path: Path) -> None:
+    from liquidity_migration.account.account_kernel import account_transactions_path
+
+    config = _target_config(tmp_path)
     daemon = CarryDemoDaemon(
         tmp_path / "carry",
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=_target_config(tmp_path),
+        demo_config=config,
     )
 
     assert daemon._cycle_runner is run_carry_demo_cycle
     assert daemon.interval_seconds == 60.0
-    # Daily decision + diff publication: a confirmed-bar wake accelerates
-    # nothing, so the loop stays a pure timer grid even with the WS kline
-    # plane feeding each cycle's bars.
-    assert daemon._event_driven_cycle is False
+    # Daily decision, event-driven wait: account-journal commits end the
+    # wait early, the 60s idle floor keeps the quiet-time cadence, and the
+    # 00:20 deadline machinery is unchanged.
+    assert daemon._event_driven_cycle is True
+    assert daemon._journal_change_wake_dir == account_transactions_path(
+        Path(str(config.account_execution_root)).expanduser()
+    )
     assert daemon._seed_thread is None
     assert daemon._reconcile_thread is None
+    assert daemon._journal_watch_thread is None
 
 
 def test_cycle_receives_only_public_state_and_the_carry_cycle_state(
@@ -135,7 +142,7 @@ def test_invalid_startup_fails_before_any_resource_construction(
         resource_calls.append("opened")
         raise AssertionError("invalid CARRY startup opened a resource")
 
-    monkeypatch.setattr(base_daemon_module, "TickerCache", forbidden)
+    monkeypatch.setattr(host_module, "TickerCache", forbidden)
 
     with pytest.raises(ValueError, match="execution_environment|configured together"):
         CarryDemoDaemon(

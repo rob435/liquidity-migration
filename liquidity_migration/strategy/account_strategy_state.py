@@ -58,6 +58,12 @@ class CanonicalEntryAttempt:
     risk_wall_ts_ns: int
     accepted: bool
     rejection_keys: tuple[str, ...]
+    # True when this attempt is the one a rejection was ABOUT: a rejection key
+    # scoped to its symbol or target key, or an account-level (unscoped) key
+    # that refused the whole batch. A grouped sibling rejected only because a
+    # DIFFERENT target's scoped key voided the batch stays False, so the next
+    # cycle republishes it instead of writing the day off.
+    suppressed_by_rejection: bool
 
 
 def canonical_entry_attempts(
@@ -86,6 +92,29 @@ def canonical_entry_attempts(
         for event in events
         if event.event_type == _RISK_DECISION
     }
+    # Every name a scoped rejection key of a batch can end with: the symbol
+    # and target key of EVERY target in it (resizes included), unfiltered by
+    # sleeve. A rejection key ending in none of them is account-level and
+    # refuses the whole batch.
+    scope_names_by_batch: dict[str, set[str]] = {}
+    for event in events:
+        if event.event_type != _TARGET:
+            continue
+        names = scope_names_by_batch.setdefault(event.correlation_id, set())
+        target_payload = event.payload
+        scope_symbol = str(target_payload.get("symbol") or event.symbol).upper()
+        if scope_symbol:
+            names.add(scope_symbol)
+        scope_target_key = str(target_payload.get("target_key") or "").strip()
+        if scope_target_key:
+            names.add(scope_target_key)
+    unscoped_rejection_by_batch: dict[str, bool] = {}
+    for batch_id, batch_risk in risk_by_batch.items():
+        keys = tuple(str(value) for value in batch_risk.payload.get("rejection_keys") or ())
+        names = scope_names_by_batch.get(batch_id, set())
+        unscoped_rejection_by_batch[batch_id] = any(
+            not any(key.endswith(f":{name}") for name in names) for key in keys
+        )
     wanted_sleeve = "" if sleeve is None else str(sleeve).strip()
     wanted_strategies = {str(value) for value in strategy_ids if str(value)}
     attempts: list[CanonicalEntryAttempt] = []
@@ -141,6 +170,15 @@ def canonical_entry_attempts(
                 f"canonical entry target batch {event.correlation_id!r} has no "
                 "risk decision"
             )
+        attempt_symbol = str(payload.get("symbol") or event.symbol).upper()
+        accepted = bool(risk.payload.get("accepted"))
+        rejection_keys = tuple(
+            str(value) for value in risk.payload.get("rejection_keys") or ()
+        )
+        named_by_rejection = any(
+            key.endswith(f":{attempt_symbol}") or key.endswith(f":{target_key}")
+            for key in rejection_keys
+        )
         attempts.append(CanonicalEntryAttempt(
             entry_attempt_key=observed_attempt_key,
             target_key=target_key,
@@ -149,16 +187,21 @@ def canonical_entry_attempts(
             sleeve=event_sleeve,
             strategy_id=strategy_id,
             component_id=str(payload.get("component_id") or ""),
-            symbol=str(payload.get("symbol") or event.symbol).upper(),
+            symbol=attempt_symbol,
             signal_ts_ms=signal_ts_ms,
             signal_valid_until_ms=signal_valid_until_ms,
             target_event_sequence=event.sequence,
             target_wall_ts_ns=event.wall_ts_ns,
             risk_decision_sequence=risk.sequence,
             risk_wall_ts_ns=risk.wall_ts_ns,
-            accepted=bool(risk.payload.get("accepted")),
-            rejection_keys=tuple(
-                str(value) for value in risk.payload.get("rejection_keys") or ()
+            accepted=accepted,
+            rejection_keys=rejection_keys,
+            suppressed_by_rejection=(
+                not accepted
+                and (
+                    named_by_rejection
+                    or unscoped_rejection_by_batch.get(event.correlation_id, False)
+                )
             ),
         ))
     return tuple(attempts)
@@ -173,6 +216,11 @@ def rejected_entry_attempt_expiries(
 ) -> dict[str, int]:
     """Every account-risk-rejected attempt key, with when its signal lapses.
 
+    Suppression is scoped to what the rejection was about: an attempt named by
+    a scoped rejection key, or any attempt in a batch an account-level key
+    refused. A grouped sibling voided only by another target's scoped key is
+    not here — it stays eligible for the next cycle's republish.
+
     A pure function of the journal, so it memoizes on journal identity alone.
     The clock belongs to the caller: mixing it in here would make a memo serve
     an answer that silently went stale as the window passed.
@@ -185,7 +233,7 @@ def rejected_entry_attempt_expiries(
         strategy_ids=strategy_ids,
         account_events=account_events,
     ):
-        if attempt.accepted:
+        if not attempt.suppressed_by_rejection:
             continue
         key = attempt.entry_attempt_key
         # A key can be attempted more than once; the latest window is the one
