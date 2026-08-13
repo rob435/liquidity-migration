@@ -35,6 +35,10 @@ pub(crate) struct Book {
     /// account. Charged to every strategy's share until they net out.
     unattributed: HashMap<u16, f64>,
     pending: HashMap<String, Pending>,
+    /// Every fill with when it arrived. A fill newer than the account view
+    /// is in neither the view nor the reservations, and the envelope must
+    /// still see it; entries the view has caught up with are pruned.
+    recent_fills: Vec<(u64, u16, f64)>,
 }
 
 impl Book {
@@ -56,7 +60,14 @@ impl Book {
         self.pending.remove(client_order_id);
     }
 
-    pub(crate) fn on_fill(&mut self, client_order_id: &str, symbol: SymbolId, signed_qty: f64) {
+    pub(crate) fn on_fill(
+        &mut self,
+        client_order_id: &str,
+        symbol: SymbolId,
+        signed_qty: f64,
+        recv_ns: u64,
+    ) {
+        self.recent_fills.push((recv_ns, symbol.0, signed_qty));
         match self.pending.get_mut(client_order_id) {
             Some(pending) => {
                 let strategy = pending.strategy.0;
@@ -122,6 +133,29 @@ impl Book {
             total += pending.signed_qty.abs() * pending_px(pending, &price)?;
         }
         Some(total)
+    }
+
+    /// Quantity already spoken for by resting reduce-only orders on this
+    /// symbol. A second full-size exit on top of these is a stack, not a
+    /// retry — a rejected or cancelled exit is forgotten and frees it.
+    pub(crate) fn pending_reduce_qty(&self, symbol: SymbolId) -> f64 {
+        self.pending
+            .values()
+            .filter(|p| p.reduce_only && p.symbol == symbol)
+            .map(|p| p.signed_qty.abs())
+            .sum()
+    }
+
+    /// Per-symbol net quantity of fills newer than the account view, pruning
+    /// what the view has caught up with. The envelope adds these to the
+    /// view's positions so a just-filled order is never counted nowhere.
+    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> HashMap<u16, f64> {
+        self.recent_fills.retain(|(ns, _, _)| *ns > observed_ns);
+        let mut net: HashMap<u16, f64> = HashMap::new();
+        for (_, symbol, qty) in &self.recent_fills {
+            *net.entry(*symbol).or_insert(0.0) += qty;
+        }
+        net
     }
 
     /// Notional of everything in flight and not yet visible in the account

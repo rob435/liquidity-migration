@@ -137,7 +137,21 @@ impl Kernel {
                     "reduce_only intent does not reduce the position it names",
                 ));
             }
-            return Ok(ask_qty.min(net_qty.abs()));
+            if let OrderKind::Limit { px, .. } = intent.kind {
+                if !px.is_finite() || px <= 0.0 {
+                    return Err(unknown("exit limit price is not a positive number"));
+                }
+            }
+            // The venue bounds ONE reduce-only order to the position, not a
+            // stack of them: what resting exits already cover is spoken for.
+            let covered = self.book.pending_reduce_qty(intent.symbol);
+            let open = net_qty.abs() - covered;
+            if open <= self.cfg.qty_tolerance {
+                return Err(unknown(
+                    "the position is already fully covered by resting exits",
+                ));
+            }
+            return Ok(ask_qty.min(open));
         }
 
         // 4. Entries are judged only against evidence about the account now.
@@ -172,7 +186,11 @@ impl Kernel {
         let (low_px, px) = self.entry_prices(intent, &view)?;
         let stop_fraction = read_stop(intent, low_px, px)?;
 
-        // 6. The equity-anchored envelope, against the book this order leaves.
+        // 6. The equity-anchored envelope, against the book this order
+        //    leaves. Fills newer than the view are in neither the view nor
+        //    the reservations — fold them in so a just-filled position is
+        //    never counted nowhere.
+        let mut recent = self.book.fills_after(account.observed_ns);
         let notional = ask_qty * px;
         let mut worst_case_loss_usdt = self
             .envelope
@@ -181,6 +199,18 @@ impl Kernel {
             let held_px = self
                 .price_for(symbol, &view)
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
+            let effective_qty = qty + recent.remove(&symbol.0).unwrap_or(0.0);
+            worst_case_loss_usdt += self
+                .envelope
+                .position_worst_case_usdt(effective_qty.abs() * held_px, 0.0);
+        }
+        for (symbol, qty) in recent {
+            if qty.abs() <= self.cfg.qty_tolerance {
+                continue;
+            }
+            let held_px = self
+                .price_for(SymbolId(symbol), &view)
+                .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
             worst_case_loss_usdt += self
                 .envelope
                 .position_worst_case_usdt(qty.abs() * held_px, 0.0);
@@ -299,11 +329,12 @@ impl RiskKernel for Kernel {
                 side,
                 qty,
                 px,
+                recv_ns,
                 ..
             } => {
                 self.book.observe_px(*symbol, *px);
                 self.book
-                    .on_fill(client_order_id, *symbol, signed(*side, qty.abs()));
+                    .on_fill(client_order_id, *symbol, signed(*side, qty.abs()), *recv_ns);
             }
             OrderUpdate::Cancelled {
                 client_order_id, ..

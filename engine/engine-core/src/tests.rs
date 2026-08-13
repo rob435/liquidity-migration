@@ -216,6 +216,7 @@ struct MockRisk {
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
     restored: Rc<RefCell<Vec<String>>>,
     anchor_script: VecDeque<String>,
+    registered: Rc<RefCell<Vec<(String, f64)>>>,
 }
 
 impl MockRisk {
@@ -228,6 +229,7 @@ impl MockRisk {
                 seen: seen.clone(),
                 restored: Rc::new(RefCell::new(Vec::new())),
                 anchor_script: VecDeque::new(),
+                registered: Rc::new(RefCell::new(Vec::new())),
             },
             seen,
         )
@@ -248,6 +250,12 @@ impl RiskKernel for MockRisk {
 
     fn take_control_anchor(&mut self) -> Option<String> {
         self.anchor_script.pop_front()
+    }
+
+    fn register_order(&mut self, client_order_id: &str, _intent: &Intent, approved_qty: f64) {
+        self.registered
+            .borrow_mut()
+            .push((client_order_id.to_string(), approved_qty));
     }
 
     fn restore_control_anchor(&mut self, state: &str) {
@@ -682,6 +690,61 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
     .expect("boot");
     drop(engine);
     assert_eq!(*restored.borrow(), vec!["{\"newest\":true}".to_string()]);
+}
+
+#[tokio::test]
+async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
+    // After a restart the partition would otherwise believe every share is
+    // free while last boot's orders are still working at the venue.
+    let replayed = vec![WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: "eng-1700000000000-4".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.25,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+        },
+        wire_ns: 3,
+    }];
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let registered = risk.registered.clone();
+    let engine = Engine::boot(
+        &settings(true),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await
+    .expect("boot");
+    drop(engine);
+    assert_eq!(
+        *registered.borrow(),
+        vec![("eng-1700000000000-4".to_string(), 0.25)]
+    );
+}
+
+#[test]
+fn minting_skips_an_id_the_log_already_knows() {
+    // boot_ms is a wall clock; a clock stepped back can repeat a previous
+    // boot's prefix, and overwriting a recovered order's ledger entry makes
+    // a real working order invisible.
+    let taken = ["eng-99-1".to_string(), "eng-99-2".to_string()];
+    let mut n = 0;
+    let id = crate::engine::mint_unused("eng-99-", &mut n, |candidate| {
+        taken.contains(&candidate.to_string())
+    });
+    assert_eq!(id, "eng-99-3");
+    assert_eq!(n, 3);
 }
 
 #[tokio::test]

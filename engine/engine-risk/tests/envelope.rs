@@ -29,6 +29,64 @@ fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
 }
 
 #[test]
+// A fill lands, the account view has not caught up, and the reservation
+// already drained — for that window the filled position must still count
+// against the envelope, or a second order is judged against a book the
+// kernel knows is missing a position.
+fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
+    use engine_types::orders::OrderUpdate;
+
+    let cfg = KernelConfig {
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: None,
+        },
+        ..demo_config()
+    };
+    let mut kernel = Kernel::new(cfg).expect("config");
+    kernel.observe_price(BUSDT, 10.0);
+    kernel.observe_price(CUSDT, 10.0);
+
+    // 400k notional fills at 2*SEC; the view below is from SEC.
+    let filled = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 9.0, SEC);
+    kernel.register_order("f1", &filled, 40_000.0);
+    kernel.on_update(&OrderUpdate::Fill {
+        client_order_id: "f1".to_string(),
+        symbol: BUSDT,
+        side: Side::Buy,
+        qty: 40_000.0,
+        px: 10.0,
+        fee: 0.0,
+        venue_ts_ms: 0,
+        recv_ns: 2 * SEC,
+    });
+
+    // 150k more would fit an empty book (52.5k of 175k allowance) but not
+    // one already carrying the 400k fill (140k + 52.5k > 175k).
+    let next = entry(CARRY, CUSDT, Side::Buy, 15_000.0, 10.0, 9.0, 3 * SEC);
+    let stale_view = flat(250_000.0, SEC);
+    assert!(matches!(
+        kernel.assess(&next, &stale_view),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
+
+    // Once the view includes the fill (observed after it), the recent-fill
+    // term must NOT double-count on top of the view's position.
+    let caught_up = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 40_000.0, 10.0, true)],
+        3 * SEC,
+    );
+    let small = entry(CARRY, CUSDT, Side::Buy, 5_000.0, 10.0, 9.0, 4 * SEC);
+    assert_eq!(
+        kernel.assess(&small, &caught_up),
+        RiskVerdict::Allow { qty: 5_000.0 },
+        "the caught-up view must not be double-counted"
+    );
+}
+
+#[test]
 // test_a_profile_without_the_block_keeps_the_historical_fixed_reference
 fn a_config_that_does_not_track_equity_keeps_its_fixed_reference() {
     let cfg = KernelConfig {

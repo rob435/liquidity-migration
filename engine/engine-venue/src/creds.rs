@@ -41,11 +41,13 @@ impl Credentials {
     }
 }
 
-/// Redacted on purpose: this struct ends up inside error and trace context.
+/// Redacted on purpose: this struct ends up inside error and trace context,
+/// and half a redaction is one derive(Debug) away from a key in the log.
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tail: String = self.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
         f.debug_struct("Credentials")
-            .field("key", &self.key)
+            .field("key", &format!("<redacted>..{tail}"))
             .field("secret", &"<redacted>")
             .finish()
     }
@@ -64,10 +66,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn debug_hides_the_secret() {
-        let creds = Credentials::new("key-1", "super-secret");
+    fn debug_hides_the_secret_and_all_but_the_keys_tail() {
+        let creds = Credentials::new("key-12345", "super-secret");
         let shown = format!("{creds:?}");
-        assert!(shown.contains("key-1"));
+        assert!(!shown.contains("key-12345"), "the full key leaked: {shown}");
+        assert!(shown.contains("2345"), "the tail identifies the key: {shown}");
         assert!(!shown.contains("super-secret"));
     }
 

@@ -211,6 +211,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut registry = OrderRegistry::new(format!("eng-{boot_ms}-"));
         for order in orders.in_flight() {
             registry.own(&order.request.client_order_id, order.request.strategy);
+            // The kernel's partition must keep charging last boot's working
+            // orders, or a restart hands every share out twice.
+            let request = &order.request;
+            risk.register_order(
+                &request.client_order_id,
+                &Intent {
+                    strategy: request.strategy,
+                    symbol: request.symbol,
+                    side: request.side,
+                    qty: request.qty,
+                    kind: request.kind,
+                    stop: request.stop,
+                    reduce_only: request.reduce_only,
+                    tag: "recovered".to_string(),
+                    decided_ns: 0,
+                },
+                request.qty,
+            );
         }
         if recovered > 0 {
             tracing::warn!(
@@ -635,6 +653,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     code,
                     reason: message,
                 }),
+                // A request that could not be built never left the box:
+                // certainty, not doubt. Ending it frees its reservation and
+                // tells the strategy, instead of a phantom in-flight order.
+                Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
+                    client_order_id: client_order_id.clone(),
+                    code: 0,
+                    reason: format!("never sent: {detail}"),
+                }),
                 Err(other) => {
                     // We do not know whether the venue got it. Leave the
                     // order in flight and say why; guessing is how an order
@@ -752,10 +778,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     fn mint_id(&mut self) -> String {
-        self.next_order_n += 1;
-        let id = format!("{}{}", self.registry.prefix(), self.next_order_n);
-        debug_assert!(id.len() <= 36, "client order id too long: {id}");
-        id
+        let orders = &self.orders;
+        mint_unused(self.registry.prefix(), &mut self.next_order_n, |candidate| {
+            orders.contains(candidate)
+        })
     }
 
     pub fn strategy_names(&self) -> &[String] {
@@ -786,6 +812,24 @@ fn feed_strategy(
 }
 
 /// When this message reached us. The whole chain is measured from here.
+/// Mint the next client order id, skipping any the log already knows: the
+/// boot prefix comes from a wall clock, and a clock stepped back must not
+/// let a new order overwrite a recovered one's ledger entry.
+pub(crate) fn mint_unused(
+    prefix: &str,
+    next_n: &mut u64,
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    loop {
+        *next_n += 1;
+        let id = format!("{prefix}{next_n}");
+        assert!(id.len() <= 36, "client order id too long: {id}");
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
 /// The first non-finite number an intent carries, named, or None.
 fn unreal_number(intent: &Intent) -> Option<&'static str> {
     if !intent.qty.is_finite() {

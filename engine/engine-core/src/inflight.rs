@@ -109,6 +109,10 @@ impl LedgerOfOrders {
         }
     }
 
+    pub fn contains(&self, client_order_id: &str) -> bool {
+        self.orders.contains_key(client_order_id)
+    }
+
     pub fn in_flight(&self) -> Vec<&OrderRec> {
         self.orders.values().filter(|o| o.in_flight()).collect()
     }

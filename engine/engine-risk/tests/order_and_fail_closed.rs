@@ -12,6 +12,61 @@ use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 const NOW: u64 = 300 * SEC;
 
 #[test]
+// One resting exit already covers the position; approving a second at full
+// size means two venue orders racing to close one position. The venue's
+// reduce-only handling bounds each order alone, not the stack.
+fn a_position_already_covered_by_a_resting_exit_takes_no_second_exit() {
+    let mut k = kernel();
+    let held = view(
+        1_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        SEC,
+    );
+
+    let first = exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, 2 * SEC);
+    assert_eq!(k.assess(&first, &held), RiskVerdict::Allow { qty: 5.0 });
+    k.register_order("x1", &first, 5.0);
+
+    let second = exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, 3 * SEC);
+    assert!(matches!(
+        k.assess(&second, &held),
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+
+    // The venue rejecting the first frees the position for a retry.
+    k.on_update(&engine_types::orders::OrderUpdate::Reject {
+        client_order_id: "x1".to_string(),
+        code: 1,
+        reason: "test".to_string(),
+    });
+    let retry = exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, 4 * SEC);
+    assert_eq!(k.assess(&retry, &held), RiskVerdict::Allow { qty: 5.0 });
+}
+
+#[test]
+fn an_exit_with_an_unreadable_limit_price_is_refused() {
+    let mut k = kernel();
+    let held = view(
+        1_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        SEC,
+    );
+    let mut bad = exit(CARRY, BUSDT, Side::Sell, 5.0, -5.0, 2 * SEC);
+    bad.kind = engine_types::orders::OrderKind::Limit {
+        px: -5.0,
+        tif: engine_types::orders::TimeInForce::Gtc,
+    };
+    assert!(matches!(
+        k.assess(&bad, &held),
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+}
+
+#[test]
 // Blindness stops new risk, never de-risking: the fleet exits against its
 // reconstructed positions while blocked, and the venue's own reduce-only
 // enforcement bounds a mis-sized exit from a stale reading.

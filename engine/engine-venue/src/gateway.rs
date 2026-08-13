@@ -189,6 +189,13 @@ impl VenueGateway for BybitGateway {
             cursor = next;
             pages += 1;
         }
+        // A truncated position list under-counts exposure and can hide an
+        // unprotected position — this read fails closed, like instruments.
+        if !cursor.is_empty() {
+            return Err(VenueError::BadReply(format!(
+                "position listing still had pages after {MAX_PAGES}"
+            )));
+        }
 
         Ok(AccountView {
             equity_usdt,
