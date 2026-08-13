@@ -642,6 +642,39 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
 }
 
 #[tokio::test]
+async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
+    // serde_json writes a non-finite float as null, which cannot be read
+    // back into f64 — so a NaN quantity appended to the log would make that
+    // frame unreadable and stop the next boot's replay. The refusal must
+    // come before any log write.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, f64::NAN);
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let kinds = appends(&h.tape);
+    assert!(
+        !kinds.contains(&"intent".to_string()),
+        "a NaN intent was written to the log: {kinds:?}"
+    );
+    assert!(h.sends.borrow().is_empty(), "nothing reached the venue");
+    let note = note_saying(&h.records, "not a finite");
+    assert!(note.contains("buy"), "the note names the intent's tag: {note}");
+    for record in h.records.borrow().iter() {
+        let bytes = serde_json::to_vec(record).expect("serializable");
+        let _: WalRecord = serde_json::from_slice(&bytes)
+            .expect("every log record must survive a read-back");
+    }
+}
+
+#[tokio::test]
 async fn an_order_under_the_minimum_value_is_refused() {
     // 0.001 of a 30k coin is 30 dollars; ask for a minimum of 5 and it passes,
     // so raise the size floor by asking for a tiny quantity of a cheap symbol.

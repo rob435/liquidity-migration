@@ -17,8 +17,8 @@ const MAX_DECIMALS: usize = 10;
 /// tail is float dust — so it gets rounded off rather than sent.
 pub(crate) fn venue_num(value: f64) -> Result<String, VenueError> {
     if !value.is_finite() || value <= 0.0 {
-        return Err(VenueError::Transport(format!(
-            "cannot build request: {value} is not a positive finite number"
+        return Err(VenueError::BadRequest(format!(
+            "{value} is not a positive finite number"
         )));
     }
     let short = format!("{value}");
@@ -27,8 +27,8 @@ pub(crate) fn venue_num(value: f64) -> Result<String, VenueError> {
     }
     let rounded = trim_trailing_zeros(&format!("{value:.MAX_DECIMALS$}"));
     if rounded.is_empty() || rounded == "0" {
-        return Err(VenueError::Transport(format!(
-            "cannot build request: {value} rounds away to nothing"
+        return Err(VenueError::BadRequest(format!(
+            "{value} rounds away to nothing"
         )));
     }
     Ok(rounded)

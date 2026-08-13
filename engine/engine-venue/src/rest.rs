@@ -78,7 +78,7 @@ impl RestClient {
             .method("GET")
             .uri(self.url(path, query))
             .body(Full::new(Bytes::new()))
-            .map_err(|e| VenueError::Transport(format!("cannot build request: {e}")))?;
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.send(req).await
     }
 
@@ -94,14 +94,14 @@ impl RestClient {
             .header(HEADER_RECV_WINDOW, RECV_WINDOW_MS)
             .header(HEADER_SIGN, sign)
             .body(Full::new(Bytes::new()))
-            .map_err(|e| VenueError::Transport(format!("cannot build request: {e}")))?;
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.send(req).await
     }
 
     /// Signed POST. The signature covers the exact body bytes sent.
     pub(crate) async fn post_signed(&self, path: &str, body: &Value) -> Result<Value, VenueError> {
         let body = serde_json::to_string(body)
-            .map_err(|e| VenueError::Transport(format!("cannot build request: {e}")))?;
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         let ts = wall_ms();
         let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), &body);
         let req = Request::builder()
@@ -113,7 +113,7 @@ impl RestClient {
             .header(HEADER_SIGN, sign)
             .header("Content-Type", "application/json")
             .body(Full::new(Bytes::from(body)))
-            .map_err(|e| VenueError::Transport(format!("cannot build request: {e}")))?;
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.send(req).await
     }
 

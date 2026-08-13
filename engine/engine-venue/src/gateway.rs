@@ -87,8 +87,8 @@ impl BybitGateway {
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
         self.names.get(id.0 as usize).map(String::as_str).ok_or_else(|| {
-            VenueError::Transport(format!(
-                "cannot build request: symbol id {} is not in the gateway's table",
+            VenueError::BadRequest(format!(
+                "symbol id {} is not in the gateway's table",
                 id.0
             ))
         })

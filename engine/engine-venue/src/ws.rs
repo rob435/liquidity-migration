@@ -46,6 +46,7 @@ pub struct BybitOrderFeed {
     acked_order: VecDeque<String>,
     backoff: Duration,
     last_ping: Instant,
+    connected_before: bool,
 }
 
 impl BybitOrderFeed {
@@ -74,6 +75,7 @@ impl BybitOrderFeed {
             acked: HashSet::new(),
             acked_order: VecDeque::new(),
             backoff: Duration::ZERO,
+            connected_before: false,
             last_ping: Instant::now(),
         }
     }
@@ -176,6 +178,13 @@ impl OrderFeed for BybitOrderFeed {
             }
             if self.socket.is_none() {
                 self.connect().await?;
+                // A reconnect may have missed updates; the engine must hear
+                // that and refresh its account view rather than trust a gap.
+                if self.connected_before {
+                    self.pending
+                        .push_back(OrderUpdate::StreamReset { recv_ns: mono_ns() });
+                }
+                self.connected_before = true;
             }
 
             let deadline = tokio::time::Instant::from_std(self.last_ping + PING_EVERY);

@@ -132,7 +132,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         settings: &EngineSection,
         config_sha256: &str,
         mut wal: W,
-        risk: R,
+        mut risk: R,
         mut venue: V,
         strategies: Vec<Box<dyn Strategy>>,
         replayed: &[WalRecord],
@@ -194,6 +194,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let account = venue.account_view().await?;
+        // The reading's wall time, so the loss guard anchors on the right
+        // UTC day from the first evaluation.
+        risk.observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
 
         let mut registry = OrderRegistry::new(format!("eng-{boot_ms}-"));
         for order in orders.in_flight() {
@@ -339,6 +342,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
         let now = clock::now_ns();
         self.market.apply(&event);
+        match event {
+            MarketEvent::Quote { symbol, quote } if quote.bid_px > 0.0 && quote.ask_px > 0.0 => {
+                self.risk
+                    .observe_price(symbol, (quote.bid_px + quote.ask_px) / 2.0);
+            }
+            MarketEvent::Ticker { symbol, ticker } if ticker.last_px > 0.0 => {
+                self.risk.observe_price(symbol, ticker.last_px);
+            }
+            _ => {}
+        }
         self.ledger.saw_event();
         self.events_seen += 1;
         let origin_ns = arrival_ns(&event, now);
@@ -401,7 +414,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         if now.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns {
             match self.venue.account_view().await {
-                Ok(view) => self.account = view,
+                Ok(view) => {
+                    self.account = view;
+                    // The loss guard's daily anchor rolls on the READING's
+                    // UTC day, so hand it the reading's wall time.
+                    self.risk
+                        .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
+                }
                 // Keeping the old reading is not the same as trusting it: it
                 // ages, and the risk kernel refuses on an old reading.
                 Err(e) => tracing::warn!(error = %e, "could not refresh the account reading"),
@@ -438,6 +457,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         self.ledger
             .record(Segment::Decide, decided_ns.saturating_sub(origin_ns));
+
+        // A non-finite number would be written to the log as null and stop
+        // the next boot's replay dead, so it is refused before any append.
+        if let Some(what) = unreal_number(&intent) {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!("intent {} refused: {what} is not a finite number", intent.tag),
+            })?;
+            tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
+            return Ok(());
+        }
 
         self.wal.append(&WalRecord::Intent {
             intent: intent.clone(),
@@ -529,6 +559,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .record(Segment::Durable, clock::now_ns().saturating_sub(decided_ns));
         self.orders.apply(&sent_record);
         self.registry.own(&client_order_id, intent.strategy);
+        self.risk.register_order(&client_order_id, &intent, qty);
         self.orders_sent += 1;
 
         let update = if self.shadow {
@@ -602,6 +633,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
+
+        // A private-stream gap may have swallowed fills. Refresh the account
+        // reading now rather than trusting exposure across the gap.
+        if let OrderUpdate::StreamReset { .. } = update {
+            match self.venue.account_view().await {
+                Ok(view) => {
+                    self.account = view;
+                    self.risk
+                        .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "no fresh account reading after a stream gap");
+                }
+            }
+        }
 
         let now = clock::now_ns();
         let event = EngineEvent::Order(update.clone());
@@ -706,6 +752,24 @@ fn feed_strategy(
 }
 
 /// When this message reached us. The whole chain is measured from here.
+/// The first non-finite number an intent carries, named, or None.
+fn unreal_number(intent: &Intent) -> Option<&'static str> {
+    if !intent.qty.is_finite() {
+        return Some("quantity");
+    }
+    if let OrderKind::Limit { px, .. } = intent.kind {
+        if !px.is_finite() {
+            return Some("limit price");
+        }
+    }
+    if let Some(stop) = intent.stop {
+        if !stop.trigger_px.is_finite() {
+            return Some("stop price");
+        }
+    }
+    None
+}
+
 fn arrival_ns(event: &MarketEvent, fallback: u64) -> u64 {
     let stamp = match event {
         MarketEvent::Quote { quote, .. } => quote.recv_ns,
