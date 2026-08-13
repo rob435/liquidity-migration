@@ -357,12 +357,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })
     }
 
-    /// Last flush and last ledger line on the way out.
+    /// Last ledger line on the way out, and the whole tail forced to disk:
+    /// a graceful stop that leaves its closing updates in the page cache
+    /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
         let record = self.ledger.record_for_wal(now);
         self.wal.append(&record)?;
-        self.wal.flush()?;
+        self.wal.barrier()?;
         tracing::info!("latency, {}", self.ledger.plain_line(now));
         Ok(())
     }
@@ -459,19 +461,37 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
         let mut handled = 0usize;
+        let mut entries_dropped = 0usize;
         while let Some(intent) = self.pending.pop_front() {
             handled += 1;
-            if handled > MAX_INTENTS_PER_WAKE {
+            // Past the cap, entries are dropped but exits still flow: a
+            // de-risking order queued behind a flood must get out, or its
+            // strategy is stranded holding a position it believes it left.
+            // The hard cap bounds even the exits against a runaway loop.
+            if handled > MAX_INTENTS_PER_WAKE && !intent.reduce_only {
+                entries_dropped += 1;
+                continue;
+            }
+            if handled > MAX_INTENTS_PER_WAKE * 4 {
                 let dropped = self.pending.len() + 1;
                 self.pending.clear();
-                tracing::error!(dropped, "too many intents in one wake; the rest were dropped");
+                tracing::error!(dropped, "far too many intents in one wake; the rest were dropped");
                 self.wal.append(&WalRecord::Note {
                     source: "engine".into(),
-                    text: format!("dropped {dropped} intents: more than {MAX_INTENTS_PER_WAKE} in one wake"),
+                    text: format!("dropped {dropped} intents, exits included: more than {} in one wake", MAX_INTENTS_PER_WAKE * 4),
                 })?;
                 break;
             }
             self.process_intent(intent, origin_ns).await?;
+        }
+        if entries_dropped > 0 {
+            tracing::error!(entries_dropped, "too many intents in one wake; entries were dropped");
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "dropped {entries_dropped} entries: more than {MAX_INTENTS_PER_WAKE} intents in one wake (exits still flowed)"
+                ),
+            })?;
         }
         self.persist_control_anchor()
     }
@@ -600,13 +620,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
 
         // Durable before the wire. Everything above this line can be lost by
-        // a crash without consequence; everything below it cannot.
+        // a crash without consequence; everything below it cannot. In shadow
+        // nothing reaches the wire, so no fsync — and no barrier BETWEEN the
+        // order record and its "no send" note, which once let a crash leave
+        // a durable order with no note: a phantom in-flight on replay.
         let sent_record = WalRecord::OrderSent {
             request: request.clone(),
             wire_ns: clock::now_ns(),
         };
         self.wal.append(&sent_record)?;
-        self.wal.barrier()?;
+        if !self.shadow {
+            self.wal.barrier()?;
+        }
         self.ledger
             .record(Segment::Durable, clock::now_ns().saturating_sub(decided_ns));
         self.orders.apply(&sent_record);

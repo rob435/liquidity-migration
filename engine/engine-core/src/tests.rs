@@ -54,6 +54,20 @@ fn kind_of(record: &WalRecord) -> String {
     .to_string()
 }
 
+/// True when the tape's only fsync is the final one after the last append —
+/// the shutdown barrier that makes the log's tail durable on the way out.
+fn only_the_shutdown_barrier(tape: &Tape) -> bool {
+    let tape = tape.borrow();
+    let barriers: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s, Step::Barrier))
+        .map(|(i, _)| i)
+        .collect();
+    let last_append = tape.iter().rposition(|s| matches!(s, Step::Append(_)));
+    barriers.len() == 1 && last_append.is_some_and(|a| barriers[0] > a)
+}
+
 /// Where a step first appears on the tape.
 fn at(tape: &Tape, step: &Step) -> Option<usize> {
     tape.borrow().iter().position(|s| s == step)
@@ -599,9 +613,15 @@ async fn shadow_mode_sends_nothing_and_says_so() {
         .collect();
     assert_eq!(notes.len(), 1, "one note per skipped send");
     assert!(notes[0].contains("no send"), "{}", notes[0]);
-    // The order record and its fsync happen exactly as they would live —
-    // only the send is skipped — but nothing is out there, and the log says
-    // so, so a later replay does not report a phantom.
+    // No order fsync in shadow: nothing leaves the box, so durability buys
+    // nothing — and a barrier BETWEEN the order record and its "no send"
+    // note opened a crash window where replay reported a phantom in-flight
+    // order on a run that never sent anything. The two records travel
+    // together, and the only fsync is the final shutdown one.
+    assert!(
+        only_the_shutdown_barrier(&h.tape),
+        "shadow mode paid for an order fsync"
+    );
     assert_eq!(appends(&h.tape).iter().filter(|k| *k == "order_sent").count(), 1);
     assert!(engine.in_flight_ids().is_empty(), "nothing ever left the box");
     let replayed = crate::replay::describe(&h.records.borrow(), false);
@@ -629,8 +649,8 @@ async fn a_refusal_stops_before_the_order_is_written() {
     assert!(!kinds.contains(&"order_sent".to_string()), "{kinds:?}");
     assert!(h.sends.borrow().is_empty(), "nothing reached the venue");
     assert!(
-        !h.tape.borrow().contains(&Step::Barrier),
-        "no fsync for an order that does not exist"
+        only_the_shutdown_barrier(&h.tape),
+        "no fsync for an order that does not exist (the shutdown one aside)"
     );
     assert_eq!(kinds.iter().filter(|k| *k == "intent").count(), 3);
     assert_eq!(kinds.iter().filter(|k| *k == "verdict").count(), 3);
@@ -776,6 +796,109 @@ async fn a_changed_control_anchor_is_written_and_made_durable() {
         tape[write..].contains(&Step::Barrier),
         "the anchor was written but never made durable"
     );
+}
+
+#[tokio::test]
+async fn a_clean_shutdown_forces_its_tail_to_disk() {
+    // Power loss right after a graceful stop must not lose the closing
+    // updates and ledger line: completed orders reading back as in flight
+    // is the conservative direction, but it is still a lie in the audit.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let tape = h.tape.borrow();
+    let last_append = tape
+        .iter()
+        .rposition(|s| matches!(s, Step::Append(_)))
+        .expect("something was appended");
+    let last_barrier = tape.iter().rposition(|s| matches!(s, Step::Barrier));
+    assert!(
+        last_barrier.is_some_and(|b| b > last_append),
+        "the log's tail was never forced to disk on the way out"
+    );
+}
+
+/// Emits a burst of entries with exits at the back, all in one wake.
+struct BurstEmitter {
+    symbol: String,
+    entries: usize,
+    exits: usize,
+    fired: bool,
+}
+
+impl Strategy for BurstEmitter {
+    fn name(&self) -> &str {
+        "burst"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        if let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event {
+            if self.fired {
+                return;
+            }
+            self.fired = true;
+            for i in 0..(self.entries + self.exits) {
+                let exit = i >= self.entries;
+                ctx.emit(Intent {
+                    strategy: StrategyId(0),
+                    symbol: *symbol,
+                    side: if exit { Side::Sell } else { Side::Buy },
+                    qty: 0.01,
+                    kind: OrderKind::Market,
+                    stop: if exit {
+                        None
+                    } else {
+                        Some(StopSpec { trigger_px: quote.bid_px * 0.99 })
+                    },
+                    reduce_only: exit,
+                    tag: if exit { "burst-exit".into() } else { "burst-entry".into() },
+                    decided_ns: ctx.now_ns(),
+                });
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_flooded_wake_drops_entries_but_never_exits() {
+    // The cap exists so a runaway strategy cannot wedge the loop — but a
+    // de-risking order queued behind the flood must still get out, or the
+    // strategy is stranded holding a position it believes it exited.
+    let burst = BurstEmitter { symbol: "BTCUSDT".into(), entries: 68, exits: 2, fired: false };
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    let exits = sends.iter().filter(|s| s.reduce_only).count();
+    let entries = sends.iter().filter(|s| !s.reduce_only).count();
+    assert_eq!(exits, 2, "both exits reach the venue");
+    assert!(entries <= 64, "the flood of entries is capped: {entries}");
+    let note = note_saying(&h.records, "dropped");
+    assert!(note.contains("entries"), "the drop is named: {note}");
 }
 
 /// Emits one reduce-only exit that (wrongly) still carries a stop.

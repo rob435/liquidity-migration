@@ -114,7 +114,32 @@ impl MarketState {
         match *event {
             MarketEvent::Quote { symbol, quote } => self.quotes[symbol.0 as usize] = quote,
             MarketEvent::Ticker { symbol, ticker } => self.tickers[symbol.0 as usize] = ticker,
-            MarketEvent::FeedReset { .. } => {}
+            // The reset arrives before the new epoch's first price. Clearing
+            // here means nobody reads a pre-gap price as current — a zeroed
+            // quote is visibly absent, a stale one lies.
+            MarketEvent::FeedReset { .. } => {
+                self.quotes.fill(Quote::default());
+                self.tickers.fill(Ticker::default());
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_feed_reset_clears_every_price() {
+        let mut market = MarketState::default();
+        let id = market.add_symbol("BTCUSDT");
+        market.apply(&MarketEvent::Quote {
+            symbol: id,
+            quote: Quote { bid_px: 10.0, ask_px: 10.5, ..Quote::default() },
+        });
+        assert_eq!(market.quote(id).bid_px, 10.0);
+        market.apply(&MarketEvent::FeedReset { recv_ns: 1 });
+        assert_eq!(*market.quote(id), Quote::default());
+        assert_eq!(*market.ticker(id), Ticker::default());
     }
 }
