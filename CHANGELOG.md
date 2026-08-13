@@ -16,6 +16,68 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 ~17:30 UTC — Wave 2 built, reviewed, and merged to main:
+  the signal→order chain is engineered for under 150 ms once the box moves
+  to the venue's region. NOT yet deployed — the deploy waits for tonight's
+  2026-08-14 00:20 boundary to prove wave 1 first.** Branch
+  `engine/wave2-hotpath` (`b46dca0`, `5d17449`, `4539163`), full gate green
+  at 3,149 tests. What changed, and what the adversarial review killed:
+  - **Producer boundary** (`b46dca0`): the 00:20 pass pays no health reads
+    and no retry sleeps (worst case was ~3s of sleeping at exactly the wrong
+    moment) — the freeze window stores its live owner-health reading and the
+    boundary serves it. Declared change point: the day sizes off freeze-time
+    equity, ~90s early, worst case ~2 minutes of owner-state age; the resize
+    dead-band absorbs the drift and the disaster stop never reads this.
+    Route manifests verify once per process (ctime in the identity so
+    metadata-only changes still re-verify); rule config parses once; a dead
+    payload attach nothing consumed is deleted.
+  - **Owner order path** (`5d17449`): plan and attempt claims fuse into ONE
+    durable commit for reduce-only batches (crash semantics unchanged) and
+    for entries whose leverage was proven pre-commit by concurrent
+    speculative `set_leverage` — sole-authority (demo) only; the funded
+    hand-traded account keeps today's sequence byte for byte. Declared
+    trade: a fused batch crashing in the ms-wide commit→wire window resolves
+    by the fail-closed wedge ladder (~5-6 min, no double-send) instead of a
+    quick retry. Plus: pre-boundary quiescence (the owner is parked and
+    listening at 00:20 instead of mid-Telegram ~10% of boundaries), a
+    per-order span ledger on existing receipts (every boundary now
+    self-reports inbox→plan→leverage→barrier→wire→ack in ns), and the
+    completed-request path stops copying the whole journal per request.
+  - **Venue client** (`4539163`): the library's hidden sleep-retries are
+    stripped (a mocked rate-limit held the order path 18s; now it
+    classifies immediately), and a keep-warm thread pins the order
+    connection so the boundary never pays a TLS handshake. Named loss:
+    pybit's recv_window auto-bump is gone, so persistent host clock skew
+    >~5s surfaces as repeated transient errors — proposing host clock
+    monitoring to the owner rather than building it unasked.
+  - **Killed by evidence, no sunk cost:** (1) the WebSocket order channel —
+    Bybit's v5 WS trade API does not exist on the demo cluster (docs state
+    it twice; live probe: demo host 404s where mainnet answers) and the
+    account rate limit is shared WS↔HTTP anyway; (2) grouped exit
+    publication as the default — two independent review probes showed one
+    dead symbol (delisting precedent) fails a grouped all-flat request at
+    owner admission as a unit, and the loss-guard flatten's republish latch
+    then never fires, leaving healthy positions open while the loss ceiling
+    is tripped. Exits stay one request each everywhere; grouping survives
+    only as an opt-in publisher capability with a landed-request check that
+    prevents double-queueing.
+  - **Review record:** two adversarial reviewers, five CONFIRMED defects
+    (all fixed, each with a test that fails without its fix): the grouped
+    loss-guard regression above; an armed fusion spec leaking to the
+    convergence retry inside the same failed pass (specs now name their
+    batch, mismatches discard); speculative leverage outcomes surviving into
+    unrelated batches (cleared every round); the fusion leverage map fusing
+    warm-cache mainnet entries (empty under shared authority); double
+    publication when a grouped submit raised after landing durably.
+  - **Rollback:** no tape or schema changes; wave-2 journals carry
+    additive span keys in attempt payloads that older code tolerates on
+    replay. Rolling back is redeploying the prior commit.
+  - **Expected numbers, to be proven by receipts:** boundary signal→inbox
+    ~15-35 ms (was ~4.5 s measured); owner software floor ~5-10 ms (was
+    25.7 ms median); with the Singapore move, whole chain ~60-90 ms
+    confirmed, against the 150 ms target. The pre-move chain stays wire-
+    dominated (~175 ms round trip from Helsinki).
+
 - **2026-08-13 ~13:40 UTC — The producers went perpetual: sleeves are plugs
   on one strategy host, cycles fire on account-journal commits and exact
   deadlines with a 60s idle floor, and carry's daily entries reach the venue
