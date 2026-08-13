@@ -9,7 +9,7 @@ incidents, repairs, change points — is [CHANGELOG.md](CHANGELOG.md). When
 something happens, add the dated entry there and edit the sections here to
 match; never append history to this file.
 
-## Now (recorded 2026-08-12; unmarked bullets below are from 2026-08-09)
+## Now (recorded 2026-08-13; unmarked bullets below are from 2026-08-09)
 
 - **The daily loss halt tripped 2026-08-10 and was reset 2026-08-12 19:13 UTC
   by owner instruction.** The trip: hand-trading drawdown took account equity
@@ -26,13 +26,19 @@ match; never append history to this file.
   confirmed. No entry can size against it (6 USDT floor), so the fleet
   decides cash until the account is funded. Earlier equity figures below are
   historical.
-- **Host runs `a61b8ab` — the perpetual strategy host — whole fleet green**
-  (deployed 2026-08-13 ~13:40 UTC, receipt `staged-ok commit=a61b8ab
-  profile=operational`, `verify-ok … mainnet=armed`, stop-first staged from
-  main; the one-line rollback floor `31ee68d` was deployed first — rolling
+- **Host runs `4063a87` — perpetual host + wave-2 order path + universe
+  resilience — whole fleet green** (deployed 2026-08-13 18:25 UTC, receipt
+  `staged-ok commit=4063a873…`, `verify-ok … mainnet=armed`, stop-first
+  staged from main; the one-line rollback floor `31ee68d` remains — rolling
   back past it requires archiving each producer's event tape). All nine
-  units on/active/enabled, zero error-level lines, existing hash-chained
-  tapes accepted unchanged. Producers are event-driven plugs on
+  units on/active/enabled, zero warning-level lines through 19:00 UTC.
+  Wave 2 measured live the same evening with real demo entries (CHANGELOG
+  2026-08-13 18:25): a grouped two-entry request went publish→venue-ack in
+  232–272 ms — pickup 17–18 ms, plan+fused attempt claims in one commit
+  33–62 ms, write-behind disk barrier 4–5 ms, wire under 1 ms, one batched
+  venue exchange 178–186 ms for both entries; cold leverage sets run
+  concurrently before the commit (247 ms join for two symbols, formerly
+  251 ms serial each after it). Producers are event-driven plugs on
   `strategy_host.py`: cycles fire on account-journal commits (~2s reaction
   to fills/receipts, was ≤60s), on exact time deadlines (never delayed by
   the debounce), and at least once per 60s idle floor — which keeps every
@@ -50,24 +56,26 @@ match; never append history to this file.
   Watch item: producer cycle/evidence growth under owner commit streams
   (floored at one cycle per 2s). CHANGELOG 2026-08-12/13 have the change
   points.
-- **Both trading-rule receipts were renewed 2026-08-09 and expire 2026-08-16.**
-  Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
-  funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.
-  The demo candidate universe grew 509 → 510, which is why the deploy chose a
-  full probe over a projection. **The funded renewal block is FIXED on `main`
-  (2026-08-13, owner directive "handle an ever-changing universe") but NOT
-  yet deployed — until the next deploy lands, the host still cannot renew
-  and the 2026-08-16 ~19:36 UTC expiry still binds.** The fix: a renewal now
-  freezes a fresh funded universe and rules as one pair from the live venue
-  (the frozen-forever universe is gone — VANRYUSDT's delisting had pinned it
-  against a venue that no longer listed it), rules also cover any symbol the
-  account still has exposure on (live row, or carried from the prior receipt
-  when the venue settled it), and a retiring symbol that is still held no
-  longer wedges the LONG cycle — entries stop, exits keep publishing until
-  flat. The next deploy exercises the new renewal live, since both receipts
-  are past half-life. The 2026-08-13 outage and the old options are in the
-  CHANGELOG; a failed renewal keeps the installed pair and the deploy
-  finishes (`70baf5f`, extended to both halves).
+- **The funded rules pair is fresh; the demo receipt is the one with a
+  deadline.** Funded: renewed live 2026-08-13 18:25 UTC by the first run of
+  the new renewal (owner directive "handle an ever-changing universe") —
+  fresh universe + rules frozen as one pair from the live venue,
+  `candidate-universe-20260813T182505Z` / `venue-rules-20260813T182505Z`,
+  512 symbols, VANRYUSDT gone, held-exposure list empty, all three env vars
+  rebound together; expires 2026-08-20 ~18:25 UTC, and every future deploy
+  renews it again (a failed renewal keeps the installed pair and the deploy
+  finishes). Rules also cover any symbol the account still has exposure on
+  (live row, or carried from the prior receipt when the venue settles it),
+  and a retiring symbol that is still held no longer wedges the LONG cycle —
+  entries stop, exits keep publishing until flat. **Demo:
+  `demo-rules-20260809T191337Z` (510 symbols, order-placing probe) expires
+  2026-08-16 ~19:13 UTC and did NOT refresh at the deploy — the refresh is
+  flag-gated (`ROLLOUT_REFRESH_STALE_DEMO_RULES=1`) and at this age routes
+  to the probe, which needs a flat demo account while demo holds carry's
+  KAITOUSDT + COTIUSDT. Owner decision before then: refresh in a flat
+  window, flatten first, or accept that a demo-owner restart after expiry
+  refuses until refreshed (a running owner keeps running; watchdog warns
+  from ~08-15 19:13).**
 - **No symbol waits for a book to be priced.** All 509 candidate symbols carry
   a pushed top of book (`tickers`), which is exactly what the order path reads;
   the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a

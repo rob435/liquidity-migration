@@ -16,12 +16,69 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
-- **2026-08-13 ~19:00 UTC — The system now handles a changing venue universe:
+- **2026-08-13 18:25–18:36 UTC — Deployed `4063a87` (wave-2 order path + universe
+  resilience) staged stop-first, and the new funded renewal ran live on its
+  first try: fresh funded universe and rules without VANRYUSDT, so the
+  2026-08-16 funded expiry is gone. Then measured the demo order path with
+  real entries: a two-entry batch went publish→venue-ack in 232–272 ms.**
+  Owner directive: "go simulate and execute some demo entries and measure
+  total latency again, break that down, and compare to old."
+  - **Deploy receipt.** Fleet stopped 18:22:48, `staged-ok
+    commit=4063a873…` 18:25, all nine units active+enabled, `mainnet=armed`,
+    zero warning-level lines in any unit through 19:00.
+  - **First live renewal under the new machinery** (both receipts were past
+    half-life, so the deploy itself was the exercise): fresh funded universe
+    `candidate-universe-20260813T182505Z-4063a873c415` (512 symbols,
+    VANRYUSDT absent) and rules `venue-rules-20260813T182505Z-4063a873c415`
+    (512 rules, held-exposure list empty — the funded account is flat), all
+    three env vars rebound to the pair as a unit. New funded expiry
+    2026-08-20 ~18:25 UTC. The un-renewable frozen universe and its
+    2026-08-16 ~19:36 cliff are history.
+  - **The measured order-path ledger** — six real demo requests through the
+    production inbox (BTCUSDT + ETHUSDT, ~139/41 USDT at 2x under a
+    probe-only carry strategy id; every position closed; account exposure
+    identical before and after; receipts carry the new span milestones).
+    Grouped two-entry request, leverage already proven (n=2):
+    publish→owner-pickup 17–18 ms; pickup→plan-committed 33–62 ms (the
+    attempt claims FUSED into the same commit: 0 ms extra; the 62 was the
+    first pass paying a fresh market-data read); commit→disk-proof 4–5 ms
+    (the write-behind journal's barrier, real VPS disks); disk→wire under
+    1 ms; wire→venue-ack 178–186 ms for ONE batched request carrying BOTH
+    entries. Totals 232 and 272 ms. Single reduce-only exits (n=4):
+    pickup→wire 20–39 ms, same ~172–183 ms venue exchange; quiet-path total
+    226 ms, worst 733 ms when the exit queued behind the pass ahead (the
+    one-request-per-pass line is unchanged; grouped exits stay deliberately
+    reverted). Cold-leverage evidence from two earlier probe rounds the
+    risk check rejected (25 USDT is under one BTC qty step —
+    `qty_step_mismatch`, refused loudly as designed, whole grouped request
+    refused as a unit): both symbols' leverage was set at the venue
+    concurrently, join 247 ms, overlapped with planning BEFORE the commit.
+  - **Old vs new, measured against the 2026-08-13 00:20 ledger below:**
+    owner decision-to-wire 37–68 ms warm was ~341 ms cold / ~95 ms warm
+    (admission ~50 + separate claim commit + 40 claim→wire, plus 251 ms
+    serial leverage when cold); the second entry now rides the same batch
+    and the same 178 ms venue exchange instead of its own pass ~1.3 s later;
+    the venue round trip itself (172–186 ms) is geography and does not move
+    until the Singapore box. What the probe cannot exercise — the producer
+    side (wake → publish of a frozen book) — self-reports at the next 00:20
+    boundary (`froze_ahead`/`build_skipped` receipts).
+  - **Open item for the owner: the demo rules receipt still expires
+    2026-08-16 ~19:13 UTC** (`demo-rules-20260809T191337Z`). The deploy's
+    demo refresh is flag-gated (`ROLLOUT_REFRESH_STALE_DEMO_RULES=1`) and at
+    this receipt age routes to the order-placing probe, which requires a
+    flat demo account — demo holds carry's KAITOUSDT and COTIUSDT, so a
+    refresh deploy today would fail with the fleet stopped. Options: refresh
+    in a naturally flat window; flatten demo first (closes carry's live
+    positions); or let it age — a RUNNING demo owner keeps running past
+    expiry, but any restart after 08-16 19:13 refuses until refreshed, and
+    the watchdog goes warning from ~08-15 19:13.
+
+- **2026-08-13 ~17:45 UTC — The system now handles a changing venue universe:
   delistings and new listings stop breaking renewals, sleeves, and exits.
-  Merged to main after review; NOT yet deployed — rides the next deploy,
-  which will itself exercise the new renewal live (both rules receipts are
-  past half-life). Until that deploy lands, the funded renewal block below
-  and its 2026-08-16 expiry still bind on the host.** Owner directive: "we
+  Merged to main after review; deployed 18:25 UTC (entry above), where the
+  new renewal ran live on its first try.** (This entry originally said "NOT
+  yet deployed" and carried a wrong ~19:00 stamp; corrected same day when
+  the deploy landed.) Owner directive: "we
   need to be able handle an ever changing universe." Branch
   `engine/universe-resilience`, four fixes, each with a test proven to fail
   without it; gate green at 3,158 tests.
