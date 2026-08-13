@@ -80,6 +80,12 @@ impl FeedState {
         &self.table
     }
 
+    /// Keep the interning, drop the running state. The feed builds one of
+    /// these to answer `symbols()` while the socket worker keeps its own.
+    pub fn into_table(self) -> SymbolTable {
+        self.table
+    }
+
     pub fn symbol_id(&self, name: &str) -> Option<SymbolId> {
         self.table.get(name)
     }
