@@ -1,0 +1,257 @@
+//! The equity-anchored envelope, against the same table as
+//! tests/policy/test_equity_anchored_envelope.py, plus the worst-case-loss
+//! allowance the Rust deny reason is written in.
+
+mod common;
+
+use common::*;
+use engine_risk::{Kernel, KernelConfig, LossGuardConfig};
+use engine_types::orders::Side;
+use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};
+
+/// The loss ceiling is off in these cases so that moving equity exercises the
+/// envelope rather than the guard.
+fn envelope_cfg() -> KernelConfig {
+    KernelConfig {
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: None,
+        },
+        ..equity_tracking_config()
+    }
+}
+
+fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
+    let now = SEC;
+    kernel.assess(
+        &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, now),
+        &flat(equity, now),
+    )
+}
+
+#[test]
+// test_a_profile_without_the_block_keeps_the_historical_fixed_reference
+fn a_config_that_does_not_track_equity_keeps_its_fixed_reference() {
+    let cfg = KernelConfig {
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: None,
+        },
+        ..demo_config()
+    };
+    let mut kernel = Kernel::new(cfg).expect("config");
+    observe(&mut kernel, 1.0);
+    assert_eq!(kernel.capital_reference_usdt(), 250_000.0);
+}
+
+#[test]
+// test_the_reference_follows_equity_down_immediately
+fn the_reference_follows_equity_down_immediately() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let start = kernel.capital_reference_usdt();
+    observe(&mut kernel, start * 0.99);
+    assert_eq!(kernel.capital_reference_usdt(), start * 0.99);
+}
+
+#[test]
+// test_expansion_waits_for_a_move_larger_than_the_dead_band
+fn expansion_waits_for_a_move_larger_than_the_dead_band() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let start = kernel.capital_reference_usdt();
+
+    observe(&mut kernel, start * 1.02);
+    assert_eq!(kernel.capital_reference_usdt(), start);
+
+    observe(&mut kernel, start * 1.20);
+    assert_eq!(kernel.capital_reference_usdt(), start * 1.20);
+}
+
+#[test]
+// test_unknown_equity_moves_nothing, and the same readings fail closed here
+fn unknown_equity_moves_nothing_and_refuses() {
+    for equity in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+        let start = kernel.capital_reference_usdt();
+        assert!(
+            matches!(
+                observe(&mut kernel, equity),
+                RiskVerdict::Deny {
+                    reason: DenyReason::UnknownState { .. }
+                }
+            ),
+            "equity {equity} must refuse"
+        );
+        assert_eq!(kernel.capital_reference_usdt(), start);
+    }
+}
+
+#[test]
+// test_the_floor_bounds_the_envelope_rather_than_collapsing_it
+fn the_floor_bounds_the_envelope_rather_than_collapsing_it() {
+    let mut cfg = envelope_cfg();
+    cfg.envelope.floor_usdt = 500.0;
+    let mut kernel = Kernel::new(cfg).expect("config");
+    observe(&mut kernel, 1.0);
+    assert_eq!(kernel.capital_reference_usdt(), 500.0);
+}
+
+#[test]
+// test_an_equity_fraction_can_hold_the_book_below_the_wallet
+fn an_equity_fraction_can_hold_the_book_below_the_wallet() {
+    let mut cfg = envelope_cfg();
+    cfg.envelope.equity_fraction = 0.25;
+    let mut kernel = Kernel::new(cfg).expect("config");
+    observe(&mut kernel, 10_000.0);
+    assert_eq!(kernel.capital_reference_usdt(), 2_500.0);
+}
+
+#[test]
+// test_the_profile_refuses_an_unbounded_or_oversized_anchor
+fn the_config_refuses_an_unbounded_or_oversized_anchor() {
+    let mut zero_floor = envelope_cfg();
+    zero_floor.envelope.floor_usdt = 0.0;
+    assert!(Kernel::new(zero_floor)
+        .err()
+        .expect("must refuse")
+        .detail
+        .contains("floor_usdt must be positive"));
+
+    let mut oversized = envelope_cfg();
+    oversized.envelope.equity_fraction = 1.5;
+    assert!(Kernel::new(oversized)
+        .err()
+        .expect("must refuse")
+        .detail
+        .contains("equity_fraction cannot exceed 1"));
+
+    let mut no_stop_distance = envelope_cfg();
+    no_stop_distance.envelope.disaster_stop_fraction = 1.0;
+    assert!(Kernel::new(no_stop_distance)
+        .err()
+        .expect("must refuse")
+        .detail
+        .contains("fraction in (0, 1)"));
+}
+
+// --------------------------------------------------------------------------
+// The allowance itself. Demo shape: reference 250_000, gross cap twice it, and
+// a 0.35 disaster stop, so the book may risk 175_000.
+// --------------------------------------------------------------------------
+
+#[test]
+fn a_book_exactly_at_the_allowance_is_allowed() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    // 500_000 notional * 0.35 = 175_000 = 250_000 * 2.0 * 0.35.
+    let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
+    assert_eq!(
+        kernel.assess(&intent, &flat(250_000.0, now)),
+        RiskVerdict::Allow { qty: 50_000.0 }
+    );
+}
+
+#[test]
+fn a_book_one_step_over_the_allowance_is_refused() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    let intent = entry(CARRY, BUSDT, Side::Buy, 50_001.0, 10.0, 9.0, now);
+    match kernel.assess(&intent, &flat(250_000.0, now)) {
+        RiskVerdict::Deny {
+            reason:
+                DenyReason::EnvelopeBreached {
+                    worst_case_loss_usdt,
+                    allowance_usdt,
+                },
+        } => {
+            assert!((worst_case_loss_usdt - 175_003.5).abs() < 1e-6);
+            assert!((allowance_usdt - 175_000.0).abs() < 1e-6);
+        }
+        other => panic!("expected an envelope breach, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_positions_already_held_count_against_the_allowance() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    let held = view(
+        250_000.0,
+        vec![position(CUSDT, Side::Buy, 40_000.0, 10.0, true)],
+        now,
+    );
+    // 400_000 held + 110_000 asked is over the 500_000 the allowance funds.
+    let intent = entry(CARRY, BUSDT, Side::Buy, 11_000.0, 10.0, 9.0, now);
+    assert!(matches!(
+        kernel.assess(&intent, &held),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
+
+    let smaller = entry(CARRY, BUSDT, Side::Buy, 10_000.0, 10.0, 9.0, now);
+    assert_eq!(
+        kernel.assess(&smaller, &held),
+        RiskVerdict::Allow { qty: 10_000.0 }
+    );
+}
+
+#[test]
+fn a_stop_wider_than_the_disaster_stop_is_charged_at_its_own_distance() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    // 400_000 notional: 140_000 at the 0.35 disaster stop, 200_000 at this
+    // order's own stop half the entry price away.
+    let tight = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 9.0, now);
+    assert_eq!(
+        kernel.assess(&tight, &flat(250_000.0, now)),
+        RiskVerdict::Allow { qty: 40_000.0 }
+    );
+
+    let wide = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 5.0, now);
+    match kernel.assess(&wide, &flat(250_000.0, now)) {
+        RiskVerdict::Deny {
+            reason:
+                DenyReason::EnvelopeBreached {
+                    worst_case_loss_usdt,
+                    ..
+                },
+        } => assert!((worst_case_loss_usdt - 200_000.0).abs() < 1e-6),
+        other => panic!("expected an envelope breach, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_allowance_follows_equity_down() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
+    assert_eq!(
+        kernel.assess(&intent, &flat(250_000.0, now)),
+        RiskVerdict::Allow { qty: 50_000.0 }
+    );
+
+    // The same order against a wallet that contracted 1%: the allowance is now
+    // 173_250 and 175_000 of worst case no longer fits.
+    assert!(matches!(
+        kernel.assess(&intent, &flat(247_500.0, now)),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
+}
+
+#[test]
+// test_an_exit_is_never_blocked_by_the_partition, same rule for the envelope:
+// a risk-reducing order bypasses the caps by design.
+fn an_exit_is_never_blocked_by_the_envelope() {
+    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let now = SEC;
+    let held = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 60_000.0, 10.0, true)],
+        now,
+    );
+    let out = exit(CARRY, BUSDT, Side::Sell, 60_000.0, 10.0, now);
+    assert_eq!(
+        kernel.assess(&out, &held),
+        RiskVerdict::Allow { qty: 60_000.0 }
+    );
+}
