@@ -103,6 +103,9 @@ def _ready_roots(
         owner_invocation_id=capture_invocation_id or invocation_id,
     )
     recorder.on_message(_snapshot(), local_receive_ts_ns=capture_receive_ts_ns)
+    # Production shape: the owner loop publishes the deferred capture pointer
+    # from its maintenance tail before the store closes.
+    recorder.flush_owner_readiness()
     recorder.close()
     return account, inbox, capture
 

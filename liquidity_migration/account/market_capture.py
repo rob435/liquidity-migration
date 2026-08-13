@@ -802,6 +802,7 @@ class SequenceAwareMarketRecorder:
         self.store = SegmentedCaptureStore(root, config=self.config)
         self._last_readiness_publish_monotonic_ns: int | None = None
         self._last_market_readiness_publish_monotonic_ns: int | None = None
+        self._pending_owner_readiness: tuple[int, str, CaptureAppendLocation] | None = None
         self._required_symbols: set[str] = set()
         self.books: dict[str, BookReconstruction] = {}
         self._post_fill_schedules: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -986,7 +987,7 @@ class SequenceAwareMarketRecorder:
             return dict(record)
         safe = json_safe(record)
         location = self.store.append(safe)
-        self._publish_owner_readiness(safe, location=location)
+        self._note_pending_owner_readiness(safe, location=location)
         output = dict(safe)
         try:
             relative_path = location.path.relative_to(self.store.root).as_posix()
@@ -1067,30 +1068,69 @@ class SequenceAwareMarketRecorder:
             label="owner-market readiness",
         )
 
-    def _publish_owner_readiness(
+    def _note_pending_owner_readiness(
         self,
         record: Mapping[str, Any],
         *,
         location: CaptureAppendLocation,
     ) -> None:
-        invocation_id = self.owner_invocation_id
-        if invocation_id is None:
+        """Remember the newest persisted record for a deferred readiness publish.
+
+        The order path calls this under the recorder lock and pays no I/O.
+        The segment fsync and the sidecar's two fsyncs — measured ~2 ms each
+        on the deployed host — moved to ``flush_owner_readiness``, which the
+        owner loop calls from its maintenance tail. The capture tape's
+        durability contract was already eventual (the one-second latch plus
+        the store's every-N-records fsync); deferring the publish keeps the
+        same bound while taking ~6 ms off every order pass.
+        """
+
+        if self.owner_invocation_id is None:
             return
-        now_monotonic_ns = self.clock.monotonic_ns()
-        last_publish_ns = self._last_readiness_publish_monotonic_ns
-        if (
-            last_publish_ns is not None
-            and now_monotonic_ns - last_publish_ns < OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS
-        ):
-            return
+        self._pending_owner_readiness = (
+            int(record.get("local_receive_ts_ns") or 0),
+            str(record.get("record_id") or ""),
+            location,
+        )
+
+    def flush_owner_readiness(self) -> bool:
+        """Publish the deferred capture-readiness pointer, off the order path.
+
+        Returns True when a pointer was published. The row is synced before
+        the pointer to it is published — the same invariant the old inline
+        publish held. The latch is set and the pending slot cleared before
+        any I/O, so a failed fsync cannot retry-loop inside one publication
+        interval; the next persisted record re-arms the slot. A latched call
+        keeps the pending slot so the pointer still advances once the
+        interval elapses.
+        """
+
+        with self._lock:
+            pending = self._pending_owner_readiness
+            invocation_id = self.owner_invocation_id
+            if pending is None or invocation_id is None:
+                return False
+            now_monotonic_ns = self.clock.monotonic_ns()
+            last_publish_ns = self._last_readiness_publish_monotonic_ns
+            if (
+                last_publish_ns is not None
+                and now_monotonic_ns - last_publish_ns < OWNER_CAPTURE_READINESS_PUBLISH_INTERVAL_NS
+            ):
+                return False
+            self._last_readiness_publish_monotonic_ns = now_monotonic_ns
+            self._pending_owner_readiness = None
+            local_receive_ts_ns, record_id, location = pending
+        # I/O runs outside the recorder lock: the store serializes itself,
+        # and the sidecar lands via one atomic replace, so a concurrent
+        # capture neither blocks on these fsyncs nor observes a torn file.
         try:
             relative_path = location.path.relative_to(self.store.root).as_posix()
         except ValueError as exc:
             raise MarketCaptureError("capture append escaped its configured root") from exc
         sidecar = OwnerCaptureReadinessSidecar(
             owner_invocation_id=invocation_id,
-            local_receive_ts_ns=int(record.get("local_receive_ts_ns") or 0),
-            record_id=str(record.get("record_id") or ""),
+            local_receive_ts_ns=local_receive_ts_ns,
+            record_id=record_id,
             record_sha256=location.record_sha256,
             segment_path=relative_path,
             segment_device=location.segment_device,
@@ -1098,15 +1138,13 @@ class SequenceAwareMarketRecorder:
             byte_offset=location.byte_offset,
             byte_length=location.byte_length,
         )
-        # Latch before I/O so a post-replace fsync error cannot loop inside the
-        # same interval; the row is synced before the pointer to it is published.
-        self._last_readiness_publish_monotonic_ns = now_monotonic_ns
         self.store.sync(location)
         _atomic_write_readiness_sidecar(
             owner_capture_readiness_path(self.store.root),
             sidecar,
             label="owner-capture readiness",
         )
+        return True
 
     def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> list[dict[str, Any]]:
         local_ns = int(local_receive_ts_ns or self.clock.wall_time_ns())

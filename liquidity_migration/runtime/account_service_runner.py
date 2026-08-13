@@ -99,6 +99,7 @@ from liquidity_migration.account.market_capture import (
     BybitRawPublicMarketStream,
     BybitTickerTouchCache,
     MarketCaptureConfig,
+    MarketCaptureError,
     SequenceAwareMarketRecorder,
     operational_market_symbols,
     recorder_callback,
@@ -1765,6 +1766,15 @@ def main(argv: list[str] | None = None) -> int:
                 public_stream.update_symbols(desired)
                 subscribed_symbols = set(desired)
                 last_symbol_refresh = now
+            # The order path only notes the capture-readiness pointer; the
+            # segment fsync and sidecar write it used to pay land here, in
+            # the maintenance tail, bounded by the same one-second latch. A
+            # failed publish degrades the pointer's freshness, not safety —
+            # the next persisted capture re-arms it.
+            try:
+                recorder.flush_owner_readiness()
+            except (MarketCaptureError, OSError) as exc:
+                _logger.warning("deferred capture-readiness publish failed: %s", exc)
             protection_markets, protection_skipped = protection_market_refs(
                 recorder,
                 {
@@ -2178,6 +2188,12 @@ def main(argv: list[str] | None = None) -> int:
         kernel.journal.close()
         public_stream.close()
         touch_stream.close()
+        # Publish the last capture pointer before the store closes; close()
+        # still fsyncs every live segment either way.
+        try:
+            recorder.flush_owner_readiness()
+        except (MarketCaptureError, OSError) as exc:
+            _logger.warning("final capture-readiness publish failed: %s", exc)
         recorder.close()
         owner_lease.close()
 
