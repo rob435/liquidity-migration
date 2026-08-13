@@ -26,22 +26,30 @@ match; never append history to this file.
   confirmed. No entry can size against it (6 USDT floor), so the fleet
   decides cash until the account is funded. Earlier equity figures below are
   historical.
-- **Host runs `cf0c20a` — the fast-execution engine — whole fleet green**
-  (deployed 2026-08-13 12:01 UTC, receipt `staged-ok commit=70baf5f
+- **Host runs `a61b8ab` — the perpetual strategy host — whole fleet green**
+  (deployed 2026-08-13 ~13:40 UTC, receipt `staged-ok commit=a61b8ab
   profile=operational`, `verify-ok … mainnet=armed`, stop-first staged from
-  main). All nine units on/active/enabled, zero error-level lines on the
-  owners and producers after the restart. Both account owners run the
-  write-behind journal (marker `account_journal/write_behind.owner` present
-  on the demo root and the mainnet root); batched venue submission,
-  tick-driven quote repricing, and deadline-driven exits are live. The first
-  deadline-fired (`market_boundary`) cycle landed 2026-08-13 00:20:00.001
-  UTC (+0.001 s vs the grid's median +24 s); carry now also freezes the
-  day's book ahead of the deadline so the boundary pass publishes in tens
-  of milliseconds instead of 4.5 s (receipts: `froze_ahead=True` on the
-  ~00:19 cycle, `build_skipped=True` on the 00:20 cycle). The first
-  multi-order batch receipt is still pending — it needs a LONG multi-entry
-  cycle or a sliced entry, since carry publishes per-symbol requests.
-  CHANGELOG 2026-08-12 and 2026-08-13 have the change points.
+  main; the one-line rollback floor `31ee68d` was deployed first — rolling
+  back past it requires archiving each producer's event tape). All nine
+  units on/active/enabled, zero error-level lines, existing hash-chained
+  tapes accepted unchanged. Producers are event-driven plugs on
+  `strategy_host.py`: cycles fire on account-journal commits (~2s reaction
+  to fills/receipts, was ≤60s), on exact time deadlines (never delayed by
+  the debounce), and at least once per 60s idle floor — which keeps every
+  quiet-time contract (watchdog ≤10min receipts, hourly funding sweep,
+  entry republication) where the grid had it. Both account owners run the
+  write-behind journal; batched venue submission, tick-driven quote
+  repricing, and deadline-driven exits are live. Carry now publishes its
+  entries+resizes as ONE grouped request, so the boundary chain is: freeze
+  ahead (~00:19) → deadline wake +1ms → publish frozen book in tens of ms →
+  one admission pass → one venue batch request for the whole book.
+  Rejection suppression is scoped to what was rejected (one dust symbol no
+  longer blanks a grouped day). Receipts to watch at 2026-08-14 00:20 UTC:
+  `froze_ahead=True` pre-boundary, `build_skipped=True` at 00:20, one
+  grouped entry request, first carry batch venue submission if ≥2 entries.
+  Watch item: producer cycle/evidence growth under owner commit streams
+  (floored at one cycle per 2s). CHANGELOG 2026-08-12/13 have the change
+  points.
 - **Both trading-rule receipts were renewed 2026-08-09 and expire 2026-08-16.**
   Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
   funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.

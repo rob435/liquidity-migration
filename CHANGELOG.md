@@ -16,6 +16,57 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 ~13:40 UTC — The producers went perpetual: sleeves are plugs
+  on one strategy host, cycles fire on account-journal commits and exact
+  deadlines with a 60s idle floor, and carry's daily entries reach the venue
+  as one batch.** Deployed `staged-ok commit=a61b8ab profile=operational`,
+  all nine units active+enabled, zero error lines, the existing hash-chained
+  event tapes accepted unchanged (carry:demo resumed at sequence 13400). A
+  one-line forward-compat commit (`31ee68d`, admitting the new
+  `journal_change` tape kind) was deployed FIRST and is the safe rollback
+  floor — rolling back past it requires archiving each producer's
+  `strategy_event_tape.jsonl` or the daemons crash-loop on the unknown kind.
+  What changed (branch `engine/perpetual-host`, commits `f475aad..3ebfc6a`):
+  - The producer daemon base is extracted to `strategy_host.py`; LONG,
+    CARRY, and the retired CONTINUOUS are plugs (contract in the module
+    docstring). Behavior-preserving; carry no longer inherits the LONG
+    class.
+  - New journal-change wake: producers watch the account journal's
+    transaction segments (commits are rename-visible) and react to fills,
+    rejection receipts, and protection events in ~2s instead of ≤60s.
+    Change points: carry flips from the pure 60s timer to event-driven
+    (same idle floor, same 00:20 deadline + freeze-ahead machinery), and
+    the event wait is deadline-first — the 2.0s debounce never delays a
+    due deadline (LONG max-hold/decay exits fired up to 2.0s late before),
+    and a wake landing at the deadline instant folds into the boundary
+    cycle. Carry journal-wake cycles serve the frozen day without a data
+    build unless the funding sweep is due or a freeze-ahead ask is pending.
+  - Carry publishes its entries+resizes as ONE grouped request (change
+    point): one admission pass (was ~1.3s per extra entry), one journal
+    claim, and the ≥2-command venue batch path finally engages for carry.
+    Grouping is stricter on risk (all intents against the same prior book).
+    With it, a rejection-suppression fix that also covers LONG: terminal
+    suppression now follows what a rejection was ABOUT — an attempt named
+    by a scoped key (`:SYMBOL`/`:target_key` suffix), or the whole batch
+    only for account-level keys — so one dust symbol or a transient margin
+    reading can no longer blank the whole grouped day's entries until
+    signal expiry.
+  - Fault fix: LONG cycles never wrote `kline_store_max_ts_ms`, so the
+    fleet watchdog's LONG WS-staleness alarm had been dead code since it
+    shipped. Now written.
+  Review: two adversarial passes, 13 findings, 7 fixed (each with a test
+  proven to fail without the fix — including a measured 419,704-spin hot
+  loop in the journal watch's failure path), the rest recorded: the
+  rollback-floor rule above; a deleted-and-recreated transactions dir
+  silently parks the inotify wake on the idle floor (production resets stop
+  producers first); wake-label counters can swap journal/bar attribution
+  under a benign race (market_boundary is never mislabeled); producer
+  evidence growth under sustained owner commit streams is floored at one
+  cycle per 2s debounce — POST-DEPLOY WATCH ITEM. Receipts to watch at the
+  2026-08-14 00:20 UTC boundary: `froze_ahead=True` on a pre-boundary
+  cycle, `build_skipped=True` at 00:20, one grouped entry request, and the
+  first carry batch venue submission if the day has ≥2 entries.
+
 - **2026-08-13 10:55-12:01 UTC — Deploying the freeze-ahead change hit a
   latent fault: the mainnet venue-rules renewal fails on a delisted symbol,
   and its failure stranded the three mainnet units stopped for ~5 minutes.**
