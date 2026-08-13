@@ -296,7 +296,26 @@ impl RiskKernel for Kernel {
                 client_order_id, ..
             } => self.book.forget(client_order_id),
             OrderUpdate::Ack(_) | OrderUpdate::StopAttached { .. } => {}
+            // A private-stream gap loses nothing here: registered orders may
+            // still fill, and the engine refreshes the account view that
+            // `assess` judges against.
+            OrderUpdate::StreamReset { .. } => {}
         }
+    }
+
+    // Forward the trait hooks to the inherent methods, so a caller generic
+    // over `RiskKernel` reaches the real accounting and not the no-op
+    // defaults.
+    fn observe_price(&mut self, symbol: SymbolId, px: f64) {
+        Kernel::observe_price(self, symbol, px);
+    }
+
+    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
+        Kernel::observe_wall_clock_ns(self, wall_ns);
+    }
+
+    fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
+        Kernel::register_order(self, client_order_id, intent, approved_qty);
     }
 }
 

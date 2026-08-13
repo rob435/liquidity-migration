@@ -4,23 +4,13 @@
 //! they are all comparable to each other. They are not wall-clock times; use
 //! [`wall_ms`] when a record needs a human date.
 
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-fn origin() -> Instant {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    *ORIGIN.get_or_init(Instant::now)
-}
-
-/// Nanoseconds since the engine's clock origin.
+/// Nanoseconds since the engine's clock origin (the shared one in
+/// engine-types, so stamps from every crate are comparable).
 pub fn now_ns() -> u64 {
-    origin().elapsed().as_nanos() as u64
+    engine_types::clock::mono_ns()
 }
 
 /// Wall-clock milliseconds since the unix epoch.
 pub fn wall_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    engine_types::clock::wall_ms()
 }

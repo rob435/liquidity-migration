@@ -11,6 +11,7 @@
 //! own clock (comparable to each other, not to wall time); `*_ms` fields are
 //! venue wall-clock milliseconds.
 
+pub mod clock;
 pub mod ids;
 pub mod market;
 pub mod orders;
@@ -46,7 +47,8 @@ pub trait VenueGateway {
     ) -> Result<(), VenueError>;
     /// Attach or move a position stop (stop-loss trigger price).
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
-    /// Current positions and equity, one venue round trip.
+    /// Current positions and equity. On Bybit this is two venue reads
+    /// (wallet and positions), issued together.
     async fn account_view(&mut self) -> Result<AccountView, VenueError>;
     /// Tick size, quantity step, and minimums for every tradable symbol.
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError>;

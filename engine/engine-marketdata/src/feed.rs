@@ -28,22 +28,18 @@ const TOPICS_PER_MESSAGE: usize = 100;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Monotonic nanoseconds from a base taken when the feed was built. Comparable
-/// to other engine stamps, not to wall time.
+/// Monotonic nanoseconds from the engine's shared clock origin (in
+/// engine-types), so feed stamps are comparable to every other crate's.
 #[derive(Copy, Clone, Debug)]
-pub struct MonoClock {
-    base: Instant,
-}
+pub struct MonoClock;
 
 impl MonoClock {
     pub fn new() -> Self {
-        MonoClock {
-            base: Instant::now(),
-        }
+        MonoClock
     }
 
     pub fn now_ns(&self) -> u64 {
-        self.base.elapsed().as_nanos() as u64
+        engine_types::clock::mono_ns()
     }
 }
 

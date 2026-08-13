@@ -105,7 +105,7 @@ impl LedgerOfOrders {
                     rec.ending = Some(Ending::Filled);
                 }
             }
-            OrderUpdate::StopAttached { .. } => {}
+            OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => {}
         }
     }
 
@@ -122,15 +122,15 @@ impl LedgerOfOrders {
     }
 }
 
-/// Which order an update is about. `StopAttached` names a symbol, not an
-/// order, so it belongs to nobody here.
+/// Which order an update is about. `StopAttached` names a symbol and
+/// `StreamReset` names nothing, so they belong to nobody here.
 pub fn client_order_id(update: &OrderUpdate) -> Option<&str> {
     match update {
         OrderUpdate::Ack(ack) => Some(&ack.client_order_id),
         OrderUpdate::Reject { client_order_id, .. } => Some(client_order_id),
         OrderUpdate::Fill { client_order_id, .. } => Some(client_order_id),
         OrderUpdate::Cancelled { client_order_id, .. } => Some(client_order_id),
-        OrderUpdate::StopAttached { .. } => None,
+        OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => None,
     }
 }
 

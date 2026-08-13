@@ -58,4 +58,13 @@ pub trait RiskKernel {
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict;
     /// Keep internal exposure/fill accounting current.
     fn on_update(&mut self, update: &OrderUpdate);
+    /// Latest price for a symbol, for valuing exposure. Default: ignore.
+    fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
+    /// Wall time of the account reading being folded in — the loss guard's
+    /// daily anchor rolls on the READING's UTC day, not on "now".
+    /// Default: ignore.
+    fn observe_wall_clock_ns(&mut self, _wall_ns: u64) {}
+    /// Bind an engine-minted client order id to the intent it approved, so
+    /// later fills can be attributed per strategy. Default: ignore.
+    fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}
 }

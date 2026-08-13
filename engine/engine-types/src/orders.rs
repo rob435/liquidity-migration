@@ -106,6 +106,11 @@ pub enum OrderUpdate {
         trigger_px: f64,
         recv_ns: u64,
     },
+    /// The private stream reconnected; updates during the gap may be lost.
+    /// The engine must refresh its account view before trusting exposure.
+    StreamReset {
+        recv_ns: u64,
+    },
 }
 
 /// Tick size, step size, and minimums for one instrument.
@@ -119,6 +124,10 @@ pub struct InstrumentRule {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VenueError {
+    /// The request could not be built at all (unknown symbol, non-finite
+    /// number). Nothing was sent; retrying the same input cannot succeed.
+    #[error("cannot build request: {0}")]
+    BadRequest(String),
     #[error("venue transport: {0}")]
     Transport(String),
     #[error("venue rejected ({code}): {message}")]

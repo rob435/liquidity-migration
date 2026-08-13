@@ -143,6 +143,7 @@ fn update_words(update: &engine_types::OrderUpdate) -> String {
         U::StopAttached {
             symbol, trigger_px, ..
         } => format!("stop on symbol {} at {trigger_px}", symbol.0),
+        U::StreamReset { .. } => "private stream reconnected; gap possible".to_string(),
     }
 }
 
