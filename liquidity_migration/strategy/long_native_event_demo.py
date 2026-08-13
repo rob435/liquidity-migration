@@ -50,8 +50,8 @@ from liquidity_migration.strategy.account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
     long_profile_universe_inputs,
-    require_scheduled_retirements_flat,
     require_profile_binding,
+    scheduled_retirement_exposure,
 )
 from liquidity_migration.account.account_kernel import AccountJournalCursor
 from liquidity_migration.account.account_route import require_account_route
@@ -351,6 +351,7 @@ def run_long_native_demo_cycle(
         universe = _build_long_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
         candidate_universe = None
         candidate_reconciliation = None
+        retirement_exposure: dict[str, tuple[str, ...]] = {}
         if demo.candidate_universe_file:
             candidate_universe = load_candidate_universe(
                 demo.candidate_universe_file,
@@ -374,12 +375,27 @@ def run_long_native_demo_cycle(
                     / f"{candidate_universe.artifact_sha256}.json"
                 ),
             )
-            require_scheduled_retirements_flat(
+            # A retiring symbol still holding exposure is a draining state,
+            # not a fault: entries for it are already suppressed below via
+            # active_symbols, and the exits that clear it are planned from the
+            # account journal further down this very cycle. Failing here would
+            # block the only publisher of those exits (the pre-2026-08-13
+            # deadlock).
+            retirement_exposure = scheduled_retirement_exposure(
                 candidate_reconciliation,
                 route=route,
-                context="LONG cycle",
                 journal_cursor=journal_cursor,
             )
+            if retirement_exposure:
+                _LOGGER.warning(
+                    "LONG cycle: scheduled-retirement symbols still hold "
+                    "account exposure; entries stay suppressed and exits keep "
+                    "publishing until flat: %s",
+                    "; ".join(
+                        f"{symbol}={','.join(labels)}"
+                        for symbol, labels in sorted(retirement_exposure.items())
+                    ),
+                )
             universe = universe.filter(
                 pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))
             )
@@ -660,6 +676,14 @@ def run_long_native_demo_cycle(
         )
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
+        # Added after write_dataset on purpose: the persisted cycle dataset
+        # keeps its schema, while the receipt/report payload records which
+        # retiring symbols are still draining.
+        cycle_row["scheduled_retirement_exposure_json"] = json.dumps(
+            {symbol: list(labels) for symbol, labels in sorted(retirement_exposure.items())},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         payload["cycle"] = cycle_row
     return PublishedTargetCyclePayload(
         payload,

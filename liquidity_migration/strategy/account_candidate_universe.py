@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
@@ -1216,23 +1216,22 @@ def enforce_frozen_candidate_frames(
     )
 
 
-def require_scheduled_retirements_flat(
-    reconciliation: CandidatePopulationReconciliation,
+def account_exposure_labels(
     *,
     route: object,
-    context: str,
     tolerance: float = 1e-12,
     journal_cursor: object | None = None,
-) -> None:
-    """Fail closed if a retired entry symbol has any account or queue exposure.
+    symbols: Iterable[str] | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Symbols with live account or queue exposure, labeled by where it sits.
 
-    A per-cycle caller passes its resumable ``journal_cursor`` so the account
-    state comes from an incremental verified read; without one the check pays
-    a full cold journal read, which is fine for CLI and offline callers.
+    ``symbols=None`` reports every exposed symbol on the account; a caller
+    with a specific population passes it to restrict the scan. A per-cycle
+    caller passes its resumable ``journal_cursor`` so the account state comes
+    from an incremental verified read; without one the check pays a full cold
+    journal read, which is fine for CLI and offline callers.
     """
 
-    if not reconciliation.scheduled_retirements:
-        return
     from liquidity_migration.account.account_kernel import (  # noqa: PLC0415
         AccountJournalCursor,
         read_account_journal,
@@ -1242,25 +1241,43 @@ def require_scheduled_retirements_flat(
 
     account_path = getattr(route, "account_path", None)
     if not isinstance(account_path, Path):
-        raise TypeError("scheduled-retirement flatness requires a verified AccountRoute")
-    retired = {row.symbol for row in reconciliation.scheduled_retirements}
+        raise TypeError("account exposure requires a verified AccountRoute")
     inbox = AccountIntentInbox(route)  # type: ignore[arg-type]
     unresolved = inbox.unresolved_requests()
-    pending = sorted(
-        {
-            item.intent.symbol.upper()
-            for request in unresolved
-            for item in request.intents
-            if item.intent.symbol.upper() in retired
-            and abs(float(item.intent.signed_notional_usdt)) > tolerance
-        }
-    )
+    pending = {
+        item.intent.symbol.upper()
+        for request in unresolved
+        for item in request.intents
+        if abs(float(item.intent.signed_notional_usdt)) > tolerance
+    }
     if isinstance(journal_cursor, AccountJournalCursor):
         state = journal_cursor.read(account_path).state
     else:
         state = reduce_account_events(read_account_journal(account_path, verify=True))
-    problems: dict[str, list[str]] = {symbol: [] for symbol in retired}
-    for symbol in sorted(retired):
+    if symbols is None:
+        candidates = {
+            symbol
+            for symbol, position in state.positions.items()
+            if abs(position.signed_qty) > tolerance
+        }
+        candidates |= {
+            symbol
+            for symbol, target in state.aggregate_targets.items()
+            if abs(float(target)) > tolerance
+        }
+        candidates |= state.working_symbols(tolerance=tolerance)
+        for targets in (state.component_targets, state.component_target_desires):
+            candidates |= {
+                str(target.get("symbol") or "").upper()
+                for target in targets.values()
+                if abs(float(target.get("signed_qty") or 0.0)) > tolerance
+            }
+        candidates |= pending
+        candidates = {_symbol(symbol) for symbol in candidates if symbol}
+    else:
+        candidates = {_symbol(symbol) for symbol in symbols}
+    problems: dict[str, list[str]] = {symbol: [] for symbol in candidates}
+    for symbol in sorted(candidates):
         position = state.positions.get(symbol)
         if position is not None and abs(position.signed_qty) > tolerance:
             problems[symbol].append("position")
@@ -1280,9 +1297,62 @@ def require_scheduled_retirements_flat(
                 problems[symbol].append(label)
         if symbol in pending:
             problems[symbol].append("unresolved_nonzero_request")
-    active = {
+    return {
         symbol: tuple(labels) for symbol, labels in problems.items() if labels
     }
+
+
+def scheduled_retirement_exposure(
+    reconciliation: CandidatePopulationReconciliation,
+    *,
+    route: object,
+    tolerance: float = 1e-12,
+    journal_cursor: object | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Exposure still standing on scheduled-retirement symbols, by source.
+
+    The per-cycle report form: a retiring symbol with exposure is a normal
+    draining state, not a fault. Entries for it are already suppressed by the
+    population reconciliation; exit management must keep running until the
+    book is flat or the venue settles the symbol, so a producer cycle reports
+    this instead of failing on it — a cycle that fails here cannot publish
+    the very exits that would clear the condition.
+    """
+
+    if not reconciliation.scheduled_retirements:
+        return {}
+    retired = {row.symbol for row in reconciliation.scheduled_retirements}
+    return account_exposure_labels(
+        route=route,
+        tolerance=tolerance,
+        journal_cursor=journal_cursor,
+        symbols=retired,
+    )
+
+
+def require_scheduled_retirements_flat(
+    reconciliation: CandidatePopulationReconciliation,
+    *,
+    route: object,
+    context: str,
+    tolerance: float = 1e-12,
+    journal_cursor: object | None = None,
+) -> None:
+    """Fail closed if a retired entry symbol has any account or queue exposure.
+
+    The raising form is for callers proving a precondition — retiring a
+    symbol from an artifact, an offline audit. Producer cycles must use
+    ``scheduled_retirement_exposure`` instead: raising mid-cycle blocks the
+    exit publication that clears the exposure, which deadlocked the LONG
+    sleeve design until 2026-08-13.
+    """
+
+    active = scheduled_retirement_exposure(
+        reconciliation,
+        route=route,
+        tolerance=tolerance,
+        journal_cursor=journal_cursor,
+    )
     if active:
         detail = "; ".join(
             f"{symbol}={','.join(labels)}" for symbol, labels in sorted(active.items())
