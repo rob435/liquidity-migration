@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "engine-types",
+    "engine-wal",
+    "engine-marketdata",
+    "engine-venue",
+    "engine-risk",
+    "engine-strategies",
+    "engine-core",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+debug = true

@@ -1,0 +1,27 @@
+[package]
+name = "engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine-types = { path = "../engine-types" }
+engine-wal = { path = "../engine-wal" }
+engine-marketdata = { path = "../engine-marketdata" }
+engine-venue = { path = "../engine-venue" }
+engine-risk = { path = "../engine-risk" }
+engine-strategies = { path = "../engine-strategies" }
+tokio = { version = "1.53.1", features = ["rt", "net", "time", "io-util", "macros", "sync", "signal"] }
+toml = "1.1.4"
+serde_json = "1.0.151"
+tracing = "0.1.44"
+hdrhistogram = "7.6.0"
+sha2 = "0.11.0"
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+rcgen = "0.14.9"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.4"

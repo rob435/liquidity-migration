@@ -1,0 +1,13 @@
+[package]
+name = "engine-wal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crc32c = "0.6.8"
+engine-types = { path = "../engine-types" }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile = "3.27.0"

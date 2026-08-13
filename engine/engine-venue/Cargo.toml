@@ -1,0 +1,22 @@
+[package]
+name = "engine-venue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = "1.12.1"
+engine-types = { path = "../engine-types" }
+futures-util = "0.3.34"
+hex = "0.4.3"
+hmac = "0.13.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27.9", default-features = false, features = ["webpki-roots", "http1", "ring"] }
+hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tokio = { version = "1.53.1", features = ["rt", "net", "time", "io-util", "macros", "sync"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1.44"
