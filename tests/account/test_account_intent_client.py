@@ -63,7 +63,12 @@ def test_publisher_writes_one_immutable_atomic_request(tmp_path) -> None:
         created_ts_ns=1_700_000_000_000_000_000,
     )
 
-    payload = json.loads(published.path.read_bytes())
+    envelope = json.loads(published.path.read_bytes())
+    # The queued file carries the request and the arrival order together, so a
+    # publish is one atomic replace and the two can never disagree.
+    assert envelope["arrival_sequence"] == 1
+    assert envelope["request_hash"] == published.request.content_hash()
+    payload = envelope["request"]
     assert payload == published.request.to_dict()
     assert len(list((route.inbox_path / "pending").glob("*.json"))) == 1
     assert payload["route_id"] == route.route_id

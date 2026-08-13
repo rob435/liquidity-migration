@@ -65,6 +65,19 @@ _logger = logging.getLogger(__name__)
 
 REQUEST_SCHEMA_VERSION = 2
 ARRIVAL_SCHEMA_VERSION = 1
+
+# Parsed queue files held per inbox. A pass looks at a handful; the bound only
+# stops names that have moved on from accumulating.
+_QUEUED_CACHE_LIMIT = 256
+
+# What each queue state adds to a queued file on top of the request and its
+# arrival order.
+_QUEUE_STATE_KEYS: dict[str, frozenset[str]] = {
+    "pending": frozenset(),
+    "processing": frozenset(),
+    "completed": frozenset({"receipt"}),
+    "failed": frozenset({"error_type", "error"}),
+}
 DEFAULT_MAX_MARKET_AGE_NS = 5_000_000_000
 DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS = 30_000_000_000
 _REQUEST_FIELDS = frozenset(
@@ -416,6 +429,19 @@ class AccountConvergenceReport:
         raise RuntimeError(f"account target convergence unhealthy: {detail}")
 
 
+def _sync_data(fd: int) -> None:
+    """Force this descriptor's data and length to the disk.
+
+    ``fdatasync`` is the same durability for a file we are about to rename
+    into place -- the data and the size are flushed, only the timestamps are
+    not -- and it is one metadata write cheaper. macOS has no ``fdatasync``,
+    so it falls back to the full sync.
+    """
+
+    sync = getattr(os, "fdatasync", os.fsync)
+    sync(fd)
+
+
 def _atomic_replace(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -435,7 +461,11 @@ def _atomic_replace(path: Path, data: bytes) -> None:
         if os.geteuid() == 0:
             parent = os.stat(path.parent)
             os.fchown(fd, parent.st_uid, parent.st_gid)
-        os.fsync(fd)
+        # The bytes and the length must survive a crash; the timestamps need
+        # not, and skipping them saves a metadata journal write per publish.
+        # The rename below is what makes the file visible, and the directory
+        # fsync after it is what makes the rename durable.
+        _sync_data(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -497,6 +527,10 @@ class AccountIntentInbox:
         self.root = self.route.inbox_path
         for name in ("pending", "processing", "completed", "failed", "arrival", ".locks"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
+        # Parsed queue files, keyed by pathname, each held with the file
+        # identity it was parsed from (see ``_read_queued_locked``).
+        self._queued_cache: dict[str, tuple[tuple[int, int, int, int], AccountTargetRequest, int]] = {}
+        self._arrival_high_water = 0
 
     @property
     def _lock_path(self) -> Path:
@@ -513,12 +547,130 @@ class AccountIntentInbox:
     def _arrival_path(self, filename: str) -> Path:
         return self.root / "arrival" / filename
 
+    @staticmethod
+    def _queued_bytes(request: AccountTargetRequest, sequence: int) -> bytes:
+        """The one durable artifact a publish writes.
+
+        The arrival order used to live in two extra files -- a counter and a
+        per-request sidecar -- so queueing one request cost three atomic
+        replaces (six fsyncs, about eleven milliseconds on the deployed host).
+        Carrying the order inside the request's own file makes the publish one
+        atomic replace, and makes a torn pairing impossible: the order and the
+        body land, or neither does.
+        """
+
+        return (
+            canonical_json(
+                {
+                    "schema_version": ARRIVAL_SCHEMA_VERSION,
+                    "arrival_sequence": sequence,
+                    "request_hash": request.content_hash(),
+                    "request": request.to_dict(),
+                }
+            )
+            + b"\n"
+        )
+
+    def _split_queued_payload(
+        self,
+        payload: object,
+        *,
+        path: Path,
+    ) -> tuple[Mapping[str, Any], int | None]:
+        """Return one queued file's request body and its embedded order.
+
+        A ``None`` order means the file predates the embedded form -- a request
+        queued by an older build, whose order still lives in the sidecar.
+
+        The key set is checked exactly, the way the request schema itself is
+        checked. A file carrying anything the queue state does not define has
+        been tampered with or half-written, and an ignored stray key is how a
+        forged field slips past a reader that only looks at what it expects.
+        """
+
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"unreadable account target request {path.name!r}")
+        if "request" not in payload:
+            # A request body on its own: queued by a build that kept the order
+            # in the sidecar.
+            return payload, None
+        body = payload.get("request")
+        if not isinstance(body, Mapping):
+            raise RuntimeError(f"unreadable account target request {path.name!r}")
+        if "arrival_sequence" not in payload:
+            # A legacy envelope -- completed or failed by an older build. Its
+            # key set is checked just as exactly as the embedded form's below.
+            legacy_expected = {"request"} | _QUEUE_STATE_KEYS.get(path.parent.name, frozenset())
+            if set(payload) != legacy_expected:
+                raise RuntimeError(f"unreadable account target request {path.name!r}")
+            return body, None
+        expected = {"schema_version", "arrival_sequence", "request_hash", "request"} | _QUEUE_STATE_KEYS.get(
+            path.parent.name, frozenset()
+        )
+        if set(payload) != expected or payload.get("schema_version") != ARRIVAL_SCHEMA_VERSION:
+            raise RuntimeError(f"unreadable account target request {path.name!r}")
+        sequence = payload.get("arrival_sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            raise RuntimeError(f"queued request {path.name!r} has an invalid arrival sequence")
+        return body, sequence
+
+    def _read_queued_locked(self, path: Path) -> tuple[AccountTargetRequest, int]:
+        """Parse one pending or claimed file into its request and arrival order.
+
+        Parsing dominates an owner pass: the readiness peek and the claim each
+        walk the queue, and every walk used to re-read, re-parse and re-hash
+        every file. The parse is memoised against the file's identity (device,
+        inode, size, modification time -- all must match), so an unchanged file
+        is read, parsed and hashed at most once however many times a pass looks
+        at it. Every atomic replace lands a new inode, so a changed file can
+        never answer from the memo.
+        """
+
+        key = str(path)
+        try:
+            before = os.stat(path)
+        except OSError as exc:
+            raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        cached = self._queued_cache.get(key)
+        if cached is not None and cached[0] == identity:
+            return cached[1], cached[2]
+
+        try:
+            data = path.read_bytes()
+            after = os.stat(path)
+            payload = json.loads(data)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity:
+            raise RuntimeError(f"account target request {path.name!r} changed while it was read")
+
+        body, embedded = self._split_queued_payload(payload, path=path)
+        # A schema or route failure travels as it always has, so a caller that
+        # distinguishes "cannot read the file" from "this is not our request"
+        # still can.
+        request = self._request_from_payload(body)
+        if len(self._queued_cache) >= _QUEUED_CACHE_LIMIT:
+            # Entries for names that have since moved on are dead weight. This
+            # is a memo, so dropping it costs one re-parse and nothing else.
+            self._queued_cache.clear()
+        if embedded is None:
+            sequence = self._read_arrival_sequence_locked(filename=path.name, request=request)
+        else:
+            sequence = embedded
+            if payload.get("request_hash") != request.content_hash():
+                raise RuntimeError(f"queued request {request.request_id!r} has an invalid arrival sequence")
+        self._queued_cache[key] = (identity, request, sequence)
+        return request, sequence
+
     def _read_arrival_sequence_locked(
         self,
         *,
         filename: str,
         request: AccountTargetRequest,
     ) -> int:
+        """Read the order of a request queued before the order was embedded."""
+
         path = self._arrival_path(filename)
         if not path.exists():
             raise RuntimeError(f"queued request {request.request_id!r} lacks a durable arrival sequence")
@@ -547,13 +699,15 @@ class AccountIntentInbox:
     def _read_arrival_counter_locked(self) -> int:
         path = self._arrival_counter_path
         if not path.exists():
-            if next((self.root / "arrival").glob("*.json"), None) is not None:
-                raise RuntimeError("account intent arrival counter is missing")
             return 0
         try:
             payload = json.loads(path.read_bytes())
-        except (OSError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("account intent arrival counter is unreadable") from exc
+        except (OSError, TypeError, json.JSONDecodeError):
+            # The counter is advisory -- each request carries its own order
+            # durably and the live queue is the correctness floor -- so a torn
+            # buffered write degrades numbering continuity, never a publish.
+            _logger.warning("account intent arrival counter is unreadable; treating as empty")
+            return 0
         sequence = payload.get("last_arrival_sequence") if isinstance(payload, Mapping) else None
         if (
             not isinstance(payload, Mapping)
@@ -562,41 +716,81 @@ class AccountIntentInbox:
             or not isinstance(sequence, int)
             or sequence < 0
         ):
-            raise RuntimeError("account intent arrival counter is invalid")
+            _logger.warning("account intent arrival counter is invalid; treating as empty")
+            return 0
         return sequence
 
-    def _ensure_arrival_sequence_locked(self, request: AccountTargetRequest) -> int:
-        filename = self._filename(request.request_id)
-        arrival_path = self._arrival_path(filename)
-        if arrival_path.exists():
-            return self._read_arrival_sequence_locked(filename=filename, request=request)
+    def _note_arrival_counter_locked(self, sequence: int) -> None:
+        """Remember the highest assigned order -- buffered, best-effort.
 
-        # High-water mark first (a crash before the sidecar just leaves a gap),
-        # then the sidecar before the request appears in pending, so nothing
-        # schedulable exists without a durable arrival order.
-        sequence = self._read_arrival_counter_locked() + 1
-        _atomic_replace(
-            self._arrival_counter_path,
+        The counter is advisory. The live queue is what stops two coexisting
+        requests sharing or inverting an order, and each request carries its
+        own order durably in its file. What the counter adds is continuity:
+        numbering that keeps climbing across drained queues, rebuilt
+        producers and restarts, so the order recorded in receipts stays a
+        usable timeline. It is written without an fsync -- the publish itself
+        stays at one durable write -- and a crash may lose the last few
+        numbers; the live queue keeps that loss away from scheduling.
+        """
+
+        path = self._arrival_counter_path
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        data = (
             canonical_json(
                 {
                     "schema_version": ARRIVAL_SCHEMA_VERSION,
                     "last_arrival_sequence": sequence,
                 }
             )
-            + b"\n",
+            + b"\n"
         )
-        _atomic_replace(
-            arrival_path,
-            canonical_json(
-                {
-                    "schema_version": ARRIVAL_SCHEMA_VERSION,
-                    "request_id": request.request_id,
-                    "request_hash": request.content_hash(),
-                    "arrival_sequence": sequence,
-                }
-            )
-            + b"\n",
-        )
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.write(fd, data)
+                if os.geteuid() == 0:
+                    parent = os.stat(path.parent)
+                    os.fchown(fd, parent.st_uid, parent.st_gid)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError as exc:
+            _logger.warning("account intent arrival counter write failed: %s", exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _next_arrival_sequence_locked(self) -> int:
+        """Assign the next arrival order.
+
+        Correctness comes from the live queue: the floor is whatever the
+        unfinished requests already claim, read under the same inbox lock
+        every producer takes, so coexisting requests can never share or
+        invert an order. Continuity comes from the advisory counter, so
+        numbering keeps climbing across drained queues, rebuilt producers
+        and restarts. A file this scan cannot read contributes nothing to
+        the floor rather than blocking the publish: refusing to queue a new
+        request -- a safety exit included -- because an unrelated file rotted
+        would turn one bad file into a frozen account. The unreadable file
+        itself stays fail-closed where it always was: the owner's claim walk
+        still refuses to schedule past it.
+        """
+
+        floor = max(self._arrival_high_water, self._read_arrival_counter_locked())
+        for directory in ("pending", "processing"):
+            for path in (self.root / directory).glob("*.json"):
+                try:
+                    floor = max(floor, self._read_queued_locked(path)[1])
+                except (RuntimeError, OSError, TypeError, ValueError) as exc:
+                    _logger.warning(
+                        "skipping unreadable queue file %s while assigning an arrival order: %s",
+                        path.name,
+                        exc,
+                    )
+        sequence = floor + 1
+        self._arrival_high_water = sequence
+        self._note_arrival_counter_locked(sequence)
         return sequence
 
     def queued_request_path(self, request_id: str) -> Path | None:
@@ -624,18 +818,15 @@ class AccountIntentInbox:
                     continue
                 try:
                     payload = json.loads(path.read_bytes())
-                    request_payload = (
-                        payload.get("request") if name == "completed" and isinstance(payload, Mapping) else payload
-                    )
-                    if not isinstance(request_payload, Mapping):
-                        raise ValueError("missing request")
+                    request_payload, embedded = self._split_queued_payload(payload, path=path)
                     request = self._request_from_payload(request_payload)
                     if request.request_id != request_id or path.name != self._filename(request.request_id):
                         raise ValueError("request filename does not match request_id")
-                    self._read_arrival_sequence_locked(
-                        filename=filename,
-                        request=request,
-                    )
+                    if embedded is None:
+                        self._read_arrival_sequence_locked(
+                            filename=filename,
+                            request=request,
+                        )
                 except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
                 return True
@@ -675,22 +866,20 @@ class AccountIntentInbox:
             except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"published request {request.request_id!r} is unreadable") from exc
             queue_state = path.parent.name
-            request_payload = (
-                payload.get("request")
-                if queue_state in {"completed", "failed"} and isinstance(payload, Mapping)
-                else payload
-            )
-            if not isinstance(request_payload, Mapping):
-                raise RuntimeError(f"published request {request.request_id!r} lacks canonical request content")
+            try:
+                request_payload, embedded = self._split_queued_payload(payload, path=path)
+            except RuntimeError as exc:
+                raise RuntimeError(f"published request {request.request_id!r} is unreadable") from exc
             try:
                 observed = self._request_from_payload(request_payload)
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(f"published request {request.request_id!r} failed schema validation") from exc
             if observed.to_dict() != request.to_dict():
                 raise RuntimeError(f"published request {request.request_id!r} changed canonical content")
-            sequence = self._read_arrival_sequence_locked(
-                filename=filename,
-                request=observed,
+            sequence = (
+                self._read_arrival_sequence_locked(filename=filename, request=observed)
+                if embedded is None
+                else embedded
             )
             return DurableTargetRequestEvidence(
                 path=snapshot.path,
@@ -706,7 +895,7 @@ class AccountIntentInbox:
             for directory in ("pending", "processing"):
                 for path in sorted((self.root / directory).glob("*.json")):
                     try:
-                        request = self._request_from_payload(json.loads(path.read_bytes()))
+                        request = self._read_queued_locked(path)[0]
                     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                         raise RuntimeError(f"unreadable account target request {path.name!r}") from exc
                     symbols.update(item.intent.symbol.upper() for item in request.intents)
@@ -726,8 +915,7 @@ class AccountIntentInbox:
             for directory in ("pending", "processing"):
                 for path in sorted((self.root / directory).glob("*.json")):
                     try:
-                        payload = json.loads(path.read_bytes())
-                        requests.append(self._request_from_payload(payload))
+                        requests.append(self._read_queued_locked(path)[0])
                     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                         raise RuntimeError(f"unreadable unresolved account target request {path.name!r}") from exc
             return tuple(requests)
@@ -735,12 +923,14 @@ class AccountIntentInbox:
     def _parse_completed_request_locked(self, path: Path) -> tuple[AccountTargetRequest, AccountServiceReceipt]:
         """Parse and identity-validate one completed request under the inbox lock."""
 
+        embedded: int | None = None
         try:
             payload = json.loads(path.read_bytes())
             request_payload = payload.get("request")
             receipt_payload = payload.get("receipt")
             if not isinstance(request_payload, Mapping) or not isinstance(receipt_payload, Mapping):
                 raise ValueError("missing request or receipt")
+            request_payload, embedded = self._split_queued_payload(payload, path=path)
             request = self._request_from_payload(request_payload)
             receipt = AccountServiceReceipt(
                 request_id=str(receipt_payload.get("request_id") or ""),
@@ -778,10 +968,11 @@ class AccountIntentInbox:
             raise RuntimeError(
                 f"completed account target request {path.name!r} failed request/receipt identity validation"
             )
-        self._read_arrival_sequence_locked(
-            filename=path.name,
-            request=request,
-        )
+        if embedded is None:
+            self._read_arrival_sequence_locked(
+                filename=path.name,
+                request=request,
+            )
         return request, receipt
 
     def completed_requests(
@@ -831,7 +1022,6 @@ class AccountIntentInbox:
         pending = self.root / "pending" / filename
         processing = self.root / "processing" / filename
         failed = self.root / "failed" / filename
-        data = canonical_json(request.to_dict()) + b"\n"
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             for existing in (completed, pending, processing, failed):
                 if not existing.exists():
@@ -853,6 +1043,7 @@ class AccountIntentInbox:
                     # sidecar goes with it so the retry queues at the back
                     # rather than reclaiming its old place.
                     existing.unlink(missing_ok=True)
+                    self._queued_cache.pop(str(existing), None)
                     self._arrival_path(filename).unlink(missing_ok=True)
                     continue
                 if existing.parent.name == "completed":
@@ -864,24 +1055,18 @@ class AccountIntentInbox:
                     if parsed_request.to_dict() != request.to_dict():
                         raise ValueError(f"immutable request_id {request.request_id!r} changed content")
                 else:
-                    parsed_request = self._request_from_payload(json.loads(existing.read_bytes()))
+                    parsed_request = self._read_queued_locked(existing)[0]
                     if parsed_request.to_dict() != request.to_dict():
                         raise ValueError(f"immutable request_id {request.request_id!r} changed content")
-                self._read_arrival_sequence_locked(filename=filename, request=request)
                 return existing
 
-            self._ensure_arrival_sequence_locked(request)
-            _atomic_replace(pending, data)
+            _atomic_replace(pending, self._queued_bytes(request, self._next_arrival_sequence_locked()))
             return pending
 
     def _queued(self) -> list[tuple[int, str, Path, AccountTargetRequest]]:
         queued: list[tuple[int, str, Path, AccountTargetRequest]] = []
         for pending in (self.root / "pending").glob("*.json"):
-            request = self._request_from_payload(json.loads(pending.read_bytes()))
-            sequence = self._read_arrival_sequence_locked(
-                filename=pending.name,
-                request=request,
-            )
+            request, sequence = self._read_queued_locked(pending)
             queued.append((sequence, request.request_id, pending, request))
         sequences = [row[0] for row in queued]
         if len(sequences) != len(set(sequences)):
@@ -1046,11 +1231,7 @@ class AccountIntentInbox:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             recovered = 0
             for processing in sorted((self.root / "processing").glob("*.json")):
-                request = self._request_from_payload(json.loads(processing.read_bytes()))
-                self._read_arrival_sequence_locked(
-                    filename=processing.name,
-                    request=request,
-                )
+                request = self._read_queued_locked(processing)[0]
                 completed = self.root / "completed" / processing.name
                 if completed.exists():
                     payload = json.loads(completed.read_bytes())
@@ -1061,6 +1242,7 @@ class AccountIntentInbox:
                     if completed_request.to_dict() != request.to_dict():
                         raise RuntimeError(f"processing/completed request {request.request_id!r} changed content")
                     processing.unlink()
+                    self._queued_cache.pop(str(processing), None)
                     continue
                 pending = self.root / "pending" / processing.name
                 os.replace(processing, pending)
@@ -1070,45 +1252,46 @@ class AccountIntentInbox:
     def complete(self, claimed_path: Path, receipt: AccountServiceReceipt) -> Path:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             completed = self.root / "completed" / claimed_path.name
-            request_payload = json.loads(claimed_path.read_bytes())
-            request = self._request_from_payload(request_payload)
-            self._read_arrival_sequence_locked(
-                filename=claimed_path.name,
-                request=request,
-            )
+            request, sequence = self._read_queued_locked(claimed_path)
             _atomic_replace(
                 completed,
-                canonical_json({"request": request_payload, "receipt": receipt.to_dict()}) + b"\n",
+                canonical_json(
+                    {
+                        "schema_version": ARRIVAL_SCHEMA_VERSION,
+                        "arrival_sequence": sequence,
+                        "request_hash": request.content_hash(),
+                        "request": request.to_dict(),
+                        "receipt": receipt.to_dict(),
+                    }
+                )
+                + b"\n",
             )
             claimed_path.unlink(missing_ok=True)
+            self._queued_cache.pop(str(claimed_path), None)
             return completed
 
     def release(self, claimed_path: Path) -> None:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             if claimed_path.exists():
-                request = self._request_from_payload(json.loads(claimed_path.read_bytes()))
-                self._read_arrival_sequence_locked(
-                    filename=claimed_path.name,
-                    request=request,
-                )
+                self._read_queued_locked(claimed_path)
                 os.replace(claimed_path, self.root / "pending" / claimed_path.name)
+                self._queued_cache.pop(str(claimed_path), None)
 
     def fail(self, claimed_path: Path, *, error: BaseException) -> Path:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
             failed = self.root / "failed" / claimed_path.name
-            request_payload = json.loads(claimed_path.read_bytes())
-            request = self._request_from_payload(request_payload)
-            self._read_arrival_sequence_locked(
-                filename=claimed_path.name,
-                request=request,
-            )
+            request, sequence = self._read_queued_locked(claimed_path)
             payload = {
-                "request": request_payload,
+                "schema_version": ARRIVAL_SCHEMA_VERSION,
+                "arrival_sequence": sequence,
+                "request_hash": request.content_hash(),
+                "request": request.to_dict(),
                 "error_type": type(error).__name__,
                 "error": str(error)[:1000],
             }
             _atomic_replace(failed, canonical_json(payload) + b"\n")
             claimed_path.unlink(missing_ok=True)
+            self._queued_cache.pop(str(claimed_path), None)
             return failed
 
     def _request_from_payload(self, payload: Mapping[str, Any]) -> AccountTargetRequest:

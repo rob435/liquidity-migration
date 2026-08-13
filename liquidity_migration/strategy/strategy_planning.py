@@ -62,10 +62,122 @@ class OwnerHealthReading:
     equity_usdt: float
     error: str
     read_wall_ts_ns: int
+    # The stamp of the owner receipt behind a successful live read. ``None``
+    # for error readings (serving a failure only blocks entries) and for
+    # callers that build their own reading and accept reading-age stacking on
+    # top of receipt age -- carry does, explicitly, for its frozen boundary.
+    receipt_wall_ts_ns: int | None = None
 
     def is_fresh(self, *, now_ns: int, max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS) -> bool:
         age_ns = int(now_ns) - int(self.read_wall_ts_ns)
         return 0 <= age_ns <= int(max_age_ns)
+
+    def is_serveable(
+        self,
+        *,
+        now_ns: int,
+        max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+        stored_max_age_ns: int | None = None,
+    ) -> bool:
+        """Fresh as a reading, and its receipt would still pass a live read now.
+
+        The second check is what stops ages stacking: without it, a reading
+        taken at the edge of the receipt bound could be served for another
+        full reading lifetime, and the equity a cycle plans on could be twice
+        as old as a live read allows. A reading without a receipt stamp keeps
+        the reading-age-only contract.
+        """
+
+        if not self.is_fresh(
+            now_ns=now_ns,
+            max_age_ns=max_age_ns if stored_max_age_ns is None else stored_max_age_ns,
+        ):
+            return False
+        if self.receipt_wall_ts_ns is None:
+            return True
+        receipt_age_ns = int(now_ns) - int(self.receipt_wall_ts_ns)
+        return 0 <= receipt_age_ns <= int(max_age_ns)
+
+
+def account_owner_health_reading(
+    route: AccountRoute,
+    *,
+    environment: str,
+    max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+    head_retry_attempts: int = 4,
+    head_retry_seconds: float = 1.0,
+    sleep: Callable[[float], None] | None = None,
+    stored_reading: OwnerHealthReading | None = None,
+    now_ns: int | None = None,
+    stored_max_age_ns: int | None = None,
+) -> OwnerHealthReading:
+    """Serve the stored reading, or read live and return a stamped reading.
+
+    A ``stored_reading`` (judged against the caller's ``now_ns``) is served
+    only while it :meth:`OwnerHealthReading.is_serveable` -- the reading is
+    inside ``stored_max_age_ns`` (defaulting to ``max_age_ns``) AND, when the
+    reading carries its receipt's own stamp, a live read at ``now_ns`` would
+    still accept that receipt under ``max_age_ns``. Serving returns the same
+    object, original stamp and all, so age can never launder itself.
+
+    A stale or absent reading falls through to the live read, whose
+    head-retry ladder may sleep; the returned reading is stamped at
+    ``now_ns`` (or the wall clock) and carries the receipt stamp on success.
+    A failed live read returns an error reading with no receipt stamp --
+    serving a failure only blocks entries, the fail-closed direction.
+    """
+
+    if head_retry_attempts <= 0:
+        raise ValueError("owner-health head retry attempts must be positive")
+    if head_retry_seconds < 0.0:
+        raise ValueError("owner-health head retry delay cannot be negative")
+    if (
+        stored_reading is not None
+        and now_ns is not None
+        and stored_reading.is_serveable(
+            now_ns=now_ns,
+            max_age_ns=max_age_ns,
+            stored_max_age_ns=stored_max_age_ns,
+        )
+    ):
+        return stored_reading
+    if sleep is None:
+        # Bound at call time, not definition time, so a test can observe the
+        # ladder's sleeps through the module's ``time``.
+        sleep = time.sleep
+    stamp_ns = time.time_ns() if now_ns is None else int(now_ns)
+    last_pending: AccountOwnerHealthHeadPending | None = None
+    for attempt in range(head_retry_attempts):
+        try:
+            owner_health = require_recent_account_owner_health(
+                route.account_path,
+                environment=environment,
+                max_age_ns=max_age_ns,
+                expected_account_id=route.account_id,
+            )
+        except AccountOwnerHealthHeadPending as exc:
+            last_pending = exc
+            if attempt + 1 < head_retry_attempts:
+                sleep(head_retry_seconds)
+                continue
+            break
+        except (OSError, RuntimeError, ValueError) as exc:
+            return OwnerHealthReading(
+                equity_usdt=0.0,
+                error=f"{type(exc).__name__}: {exc}"[:500],
+                read_wall_ts_ns=stamp_ns,
+            )
+        return OwnerHealthReading(
+            equity_usdt=float(owner_health.equity_usdt),
+            error="",
+            read_wall_ts_ns=stamp_ns,
+            receipt_wall_ts_ns=int(owner_health.observed_ts_ns),
+        )
+    return OwnerHealthReading(
+        equity_usdt=0.0,
+        error=f"{type(last_pending).__name__}: {last_pending}"[:500],
+        read_wall_ts_ns=stamp_ns,
+    )
 
 
 def account_owner_equity_or_error(
@@ -83,56 +195,23 @@ def account_owner_equity_or_error(
     """Return (equity_usdt, "") from fresh owner health, or (0.0, error).
 
     A missing or stale owner-health receipt never fails the cycle; the caller
-    records the error and plans entries as blocked.
-
-    A ``stored_reading`` (judged against the caller's ``now_ns``) whose age is
-    within ``stored_max_age_ns`` — defaulting to ``max_age_ns`` — is served
-    as-is, value and error, without touching the filesystem or sleeping. The
-    served value carries whatever the live read enforced WHEN IT WAS TAKEN
-    (owner-receipt age and exact head binding); its own age is the only bound
-    applied here, so a caller widening ``stored_max_age_ns`` is accepting
-    reading-age on top of that, and must say so where it stores the reading.
-    A stale or absent reading falls through to the live read, whose
-    head-retry ladder may sleep; ``max_age_ns`` bounds only that live read's
-    owner-receipt age, exactly as before stored readings existed.
+    records the error and plans entries as blocked. The serving and live-read
+    contract lives in :func:`account_owner_health_reading`; this wrapper just
+    unpacks the reading for callers that keep their own.
     """
 
-    if head_retry_attempts <= 0:
-        raise ValueError("owner-health head retry attempts must be positive")
-    if head_retry_seconds < 0.0:
-        raise ValueError("owner-health head retry delay cannot be negative")
-    if (
-        stored_reading is not None
-        and now_ns is not None
-        and stored_reading.is_fresh(
-            now_ns=now_ns,
-            max_age_ns=max_age_ns if stored_max_age_ns is None else stored_max_age_ns,
-        )
-    ):
-        return float(stored_reading.equity_usdt), str(stored_reading.error)
-    if sleep is None:
-        # Bound at call time, not definition time, so a test can observe the
-        # ladder's sleeps through the module's ``time``.
-        sleep = time.sleep
-    last_pending: AccountOwnerHealthHeadPending | None = None
-    for attempt in range(head_retry_attempts):
-        try:
-            owner_health = require_recent_account_owner_health(
-                route.account_path,
-                environment=environment,
-                max_age_ns=max_age_ns,
-                expected_account_id=route.account_id,
-            )
-        except AccountOwnerHealthHeadPending as exc:
-            last_pending = exc
-            if attempt + 1 < head_retry_attempts:
-                sleep(head_retry_seconds)
-                continue
-            break
-        except (OSError, RuntimeError, ValueError) as exc:
-            return 0.0, f"{type(exc).__name__}: {exc}"[:500]
-        return float(owner_health.equity_usdt), ""
-    return 0.0, f"{type(last_pending).__name__}: {last_pending}"[:500]
+    reading = account_owner_health_reading(
+        route,
+        environment=environment,
+        max_age_ns=max_age_ns,
+        head_retry_attempts=head_retry_attempts,
+        head_retry_seconds=head_retry_seconds,
+        sleep=sleep,
+        stored_reading=stored_reading,
+        now_ns=now_ns,
+        stored_max_age_ns=stored_max_age_ns,
+    )
+    return float(reading.equity_usdt), str(reading.error)
 
 
 @dataclass(frozen=True, slots=True)

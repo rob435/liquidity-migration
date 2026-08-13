@@ -447,6 +447,60 @@ def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_cha
     recorder.close()
 
 
+def test_market_readiness_fsyncs_land_outside_the_recorder_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar's two fsyncs must not hold the lock the order path takes.
+
+    The write used to happen inside ``on_message``'s lock, so an order-path
+    capture could queue behind a couple of fsyncs about once a second. The
+    pointer is now built and latched under the lock and written after the
+    lock is released.
+    """
+
+    from liquidity_migration.account import market_capture as module
+
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=VirtualClock(
+            current_wall_ns=1_800_000_000_010_000_000,
+            current_monotonic_ns=0,
+        ),
+        owner_invocation_id="a1" * 16,
+    )
+    recorder.set_required_symbols({"BUSDT"})
+
+    real_write = module._atomic_write_readiness_sidecar
+    lock_free_during_write: list[bool] = []
+
+    def probing_write(path: Path, sidecar: Any, *, label: str) -> None:
+        # Probe from another thread: a reentrant acquire on this thread would
+        # succeed even while on_message still held the lock.
+        seen: list[bool] = []
+
+        def probe() -> None:
+            acquired = recorder._lock.acquire(blocking=False)
+            seen.append(acquired)
+            if acquired:
+                recorder._lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        lock_free_during_write.append(seen[0])
+        real_write(path, sidecar, label=label)
+
+    monkeypatch.setattr(module, "_atomic_write_readiness_sidecar", probing_write)
+    recorder.on_message(
+        _snapshot(symbol="BUSDT"),
+        local_receive_ts_ns=1_800_000_000_010_000_000,
+    )
+
+    assert lock_free_during_write == [True]
+    recorder.close()
+
+
 def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
     recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
@@ -529,6 +583,7 @@ def test_owner_invocation_id_is_optional_and_persisted_on_every_owner_row(
         context_kind="decision",
         reference_key="decision-1",
     )
+    assert recorder.flush_owner_readiness() is True
     recorder.close()
 
     assert snapshot["owner_invocation_id"] == invocation_id
@@ -548,6 +603,7 @@ def test_owner_invocation_id_is_optional_and_persisted_on_every_owner_row(
         _snapshot(),
         local_receive_ts_ns=1_800_000_000_010_000_000,
     )[0]
+    assert standalone.flush_owner_readiness() is False
     standalone.close()
     assert "owner_invocation_id" not in standalone_row
     assert not (tmp_path / "standalone" / OWNER_CAPTURE_READINESS_FILENAME).exists()
@@ -581,7 +637,7 @@ def test_segment_store_returns_exact_completed_append_location(tmp_path: Path) -
     assert location.record_sha256 == hashlib.sha256(stored).hexdigest()
 
 
-def test_owner_readiness_sidecar_is_first_row_immediate_and_at_most_once_per_second(
+def test_owner_readiness_sidecar_publishes_on_flush_at_most_once_per_second(
     tmp_path: Path,
 ) -> None:
     clock = VirtualClock(
@@ -599,6 +655,9 @@ def test_owner_readiness_sidecar_is_first_row_immediate_and_at_most_once_per_sec
         local_receive_ts_ns=clock.wall_time_ns(),
     )[0]
     sidecar_path = tmp_path / OWNER_CAPTURE_READINESS_FILENAME
+    # The persist itself pays no readiness I/O; the pointer appears on flush.
+    assert not sidecar_path.exists()
+    assert recorder.flush_owner_readiness() is True
     first_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
 
     clock.advance_ns(999_999_999)
@@ -606,6 +665,7 @@ def test_owner_readiness_sidecar_is_first_row_immediate_and_at_most_once_per_sec
         _snapshot(update_id=101, seq=1_001),
         local_receive_ts_ns=clock.wall_time_ns(),
     )[0]
+    assert recorder.flush_owner_readiness() is False
     throttled_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
 
     clock.advance_ns(1)
@@ -613,6 +673,7 @@ def test_owner_readiness_sidecar_is_first_row_immediate_and_at_most_once_per_sec
         _snapshot(update_id=102, seq=1_002),
         local_receive_ts_ns=clock.wall_time_ns(),
     )[0]
+    assert recorder.flush_owner_readiness() is True
     refreshed_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     recorder.close()
 
@@ -1580,3 +1641,96 @@ def test_the_public_stream_asks_the_library_to_skip_its_utf8_revalidation() -> N
     repo = Path(__file__).resolve().parents[2]
     source = (repo / "liquidity_migration" / "account" / "market_capture.py").read_text(encoding="utf-8")
     assert "run_forever(ping_interval=20, ping_timeout=10, skip_utf8_validation=True)" in source
+
+
+def test_order_path_capture_defers_readiness_fsyncs_to_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The order-path capture pays no readiness I/O; the flush does, row first.
+
+    Before the deferral, ``capture_context`` itself synced the segment and
+    wrote the sidecar (three fsyncs inside the recorder lock, on the order
+    path) — with the latch open, the first assertion fails there.
+    """
+
+    clock = VirtualClock(current_wall_ns=1_800_000_000_010_000_000, current_monotonic_ns=0)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(),
+        clock=clock,
+        owner_invocation_id="0123456789abcdef0123456789abcdef",
+    )
+    recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
+    # Open the one-second latch that the seeding message's persist consumed,
+    # so an inline publish on the next capture would be due, not latched.
+    clock.advance_ns(2_000_000_000)
+
+    io_calls: list[str] = []
+    real_sync = recorder.store.sync
+
+    def recording_sync(location: Any) -> None:
+        io_calls.append("sync")
+        real_sync(location)
+
+    monkeypatch.setattr(recorder.store, "sync", recording_sync)
+    import liquidity_migration.account.market_capture as capture_module
+
+    real_sidecar_write = capture_module._atomic_write_readiness_sidecar
+
+    def recording_sidecar_write(path: Path, sidecar: Any, *, label: str) -> None:
+        io_calls.append(f"sidecar:{label}")
+        real_sidecar_write(path, sidecar, label=label)
+
+    monkeypatch.setattr(capture_module, "_atomic_write_readiness_sidecar", recording_sidecar_write)
+
+    context, _book = recorder.capture_context(
+        symbol="BUSDT",
+        context_kind="decision",
+        reference_key="defer-1",
+    )
+    assert io_calls == []
+
+    assert recorder.flush_owner_readiness() is True
+    assert io_calls == ["sync", "sidecar:owner-capture readiness"]
+    payload = json.loads((tmp_path / OWNER_CAPTURE_READINESS_FILENAME).read_text(encoding="utf-8"))
+    assert payload["record_id"] == context["record_id"]
+    assert payload["record_sha256"] == context["capture_record_sha256"]
+    assert payload["byte_offset"] == context["capture_byte_offset"]
+
+    assert recorder.flush_owner_readiness() is False
+    recorder.close()
+
+
+def test_flush_owner_readiness_latch_holds_pending_until_the_interval_elapses(
+    tmp_path: Path,
+) -> None:
+    """A latched flush keeps the pointer pending instead of dropping it."""
+
+    clock = VirtualClock(current_wall_ns=1_800_000_000_010_000_000, current_monotonic_ns=0)
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(),
+        clock=clock,
+        owner_invocation_id="0123456789abcdef0123456789abcdef",
+    )
+    recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)
+    clock.advance_ns(2_000_000_000)
+
+    first, _ = recorder.capture_context(
+        symbol="BUSDT", context_kind="decision", reference_key="latch-1"
+    )
+    assert recorder.flush_owner_readiness() is True
+
+    clock.advance_ns(100_000_000)  # within the one-second publication interval
+    second, _ = recorder.capture_context(
+        symbol="BUSDT", context_kind="risk", reference_key="latch-2"
+    )
+    assert recorder.flush_owner_readiness() is False
+    stale = json.loads((tmp_path / OWNER_CAPTURE_READINESS_FILENAME).read_text(encoding="utf-8"))
+    assert stale["record_id"] == first["record_id"]
+
+    clock.advance_ns(1_000_000_000)
+    assert recorder.flush_owner_readiness() is True
+    fresh = json.loads((tmp_path / OWNER_CAPTURE_READINESS_FILENAME).read_text(encoding="utf-8"))
+    assert fresh["record_id"] == second["record_id"]
+    recorder.close()

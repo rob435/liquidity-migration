@@ -198,7 +198,7 @@ def _patch_planning(
     def owner_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         if owner_health_error:
             raise RuntimeError("owner health receipt is stale")
-        return SimpleNamespace(equity_usdt=EQUITY)
+        return SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
 
     monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
     monkeypatch.setattr(
@@ -1937,7 +1937,7 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
         _route(tmp_path / "route")
         _patch_demo_market_data_ws_served(monkeypatch)
         self._patch_health(
-            monkeypatch, lambda *_a, **_k: SimpleNamespace(equity_usdt=EQUITY)
+            monkeypatch, lambda *_a, **_k: SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
         )
         state = CarryCycleState()
         prewarm = self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
@@ -2002,7 +2002,7 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
         live_equity = {"value": freeze_equity}
         self._patch_health(
             monkeypatch,
-            lambda *_a, **_k: SimpleNamespace(equity_usdt=live_equity["value"]),
+            lambda *_a, **_k: SimpleNamespace(equity_usdt=live_equity["value"], observed_ts_ns=0),
         )
         state = CarryCycleState()
         prewarm = self._run(tmp_path, state, now_ms=PREWARM_NOW, freeze_ahead=D0)
@@ -2045,7 +2045,7 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
 
         def live_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=EQUITY)
+            return SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
 
         self._patch_health(monkeypatch, live_health)
         state = CarryCycleState()
@@ -2091,7 +2091,7 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
 
         def healed_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=EQUITY)
+            return SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
 
         self._patch_health(monkeypatch, healed_health)
         boundary = self._run(
@@ -2126,7 +2126,7 @@ class TestBoundaryOnlyStoredHealth:
 
         def live_health(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=EQUITY)
+            return SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
 
         self._patch_health(monkeypatch, live_health)
         state = module.CarryCycleState()

@@ -208,6 +208,250 @@ def test_a_wake_landing_at_the_deadline_instant_folds_into_the_boundary(tmp_path
     assert daemon._deadline_fired_ts_ms == deadline_ms
 
 
+# ----------------------------------------------------------------------
+# Price-touch wakes. A cycle reports the prices at which a live tick could
+# change its book; the ticker callback ends the wait when a push crosses one.
+
+
+def _ticker_push(symbol: str, price: float) -> dict[str, Any]:
+    """One public ticker WS frame in Bybit's envelope."""
+
+    return {"topic": f"tickers.{symbol}", "data": {"symbol": symbol, "markPrice": str(price)}}
+
+
+def _price_wake_host(tmp_path: Path, **kwargs: Any) -> tuple[_Host, Any]:
+    """A host whose cycle reports whatever price levels the test sets.
+
+    Driven through the real ``_run_one_cycle`` adoption path rather than by
+    poking the registry, so the test exercises what production runs.
+    """
+
+    from liquidity_migration.account.account_intent_client import ExitFirstPublication
+    from liquidity_migration.account.account_route import derive_account_route
+    from liquidity_migration.strategy.strategy_target_replay import (
+        PublishedTargetCyclePayload,
+    )
+
+    route = derive_account_route(
+        account_id="price-wake-test",
+        environment="demo",
+        account_root=tmp_path / "account",
+        inbox_root=tmp_path / "inbox",
+    )
+    reported: dict[str, Any] = {"levels": []}
+
+    def runner(*_args: Any, **_kwargs: Any) -> PublishedTargetCyclePayload:
+        return PublishedTargetCyclePayload(
+            {
+                "cycle_id": "price-wake-1",
+                "ts_ms": 1,
+                "price_wake_levels": list(reported["levels"]),
+            },
+            publication=ExitFirstPublication(exit_requests=(), entry_requests=(), errors=()),
+            route=route,
+        )
+
+    kwargs.setdefault("min_cycle_interval_seconds", 0.05)
+    daemon = _Host(
+        tmp_path / "host",
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_HostConfig(),
+        cycle_runner=runner,
+        **kwargs,
+    )
+    return daemon, reported
+
+
+def test_a_touched_price_level_ends_the_wait_instead_of_the_idle_floor(tmp_path: Path) -> None:
+    # Fails without the fix: the ticker callback only fed the cache, so the
+    # predicate was evaluated by whatever cycle happened to run next — up to
+    # the whole idle floor later.
+    daemon, reported = _price_wake_host(tmp_path, interval_seconds=30.0)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    # Above the level: nothing to look at.
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 100.5))
+    assert daemon._bar_event.is_set() is False
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.5))
+    assert daemon._bar_event.is_set() is True
+
+    started = time.monotonic()
+    daemon._wait_for_next_cycle_event()
+    elapsed = time.monotonic() - started
+
+    assert daemon._pending_cycle_kind == "price_touch"
+    assert elapsed < 5.0, f"price wake took {elapsed:.2f}s against a 30s idle floor"
+
+
+def test_an_unwatched_symbol_never_wakes_the_loop(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    # Same price, different symbol: the cheap per-symbol lookup misses.
+    daemon._handle_ticker_message(_ticker_push("BBBUSDT", 1.0))
+
+    assert daemon._bar_event.is_set() is False
+
+
+def test_a_churning_tick_stream_cannot_spin_cycles(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0))
+    assert daemon._bar_event.is_set() is True
+
+    # A cycle consumes the wake; the next hundred ticks are all still below
+    # the level and must not re-arm it inside the debounce window.
+    daemon._bar_event.clear()
+    for tick in range(100):
+        daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0 - tick * 0.001))
+    assert daemon._bar_event.is_set() is False
+
+    # Even past the debounce window the same registration stays silent: it
+    # already woke a cycle, and until a cycle re-arms the symbol the idle
+    # grid owns the retries. Without the latch a level that cannot clear
+    # would re-fire every debounce interval for a whole owner outage.
+    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 98.0))
+    assert daemon._bar_event.is_set() is False
+
+
+def test_a_level_that_cannot_clear_wakes_once_until_it_is_rearmed(tmp_path: Path) -> None:
+    """A breached-but-unexitable stop must not spin the sleeve at 0.5 Hz.
+
+    The wake fires once per registration. A cycle that re-arms the very same
+    level (its exit still unresolved) keeps the latch; a cycle that arms a
+    different level -- the stop decayed further, or a new trade -- re-arms
+    the wake.
+    """
+
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 95.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 94.0))
+    assert daemon._bar_event.is_set() is True
+
+    # The cycle that wake started re-arms the SAME level: still latched.
+    daemon._bar_event.clear()
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 93.0))
+    assert daemon._bar_event.is_set() is False
+
+    # A DIFFERENT level for the symbol re-arms the wake.
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 92.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 91.0))
+    assert daemon._bar_event.is_set() is True
+
+
+def test_each_cycle_replaces_the_previous_cycle_s_levels(tmp_path: Path) -> None:
+    # Fails without the fix in the second half: stale levels must not pile up
+    # across cycles, and the new cycle's level must actually be armed.
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+
+    reported["levels"] = [{"symbol": "BBBUSDT", "at_or_below": 50.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    # The retired level is gone, not merely outvoted.
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 1.0))
+    assert daemon._bar_event.is_set() is False
+
+    daemon._handle_ticker_message(_ticker_push("BBBUSDT", 49.0))
+    assert daemon._bar_event.is_set() is True
+
+
+def test_only_the_first_level_a_falling_price_reaches_is_kept(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [
+        {"symbol": "AAAUSDT", "at_or_below": 90.0},
+        {"symbol": "AAAUSDT", "at_or_below": 100.0},
+        {"symbol": "AAAUSDT", "at_or_below": 80.0},
+    ]
+    daemon._run_one_cycle()
+
+    assert daemon._price_wake_floor_by_symbol == {"AAAUSDT": 100.0}
+
+
+def test_a_rising_price_level_wakes_on_the_way_up(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_above": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.5))
+    assert daemon._bar_event.is_set() is False
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 100.0))
+    assert daemon._bar_event.is_set() is True
+
+
+def test_a_journal_commit_outranks_a_price_touch(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0))
+    daemon._journal_wake_pending = True
+
+    daemon._wait_for_next_cycle_event()
+
+    # The commit means the book itself moved; its cycle reads the touched
+    # price anyway.
+    assert daemon._pending_cycle_kind == "journal_change"
+    # The consumed price flag must not relabel the next plain bar wake.
+    daemon._bar_event.clear()
+    daemon._bar_event.set()
+    daemon._wait_for_next_cycle_event()
+    assert daemon._pending_cycle_kind == "confirmed_bar"
+
+
+def test_the_timer_grid_pays_no_per_tick_price_work(tmp_path: Path) -> None:
+    # The timer grid ignores the wake event, so watching prices for it would
+    # be pure per-tick cost on the WS thread.
+    daemon, reported = _price_wake_host(tmp_path, event_driven_cycle=False)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+
+    assert daemon._price_wake_floor_by_symbol == {}
+
+
+def test_a_broken_level_row_never_costs_the_cache_its_update(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [
+        {"symbol": "", "at_or_below": 100.0},
+        {"symbol": "AAAUSDT", "at_or_below": "cheap"},
+        {"symbol": "AAAUSDT", "at_or_below": 0.0},
+        {"symbol": "AAAUSDT", "at_or_below": True},
+        "not a row",
+        {"symbol": "BBBUSDT", "at_or_below": 7},
+    ]
+    daemon._run_one_cycle()
+
+    # Only the usable one survives; an int level is a price.
+    assert daemon._price_wake_floor_by_symbol == {"BBBUSDT": 7.0}
+
+    daemon._handle_ticker_message(_ticker_push("BBBUSDT", 6.0))
+    assert daemon._bar_event.is_set() is True
+    assert daemon._ticker_cache.get("BBBUSDT") is not None
+
+
 def test_cycle_payload_is_not_decorated_with_ws_plane_stats(tmp_path: Path) -> None:
     """The post-cycle ws_klines/ws_state attach was computed-and-dropped: every
     sleeve persists its cycle row inside its own runner, before the host sees

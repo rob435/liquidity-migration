@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import dataclasses
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -470,8 +471,11 @@ def test_privileged_inbox_writes_hand_inodes_to_the_directory_owner(
         )
     )
     owner = os.stat(tmp_path / "inbox")
-    # Arrival counter, arrival sidecar, and the request body all hand off.
-    assert len(recorded) == 3
+    # The request body (the one durable, fsync-paying write) and the advisory
+    # counter (buffered). The arrival sidecar used to be a third; the order now
+    # travels inside the request's own file. Both inodes are handed to the
+    # directory owner -- a root-owned counter is exactly the 2026-08-01 poison.
+    assert len(recorded) == 2
     assert set(recorded) == {(owner.st_uid, owner.st_gid)}
 
 
@@ -557,9 +561,12 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
         notional=-20.0,
     )
     inbox.submit(request)
-    arrival_path = inbox.root / "arrival" / inbox._filename(request.request_id)
-    arrival_before = json.loads(arrival_path.read_bytes())
-    assert arrival_before["arrival_sequence"] == 1
+    filename = inbox._filename(request.request_id)
+
+    def _arrival_of(state: str) -> int:
+        return json.loads((inbox.root / state / filename).read_bytes())["arrival_sequence"]
+
+    assert _arrival_of("pending") == 1
     claimed = inbox.claim_next()
     assert claimed is not None
     processing_path, claimed_request = claimed
@@ -572,9 +579,11 @@ def test_crash_after_kernel_execution_replays_request_without_resubmitting_fille
     assert after_restart == before_crash
     assert adapter.submit_calls == 1
     assert len(list((inbox.root / "completed").glob("*.json"))) == 1
-    assert json.loads(arrival_path.read_bytes()) == arrival_before
+    # The arrival order survives the claim, the crash, the recovery and the
+    # completion: it moves with the request's own file.
+    assert _arrival_of("completed") == 1
     assert inbox.submit(request).parent.name == "completed"
-    assert json.loads(arrival_path.read_bytes()) == arrival_before
+    assert _arrival_of("completed") == 1
 
 
 def test_lost_submit_response_reconciles_before_request_replay(tmp_path: Path) -> None:
@@ -851,7 +860,7 @@ def test_tampered_pending_request_fails_closed_on_every_read_path(
     )
     path = inbox.submit(request)
     payload = json.loads(path.read_bytes())
-    payload["account_id"] = "wrong-account"
+    payload["request"]["account_id"] = "wrong-account"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="unreadable account target request"):
@@ -2661,8 +2670,12 @@ def test_inbox_fifo_uses_durable_arrival_order_across_mixed_producer_timestamps(
     claimed = inbox.claim_next()
 
     assert claimed is not None and claimed[1].request_id == "arrived-first"
-    arrival_rows = [json.loads(path.read_bytes()) for path in (inbox.root / "arrival").glob("*.json")]
-    assert {row["request_id"]: row["arrival_sequence"] for row in arrival_rows} == {
+    arrival_rows = [
+        json.loads(path.read_bytes())
+        for state in ("pending", "processing")
+        for path in (inbox.root / state).glob("*.json")
+    ]
+    assert {row["request"]["request_id"]: row["arrival_sequence"] for row in arrival_rows} == {
         "arrived-first": 1,
         "arrived-second": 2,
     }
@@ -2939,9 +2952,292 @@ def test_risk_flat_is_not_superseded_by_genuinely_later_strategy_reentry(
     assert claimed is not None and claimed[1].request_id == risk_flat.request_id
 
 
-def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
+def test_publishing_one_request_writes_exactly_one_durable_file(tmp_path: Path) -> None:
+    """A publish costs one atomic replace, not three.
+
+    Queueing a request used to write an arrival counter, an arrival sidecar
+    and the request body -- three atomic replaces, six fsyncs, about eleven
+    milliseconds of the measured publish-to-pickup time on the deployed host.
+    The order now rides inside the request's own file; the counter survives
+    only as an advisory, buffered write that pays no fsync.
+    """
+
+    from liquidity_migration.account import account_service as account_service_module
+
+    inbox = _inbox(tmp_path)
+    route = _route(tmp_path)
+
+    real_atomic = account_service_module._atomic_replace
+    durable_writes: list[str] = []
+
+    def _counting_atomic(path: Path, data: bytes) -> None:
+        durable_writes.append(str(path))
+        real_atomic(path, data)
+
+    with mock.patch.object(account_service_module, "_atomic_replace", _counting_atomic):
+        inbox.submit(
+            _request(
+                route,
+                request_id="single-write",
+                batch_id="single-write",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+
+    assert durable_writes == [str(inbox.root / "pending" / inbox._filename("single-write"))]
+    assert not list((inbox.root / "arrival").glob("*.json"))
+    # The advisory counter exists -- written buffered, outside the durable
+    # (fsync-paying) path counted above.
+    assert json.loads((inbox.root / "arrival_counter.json").read_bytes()) == {
+        "schema_version": 1,
+        "last_arrival_sequence": 1,
+    }
+
+
+def test_a_rotted_queue_file_never_blocks_a_new_publish(tmp_path: Path) -> None:
+    """One unreadable file must not freeze the queue for everyone else.
+
+    The publish derives its arrival order by scanning the live queue. A file
+    that scan cannot read -- rot, a stray key, a foreign shape -- contributes
+    nothing instead of raising, because refusing to queue a new request over
+    an unrelated bad file would block the safety exits that ride this same
+    inbox. The bad file itself stays fail-closed at the owner's claim walk.
+    """
+
+    route = _route(tmp_path)
+    inbox = AccountIntentInbox(route)
+    inbox.submit(
+        _request(
+            route,
+            request_id="good-first",
+            batch_id="good-first",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    claimed = inbox.claim_next()
+    assert claimed is not None
+    # The claimed copy rots in processing/ -- truncated to nothing.
+    (inbox.root / "processing" / inbox._filename("good-first")).write_bytes(b"")
+
+    # The safety-exit shape still queues, with an order past the good history.
+    exit_path = inbox.submit(
+        _request(
+            route,
+            request_id="safety-exit",
+            batch_id="safety-exit",
+            kind=SleeveAdapterKind.RISK,
+            notional=0.0,
+        )
+    )
+    assert json.loads(exit_path.read_bytes())["arrival_sequence"] == 2
+
+    # A rotten file in pending/ does not block publishing either -- but the
+    # claim walk still refuses to schedule past it, exactly as before.
+    (inbox.root / "pending" / "0000-rotten.json").write_text('{"what": 1}', encoding="utf-8")
+    inbox.submit(
+        _request(
+            route,
+            request_id="after-rot",
+            batch_id="after-rot",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    with pytest.raises((RuntimeError, ValueError)):
+        inbox.claim_next()
+
+
+def test_arrival_numbering_survives_a_drained_queue_and_a_rebuilt_publisher(
     tmp_path: Path,
 ) -> None:
+    """Receipts keep a climbing arrival order across producer rebuilds.
+
+    Producers rebuild their inbox object every cycle, and the queue is
+    usually empty at publish time. The advisory counter carries the numbering
+    across, so completed receipts hold a usable timeline instead of every
+    request being number one.
+    """
+
+    route = _route(tmp_path)
+    first = AccountIntentInbox(route)
+    _submit_and_complete(first, route, request_id="first-life")
+
+    rebuilt = AccountIntentInbox(route)
+    path = rebuilt.submit(
+        _request(
+            route,
+            request_id="second-life",
+            batch_id="second-life",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert json.loads(path.read_bytes())["arrival_sequence"] == 2
+
+
+def test_a_forged_legacy_completed_file_is_rejected_exactly(tmp_path: Path) -> None:
+    """A legacy-shaped file carrying a stray key fails the read.
+
+    Files completed by an older build carry only the request and the receipt;
+    their key set is checked exactly, the same way the embedded form's is. An
+    ignored stray key is how a forged field slips past a reader that only
+    looks at what it expects.
+    """
+
+    route = _route(tmp_path)
+    inbox = AccountIntentInbox(route)
+    request = _submit_and_complete(inbox, route, request_id="legacy-forge")
+    completed = inbox.root / "completed" / inbox._filename("legacy-forge")
+    payload = json.loads(completed.read_bytes())
+    # Rebuild the file the way the older build shaped it, plus one stray key,
+    # and plant the matching sidecar so only the key check can reject it.
+    completed.write_text(
+        json.dumps(
+            {"request": payload["request"], "receipt": payload["receipt"], "forged": True}
+        ),
+        encoding="utf-8",
+    )
+    (inbox.root / "arrival" / inbox._filename("legacy-forge")).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "request_id": request.request_id,
+                "request_hash": request.content_hash(),
+                "arrival_sequence": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        inbox.completed_requests()
+
+
+def test_owner_pass_parses_and_hashes_each_pending_file_once(tmp_path: Path) -> None:
+    """The readiness peek and the claim share one parse of the queue.
+
+    The owner looks at the pending queue twice per order pass: once to check
+    the head's market data is warm, once to claim it. Each look used to read,
+    parse and re-hash every pending file.
+    """
+
+    route = _route(tmp_path)
+    producer = AccountIntentInbox(route)
+    for index in range(3):
+        producer.submit(
+            _request(
+                route,
+                request_id=f"parse-once-{index}",
+                batch_id=f"parse-once-{index}",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+    # The owner is a different process from the producer, so it starts a pass
+    # knowing nothing about these files.
+    inbox = AccountIntentInbox(route)
+
+    parses = 0
+    hashes = 0
+    real_from_dict = AccountTargetRequest.from_dict.__func__
+    real_content_hash = AccountTargetRequest.content_hash
+
+    def _counting_from_dict(cls, payload):
+        nonlocal parses
+        parses += 1
+        return real_from_dict(cls, payload)
+
+    def _counting_content_hash(self):
+        nonlocal hashes
+        hashes += 1
+        return real_content_hash(self)
+
+    with mock.patch.object(
+        AccountTargetRequest, "from_dict", classmethod(_counting_from_dict)
+    ), mock.patch.object(AccountTargetRequest, "content_hash", _counting_content_hash):
+        head = inbox.peek_next()
+        assert head is not None
+        claimed = inbox.claim_expected_next(head.request_id)
+
+    assert claimed is not None and claimed[1].request_id == head.request_id
+    # Three pending files, looked at twice, parsed and hashed once each.
+    assert parses == 3
+    assert hashes == 3
+
+
+def test_a_fresh_inbox_never_reorders_or_reuses_a_live_arrival_order(
+    tmp_path: Path,
+) -> None:
+    """A restarted producer keeps queueing behind what is already waiting.
+
+    The arrival order is derived from the unfinished requests themselves, so a
+    producer that starts with no memory of the queue -- a restart, or a second
+    process -- still reads the same shared truth under the same inbox lock.
+    """
+
+    route = _route(tmp_path)
+    first = AccountIntentInbox(route)
+    for index in range(3):
+        first.submit(
+            _request(
+                route,
+                request_id=f"before-restart-{index}",
+                batch_id=f"before-restart-{index}",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+
+    restarted = AccountIntentInbox(route)
+    restarted.submit(
+        _request(
+            route,
+            request_id="after-restart",
+            batch_id="after-restart",
+            kind=SleeveAdapterKind.CONTINUOUS,
+            notional=-20.0,
+        )
+    )
+
+    orders = {
+        json.loads(path.read_bytes())["request"]["request_id"]: json.loads(path.read_bytes())[
+            "arrival_sequence"
+        ]
+        for path in (restarted.root / "pending").glob("*.json")
+    }
+    assert orders == {
+        "before-restart-0": 1,
+        "before-restart-1": 2,
+        "before-restart-2": 3,
+        "after-restart": 4,
+    }
+    assert len(set(orders.values())) == len(orders)
+    claimed_ids = []
+    while True:
+        claimed = restarted.claim_next()
+        if claimed is None:
+            break
+        claimed_ids.append(claimed[1].request_id)
+    assert claimed_ids == [
+        "before-restart-0",
+        "before-restart-1",
+        "before-restart-2",
+        "after-restart",
+    ]
+
+
+def test_inbox_fails_closed_when_pending_request_loses_its_arrival_order(
+    tmp_path: Path,
+) -> None:
+    """A queued request whose durable order is gone is never served.
+
+    The order used to live in a sidecar file; it now lives in the request's
+    own file. Either way, a pending request the inbox cannot place in the
+    queue must stop the scan, not be guessed at.
+    """
+
     inbox = _inbox(tmp_path)
     request = _request(
         _route(tmp_path),
@@ -2950,10 +3246,14 @@ def test_inbox_fails_closed_when_pending_request_loses_arrival_sidecar(
         kind=SleeveAdapterKind.LONG,
         notional=20.0,
     )
-    inbox.submit(request)
-    (inbox.root / "arrival" / inbox._filename(request.request_id)).unlink()
+    path = inbox.submit(request)
+    stripped = json.loads(path.read_bytes())
+    del stripped["arrival_sequence"]
+    path.write_text(json.dumps(stripped), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="lacks a durable arrival sequence"):
+    # The stripped file no longer matches any legal shape -- embedded or
+    # legacy -- so the claim walk refuses it at the key check.
+    with pytest.raises(RuntimeError, match="unreadable account target request"):
         inbox.claim_next()
 
 

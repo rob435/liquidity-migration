@@ -27,7 +27,7 @@ def test_owner_equity_retries_only_the_exact_head_publication_race(
             raise AccountOwnerHealthHeadPending(
                 "account-owner health journal sequence mismatch: health=10, journal=11"
             )
-        return SimpleNamespace(equity_usdt=9_876.5)
+        return SimpleNamespace(equity_usdt=9_876.5, observed_ts_ns=0)
 
     monkeypatch.setattr(planning, "require_recent_account_owner_health", owner_health)
 

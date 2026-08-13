@@ -1517,7 +1517,7 @@ def test_cycle_publishes_exit_and_independent_component_entries_through_one_rout
 
     def owner_health(*_args: Any, **kwargs: Any) -> SimpleNamespace:
         owner_health_call.update(kwargs)
-        return SimpleNamespace(equity_usdt=10_000.0)
+        return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=0)
 
     monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
     monkeypatch.setattr(
