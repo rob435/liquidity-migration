@@ -17,6 +17,7 @@ import math
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import polars as pl
@@ -1184,6 +1185,381 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     intent = request["intents"][0]["intent"]
     assert intent["target_key"].startswith("long/")
     assert intent["signed_notional_usdt"] > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# The cycle context a fast wake needs                                           #
+# --------------------------------------------------------------------------- #
+class _CountingTimeModule:
+    """`time` stand-in for strategy_planning: sleeps counted, rest passed through."""
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(float(seconds))
+
+    def __getattr__(self, name: str) -> Any:
+        import time as real_time
+
+        return getattr(real_time, name)
+
+
+class TestFastWakeSpendsTheStoredHealthReading:
+    """A wake that exists to act fast must not spend its first seconds on the
+    owner-health read, whose retry ladder sleeps a second between attempts
+    when the owner's receipt is mid-publish. LONG had no cycle context at
+    all, so every wake paid it."""
+
+    def _cycle(
+        self,
+        tmp_path: Path,
+        demo: LongNativeDemoCycleConfig,
+        *,
+        now_ms: int,
+        state: lnd.LongCycleState,
+        cycle_kind: str = "timer",
+    ) -> Any:
+        return run_long_native_demo_cycle(
+            tmp_path / "long",
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=demo,
+            now_ms=now_ms,
+            cycle_state=state,
+            cycle_kind=cycle_kind,
+        )
+
+    def _demo(self, tmp_path: Path) -> LongNativeDemoCycleConfig:
+        inbox = tmp_path / "account-inbox"
+        account_root = tmp_path / "account"
+        _ensure_owner_route(account_root, inbox, environment="demo")
+        return LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=str(inbox),
+            account_execution_root=str(account_root),
+            ws_klines_enabled=False,
+        )
+
+    def test_a_price_touch_wake_does_zero_health_reads_or_sleeps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from liquidity_migration.account.account_owner_health import (
+            AccountOwnerHealthHeadPending,
+        )
+
+        _stub_cycle_dependencies(monkeypatch, candidates=[])
+        demo = self._demo(tmp_path)
+        now = 1_700_000_300_000
+        monkeypatch.setattr(
+            planning_module,
+            "require_recent_account_owner_health",
+            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0),
+        )
+
+        # An ordinary cycle takes the reading the fast wake will spend.
+        state = lnd.LongCycleState()
+        self._cycle(tmp_path, demo, now_ms=now, state=state)
+        assert state.owner_health_reading is not None
+        assert state.owner_health_reading.read_wall_ts_ns == now * 1_000_000
+        assert state.owner_health_reading.equity_usdt == pytest.approx(10_000.0)
+
+        # From here the owner-health head is pending: a live read walks the
+        # retry ladder and sleeps between attempts.
+        live_reads: list[str] = []
+
+        def head_pending(*_args: Any, **_kwargs: Any) -> Any:
+            live_reads.append("read")
+            raise AccountOwnerHealthHeadPending("synthetic head pending")
+
+        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", head_pending)
+        counting_time = _CountingTimeModule()
+        monkeypatch.setattr(planning_module, "time", counting_time)
+
+        # CONTROL — the pre-change path: no stored reading, so the wake pays
+        # the live read, retries the pending head, and sleeps.
+        control = self._cycle(
+            tmp_path,
+            demo,
+            now_ms=now + 10_000,
+            state=lnd.LongCycleState(),
+            cycle_kind="price_touch",
+        )
+        assert len(live_reads) == 4  # 4 head attempts
+        assert len(counting_time.sleeps) == 3  # a sleep between each attempt
+        assert control["cycle"]["equity_usdt"] is None
+
+        # TREATED — the reading is 10s old, inside the same 30s freshness
+        # bound a live read enforces: zero reads, zero sleeps.
+        live_reads.clear()
+        counting_time.sleeps.clear()
+        wake = self._cycle(
+            tmp_path, demo, now_ms=now + 10_000, state=state, cycle_kind="price_touch"
+        )
+
+        assert live_reads == []
+        assert counting_time.sleeps == []
+        assert wake["cycle"]["equity_usdt"] == pytest.approx(10_000.0)
+
+    def test_a_reading_older_than_a_live_read_would_allow_falls_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is widened: past 30s the stored reading is worth no more
+        than it would be to a live read, so the cycle reads live."""
+
+        _stub_cycle_dependencies(monkeypatch, candidates=[])
+        demo = self._demo(tmp_path)
+        now = 1_700_000_300_000
+        live_reads: list[str] = []
+
+        def live_health(*_args: Any, **_kwargs: Any) -> Any:
+            live_reads.append("read")
+            return SimpleNamespace(equity_usdt=10_000.0)
+
+        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
+        state = lnd.LongCycleState()
+        self._cycle(tmp_path, demo, now_ms=now, state=state)
+
+        live_reads.clear()
+        self._cycle(
+            tmp_path,
+            demo,
+            now_ms=now + 30_001,
+            state=state,
+            cycle_kind="market_boundary",
+        )
+
+        assert live_reads  # the wake paid its own live read
+        assert state.owner_health_reading.read_wall_ts_ns == (now + 30_001) * 1_000_000
+
+    def test_a_journal_change_wake_reads_live_even_with_a_fresh_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A journal wake fires BECAUSE the journal moved, so a stored reading
+        could predate the very fill that woke it."""
+
+        _stub_cycle_dependencies(monkeypatch, candidates=[])
+        demo = self._demo(tmp_path)
+        now = 1_700_000_300_000
+        live_reads: list[str] = []
+
+        def live_health(*_args: Any, **_kwargs: Any) -> Any:
+            live_reads.append("read")
+            return SimpleNamespace(equity_usdt=10_000.0)
+
+        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
+        state = lnd.LongCycleState()
+        self._cycle(tmp_path, demo, now_ms=now, state=state)
+        assert state.owner_health_reading is not None
+
+        live_reads.clear()
+        self._cycle(
+            tmp_path, demo, now_ms=now + 5_000, state=state, cycle_kind="journal_change"
+        )
+
+        assert live_reads
+
+    def test_the_daemon_hands_its_cycles_the_wake_reason_and_one_state(
+        self, tmp_path: Path
+    ) -> None:
+        from liquidity_migration.strategy.long_native_event_demo_daemon import (
+            LongNativeDemoDaemon,
+        )
+
+        daemon = LongNativeDemoDaemon(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=LongNativeDemoCycleConfig(
+                execution_environment="demo",
+                account_intent_inbox_root=str(tmp_path / "inbox"),
+                account_execution_root=str(tmp_path / "account"),
+                ws_klines_enabled=False,
+            ),
+            cycle_runner=lambda *a, **k: None,
+        )
+
+        daemon._pending_cycle_kind = "price_touch"
+        first = daemon._extra_cycle_kwargs()
+        second = daemon._extra_cycle_kwargs()
+
+        assert first["cycle_kind"] == "price_touch"
+        # One state for the daemon's life, or a reading could never outlive
+        # the cycle that took it.
+        assert first["cycle_state"] is second["cycle_state"]
+        assert type(first["cycle_state"]) is lnd.LongCycleState
+
+
+# --------------------------------------------------------------------------- #
+# Price levels the cycle asks to be woken for                                   #
+# --------------------------------------------------------------------------- #
+def test_a_candidate_still_waiting_for_its_retrace_reports_the_price() -> None:
+    """The level the entry is waiting for is exactly the published threshold."""
+
+    strategy = long_v11a_profile()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    features = _build_features_with_fc_signal(
+        symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0
+    )
+    watch: list[dict[str, Any]] = []
+
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        # Above the 1%-below threshold: no entry yet, so the cycle waits.
+        price_by_symbol={"BTCUSDT": 99.5},
+        max_new_entries=5,
+        retrace_watch=watch,
+    )
+
+    assert candidates == []
+    assert skips["no_retrace_yet"] == 1
+    assert watch == [{"symbol": "BTCUSDT", "at_or_below": pytest.approx(99.0)}]
+
+
+def test_a_candidate_that_already_entered_asks_for_no_price_wake() -> None:
+    strategy = long_v11a_profile()
+    signal_ts = 1_700_000_000_000
+    features = _build_features_with_fc_signal(
+        symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0
+    )
+    watch: list[dict[str, Any]] = []
+
+    candidates, _skips = _select_long_entry_candidates(
+        features=features,
+        all_trades=pl.DataFrame(),
+        now_ms=signal_ts + 2 * MS_PER_HOUR,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
+        max_new_entries=5,
+        retrace_watch=watch,
+    )
+
+    assert len(candidates) == 1
+    assert watch == []
+
+
+def test_an_armed_decayed_stop_is_a_price_the_cycle_watches() -> None:
+    now = 2_000_000_000_000
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "armed",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+                "stop_decay_after_ms": 48 * MS_PER_HOUR,
+                "decayed_stop_loss_pct": 0.05,
+                "entry_ts_ms": now - 49 * MS_PER_HOUR,
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    levels = lnd._long_price_wake_levels(trades, retrace_watch=[], now_ms=now)
+
+    assert levels == [{"symbol": "BTCUSDT", "at_or_below": pytest.approx(95.0)}]
+
+
+def test_a_decayed_stop_whose_clock_has_not_started_is_not_watched() -> None:
+    """The arming instant is already a reported time deadline; watching the
+    price early would wake cycles that can do nothing with the touch."""
+
+    now = 2_000_000_000_000
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "unarmed",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+                "stop_decay_after_ms": 48 * MS_PER_HOUR,
+                "decayed_stop_loss_pct": 0.05,
+                "entry_ts_ms": now - 47 * MS_PER_HOUR,
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    assert lnd._long_price_wake_levels(trades, retrace_watch=[], now_ms=now) == []
+
+
+def test_trades_a_decay_exit_could_not_act_on_are_not_watched() -> None:
+    now = 2_000_000_000_000
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "no-qty",
+                "sleeve": "long",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0",
+                "stop_decay_after_ms": MS_PER_HOUR,
+                "decayed_stop_loss_pct": 0.05,
+                "entry_ts_ms": now - 2 * MS_PER_HOUR,
+                "entry_price": 100.0,
+            },
+            {
+                "trade_id": "no-fill-price",
+                "sleeve": "long",
+                "symbol": "ETHUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+                "stop_decay_after_ms": MS_PER_HOUR,
+                "decayed_stop_loss_pct": 0.05,
+                "entry_ts_ms": now - 2 * MS_PER_HOUR,
+                "entry_price": 0.0,
+            },
+            {
+                "trade_id": "no-decay-contract",
+                "sleeve": "long",
+                "symbol": "SOLUSDT",
+                "side": "long",
+                "status": "open",
+                "qty": "0.001",
+                "entry_ts_ms": now - 2 * MS_PER_HOUR,
+                "entry_price": 100.0,
+            },
+        ]
+    )
+
+    assert lnd._long_price_wake_levels(trades, retrace_watch=[], now_ms=now) == []
+    assert lnd._long_price_wake_levels(pl.DataFrame(), retrace_watch=[], now_ms=now) == []
+
+
+def test_the_cycle_payload_carries_the_prices_the_daemon_should_watch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fails without the fix: the payload had no price levels at all, so the
+    daemon could only ever notice a retrace on whatever cycle came next."""
+
+    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
+
+    def waiting_on_a_retrace(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        kwargs["retrace_watch"].append({"symbol": "AAAUSDT", "at_or_below": 42.5})
+        return [], {"no_retrace_yet": 1}
+
+    monkeypatch.setattr(lnd, "_select_long_entry_candidates", waiting_on_a_retrace)
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(account_root, inbox, environment="demo")
+
+    payload = _run_cycle(tmp_path / "long", demo)
+
+    assert payload["price_wake_levels"] == [{"symbol": "AAAUSDT", "at_or_below": 42.5}]
 
 
 def test_long_producer_rejects_cross_wired_route_before_cycle_resources(

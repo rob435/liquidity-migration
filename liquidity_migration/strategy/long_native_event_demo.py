@@ -96,6 +96,7 @@ from liquidity_migration.research.backtest.long_identity import (
     long_trade_id,
 )
 from liquidity_migration.strategy.strategy_planning import (
+    OwnerHealthReading,
     account_owner_equity_or_error,
     sleeve_planning_snapshot,
     suppress_target_intents,
@@ -115,6 +116,25 @@ from liquidity_migration.data.universe import build_current_universe_table
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 _LOGGER = logging.getLogger(__name__)
+
+# The wakes whose whole point is speed: a time stop coming due, and a price
+# the cycle asked to be woken for. Those two spend the owner-health reading an
+# ordinary cycle already took instead of reading it again. Every other kind —
+# timer, confirmed bar, journal change, startup — reads live.
+_FAST_WAKE_CYCLE_KINDS = frozenset({"market_boundary", "price_touch"})
+
+
+@dataclass(slots=True)
+class LongCycleState:
+    """Operational hints a LONG daemon carries between its own cycles.
+
+    Never decision state: every cycle rebuilds features and re-decides from
+    scratch. It holds one thing — the owner-health reading an ordinary cycle
+    took — so a wake that exists to act fast can spend it instead of paying
+    the read and the head-retry sleeps behind it.
+    """
+
+    owner_health_reading: OwnerHealthReading | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,9 +327,12 @@ def run_long_native_demo_cycle(
     state_cache_stale_seconds: float = 120.0,
     funnel_observer: DecisionFunnelObserver | None = None,
     journal_cursor: AccountJournalCursor | None = None,
+    cycle_state: LongCycleState | None = None,
+    cycle_kind: str = "timer",
 ) -> PublishedTargetCyclePayload:
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or long_v11a_profile()
+    state = cycle_state if cycle_state is not None else LongCycleState()
     strategy_id = strategy.execution_strategy_id
     _validate_long_demo_config(demo, strategy)
     owner_environment = execution_environment(demo.execution_environment).value
@@ -404,10 +427,31 @@ def run_long_native_demo_cycle(
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
         mark_stage("universe")
 
+        # A wake that exists to act fast must not spend its first seconds on
+        # the owner-health read, whose head-retry ladder sleeps a second
+        # between attempts when the owner's receipt is mid-publish. Those
+        # wakes serve the reading an ordinary cycle already took, and only
+        # while it sits inside the SAME freshness bound a live read enforces:
+        # nothing is widened, so the equity a cycle plans on is the equity it
+        # would have read anyway. A journal-change wake always reads live —
+        # it fired BECAUSE the journal moved, so a stored reading could
+        # predate the very fill that woke it.
+        now_ns = cycle_now_ms * 1_000_000
+        stored_reading = state.owner_health_reading if cycle_kind in _FAST_WAKE_CYCLE_KINDS else None
         equity_usdt, account_owner_health_error = account_owner_equity_or_error(
             route,
             environment=owner_environment,
+            stored_reading=stored_reading,
+            now_ns=now_ns,
         )
+        # Re-stamp on live reads only: a served reading keeps its original
+        # timestamp, so age can never launder itself through a re-stamp.
+        if stored_reading is None or not stored_reading.is_fresh(now_ns=now_ns):
+            state.owner_health_reading = OwnerHealthReading(
+                equity_usdt=float(equity_usdt),
+                error=str(account_owner_health_error),
+                read_wall_ts_ns=now_ns,
+            )
         account_state_source = f"account_owner_health:{owner_environment}"
         mark_stage("account_health")
 
@@ -483,6 +527,7 @@ def run_long_native_demo_cycle(
 
         # Derive FC candidates from the latest closed daily bar per symbol, then
         # check the sniper retrace condition against live 1h bars.
+        retrace_watch: list[dict[str, Any]] = []
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
             all_trades=all_trades,
@@ -491,6 +536,7 @@ def run_long_native_demo_cycle(
             price_by_symbol=price_by_symbol,
             max_new_entries=demo.max_new_entries_per_cycle,
             funnel_observer=funnel_observer,
+            retrace_watch=retrace_watch,
         )
         free_slots = max(
             strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
@@ -638,6 +684,13 @@ def run_long_native_demo_cycle(
             # stop fires on its deadline instead of on the polling grid.
             "next_time_deadline_ts_ms": _next_time_deadline_ts_ms(
                 all_trades, now_ms=cycle_now_ms
+            ),
+            # The daemon watches these prices on the ticker stream, so a
+            # retrace coming into reach or an armed decayed stop being
+            # touched starts a cycle in seconds rather than whenever the
+            # next cycle happens to run.
+            "price_wake_levels": _long_price_wake_levels(
+                all_trades, retrace_watch=retrace_watch, now_ms=cycle_now_ms
             ),
             "data_sources": {
                 "ticker_source": ticker_source,
@@ -812,6 +865,7 @@ def _select_long_entry_candidates(
     max_new_entries: int,
     funnel_observer: DecisionFunnelObserver | None = None,
     funnel_venue: str = "bybit",
+    retrace_watch: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Detect FC v11a candidates from the latest closed daily bar.
 
@@ -819,6 +873,11 @@ def _select_long_entry_candidates(
     yesterday if today's bar hasn't closed yet), check the sniper-retrace
     condition against live price. Emit candidates ready for immediate market
     entry. Stale signals (>24h old) are dropped to avoid late-fill surprises.
+
+    ``retrace_watch``, when given, collects the price each still-waiting
+    candidate is waiting for. It takes no part in selection — the daemon
+    watches those prices on the ticker stream so a retrace that comes into
+    reach starts a cycle in seconds instead of on the idle floor.
     """
     skips = {
         "no_features": 0,
@@ -919,6 +978,8 @@ def _select_long_entry_candidates(
                 entry_reason = "sniper_deadline_fallthru"
             else:
                 skips["no_retrace_yet"] += 1
+                if retrace_watch is not None:
+                    retrace_watch.append({"symbol": symbol, "at_or_below": retrace_threshold})
                 continue
             atr_pct = float(row.get("atr_14d_pct") or 0.0)
             realized_vol = float(row.get("realized_vol") or strategy.vol_floor_annual)
@@ -1239,6 +1300,53 @@ def _next_time_deadline_ts_ms(all_trades: pl.DataFrame, *, now_ms: int) -> int |
             if decay_deadline_ts_ms > now_ms:
                 deadlines.append(decay_deadline_ts_ms)
     return min(deadlines) if deadlines else None
+
+
+def _long_price_wake_levels(
+    all_trades: pl.DataFrame,
+    *,
+    retrace_watch: list[dict[str, Any]],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """The prices at which a live tick could change an open or pending LONG.
+
+    The price twin of :func:`_next_time_deadline_ts_ms`. Two levels qualify,
+    and a fall reaches both: a sniper retrace threshold this cycle was still
+    waiting for, and an armed decayed stop on an open trade. The daemon
+    watches them on the ticker stream and starts a cycle the moment one is
+    touched. That cycle re-decides everything from scratch, so a level that
+    is slightly generous costs one extra cycle and can never cause a trade
+    the ordinary path would not have made.
+
+    The decayed stop is listed only once its clock has started. Before that
+    the arming instant is already a reported time deadline, and watching the
+    price early would wake cycles that can do nothing with the touch.
+    """
+
+    levels: list[dict[str, Any]] = list(retrace_watch)
+    open_long = _open_long_trades(all_trades)
+    if open_long.is_empty():
+        return levels
+    for trade in open_long.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        if not symbol or _float(str(trade.get("qty") or "")) <= 0.0:
+            continue
+        decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
+        decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
+        entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
+        entry_price = _float(trade.get("entry_price"))
+        if (
+            decay_after_ms <= 0
+            or not 0.0 < decayed_stop_loss_pct < 1.0
+            or entry_ts_ms <= 0
+            or entry_price <= 0.0
+            or now_ms < entry_ts_ms + decay_after_ms
+        ):
+            continue
+        levels.append(
+            {"symbol": symbol, "at_or_below": entry_price * (1.0 - decayed_stop_loss_pct)}
+        )
+    return levels
 
 
 def _long_exit_target_intents(

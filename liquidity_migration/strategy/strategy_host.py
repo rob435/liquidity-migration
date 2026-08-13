@@ -3,7 +3,8 @@
 One process per strategy sleeve. The host owns everything that is not the
 strategy itself: the public market planes (WS kline store, WS ticker cache
 with REST reconcile), the wake machinery (confirmed-bar events, time
-deadlines, the fixed-interval floor), the replayable strategy event clock and
+deadlines, price levels a cycle asked to be woken for, the fixed-interval
+floor), the replayable strategy event clock and
 its evidence tapes, the per-cycle health receipt the fleet watchdog reads,
 and graceful shutdown. SIGTERM drains the current cycle and exits cleanly.
 
@@ -62,10 +63,15 @@ from liquidity_migration.strategy.strategy_target_replay import (
     JsonlTargetSchedulingCaptureTape,
     PublishedTargetCyclePayload,
 )
-from liquidity_migration.marketdata.ws_state_cache import TickerCache
+from liquidity_migration.marketdata.ws_state_cache import TickerCache, _message_rows
 
 
 _logger = logging.getLogger("liquidity_migration.strategy.strategy_host")
+
+# A churning tick stream must not spin cycles: at most one price wake per
+# this window, timed from the last one that ended a wait. A touch suppressed
+# inside the window stays registered, so the next tick past it still wakes.
+PRICE_WAKE_MIN_INTERVAL_SECONDS = 2.0
 
 
 class HostedCycleConfig(Protocol):
@@ -203,6 +209,20 @@ class StrategyHostDaemon:
         # crosses the slot boundary, the next timer wait must not read that
         # as the cycle overrunning the interval.
         self._deadline_borrowed_slot = False
+        # Price-touch wakes: each cycle reports the prices at which a live
+        # tick could change its book (a sniper retrace coming into reach, an
+        # armed decayed stop), and the ticker callback ends the wait the
+        # moment a push crosses one. Without it a price predicate is only
+        # ever evaluated by whatever cycle happens to run, so a touch could
+        # wait out the whole idle floor. An accelerator, not a correctness
+        # gate: a touch missed while the stream is down is picked up by the
+        # idle-floor cycle, exactly as before.
+        self._price_wake_floor_by_symbol: dict[str, float] = {}
+        self._price_wake_ceiling_by_symbol: dict[str, float] = {}
+        self._price_wake_pending = False
+        self._price_wake_min_interval_seconds = PRICE_WAKE_MIN_INTERVAL_SECONDS
+        self._last_price_wake_monotonic = 0.0
+        self._cycles_price_triggered = 0
         self._cycles_run = 0
         self._cycle_errors = 0
         self._cycle_overruns = 0
@@ -257,6 +277,51 @@ class StrategyHostDaemon:
             self._ticker_cache.on_ticker_event(message)
         except Exception as exc:  # noqa: BLE001
             _logger.exception("%s ticker cache crashed on event: %s", self._sleeve_label, exc)
+        # Cache first, then the wake check: the cycle this may start reads the
+        # cache, so the push must already be in it. Separately guarded so a
+        # fault in the wake check can never cost the cache its update.
+        try:
+            self._check_price_wake_levels(message)
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("%s price wake check crashed on event: %s", self._sleeve_label, exc)
+
+    def _check_price_wake_levels(self, message: Mapping[str, Any]) -> None:
+        """End the wait when a pushed price crosses a level the cycle asked for.
+
+        Runs on the ticker WS thread, so it is float compares and nothing
+        else: no strategy logic, no locks, no I/O. The wake only says "look
+        now" — the cycle it starts re-reads the cache and decides everything.
+        """
+
+        floors = self._price_wake_floor_by_symbol
+        ceilings = self._price_wake_ceiling_by_symbol
+        if not floors and not ceilings:
+            return
+        touched = False
+        for row in _message_rows(message):
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                continue
+            floor = floors.get(symbol)
+            ceiling = ceilings.get(symbol)
+            if floor is None and ceiling is None:
+                continue
+            price = _pushed_ticker_price(row)
+            if price is None:
+                continue
+            if (floor is not None and price <= floor) or (ceiling is not None and price >= ceiling):
+                touched = True
+                break
+        if not touched:
+            return
+        now = time.monotonic()
+        if now - self._last_price_wake_monotonic < self._price_wake_min_interval_seconds:
+            return
+        self._last_price_wake_monotonic = now
+        # Flag before event, as the journal watch does: the wait reads the
+        # flag only after the event woke it.
+        self._price_wake_pending = True
+        self._bar_event.set()
 
     def _pre_resource_teardown(self) -> None:
         """Hook run before shared public ticker and kline resources close.
@@ -304,6 +369,7 @@ class StrategyHostDaemon:
                 # Flag before event: an arrival racing this clear is folded
                 # into the cycle about to run, same as a bar arrival.
                 self._journal_wake_pending = False
+                self._price_wake_pending = False
                 self._bar_event.clear()
                 self._run_one_cycle()
                 if self._shutdown.is_set():
@@ -329,7 +395,7 @@ class StrategyHostDaemon:
             "%s strategy host stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
             "cycles_journal_triggered=%d cycles_timer_triggered=%d "
-            "cycles_deadline_triggered=%d "
+            "cycles_deadline_triggered=%d cycles_price_triggered=%d "
             "reconciles_total=%d reconcile_errors=%d ws_ticker_stale_ticks=%d",
             self._sleeve_label,
             self._cycles_run,
@@ -340,6 +406,7 @@ class StrategyHostDaemon:
             self._cycles_journal_triggered,
             self._cycles_timer_triggered,
             self._cycles_deadline_triggered,
+            self._cycles_price_triggered,
             self._reconciles_total,
             self._reconcile_errors,
             self._ws_ticker_stale_ticks,
@@ -353,6 +420,7 @@ class StrategyHostDaemon:
             "cycles_journal_triggered": self._cycles_journal_triggered,
             "cycles_timer_triggered": self._cycles_timer_triggered,
             "cycles_deadline_triggered": self._cycles_deadline_triggered,
+            "cycles_price_triggered": self._cycles_price_triggered,
             "reconciles_total": self._reconciles_total,
             "reconcile_errors": self._reconcile_errors,
             "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
@@ -388,6 +456,7 @@ class StrategyHostDaemon:
         if payload is None:
             return
         self._note_time_deadline(payload)
+        self._note_price_wake_levels(payload)
         try:
             capture = self._target_capture_recorder.append_from_cycle(
                 event,
@@ -862,6 +931,43 @@ class StrategyHostDaemon:
             return
         self._shutdown.wait(timeout=seconds)
 
+    def _note_price_wake_levels(self, payload: Mapping[str, Any]) -> None:
+        """Adopt the prices this cycle wants to be woken for.
+
+        Replaces the previous cycle's levels outright, the same way the
+        reported time deadline replaces its predecessor: a level the new
+        cycle no longer reports is no longer watched, so registrations can
+        never pile up across cycles. The dicts are rebuilt and rebound, never
+        mutated, so the ticker thread always reads one whole consistent set
+        without taking a lock.
+
+        Per symbol only the most binding level survives — the highest floor
+        and the lowest ceiling — because a falling price reaches the highest
+        floor first, and waking is all any of them can ask for.
+        """
+
+        if not self._event_driven_cycle:
+            # The timer grid ignores the wake event, so watching prices for
+            # it would be pure per-tick cost.
+            return
+        floors: dict[str, float] = {}
+        ceilings: dict[str, float] = {}
+        rows = payload.get("price_wake_levels")
+        for row in rows if isinstance(rows, (list, tuple)) else ():
+            if not isinstance(row, Mapping):
+                continue
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                continue
+            floor = _positive_price(row.get("at_or_below"))
+            if floor is not None:
+                floors[symbol] = max(floor, floors.get(symbol, 0.0))
+            ceiling = _positive_price(row.get("at_or_above"))
+            if ceiling is not None:
+                ceilings[symbol] = min(ceiling, ceilings.get(symbol, float("inf")))
+        self._price_wake_floor_by_symbol = floors
+        self._price_wake_ceiling_by_symbol = ceilings
+
     def _note_time_deadline(self, payload: Mapping[str, Any]) -> None:
         """Adopt the cycle's reported next time deadline, if it carries one.
 
@@ -981,16 +1087,59 @@ class StrategyHostDaemon:
             return
         if woke:
             journal_woke = self._journal_wake_pending
+            price_woke = self._price_wake_pending
             self._journal_wake_pending = False
+            self._price_wake_pending = False
+            # Account news outranks a price touch: a commit means the book
+            # itself moved, and the cycle it starts reads the touched price
+            # anyway.
             if journal_woke:
                 self._cycles_journal_triggered += 1
                 self._pending_cycle_kind = "journal_change"
+            elif price_woke:
+                self._cycles_price_triggered += 1
+                self._pending_cycle_kind = "price_touch"
             else:
                 self._cycles_kline_triggered += 1
                 self._pending_cycle_kind = "confirmed_bar"
             return
         self._cycles_timer_triggered += 1
         self._pending_cycle_kind = "timer"
+
+
+def _positive_price(value: Any) -> float | None:
+    """A reported wake level, or None when it is not a usable price.
+
+    ``type(...) is`` rather than ``isinstance``: a bool is an int subclass and
+    ``True`` is not a price.
+    """
+
+    if type(value) is not float and type(value) is not int:
+        return None
+    price = float(value)
+    return price if price > 0.0 else None
+
+
+def _pushed_ticker_price(row: Mapping[str, Any]) -> float | None:
+    """The price a pushed ticker row carries, read as the cycle reads it.
+
+    Mark price first, last price as the fallback — the same order
+    ``_price_lookup_from_tickers_and_klines`` uses, so a level is compared
+    against the number the cycle would compare it against. Bybit pushes
+    deltas, and a delta carrying neither field simply moves no level.
+    """
+
+    for field in ("markPrice", "lastPrice"):
+        raw = row.get(field)
+        if raw is None:
+            continue
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if price > 0.0:
+            return price
+    return None
 
 
 def _default_public_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTickerStream:

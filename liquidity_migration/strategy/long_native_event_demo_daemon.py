@@ -26,6 +26,7 @@ from liquidity_migration.research.backtest.long_identity import (
 )
 from liquidity_migration.research.backtest.long_native import LongNativeConfig
 from liquidity_migration.strategy.long_native_event_demo import (
+    LongCycleState,
     LongNativeDemoCycleConfig,
     _validate_long_demo_config,
     format_long_demo_cycle_summary,
@@ -53,6 +54,7 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
     # skeleton instances built without __init__ (the cursor contract test).
     _long_target_producer = False
     _strategy_config: LongNativeConfig | None = None
+    _long_cycle_state: LongCycleState | None = None
 
     def _strategy_profile_name(self) -> str:
         if self._strategy_config is not None:
@@ -94,6 +96,10 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             cycle_runner=cycle_runner,
             **kwargs,
         )
+        # Operational hints carried between this daemon's own cycles — today
+        # just the owner-health reading a fast wake spends. Only the LONG
+        # producer's runner accepts it; sleeve subclasses never pass it.
+        self._long_cycle_state = LongCycleState() if long_target_producer else None
 
     def run(self) -> dict[str, Any]:
         if self._long_target_producer:
@@ -107,10 +113,18 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
         # The host supplies the journal cursor; only the LONG runner accepts
-        # strategy_config, so sleeve subclasses never see it here.
+        # strategy_config, the cycle state, and the wake reason, so sleeve
+        # subclasses never see them here.
         extra = super()._extra_cycle_kwargs()
-        if self._long_target_producer and self._strategy_config is not None:
-            extra["strategy_config"] = self._strategy_config
+        if self._long_target_producer:
+            if self._strategy_config is not None:
+                extra["strategy_config"] = self._strategy_config
+            if self._long_cycle_state is not None:
+                extra["cycle_state"] = self._long_cycle_state
+            # The wake reason the host stamped on this cycle's strategy
+            # event. A wake that exists to act fast spends the stored
+            # owner-health reading instead of re-reading it.
+            extra["cycle_kind"] = self._pending_cycle_kind
         return extra
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
