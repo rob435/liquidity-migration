@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import liquidity_migration.strategy.long_native_event_demo_daemon as daemon_module
+import liquidity_migration.strategy.strategy_host as host_module
 from liquidity_migration.account.account_intent_client import ExitFirstPublication
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.core.config import ResearchConfig
@@ -244,7 +244,7 @@ def test_invalid_long_startup_fails_before_any_resource_construction(
 
     # The public cache is the first local runtime resource. Patching it proves
     # route validation happens before resource construction.
-    monkeypatch.setattr(daemon_module, "TickerCache", forbidden)
+    monkeypatch.setattr(host_module, "TickerCache", forbidden)
 
     with pytest.raises(ValueError, match=message):
         LongNativeDemoDaemon(

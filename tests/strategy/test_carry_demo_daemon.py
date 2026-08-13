@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import liquidity_migration.strategy.long_native_event_demo_daemon as base_daemon_module
+import liquidity_migration.strategy.strategy_host as host_module
 from liquidity_migration.account.account_intent_client import ExitFirstPublication
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.strategy.carry_demo import CarryCycleState, CarryDemoCycleConfig, run_carry_demo_cycle
@@ -135,7 +135,7 @@ def test_invalid_startup_fails_before_any_resource_construction(
         resource_calls.append("opened")
         raise AssertionError("invalid CARRY startup opened a resource")
 
-    monkeypatch.setattr(base_daemon_module, "TickerCache", forbidden)
+    monkeypatch.setattr(host_module, "TickerCache", forbidden)
 
     with pytest.raises(ValueError, match="execution_environment|configured together"):
         CarryDemoDaemon(
