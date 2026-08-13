@@ -836,6 +836,11 @@ class StrategyHostDaemon:
                     except (OSError, ValueError):
                         watch.close()
                         watch = None
+                        # Pace the rebuild: a persistently failing select
+                        # (fd budget, dead descriptor) must degrade to the
+                        # poll cadence, never a hot loop.
+                        if self._journal_watch_stop.wait(timeout=0.25):
+                            return
                         continue
                 else:
                     if self._journal_watch_stop.wait(timeout=0.25):
@@ -958,12 +963,14 @@ class StrategyHostDaemon:
             self._sleep_interruptible(debounce if deadline_wait is None else min(debounce, deadline_wait))
             if self._shutdown.is_set():
                 return
-            fired = self._time_deadline_reached()
-            if fired is not None:
-                self._deadline_fired_ts_ms = fired
-                self._cycles_deadline_triggered += 1
-                self._pending_cycle_kind = "market_boundary"
-                return
+        # A due deadline outranks pending bar/journal wakes at every debounce
+        # setting — the deadline cycle reads the same fresh data they announce.
+        fired = self._time_deadline_reached()
+        if fired is not None:
+            self._deadline_fired_ts_ms = fired
+            self._cycles_deadline_triggered += 1
+            self._pending_cycle_kind = "market_boundary"
+            return
         remaining = max(0.0, self._max_idle_seconds - debounce)
         deadline_wait = self._seconds_until_time_deadline()
         if deadline_wait is not None:

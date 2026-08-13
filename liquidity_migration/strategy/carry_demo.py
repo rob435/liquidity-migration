@@ -1716,7 +1716,9 @@ def run_carry_demo_cycle(
                 {
                     "request_id": item.request.request_id,
                     "batch_id": item.request.batch_id,
-                    "target_key": item.request.intents[0].intent.target_key,
+                    # The grouped request carries every entry+resize; a single
+                    # target_key would silently drop the rest (LONG precedent).
+                    "intent_count": len(item.request.intents),
                 }
                 for item in publication.entry_requests
             ],

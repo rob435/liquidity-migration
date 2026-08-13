@@ -139,3 +139,43 @@ def test_no_journal_watch_thread_without_a_wake_dir_or_in_timer_mode(tmp_path: P
     timer_mode = _host(tmp_path, event_driven_cycle=False, journal_change_wake_dir=tmp_path / "j")
     timer_mode._start_journal_watch_thread()
     assert timer_mode._journal_watch_thread is None
+
+
+def test_journal_watch_select_failure_degrades_to_poll_pace_not_a_hot_loop(
+    tmp_path: Path, monkeypatch: __import__("pytest").MonkeyPatch
+) -> None:
+    import liquidity_migration.strategy.strategy_host as host_module
+
+    class _FakeWatch:
+        def __init__(self, directory: Path) -> None:
+            self.fd = 999
+
+        def drain(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    calls = {"select": 0}
+
+    class _FailingSelect:
+        @staticmethod
+        def select(*args: Any, **kwargs: Any) -> Any:
+            calls["select"] += 1
+            raise ValueError("fd out of range in select()")
+
+    monkeypatch.setattr(host_module, "DirectoryRenameWatch", _FakeWatch)
+    monkeypatch.setattr(host_module, "select", _FailingSelect)
+
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    daemon = _host(tmp_path, journal_change_wake_dir=journal_dir)
+    daemon._start_journal_watch_thread()
+    try:
+        time.sleep(0.6)
+    finally:
+        daemon._stop_journal_watch_thread()
+
+    # Rebuild-after-failure must run at the poll cadence (~0.25s), never a
+    # full-speed construct/select/close spin.
+    assert calls["select"] < 10, f"select ran {calls['select']} times in 0.6s - hot loop"

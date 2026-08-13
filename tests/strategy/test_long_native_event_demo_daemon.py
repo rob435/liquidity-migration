@@ -349,3 +349,26 @@ def test_daemon_without_strategy_config_keeps_v11a_default(tmp_path: Path) -> No
     # No override means the cycle runner's own default (the v11a profile);
     # the kwarg must be absent, not None, for subclass runner signatures.
     assert "strategy_config" not in seen[0]["kwargs"]
+
+
+def test_explicit_none_kline_factory_still_means_the_long_default(tmp_path: Path) -> None:
+    from liquidity_migration.strategy.long_native_event_demo_daemon import (
+        _default_long_kline_stream_manager_factory,
+    )
+
+    daemon = LongNativeDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(
+            execution_environment="demo",
+            account_intent_inbox_root=str(tmp_path / "inbox"),
+            account_execution_root=str(tmp_path / "account"),
+            ws_klines_enabled=True,
+        ),
+        kline_stream_manager_factory=None,
+    )
+
+    # Pre-split behavior: `factory or default`, so an explicit None meant the
+    # LONG default, and ws_klines stayed on. A plain setdefault would keep the
+    # None and silently drop the whole WS kline plane.
+    assert daemon._kline_stream_manager_factory is _default_long_kline_stream_manager_factory

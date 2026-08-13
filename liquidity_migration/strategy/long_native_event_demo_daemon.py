@@ -81,7 +81,10 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             # The cycle runner also validates, but it catches cycle exceptions;
             # startup-boundary failures must instead terminate the process.
             _validate_long_daemon_startup(resolved_demo_config, self._strategy_config)
-        kwargs.setdefault("kline_stream_manager_factory", _default_long_kline_stream_manager_factory)
+        # `get(...) is None` rather than setdefault: an explicit None keeps
+        # meaning "use the LONG default", as it did before the host split.
+        if kwargs.get("kline_stream_manager_factory") is None:
+            kwargs["kline_stream_manager_factory"] = _default_long_kline_stream_manager_factory
         default_journal_change_wake_dir(kwargs, resolved_demo_config)
         super().__init__(
             data_root,
