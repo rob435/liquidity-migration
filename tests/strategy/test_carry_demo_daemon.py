@@ -212,3 +212,67 @@ def test_carry_summary_formatter_remains_selected(tmp_path: Path) -> None:
     assert "pub exit/entry/resize=0/0/0" in line
     assert daemon._strategy_profile_name() == "carry_hold_v4_live_v1"
     assert daemon._sleeve_label == "carry"
+
+
+def test_pre_deadline_cycles_carry_the_freeze_ahead_ask(tmp_path: Path) -> None:
+    """The daemon asks a cycle to freeze the upcoming day only inside the
+    pre-deadline window, and always tells the runner why the cycle woke."""
+
+    from liquidity_migration.strategy.carry_demo import (
+        DECISION_KLINE_LAG_MS,
+        FREEZE_AHEAD_WINDOW_MS,
+    )
+
+    seen: dict[str, Any] = {}
+
+    def cycle_runner(data_root: Path, **kwargs: Any) -> PublishedTargetCyclePayload:
+        seen["kwargs"] = kwargs
+        demo = kwargs["demo_config"]
+        route = ensure_account_route(
+            account_id=account_id_for_environment(demo.execution_environment),
+            environment=demo.execution_environment,
+            account_root=demo.account_execution_root,
+            inbox_root=demo.account_intent_inbox_root,
+        )
+        return PublishedTargetCyclePayload(
+            _flat_payload(),
+            publication=ExitFirstPublication((), (), ()),
+            route=route,
+        )
+
+    daemon = CarryDemoDaemon(
+        tmp_path / "carry",
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_target_config(tmp_path),
+        cycle_runner=cycle_runner,
+    )
+
+    # No deadline known: the wake kind rides along, no freeze-ahead ask.
+    daemon._run_one_cycle()
+    assert seen["kwargs"]["cycle_kind"] == "startup"
+    assert "freeze_ahead_decision_ts_ms" not in seen["kwargs"]
+
+    # A deadline outside the window: still no ask. (_run_one_cycle re-reads
+    # the payload's deadline afterwards, so the deadline is set per call.)
+    now_ms = daemon._clock.wall_time_ns() // 1_000_000
+    daemon._next_wake_deadline_ts_ms = now_ms + FREEZE_AHEAD_WINDOW_MS + 60_000
+    daemon._run_one_cycle()
+    assert "freeze_ahead_decision_ts_ms" not in seen["kwargs"]
+
+    # Inside the window: the ask names the deadline's decision day.
+    near = daemon._clock.wall_time_ns() // 1_000_000 + 45_000
+    daemon._next_wake_deadline_ts_ms = near
+    daemon._run_one_cycle()
+    assert seen["kwargs"]["freeze_ahead_decision_ts_ms"] == near - DECISION_KLINE_LAG_MS
+
+    # A fired deadline is owed nothing until the next one is minted.
+    daemon._next_wake_deadline_ts_ms = near
+    daemon._deadline_fired_ts_ms = near
+    daemon._run_one_cycle()
+    assert "freeze_ahead_decision_ts_ms" not in seen["kwargs"]
+
+    # The deadline wake's kind reaches the runner, which is what lets the
+    # cycle skip the data build on an already-frozen day.
+    daemon._pending_cycle_kind = "market_boundary"
+    daemon._run_one_cycle()
+    assert seen["kwargs"]["cycle_kind"] == "market_boundary"

@@ -34,10 +34,14 @@ match; never append history to this file.
   write-behind journal (marker `account_journal/write_behind.owner` present
   on the demo root and the mainnet root); batched venue submission,
   tick-driven quote repricing, and deadline-driven exits are live. The first
-  multi-order batch receipt and the first deadline-fired (`market_boundary`)
-  producer cycle are the two engine proofs to read off the host; carry's
-  00:20 UTC decision is the natural first occasion for both. CHANGELOG
-  2026-08-12 has the change points.
+  deadline-fired (`market_boundary`) cycle landed 2026-08-13 00:20:00.001
+  UTC (+0.001 s vs the grid's median +24 s); carry now also freezes the
+  day's book ahead of the deadline so the boundary pass publishes in tens
+  of milliseconds instead of 4.5 s (receipts: `froze_ahead=True` on the
+  ~00:19 cycle, `build_skipped=True` on the 00:20 cycle). The first
+  multi-order batch receipt is still pending — it needs a LONG multi-entry
+  cycle or a sliced entry, since carry publishes per-symbol requests.
+  CHANGELOG 2026-08-12 and 2026-08-13 have the change points.
 - **Both trading-rule receipts were renewed 2026-08-09 and expire 2026-08-16.**
   Demo `demo-rules-20260809T191337Z`, 510 symbols, from the order-placing probe;
   funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.

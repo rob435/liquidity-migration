@@ -8,7 +8,11 @@ the other sleeves:
 * PURE TIMER cadence (``event_driven_cycle=False``). The decision is daily and
   publication is a diff against the standing book, so a confirmed-bar wake has
   nothing to accelerate; the WS kline store still feeds each cycle's bars so
-  the fixed 60-second grid stops paying a REST burst.
+  the fixed 60-second grid stops paying a REST burst. The base's daily
+  deadline wake (00:20 UTC) still fires, and cycles inside the pre-deadline
+  window additionally freeze the upcoming day's book ahead of it
+  (``freeze_ahead_decision_ts_ms``), so the deadline pass publishes instead
+  of computing.
 * A daemon-owned :class:`CarryCycleState` is threaded into every cycle as an
   operational hint (funding-sweep throttle, decision-staleness clock), never
   decision state: each cycle replays the registered rule from scratch.
@@ -26,6 +30,8 @@ from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
 from liquidity_migration.strategy.carry_demo import (
     CARRY_FETCH_UNIVERSE_TOP_N,
+    DECISION_KLINE_LAG_MS,
+    FREEZE_AHEAD_WINDOW_MS,
     CarryCycleState,
     CarryDemoCycleConfig,
     _validate_carry_demo_config,
@@ -134,10 +140,25 @@ class CarryDemoDaemon(LongNativeDemoDaemon):
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
         # REPLACES the base kwargs rather than extending: CARRY's cycle runner
         # takes no ``journal_cursor`` -- its cursor lives in the cycle state.
-        return {
+        kwargs: dict[str, Any] = {
             "cycle_state": self._carry_cycle_state,
             "market_client": self._cycle_market_client,
+            # The wake reason the base stamped on this cycle's strategy event.
+            # A ``market_boundary`` wake on an already-frozen day skips the
+            # data build and publishes in tens of milliseconds.
+            "cycle_kind": self._pending_cycle_kind,
         }
+        deadline_ts_ms = self._next_wake_deadline_ts_ms
+        deadline_wait = self._seconds_until_time_deadline()
+        if (
+            deadline_ts_ms is not None
+            and deadline_wait is not None
+            and deadline_wait * 1000.0 <= FREEZE_AHEAD_WINDOW_MS
+        ):
+            # Inside the pre-deadline window: ask this cycle to compute and
+            # freeze the upcoming day's book so the deadline wake finds it.
+            kwargs["freeze_ahead_decision_ts_ms"] = deadline_ts_ms - DECISION_KLINE_LAG_MS
+        return kwargs
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         # CARRY payloads are flat; the inherited formatter expects a nested

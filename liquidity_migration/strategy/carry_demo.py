@@ -269,6 +269,13 @@ CARRY_FETCH_UNIVERSE_TOP_N = 150
 #: day (23:00-00:00) is reliably served by REST — the same 20-minute margin the
 #: rmom refresh timer uses for exactly the same bar.
 DECISION_KLINE_LAG_MS = 20 * 60 * 1000
+
+#: How long before the decision deadline a cycle may compute and freeze the
+#: upcoming day's book (2026-08-13). The window sits entirely inside the
+#: 20-minute kline lag, so every input row for the new decision bar is already
+#: public and cached when it opens; one 60-second grid cycle always lands in
+#: 90 seconds, which is what lets the deadline wake publish instead of compute.
+FREEZE_AHEAD_WINDOW_MS = 90 * 1000
 #: Entry-signal validity. The decision is a daily state, but an entry request
 #: that has not been accepted within 6h belongs to a stale book; the account
 #: service expires it rather than executing it late.
@@ -335,8 +342,8 @@ class CarryCycleState:
     """
 
     __slots__ = (
-        "frozen_decision_bar_ts_ms",
-        "frozen_decision_payload",
+        "frozen_ahead_bar_ts_ms",
+        "frozen_decisions",
         "funding_swept_hour_ts",
         "journal_cursor",
         "last_successful_decision_ts_ms",
@@ -345,8 +352,12 @@ class CarryCycleState:
     )
 
     def __init__(self) -> None:
-        self.frozen_decision_bar_ts_ms: int | None = None
-        self.frozen_decision_payload: tuple[CarryDecision, dict[str, float], int] | None = None
+        # Keyed by decision bar; holds the two newest bars because the
+        # freeze-ahead path pins TOMORROW's book while cycles before the
+        # boundary still serve TODAY's. A single slot made those two freezes
+        # evict each other, recomputing both once a minute.
+        self.frozen_decisions: dict[int, tuple[CarryDecision, dict[str, float], int]] = {}
+        self.frozen_ahead_bar_ts_ms: int | None = None
         self.funding_swept_hour_ts: int | None = None
         self.journal_cursor = new_planning_journal_cursor()
         self.last_successful_decision_ts_ms: int | None = None
@@ -365,12 +376,7 @@ class CarryCycleState:
         failed decision is never frozen, so a data hiccup still retries.
         """
 
-        if (
-            self.frozen_decision_bar_ts_ms == int(decision_ts_ms)
-            and self.frozen_decision_payload is not None
-        ):
-            return self.frozen_decision_payload
-        return None
+        return self.frozen_decisions.get(int(decision_ts_ms))
 
     def freeze_decision(
         self,
@@ -379,11 +385,19 @@ class CarryCycleState:
         decision: CarryDecision,
         trail_by_symbol: dict[str, float],
         universe_eligible: int,
+        frozen_ahead: bool = False,
     ) -> None:
-        """Pin this bar's book. Only a NEW bar replaces it."""
+        """Pin this bar's book. Older bars age out two freezes later."""
 
-        self.frozen_decision_bar_ts_ms = int(decision_ts_ms)
-        self.frozen_decision_payload = (decision, dict(trail_by_symbol), int(universe_eligible))
+        self.frozen_decisions[int(decision_ts_ms)] = (
+            decision,
+            dict(trail_by_symbol),
+            int(universe_eligible),
+        )
+        while len(self.frozen_decisions) > 2:
+            del self.frozen_decisions[min(self.frozen_decisions)]
+        if frozen_ahead:
+            self.frozen_ahead_bar_ts_ms = int(decision_ts_ms)
 
     def sizing_equity(self, *, decision_ts_ms: int, equity_usdt: float) -> float:
         """Equity as of when this decision was first sized, not the live mark.
@@ -710,6 +724,93 @@ def _trailing_settled_funding(
         return {}
     sums = window.group_by("symbol").agg(pl.col("funding_rate").sum().alias("trail"))
     return {str(row["symbol"]): float(row["trail"]) for row in sums.iter_rows(named=True)}
+
+
+def _freeze_decision_ahead(
+    *,
+    state: CarryCycleState,
+    rule: CarryHoldConfig,
+    klines: pl.DataFrame,
+    funding: pl.DataFrame,
+    build_stats: dict[str, Any],
+    ahead_ts_ms: int,
+    current_decision_ts_ms: int,
+    replay_days: int,
+    standing_symbols: set[str],
+) -> bool:
+    """Compute and freeze the UPCOMING day's book from this cycle's build.
+
+    A decision keyed ``ahead_ts_ms`` reads only rows stamped at or before that
+    key, and inside :data:`FREEZE_AHEAD_WINDOW_MS` every such row is already
+    public and cached (the 20-minute decision clock is a REST-serving margin,
+    not a data-arrival instant). Computing the same frame tens of seconds
+    early therefore reads identical inputs, and the gates below refuse
+    whenever this build carries repair-pending evidence — klines that needed
+    REST repair or never came from the WS store, or a funding sweep with
+    fetch failures (an outage that heals before the deadline would hand the
+    deadline's own rebuild prints this build never saw). One residual is
+    documented rather than gated: the top-150 fetch universe is sampled from
+    the ticker snapshot at this instant, so per-symbol ticker staleness that
+    heals inside the window can shrink the frozen decision's reachable set.
+    A total ticker outage already refuses itself (an empty universe fails the
+    build; a standing-only universe fails ``decide_book``'s 50-symbol floor).
+    Failure here is never a cycle failure: the deadline pass computes
+    authoritatively, as before.
+    """
+
+    if ahead_ts_ms <= current_decision_ts_ms or ahead_ts_ms % DAY_MS != 0:
+        return False
+    if state.frozen_decision(ahead_ts_ms) is not None:
+        # Already warmed by an earlier in-window cycle. False, not True:
+        # the return value feeds the payload's "this cycle froze it" flag,
+        # and a duplicate receipt would say two cycles both froze the day.
+        return False
+    if int(build_stats.get("kline_fetched_rows", 0)) != 0:
+        return False
+    if int(build_stats.get("kline_store_rows", 0)) <= 0:
+        return False
+    if int(build_stats.get("funding_fetch_failures", 0)) != 0:
+        return False
+    try:
+        view = _carry_venue_view(
+            klines,
+            funding,
+            window_start_ms=ahead_ts_ms - replay_days * DAY_MS,
+            max_bar_ts_ms=ahead_ts_ms,
+        )
+        if view.is_empty():
+            return False
+        # Same daily-grid phase trim as the deadline path would apply.
+        first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
+        if first_ts % DAY_MS != 0:
+            aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
+            view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
+        universe_eligible = (
+            int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
+        )
+        _validate_carry_view_health(
+            view, decision_ts_ms=ahead_ts_ms, standing_symbols=standing_symbols
+        )
+        trail_by_symbol = _trailing_settled_funding(funding, decision_ts_ms=ahead_ts_ms)
+        decision = decide_book(view, rule, ahead_ts_ms)
+    except Exception as exc:  # noqa: BLE001 - warm-up only; the deadline retries from scratch
+        _logger.info("carry freeze-ahead for %s not ready: %s", ahead_ts_ms, exc)
+        return False
+    state.freeze_decision(
+        decision_ts_ms=ahead_ts_ms,
+        decision=decision,
+        trail_by_symbol=trail_by_symbol,
+        universe_eligible=universe_eligible,
+        frozen_ahead=True,
+    )
+    _logger.info(
+        "carry decision for %s frozen ahead of the deadline: book=%d gross=%.3f universe=%d",
+        ahead_ts_ms,
+        len(decision.weights),
+        decision.gross,
+        universe_eligible,
+    )
+    return True
 
 
 def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, float, str]]:
@@ -1362,6 +1463,8 @@ def run_carry_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
     cycle_state: CarryCycleState | None = None,
+    cycle_kind: str = "timer",
+    freeze_ahead_decision_ts_ms: int | None = None,
 ) -> PublishedTargetCyclePayload:
     """Plan one CARRY cycle and publish immutable account targets.
 
@@ -1377,6 +1480,13 @@ def run_carry_demo_cycle(
     universe. REST remains the fallback for either when the stream is cold or
     stale, and the sole source for settled funding history, which no stream
     carries.
+
+    ``cycle_kind`` is the daemon's wake reason: a ``market_boundary`` wake with
+    an already-frozen decision skips the data build entirely and goes straight
+    to plan-and-publish, which is what turns the daily boundary from a
+    multi-second pass into tens of milliseconds. ``freeze_ahead_decision_ts_ms``
+    asks a pre-deadline cycle to compute and freeze the upcoming day's book
+    from its own build (:func:`_freeze_decision_ahead`).
     """
 
     demo = demo_config or CarryDemoCycleConfig()
@@ -1426,72 +1536,103 @@ def run_carry_demo_cycle(
         trail_by_symbol: dict[str, float] = {}
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
-        try:
-            market = market_client or BybitMarketData(
-                category=config.exchange.category,
-                testnet=config.exchange.testnet,
-            )
-            klines, funding, build_stats = _build_carry_demo_market_data(
-                root=root,
-                config=config,
-                demo=demo,
-                market=market,
-                now_ms=cycle_now_ms,
-                standing_symbols=standing_symbols,
-                state=state,
-                kline_store=kline_store,
-                ticker_cache=ticker_cache,
-                state_cache_stale_seconds=state_cache_stale_seconds,
-            )
-            # Asked before the panel is built, not after: the decision is frozen
-            # for the whole day, so on all but the first cycle the rebuild below
-            # — two sorts and an as-of join over the whole window — produced a
-            # ``universe_eligible`` that the frozen tuple immediately replaced,
-            # and nothing else read the panel. ``_build_carry_demo_market_data``
-            # stays above, so the hourly funding sweep and the kline caches are
-            # still maintained every cycle.
-            frozen = state.frozen_decision(decision_ts_ms)
-            if frozen is not None:
-                decision, trail_by_symbol, universe_eligible = frozen
-                decision_frozen = True
-            else:
-                window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
-                view = _carry_venue_view(
-                    klines,
-                    funding,
-                    window_start_ms=window_start_ms,
-                    max_bar_ts_ms=decision_ts_ms,
+        freeze_ahead_frozen = False
+        built_klines: pl.DataFrame | None = None
+        built_funding: pl.DataFrame | None = None
+        # A deadline wake exists to publish the frozen day the instant it
+        # becomes actionable; rebuilding caches first spends seconds on data
+        # the frozen decision cannot read. Timer cycles keep the build (it IS
+        # the cache maintenance: WS-store flush and the hourly funding sweep),
+        # and an unfrozen deadline falls through to the full path below.
+        prewarmed = (
+            state.frozen_decision(decision_ts_ms) if cycle_kind == "market_boundary" else None
+        )
+        data_build_skipped = prewarmed is not None
+        if prewarmed is not None:
+            decision, trail_by_symbol, universe_eligible = prewarmed
+            decision_frozen = True
+            build_stats = {"data_source": "build_skipped", "ticker_source": "skipped"}
+        else:
+            try:
+                market = market_client or BybitMarketData(
+                    category=config.exchange.category,
+                    testnet=config.exchange.testnet,
                 )
-                if not view.is_empty():
-                    # A cold-started cache begins mid-day, which the engine's
-                    # daily-grid phase guard rightly refuses, so trim to the
-                    # first 00:00 UTC key. A no-op once the cache spans the
-                    # window.
-                    first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
-                    if first_ts % DAY_MS != 0:
-                        aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
-                        view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
-                universe_eligible = (
-                    int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
-                )
-                _validate_carry_view_health(
-                    view,
-                    decision_ts_ms=decision_ts_ms,
+                klines, funding, build_stats = _build_carry_demo_market_data(
+                    root=root,
+                    config=config,
+                    demo=demo,
+                    market=market,
+                    now_ms=cycle_now_ms,
                     standing_symbols=standing_symbols,
+                    state=state,
+                    kline_store=kline_store,
+                    ticker_cache=ticker_cache,
+                    state_cache_stale_seconds=state_cache_stale_seconds,
                 )
-                trail_by_symbol = _trailing_settled_funding(
-                    funding, decision_ts_ms=decision_ts_ms
-                )
-                decision = decide_book(view, rule, decision_ts_ms)
-                state.freeze_decision(
-                    decision_ts_ms=decision_ts_ms,
-                    decision=decision,
-                    trail_by_symbol=trail_by_symbol,
-                    universe_eligible=universe_eligible,
-                )
-        except Exception as exc:  # noqa: BLE001 - hold-steady: a data hiccup must never flatten
-            decision_error = f"{type(exc).__name__}: {exc}"[:500]
-            _logger.exception("carry decision build failed; holding the standing book")
+                built_klines, built_funding = klines, funding
+                # Asked before the panel is built, not after: the decision is frozen
+                # for the whole day, so on all but the first cycle the rebuild below
+                # — two sorts and an as-of join over the whole window — produced a
+                # ``universe_eligible`` that the frozen tuple immediately replaced,
+                # and nothing else read the panel. ``_build_carry_demo_market_data``
+                # stays above, so the hourly funding sweep and the kline caches are
+                # still maintained every cycle.
+                frozen = state.frozen_decision(decision_ts_ms)
+                if frozen is not None:
+                    decision, trail_by_symbol, universe_eligible = frozen
+                    decision_frozen = True
+                else:
+                    window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
+                    view = _carry_venue_view(
+                        klines,
+                        funding,
+                        window_start_ms=window_start_ms,
+                        max_bar_ts_ms=decision_ts_ms,
+                    )
+                    if not view.is_empty():
+                        # A cold-started cache begins mid-day, which the engine's
+                        # daily-grid phase guard rightly refuses, so trim to the
+                        # first 00:00 UTC key. A no-op once the cache spans the
+                        # window.
+                        first_ts = int(view.get_column("bar_ts_ms").min())  # type: ignore[arg-type]
+                        if first_ts % DAY_MS != 0:
+                            aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
+                            view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
+                    universe_eligible = (
+                        int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
+                    )
+                    _validate_carry_view_health(
+                        view,
+                        decision_ts_ms=decision_ts_ms,
+                        standing_symbols=standing_symbols,
+                    )
+                    trail_by_symbol = _trailing_settled_funding(
+                        funding, decision_ts_ms=decision_ts_ms
+                    )
+                    decision = decide_book(view, rule, decision_ts_ms)
+                    state.freeze_decision(
+                        decision_ts_ms=decision_ts_ms,
+                        decision=decision,
+                        trail_by_symbol=trail_by_symbol,
+                        universe_eligible=universe_eligible,
+                    )
+            except Exception as exc:  # noqa: BLE001 - hold-steady: a data hiccup must never flatten
+                decision_error = f"{type(exc).__name__}: {exc}"[:500]
+                _logger.exception("carry decision build failed; holding the standing book")
+
+        if freeze_ahead_decision_ts_ms is not None and built_klines is not None and built_funding is not None:
+            freeze_ahead_frozen = _freeze_decision_ahead(
+                state=state,
+                rule=rule,
+                klines=built_klines,
+                funding=built_funding,
+                build_stats=build_stats,
+                ahead_ts_ms=int(freeze_ahead_decision_ts_ms),
+                current_decision_ts_ms=decision_ts_ms,
+                replay_days=demo.replay_days,
+                standing_symbols=standing_symbols,
+            )
 
         if decision is not None:
             state.last_successful_decision_ts_ms = max(
@@ -1610,6 +1751,15 @@ def run_carry_demo_cycle(
             "decision_error": decision_error,
             "decision_stale": decision_stale,
             "decision_frozen": decision_frozen,
+            # Deadline-latency provenance (2026-08-13): whether this cycle
+            # skipped the data build (deadline wake on a frozen day), whether
+            # the decision it served was frozen ahead of the deadline, and
+            # whether this cycle itself froze the upcoming day.
+            "data_build_skipped": data_build_skipped,
+            "decision_frozen_ahead": bool(
+                decision_frozen and state.frozen_ahead_bar_ts_ms == decision_ts_ms
+            ),
+            "freeze_ahead_frozen": freeze_ahead_frozen,
             "decision_universe_size": decision.universe_size if decision is not None else 0,
             "decision_replay_days": decision.replay_days if decision is not None else 0,
             "desired_book_size": plan.desired_book_size,
@@ -1719,11 +1869,17 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     # book silently fails to enter (the 2026-08-06 funded miss).
     dust = int(payload.get("entry_dust_skips", 0) or 0)
     dust_text = f" dust={dust}" if dust else ""
+    # Only rendered when engaged: the deadline pass that skipped the build,
+    # and the pre-deadline pass that froze the next day, are the receipts of
+    # the fast boundary path.
+    fast_path_text = " build_skipped=True" if payload.get("data_build_skipped") else ""
+    if payload.get("freeze_ahead_frozen"):
+        fast_path_text += " froze_ahead=True"
     return (
         "carry target producer "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
         f"decision_day={decision_day} stale={payload.get('decision_stale')} "
-        f"frozen={payload.get('decision_frozen')} "
+        f"frozen={payload.get('decision_frozen')}{fast_path_text} "
         f"book={payload.get('desired_book_size')} gross={gross_text} "
         f"standing={payload.get('standing_symbols')} open={payload.get('open_positions')} "
         f"pub exit/entry/resize={payload.get('exit_targets_queued')}/"

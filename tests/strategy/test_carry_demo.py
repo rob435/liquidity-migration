@@ -238,6 +238,37 @@ def _patch_demo_market_data(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _patch_demo_market_data_ws_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same synthetic bars, reported as a clean WS-store-served build.
+
+    The freeze-ahead path only trusts a build the WS store served without REST
+    repair (``fetched_rows == 0``, ``store_rows > 0``); the default shim above
+    reports a REST build and must keep refusing to freeze ahead.
+    """
+
+    def download(symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
+        frame = _synth_klines(symbols, start_ms=start_ms, end_ms=end_ms)
+        return frame, {
+            "cache_rows": frame.height,
+            "fetched_rows": 0,
+            "output_rows": frame.height,
+            "fetch_symbols": 0,
+            "store_rows": frame.height,
+        }
+
+    monkeypatch.setattr(module, "_download_recent_1h_klines", download)
+    monkeypatch.setattr(
+        module,
+        "_demo_instruments",
+        lambda *_a, **_k: pl.DataFrame(
+            {
+                "symbol": pl.Series([], dtype=pl.String),
+                "launch_time_ms": pl.Series([], dtype=pl.Int64),
+            }
+        ),
+    )
+
+
 def test_carry_decision_day_rolls_at_20_minutes_after_midnight() -> None:
     assert carry_decision_ts_ms(D0 + 19 * 60_000) == D0 - MS_PER_DAY
     assert carry_decision_ts_ms(D0 + 20 * 60_000) == D0
@@ -1286,3 +1317,267 @@ class TestCarryStrategyProfileDial:
         )
         with pytest.raises(ValueError, match="unknown CARRY strategy profile"):
             _validate_carry_demo_config(config)
+
+
+# --- freeze-ahead + deadline build-skip (the fast 00:20 boundary, 2026-08-13) ---
+
+#: 00:19 UTC: inside the 90s pre-deadline window, before the 00:20 decision
+#: roll, and every input row for the D0 decision bar (the 23:00-00:00 kline
+#: close and the 00:00 settlement) is already public.
+PREWARM_NOW = D0 + 19 * 60_000
+#: 00:20:00.001 UTC: the deadline wake's first instant.
+BOUNDARY_NOW = D0 + 20 * 60_000 + 1
+
+
+class TestFreezeAheadDeadline:
+    def _prewarm(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        state: CarryCycleState,
+    ) -> PublishedTargetCyclePayload:
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        _patch_planning(monkeypatch)
+        return run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=PREWARM_NOW,
+            cycle_state=state,
+            freeze_ahead_decision_ts_ms=D0,
+        )
+
+    def test_a_pre_deadline_cycle_freezes_tomorrows_book(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CarryCycleState()
+        payload = self._prewarm(tmp_path, monkeypatch, state)
+
+        # The cycle itself still lives on the OLD decision day and publishes
+        # nothing (the old day's entry signals expired hours ago).
+        assert payload["decision_ts_ms"] == D0 - MS_PER_DAY
+        assert payload["target_intents_queued"] == 0
+        assert payload["freeze_ahead_frozen"] is True
+        assert state.frozen_decision(D0) is not None
+        # Two-day store: warming tomorrow must not evict today's frozen book,
+        # or the two freezes recompute each other once a minute.
+        assert state.frozen_decision(D0 - MS_PER_DAY) is not None
+
+    def test_the_deadline_cycle_publishes_the_frozen_book_without_a_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = CarryCycleState()
+        self._prewarm(tmp_path, monkeypatch, state)
+
+        def refuse_build(**_kwargs: Any) -> None:
+            raise AssertionError("the deadline pass must not rebuild market data")
+
+        monkeypatch.setattr(module, "_build_carry_demo_market_data", refuse_build)
+        boundary = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=BOUNDARY_NOW,
+            cycle_state=state,
+            cycle_kind="market_boundary",
+        )
+
+        assert boundary["decision_error"] is None
+        assert boundary["data_build_skipped"] is True
+        assert boundary["decision_frozen"] is True
+        assert boundary["decision_frozen_ahead"] is True
+        assert boundary["decision_ts_ms"] == D0
+        entry_symbols = [
+            item.request.intents[0].intent.symbol
+            for item in boundary.publication.entry_requests
+        ]
+        assert entry_symbols == [DEEP_B, DEEP_A, RESIZED]
+        summary = format_carry_demo_cycle_summary(dict(boundary))
+        assert "build_skipped=True" in summary
+
+    def test_the_frozen_ahead_book_equals_the_boundary_computed_book(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        warmed = CarryCycleState()
+        self._prewarm(tmp_path, monkeypatch, warmed)
+
+        # A separate route and producer root, or the first run's unresolved
+        # inbox requests would suppress the second run's identical entries.
+        _route(tmp_path / "route2")
+        fresh = CarryCycleState()
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer2",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route2"),
+            market_client=_FakeCarryMarket(),
+            now_ms=BOUNDARY_NOW,
+            cycle_state=fresh,
+            cycle_kind="market_boundary",
+        )
+
+        assert payload["data_build_skipped"] is False
+        warmed_decision = warmed.frozen_decision(D0)
+        fresh_decision = fresh.frozen_decision(D0)
+        assert warmed_decision is not None and fresh_decision is not None
+        # Discrete-decision equality: identical inputs, identical book.
+        assert warmed_decision[0].weights == fresh_decision[0].weights
+        assert warmed_decision[0].universe_size == fresh_decision[0].universe_size
+        assert warmed_decision[1] == fresh_decision[1]  # trailing-funding ranks
+        assert warmed_decision[2] == fresh_decision[2]  # eligible universe
+
+    def test_freeze_ahead_refuses_a_rest_degraded_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default shim reports a REST-repaired build (fetched_rows > 0):
+        # the boundary's own rebuild could see different rows, so the cycle
+        # must refuse to pin tomorrow's book from it.
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch)
+        state = CarryCycleState()
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=PREWARM_NOW,
+            cycle_state=state,
+            freeze_ahead_decision_ts_ms=D0,
+        )
+
+        assert payload["freeze_ahead_frozen"] is False
+        assert state.frozen_decision(D0) is None
+
+    def test_an_unfrozen_deadline_cycle_still_builds_and_decides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        _patch_planning(monkeypatch)
+        state = CarryCycleState()
+        payload = run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=_FakeCarryMarket(),
+            now_ms=BOUNDARY_NOW,
+            cycle_state=state,
+            cycle_kind="market_boundary",
+        )
+
+        assert payload["data_build_skipped"] is False
+        assert payload["decision_error"] is None
+        assert payload["decision_ts_ms"] == D0
+        assert state.frozen_decision(D0) is not None
+
+    def _run_prewarm_with_stats(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        state: CarryCycleState,
+        stats: dict[str, int],
+        market: Any | None = None,
+    ) -> PublishedTargetCyclePayload:
+        """One pre-deadline cycle whose kline build reports the given stats —
+        each gate of `_freeze_decision_ahead` can be probed in isolation."""
+
+        _route(tmp_path / "route")
+        _patch_planning(monkeypatch)
+
+        def download(
+            symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any
+        ) -> tuple[pl.DataFrame, dict[str, int]]:
+            frame = _synth_klines(symbols, start_ms=start_ms, end_ms=end_ms)
+            return frame, {
+                "cache_rows": frame.height,
+                "output_rows": frame.height,
+                "fetch_symbols": 0,
+                **stats,
+            }
+
+        monkeypatch.setattr(module, "_download_recent_1h_klines", download)
+        monkeypatch.setattr(
+            module,
+            "_demo_instruments",
+            lambda *_a, **_k: pl.DataFrame(
+                {
+                    "symbol": pl.Series([], dtype=pl.String),
+                    "launch_time_ms": pl.Series([], dtype=pl.Int64),
+                }
+            ),
+        )
+        return run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(tmp_path / "route"),
+            market_client=market or _FakeCarryMarket(),
+            now_ms=PREWARM_NOW,
+            cycle_state=state,
+            freeze_ahead_decision_ts_ms=D0,
+        )
+
+    def test_freeze_ahead_refuses_rest_repair_even_with_a_serving_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The realistic degraded state: the store serves most bars AND REST
+        # repaired a tail. The boundary's own rebuild could repair differently,
+        # so this alone must refuse — independent of the store gate.
+        state = CarryCycleState()
+        payload = self._run_prewarm_with_stats(
+            tmp_path, monkeypatch, state, {"fetched_rows": 5, "store_rows": 100_000}
+        )
+        assert payload["freeze_ahead_frozen"] is False
+        assert state.frozen_decision(D0) is None
+
+    def test_freeze_ahead_refuses_a_store_that_never_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Cache-only build, zero fetches: fetched_rows==0 passes the first
+        # gate, so the store gate alone must refuse.
+        state = CarryCycleState()
+        payload = self._run_prewarm_with_stats(
+            tmp_path, monkeypatch, state, {"fetched_rows": 0, "store_rows": 0}
+        )
+        assert payload["freeze_ahead_frozen"] is False
+        assert state.frozen_decision(D0) is None
+
+    def test_freeze_ahead_refuses_a_failing_funding_sweep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A funding outage that heals before 00:20 would hand the deadline's
+        # rebuild settlement prints this build never saw; a build with funding
+        # fetch failures must not pin tomorrow's book.
+        class _FundingOutageMarket(_FakeCarryMarket):
+            def get_funding_history(
+                self, symbol: str, start: int, end: int
+            ) -> list[dict[str, Any]]:
+                if symbol == DEEP_A:
+                    raise RuntimeError("synthetic funding outage")
+                return super().get_funding_history(symbol, start, end)
+
+        state = CarryCycleState()
+        payload = self._run_prewarm_with_stats(
+            tmp_path,
+            monkeypatch,
+            state,
+            {"fetched_rows": 0, "store_rows": 100_000},
+            market=_FundingOutageMarket(),
+        )
+        assert payload["decision_error"] is None  # current day still decides
+        assert payload["freeze_ahead_frozen"] is False
+        assert state.frozen_decision(D0) is None
+
+    def test_the_second_in_window_cycle_does_not_claim_the_freeze(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two grid cycles can land inside the 90s window; the receipt must
+        # name the one that actually froze the day, not both.
+        state = CarryCycleState()
+        first = self._prewarm(tmp_path, monkeypatch, state)
+        second = self._prewarm(tmp_path, monkeypatch, state)
+        assert first["freeze_ahead_frozen"] is True
+        assert second["freeze_ahead_frozen"] is False
+        assert state.frozen_decision(D0) is not None

@@ -16,6 +16,46 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 — Where the boundary's ~5 s went, and the fix: carry now
+  freezes the day's book ahead of the deadline and the deadline wake skips
+  the data build.** Tonight's live cycle, split by receipt: wake +0.001 s;
+  carry pass 4.50 s (summary logged 00:20:04.505 — of which ~2.0 s is the
+  every-minute data build the frozen decision never reads (steady-state
+  cycles measure p50 1.96 s over 183 cycles) and ~2.5 s is the fresh-day
+  decision: venue-view join + 90-day replay + publish); owner pickup and
+  admission commit ~50 ms; commit→claim 251 ms (one `set_leverage`, its
+  documented 188-194 ms — both symbols were fresh after the 2026-08-12
+  epoch reset); claim→wire 40 ms; one-way to the venue ~87 ms (geography).
+  The change: any cycle inside a 90 s pre-deadline window computes and
+  freezes the upcoming day's book from its own build
+  (`_freeze_decision_ahead`), and the `market_boundary` wake on an
+  already-frozen day goes straight to plan-and-publish — expected boundary
+  pass tens of milliseconds, signal→order-at-venue ~0.3-0.45 s (~0.25 s of
+  which is the mandatory leverage set plus wire; repeat-symbol entries skip
+  the leverage set). Same decision, same registered 00:20 clock: the
+  decision bar's inputs (23:00-00:00 kline, 00:00 settlement) are public
+  and cached minutes after midnight; the synthetic-market test asserts the
+  frozen-ahead book equals the boundary-computed book cell for cell, and
+  sizing equity still anchors at the boundary cycle. The freeze store holds
+  two days (a single slot made today's and tomorrow's freezes evict each
+  other once a minute). Freeze-ahead refuses any build carrying
+  repair-pending evidence — klines REST-repaired or store-unserved, or a
+  funding sweep with fetch failures (adversarial review finding: an outage
+  healing inside the window would otherwise pin a staler book than the
+  boundary's own rebuild; the refusal test is proven to fail without the
+  gate). Accepted residual, documented not gated: the top-150 fetch
+  universe is sampled at the prewarm instant, so per-symbol ticker
+  staleness healing inside the 90 s window can shrink the frozen reachable
+  set (total outage self-refuses via the build failure or the 50-symbol
+  decision floor) — a stricter ticker gate is the owner's call. Remaining
+  serial cost outside carry's hands, measured tonight: the owner admits one
+  request per loop pass (entry 2 waited ~1.3 s behind entry 1), and carry
+  publishes per-symbol requests so the batch venue path stays dormant —
+  collapsing both needs a cross-target batch request shape, proposed, not
+  built. Receipts to watch tonight: the ~00:19 cycle logs
+  `froze_ahead=True`, the 00:20:00.001 cycle logs `build_skipped=True`,
+  entries admitted within ~0.3 s.
+
 - **2026-08-13 00:20 UTC — First live deadline-fired producer cycle: carry's
   daily decision ran at +0.001 s instead of the grid's median +24 s.** The
   tape's first `market_boundary` event carries cycle id
