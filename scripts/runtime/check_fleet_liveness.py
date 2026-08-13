@@ -54,6 +54,7 @@ from liquidity_migration.account.account_owner_health import (  # noqa: E402
     validate_systemd_invocation_id,
 )
 from liquidity_migration.runtime.account_owner_readiness import latest_market_readiness  # noqa: E402
+from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes  # noqa: E402
 from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
@@ -325,38 +326,51 @@ def evaluate_demo_rule_age(
     *,
     verified_ts_ns: int,
     now_ns: int,
+    realm: str = "demo",
 ) -> Alert | None:
-    """Warn before demo-rule evidence expires and the next start fails closed."""
+    """Warn before rules evidence expires and the next start fails closed.
+
+    ``realm`` changes the alert key and the remedy text only: the funded
+    receipt renews through a read-only freeze on any deploy, while demo's
+    slow path is the order-placing probe in a flat maintenance window.
+    """
+    key = "demo_rules_age" if realm == "demo" else "venue_rules_age"
+    label = "demo-rule" if realm == "demo" else f"{realm} venue-rule"
     age_hours = (now_ns - verified_ts_ns) / 3_600_000_000_000.0
     remaining_hours = REGISTERED_MAX_DEMO_RULE_AGE_HOURS - age_hours
     if age_hours < 0.0:
         return Alert(
-            key="demo_rules_age",
+            key=key,
             severity=CRITICAL,
             message=(
-                f"demo-rule evidence is {-age_hours:.1f}h future-dated; "
+                f"{label} evidence is {-age_hours:.1f}h future-dated; "
                 "runtime quantity authority is invalid."
             ),
             headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
+        remedy = (
+            "the next authorized runtime start will fail closed and require a full probe."
+            if realm == "demo"
+            else "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
+        )
         return Alert(
-            key="demo_rules_age",
+            key=key,
             severity=CRITICAL,
-            message=(
-                f"demo-rule evidence expired {abs(remaining_hours):.1f}h ago; "
-                "the next authorized runtime start will fail closed and require a full probe."
-            ),
+            message=f"{label} evidence expired {abs(remaining_hours):.1f}h ago; " + remedy,
             headline="The trading-rules receipt has expired — the next restart will refuse to start.",
         )
     if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
+        remedy = (
+            "schedule the guarded flat-account maintenance window before expiry "
+            "so the slow path is planned."
+            if realm == "demo"
+            else "any deploy renews it (read-only freeze); deploy before expiry."
+        )
         return Alert(
-            key="demo_rules_age",
+            key=key,
             severity=WARNING,
-            message=(
-                f"demo-rule evidence expires in {remaining_hours:.1f}h; schedule the guarded "
-                "flat-account maintenance window before expiry so the slow path is planned."
-            ),
+            message=f"{label} evidence expires in {remaining_hours:.1f}h; " + remedy,
             headline=f"The trading-rules receipt expires in {remaining_hours:.0f}h — plan the refresh.",
         )
     return None
@@ -366,26 +380,37 @@ def gather_demo_rule_alerts(
     *,
     rules_path: Path,
     now_ns: int | None = None,
+    realm: str = "demo",
 ) -> list[Alert]:
-    """Reopen the bound receipt and report corruption, future dating, or expiry."""
+    """Reopen the bound receipt and report corruption, future dating, or expiry.
+
+    The mainnet receipt is validated by the loader that admits one; only
+    mainnet holds the registered 168-hour ceiling as a hard start refusal, so
+    it is exactly the receipt that must not reach that cliff unwatched (it
+    did, silently, until 2026-08-13).
+    """
     try:
         snapshot = read_stable_file(
             rules_path,
-            label="demo-rule receipt",
+            label="demo-rule receipt" if realm == "demo" else f"{realm} venue-rule receipt",
             reject_empty=True,
             require_mode=0o600,
             require_owner=True,
         )
-        load_demo_rules(
-            snapshot.path,
-            max_age_seconds=None,
-            snapshot=snapshot,
-        )
+        if realm == "demo":
+            load_demo_rules(
+                snapshot.path,
+                max_age_seconds=None,
+                snapshot=snapshot,
+            )
+        else:
+            load_venue_rules_bytes(snapshot.data, realm=realm, max_age_seconds=None)
         payload = json.loads(snapshot.data)
         verified_ts_ns = int(payload.get("verified_ts_ns") or 0)
         alert = evaluate_demo_rule_age(
             verified_ts_ns=verified_ts_ns,
             now_ns=time.time_ns() if now_ns is None else now_ns,
+            realm=realm,
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         return [
@@ -1371,11 +1396,14 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
-    if not mainnet and str(args.demo_rules_file).strip():
+    if str(args.demo_rules_file).strip():
+        # Both realms: only mainnet holds the 168h ceiling as a hard start
+        # refusal, so its receipt is the one that must never expire unseen.
         alerts.extend(
             gather_demo_rule_alerts(
                 rules_path=Path(args.demo_rules_file),
                 now_ns=now_ms * 1_000_000,
+                realm="mainnet" if mainnet else "demo",
             )
         )
     alerts.extend(
