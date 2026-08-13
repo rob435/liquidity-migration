@@ -1,7 +1,9 @@
 //! The private stream handshake, against a local WebSocket server. No
 //! network, no credentials.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use engine_types::{FeedError, OrderFeed, OrderUpdate, Side, SymbolId};
 use engine_venue::{BybitOrderFeed, Credentials};
@@ -22,62 +24,183 @@ fn expected_ws_signature(expires: i64) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// A server that completes the handshake, records what it was sent, then
-/// pushes `frames` at the client.
-async fn start(frames: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+/// What the server does with one connection.
+enum Outcome {
+    /// Read the auth op and then close the socket instead of answering: a
+    /// venue hiccup in the middle of the handshake.
+    CloseMidAuth,
+    /// Answer the auth op with a refusal.
+    Refuse(&'static str),
+    /// Finish the handshake, push these frames, then either close or hold the
+    /// socket open.
+    Serve {
+        frames: Vec<String>,
+        then_close: bool,
+    },
+}
+
+struct Conn {
+    /// How long the venue takes to answer the auth op. A real venue is a
+    /// round trip away, not a function call.
+    auth_delay: Duration,
+    outcome: Outcome,
+}
+
+impl Conn {
+    fn serving(frames: Vec<String>) -> Conn {
+        Conn {
+            auth_delay: Duration::ZERO,
+            outcome: Outcome::Serve {
+                frames,
+                then_close: false,
+            },
+        }
+    }
+}
+
+struct Server {
+    url: String,
+    seen: Arc<Mutex<Vec<Value>>>,
+    connections: Arc<AtomicUsize>,
+    hung_up: Arc<AtomicUsize>,
+}
+
+impl Server {
+    fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    /// How many client connections have ended, from the server's side.
+    fn hung_up(&self) -> usize {
+        self.hung_up.load(Ordering::SeqCst)
+    }
+
+    fn seen(&self) -> Vec<Value> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// A server that accepts connection after connection, handing the nth one to
+/// `plan(n)`. Every op the client sends is recorded.
+async fn serve<F>(plan: F) -> Server
+where
+    F: Fn(usize) -> Conn + Send + Sync + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let connections = Arc::new(AtomicUsize::new(0));
+
+    let hung_up = Arc::new(AtomicUsize::new(0));
     let recorded = seen.clone();
-
+    let counted = connections.clone();
+    let ended = hung_up.clone();
     tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-
-        // Auth first.
-        let auth = next_json(&mut socket).await;
-        recorded.lock().unwrap().push(auth);
-        socket
-            .send(Message::text(
-                json!({"op": "auth", "success": true, "ret_msg": "", "conn_id": "test"})
-                    .to_string(),
-            ))
-            .await
-            .unwrap();
-
-        // Then the subscription.
-        let subscribe = next_json(&mut socket).await;
-        recorded.lock().unwrap().push(subscribe);
-        socket
-            .send(Message::text(
-                json!({"op": "subscribe", "success": true, "conn_id": "test"}).to_string(),
-            ))
-            .await
-            .unwrap();
-
-        for frame in frames {
-            socket.send(Message::text(frame)).await.unwrap();
-        }
-        // Hold the socket open so the client does not see a close.
-        while let Some(Ok(msg)) = socket.next().await {
-            if msg.is_close() {
-                break;
-            }
+        let mut n = 0usize;
+        while let Ok((stream, _)) = listener.accept().await {
+            let conn = plan(n);
+            n += 1;
+            counted.fetch_add(1, Ordering::SeqCst);
+            let recorded = recorded.clone();
+            let ended = ended.clone();
+            tokio::spawn(async move {
+                one_connection(stream, conn, recorded).await;
+                ended.fetch_add(1, Ordering::SeqCst);
+            });
         }
     });
 
-    (format!("ws://{addr}/v5/private"), seen)
+    Server {
+        url: format!("ws://{addr}/v5/private"),
+        seen,
+        connections,
+        hung_up,
+    }
 }
 
-async fn next_json(
-    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-) -> Value {
+type ServerSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+async fn one_connection(
+    stream: tokio::net::TcpStream,
+    conn: Conn,
+    seen: Arc<Mutex<Vec<Value>>>,
+) {
+    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+        return;
+    };
+    let Some(auth) = next_json(&mut socket).await else { return };
+    seen.lock().unwrap().push(auth);
+    tokio::time::sleep(conn.auth_delay).await;
+
+    match conn.outcome {
+        Outcome::CloseMidAuth => {
+            let _ = socket.close(None).await;
+        }
+        Outcome::Refuse(why) => {
+            let _ = socket
+                .send(Message::text(
+                    json!({"op": "auth", "success": false, "ret_msg": why}).to_string(),
+                ))
+                .await;
+            hold(&mut socket).await;
+        }
+        Outcome::Serve { frames, then_close } => {
+            if socket
+                .send(Message::text(
+                    json!({"op": "auth", "success": true, "ret_msg": "", "conn_id": "test"})
+                        .to_string(),
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let Some(subscribe) = next_json(&mut socket).await else { return };
+            seen.lock().unwrap().push(subscribe);
+            let _ = socket
+                .send(Message::text(
+                    json!({"op": "subscribe", "success": true, "conn_id": "test"}).to_string(),
+                ))
+                .await;
+            for frame in frames {
+                if socket.send(Message::text(frame)).await.is_err() {
+                    return;
+                }
+            }
+            if then_close {
+                let _ = socket.close(None).await;
+            } else {
+                hold(&mut socket).await;
+            }
+        }
+    }
+}
+
+/// Keep the socket open so the client does not see a close.
+async fn hold(socket: &mut ServerSocket) {
+    while let Some(Ok(msg)) = socket.next().await {
+        if msg.is_close() {
+            break;
+        }
+    }
+}
+
+/// The next text op from the client, or `None` if it went away.
+async fn next_json(socket: &mut ServerSocket) -> Option<Value> {
     loop {
-        match socket.next().await.expect("client sent nothing").unwrap() {
-            Message::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
+        match socket.next().await?.ok()? {
+            Message::Text(text) => return serde_json::from_str(text.as_str()).ok(),
+            Message::Close(_) => return None,
             _ => continue,
         }
     }
+}
+
+/// A server that completes the handshake on every connection and pushes
+/// `frames` at the client.
+async fn start(frames: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let server = serve(move |_| Conn::serving(frames.clone())).await;
+    (server.url.clone(), server.seen.clone())
 }
 
 fn feed(url: &str) -> BybitOrderFeed {
@@ -86,6 +209,68 @@ fn feed(url: &str) -> BybitOrderFeed {
         Credentials::new(KEY, SECRET),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
+}
+
+/// One `order` frame carrying a New order under `link_id`.
+fn ack_frame(link_id: &str) -> String {
+    json!({
+        "topic": "order",
+        "id": "test",
+        "creationTime": 1_672_364_262_474i64,
+        "data": [{
+            "symbol": "BTCUSDT",
+            "orderId": format!("ord-for-{link_id}"),
+            "orderLinkId": link_id,
+            "side": "Buy",
+            "orderType": "Limit",
+            "orderStatus": "New",
+            "price": "95000",
+            "qty": "0.01",
+            "category": "linear"
+        }]
+    })
+    .to_string()
+}
+
+/// Read updates the way the engine does: a fresh `next_update` future inside a
+/// `select!` that also carries the 250 ms group-flush tick, so the losing
+/// branch's future is dropped every time the tick wins. Panics if nothing
+/// arrives inside `limit`.
+async fn drive(feed: &mut BybitOrderFeed, limit: Duration, what: &str) -> OrderUpdate {
+    let mut flush_tick = tokio::time::interval(Duration::from_millis(250));
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        tokio::select! {
+            update = feed.next_update() => match update {
+                Ok(update) => return update,
+                Err(FeedError::Closed) => panic!("{what}: the feed reported itself closed"),
+                // A feed that errors without closing is reconnecting inside;
+                // the engine logs it and keeps waiting, so this does too.
+                Err(_) => (),
+            },
+            _ = flush_tick.tick() => (),
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("{what}: nothing arrived in {limit:?}")
+            }
+        }
+    }
+}
+
+/// Read updates one after another, nothing cancelling anything. A feed that
+/// reports itself closed has retired itself, which is the fault this catches.
+async fn read(feed: &mut BybitOrderFeed, limit: Duration, what: &str) -> OrderUpdate {
+    let waited = tokio::time::timeout(limit, async {
+        loop {
+            match feed.next_update().await {
+                Ok(update) => return update,
+                Err(FeedError::Closed) => panic!("{what}: the feed reported itself closed"),
+                Err(_) => (),
+            }
+        }
+    })
+    .await;
+    waited.unwrap_or_else(|_| panic!("{what}: nothing arrived in {limit:?}"))
 }
 
 #[tokio::test]
@@ -198,5 +383,133 @@ async fn a_refused_auth_is_reported_not_swallowed() {
     match feed.next_update().await {
         Err(FeedError::Transport(why)) => assert!(why.contains("error sign!"), "{why}"),
         other => panic!("expected a transport error, got {other:?}"),
+    }
+}
+
+/// Defect 1: the engine drops the losing `select!` branch every flush tick, so
+/// a handshake that lives inside `next_update`'s future never finishes.
+#[tokio::test]
+async fn the_handshake_survives_the_engine_dropping_the_future_every_tick() {
+    let server = serve(|_| Conn {
+        // Longer than the engine's 250 ms flush tick, which is what a venue a
+        // round trip away actually costs.
+        auth_delay: Duration::from_millis(400),
+        outcome: Outcome::Serve {
+            frames: vec![ack_frame("eng-1")],
+            then_close: false,
+        },
+    })
+    .await;
+    let mut feed = feed(&server.url);
+
+    match drive(&mut feed, Duration::from_secs(8), "first update").await {
+        OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
+        other => panic!("expected Ack, got {other:?}"),
+    }
+    // One socket, not a new dial per tick.
+    assert_eq!(server.connections(), 1, "the feed redialled");
+}
+
+/// Defect 2: a venue hiccup part-way through the handshake used to read as
+/// `Closed`, which the engine takes as "no more order news, ever". Read
+/// straight through, with no `select!` anywhere, so only this defect can fail
+/// the test.
+#[tokio::test]
+async fn a_socket_closed_mid_auth_is_retried_not_terminal() {
+    let server = serve(|n| Conn {
+        auth_delay: Duration::ZERO,
+        outcome: if n == 0 {
+            Outcome::CloseMidAuth
+        } else {
+            Outcome::Serve {
+                frames: vec![ack_frame("eng-1")],
+                then_close: false,
+            }
+        },
+    })
+    .await;
+    let mut feed = feed(&server.url);
+
+    match read(&mut feed, Duration::from_secs(8), "update after the hiccup").await {
+        OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
+        other => panic!("expected Ack, got {other:?}"),
+    }
+    assert!(server.connections() >= 2, "the feed never redialled");
+}
+
+/// A refused auth is reported and then tried again. Nothing the venue says
+/// during the handshake retires the feed.
+#[tokio::test]
+async fn a_refused_auth_is_retried_until_it_takes() {
+    let server = serve(|n| Conn {
+        auth_delay: Duration::ZERO,
+        outcome: if n < 2 {
+            Outcome::Refuse("error sign!")
+        } else {
+            Outcome::Serve {
+                frames: vec![ack_frame("eng-1")],
+                then_close: false,
+            }
+        },
+    })
+    .await;
+    let mut feed = feed(&server.url);
+
+    match drive(&mut feed, Duration::from_secs(8), "update after two refusals").await {
+        OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
+        other => panic!("expected Ack, got {other:?}"),
+    }
+    assert_eq!(server.connections(), 3, "expected two refusals then a good one");
+    let auths = server.seen().iter().filter(|op| op["op"] == "auth").count();
+    assert_eq!(auths, 3, "every attempt signed a fresh auth op");
+}
+
+/// The socket belongs to the feed: let the feed go and the socket goes with
+/// it, rather than a task reconnecting forever to nobody.
+#[tokio::test]
+async fn dropping_the_feed_takes_the_socket_with_it() {
+    let server = serve(|_| Conn::serving(vec![ack_frame("eng-1")])).await;
+    let mut feed = feed(&server.url);
+
+    read(&mut feed, Duration::from_secs(8), "first update").await;
+    assert_eq!(server.connections(), 1);
+    assert_eq!(server.hung_up(), 0, "the socket ended too early");
+
+    drop(feed);
+    let gave_up = tokio::time::timeout(Duration::from_secs(5), async {
+        while server.hung_up() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(gave_up.is_ok(), "the socket outlived the feed");
+    assert_eq!(server.connections(), 1, "it redialled after being dropped");
+}
+
+/// A reconnect owes the engine a `StreamReset` before any row off the new
+/// socket, because whatever happened while the feed was away is lost.
+#[tokio::test]
+async fn a_reconnect_announces_itself_before_the_new_socket_says_anything() {
+    let server = serve(|n| Conn {
+        auth_delay: Duration::ZERO,
+        outcome: Outcome::Serve {
+            frames: vec![ack_frame(if n == 0 { "eng-1" } else { "eng-2" })],
+            then_close: n == 0,
+        },
+    })
+    .await;
+    let mut feed = feed(&server.url);
+
+    match drive(&mut feed, Duration::from_secs(8), "first update").await {
+        OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
+        other => panic!("the first connection owes no reset, got {other:?}"),
+    }
+    match drive(&mut feed, Duration::from_secs(8), "the reset").await {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected StreamReset, got {other:?}"),
+    }
+    match drive(&mut feed, Duration::from_secs(8), "update after the reset").await {
+        OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-2"),
+        other => panic!("expected Ack, got {other:?}"),
     }
 }

@@ -4,6 +4,16 @@
 //! The socket carries everything that happens to the account, including
 //! orders this engine did not place. Rows without our own `orderLinkId` are
 //! not ours and are dropped — the demo account is hand-traded too.
+//!
+//! **The socket lives in its own task.** The engine waits on this feed inside
+//! a `select!`, which drops the losing branch's future every flush tick, so
+//! anything half-finished inside `next_update` is thrown away several times a
+//! second. A handshake is six awaits long and cannot survive that. So the
+//! dial, the auth, the subscription, the ping schedule and the reconnect loop
+//! all belong to a task nobody cancels, and `next_update` is nothing but a
+//! channel receive — which loses nothing when it is dropped. The task is
+//! spawned on the engine's own current-thread runtime, so it still runs on
+//! the one engine thread; it just is not part of the `select!`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -15,6 +25,7 @@ use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
@@ -30,23 +41,26 @@ const AUTH_WINDOW_MS: i64 = 5_000;
 const AUTH_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// A socket that lasted this long was a real connection, so the wait between
+/// dials starts over. Shorter than that and the venue is still unhappy.
+const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 /// How many client order ids to remember so one order acks once. Well past
 /// anything in flight, and it keeps a long run's memory flat.
 const ACK_MEMORY: usize = 8192;
+/// Room for a burst of updates while the engine is busy with something else.
+const CHANNEL_DEPTH: usize = 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// What the socket task hands over: an update, or a failure worth telling the
+/// engine about. Never [`FeedError::Closed`] — that arrives as the channel
+/// itself closing, and means the task is gone.
+type Handover = Result<OrderUpdate, FeedError>;
 
 pub struct BybitOrderFeed {
     url: String,
     creds: Credentials,
-    ids: HashMap<Symbol, SymbolId>,
-    socket: Option<Socket>,
-    pending: VecDeque<OrderUpdate>,
-    acked: HashSet<String>,
-    acked_order: VecDeque<String>,
-    backoff: Duration,
-    last_ping: Instant,
-    connected_before: bool,
+    symbols: Vec<Symbol>,
+    updates: Option<mpsc::Receiver<Handover>>,
 }
 
 impl BybitOrderFeed {
@@ -61,26 +75,116 @@ impl BybitOrderFeed {
     }
 
     fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Self {
             url: url.to_string(),
             creds,
-            ids,
-            socket: None,
-            pending: VecDeque::new(),
-            acked: HashSet::new(),
-            acked_order: VecDeque::new(),
-            backoff: Duration::ZERO,
-            connected_before: false,
-            last_ping: Instant::now(),
+            symbols,
+            updates: None,
         }
     }
 
-    async fn connect(&mut self) -> Result<(), FeedError> {
+    /// Start the socket task. The first `next_update` does this, because that
+    /// is the first moment there is certain to be a runtime to spawn on.
+    fn start(&mut self) {
+        let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
+        let worker = Worker {
+            url: self.url.clone(),
+            creds: self.creds.clone(),
+            decoder: Decoder::new(&self.symbols),
+            backoff: Duration::ZERO,
+            connected_before: false,
+        };
+        tokio::spawn(worker.run(tx));
+        self.updates = Some(rx);
+    }
+}
+
+impl OrderFeed for BybitOrderFeed {
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        if self.updates.is_none() {
+            self.start();
+        }
+        let updates = self.updates.as_mut().expect("started just above");
+        match updates.recv().await {
+            Some(handover) => handover,
+            // The socket task only ends when this feed is dropped, so a shut
+            // channel really is the end of the feed.
+            None => Err(FeedError::Closed),
+        }
+    }
+}
+
+/// The socket task: dial, authenticate, subscribe, read, reconnect. Nothing
+/// cancels it, so a handshake several round trips long gets to finish.
+struct Worker {
+    url: String,
+    creds: Credentials,
+    decoder: Decoder,
+    backoff: Duration,
+    connected_before: bool,
+}
+
+/// The engine dropped the feed: there is nobody left to hand updates to.
+struct Gone;
+
+impl Worker {
+    async fn run(mut self, tx: mpsc::Sender<Handover>) {
+        let dropped = tx.closed();
+        tokio::pin!(dropped);
+        tokio::select! {
+            // Stop promptly when the feed goes away, even if the loop below is
+            // parked on a socket or a backoff sleep. No task is left behind.
+            _ = &mut dropped => (),
+            _ = self.reconnect_forever(&tx) => (),
+        }
+        tracing::info!("private stream task finished; the engine let the feed go");
+    }
+
+    /// Keep a socket up for as long as the engine is listening.
+    ///
+    /// Nothing the venue does during a handshake is final. A refused auth is
+    /// most likely a bad key, which will go on failing and go on saying so in
+    /// the log — the honest behaviour for a process nobody is watching.
+    /// Retiring the feed instead would cost every fill for the rest of the
+    /// run, silently.
+    async fn reconnect_forever(&mut self, tx: &mpsc::Sender<Handover>) -> Gone {
+        loop {
+            match self.connect().await {
+                Ok(socket) => {
+                    let opened = Instant::now();
+                    if self.connected_before {
+                        // Updates that happened while we were away are lost;
+                        // the engine must refresh its account view rather
+                        // than trust the gap. This goes out before anything
+                        // read off the new socket.
+                        let reset = OrderUpdate::StreamReset { recv_ns: mono_ns() };
+                        if hand_over(tx, Ok(reset)).await.is_err() {
+                            return Gone;
+                        }
+                    }
+                    self.connected_before = true;
+                    if self.pump(socket, tx).await.is_err() {
+                        return Gone;
+                    }
+                    if opened.elapsed() >= HEALTHY_AFTER {
+                        self.backoff = Duration::ZERO;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "private stream did not come up; trying again");
+                    if hand_over(tx, Err(e)).await.is_err() {
+                        return Gone;
+                    }
+                }
+            }
+            self.wait_before_redialling().await;
+        }
+    }
+
+    /// Wait, then make the next wait longer. Only a dial that failed or a
+    /// socket that died reaches here, so the wait grows while the venue is
+    /// unhappy and never because the engine looked away.
+    async fn wait_before_redialling(&mut self) {
         if !self.backoff.is_zero() {
             tokio::time::sleep(self.backoff).await;
         }
@@ -89,7 +193,9 @@ impl BybitOrderFeed {
         } else {
             (self.backoff * 2).min(BACKOFF_CAP)
         };
+    }
 
+    async fn connect(&self) -> Result<Socket, FeedError> {
         crate::tls::install_crypto_provider();
 
         // Nagle off: an order update held back for coalescing is an order
@@ -110,10 +216,91 @@ impl BybitOrderFeed {
         send(&mut socket, subscribe.to_string()).await?;
 
         tracing::info!("private stream authenticated and subscribed");
-        self.backoff = Duration::ZERO;
-        self.last_ping = Instant::now();
-        self.socket = Some(socket);
-        Ok(())
+        Ok(socket)
+    }
+
+    /// Read one socket until it dies. `Err(Gone)` means the feed was dropped;
+    /// `Ok` means dial again.
+    async fn pump(&mut self, mut socket: Socket, tx: &mpsc::Sender<Handover>) -> Result<(), Gone> {
+        let mut last_ping = Instant::now();
+        loop {
+            let deadline = tokio::time::Instant::from_std(last_ping + PING_EVERY);
+            let wake = tokio::select! {
+                frame = socket.next() => Wake::Frame(frame),
+                _ = tokio::time::sleep_until(deadline) => Wake::Ping,
+            };
+            let step = match wake {
+                Wake::Ping => match send(&mut socket, r#"{"op":"ping"}"#.to_string()).await {
+                    Ok(()) => Step::Pinged,
+                    Err(e) => Step::Dropped(e.to_string()),
+                },
+                Wake::Frame(Some(Ok(Message::Text(text)))) => Step::Text(text.as_str().to_string()),
+                Wake::Frame(Some(Ok(Message::Ping(payload)))) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                    Step::Idle
+                }
+                Wake::Frame(Some(Ok(Message::Close(_)))) => {
+                    Step::Dropped("venue closed the socket".to_string())
+                }
+                Wake::Frame(Some(Ok(_))) => Step::Idle,
+                Wake::Frame(Some(Err(e))) => Step::Dropped(e.to_string()),
+                Wake::Frame(None) => Step::Dropped("stream ended".to_string()),
+            };
+
+            match step {
+                Step::Idle => (),
+                Step::Pinged => last_ping = Instant::now(),
+                Step::Text(text) => {
+                    let read = self.decoder.ingest(&text);
+                    while let Some(update) = self.decoder.pending.pop_front() {
+                        hand_over(tx, Ok(update)).await?;
+                    }
+                    if let Err(e) = read {
+                        // A refused op leaves a socket that will never carry
+                        // what we asked for; one unreadable frame does not.
+                        let socket_is_useless = matches!(e, FeedError::Transport(_));
+                        tracing::warn!(error = %e, "private stream frame");
+                        hand_over(tx, Err(e)).await?;
+                        if socket_is_useless {
+                            return Ok(());
+                        }
+                    }
+                }
+                Step::Dropped(why) => {
+                    tracing::warn!(why, "private stream dropped, reconnecting");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Hand one item to the engine, waiting if it is behind.
+async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Gone> {
+    tx.send(item).await.map_err(|_| Gone)
+}
+
+/// Frames in, updates out, plus the memory of which orders have already
+/// acked. No socket and no clock but the receive stamp.
+struct Decoder {
+    ids: HashMap<Symbol, SymbolId>,
+    pending: VecDeque<OrderUpdate>,
+    acked: HashSet<String>,
+    acked_order: VecDeque<String>,
+}
+
+impl Decoder {
+    fn new(symbols: &[Symbol]) -> Self {
+        Self {
+            ids: symbols
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
+                .collect(),
+            pending: VecDeque::new(),
+            acked: HashSet::new(),
+            acked_order: VecDeque::new(),
+        }
     }
 
     /// Turn one frame into updates and queue them.
@@ -170,62 +357,6 @@ impl BybitOrderFeed {
     }
 }
 
-impl OrderFeed for BybitOrderFeed {
-    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
-        loop {
-            if let Some(update) = self.pending.pop_front() {
-                return Ok(update);
-            }
-            if self.socket.is_none() {
-                self.connect().await?;
-                // A reconnect may have missed updates; the engine must hear
-                // that and refresh its account view rather than trust a gap.
-                if self.connected_before {
-                    self.pending
-                        .push_back(OrderUpdate::StreamReset { recv_ns: mono_ns() });
-                }
-                self.connected_before = true;
-            }
-
-            let deadline = tokio::time::Instant::from_std(self.last_ping + PING_EVERY);
-            let step = {
-                let socket = self.socket.as_mut().expect("connected just above");
-                let wake = tokio::select! {
-                    frame = socket.next() => Wake::Frame(frame),
-                    _ = tokio::time::sleep_until(deadline) => Wake::Ping,
-                };
-                match wake {
-                    Wake::Ping => match send(socket, r#"{"op":"ping"}"#.to_string()).await {
-                        Ok(()) => Step::Pinged,
-                        Err(e) => Step::Dropped(e.to_string()),
-                    },
-                    Wake::Frame(Some(Ok(Message::Text(text)))) => Step::Text(text.as_str().to_string()),
-                    Wake::Frame(Some(Ok(Message::Ping(payload)))) => {
-                        let _ = socket.send(Message::Pong(payload)).await;
-                        Step::Idle
-                    }
-                    Wake::Frame(Some(Ok(Message::Close(_)))) => Step::Dropped("venue closed the socket".to_string()),
-                    Wake::Frame(Some(Ok(_))) => Step::Idle,
-                    Wake::Frame(Some(Err(e))) => Step::Dropped(e.to_string()),
-                    Wake::Frame(None) => Step::Dropped("stream ended".to_string()),
-                }
-            };
-
-            match step {
-                Step::Idle => {}
-                Step::Pinged => self.last_ping = Instant::now(),
-                Step::Text(text) => self.ingest(&text)?,
-                Step::Dropped(why) => {
-                    // Updates that happened while we were away are lost; the
-                    // engine's account read is what recovers the truth.
-                    tracing::warn!(why, "private stream dropped, reconnecting");
-                    self.socket = None;
-                }
-            }
-        }
-    }
-}
-
 enum Wake {
     Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Ping,
@@ -257,7 +388,11 @@ async fn await_auth(socket: &mut Socket) -> Result<(), FeedError> {
                 return Ok(value);
             }
         }
-        Err(FeedError::Closed)
+        // The venue hung up mid-handshake. That is a hiccup to dial through,
+        // not the end of the feed.
+        Err(FeedError::Transport(
+            "the venue closed the socket during auth".to_string(),
+        ))
     })
     .await
     .map_err(|_| FeedError::Transport("no auth reply from the venue".to_string()))??;
@@ -541,11 +676,7 @@ mod tests {
 
     #[test]
     fn a_whole_frame_queues_every_row_once() {
-        let mut feed = BybitOrderFeed::for_test(
-            "ws://127.0.0.1:1/v5/private",
-            Credentials::new("k", "s"),
-            vec!["BTCUSDT".to_string()],
-        );
+        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
         let frame = json!({
             "topic": "order",
             "id": "test",
@@ -568,11 +699,7 @@ mod tests {
 
     #[test]
     fn control_frames_are_ignored_and_failures_surface() {
-        let mut feed = BybitOrderFeed::for_test(
-            "ws://127.0.0.1:1/v5/private",
-            Credentials::new("k", "s"),
-            vec!["BTCUSDT".to_string()],
-        );
+        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
         feed.ingest(r#"{"op":"pong","success":true,"ret_msg":"pong"}"#).unwrap();
         feed.ingest(r#"{"op":"subscribe","success":true}"#).unwrap();
         assert!(feed.pending.is_empty());
@@ -584,11 +711,7 @@ mod tests {
 
     #[test]
     fn ack_memory_stays_bounded() {
-        let mut feed = BybitOrderFeed::for_test(
-            "ws://127.0.0.1:1/v5/private",
-            Credentials::new("k", "s"),
-            vec!["BTCUSDT".to_string()],
-        );
+        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
         for i in 0..(ACK_MEMORY + 100) {
             assert!(feed.remember_ack(&format!("eng-{i}")));
         }
