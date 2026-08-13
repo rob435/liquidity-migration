@@ -18,6 +18,7 @@ mod gateway;
 mod parse;
 mod rest;
 mod sign;
+mod tls;
 mod ws;
 
 pub use creds::{Credentials, API_KEY_ENV, API_SECRET_ENV};

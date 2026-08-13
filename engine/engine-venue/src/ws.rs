@@ -88,6 +88,8 @@ impl BybitOrderFeed {
             (self.backoff * 2).min(BACKOFF_CAP)
         };
 
+        crate::tls::install_crypto_provider();
+
         // Nagle off: an order update held back for coalescing is an order
         // update arriving late.
         let (mut socket, _) = connect_async_with_config(self.url.as_str(), None, true)

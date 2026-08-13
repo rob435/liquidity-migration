@@ -32,6 +32,8 @@ pub(crate) struct RestClient {
 
 impl RestClient {
     pub(crate) fn new(base: impl Into<String>, creds: Credentials) -> Self {
+        crate::tls::install_crypto_provider();
+
         let mut http = HttpConnector::new();
         // The order path is small writes on a warm socket: do not wait to
         // coalesce them.
