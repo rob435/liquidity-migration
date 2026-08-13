@@ -30,97 +30,16 @@ polls is for intents only.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
-import errno
 import os
 import select
-import struct
 import threading
 import time
 from pathlib import Path
 
-# Only the ways a finished request appears. A claim renames the file *out* of
-# pending, which is IN_MOVED_FROM and deliberately unwatched: consuming work
-# must not look like new work.
-_IN_CLOSE_WRITE = 0x00000008
-_IN_MOVED_TO = 0x00000080
-_WATCH_MASK = _IN_CLOSE_WRITE | _IN_MOVED_TO
-
-# inotify_event: int wd, uint32 mask, uint32 cookie, uint32 len, then len bytes
-# of NUL-padded name.
-_EVENT_HEADER = struct.Struct("iIII")
-_READ_BUFFER_BYTES = 8192
-
-
-class _InotifyWatch:
-    """A single directory watch on an inotify descriptor."""
-
-    __slots__ = ("_libc", "_fd", "_wd")
-
-    def __init__(self, directory: Path) -> None:
-        name = ctypes.util.find_library("c")
-        self._libc = ctypes.CDLL(name, use_errno=True) if name else ctypes.CDLL(None, use_errno=True)
-        self._libc.inotify_init1.argtypes = [ctypes.c_int]
-        self._libc.inotify_init1.restype = ctypes.c_int
-        self._libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-        self._libc.inotify_add_watch.restype = ctypes.c_int
-        fd = self._libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
-        if fd < 0:
-            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
-        self._fd = fd
-        wd = self._libc.inotify_add_watch(fd, str(directory).encode(), _WATCH_MASK)
-        if wd < 0:
-            code = ctypes.get_errno()
-            os.close(fd)
-            raise OSError(code, f"inotify_add_watch failed for {directory}")
-        self._wd = wd
-
-    def drain(self) -> bool:
-        """Read every queued event. True when any named a real request file."""
-
-        arrived = False
-        while True:
-            try:
-                data = os.read(self._fd, _READ_BUFFER_BYTES)
-            except BlockingIOError:
-                return arrived
-            except OSError as exc:
-                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    return arrived
-                raise
-            if not data:
-                return arrived
-            offset = 0
-            while offset + _EVENT_HEADER.size <= len(data):
-                _wd, _mask, _cookie, length = _EVENT_HEADER.unpack_from(data, offset)
-                offset += _EVENT_HEADER.size
-                raw = data[offset : offset + length]
-                offset += length
-                name = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
-                # The publisher writes a dotted temp file beside the request and
-                # renames it into place. Only the rename is an arrival.
-                if name and not name.startswith("."):
-                    arrived = True
-
-    @property
-    def fd(self) -> int:
-        return self._fd
-
-    def peek(self) -> bool:
-        """True when an arrival is already queued, without consuming it."""
-
-        try:
-            ready, _, _ = select.select([self._fd], [], [], 0)
-        except (OSError, ValueError):  # pragma: no cover - descriptor died
-            return False
-        return bool(ready)
-
-    def close(self) -> None:
-        try:
-            os.close(self._fd)
-        except OSError:  # pragma: no cover - already closed
-            pass
+# The rename-into-place mask and drain/peek mechanics are shared with the
+# strategy hosts' journal watch; the request-file semantics (dotted temps
+# ignored, claims renaming OUT are unwatched) are documented there.
+from liquidity_migration.core.fs_watch import DirectoryRenameWatch as _InotifyWatch
 
 
 class BookTickWakeup:

@@ -31,7 +31,7 @@ from liquidity_migration.strategy.long_native_event_demo import (
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
 )
-from liquidity_migration.strategy.strategy_host import StrategyHostDaemon
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_journal_change_wake_dir
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 
@@ -82,6 +82,7 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             # startup-boundary failures must instead terminate the process.
             _validate_long_daemon_startup(resolved_demo_config, self._strategy_config)
         kwargs.setdefault("kline_stream_manager_factory", _default_long_kline_stream_manager_factory)
+        default_journal_change_wake_dir(kwargs, resolved_demo_config)
         super().__init__(
             data_root,
             config=config,

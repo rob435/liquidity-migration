@@ -35,13 +35,16 @@ from __future__ import annotations
 
 import logging
 import os
+import select
 import signal
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from liquidity_migration.account.account_kernel import account_transactions_path
 from liquidity_migration.account.account_owner_health import validate_systemd_invocation_id
+from liquidity_migration.core.fs_watch import DirectoryRenameWatch
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
@@ -112,6 +115,7 @@ class StrategyHostDaemon:
         state_cache_stale_seconds: float = 120.0,
         event_driven_cycle: bool = True,
         min_cycle_interval_seconds: float = 2.0,
+        journal_change_wake_dir: str | Path | None = None,
         clock: Clock | None = None,
         strategy_event_recorder: StrategyEventRecorder | None = None,
         strategy_decision_recorder: JsonlStrategyEventDecisionTape | None = None,
@@ -173,6 +177,18 @@ class StrategyHostDaemon:
         self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
         self._cycles_kline_triggered = 0
         self._cycles_timer_triggered = 0
+        # Account-journal change wake: a watch on the journal's transaction
+        # directory ends the event wait the instant a fill, receipt, or any
+        # other account event commits, instead of on the next idle-floor pass.
+        # An accelerator, not a correctness gate: a commit that lands while
+        # the watch is down is picked up by the idle-floor cycle.
+        self._journal_change_wake_dir = (
+            Path(journal_change_wake_dir).expanduser() if journal_change_wake_dir is not None else None
+        )
+        self._journal_wake_pending = False
+        self._journal_watch_thread: threading.Thread | None = None
+        self._journal_watch_stop = threading.Event()
+        self._cycles_journal_triggered = 0
         # Deadline-driven passes: each cycle reports the earliest future
         # instant a time rule can change its book (a max-hold stop coming
         # due, carry's daily decision boundary), and the wait below is cut
@@ -281,9 +297,13 @@ class StrategyHostDaemon:
         # the reconcile thread handles subsequent REST refreshes.
         self._seed_public_ticker_cache()
         self._start_reconcile_thread()
+        self._start_journal_watch_thread()
         try:
             self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
+                # Flag before event: an arrival racing this clear is folded
+                # into the cycle about to run, same as a bar arrival.
+                self._journal_wake_pending = False
                 self._bar_event.clear()
                 self._run_one_cycle()
                 if self._shutdown.is_set():
@@ -301,13 +321,15 @@ class StrategyHostDaemon:
                 seed.join(timeout=5.0)
             # Let plugs quiesce before shared public resources close.
             self._pre_resource_teardown()
+            self._stop_journal_watch_thread()
             self._stop_reconcile_thread()
             self._close_ticker_stream()
             self._stop_kline_stream_manager()
         _logger.info(
             "%s strategy host stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
-            "cycles_timer_triggered=%d cycles_deadline_triggered=%d "
+            "cycles_journal_triggered=%d cycles_timer_triggered=%d "
+            "cycles_deadline_triggered=%d "
             "reconciles_total=%d reconcile_errors=%d ws_ticker_stale_ticks=%d",
             self._sleeve_label,
             self._cycles_run,
@@ -315,6 +337,7 @@ class StrategyHostDaemon:
             self._cycle_overruns,
             self._max_cycle_seconds,
             self._cycles_kline_triggered,
+            self._cycles_journal_triggered,
             self._cycles_timer_triggered,
             self._cycles_deadline_triggered,
             self._reconciles_total,
@@ -327,6 +350,7 @@ class StrategyHostDaemon:
             "cycle_overruns": self._cycle_overruns,
             "max_cycle_seconds": self._max_cycle_seconds,
             "cycles_kline_triggered": self._cycles_kline_triggered,
+            "cycles_journal_triggered": self._cycles_journal_triggered,
             "cycles_timer_triggered": self._cycles_timer_triggered,
             "cycles_deadline_triggered": self._cycles_deadline_triggered,
             "reconciles_total": self._reconciles_total,
@@ -757,6 +781,86 @@ class StrategyHostDaemon:
         except Exception as exc:  # noqa: BLE001
             _logger.warning("%s kline_stream_manager.stop failed: %s", self._sleeve_label, exc)
 
+    # -- account-journal change wake ----------------------------------
+
+    def _start_journal_watch_thread(self) -> None:
+        """Watch the account journal's transaction directory and end the
+        event wait the instant a commit renames a segment into place.
+
+        Only meaningful in event mode: the timer grid ignores the wake
+        event. Uses inotify where available; elsewhere a coarse mtime poll
+        carries the same signal a little later."""
+        if not self._event_driven_cycle or self._journal_change_wake_dir is None:
+            return
+        self._journal_watch_stop.clear()
+        self._journal_watch_thread = threading.Thread(
+            target=self._journal_watch_loop,
+            name=f"{self._sleeve_label}-journal-watch",
+            daemon=True,
+        )
+        self._journal_watch_thread.start()
+
+    def _stop_journal_watch_thread(self) -> None:
+        thread = self._journal_watch_thread
+        self._journal_watch_thread = None
+        if thread is None:
+            return
+        self._journal_watch_stop.set()
+        thread.join(timeout=5.0)
+
+    def _journal_watch_loop(self) -> None:
+        directory = self._journal_change_wake_dir
+        if directory is None:  # pragma: no cover - guarded by the starter
+            return
+        watch: DirectoryRenameWatch | None = None
+        last_mtime_ns: int | None = None
+        inotify_unavailable = False
+        try:
+            while not self._journal_watch_stop.is_set():
+                if watch is None and not inotify_unavailable and directory.is_dir():
+                    try:
+                        watch = DirectoryRenameWatch(directory)
+                    except AttributeError:
+                        # No inotify symbols on this platform (macOS
+                        # development): the mtime poll carries the wake.
+                        inotify_unavailable = True
+                    except (OSError, ValueError):
+                        # Descriptor budget spent or the directory raced away;
+                        # poll now, retry the watch on later passes.
+                        watch = None
+                arrived = False
+                if watch is not None:
+                    try:
+                        ready, _, _ = select.select([watch.fd], [], [], 0.5)
+                        arrived = bool(ready) and watch.drain()
+                    except (OSError, ValueError):
+                        watch.close()
+                        watch = None
+                        continue
+                else:
+                    if self._journal_watch_stop.wait(timeout=0.25):
+                        return
+                    current = self._journal_dir_mtime_ns(directory)
+                    # First observation is the baseline, not an arrival.
+                    arrived = current is not None and last_mtime_ns is not None and current != last_mtime_ns
+                    if current is not None:
+                        last_mtime_ns = current
+                if arrived:
+                    # Flag before event: the wait reads the flag only after
+                    # the event woke it.
+                    self._journal_wake_pending = True
+                    self._bar_event.set()
+        finally:
+            if watch is not None:
+                watch.close()
+
+    @staticmethod
+    def _journal_dir_mtime_ns(directory: Path) -> int | None:
+        try:
+            return os.stat(directory).st_mtime_ns
+        except OSError:
+            return None
+
     def _sleep_interruptible(self, seconds: float) -> None:
         if seconds <= 0.0:
             return
@@ -840,14 +944,27 @@ class StrategyHostDaemon:
         self._pending_cycle_kind = "timer"
 
     def _wait_for_next_cycle_event(self) -> None:
-        """WS-event-driven wait: wake on a new confirmed-bar boundary, a due
-        time deadline, the safety heartbeat, or shutdown, with a min-interval
-        debounce floor."""
-        if self._min_cycle_interval_seconds > 0.0:
-            self._sleep_interruptible(self._min_cycle_interval_seconds)
+        """Event-driven wait: wake on a new confirmed-bar boundary, an
+        account-journal commit, a due time deadline, the safety heartbeat,
+        or shutdown, with a min-interval debounce floor.
+
+        The debounce coalesces event bursts but never delays a deadline:
+        the pre-sleep is clamped to the deadline and a due deadline fires
+        before the event wait, ahead of any pending bar or journal wake
+        (whose data the deadline cycle reads anyway)."""
+        deadline_wait = self._seconds_until_time_deadline()
+        debounce = self._min_cycle_interval_seconds
+        if debounce > 0.0:
+            self._sleep_interruptible(debounce if deadline_wait is None else min(debounce, deadline_wait))
             if self._shutdown.is_set():
                 return
-        remaining = max(0.0, self._max_idle_seconds - self._min_cycle_interval_seconds)
+            fired = self._time_deadline_reached()
+            if fired is not None:
+                self._deadline_fired_ts_ms = fired
+                self._cycles_deadline_triggered += 1
+                self._pending_cycle_kind = "market_boundary"
+                return
+        remaining = max(0.0, self._max_idle_seconds - debounce)
         deadline_wait = self._seconds_until_time_deadline()
         if deadline_wait is not None:
             remaining = min(remaining, deadline_wait)
@@ -855,8 +972,14 @@ class StrategyHostDaemon:
         if self._shutdown.is_set():
             return
         if woke:
-            self._cycles_kline_triggered += 1
-            self._pending_cycle_kind = "confirmed_bar"
+            journal_woke = self._journal_wake_pending
+            self._journal_wake_pending = False
+            if journal_woke:
+                self._cycles_journal_triggered += 1
+                self._pending_cycle_kind = "journal_change"
+            else:
+                self._cycles_kline_triggered += 1
+                self._pending_cycle_kind = "confirmed_bar"
             return
         fired = self._time_deadline_reached()
         if fired is not None:
@@ -876,3 +999,16 @@ def _default_public_ticker_stream_factory(config: ResearchConfig) -> BybitPublic
         testnet=config.exchange.testnet,
         demo=False,
     )
+
+
+def default_journal_change_wake_dir(kwargs: dict[str, Any], demo_config: Any) -> None:
+    """Point the journal-change wake at the sleeve's account root.
+
+    Called by plug constructors ahead of ``super().__init__``; an explicit
+    ``journal_change_wake_dir`` in ``kwargs`` wins, and a config without an
+    account root (research/local shapes) simply gets no journal wake."""
+    if "journal_change_wake_dir" in kwargs:
+        return
+    account_root = getattr(demo_config, "account_execution_root", None)
+    if account_root:
+        kwargs["journal_change_wake_dir"] = account_transactions_path(Path(str(account_root)).expanduser())
