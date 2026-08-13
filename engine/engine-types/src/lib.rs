@@ -20,7 +20,9 @@ pub mod strategy;
 pub mod wal;
 
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
-pub use market::{Feed, MarketEvent, MarketState, Quote, Subscription, Ticker};
+pub use market::{
+    Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote, Subscription, Ticker,
+};
 pub use orders::{
     Intent, InstrumentRule, OrderAck, OrderKind, OrderRequest, OrderUpdate, Side, StopSpec,
     TimeInForce, VenueError,

@@ -56,6 +56,31 @@ pub enum MarketEvent {
     FeedReset { recv_ns: u64 },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FeedError {
+    #[error("feed transport: {0}")]
+    Transport(String),
+    #[error("feed message unreadable: {0}")]
+    BadMessage(String),
+    #[error("feed closed")]
+    Closed,
+}
+
+/// A live market data source. Implementations own the socket and the parse;
+/// the engine core owns [`MarketState`] and applies the events it is handed.
+/// `next_event` resolves with the next parsed message; reconnects happen
+/// inside and surface as [`MarketEvent::FeedReset`].
+#[allow(async_fn_in_trait)]
+pub trait MarketFeed {
+    async fn next_event(&mut self) -> Result<MarketEvent, FeedError>;
+}
+
+/// A live order/fill update source (the venue's private stream).
+#[allow(async_fn_in_trait)]
+pub trait OrderFeed {
+    async fn next_update(&mut self) -> Result<crate::orders::OrderUpdate, FeedError>;
+}
+
 /// The single in-memory market picture. The market data crate is the only
 /// writer; everything else reads. Flat vectors indexed by [`SymbolId`].
 #[derive(Debug, Default)]
