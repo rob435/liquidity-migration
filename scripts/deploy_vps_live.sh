@@ -1357,9 +1357,23 @@ PY
     receipt_dir=/var/lib/liquidity-migration/mainnet-venue-rule-receipts
     install -d -o root -g root -m 0700 "$receipt_dir"
     refreshed="$receipt_dir/venue-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-    lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
-        --realm mainnet --symbols-file "$universe_file" --output "$refreshed" \
-        || fail "mainnet venue-rules refresh failed"
+    # This renewal is opportunistic: the installed receipt validated above and
+    # is merely past half-life, so a failed re-freeze keeps the valid receipt
+    # and the deploy continues instead of stopping with the fleet half-down
+    # (2026-08-13: a symbol delisted from mainnet after the universe freeze,
+    # VANRYUSDT, failed the freeze here and stranded the mainnet units
+    # stopped and disabled). The 168-hour ceiling is untouched -- the funded
+    # owner still refuses to start on an expired receipt, and the renewal is
+    # retried on every deploy until it succeeds.
+    if ! lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
+        --realm mainnet --symbols-file "$universe_file" --output "$refreshed"; then
+        rm -f "$refreshed"
+        echo "mainnet-venue-rule-plan path=reuse reason=REFRESH-FAILED-KEEPING-VALID-RECEIPT" >&2
+        echo "WARNING: mainnet venue-rules renewal failed; the installed receipt is still" >&2
+        echo "WARNING: valid but ages toward its 168-hour ceiling. Fix the freeze before" >&2
+        echo "WARNING: it expires or the funded owner will refuse to start." >&2
+        return 0
+    fi
 
     "$PYTHON" - "$MAINNET_ROUTE_ENV" "$refreshed" "$universe_file" <<'PY' \
         || fail "mainnet venue-rule rebind of the account execution environment failed"
