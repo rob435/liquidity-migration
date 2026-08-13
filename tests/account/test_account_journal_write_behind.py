@@ -425,6 +425,51 @@ def test_barrier_waits_for_another_threads_inflight_drain(
     kernel.journal.close()
 
 
+def test_barrier_does_not_wait_for_trailing_projection_appends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-wire barrier waits on segments only; the rebuildable projection
+    append behind the last segment must not hold the order path.
+
+    Fails without the fix: ``barrier()`` targeted every enqueued item, so with
+    the projection append blocked the barrier thread below never finished.
+    """
+
+    kernel = _kernel(tmp_path, write_behind=True)
+    flusher = kernel.journal._flusher
+    assert flusher is not None
+    projection_started = threading.Event()
+    release_projection = threading.Event()
+    original = account_kernel_module._process_durability_item
+
+    def gated(item: tuple) -> None:
+        if item[0] != "segment":
+            projection_started.set()
+            assert release_projection.wait(5.0)
+        original(item)
+
+    monkeypatch.setattr(account_kernel_module, "_process_durability_item", gated)
+    _submit_one(kernel)
+
+    barrier_done = threading.Event()
+
+    def run_barrier() -> None:
+        kernel.journal.barrier()
+        barrier_done.set()
+
+    barrier_thread = threading.Thread(target=run_barrier, name="segment-barrier")
+    barrier_thread.start()
+    # The worker syncs the segment first (commit order), then blocks inside
+    # the projection append; the barrier must return regardless.
+    assert barrier_done.wait(2.0), "barrier waited for a rebuildable projection"
+    assert projection_started.wait(2.0)
+    release_projection.set()
+    barrier_thread.join(5.0)
+    kernel.journal.close()
+    # The projection was still processed, in order, by the worker.
+    assert account_kernel_module.account_journal_path(tmp_path).exists()
+
+
 def test_failed_segment_fsync_rewrites_through_fresh_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

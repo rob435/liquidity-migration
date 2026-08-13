@@ -20,6 +20,7 @@ ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS="${ACCOUNT_REQUEST_MARKET_WARMUP_T
 ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"
 ACCOUNT_SHARED_LEVERAGE_AUTHORITY="${ACCOUNT_SHARED_LEVERAGE_AUTHORITY:-0}"
+ACCOUNT_PRE_BOUNDARY_QUIESCE="${ACCOUNT_PRE_BOUNDARY_QUIESCE:-}"
 CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
 CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
@@ -106,6 +107,14 @@ case "$ACCOUNT_SHARED_LEVERAGE_AUTHORITY" in
     1) leverage_authority_args=(--shared-leverage-authority) ;;
 esac
 
+# Daily UTC boundary anchors (e.g. "00:20") before which the owner loop goes
+# quiet for a couple of seconds, so the boundary intent lands on an idle pass
+# instead of behind a wallet read or a Telegram send. Empty disables.
+quiesce_args=()
+if [[ -n "$ACCOUNT_PRE_BOUNDARY_QUIESCE" ]]; then
+    quiesce_args=(--pre-boundary-quiesce "$ACCOUNT_PRE_BOUNDARY_QUIESCE")
+fi
+
 # Journal fsyncs move to a background thread; the order path syncs the disk
 # once, right before an order leaves for the venue, instead of twice inline.
 # On unless explicitly disabled: set 0 to restore inline fsyncs per commit.
@@ -150,6 +159,7 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
     "${leverage_authority_args[@]}" \
+    "${quiesce_args[@]}" \
     "${journal_args[@]}" \
     --disaster-stop-fraction "$DISASTER_STOP_FRACTION" \
     "${telegram_args[@]}"

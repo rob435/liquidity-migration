@@ -15,7 +15,7 @@ import logging
 import math
 import os
 from collections.abc import Set as AbstractSet
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -34,6 +34,8 @@ from liquidity_migration.account.account_contracts import (
 )
 from liquidity_migration.account.account_kernel import (
     AccountExecutionKernel,
+    SubmissionFusionSpec,
+    SubmitSpanLedger,
     quantized_down,
 )
 from liquidity_migration.account.account_route import AccountRoute, require_account_route
@@ -322,6 +324,10 @@ class AccountServiceReceipt:
     disposition: str = "processed"
     superseded_by_request_id: str = ""
     superseded_by_request_ids: tuple[str, ...] = ()
+    # This pass's order-path milestones, wall-clock ns (see SubmitSpanLedger).
+    # Excluded from equality: a crash replay must produce a receipt equal to
+    # the one the dead process would have written, and timings differ by pass.
+    spans: Mapping[str, int] = field(default_factory=dict, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -593,6 +599,22 @@ class AccountIntentInbox:
         )
         return sequence
 
+    def queued_request_path(self, request_id: str) -> Path | None:
+        """The request's inbox file, wherever it now lives, or None.
+
+        Publishers use this after a submit raised: a visible file means the
+        request is in force (the owner will or did serve it), so republishing
+        the same intents under fresh ids would double-queue them.
+        """
+
+        filename = self._filename(request_id)
+        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
+            for name in ("pending", "processing", "completed"):
+                path = self.root / name / filename
+                if path.exists():
+                    return path
+        return None
+
     def contains(self, request_id: str) -> bool:
         filename = self._filename(request_id)
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
@@ -735,6 +757,14 @@ class AccountIntentInbox:
                 superseded_by_request_id=str(receipt_payload.get("superseded_by_request_id") or ""),
                 superseded_by_request_ids=tuple(
                     str(value) for value in receipt_payload.get("superseded_by_request_ids") or ()
+                ),
+                spans=(
+                    {
+                        str(name): int(value)
+                        for name, value in receipt_payload["spans"].items()
+                    }
+                    if isinstance(receipt_payload.get("spans"), Mapping)
+                    else {}
                 ),
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -1656,6 +1686,44 @@ class AccountExecutionService:
             )
         return targets
 
+    def _entry_leverage_pairs(
+        self, targets: Sequence[DesiredTarget]
+    ) -> tuple[tuple[str, float], ...]:
+        """The (symbol, leverage) pairs this batch's entry commands will need.
+
+        Approximates the kernel's per-symbol command leverage (the minimum
+        over the symbol's projected targets) from this batch's own targets,
+        for symbols where at least one nonzero target is NOT a strict
+        reduction — only those produce commands that negotiate leverage. A
+        miss is safe either way: the fusion gate compares the adapter's
+        confirmed value against each command's exact leverage, and an
+        unsatisfied symbol keeps the batch on the unfused path where
+        ``prepare_submission`` negotiates leverage exactly as it does today.
+        """
+
+        symbol_leverages: dict[str, float] = {}
+        entry_symbols: set[str] = set()
+        for target in targets:
+            symbol = target.symbol.upper()
+            leverage = float(target.leverage)
+            if leverage > 0.0:
+                held = symbol_leverages.get(symbol)
+                symbol_leverages[symbol] = (
+                    leverage if held is None else min(held, leverage)
+                )
+            if float(target.signed_qty) == 0.0:
+                continue
+            if not self.kernel.targets_are_strictly_risk_reducing(
+                [target],
+                quantity_tolerance=self.risk_policy.quantity_tolerance,
+            ):
+                entry_symbols.add(symbol)
+        return tuple(
+            (symbol, symbol_leverages[symbol])
+            for symbol in sorted(entry_symbols)
+            if symbol in symbol_leverages
+        )
+
     @staticmethod
     def request_carries_new_risk(request: AccountTargetRequest) -> bool:
         """Whether serving this request could leave the account holding more.
@@ -1702,7 +1770,12 @@ class AccountExecutionService:
             return ""
         return self.new_risk_halt()
 
-    def handle(self, request: AccountTargetRequest) -> AccountServiceReceipt:
+    def handle(
+        self,
+        request: AccountTargetRequest,
+        *,
+        inbox_claimed_ts: tuple[int, int] | None = None,
+    ) -> AccountServiceReceipt:
         request.require_route(self.route)
         # Expiry is an admission rule for never-committed work. Once the batch
         # is durable, replay must resume its commanded execution even past the
@@ -1814,6 +1887,27 @@ class AccountExecutionService:
             )
         if risk_reducing_only:
             self._require_reduction_position_truth(requested_symbols)
+        ledger = SubmitSpanLedger()
+        if inbox_claimed_ts is not None:
+            ledger.inbox_claimed_ts_ns = int(inbox_claimed_ts[0])
+            ledger.inbox_claimed_monotonic_ns = int(inbox_claimed_ts[1])
+        adapter = self.execution_adapter
+        ambiguous_adapter = bool(
+            getattr(adapter, "submission_outcome_can_be_ambiguous", False)
+        )
+        # Speculative pre-commit leverage: fire the cache-miss set_leverage
+        # calls now, so they run concurrently with the account-wide health and
+        # wallet reads below, and join before the plan commit. The adapter
+        # refuses the whole round under shared leverage authority (the owner
+        # hand-sets leverage there), so a batch the RISK_DECISION rejects can
+        # never have overwritten a hand-set value.
+        leverage_join: Callable[[], None] | None = None
+        if not batch_already_committed and not risk_reducing_only and ambiguous_adapter:
+            begin_speculative = getattr(adapter, "begin_speculative_leverage", None)
+            if callable(begin_speculative):
+                pairs = self._entry_leverage_pairs(preview_targets)
+                if pairs:
+                    leverage_join = begin_speculative(pairs)
         if not risk_reducing_only:
             market_inputs, snapshot, rules = self._execution_inputs(
                 requested_symbols=requested_symbols,
@@ -1833,24 +1927,60 @@ class AccountExecutionService:
                     else None
                 ),
             )
+        if leverage_join is not None:
+            # The join never raises; failed symbols carry their stored outcome
+            # into prepare_submission, which replays it with today's inline
+            # semantics. Only proven-satisfied symbols enter the fusion gate.
+            join_started_ns = self.clock.monotonic_ns()
+            leverage_join()
+            ledger.leverage_wait_ns = max(
+                self.clock.monotonic_ns() - join_started_ns, 0
+            )
+            ledger.leverage_done_ts_ns = self.clock.wall_time_ns()
+        if ambiguous_adapter:
+            confirmed_leverage = getattr(adapter, "confirmed_venue_leverage", None)
+            self.kernel.arm_submission_fusion(
+                SubmissionFusionSpec(
+                    adapter_name=str(getattr(adapter, "name", "provider")),
+                    batch_id=request.batch_id,
+                    leverage_satisfied=(
+                        confirmed_leverage() if callable(confirmed_leverage) else {}
+                    ),
+                    leverage_wait_ns=ledger.leverage_wait_ns,
+                )
+            )
         adapted = [AdaptedIntent(item.adapter(), intent) for item, intent in prepare_account_request_intents(request)]
-        result = self.runtime.process_cycle(
-            batch_id=request.batch_id,
-            intents=adapted,
-            market_inputs=market_inputs,
-            risk_snapshot=snapshot,
-            risk_policy=self.risk_policy,
-            instrument_rules=rules,
-            execution_adapter=self.execution_adapter,
-            native_protection_policy=self.native_protection_policy,
-            command_symbols=requested_symbols,
-            require_strict_risk_reduction=risk_reducing_only,
-            request_content_hash=request.content_hash(),
-        )
+        self.kernel.span_ledger = ledger
+        try:
+            result = self.runtime.process_cycle(
+                batch_id=request.batch_id,
+                intents=adapted,
+                market_inputs=market_inputs,
+                risk_snapshot=snapshot,
+                risk_policy=self.risk_policy,
+                instrument_rules=rules,
+                execution_adapter=self.execution_adapter,
+                native_protection_policy=self.native_protection_policy,
+                command_symbols=requested_symbols,
+                require_strict_risk_reduction=risk_reducing_only,
+                request_content_hash=request.content_hash(),
+            )
+        finally:
+            self.kernel.span_ledger = None
         final_state = self.kernel._state_ref()
+        # This pass's own execution events, straight from the driver: never a
+        # full-journal scan or copy on the fresh request path (the journal
+        # grows with the account's whole history). Only a REPLAY of an
+        # already-committed batch scans, because its receipt must list the
+        # events the pre-crash pass produced — the same fresh/replay split
+        # ``submit_targets`` itself documents.
+        if batch_already_committed:
+            execution_source: Sequence[Any] = self.kernel.journal._events_ref()
+        else:
+            execution_source = result.execution_events
         execution_event_ids = tuple(
             event.event_id
-            for event in self.kernel.journal.events()
+            for event in execution_source
             if event.correlation_id == request.batch_id
             and event.event_type in {AccountEventType.ACK.value, AccountEventType.FILL.value}
         )
@@ -1863,6 +1993,7 @@ class AccountExecutionService:
             command_ids=tuple(command.command_id for command in result.target_result.commands),
             execution_event_ids=execution_event_ids,
             final_state_hash=final_state.state_hash(),
+            spans=ledger.spans(),
         )
 
     def _convergence_plans(self) -> tuple[_ConvergencePlan, ...]:
@@ -2584,8 +2715,11 @@ class AccountExecutionService:
             self.converge_once()
             return None
         committed_claim: tuple[Path, AccountTargetRequest] | None = None
+        claim_stamp: tuple[int, int] | None = None
         if strict_arrival and expected_request_id:
             expected = inbox.claim_expected_next(expected_request_id)
+            # Span ledger origin: the instant the inbox rename claim returned.
+            claim_stamp = (self.clock.wall_time_ns(), self.clock.monotonic_ns())
             if expected is None:
                 return None
             path, request, replacements = expected
@@ -2641,6 +2775,8 @@ class AccountExecutionService:
             )
             inbox.complete(path, last_superseded)
         claimed = strict_claimed if strict_arrival else (committed_claim or inbox.claim_next())
+        if claim_stamp is None and claimed is not None:
+            claim_stamp = (self.clock.wall_time_ns(), self.clock.monotonic_ns())
         if claimed is None:
             self.converge_once()
             return last_superseded
@@ -2649,7 +2785,7 @@ class AccountExecutionService:
             inbox.release(path)
             return last_superseded
         try:
-            receipt = self.handle(request)
+            receipt = self.handle(request, inbox_claimed_ts=claim_stamp)
         except Exception as exc:
             terminal: StaleEntryRequestExpired | None = None
             failing_since_ns = self._inbox_failure_first_ns.setdefault(
@@ -2753,9 +2889,10 @@ class AccountExecutionService:
         )
         if claimed is None:
             return None
+        claim_stamp = (self.clock.wall_time_ns(), self.clock.monotonic_ns())
         path, request = claimed
         try:
-            receipt = self.handle(request)
+            receipt = self.handle(request, inbox_claimed_ts=claim_stamp)
         except Exception as exc:
             if permanent_failure:
                 inbox.fail(path, error=exc)

@@ -3153,7 +3153,7 @@ def _submit_entry_request(
     return target_key
 
 
-def _stale_command_raiser(request: AccountTargetRequest) -> None:
+def _stale_command_raiser(request: AccountTargetRequest, **_kwargs: object) -> None:
     raise StaleUnsubmittedExposureCommand(
         "refusing to submit a stale exposure-increasing command: command=test"
     )
@@ -3209,7 +3209,7 @@ def test_non_stale_failure_with_expired_entries_still_releases(
     clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
     service = _service(tmp_path / "account", CountingTwin(), clock=clock)
 
-    def _crash(request: AccountTargetRequest) -> None:
+    def _crash(request: AccountTargetRequest, **_kwargs: object) -> None:
         raise RuntimeError("simulated crash")
 
     monkeypatch.setattr(service, "handle", _crash)
@@ -3233,7 +3233,7 @@ def test_a_head_request_cannot_retry_past_the_inbox_budget(
     clock = VirtualClock(current_wall_ns=2_000_000_000, current_monotonic_ns=100)
     service = _service(tmp_path / "account", CountingTwin(), clock=clock)
 
-    def _always_fails(request: AccountTargetRequest) -> None:
+    def _always_fails(request: AccountTargetRequest, **_kwargs: object) -> None:
         raise RuntimeError("simulated persistent failure")
 
     monkeypatch.setattr(service, "handle", _always_fails)
