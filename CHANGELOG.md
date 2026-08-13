@@ -16,6 +16,23 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 00:20 UTC — First live deadline-fired producer cycle: carry's
+  daily decision ran at +0.001 s instead of the grid's median +24 s.** The
+  tape's first `market_boundary` event carries cycle id
+  `carry-target-carry_hold-1786580400001` — 00:20:00.001 UTC, against a
+  measured +1.8 s…+58 s (median ~24 s, mean ~28 s) across the eight prior
+  days the daemon was up at the boundary (yesterday: +57.96 s). The cycle
+  computed the fresh 2026-08-13 decision, published two entries (~4 s pass),
+  both admitted by 00:20:07 and open on the venue with their stops verified
+  by 00:20:13 — day-boundary signal to live orders in ~7 s, where
+  yesterday's identical chain started 58 s late. The create-boundary stop
+  verifier also earned its keep twice: the venue applied both entry stops
+  one tick off the commanded price and the verifier installed the correct
+  stop directly. The first multi-order batch receipt remains pending: carry
+  publishes entries as one-command requests, so the batch path (two-plus
+  commands in one admission) correctly stayed dormant — it arrives with a
+  LONG multi-entry cycle or a sliced entry.
+
 - **2026-08-13 — The amend-budget question is answered: keep 8; the tick
   cadence itself is the measured win.** The quote-forge replay (evening tape,
   22 symbols, 2,901 paired attempts per world, the fleet's real 45 s window,
