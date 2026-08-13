@@ -27,7 +27,7 @@ match; never append history to this file.
   decides cash until the account is funded. Earlier equity figures below are
   historical.
 - **Host runs `cf0c20a` — the fast-execution engine — whole fleet green**
-  (deployed 2026-08-12 23:03 UTC, receipt `staged-ok commit=cf0c20a
+  (deployed 2026-08-13 12:01 UTC, receipt `staged-ok commit=70baf5f
   profile=operational`, `verify-ok … mainnet=armed`, stop-first staged from
   main). All nine units on/active/enabled, zero error-level lines on the
   owners and producers after the restart. Both account owners run the
@@ -47,7 +47,12 @@ match; never append history to this file.
   funded `venue-rules-20260809T193602Z`, 509 symbols, from the read-only freeze.
   The demo candidate universe grew 509 → 510, which is why the deploy chose a
   full probe over a projection. The funded universe is frozen only when absent
-  and still holds its own 509.
+  and still holds its own 509. **The funded renewal is BLOCKED and needs an
+  owner decision before the 2026-08-16 ~19:36 UTC expiry**: VANRYUSDT was
+  delisted 2026-08-12, the frozen universe still lists it, and the rules
+  freeze fails closed on the whole set — after expiry the funded owner
+  refuses to start. Options and the 2026-08-13 outage this caused are in the
+  CHANGELOG; a failed renewal no longer aborts the deploy (`70baf5f`).
 - **No symbol waits for a book to be priced.** All 509 candidate symbols carry
   a pushed top of book (`tickers`), which is exactly what the order path reads;
   the reconstructed L2 book is a quoting refinement, not a gate. Proved live: a

@@ -16,6 +16,36 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-13 10:55-12:01 UTC — Deploying the freeze-ahead change hit a
+  latent fault: the mainnet venue-rules renewal fails on a delisted symbol,
+  and its failure stranded the three mainnet units stopped for ~5 minutes.**
+  The staged deploy of `2623afb` stopped the fleet, restarted the demo units
+  clean, then died in the opportunistic mainnet venue-rules renewal:
+  VANRYUSDT was closed and settled by Bybit on 2026-08-12 09:00 UTC
+  (instruments-info `status=Closed`, delivery 1786525200000), so the frozen
+  509-symbol funded universe no longer builds rules, and `fail` exited with
+  the mainnet units still stopped and disabled — including the mainnet
+  liveness watchdog timer, so the outage was silent. Repaired by hand at
+  11:00:40 UTC (`systemctl enable --now` on the three units + timer; owner
+  logs clean, the installed receipt `venue-rules-20260809T193602Z` is valid
+  until 2026-08-16 so startup validation passed). Root-cause fix deployed
+  in `70baf5f`: a failed renewal now keeps the validated receipt, prints a
+  loud warning, and lets the deploy finish — the 168-hour ceiling is
+  untouched, the funded owner still refuses an expired receipt, and the
+  renewal retries every deploy. Final deploy receipt: `staged-ok
+  commit=70baf5f profile=operational`, all nine units active+enabled,
+  `verify-ok … mainnet=armed`, zero error lines after restart, no new
+  rules receipt minted (correct: the freeze still fails on the delisted
+  symbol). **Owner decision needed before 2026-08-16 ~19:36 UTC**, when the
+  receipt expires and the funded owner will refuse to start: either (a)
+  drop delisted symbols at renewal, which needs the coverage contract
+  (exact universe↔rules symbol equality,
+  `candidate_rule_coverage.build_candidate_rule_coverage`) to admit
+  receipt-documented drops, or (b) re-freeze the mainnet candidate
+  universe, which supersedes the recorded frozen-only-when-absent choice
+  and would also admit venue listings added since 2026-08-09. Neither was
+  taken unilaterally; both are small once chosen.
+
 - **2026-08-13 — Where the boundary's ~5 s went, and the fix: carry now
   freezes the day's book ahead of the deadline and the deadline wake skips
   the data build.** Tonight's live cycle, split by receipt: wake +0.001 s;
