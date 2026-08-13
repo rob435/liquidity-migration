@@ -26,20 +26,26 @@ Geography is not ours to fix in software. From the current box, one round trip
 to the venue is ~175 ms; no rebuild changes that. What the engine owns is our
 side of the wire, and that is what we measure and promise:
 
-| Segment | Target | Why believable |
-| --- | --- | --- |
-| market message in → decision made | tens of microseconds | one parse, flat structs, no allocation on the hot path |
-| decision → order durable in the log | < 3 ms worst (one fdatasync) | measured ~2.2 ms/fsync on the VPS disk; ~0.1 ms on NVMe |
-| durable → signed bytes on the socket | < 1 ms | HMAC of a small body + write to a warm TLS connection |
-| **in → wire, whole chain** | **< 5 ms p99 on VPS disk, < 1 ms on NVMe** | sum of the above |
+Measured 2026-08-14 by `engine bench` (the real loop, real HMAC signing,
+the real log with its fsync in the chain, a pretend venue on the same box;
+release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 
-Every event is stamped four times (`recv_ns`, `intent_ns`, `wal_ns`,
-`wire_ns`) and the engine ships its own measurement: a mock venue lets us run
-the full chain on one box and read the histograms, so the numbers above are
-checked by the engine itself, not asserted in a doc. The <100 ms
-decision-to-execution goal is therefore met on our side of the wire with two
-orders of magnitude to spare; the venue round trip on top is the same
-geography every non-colocated participant pays.
+| Segment | median | p99 | worst |
+| --- | --- | --- | --- |
+| market message in → decision made | 84 ns | 125 ns | 209 ns |
+| decision → order durable in the log | 3.8 ms | 4.8 ms | 10.5 ms |
+| **in → durable → out the socket** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
+
+The durable step is nearly the whole chain, and it is the platform's price:
+on macOS, Rust's `sync_data` is a full drive-cache flush (~3.2 ms/barrier
+measured); the VPS's Linux `fdatasync` measured ~2.2 ms in wave 3. The
+pretend venue is plain HTTP on localhost, so the venue-side cost is short by
+about one TLS record's work. Numbers are re-measured by running
+`engine bench` — they live in the log the bench writes, not only here.
+
+The <100 ms decision-to-execution goal is met on our side of the wire with
+a ~25× margin at p99; the venue round trip on top is the same geography
+every non-colocated participant pays.
 
 ## Layout
 
