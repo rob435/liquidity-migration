@@ -447,6 +447,60 @@ def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_cha
     recorder.close()
 
 
+def test_market_readiness_fsyncs_land_outside_the_recorder_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar's two fsyncs must not hold the lock the order path takes.
+
+    The write used to happen inside ``on_message``'s lock, so an order-path
+    capture could queue behind a couple of fsyncs about once a second. The
+    pointer is now built and latched under the lock and written after the
+    lock is released.
+    """
+
+    from liquidity_migration.account import market_capture as module
+
+    recorder = SequenceAwareMarketRecorder(
+        tmp_path,
+        config=_config(persist_raw_market=False),
+        clock=VirtualClock(
+            current_wall_ns=1_800_000_000_010_000_000,
+            current_monotonic_ns=0,
+        ),
+        owner_invocation_id="a1" * 16,
+    )
+    recorder.set_required_symbols({"BUSDT"})
+
+    real_write = module._atomic_write_readiness_sidecar
+    lock_free_during_write: list[bool] = []
+
+    def probing_write(path: Path, sidecar: Any, *, label: str) -> None:
+        # Probe from another thread: a reentrant acquire on this thread would
+        # succeed even while on_message still held the lock.
+        seen: list[bool] = []
+
+        def probe() -> None:
+            acquired = recorder._lock.acquire(blocking=False)
+            seen.append(acquired)
+            if acquired:
+                recorder._lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        lock_free_during_write.append(seen[0])
+        real_write(path, sidecar, label=label)
+
+    monkeypatch.setattr(module, "_atomic_write_readiness_sidecar", probing_write)
+    recorder.on_message(
+        _snapshot(symbol="BUSDT"),
+        local_receive_ts_ns=1_800_000_000_010_000_000,
+    )
+
+    assert lock_free_during_write == [True]
+    recorder.close()
+
+
 def test_regression_marks_book_unhealthy_until_fresh_snapshot(tmp_path: Path) -> None:
     recorder = SequenceAwareMarketRecorder(tmp_path, config=_config())
     recorder.on_message(_snapshot(), local_receive_ts_ns=1_800_000_000_010_000_000)

@@ -219,6 +219,10 @@ class StrategyHostDaemon:
         # idle-floor cycle, exactly as before.
         self._price_wake_floor_by_symbol: dict[str, float] = {}
         self._price_wake_ceiling_by_symbol: dict[str, float] = {}
+        # Registrations that already woke a cycle, keyed by symbol with the
+        # exact (floor, ceiling) pair that fired. A latched pair stays silent
+        # until a cycle re-arms the symbol with a different pair.
+        self._price_wake_fired: dict[str, tuple[float | None, float | None]] = {}
         self._price_wake_pending = False
         self._price_wake_min_interval_seconds = PRICE_WAKE_MIN_INTERVAL_SECONDS
         self._last_price_wake_monotonic = 0.0
@@ -297,7 +301,8 @@ class StrategyHostDaemon:
         ceilings = self._price_wake_ceiling_by_symbol
         if not floors and not ceilings:
             return
-        touched = False
+        fired = self._price_wake_fired
+        touched_symbol: str | None = None
         for row in _message_rows(message):
             symbol = str(row.get("symbol") or "")
             if not symbol:
@@ -306,18 +311,29 @@ class StrategyHostDaemon:
             ceiling = ceilings.get(symbol)
             if floor is None and ceiling is None:
                 continue
+            if fired.get(symbol) == (floor, ceiling):
+                # This exact registration already woke a cycle. A level that
+                # cannot clear -- an exit the owner cannot serve yet -- would
+                # otherwise re-fire on every tick at the debounce rate for the
+                # whole outage; instead the idle grid owns the retries until a
+                # cycle re-arms the symbol with a different level.
+                continue
             price = _pushed_ticker_price(row)
             if price is None:
                 continue
             if (floor is not None and price <= floor) or (ceiling is not None and price >= ceiling):
-                touched = True
+                touched_symbol = symbol
                 break
-        if not touched:
+        if touched_symbol is None:
             return
         now = time.monotonic()
         if now - self._last_price_wake_monotonic < self._price_wake_min_interval_seconds:
             return
         self._last_price_wake_monotonic = now
+        self._price_wake_fired[touched_symbol] = (
+            floors.get(touched_symbol),
+            ceilings.get(touched_symbol),
+        )
         # Flag before event, as the journal watch does: the wait reads the
         # flag only after the event woke it.
         self._price_wake_pending = True
@@ -967,6 +983,16 @@ class StrategyHostDaemon:
                 ceilings[symbol] = min(ceiling, ceilings.get(symbol, float("inf")))
         self._price_wake_floor_by_symbol = floors
         self._price_wake_ceiling_by_symbol = ceilings
+        # A fired latch survives only while its exact registration does: a
+        # cycle that re-arms the same pair (an exit still unresolved) keeps it
+        # latched and leaves the retries to the idle grid; any different pair
+        # re-arms the wake.
+        fired = self._price_wake_fired
+        self._price_wake_fired = {
+            symbol: pair
+            for symbol, pair in fired.items()
+            if pair == (floors.get(symbol), ceilings.get(symbol))
+        }
 
     def _note_time_deadline(self, payload: Mapping[str, Any]) -> None:
         """Adopt the cycle's reported next time deadline, if it carries one.

@@ -1006,22 +1006,33 @@ class SequenceAwareMarketRecorder:
         )
         return output
 
-    def _publish_owner_market_readiness(
+    def _build_owner_market_readiness_sidecar(
         self,
         record: Mapping[str, Any],
         *,
         state: BookReconstruction,
-    ) -> None:
+    ) -> OwnerMarketReadinessSidecar | None:
+        """Build the market-readiness pointer under the lock; write it later.
+
+        The snapshot of the books must happen under the recorder lock, but
+        the sidecar's two fsyncs must not: they used to hold this lock for
+        milliseconds about once a second, and the order path's capture takes
+        the same lock. The caller writes the returned sidecar after the lock
+        is released. The latch advances here, at build time, so a failed
+        write outside cannot retry-loop -- the next healthy message builds
+        the next publish, exactly the no-retry contract the inline write had.
+        """
+
         invocation_id = self.owner_invocation_id
         if invocation_id is None:
-            return
+            return None
         now_monotonic_ns = self.clock.monotonic_ns()
         last_publish_ns = self._last_market_readiness_publish_monotonic_ns
         if (
             last_publish_ns is not None
             and now_monotonic_ns - last_publish_ns < OWNER_MARKET_READINESS_PUBLISH_INTERVAL_NS
         ):
-            return
+            return None
         bids = sorted(state.bids.items(), reverse=True)
         asks = sorted(state.asks.items())
         bid_price = bids[0][0] if bids else None
@@ -1059,14 +1070,10 @@ class SequenceAwareMarketRecorder:
             oldest_required_receive_ts_ns=oldest_required_receive_ts_ns,
             raw_market_persistence_enabled=self.config.persist_raw_market,
         )
-        # Latch before I/O so a post-replace fsync error cannot create an
-        # unbounded retry/write loop inside the same publication interval.
+        # Latch at build time, under the lock: a failed write outside cannot
+        # retry-loop inside the same publication interval.
         self._last_market_readiness_publish_monotonic_ns = now_monotonic_ns
-        _atomic_write_readiness_sidecar(
-            owner_market_readiness_path(self.store.root),
-            sidecar,
-            label="owner-market readiness",
-        )
+        return sidecar
 
     def _note_pending_owner_readiness(
         self,
@@ -1149,22 +1156,38 @@ class SequenceAwareMarketRecorder:
     def on_message(self, message: Mapping[str, Any], *, local_receive_ts_ns: int | None = None) -> list[dict[str, Any]]:
         local_ns = int(local_receive_ts_ns or self.clock.wall_time_ns())
         topic = str(message.get("topic") or "")
+        readiness: OwnerMarketReadinessSidecar | None = None
         with self._lock:
             if topic.startswith("orderbook."):
-                persisted = self._on_orderbook(message, local_ns=local_ns)
+                persisted, readiness = self._on_orderbook(message, local_ns=local_ns)
                 symbol = str(persisted.get("symbol") or "").upper()
-                return [
+                results = [
                     persisted,
                     *self._capture_due_post_fill_markouts(
                         symbol=symbol,
                         local_ns=local_ns,
                     ),
                 ]
-            if topic.startswith("publicTrade."):
+            elif topic.startswith("publicTrade."):
                 return self._on_trades(message, local_ns=local_ns)
-            return []
+            else:
+                return []
+        # The market-readiness sidecar's two fsyncs land here, outside the
+        # recorder lock, so the order path's capture never queues behind
+        # them. The tmp name is unique per thread and instant and the rename
+        # is atomic, so concurrent writers cannot tear the file -- the last
+        # complete write wins, and the latch spaces writes a second apart.
+        if readiness is not None:
+            _atomic_write_readiness_sidecar(
+                owner_market_readiness_path(self.store.root),
+                readiness,
+                label="owner-market readiness",
+            )
+        return results
 
-    def _on_orderbook(self, message: Mapping[str, Any], *, local_ns: int) -> dict[str, Any]:
+    def _on_orderbook(
+        self, message: Mapping[str, Any], *, local_ns: int
+    ) -> tuple[dict[str, Any], "OwnerMarketReadinessSidecar | None"]:
         data = message.get("data") or {}
         if not isinstance(data, Mapping):
             raise MarketCaptureError("orderbook message data must be an object")
@@ -1258,8 +1281,7 @@ class SequenceAwareMarketRecorder:
             record,
             persist_to_disk=self.config.persist_raw_market,
         )
-        self._publish_owner_market_readiness(persisted, state=state)
-        return persisted
+        return persisted, self._build_owner_market_readiness_sidecar(persisted, state=state)
 
     def _capture_due_post_fill_markouts(
         self,

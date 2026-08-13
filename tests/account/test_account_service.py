@@ -471,12 +471,11 @@ def test_privileged_inbox_writes_hand_inodes_to_the_directory_owner(
         )
     )
     owner = os.stat(tmp_path / "inbox")
-    # One request body, and nothing else: the arrival counter and the arrival
-    # sidecar used to be written here too, so queueing one request cost three
-    # atomic replaces -- six fsyncs, about eleven milliseconds of the measured
-    # publish-to-pickup time on the deployed host. The order now travels inside
-    # the request's own file, so a publish hands off exactly one inode.
-    assert len(recorded) == 1
+    # The request body (the one durable, fsync-paying write) and the advisory
+    # counter (buffered). The arrival sidecar used to be a third; the order now
+    # travels inside the request's own file. Both inodes are handed to the
+    # directory owner -- a root-owned counter is exactly the 2026-08-01 poison.
+    assert len(recorded) == 2
     assert set(recorded) == {(owner.st_uid, owner.st_gid)}
 
 
@@ -2953,41 +2952,167 @@ def test_risk_flat_is_not_superseded_by_genuinely_later_strategy_reentry(
     assert claimed is not None and claimed[1].request_id == risk_flat.request_id
 
 
-def test_publishing_one_request_writes_exactly_one_file(tmp_path: Path) -> None:
+def test_publishing_one_request_writes_exactly_one_durable_file(tmp_path: Path) -> None:
     """A publish costs one atomic replace, not three.
 
     Queueing a request used to write an arrival counter, an arrival sidecar
     and the request body -- three atomic replaces, six fsyncs, about eleven
     milliseconds of the measured publish-to-pickup time on the deployed host.
-    The order now rides inside the request's own file.
+    The order now rides inside the request's own file; the counter survives
+    only as an advisory, buffered write that pays no fsync.
     """
+
+    from liquidity_migration.account import account_service as account_service_module
 
     inbox = _inbox(tmp_path)
     route = _route(tmp_path)
-    before = {
-        str(path)
-        for path in inbox.root.rglob("*")
-        if path.is_file() and ".locks" not in path.parts
+
+    real_atomic = account_service_module._atomic_replace
+    durable_writes: list[str] = []
+
+    def _counting_atomic(path: Path, data: bytes) -> None:
+        durable_writes.append(str(path))
+        real_atomic(path, data)
+
+    with mock.patch.object(account_service_module, "_atomic_replace", _counting_atomic):
+        inbox.submit(
+            _request(
+                route,
+                request_id="single-write",
+                batch_id="single-write",
+                kind=SleeveAdapterKind.LONG,
+                notional=20.0,
+            )
+        )
+
+    assert durable_writes == [str(inbox.root / "pending" / inbox._filename("single-write"))]
+    assert not list((inbox.root / "arrival").glob("*.json"))
+    # The advisory counter exists -- written buffered, outside the durable
+    # (fsync-paying) path counted above.
+    assert json.loads((inbox.root / "arrival_counter.json").read_bytes()) == {
+        "schema_version": 1,
+        "last_arrival_sequence": 1,
     }
 
+
+def test_a_rotted_queue_file_never_blocks_a_new_publish(tmp_path: Path) -> None:
+    """One unreadable file must not freeze the queue for everyone else.
+
+    The publish derives its arrival order by scanning the live queue. A file
+    that scan cannot read -- rot, a stray key, a foreign shape -- contributes
+    nothing instead of raising, because refusing to queue a new request over
+    an unrelated bad file would block the safety exits that ride this same
+    inbox. The bad file itself stays fail-closed at the owner's claim walk.
+    """
+
+    route = _route(tmp_path)
+    inbox = AccountIntentInbox(route)
     inbox.submit(
         _request(
             route,
-            request_id="single-write",
-            batch_id="single-write",
+            request_id="good-first",
+            batch_id="good-first",
             kind=SleeveAdapterKind.LONG,
             notional=20.0,
         )
     )
+    claimed = inbox.claim_next()
+    assert claimed is not None
+    # The claimed copy rots in processing/ -- truncated to nothing.
+    (inbox.root / "processing" / inbox._filename("good-first")).write_bytes(b"")
 
-    written = {
-        str(path)
-        for path in inbox.root.rglob("*")
-        if path.is_file() and ".locks" not in path.parts
-    } - before
-    assert written == {str(inbox.root / "pending" / inbox._filename("single-write"))}
-    assert not list((inbox.root / "arrival").glob("*.json"))
-    assert not (inbox.root / "arrival_counter.json").exists()
+    # The safety-exit shape still queues, with an order past the good history.
+    exit_path = inbox.submit(
+        _request(
+            route,
+            request_id="safety-exit",
+            batch_id="safety-exit",
+            kind=SleeveAdapterKind.RISK,
+            notional=0.0,
+        )
+    )
+    assert json.loads(exit_path.read_bytes())["arrival_sequence"] == 2
+
+    # A rotten file in pending/ does not block publishing either -- but the
+    # claim walk still refuses to schedule past it, exactly as before.
+    (inbox.root / "pending" / "0000-rotten.json").write_text('{"what": 1}', encoding="utf-8")
+    inbox.submit(
+        _request(
+            route,
+            request_id="after-rot",
+            batch_id="after-rot",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    with pytest.raises((RuntimeError, ValueError)):
+        inbox.claim_next()
+
+
+def test_arrival_numbering_survives_a_drained_queue_and_a_rebuilt_publisher(
+    tmp_path: Path,
+) -> None:
+    """Receipts keep a climbing arrival order across producer rebuilds.
+
+    Producers rebuild their inbox object every cycle, and the queue is
+    usually empty at publish time. The advisory counter carries the numbering
+    across, so completed receipts hold a usable timeline instead of every
+    request being number one.
+    """
+
+    route = _route(tmp_path)
+    first = AccountIntentInbox(route)
+    _submit_and_complete(first, route, request_id="first-life")
+
+    rebuilt = AccountIntentInbox(route)
+    path = rebuilt.submit(
+        _request(
+            route,
+            request_id="second-life",
+            batch_id="second-life",
+            kind=SleeveAdapterKind.LONG,
+            notional=20.0,
+        )
+    )
+    assert json.loads(path.read_bytes())["arrival_sequence"] == 2
+
+
+def test_a_forged_legacy_completed_file_is_rejected_exactly(tmp_path: Path) -> None:
+    """A legacy-shaped file carrying a stray key fails the read.
+
+    Files completed by an older build carry only the request and the receipt;
+    their key set is checked exactly, the same way the embedded form's is. An
+    ignored stray key is how a forged field slips past a reader that only
+    looks at what it expects.
+    """
+
+    route = _route(tmp_path)
+    inbox = AccountIntentInbox(route)
+    request = _submit_and_complete(inbox, route, request_id="legacy-forge")
+    completed = inbox.root / "completed" / inbox._filename("legacy-forge")
+    payload = json.loads(completed.read_bytes())
+    # Rebuild the file the way the older build shaped it, plus one stray key,
+    # and plant the matching sidecar so only the key check can reject it.
+    completed.write_text(
+        json.dumps(
+            {"request": payload["request"], "receipt": payload["receipt"], "forged": True}
+        ),
+        encoding="utf-8",
+    )
+    (inbox.root / "arrival" / inbox._filename("legacy-forge")).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "request_id": request.request_id,
+                "request_hash": request.content_hash(),
+                "arrival_sequence": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        inbox.completed_requests()
 
 
 def test_owner_pass_parses_and_hashes_each_pending_file_once(tmp_path: Path) -> None:
@@ -3126,7 +3251,9 @@ def test_inbox_fails_closed_when_pending_request_loses_its_arrival_order(
     del stripped["arrival_sequence"]
     path.write_text(json.dumps(stripped), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="lacks a durable arrival sequence"):
+    # The stripped file no longer matches any legal shape -- embedded or
+    # legacy -- so the claim walk refuses it at the key check.
+    with pytest.raises(RuntimeError, match="unreadable account target request"):
         inbox.claim_next()
 
 

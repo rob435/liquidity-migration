@@ -531,7 +531,6 @@ class AccountIntentInbox:
         # identity it was parsed from (see ``_read_queued_locked``).
         self._queued_cache: dict[str, tuple[tuple[int, int, int, int], AccountTargetRequest, int]] = {}
         self._arrival_high_water = 0
-        self._arrival_seeded = False
 
     @property
     def _lock_path(self) -> Path:
@@ -599,6 +598,11 @@ class AccountIntentInbox:
         if not isinstance(body, Mapping):
             raise RuntimeError(f"unreadable account target request {path.name!r}")
         if "arrival_sequence" not in payload:
+            # A legacy envelope -- completed or failed by an older build. Its
+            # key set is checked just as exactly as the embedded form's below.
+            legacy_expected = {"request"} | _QUEUE_STATE_KEYS.get(path.parent.name, frozenset())
+            if set(payload) != legacy_expected:
+                raise RuntimeError(f"unreadable account target request {path.name!r}")
             return body, None
         expected = {"schema_version", "arrival_sequence", "request_hash", "request"} | _QUEUE_STATE_KEYS.get(
             path.parent.name, frozenset()
@@ -698,8 +702,12 @@ class AccountIntentInbox:
             return 0
         try:
             payload = json.loads(path.read_bytes())
-        except (OSError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("account intent arrival counter is unreadable") from exc
+        except (OSError, TypeError, json.JSONDecodeError):
+            # The counter is advisory -- each request carries its own order
+            # durably and the live queue is the correctness floor -- so a torn
+            # buffered write degrades numbering continuity, never a publish.
+            _logger.warning("account intent arrival counter is unreadable; treating as empty")
+            return 0
         sequence = payload.get("last_arrival_sequence") if isinstance(payload, Mapping) else None
         if (
             not isinstance(payload, Mapping)
@@ -708,32 +716,81 @@ class AccountIntentInbox:
             or not isinstance(sequence, int)
             or sequence < 0
         ):
-            raise RuntimeError("account intent arrival counter is invalid")
+            _logger.warning("account intent arrival counter is invalid; treating as empty")
+            return 0
         return sequence
 
-    def _next_arrival_sequence_locked(self) -> int:
-        """Assign the next arrival order, derived from the live queue itself.
+    def _note_arrival_counter_locked(self, sequence: int) -> None:
+        """Remember the highest assigned order -- buffered, best-effort.
 
-        There is no durable counter to lose or outrun. The floor is whatever
-        the unfinished requests already claim, so a restarted or second
-        producer reads the same shared truth under the same inbox lock and
-        cannot reorder, drop or duplicate an order. The in-process mark only
-        keeps numbers climbing once the queue drains, and any counter left by
-        an older build is honoured as a floor so the two builds' orders stay in
-        one increasing run.
+        The counter is advisory. The live queue is what stops two coexisting
+        requests sharing or inverting an order, and each request carries its
+        own order durably in its file. What the counter adds is continuity:
+        numbering that keeps climbing across drained queues, rebuilt
+        producers and restarts, so the order recorded in receipts stays a
+        usable timeline. It is written without an fsync -- the publish itself
+        stays at one durable write -- and a crash may lose the last few
+        numbers; the live queue keeps that loss away from scheduling.
         """
 
-        if not self._arrival_seeded:
-            self._arrival_high_water = max(
-                self._arrival_high_water, self._read_arrival_counter_locked()
+        path = self._arrival_counter_path
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        data = (
+            canonical_json(
+                {
+                    "schema_version": ARRIVAL_SCHEMA_VERSION,
+                    "last_arrival_sequence": sequence,
+                }
             )
-            self._arrival_seeded = True
-        live = 0
+            + b"\n"
+        )
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.write(fd, data)
+                if os.geteuid() == 0:
+                    parent = os.stat(path.parent)
+                    os.fchown(fd, parent.st_uid, parent.st_gid)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError as exc:
+            _logger.warning("account intent arrival counter write failed: %s", exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _next_arrival_sequence_locked(self) -> int:
+        """Assign the next arrival order.
+
+        Correctness comes from the live queue: the floor is whatever the
+        unfinished requests already claim, read under the same inbox lock
+        every producer takes, so coexisting requests can never share or
+        invert an order. Continuity comes from the advisory counter, so
+        numbering keeps climbing across drained queues, rebuilt producers
+        and restarts. A file this scan cannot read contributes nothing to
+        the floor rather than blocking the publish: refusing to queue a new
+        request -- a safety exit included -- because an unrelated file rotted
+        would turn one bad file into a frozen account. The unreadable file
+        itself stays fail-closed where it always was: the owner's claim walk
+        still refuses to schedule past it.
+        """
+
+        floor = max(self._arrival_high_water, self._read_arrival_counter_locked())
         for directory in ("pending", "processing"):
             for path in (self.root / directory).glob("*.json"):
-                live = max(live, self._read_queued_locked(path)[1])
-        sequence = max(self._arrival_high_water, live) + 1
+                try:
+                    floor = max(floor, self._read_queued_locked(path)[1])
+                except (RuntimeError, OSError, TypeError, ValueError) as exc:
+                    _logger.warning(
+                        "skipping unreadable queue file %s while assigning an arrival order: %s",
+                        path.name,
+                        exc,
+                    )
+        sequence = floor + 1
         self._arrival_high_water = sequence
+        self._note_arrival_counter_locked(sequence)
         return sequence
 
     def queued_request_path(self, request_id: str) -> Path | None:

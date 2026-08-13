@@ -73,8 +73,12 @@ coalesces later replacements and carries component revisions, so an older entry 
 reopen a component after a newer zero target. Each queued file carries its own arrival
 order, so queueing one request is a single atomic replace and the order can never be
 torn from the request it belongs to; the order of a new request is one past whatever the
-unfinished requests already claim. (`arrival/` still exists and is still read for
-requests queued by an older build, which kept the order in a sidecar file.)
+unfinished requests already claim, floored by an advisory counter (written buffered,
+no fsync) that keeps numbering climbing across drained queues and restarts. A queue
+file the publish scan cannot read is skipped with a warning rather than blocking the
+publish — the owner's claim walk still fails closed on it. (`arrival/` still exists
+and is still read for requests queued by an older build, which kept the order in a
+sidecar file.)
 A failed request normally releases back to
 `pending/` for retry, with one owner-approved exception (2026-08-03): when the failure is
 the never-attempted stale-command refusal (`StaleUnsubmittedExposureCommand`) and every

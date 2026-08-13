@@ -314,9 +314,46 @@ def test_a_churning_tick_stream_cannot_spin_cycles(tmp_path: Path) -> None:
         daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0 - tick * 0.001))
     assert daemon._bar_event.is_set() is False
 
-    # Past the floor, the next touch wakes again — the level was never lost.
+    # Even past the debounce window the same registration stays silent: it
+    # already woke a cycle, and until a cycle re-arms the symbol the idle
+    # grid owns the retries. Without the latch a level that cannot clear
+    # would re-fire every debounce interval for a whole owner outage.
     daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
     daemon._handle_ticker_message(_ticker_push("AAAUSDT", 98.0))
+    assert daemon._bar_event.is_set() is False
+
+
+def test_a_level_that_cannot_clear_wakes_once_until_it_is_rearmed(tmp_path: Path) -> None:
+    """A breached-but-unexitable stop must not spin the sleeve at 0.5 Hz.
+
+    The wake fires once per registration. A cycle that re-arms the very same
+    level (its exit still unresolved) keeps the latch; a cycle that arms a
+    different level -- the stop decayed further, or a new trade -- re-arms
+    the wake.
+    """
+
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 95.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 94.0))
+    assert daemon._bar_event.is_set() is True
+
+    # The cycle that wake started re-arms the SAME level: still latched.
+    daemon._bar_event.clear()
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 93.0))
+    assert daemon._bar_event.is_set() is False
+
+    # A DIFFERENT level for the symbol re-arms the wake.
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 92.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 91.0))
     assert daemon._bar_event.is_set() is True
 
 

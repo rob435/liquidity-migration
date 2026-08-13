@@ -1253,7 +1253,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
         monkeypatch.setattr(
             planning_module,
             "require_recent_account_owner_health",
-            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0),
+            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000),
         )
 
         # An ordinary cycle takes the reading the fast wake will spend.
@@ -1313,7 +1313,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
 
         def live_health(*_args: Any, **_kwargs: Any) -> Any:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0)
+            return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
 
         monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
         state = lnd.LongCycleState()
@@ -1331,6 +1331,44 @@ class TestFastWakeSpendsTheStoredHealthReading:
         assert live_reads  # the wake paid its own live read
         assert state.owner_health_reading.read_wall_ts_ns == (now + 30_001) * 1_000_000
 
+    def test_a_served_reading_never_outlives_its_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ages never stack: a reading taken off an already-old receipt is
+        refused as soon as a live read would refuse that receipt, not a full
+        reading-lifetime later."""
+
+        _stub_cycle_dependencies(monkeypatch, candidates=[])
+        demo = self._demo(tmp_path)
+        now = 1_700_000_300_000
+        live_reads: list[str] = []
+
+        def aged_receipt(*_args: Any, **_kwargs: Any) -> Any:
+            live_reads.append("read")
+            return SimpleNamespace(
+                equity_usdt=10_000.0,
+                observed_ts_ns=(now - 25_000) * 1_000_000,
+            )
+
+        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", aged_receipt)
+        state = lnd.LongCycleState()
+        self._cycle(tmp_path, demo, now_ms=now, state=state)
+        assert live_reads == ["read"]
+        stored = state.owner_health_reading
+        assert stored is not None
+        assert stored.receipt_wall_ts_ns == (now - 25_000) * 1_000_000
+
+        # Six seconds later the reading is young (6 s) but its receipt is 31 s
+        # old -- a live read would refuse it, so the fast wake must read live.
+        self._cycle(
+            tmp_path,
+            demo,
+            now_ms=now + 6_000,
+            state=state,
+            cycle_kind="price_touch",
+        )
+        assert live_reads == ["read", "read"]
+
     def test_a_journal_change_wake_reads_live_even_with_a_fresh_reading(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1344,7 +1382,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
 
         def live_health(*_args: Any, **_kwargs: Any) -> Any:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0)
+            return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
 
         monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
         state = lnd.LongCycleState()
@@ -2283,7 +2321,7 @@ def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
     def _sentinel_health(*args: Any, **kwargs: Any) -> Any:
         raise _HealthSentinel("cycle proceeded past the retirement gate")
 
-    monkeypatch.setattr(lnd, "account_owner_equity_or_error", _sentinel_health)
+    monkeypatch.setattr(lnd, "account_owner_health_reading", _sentinel_health)
 
     demo = LongNativeDemoCycleConfig(
         execution_environment="demo",

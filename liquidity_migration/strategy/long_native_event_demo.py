@@ -97,7 +97,7 @@ from liquidity_migration.research.backtest.long_identity import (
 )
 from liquidity_migration.strategy.strategy_planning import (
     OwnerHealthReading,
-    account_owner_equity_or_error,
+    account_owner_health_reading,
     sleeve_planning_snapshot,
     suppress_target_intents,
 )
@@ -430,28 +430,26 @@ def run_long_native_demo_cycle(
         # A wake that exists to act fast must not spend its first seconds on
         # the owner-health read, whose head-retry ladder sleeps a second
         # between attempts when the owner's receipt is mid-publish. Those
-        # wakes serve the reading an ordinary cycle already took, and only
-        # while it sits inside the SAME freshness bound a live read enforces:
-        # nothing is widened, so the equity a cycle plans on is the equity it
-        # would have read anyway. A journal-change wake always reads live —
-        # it fired BECAUSE the journal moved, so a stored reading could
-        # predate the very fill that woke it.
+        # wakes serve the reading an ordinary cycle already took -- but only
+        # while the receipt BEHIND that reading is still young enough that a
+        # live read at this instant would accept it, so ages never stack:
+        # the equity a cycle plans on is the equity it would have read
+        # anyway. A journal-change wake always reads live — it fired BECAUSE
+        # the journal moved, so a stored reading could predate the very fill
+        # that woke it.
         now_ns = cycle_now_ms * 1_000_000
         stored_reading = state.owner_health_reading if cycle_kind in _FAST_WAKE_CYCLE_KINDS else None
-        equity_usdt, account_owner_health_error = account_owner_equity_or_error(
+        reading = account_owner_health_reading(
             route,
             environment=owner_environment,
             stored_reading=stored_reading,
             now_ns=now_ns,
         )
-        # Re-stamp on live reads only: a served reading keeps its original
-        # timestamp, so age can never launder itself through a re-stamp.
-        if stored_reading is None or not stored_reading.is_fresh(now_ns=now_ns):
-            state.owner_health_reading = OwnerHealthReading(
-                equity_usdt=float(equity_usdt),
-                error=str(account_owner_health_error),
-                read_wall_ts_ns=now_ns,
-            )
+        equity_usdt, account_owner_health_error = float(reading.equity_usdt), str(reading.error)
+        # A live read comes back freshly stamped; a served reading is the
+        # same object with its original stamp, so age can never launder
+        # itself through a re-stamp.
+        state.owner_health_reading = reading
         account_state_source = f"account_owner_health:{owner_environment}"
         mark_stage("account_health")
 
