@@ -162,3 +162,87 @@ def test_the_deploy_rule_probe_is_gated_by_realm() -> None:
     probe_index = source.index("scripts/maintain/probe_bybit_demo_rules.py")
     gate_index = source.index('[ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ]')
     assert gate_index < probe_index
+
+
+def test_an_optional_symbol_is_skipped_when_absent_or_degenerate() -> None:
+    """Held-exposure carryover symbols must not fail the whole rules read.
+
+    A universe symbol stays strict — the universe was frozen from the same
+    live venue moments earlier — but a symbol the account merely still holds
+    can be gone (settled) or structurally degenerate (a retiring contract),
+    and either used to block every renewal (VANRYUSDT, 2026-08-12).
+    """
+
+    rules = build_venue_instrument_rules(
+        _ReadOnlyVenue([_row("BUSDT"), _row("DYINGUSDT", max_leverage="0")]),
+        realm="mainnet",
+        symbols=["BUSDT", "GONEUSDT", "DYINGUSDT"],
+        observed_ts_ns=1_000,
+        optional_symbols=["GONEUSDT", "DYINGUSDT"],
+    )
+    assert sorted(rules) == ["BUSDT"]
+
+    with pytest.raises(RuntimeError, match="absent from mainnet instruments-info"):
+        build_venue_instrument_rules(
+            _ReadOnlyVenue([_row("BUSDT")]),
+            realm="mainnet",
+            symbols=["BUSDT", "GONEUSDT"],
+            observed_ts_ns=1_000,
+            optional_symbols=["OTHERUSDT"],
+        )
+
+
+def test_held_exposure_declarations_round_trip_and_are_validated() -> None:
+    venue = _ReadOnlyVenue([_row("BUSDT"), _row("HELDUSDT")])
+    rules = build_venue_instrument_rules(
+        venue,
+        realm="mainnet",
+        symbols=["BUSDT", "HELDUSDT"],
+        observed_ts_ns=1_000,
+    )
+
+    data = render_venue_rules_artifact(
+        rules,
+        realm="mainnet",
+        verified_ts_ns=2_000,
+        held_exposure={"HELDUSDT": {"basis": "live_instruments_info"}},
+    )
+    loaded = load_venue_rules_bytes(data, realm="mainnet")
+    assert sorted(loaded) == ["BUSDT", "HELDUSDT"]
+
+    with pytest.raises(ValueError, match="has no rule in this receipt"):
+        render_venue_rules_artifact(
+            rules,
+            realm="mainnet",
+            verified_ts_ns=2_000,
+            held_exposure={"GHOSTUSDT": {"basis": "live_instruments_info"}},
+        )
+    with pytest.raises(ValueError, match="invalid basis"):
+        render_venue_rules_artifact(
+            rules,
+            realm="mainnet",
+            verified_ts_ns=2_000,
+            held_exposure={"HELDUSDT": {"basis": "wishful_thinking"}},
+        )
+
+
+def test_a_receipt_frozen_before_the_exposure_key_still_loads() -> None:
+    rules = build_venue_instrument_rules(
+        _ReadOnlyVenue([_row("BUSDT")]),
+        realm="mainnet",
+        symbols=["BUSDT"],
+        observed_ts_ns=1_000,
+    )
+    data = render_venue_rules_artifact(rules, realm="mainnet", verified_ts_ns=2_000)
+    import json
+
+    payload = json.loads(data)
+    del payload["held_exposure_symbols"]
+    payload["artifact_sha256"] = ""
+    import hashlib
+
+    from liquidity_migration.core.deterministic_serialization import canonical_json
+
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    loaded = load_venue_rules_bytes(canonical_json(payload) + b"\n", realm="mainnet")
+    assert sorted(loaded) == ["BUSDT"]

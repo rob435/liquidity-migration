@@ -51,11 +51,22 @@ def build_venue_instrument_rules(
     realm: VenueRealm | str,
     symbols: Iterable[str],
     observed_ts_ns: int,
+    optional_symbols: Iterable[str] = (),
 ) -> dict[str, InstrumentRules]:
-    """Read structural rules for ``symbols`` through the read-only endpoint."""
+    """Read structural rules for ``symbols`` through the read-only endpoint.
+
+    A symbol named in ``optional_symbols`` whose live row is absent or
+    degenerate (a retiring contract can lose its declared floors) is skipped
+    instead of failing the whole read. That is only correct for held-exposure
+    carryover symbols — a symbol leaving the venue while the account still has
+    exposure on it — where the caller supplies the rule from a prior receipt.
+    Universe symbols must never be optional: the universe is frozen from the
+    same live venue moments earlier, so a fault there is a real fault.
+    """
 
     selected = venue_realm(realm)
     wanted = {str(symbol).upper() for symbol in symbols}
+    optional = {str(symbol).upper() for symbol in optional_symbols}
     if not wanted:
         raise ValueError("venue instrument rules require at least one symbol")
     if int(observed_ts_ns) <= 0:
@@ -69,13 +80,13 @@ def build_venue_instrument_rules(
         for row in client.get_instruments_info()
         if isinstance(row, Mapping)
     }
-    missing = sorted(wanted - set(rows))
+    missing = sorted(wanted - set(rows) - optional)
     if missing:
         raise RuntimeError(
             f"absent from {selected.value} instruments-info: {', '.join(missing)}"
         )
     rules: dict[str, InstrumentRules] = {}
-    for symbol in sorted(wanted):
+    for symbol in sorted(wanted & set(rows)):
         rule = instrument_rules_from_bybit_row(
             rows[symbol],
             source=_rules_source(selected),
@@ -85,9 +96,13 @@ def build_venue_instrument_rules(
         # A zero or absent floor would admit dust orders the venue then rejects
         # at submit, one symbol at a time.
         if not math.isfinite(rule.min_notional) or rule.min_notional <= 0.0:
+            if symbol in optional:
+                continue
             raise RuntimeError(f"{symbol}: {selected.value} declares no minimum notional")
         # A non-positive max_leverage voids the venue leverage cap downstream.
         if not math.isfinite(rule.max_leverage) or rule.max_leverage <= 0.0:
+            if symbol in optional:
+                continue
             raise RuntimeError(f"{symbol}: {selected.value} declares no maximum leverage")
         rules[symbol] = rule
     return rules
@@ -116,12 +131,22 @@ def render_venue_rules_artifact(
     realm: VenueRealm | str,
     verified_ts_ns: int | None = None,
     symbol_source: Mapping[str, Any] | None = None,
+    held_exposure: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> bytes:
     """Serialize one self-describing, hash-bound venue-declared rules receipt.
 
     ``symbol_source`` binds the receipt to the candidate-universe artifact its
     symbol list came from, so a receipt frozen against a different universe
     cannot be installed as if it covered this one.
+
+    ``held_exposure`` declares the rules that go BEYOND that universe: symbols
+    the account still has exposure on after they left the entry population.
+    Each entry maps the symbol to its basis — ``live_instruments_info`` for a
+    symbol the venue still lists, or ``prior_receipt_carryover`` (with the
+    source receipt's hash) for a settled symbol whose structural rule is
+    carried forward so its remaining exits can still be built and can die
+    properly on the venue's definite reject. The coverage proof accepts
+    exactly the declared set and nothing else.
     """
 
     selected = venue_realm(realm)
@@ -130,6 +155,17 @@ def render_venue_rules_artifact(
     stamped = int(time.time_ns() if verified_ts_ns is None else verified_ts_ns)
     if stamped <= 0:
         raise ValueError("venue rules artifact requires a positive verified_ts_ns")
+    declared_exposure = {
+        str(symbol).upper(): dict(entry)
+        for symbol, entry in (held_exposure or {}).items()
+    }
+    for symbol, entry in declared_exposure.items():
+        if symbol not in {str(key).upper() for key in rules}:
+            raise ValueError(
+                f"held-exposure declaration {symbol} has no rule in this receipt"
+            )
+        if entry.get("basis") not in {"live_instruments_info", "prior_receipt_carryover"}:
+            raise ValueError(f"held-exposure declaration {symbol} has an invalid basis")
     for symbol, rule in rules.items():
         if rule.environment != selected.value or rule.symbol != str(symbol).upper():
             raise ValueError(f"rule {symbol} does not belong to realm {selected.value}")
@@ -143,6 +179,9 @@ def render_venue_rules_artifact(
         "evidence": VENUE_RULES_EVIDENCE,
         "verified_ts_ns": stamped,
         "symbol_source": dict(symbol_source) if symbol_source is not None else None,
+        "held_exposure_symbols": {
+            symbol: declared_exposure[symbol] for symbol in sorted(declared_exposure)
+        },
         "rules": {
             symbol.upper(): {
                 "qty_step": rule.qty_step,
@@ -213,6 +252,22 @@ def load_venue_rules_bytes(
     rows = payload.get("rules")
     if not isinstance(rows, Mapping) or not rows:
         raise ValueError("venue rules file requires a non-empty 'rules' object")
+    declared_exposure = payload.get("held_exposure_symbols")
+    if declared_exposure is not None:
+        # Optional for receipts frozen before 2026-08-13; always written since.
+        if not isinstance(declared_exposure, Mapping):
+            raise ValueError("venue rules held_exposure_symbols must be an object")
+        rule_keys = {str(symbol).upper() for symbol in rows}
+        for symbol, entry in declared_exposure.items():
+            if (
+                str(symbol).upper() not in rule_keys
+                or not isinstance(entry, Mapping)
+                or entry.get("basis")
+                not in {"live_instruments_info", "prior_receipt_carryover"}
+            ):
+                raise ValueError(
+                    f"venue rules held-exposure declaration {symbol} is invalid"
+                )
     output: dict[str, InstrumentRules] = {}
     for symbol, raw in rows.items():
         if not isinstance(raw, Mapping):
