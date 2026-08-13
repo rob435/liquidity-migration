@@ -1170,6 +1170,9 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
     assert payload["cycle"]["entry_targets_queued"] == 1
     assert payload["cycle"]["equity_usdt"] == pytest.approx(12_345.0)
     assert payload["cycle"]["account_state_source"] == "account_owner_health:demo"
+    # The fleet watchdog's WS-staleness alarm reads this column from the
+    # cycles dataset; it must exist even when the WS store served nothing.
+    assert "kline_store_max_ts_ms" in payload["cycle"]
     assert "now_ns" not in owner_health_call
     assert "entries_executed" not in payload["cycle"]
     assert "bybit_positions" not in payload
