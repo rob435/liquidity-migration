@@ -12,12 +12,13 @@ fn build_err(result: Result<Box<dyn Strategy>, BuildError>) -> BuildError {
 
 const ID: StrategyId = StrategyId(0);
 
-/// The block the research system writes, exactly as the registry documents it.
+/// The flat block the research system writes, exactly as the registry
+/// documents it. The engine core keeps `name` and `capital_usdt` and hands
+/// the rest over as the parameter table — mirrored below in the test.
 const RESEARCH_BLOCK: &str = r#"
 [[strategy]]
 name = "touch_sniper"
-
-[strategy.params]
+capital_usdt = 50.0
 symbol = "BTCUSDT"
 side = "buy"
 trigger_px = 61000.0
@@ -79,9 +80,14 @@ fn the_documented_research_block_builds() {
     let blocks = doc.get("strategy").expect("a [[strategy]] array").as_array().expect("an array");
     assert_eq!(blocks.len(), 1);
 
-    let name = blocks[0].get("name").unwrap().as_str().unwrap();
-    let block_params = blocks[0].get("params").expect("a [strategy.params] table");
-    let strategy = build_strategy(name, StrategyId(3), block_params).expect("the block builds");
+    let name = blocks[0].get("name").unwrap().as_str().unwrap().to_string();
+    // What the engine core does with a flat block: keep name and
+    // capital_usdt, hand the rest over.
+    let mut table = blocks[0].as_table().expect("a table").clone();
+    table.remove("name");
+    table.remove("capital_usdt");
+    let block_params = toml::Value::Table(table);
+    let strategy = build_strategy(&name, StrategyId(3), &block_params).expect("the block builds");
 
     assert_eq!(strategy.name(), "touch_sniper");
     let subs = strategy.subscriptions();

@@ -35,16 +35,13 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .iter()
         .flat_map(|s| s.subscriptions())
         .collect::<Vec<_>>();
-    let risk = assembly::risk(&loaded.config.risk)?;
-    let venue = assembly::venue()?;
-    let mut market_feed = assembly::market_feed(&wanted)?;
-    let mut order_feed = assembly::order_feed()?;
+    let symbols = assembly::symbol_order(&wanted);
+    let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
+    let venue = assembly::venue(symbols.clone())?;
+    let mut market_feed = assembly::market_feed(&wanted);
+    let mut order_feed = assembly::order_feed(symbols)?;
 
-    let scan = assembly::replay(&settings.wal_path)?;
-    if scan.torn_tail {
-        tracing::warn!("the log ended part-way through a record; that tail was dropped");
-    }
-    let wal = assembly::wal(&settings.wal_path)?;
+    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
 
     let mut engine = Engine::boot(
         &settings,
@@ -53,7 +50,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         risk,
         venue,
         strategies,
-        &scan.records,
+        &replayed,
     )
     .await?;
 

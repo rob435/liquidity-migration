@@ -32,7 +32,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::clock;
 use crate::config::EngineSection;
 use crate::engine::{Engine, EngineError};
-use crate::filewal::FileWal;
+
 use crate::ledger::{pretty, LatencyLedger, Quantiles, Segment};
 
 #[derive(Clone, Debug)]
@@ -119,7 +119,8 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // Shadow off on purpose: the point is to measure a real send. The
         // venue on the other end is the pretend one started just above.
     };
-    let wal = FileWal::open(&options.wal_path)?;
+    // The real log, so the measured barrier is the shipping fsync path.
+    let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;
     let strategy = BenchStrategy::new(&options.symbols, options.every_nth);
     let mut engine = Engine::boot(
         &settings,

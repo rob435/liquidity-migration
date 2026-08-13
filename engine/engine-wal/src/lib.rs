@@ -139,12 +139,21 @@ impl fmt::Debug for WalWriter {
 /// Read a log without changing it: the good prefix, stopping exactly where a
 /// writer would truncate. A bad header is still an error.
 pub fn replay(path: impl AsRef<Path>) -> Result<Vec<(u64, WalRecord)>, WalError> {
+    Ok(replay_scan(path)?.0)
+}
+
+/// Like [`replay`], and also says whether bytes exist past the good prefix —
+/// a torn or corrupt tail that a writer would truncate. The audit command
+/// prints that fact rather than silently hiding a crash point.
+pub fn replay_scan(path: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
     let mut file = File::open(path.as_ref())?;
     let len = file.metadata()?.len();
     if len == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
-    Ok(scan_file(&mut file, len)?.records)
+    let scan = scan_file(&mut file, len)?;
+    let damaged_tail = scan.good_end < len;
+    Ok((scan.records, damaged_tail))
 }
 
 struct Scan {

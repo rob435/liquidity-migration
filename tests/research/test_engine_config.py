@@ -30,9 +30,11 @@ def test_rendered_block_parses_back_to_the_same_values() -> None:
     parsed = tomllib.loads(text)
     assert len(parsed["strategy"]) == 1
     block = parsed["strategy"][0]
-    assert block["name"] == "touch_sniper"
-    assert block["capital_usdt"] == 100.0
-    assert block["params"] == {
+    # Flat shape: the engine keeps name and capital_usdt, the rest is the
+    # strategy's parameter table.
+    assert block == {
+        "name": "touch_sniper",
+        "capital_usdt": 100.0,
         "symbol": "BTCUSDT",
         "side": "buy",
         "trigger_px": 60000.0,
@@ -65,6 +67,8 @@ def test_two_blocks_render_as_two_toml_entries() -> None:
         (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"bad key": 1}), "not a plain identifier"),
         (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"px": float("inf")}), "not a finite number"),
         (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"s": 'a"b'}), "would mangle"),
+        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"name": "x"}), "reserved"),
+        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"capital_usdt": 2.0}), "reserved"),
     ],
 )
 def test_bad_blocks_are_refused_with_a_named_reason(block: EngineStrategyBlock, match: str) -> None:

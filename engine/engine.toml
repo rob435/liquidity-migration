@@ -14,14 +14,40 @@ account_view_max_age_ms = 5000
 # still gates every send either way.
 shadow = true
 
-# Handed to the risk kernel as written. The engine does not read inside it.
+# The four capital controls. Nothing here has a default: every number is
+# written down, and the Python fleet's values are recorded in
+# engine-risk/PORT_NOTES.md.
 [risk]
-loss_floor_frac = 0.85
-max_position_usdt = 500.0
+max_account_view_age_s = 120
+# Daily loss ceiling against the UTC day's opening equity. Remove the line
+# to run without a ceiling; the guard still refuses on blindness.
+max_daily_loss_usdt = 10.0
+# Account leverage: turns each strategy's capital into its gross share.
+leverage = 2.0
+# An order smaller than this after the partition clamp is refused, not sent.
+min_order_notional_usdt = 1.0
 
-# One block per strategy. Name and capital are the engine's; everything else
-# belongs to the strategy and is passed through untouched.
+[risk.envelope]
+tracks_equity = true
+# The reference the strategy capitals below were sized against.
+reference_usdt = 100.0
+equity_fraction = 1.0
+floor_usdt = 100.0
+expand_dead_band_fraction = 0.05
+gross_notional_multiple = 2.0
+disaster_stop_fraction = 0.35
+
+# One block per strategy — the plug seam. `name` and `capital_usdt` are the
+# engine's (capital_usdt is this strategy's margin share of the partition;
+# its gross share is capital times leverage). Every other key belongs to the
+# strategy and is handed over as written.
 [[strategy]]
-name = "example"
-capital_usdt = 250.0
-symbols = ["BTCUSDT"]
+name = "touch_sniper"
+capital_usdt = 50.0
+symbol = "BTCUSDT"
+side = "buy"
+trigger_px = 60000.0
+qty = 0.001
+stop_px = 59000.0
+take_px = 61000.0
+ttl_s = 3600

@@ -39,14 +39,16 @@ def _render_block(block: EngineStrategyBlock) -> str:
         raise ValueError(f"strategy name {block.name!r} is not a plain identifier")
     if not math.isfinite(block.capital_usdt) or block.capital_usdt <= 0:
         raise ValueError(f"{block.name}: capital_usdt must be a positive finite number")
+    # Flat blocks: the engine keeps name and capital_usdt for itself and
+    # hands every other key to the strategy, so those two are reserved.
     lines = [
         "[[strategy]]",
         f'name = "{block.name}"',
         f"capital_usdt = {_render_value(float(block.capital_usdt), 'capital_usdt', block.name)}",
-        "",
-        "[strategy.params]",
     ]
     for key in sorted(block.params):
+        if key in ("name", "capital_usdt"):
+            raise ValueError(f"{block.name}: param key {key!r} is reserved for the engine")
         if not key or not key.replace("_", "").isalnum():
             raise ValueError(f"{block.name}: param key {key!r} is not a plain identifier")
         lines.append(f"{key} = {_render_value(block.params[key], key, block.name)}")

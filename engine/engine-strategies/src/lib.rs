@@ -74,14 +74,14 @@ impl std::error::Error for BuildError {}
 /// config order; every intent the plug emits carries it, which is how the risk
 /// kernel keeps each plug inside its own slice of capital.
 ///
-/// The research system emits blocks in this shape, and the engine core hands
-/// the `params` table of each one to this function:
+/// The research system emits flat blocks in this shape. The engine core
+/// keeps `name` and `capital_usdt` for itself and hands everything else to
+/// this function as the parameter table:
 ///
 /// ```toml
 /// [[strategy]]
 /// name = "touch_sniper"
-///
-/// [strategy.params]
+/// capital_usdt = 50.0     # margin share of the partition (engine's, not yours)
 /// symbol = "BTCUSDT"      # venue symbol
 /// side = "buy"            # "buy" or "sell"
 /// trigger_px = 61000.0    # the level to watch

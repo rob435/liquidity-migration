@@ -20,8 +20,9 @@ pub struct ReplayReport {
 }
 
 pub fn read(path: &Path) -> Result<ReplayReport, engine_types::WalError> {
-    let scan = crate::assembly::replay(path)?;
-    Ok(describe(&scan.records, scan.torn_tail))
+    let (replayed, torn_tail) = engine_wal::replay_scan(path)?;
+    let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+    Ok(describe(&records, torn_tail))
 }
 
 pub fn describe(records: &[WalRecord], torn_tail: bool) -> ReplayReport {

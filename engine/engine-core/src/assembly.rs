@@ -1,150 +1,147 @@
 //! Where the real parts get plugged in.
 //!
-//! The loop is written against the traits in `engine-types`, so it compiles
-//! and is tested without any of the crates that will supply them. The crates
-//! that are still empty are named here, one constructor each. Each returns a
-//! plain "not wired yet" error when it runs, so `engine run` starts, says
-//! exactly which part is missing, and stops — instead of pretending.
-//!
-//! Swapping one in is a two-line change: build the real thing and return it.
-//! Nothing above this file moves.
+//! The loop is generic over the traits in `engine-types`; this file names
+//! the concrete crates exactly once. Nothing above it knows which venue,
+//! which log format, or which kernel it is running.
 
+use std::error::Error;
 use std::path::Path;
 
-use engine_types::{
-    AccountView, FeedError, InstrumentRule, Intent, MarketEvent, MarketFeed, OrderAck, OrderFeed,
-    OrderRequest, OrderUpdate, RiskKernel, RiskVerdict, Strategy, Subscription, Symbol, SymbolId,
-    VenueError, VenueGateway, WalError,
+use engine_marketdata::BybitPublicFeed;
+use engine_risk::{
+    EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig, PartitionConfig, StrategyAllocation,
 };
+use engine_strategies::build_strategy;
+use engine_types::{
+    Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
+};
+use engine_venue::{BybitGateway, BybitOrderFeed};
+use engine_wal::WalWriter;
+use serde::Deserialize;
 
 use crate::config::StrategyConfig;
-use crate::filewal::FileWal;
 
-#[derive(Debug)]
-pub struct NotWired {
-    pub part: &'static str,
-    pub crate_name: &'static str,
+/// Open the log and replay what an earlier run left. The writer truncates a
+/// torn tail at the crash point before appending continues.
+pub fn wal(path: &Path) -> Result<(WalWriter, Vec<WalRecord>), WalError> {
+    let (writer, replayed) = WalWriter::open(path)?;
+    Ok((writer, replayed.into_iter().map(|(_, r)| r).collect()))
 }
 
-impl std::fmt::Display for NotWired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the {} is not wired yet: {} is still empty",
-            self.part, self.crate_name
-        )
-    }
-}
-
-impl std::error::Error for NotWired {}
-
-/// The log. Today this is the small file log inside engine-core; when
-/// `engine-wal` lands, build that here instead and delete `filewal.rs`.
-pub fn wal(path: &Path) -> Result<FileWal, WalError> {
-    FileWal::open(path)
-}
-
-/// Reading the log back. Same swap as `wal` — the reader must match whoever
-/// wrote the file.
-pub fn replay(path: &Path) -> Result<crate::filewal::Scan, WalError> {
-    crate::filewal::read_frames(path)
-}
-
-/// Bybit's public market stream. Needs `engine-marketdata`.
-pub fn market_feed(_wanted: &[Subscription]) -> Result<PendingMarketFeed, NotWired> {
-    Err(NotWired {
-        part: "market feed",
-        crate_name: "engine-marketdata",
-    })
-}
-
-/// The venue's private order stream. Needs `engine-venue`.
-pub fn order_feed() -> Result<PendingOrderFeed, NotWired> {
-    Err(NotWired {
-        part: "order feed",
-        crate_name: "engine-venue",
-    })
-}
-
-/// The demo venue gateway. Needs `engine-venue`.
-pub fn venue() -> Result<PendingVenue, NotWired> {
-    Err(NotWired {
-        part: "venue gateway",
-        crate_name: "engine-venue",
-    })
-}
-
-/// The four capital controls. Needs `engine-risk`. Note what the absence
-/// means: with no kernel there is nothing to gate a send, so the engine will
-/// not run without it, in shadow mode or otherwise.
-pub fn risk(_settings: &toml::Table) -> Result<PendingRisk, NotWired> {
-    Err(NotWired {
-        part: "risk kernel",
-        crate_name: "engine-risk",
-    })
-}
-
-/// Name plus config block to a live strategy. Needs `engine-strategies`.
-pub fn strategies(_configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>>, NotWired> {
-    Err(NotWired {
-        part: "strategy registry",
-        crate_name: "engine-strategies",
-    })
-}
-
-// The types below exist so the loop type-checks against real signatures
-// before the crates arrive. They are never built at runtime.
-
-pub struct PendingMarketFeed;
-
-impl MarketFeed for PendingMarketFeed {
-    async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
-        Err(FeedError::Transport("market feed not wired".into()))
-    }
-}
-
-pub struct PendingOrderFeed;
-
-impl OrderFeed for PendingOrderFeed {
-    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
-        Err(FeedError::Transport("order feed not wired".into()))
-    }
-}
-
-pub struct PendingVenue;
-
-impl VenueGateway for PendingVenue {
-    async fn send_order(&mut self, _req: &OrderRequest) -> Result<OrderAck, VenueError> {
-        Err(VenueError::Transport("venue not wired".into()))
-    }
-
-    async fn cancel_order(&mut self, _symbol: SymbolId, _id: &str) -> Result<(), VenueError> {
-        Err(VenueError::Transport("venue not wired".into()))
-    }
-
-    async fn set_stop(&mut self, _symbol: SymbolId, _trigger_px: f64) -> Result<(), VenueError> {
-        Err(VenueError::Transport("venue not wired".into()))
-    }
-
-    async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        Err(VenueError::Transport("venue not wired".into()))
-    }
-
-    async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
-        Err(VenueError::Transport("venue not wired".into()))
-    }
-}
-
-pub struct PendingRisk;
-
-impl RiskKernel for PendingRisk {
-    fn assess(&mut self, _intent: &Intent, _account: &AccountView) -> RiskVerdict {
-        RiskVerdict::Deny {
-            reason: engine_types::DenyReason::UnknownState {
-                detail: "risk kernel not wired".into(),
-            },
+/// The symbols the engine trades, in the one order every table uses: first
+/// appearance across the strategies' subscriptions. The market feed, the
+/// venue gateway, the private stream, and the core's own table all intern
+/// this same sequence, so a `SymbolId` means the same symbol everywhere.
+pub fn symbol_order(wanted: &[Subscription]) -> Vec<Symbol> {
+    let mut names: Vec<Symbol> = Vec::new();
+    for sub in wanted {
+        if !names.iter().any(|n| n == &sub.symbol) {
+            names.push(sub.symbol.clone());
         }
     }
+    names
+}
 
-    fn on_update(&mut self, _update: &OrderUpdate) {}
+/// Bybit's public market stream, subscribed to exactly what was asked.
+pub fn market_feed(wanted: &[Subscription]) -> BybitPublicFeed {
+    BybitPublicFeed::new(wanted)
+}
+
+/// The venue's private order stream (demo host, credentials from the
+/// environment).
+pub fn order_feed(symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
+    BybitOrderFeed::new(symbols)
+}
+
+/// The demo venue gateway (credentials from the environment).
+pub fn venue(symbols: Vec<Symbol>) -> Result<BybitGateway, VenueError> {
+    BybitGateway::new(symbols)
+}
+
+/// The `[risk]` block, exactly as engine.toml spells it. There are no
+/// defaults for the capital controls: every number is written down, and the
+/// Python fleet's values are recorded in engine-risk/PORT_NOTES.md.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RiskSection {
+    max_account_view_age_s: u64,
+    /// Absent means no daily ceiling; the guard still refuses on blindness.
+    max_daily_loss_usdt: Option<f64>,
+    leverage: f64,
+    min_order_notional_usdt: f64,
+    #[serde(default = "default_qty_tolerance")]
+    qty_tolerance: f64,
+    envelope: EnvelopeSection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvelopeSection {
+    tracks_equity: bool,
+    reference_usdt: f64,
+    equity_fraction: f64,
+    floor_usdt: f64,
+    expand_dead_band_fraction: f64,
+    gross_notional_multiple: f64,
+    disaster_stop_fraction: f64,
+}
+
+fn default_qty_tolerance() -> f64 {
+    1e-12
+}
+
+/// The four capital controls. Each strategy's `capital_usdt` is its margin
+/// share of the partition; its gross share is that times the account
+/// leverage. `Kernel::new` still proves the shares fit inside the account
+/// caps and refuses a config that does not.
+pub fn risk(
+    section: &toml::Table,
+    strategies: &[StrategyConfig],
+) -> Result<Kernel, Box<dyn Error>> {
+    let parsed: RiskSection = toml::Value::Table(section.clone())
+        .try_into()
+        .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
+    let allocations = strategies
+        .iter()
+        .enumerate()
+        .map(|(index, s)| StrategyAllocation {
+            strategy: StrategyId(index as u16),
+            max_gross_notional_usdt: s.capital_usdt * parsed.leverage,
+            max_initial_margin_usdt: s.capital_usdt,
+        })
+        .collect();
+    let cfg = KernelConfig {
+        max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: parsed.max_daily_loss_usdt,
+        },
+        envelope: EnvelopeConfig {
+            tracks_equity: parsed.envelope.tracks_equity,
+            reference_usdt: parsed.envelope.reference_usdt,
+            equity_fraction: parsed.envelope.equity_fraction,
+            floor_usdt: parsed.envelope.floor_usdt,
+            expand_dead_band_fraction: parsed.envelope.expand_dead_band_fraction,
+            gross_notional_multiple: parsed.envelope.gross_notional_multiple,
+            disaster_stop_fraction: parsed.envelope.disaster_stop_fraction,
+        },
+        partition: PartitionConfig {
+            allocations,
+            leverage: parsed.leverage,
+            min_order_notional_usdt: parsed.min_order_notional_usdt,
+        },
+        qty_tolerance: parsed.qty_tolerance,
+    };
+    Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
+}
+
+/// Name plus config block to a live strategy, ids in block order — the same
+/// order the partition shares were derived in.
+pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
+    let mut out: Vec<Box<dyn Strategy>> = Vec::with_capacity(configured.len());
+    for (index, cfg) in configured.iter().enumerate() {
+        let id = StrategyId(u16::try_from(index).map_err(|_| "more than 65535 strategies")?);
+        let params = toml::Value::Table(cfg.params.clone());
+        out.push(build_strategy(&cfg.name, id, &params).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
