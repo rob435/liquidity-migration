@@ -32,6 +32,18 @@ pub enum DenyReason {
     LossGuardTripped { equity_usdt: f64, floor_usdt: f64 },
     /// The order would breach the equity-anchored envelope.
     EnvelopeBreached { worst_case_loss_usdt: f64, allowance_usdt: f64 },
+    /// One symbol would carry more gross notional than the account allows on
+    /// any single symbol.
+    SymbolNotionalBreached { symbol: SymbolId, notional_usdt: f64, cap_usdt: f64 },
+    /// The whole book's gross notional, added up without letting one symbol's
+    /// exposure cancel another's, breaches the account's second gross ceiling.
+    ComponentGrossBreached { gross_usdt: f64, cap_usdt: f64 },
+    /// Total margin the book commits would breach the account ceiling.
+    InitialMarginBreached { margin_usdt: f64, cap_usdt: f64 },
+    /// The account's spare margin cannot fund the margin this order adds. A
+    /// negative reading is ordinary when the owner hand-trades, and it refuses
+    /// every entry until it recovers.
+    AvailableMarginExhausted { additional_margin_usdt: f64, available_usdt: f64 },
     /// The strategy's capital partition cannot fund this size.
     PartitionExhausted { strategy: StrategyId, requested_usdt: f64, remaining_usdt: f64 },
     /// A position-opening intent carries no stop.

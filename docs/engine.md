@@ -133,11 +133,17 @@ parallel and integrate by type-check.
 
 ## Safety posture
 
-- **Demo only, by construction.** The venue crate contains the demo hostname
-  and no other. There is no mainnet code path to misconfigure. Real-money
-  arming remains exclusively the Python fleet's `REAL_MONEY` switch, set by
-  the owner's hand; the engine has no equivalent and gets none without an
-  explicit owner decision.
+- **No mainnet order path, by construction.** The venue crate — the only crate
+  that can send an order — contains the demo hostname and no other, and its
+  own test reads the crate source back and fails on any other host. State that
+  precisely: `engine-marketdata` *does* hold a mainnet host,
+  `wss://stream.bybit.com/v5/public/linear`, because Bybit serves demo public
+  data from the mainnet stream. It is unauthenticated, read-only, and pinned by
+  its own test. So the engine already sees real production market data; what it
+  cannot reach is any account other than a demo one. Real-money arming remains
+  exclusively the Python fleet's `REAL_MONEY` switch, set by the owner's hand;
+  the engine has no equivalent and gets none without an explicit owner
+  decision.
 - **Shadow mode is the default.** The engine computes intents and logs them;
   it only sends orders when started with an explicit live flag, and the risk
   kernel still gates every send.
@@ -297,9 +303,20 @@ because the deletion order depends on it:
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | **Absent.** Nothing outside the process can tell whether the engine is healthy |
 
-Until the four absent rows are built and proven, the Python execution path
-stays: deleting it would not be a risk, it would simply stop the fleet
-trading.
+The Python execution path stays, and not out of caution. Measured 2026-08-14
+by walking the import graph from all nine systemd units: **93 of 135 modules
+are reachable from a live unit, and none of them is demo-only.** Demo and
+mainnet run byte-identical command lines — the realm is a parameter branched
+*inside* shared modules — so there is no demo half to retire first. A
+symbol-level scan of all 45 order-path modules found zero unreferenced
+functions or classes. Deleting any of it would not be a risk taken; it would
+simply stop the funded fleet trading.
+
+There is a further trap worth knowing before anyone tries the obvious first
+step: `verify_topology()` in `scripts/deploy_vps_live.sh` unconditionally
+requires the demo owner to be active, and `staged` reaches it through
+`activate_mode` — so **every mainnet deploy verifies the demo fleet.**
+Removing the demo units breaks the path that ships mainnet changes.
 
 ## What v1 does not do
 

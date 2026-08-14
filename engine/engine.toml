@@ -47,6 +47,22 @@ floor_usdt = 100.0
 expand_dead_band_fraction = 0.05
 gross_notional_multiple = 2.0
 disaster_stop_fraction = 0.35
+# The account-wide caps. All three are sized against reference_usdt above and
+# move with it, so this file is at the same 100 USDT test scale as the rest.
+#
+# Most gross notional on any one symbol. The one strategy below has a 100 USDT
+# gross share (50 capital x 2 leverage) and one symbol to spend it on, so at
+# this scale the symbol cap and that share bind in the same place. The mainnet
+# profile sets it to half the reference — 50 USDT here — which is the number to
+# copy once more than one symbol is traded.
+max_symbol_notional_usdt = 100.0
+# A second account-wide gross ceiling, at or below reference x
+# gross_notional_multiple. Both Python profiles ship it equal to that cap, so it
+# is equal here too and the envelope allowance is what binds.
+max_component_gross_notional_usdt = 200.0
+# Most margin the whole book may commit. Both Python profiles set this to the
+# reference exactly.
+max_initial_margin_usdt = 100.0
 
 # One block per strategy — the plug seam. `name` and `capital_usdt` are the
 # engine's (capital_usdt is this strategy's margin share of the partition;

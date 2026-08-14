@@ -158,19 +158,24 @@ impl Book {
         net
     }
 
-    /// Notional of everything in flight and not yet visible in the account
-    /// view. `None` when an in-flight order cannot be priced.
-    pub(crate) fn pending_notional_usdt(
+    /// Notional in flight per symbol, not yet visible in the account view.
+    /// `None` when an in-flight order cannot be priced. Per symbol rather than
+    /// one total because the per-symbol cap needs to know where it sits.
+    pub(crate) fn pending_notional_by_symbol(
         &self,
         price: impl Fn(SymbolId) -> Option<f64>,
-    ) -> Option<f64> {
-        let mut total = 0.0;
+    ) -> Option<Vec<(u16, f64)>> {
+        let mut out: Vec<(u16, f64)> = Vec::new();
         for pending in self.pending.values() {
             if pending.reduce_only || pending.signed_qty == 0.0 {
                 continue;
             }
-            total += pending.signed_qty.abs() * pending_px(pending, &price)?;
+            let notional = pending.signed_qty.abs() * pending_px(pending, &price)?;
+            match out.iter_mut().find(|(symbol, _)| *symbol == pending.symbol.0) {
+                Some((_, running)) => *running += notional,
+                None => out.push((pending.symbol.0, notional)),
+            }
         }
-        Some(total)
+        Some(out)
     }
 }

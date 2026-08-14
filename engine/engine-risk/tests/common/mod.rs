@@ -24,6 +24,9 @@ pub const MIN_ORDER_NOTIONAL_USDT: f64 = 1.0;
 
 pub const CARRY: StrategyId = StrategyId(0);
 pub const LONG: StrategyId = StrategyId(1);
+/// A third strategy no fixture partition names. The sleeve it was named for
+/// has since lost its claim on capital in the operational profiles, so read
+/// this as "a strategy with no share", not as a live sleeve.
 pub const CONTINUOUS: StrategyId = StrategyId(2);
 pub const BUSDT: SymbolId = SymbolId(0);
 pub const CUSDT: SymbolId = SymbolId(1);
@@ -50,6 +53,15 @@ pub fn demo_config() -> KernelConfig {
             expand_dead_band_fraction: 0.05,
             gross_notional_multiple: 2.0,
             disaster_stop_fraction: DISASTER_STOP_FRACTION,
+            // The loosest legal setting: symbol and second gross ceiling both
+            // at the account gross cap, margin at what that gross funds. The
+            // demo profile is tighter (a 125_000 symbol cap), but these tables
+            // are about the envelope and the partition, and a tighter cap here
+            // would refuse their orders before the control under test ran.
+            // tests/account_caps.rs sets each cap to the binding one instead.
+            max_symbol_notional_usdt: 500_000.0,
+            max_component_gross_notional_usdt: 500_000.0,
+            max_initial_margin_usdt: 250_000.0,
         },
         partition: PartitionConfig {
             allocations: Vec::new(),
@@ -74,6 +86,11 @@ pub fn partition_config() -> KernelConfig {
     let mut cfg = demo_config();
     cfg.envelope.reference_usdt = 500.0;
     cfg.envelope.gross_notional_multiple = 2.0;
+    // The account caps move with the reference, or they would sit 500x above
+    // the 1000 USDT of book this shape describes and never be reached.
+    cfg.envelope.max_symbol_notional_usdt = 1_000.0;
+    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
+    cfg.envelope.max_initial_margin_usdt = 500.0;
     cfg.partition = PartitionConfig {
         allocations: vec![
             StrategyAllocation {

@@ -174,10 +174,12 @@ match; never append history to this file.
 
 Nine units on and active: the demo owner, demo LONG and CARRY producers, the
 mainnet owner, mainnet LONG and CARRY producers, the Telegram controls daemon,
-and the demo and mainnet liveness timers. The CONTINUOUS producer and the hedge
-and residual-momentum timers remain installed on the host but off (sleeve retired
-2026-07-29; its code left the tree 2026-08-14, so a re-enabled unit would now fail
-to start until the units are removed from the host). Paper is retired whole (2026-08-03); demo is the only practice book.
+and the demo and mainnet liveness timers. Checked 2026-08-14: the host carries
+exactly the eleven unit files in `deploy/systemd/` and nothing else — the
+retired CONTINUOUS producer and the hedge and residual-momentum timers are
+gone from the box, so the warning that used to stand here about a re-enabled
+unit failing to start no longer applies. Paper is retired whole (2026-08-03);
+demo is the only practice book.
 
 | Kind | Units |
 | --- | --- |

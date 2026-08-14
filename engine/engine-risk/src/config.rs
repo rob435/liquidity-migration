@@ -68,6 +68,16 @@ pub struct EnvelopeConfig {
     /// How far a position can move against us before its stop ends it. Turns a
     /// notional cap into a worst-case-loss allowance.
     pub disaster_stop_fraction: f64,
+    /// Most gross notional any one symbol may carry, across the whole account.
+    /// One strategy owns a symbol, so nothing else stops it concentrating
+    /// every share it has into a single name.
+    pub max_symbol_notional_usdt: f64,
+    /// A second account-wide gross ceiling, below the gross cap the allowance
+    /// above is derived from. Set the two equal and this one never binds.
+    pub max_component_gross_notional_usdt: f64,
+    /// Most margin the whole book may commit. The partition's per-strategy
+    /// margin shares are carved out of this.
+    pub max_initial_margin_usdt: f64,
 }
 
 impl EnvelopeConfig {
@@ -88,6 +98,31 @@ impl EnvelopeConfig {
             || !(self.disaster_stop_fraction > 0.0 && self.disaster_stop_fraction < 1.0)
         {
             return Err(bad("disaster_stop_fraction must be a fraction in (0, 1)"));
+        }
+        positive(self.max_symbol_notional_usdt, "max_symbol_notional_usdt")?;
+        positive(
+            self.max_component_gross_notional_usdt,
+            "max_component_gross_notional_usdt",
+        )?;
+        positive(self.max_initial_margin_usdt, "max_initial_margin_usdt")?;
+        // operational_profile.py proves the same nesting at load. Caps that do
+        // not nest describe a book nobody can reach: the outer one would never
+        // bind, and an operator tightening it would see nothing change.
+        if self.max_symbol_notional_usdt > self.max_component_gross_notional_usdt {
+            return Err(bad(
+                "max_symbol_notional_usdt cannot exceed max_component_gross_notional_usdt",
+            ));
+        }
+        if self.max_component_gross_notional_usdt > self.account_gross_cap_usdt() {
+            return Err(bad(
+                "max_component_gross_notional_usdt cannot exceed reference_usdt * \
+                 gross_notional_multiple",
+            ));
+        }
+        if self.max_initial_margin_usdt > self.reference_usdt {
+            return Err(bad(
+                "max_initial_margin_usdt cannot exceed reference_usdt",
+            ));
         }
         Ok(())
     }
@@ -157,9 +192,13 @@ impl PartitionConfig {
             .iter()
             .map(|share| share.max_initial_margin_usdt)
             .sum();
-        if margin > (envelope.account_gross_cap_usdt() / self.leverage) * (1.0 + 1e-12) {
+        // Against the declared account margin cap, as _parse_sleeve_limits does.
+        // Before that cap was a config key this compared against the gross cap
+        // divided by leverage, which is a different number: the mainnet shares
+        // sum to exactly the declared cap and would have been refused by it.
+        if margin > envelope.max_initial_margin_usdt * (1.0 + 1e-12) {
             return Err(bad(
-                "partition margin shares sum above the account margin cap",
+                "partition margin shares sum above max_initial_margin_usdt",
             ));
         }
         Ok(())

@@ -186,50 +186,151 @@ impl Kernel {
         let (low_px, px) = self.entry_prices(intent, &view)?;
         let stop_fraction = read_stop(intent, low_px, px)?;
 
-        // 6. The equity-anchored envelope, against the book this order
-        //    leaves. Fills newer than the view are in neither the view nor
-        //    the reservations — fold them in so a just-filled position is
-        //    never counted nowhere.
-        let mut recent = self.book.fills_after(account.observed_ns);
+        // 6. The book this order leaves, walked once so the envelope and the
+        //    account caps below can never disagree about what is on it.
         let notional = ask_qty * px;
-        let mut worst_case_loss_usdt = self
+        let projected = self.projected_book(intent, notional, stop_fraction, account, &view)?;
+
+        // 7. The equity-anchored envelope.
+        let allowance_usdt = self.envelope.allowance_usdt();
+        if projected.worst_case_loss_usdt > allowance_usdt {
+            return Err(DenyReason::EnvelopeBreached {
+                worst_case_loss_usdt: projected.worst_case_loss_usdt,
+                allowance_usdt,
+            });
+        }
+
+        // 8. The account-wide capital caps.
+        self.account_caps(intent, notional, &projected, &view)?;
+
+        // 9. The per-strategy capital partition.
+        self.partition_qty(intent.strategy, ask_qty, px, &view)
+    }
+
+    /// Gross notional per symbol and account-wide once this order is added,
+    /// plus the worst-case loss the envelope judges.
+    ///
+    /// Nothing here nets this order against the position it lands on: a book
+    /// that already holds 100 long and asks for 100 more short counts 200, not
+    /// zero. Both sides really are exposure until one of them closes, and the
+    /// Python kernel's own gross figure is summed the same way.
+    fn projected_book(
+        &mut self,
+        intent: &Intent,
+        notional: f64,
+        stop_fraction: f64,
+        account: &AccountView,
+        view: &ViewFacts,
+    ) -> Result<Projected, DenyReason> {
+        // Fills newer than the view are in neither the view nor the
+        // reservations — fold them in so a just-filled position is never
+        // counted nowhere.
+        let mut recent = self.book.fills_after(account.observed_ns);
+        let mut projected = Projected::default();
+        projected.add(intent.symbol.0, notional);
+        projected.worst_case_loss_usdt = self
             .envelope
             .position_worst_case_usdt(notional, stop_fraction);
         for (symbol, qty) in view.exposures() {
             let held_px = self
-                .price_for(symbol, &view)
+                .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
             let effective_qty = qty + recent.remove(&symbol.0).unwrap_or(0.0);
-            worst_case_loss_usdt += self
-                .envelope
-                .position_worst_case_usdt(effective_qty.abs() * held_px, 0.0);
+            let held_usdt = effective_qty.abs() * held_px;
+            projected.add(symbol.0, held_usdt);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(held_usdt, 0.0);
         }
         for (symbol, qty) in recent {
             if qty.abs() <= self.cfg.qty_tolerance {
                 continue;
             }
             let held_px = self
-                .price_for(SymbolId(symbol), &view)
+                .price_for(SymbolId(symbol), view)
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
-            worst_case_loss_usdt += self
-                .envelope
-                .position_worst_case_usdt(qty.abs() * held_px, 0.0);
+            let held_usdt = qty.abs() * held_px;
+            projected.add(symbol, held_usdt);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(held_usdt, 0.0);
         }
         let in_flight = self
             .book
-            .pending_notional_usdt(|symbol| self.price_for(symbol, &view))
+            .pending_notional_by_symbol(|symbol| self.price_for(symbol, view))
             .ok_or_else(|| unknown("no price for an in-flight symbol"))?;
-        worst_case_loss_usdt += self.envelope.position_worst_case_usdt(in_flight, 0.0);
-        let allowance_usdt = self.envelope.allowance_usdt();
-        if worst_case_loss_usdt > allowance_usdt {
-            return Err(DenyReason::EnvelopeBreached {
-                worst_case_loss_usdt,
-                allowance_usdt,
+        for (symbol, pending_usdt) in in_flight {
+            projected.add(symbol, pending_usdt);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(pending_usdt, 0.0);
+        }
+        Ok(projected)
+    }
+
+    /// The caps that bound the whole account rather than one strategy, in
+    /// order from the smallest thing an operator can change to the largest, so
+    /// the first refusal is the most actionable one.
+    ///
+    /// Every cap here was sized against the configured capital reference, so
+    /// each is multiplied by how far the reference has moved — the same
+    /// rescale `profile_at_capital_reference` does to the whole profile.
+    ///
+    /// These refuse rather than clamp, as the Python kernel refuses the whole
+    /// batch. Only the per-strategy partition after this clamps, so it stays
+    /// the last word on size.
+    fn account_caps(
+        &self,
+        intent: &Intent,
+        notional: f64,
+        projected: &Projected,
+        view: &ViewFacts,
+    ) -> Result<(), DenyReason> {
+        let caps = &self.cfg.envelope;
+        let scale = self.envelope.scale();
+
+        // Every symbol in the book, not only the one this order names: the
+        // Python kernel judges the whole projected book, so a name already
+        // over its cap stops new risk anywhere until it comes back down.
+        let cap_usdt = caps.max_symbol_notional_usdt * scale;
+        if let Some((symbol, notional_usdt)) = projected.worst_symbol_over(cap_usdt, intent.symbol.0)
+        {
+            return Err(DenyReason::SymbolNotionalBreached {
+                symbol: SymbolId(symbol),
+                notional_usdt,
+                cap_usdt,
             });
         }
 
-        // 7. The per-strategy capital partition.
-        self.partition_qty(intent.strategy, ask_qty, px, &view)
+        let cap_usdt = caps.max_component_gross_notional_usdt * scale;
+        if projected.gross_usdt > cap_usdt {
+            return Err(DenyReason::ComponentGrossBreached {
+                gross_usdt: projected.gross_usdt,
+                cap_usdt,
+            });
+        }
+
+        // The intent carries no leverage of its own, so the account leverage
+        // stands in — the same substitution the partition's margin share makes.
+        let leverage = self.cfg.partition.leverage;
+        let margin_usdt = projected.gross_usdt / leverage;
+        let cap_usdt = caps.max_initial_margin_usdt * scale;
+        if margin_usdt > cap_usdt {
+            return Err(DenyReason::InitialMarginBreached {
+                margin_usdt,
+                cap_usdt,
+            });
+        }
+
+        // Available margin is what is left AFTER the standing book's margin is
+        // deducted, so only the increase is new money — charging the whole book
+        // against it would count the standing book twice. This order is the
+        // whole increase, because nothing above nets it against the book.
+        let additional_margin_usdt = notional / leverage;
+        if additional_margin_usdt > view.available_usdt {
+            return Err(DenyReason::AvailableMarginExhausted {
+                additional_margin_usdt,
+                available_usdt: view.available_usdt,
+            });
+        }
+        Ok(())
     }
 
     /// The lowest and highest price this order could reasonably fill at, from
@@ -312,7 +413,13 @@ impl RiskKernel for Kernel {
     /// 5. the account loss guard — [`DenyReason::LossGuardTripped`];
     /// 6. stop discipline — [`DenyReason::MissingStop`];
     /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 8. the per-strategy partition, which clamps before it refuses —
+    /// 8. the account-wide capital caps, smallest scope first: one symbol's
+    ///    gross ([`DenyReason::SymbolNotionalBreached`]), the whole book's
+    ///    gross ([`DenyReason::ComponentGrossBreached`]), the whole book's
+    ///    margin ([`DenyReason::InitialMarginBreached`]), and whether the
+    ///    account's spare margin funds the increase
+    ///    ([`DenyReason::AvailableMarginExhausted`]);
+    /// 9. the per-strategy partition, which clamps before it refuses —
     ///    [`DenyReason::PartitionExhausted`].
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
         match self.evaluate(intent, account) {
@@ -414,9 +521,51 @@ fn read_stop(intent: &Intent, low_px: f64, high_px: f64) -> Result<f64, DenyReas
     }
 }
 
+/// The book once this order is added, as every cap below the envelope sees it.
+#[derive(Default)]
+struct Projected {
+    per_symbol: Vec<(u16, f64)>,
+    gross_usdt: f64,
+    worst_case_loss_usdt: f64,
+}
+
+impl Projected {
+    fn add(&mut self, symbol: u16, notional_usdt: f64) {
+        self.gross_usdt += notional_usdt;
+        match self.per_symbol.iter_mut().find(|(held, _)| *held == symbol) {
+            Some((_, running)) => *running += notional_usdt,
+            None => self.per_symbol.push((symbol, notional_usdt)),
+        }
+    }
+
+    /// The symbol to report as over a cap: the one this order names if it is
+    /// over, otherwise the lowest-numbered other symbol that is. Preferring
+    /// `asked` puts the name the caller can act on first, and falling back to
+    /// the lowest id keeps the answer the same on every run — the book is
+    /// assembled partly from hash maps, so "the first one found" is not.
+    fn worst_symbol_over(&self, cap_usdt: f64, asked: u16) -> Option<(u16, f64)> {
+        let mut over: Option<(u16, f64)> = None;
+        for (symbol, usdt) in &self.per_symbol {
+            if *usdt <= cap_usdt {
+                continue;
+            }
+            if *symbol == asked {
+                return Some((*symbol, *usdt));
+            }
+            if over.is_none_or(|(lowest, _)| *symbol < lowest) {
+                over = Some((*symbol, *usdt));
+            }
+        }
+        over
+    }
+}
+
 /// What the kernel could read out of one account view.
 struct ViewFacts {
     equity_usdt: f64,
+    /// Spare margin the venue reports. Legitimately negative when the owner
+    /// hand-trades the account, which is a reading, not a fault.
+    available_usdt: f64,
     /// Net signed quantity per symbol: positive long, negative short.
     net: Vec<(u16, f64)>,
     entry_px: Vec<(u16, f64)>,
@@ -439,6 +588,7 @@ impl ViewFacts {
         }
         let mut facts = ViewFacts {
             equity_usdt,
+            available_usdt: account.available_usdt,
             net: Vec::new(),
             entry_px: Vec::new(),
             unprotected: false,

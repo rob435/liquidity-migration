@@ -97,6 +97,9 @@ struct EnvelopeSection {
     expand_dead_band_fraction: f64,
     gross_notional_multiple: f64,
     disaster_stop_fraction: f64,
+    max_symbol_notional_usdt: f64,
+    max_component_gross_notional_usdt: f64,
+    max_initial_margin_usdt: f64,
 }
 
 fn default_qty_tolerance() -> f64 {
@@ -136,6 +139,9 @@ pub fn risk(
             expand_dead_band_fraction: parsed.envelope.expand_dead_band_fraction,
             gross_notional_multiple: parsed.envelope.gross_notional_multiple,
             disaster_stop_fraction: parsed.envelope.disaster_stop_fraction,
+            max_symbol_notional_usdt: parsed.envelope.max_symbol_notional_usdt,
+            max_component_gross_notional_usdt: parsed.envelope.max_component_gross_notional_usdt,
+            max_initial_margin_usdt: parsed.envelope.max_initial_margin_usdt,
         },
         partition: PartitionConfig {
             allocations,
@@ -228,6 +234,65 @@ mod tests {
         ))
         .expect("test config parses");
         StrategyConfig { name: "quoter".into(), capital_usdt: 50.0, params }
+    }
+
+    /// The shipped engine.toml `[risk]` block.
+    const RISK: &str = r#"
+max_account_view_age_s = 120
+max_daily_loss_usdt = 10.0
+leverage = 2.0
+min_order_notional_usdt = 1.0
+
+[envelope]
+tracks_equity = true
+reference_usdt = 100.0
+equity_fraction = 1.0
+floor_usdt = 100.0
+expand_dead_band_fraction = 0.05
+gross_notional_multiple = 2.0
+disaster_stop_fraction = 0.35
+max_symbol_notional_usdt = 100.0
+max_component_gross_notional_usdt = 200.0
+max_initial_margin_usdt = 100.0
+"#;
+
+    fn risk_block(text: &str) -> toml::Table {
+        toml::from_str(text).expect("the test block parses as toml")
+    }
+
+    #[test]
+    fn the_shipped_risk_block_builds_a_kernel() {
+        assert!(risk(&risk_block(RISK), &[sniper("BTCUSDT")]).is_ok());
+    }
+
+    #[test]
+    // A config written before these caps existed names no value for them.
+    // Guessing one would be a capital control nobody chose, so it is refused.
+    fn a_risk_block_missing_a_capital_cap_is_refused() {
+        for key in [
+            "max_symbol_notional_usdt",
+            "max_component_gross_notional_usdt",
+            "max_initial_margin_usdt",
+        ] {
+            let without: String = RISK
+                .lines()
+                .filter(|line| !line.starts_with(key))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let err = risk(&risk_block(&without), &[sniper("BTCUSDT")])
+                .err()
+                .unwrap_or_else(|| panic!("a block with no {key} must not boot"));
+            let text = err.to_string();
+            assert!(text.contains(key), "{key}: got {text}");
+            // Refused for being absent, not for having been filled in with
+            // something. A default would also be refused here — by the cap's
+            // own "must be positive" check — and that would leave this test
+            // passing while the key quietly had a value nobody chose.
+            assert!(
+                text.contains("missing field"),
+                "{key} must be refused as missing, not defaulted: got {text}"
+            );
+        }
     }
 
     #[test]
