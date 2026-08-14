@@ -2799,6 +2799,12 @@ it and live, both the owner's. It is left running rather than stopped because
 stopped does not stick — the deploy starts it wherever its env file and binary
 both exist — so shadow, which cannot trade, is the honest resting state.
 
+Both realms' candidate-universe artifacts on the host were schema 4 against
+code that reads schema 5, which stopped every producer cycle before it decided
+anything. Migrated offline, both unchanged symbol for symbol (demo 510, mainnet
+512), and the env files repointed. This was pre-existing and unrelated to the
+engine; it surfaced because the producers finally got far enough to hit it.
+
 Left alone, with the reason: demo has no per-sleeve partition, and drawing one
 from a profile whose capital reference is 250,000 against a $1,400 account
 would produce a control that never binds. Retuning that reference is a dial the
