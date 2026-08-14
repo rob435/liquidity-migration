@@ -20,8 +20,11 @@ engine — the execution loop
       Run the engine. Shadow (compute and log, send nothing) unless --live.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
-               [--wal PATH]
+               [--wal PATH] [--fills]
       Measure the whole chain on this box against a pretend venue.
+      --fills has that venue fill what it accepts, so the log it writes can be
+      read by `engine fills`. Off by default: the published latency table was
+      measured without it.
 
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.
@@ -79,6 +82,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             if let Some(v) = value(args, "--wal") {
                 options.wal_path = PathBuf::from(v);
             }
+            options.fills = args.iter().any(|a| a == "--fills");
             let result = runtime()?.block_on(bench::run(&options))?;
             println!(
                 "\nbench: {} quotes in, {} orders out, against a pretend venue on this box",

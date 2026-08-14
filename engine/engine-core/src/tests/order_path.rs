@@ -877,6 +877,7 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
         every_nth: 10,
         symbols: vec!["BTCUSDT".to_string()],
         wal_path: path.path().to_path_buf(),
+        fills: false,
     };
     let result = bench::run(&options).await.expect("bench");
     assert_eq!(result.events, 300);

@@ -15,9 +15,11 @@
 //! What it proves: our side of the wire. The venue round trip from this box
 //! is about 175 ms and no rebuild changes that.
 
+use std::cell::Cell;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use engine_types::{
@@ -44,6 +46,15 @@ pub struct BenchOptions {
     pub every_nth: u64,
     pub symbols: Vec<String>,
     pub wal_path: PathBuf,
+    /// Have the pretend venue fill what it accepts.
+    ///
+    /// Off by default, and deliberately: the latency table in
+    /// `docs/engine.md` was measured without it, and turning fills on
+    /// silently would put fill handling inside numbers nobody re-measured.
+    /// On, it exercises the part of the loop the default never reaches --
+    /// pricing a fill against the book its order left at, and the markout
+    /// queue that the group-flush tick drains.
+    pub fills: bool,
 }
 
 impl Default for BenchOptions {
@@ -54,6 +65,7 @@ impl Default for BenchOptions {
             every_nth: 20,
             symbols: vec!["BTCUSDT".to_string()],
             wal_path: PathBuf::from("engine-bench.wal"),
+            fills: false,
         }
     }
 }
@@ -128,12 +140,18 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     // The real log, so the measured barrier is the shipping fsync path.
     let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;
     let strategy = BenchStrategy::new(&options.symbols, options.every_nth);
+    let touch = LastTouch::default();
+    let (accepted, filled) = tokio::sync::mpsc::unbounded_channel();
+    let mut venue = HttpVenue::new(venue_addr, options.symbols.clone());
+    if options.fills {
+        venue = venue.filling(accepted);
+    }
     let mut engine = Engine::boot(
         &settings,
         &format!("bench-{}-{}", options.events, options.every_nth),
         wal,
         AllowEverything,
-        HttpVenue::new(venue_addr, options.symbols.clone()),
+        venue,
         vec![Box::new(strategy)],
         &[],
     )
@@ -144,12 +162,24 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         .iter()
         .filter_map(|name| engine.market().table.get(name))
         .collect();
-    let mut feed = ScriptedFeed::new(symbols, options.events, options.rate);
-    let mut orders = SilentOrderFeed;
+    let mut feed = ScriptedFeed::sharing(symbols, options.events, options.rate, touch.clone());
 
-    let outcome = engine
-        .run(&mut feed, &mut orders, std::future::pending::<()>())
-        .await?;
+    // Branched rather than boxed: `OrderFeed::next_update` is an async trait
+    // method, so the trait is not object-safe and there is no `dyn` to reach
+    // for. Two arms is the whole cost.
+    let outcome = if options.fills {
+        engine
+            .run(
+                &mut feed,
+                &mut FillingOrderFeed::new(filled, touch),
+                std::future::pending::<()>(),
+            )
+            .await?
+    } else {
+        engine
+            .run(&mut feed, &mut SilentOrderFeed, std::future::pending::<()>())
+            .await?
+    };
 
     let result = summarise(engine.ledger(), outcome.market_events, outcome.orders_sent);
     engine.wal.append(&WalRecord::Note {
@@ -181,7 +211,13 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64) -> BenchResult {
 // ---------------------------------------------------------------- the parts
 
 /// A quote stream with no venue behind it.
+/// The touch the scripted feed last produced, so the pretend venue's fills
+/// land at a price that means something. Both feeds live on the engine's own
+/// thread, which is what makes a plain `Rc<Cell<_>>` the right sharing here.
+pub type LastTouch = Rc<Cell<(f64, f64)>>;
+
 pub struct ScriptedFeed {
+    touch: LastTouch,
     symbols: Vec<SymbolId>,
     remaining: u64,
     sent: u64,
@@ -192,7 +228,12 @@ pub struct ScriptedFeed {
 
 impl ScriptedFeed {
     pub fn new(symbols: Vec<SymbolId>, events: u64, rate: u64) -> Self {
+        ScriptedFeed::sharing(symbols, events, rate, LastTouch::default())
+    }
+
+    pub fn sharing(symbols: Vec<SymbolId>, events: u64, rate: u64, touch: LastTouch) -> Self {
         ScriptedFeed {
+            touch,
             symbols,
             remaining: events,
             sent: 0,
@@ -221,6 +262,7 @@ impl MarketFeed for ScriptedFeed {
         // A small saw-tooth so the price is not constant.
         self.px += if self.sent.is_multiple_of(2) { 0.5 } else { -0.5 };
         let symbol = self.symbols[(self.sent as usize) % self.symbols.len()];
+        self.touch.set((self.px, self.px + 0.5));
         Ok(MarketEvent::Quote {
             symbol,
             quote: Quote {
@@ -232,6 +274,56 @@ impl MarketFeed for ScriptedFeed {
                 recv_ns: clock::now_ns(),
                 seq: self.sent,
             },
+        })
+    }
+}
+
+/// The private stream the `--fills` bench gets: everything the venue accepted
+/// comes back filled at the touch it would have crossed.
+///
+/// One fill per order, at the far touch and never partial. That is not what a
+/// real venue does, and it does not need to be -- what this exists to drive is
+/// the engine's own path from a fill to a priced one, which a bench whose
+/// venue never fills leaves entirely unrun.
+pub struct FillingOrderFeed {
+    orders: tokio::sync::mpsc::UnboundedReceiver<OrderRequest>,
+    touch: LastTouch,
+}
+
+impl FillingOrderFeed {
+    pub fn new(
+        orders: tokio::sync::mpsc::UnboundedReceiver<OrderRequest>,
+        touch: LastTouch,
+    ) -> Self {
+        FillingOrderFeed { orders, touch }
+    }
+}
+
+impl OrderFeed for FillingOrderFeed {
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        // `recv` is cancel-safe, which the loop's `select!` requires: it drops
+        // the futures of every branch that did not win.
+        let Some(request) = self.orders.recv().await else {
+            return std::future::pending().await;
+        };
+        let (bid, ask) = self.touch.get();
+        let px = match (request.kind, request.side) {
+            (OrderKind::Limit { px, .. }, _) => px,
+            (OrderKind::Market, Side::Buy) => ask,
+            (OrderKind::Market, Side::Sell) => bid,
+        };
+        Ok(OrderUpdate::Fill {
+            client_order_id: request.client_order_id,
+            symbol: request.symbol,
+            side: request.side,
+            qty: request.qty,
+            px,
+            // A round two basis points, the maker rate this venue's real
+            // counterpart charges on most names.
+            fee: (px * request.qty * 0.0002).abs(),
+            is_maker: matches!(request.kind, OrderKind::Limit { .. }),
+            venue_ts_ms: clock::wall_ms(),
+            recv_ns: clock::now_ns(),
         })
     }
 }
@@ -321,6 +413,8 @@ impl Strategy for BenchStrategy {
 
 /// The client side: signs, writes to a warm socket, reads the reply.
 pub struct HttpVenue {
+    /// Where accepted orders go to be filled, when the bench asked for fills.
+    accepted: Option<tokio::sync::mpsc::UnboundedSender<OrderRequest>>,
     addr: SocketAddr,
     stream: Option<tokio::net::TcpStream>,
     buf: Vec<u8>,
@@ -331,12 +425,19 @@ pub struct HttpVenue {
 impl HttpVenue {
     pub fn new(addr: SocketAddr, symbols: Vec<Symbol>) -> Self {
         HttpVenue {
+            accepted: None,
             addr,
             stream: None,
             buf: Vec::with_capacity(8 * 1024),
             symbols,
             key: b"bench-secret-key".to_vec(),
         }
+    }
+
+    /// Send every order this venue accepts to a feed that will fill it.
+    pub fn filling(mut self, to: tokio::sync::mpsc::UnboundedSender<OrderRequest>) -> Self {
+        self.accepted = Some(to);
+        self
     }
 
     async fn connect(&mut self) -> Result<(), VenueError> {
@@ -445,6 +546,11 @@ impl VenueGateway for HttpVenue {
             .and_then(|v| v.as_str())
             .ok_or_else(|| VenueError::BadReply("no orderId".into()))?
             .to_string();
+        // After the ack and never before it: a fill for an order the engine
+        // has not been told was accepted is not a sequence any venue produces.
+        if let Some(accepted) = &self.accepted {
+            let _ = accepted.send(req.clone());
+        }
         Ok(OrderAck {
             client_order_id: req.client_order_id.clone(),
             venue_order_id,

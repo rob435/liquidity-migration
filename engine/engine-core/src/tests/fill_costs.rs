@@ -186,3 +186,79 @@ async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
         .expect("the log says what its ids mean");
     assert_eq!(said, vec!["buyer".to_string()], "the plug's own name");
 }
+
+#[tokio::test]
+async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
+    // Every other test here drives one piece. This drives the loop: a real
+    // engine, a real log with its fsync, orders that come back filled, and a
+    // markout queue drained by the group-flush tick.
+    //
+    // It is paced rather than run flat out, because the shortest horizon is a
+    // second and a bench that finishes in eighty milliseconds proves nothing
+    // about a mark ever coming due.
+    let path = temp_path("bench-fills");
+    let options = BenchOptions {
+        events: 600,
+        rate: 400,
+        every_nth: 50,
+        symbols: vec!["BTCUSDT".to_string()],
+        wal_path: path.path().to_path_buf(),
+        fills: true,
+    };
+    let result = bench::run(&options).await.expect("the bench runs");
+    assert!(result.orders > 0, "no orders, nothing to price");
+
+    let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
+    let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+    let costs = crate::execution::Fills::from_records(&records).total();
+
+    // All but at most the last. The run ends when the market feed closes, and
+    // a fill still in the channel at that moment is never read -- which is the
+    // truthful shape of a process that stops, not something to pad over.
+    assert!(
+        costs.fills + 1 >= result.orders && costs.fills <= result.orders,
+        "{} fills for {} orders",
+        costs.fills,
+        result.orders
+    );
+    assert!(costs.notional_usdt > 0.0);
+    // The venue charges a flat two basis points, so this is arithmetic and not
+    // a range: if it drifts, the fee is not reaching the ledger.
+    let fee = costs.fee.mean().expect("the fee was priced");
+    assert!((fee - 2.0).abs() < 0.01, "expected 2 bp of fee, got {fee}");
+    // Priced against the book each order left at, which the log carries.
+    let arrival = costs.arrival_shortfall.mean().expect("the arrival was priced");
+    assert!(arrival.abs() < 5.0, "half a tick on a 30,000 book, got {arrival}");
+    assert_eq!(costs.all_in_arrival_bps(), Some(arrival + fee));
+
+    // And the part nothing else exercises: a horizon came round, the tick read
+    // the book, and the mark went into the log.
+    let marks = records
+        .iter()
+        .filter(|r| matches!(r, WalRecord::Markout { .. }))
+        .count();
+    assert!(marks > 0, "no markout came due in {} records", records.len());
+    assert!(
+        costs.markout[0].mean().is_some(),
+        "the one-second bucket is empty despite {marks} mark(s)"
+    );
+}
+
+#[tokio::test]
+async fn the_bench_fills_nothing_unless_it_is_asked_to() {
+    // The default has to stay the run the latency table was measured on.
+    let path = temp_path("bench-no-fills");
+    let options = BenchOptions {
+        events: 200,
+        rate: 0,
+        every_nth: 50,
+        symbols: vec!["BTCUSDT".to_string()],
+        wal_path: path.path().to_path_buf(),
+        ..BenchOptions::default()
+    };
+    assert!(!options.fills, "off unless asked");
+    bench::run(&options).await.expect("the bench runs");
+    let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
+    let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(crate::execution::Fills::from_records(&records).total().fills, 0);
+}

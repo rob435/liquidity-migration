@@ -264,6 +264,19 @@ records the horizon as terminally missing.
 engine fills --wal /var/lib/liquidity-migration-engine/engine.wal
 ```
 
+To see the whole path run without an account, give the bench's pretend venue
+fills and read the log it writes:
+
+```bash
+engine bench --events 900 --rate 500 --every 60 --wal /tmp/f.wal --fills
+engine fills --wal /tmp/f.wal
+```
+
+`--fills` is off by default and stays off, because the latency table above was
+measured without it and turning it on silently would put fill handling inside
+numbers nobody re-measured. Pace the run: the shortest horizon is a second, so
+a bench that finishes in eighty milliseconds never brings a mark due.
+
 One row per sleeve and symbol: maker share, fee, arrival shortfall, all-in, and
 the signed markout at 1 s, 15 s, 1 min and 5 min. The footer confesses rather
 than staying silent — what share of the traded notional had a book to be
