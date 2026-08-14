@@ -208,6 +208,12 @@ match; never append history to this file.
   `market_capture.register_post_fill_markouts` has had no production caller
   since. The readers survived the writer; the engine is the new writer, for
   its own fills only.
+- **A deploy restarts both engines, since 2026-08-14.** They share one binary
+  and the funded engine is started in the activate phase, before the build; the
+  build restarted only the demo unit, so the funded engine ran whatever binary
+  it came up with. `mainnet-engine-ok` now prints beside `engine-ok`. Verify a
+  deploy by a field only the new code produces, read on **both** heartbeats —
+  "active" says nothing about which binary.
 - **Entries rest for 45 s, not 120 s.** 15 live resting entries filled at a
   median of 1.28 s and a maximum of 36.6 s, so 45 s keeps every passive fill
   120 s got and bounds the tail; 30 s would have crossed 1 of 15, 15 s, 3 of 15.

@@ -16,6 +16,26 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — A deploy left the funded engine on the previous binary.**
+  Found by deploying the entry below and reading both heartbeats. The two
+  engines share one binary; the activate phase starts the funded one and the
+  engine-build phase that compiles the binary runs after it, restarting only
+  the demo unit. So every deploy since the funded engine was installed gave
+  the demo engine the new code and silently left the funded one where it was.
+  Both units read `active`, both heartbeats looked healthy, `staged-ok`
+  printed.
+
+  It surfaced only because the entry below changed a field both engines
+  publish: the demo engine named its sleeves `carry, long` and the funded one
+  still said `target_book` twice, from identical config. Harmless so far only
+  because the funded engine is in shadow.
+
+  Fixed in `deploy_vps_live.sh` and proved by redeploying:
+  `mainnet-engine-ok` now prints beside `engine-ok`, and the funded heartbeat
+  reads `realm=mainnet mode=shadow strategies=[carry, long]`. Deployed
+  `f89c0583`; 9 units active, none failed, zero error lines, producers
+  `err=none owner=healthy`.
+
 - **2026-08-14 — The engine says what its fills cost.** It measured our own
   side of the wire to the nanosecond and could say nothing about the price it
   got. Two facts were on the wire and thrown away: Bybit sends `is_maker` on
