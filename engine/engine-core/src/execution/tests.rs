@@ -62,6 +62,9 @@ fn paying_up_reads_adverse_whichever_way_round_the_trade_is() {
     assert!(arrival_shortfall_bps(Side::Sell, 101.0, 100.0).unwrap() < 0.0);
 }
 
+/// The formula is the doc's and stays; nothing aggregates it, because twice
+/// the shortfall against a *send-time* mid is twice the drift of an entry that
+/// rested, not a spread — and resting entries are what this fleet ships.
 #[test]
 fn the_effective_spread_is_twice_the_shortfall() {
     // Not a coincidence and not a fudge: the shortfall is measured from the
@@ -142,7 +145,6 @@ fn the_ledger_prices_a_fill_against_the_book_when_the_order_left() {
     assert_eq!(total.fills, 1);
     assert_eq!(total.notional_usdt, 1010.0);
     assert_eq!(total.arrival_shortfall.mean(), Some(100.0));
-    assert_eq!(total.effective_spread.mean(), Some(200.0));
     assert_eq!(total.fee.mean(), Some(5.5));
     assert_eq!(total.all_in_arrival_bps(), Some(105.5));
     assert_eq!(total.arrival_coverage(), Some(1.0));
@@ -163,15 +165,84 @@ fn a_fill_with_no_anchor_still_counts_as_trading_but_not_as_measurement() {
 }
 
 #[test]
-fn the_maker_share_is_what_rested() {
+fn the_maker_share_is_notional_that_rested_not_fills_that_rested() {
+    // Twenty small maker fills and one large taker fill is 95% of the fills
+    // and 9% of the money. The money is the answer: a fill-count share lets
+    // the one trade that actually paid the spread hide behind twenty that did
+    // not, and this is the number STATE.md says the funded grade waits on.
     let mut fills = Fills::default();
-    let mut maker = fill(Side::Buy, 100.0, 1.0, 100.0);
-    maker.is_maker = true;
-    fills.on_fill(&maker, 0);
-    fills.on_fill(&fill(Side::Buy, 100.0, 1.0, 100.0), 0);
-    fills.on_fill(&fill(Side::Buy, 100.0, 1.0, 100.0), 0);
-    assert_eq!(fills.total().maker_share(), Some(1.0 / 3.0));
-    assert_eq!(Costs::default().maker_share(), None, "no fills, no share");
+    for _ in 0..20 {
+        let mut maker = fill(Side::Buy, 100.0, 0.2, 100.0);
+        maker.is_maker = true;
+        fills.on_fill(&maker, 0);
+    }
+    fills.on_fill(&fill(Side::Buy, 100.0, 40.0, 100.0), 0);
+
+    let total = fills.total();
+    assert_eq!(total.fills, 21);
+    assert_eq!(total.maker_fills, 20, "by count it is twenty of twenty-one");
+    let share = total.maker_share().expect("something traded");
+    assert!((share - 400.0 / 4400.0).abs() < 1e-12, "9% by money, got {share}");
+    assert_eq!(Costs::default().maker_share(), None, "nothing traded, no share");
+}
+
+#[test]
+fn the_all_in_number_is_not_two_means_over_different_fills() {
+    // The fee is measured on every fill; the shortfall only on fills whose
+    // book could be read. Adding the two means adds numbers taken over
+    // different populations, and the rollup is exactly where they diverge.
+    let mut fills = Fills::default();
+    let mut measured = fill(Side::Buy, 101.0, 10.0, 100.0);
+    measured.fee = 0.5555; // 5.5 bp on 1,010
+    fills.on_fill(&measured, 0);
+    let mut blind = fill(Side::Buy, 101.0, 10.0, 0.0);
+    blind.fee = 10.1; // 100 bp, and no book to measure the rest against
+    fills.on_fill(&blind, 0);
+
+    let total = fills.total();
+    // Both fees counted, so the fee mean is over everything.
+    assert_eq!(total.fee.mean(), Some((5.5 + 100.0) / 2.0));
+    // The all-in is over the one fill that had both halves, and nothing else.
+    assert_eq!(total.all_in_arrival_bps(), Some(105.5));
+    assert_eq!(total.arrival_coverage(), Some(0.5));
+}
+
+#[test]
+fn a_mark_that_arrives_long_after_its_horizon_is_not_that_horizon() {
+    // Every mark is a little late -- the engine looks on a 250 ms tick. One
+    // that is twenty seconds late is a stall, a paused machine, or a backlog
+    // replayed after a reconnect, and averaging it into the one-second column
+    // at full weight would read as a one-second fact.
+    let mut fills = Fills::default();
+    let late = Mark {
+        client_order_id: "eng-1".into(),
+        strategy: CARRY,
+        symbol: BTC,
+        fill_ts_ms: 0,
+        horizon_ms: 1_000,
+        mid: Some(101.0),
+        signed_markout_bps: Some(100.0),
+        actual_horizon_ms: 1_000 + LATENESS_BOUND_MS + 1,
+        notional_usdt: 1_000.0,
+    };
+    fills.fold_mark(&late);
+    let total = fills.total();
+    assert_eq!(total.markout[0].mean(), None, "not folded in");
+    assert_eq!(total.marks_unmeasurable, 1, "counted, not hidden");
+
+    // A mark inside the bound is the horizon it says it is.
+    fills.fold_mark(&Mark { actual_horizon_ms: 1_250, ..late });
+    assert_eq!(fills.total().markout[0].mean(), Some(100.0));
+}
+
+#[test]
+fn a_fill_of_nothing_is_never_owed_a_mark_it_cannot_carry() {
+    // Zero quantity: the price is real, so a mark would be measured, written
+    // to the log, and then dropped by a weight of zero -- counted neither in
+    // the average nor in the tally of what could not be measured.
+    let mut fills = Fills::default();
+    fills.on_fill(&fill(Side::Buy, 100.0, 0.0, 100.0), 0);
+    assert_eq!(fills.pending(), 0);
 }
 
 #[test]

@@ -165,14 +165,23 @@ impl Weighted {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Costs {
     pub fills: u64,
-    /// Fills where we were the resting side.
+    /// Fills where we were the resting side, and what they traded.
     pub maker_fills: u64,
+    pub maker_notional_usdt: f64,
     pub notional_usdt: f64,
     /// What the venue charged, in account currency. Negative is a rebate.
     pub fee_usdt: f64,
     pub arrival_shortfall: Weighted,
-    pub effective_spread: Weighted,
     pub fee: Weighted,
+    /// `arrival_shortfall_bps + fee_bps`, accumulated per fill and only where
+    /// both existed.
+    ///
+    /// Not the sum of the two means beside it: the fee is measured on every
+    /// fill and the shortfall only on fills whose book could be read, so
+    /// adding the means adds two numbers taken over different populations.
+    /// The doc's rule -- null unless both operands are -- holds at the fill
+    /// grain, and this is what carries it up to the rollup.
+    pub all_in: Weighted,
     /// One per entry in [`HORIZONS_MS`].
     pub markout: [Weighted; HORIZONS_MS.len()],
     /// Fills whose horizon came and went without a readable book.
@@ -186,13 +195,12 @@ impl Costs {
     /// By notional rather than by fill count, so one large taker fill cannot
     /// hide behind twenty small maker ones.
     pub fn maker_share(&self) -> Option<f64> {
-        (self.fills > 0).then(|| self.maker_fills as f64 / self.fills as f64)
+        (self.notional_usdt > 0.0).then(|| self.maker_notional_usdt / self.notional_usdt)
     }
 
-    /// `arrival_shortfall_bps + fee_bps`, and `None` unless both are there —
-    /// the doc is explicit that a half-measured all-in number is not one.
+    /// `arrival_shortfall_bps + fee_bps`, over the fills that had both.
     pub fn all_in_arrival_bps(&self) -> Option<f64> {
-        Some(self.arrival_shortfall.mean()? + self.fee.mean()?)
+        self.all_in.mean()
     }
 
     /// How much of the traded notional had a midpoint to measure against.
@@ -204,11 +212,12 @@ impl Costs {
     pub fn merge(&mut self, other: &Costs) {
         self.fills += other.fills;
         self.maker_fills += other.maker_fills;
+        self.maker_notional_usdt += other.maker_notional_usdt;
         self.notional_usdt += other.notional_usdt;
         self.fee_usdt += other.fee_usdt;
         self.arrival_shortfall.merge(&other.arrival_shortfall);
-        self.effective_spread.merge(&other.effective_spread);
         self.fee.merge(&other.fee);
+        self.all_in.merge(&other.all_in);
         for (mine, theirs) in self.markout.iter_mut().zip(other.markout.iter()) {
             mine.merge(theirs);
         }
@@ -305,21 +314,30 @@ impl Fills {
         }
         if notional.is_finite() {
             costs.notional_usdt += notional;
+            if fill.is_maker {
+                costs.maker_notional_usdt += notional;
+            }
         }
         if fill.fee.is_finite() {
             costs.fee_usdt += fill.fee;
         }
-        if let Some(bps) = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid) {
+        let shortfall = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid);
+        let fee = fee_bps(fill.fee, fill.px, fill.qty);
+        if let Some(bps) = shortfall {
             costs.arrival_shortfall.add(bps, notional);
         }
-        if let Some(bps) = effective_spread_bps(fill.side, fill.px, fill.arrival_mid) {
-            costs.effective_spread.add(bps, notional);
-        }
-        if let Some(bps) = fee_bps(fill.fee, fill.px, fill.qty) {
+        if let Some(bps) = fee {
             costs.fee.add(bps, notional);
         }
+        if let (Some(shortfall), Some(fee)) = (shortfall, fee) {
+            costs.all_in.add(shortfall + fee, notional);
+        }
 
-        if !usable(fill.px) || !notional.is_finite() {
+        // `usable`, not `is_finite`: a zero-notional fill would otherwise be
+        // owed marks that are measured, written to the log, and then dropped
+        // by a weight of zero -- counted neither in the average nor in the
+        // tally of what could not be measured.
+        if !usable(fill.px) || !usable(notional) {
             // Nothing later could be measured against this, so do not hold a
             // slot open for it.
             return;
@@ -389,6 +407,19 @@ impl Fills {
     /// Fold a mark into the running totals. Public because the report read off
     /// a finished log takes the same path: one arithmetic, two callers.
     pub fn fold_mark(&mut self, mark: &Mark) {
+        // A mark read long after its horizon is not that horizon. The engine
+        // looks on a 250 ms tick, so every mark is a little late and that is
+        // priced in; one that arrives twenty seconds late -- a stall, a paused
+        // machine, a backlog replayed after a reconnect -- would otherwise be
+        // averaged into the one-second column at full weight and read as a
+        // one-second fact.
+        if mark.actual_horizon_ms > mark.horizon_ms.saturating_add(LATENESS_BOUND_MS) {
+            self.by_key
+                .entry((mark.strategy.0, mark.symbol.0))
+                .or_default()
+                .marks_unmeasurable += 1;
+            return;
+        }
         let Some(index) = HORIZONS_MS.iter().position(|h| *h == mark.horizon_ms) else {
             // A horizon this build does not measure. Counting it into the
             // wrong bucket would be worse than not counting it.
@@ -523,8 +554,13 @@ impl Fills {
             }
         }
         // Replaying a log is not trading: nothing is owed a future mark,
-        // because every mark this log will ever hold is already in it.
+        // because every mark this log will ever hold is already in it. The
+        // drop count goes with the queue -- it counted this replay popping its
+        // own transient queue, which is not something that happened to the
+        // run, and reporting it as one sent a reader looking for an incident
+        // that never was.
         me.pending.clear();
+        me.dropped = 0;
         me
     }
 }

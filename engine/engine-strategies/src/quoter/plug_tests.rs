@@ -524,3 +524,72 @@ fn cancel_count(h: &mut Harness) -> usize {
         .filter(|a| matches!(a, Action::Cancel { .. }))
         .count()
 }
+
+fn amend_count(h: &mut Harness) -> usize {
+    h.drain_actions()
+        .into_iter()
+        .filter(|a| matches!(a, Action::Amend { .. }))
+        .count()
+}
+
+fn seed_bid(h: &mut Harness, id: &str, symbol: &str, px: f64) {
+    let id_of = h.ctx.id_of(symbol);
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: id.into(),
+        symbol: id_of,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+}
+
+#[test]
+fn an_order_is_asked_to_move_once_for_one_move_of_the_market() {
+    // The engine's order ledger records the price an order was *sent* at and
+    // is never updated by an amend -- `inflight.rs` has no `AmendSent` arm at
+    // all. So `resting` reports the original price for the order's whole life,
+    // and a quoter that measured drift against it would ask again on every
+    // price, for ever, with no terminating condition. Worse than the cancel
+    // loop: that one ended when the venue confirmed.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    seed_bid(&mut h, "eng-bid", "BTCUSDT", 99.90);
+    for _ in 0..10 {
+        // A market that has moved once and then sits still.
+        h.quote("BTCUSDT", 99.1, 101.1);
+    }
+    assert_eq!(amend_count(&mut h), 1, "one move of the market, one ask");
+}
+
+#[test]
+fn a_market_that_keeps_moving_keeps_the_quote_with_it() {
+    // The other half: not asking twice for the same price must not become not
+    // asking at all.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    seed_bid(&mut h, "eng-bid", "BTCUSDT", 99.90);
+    h.quote("BTCUSDT", 99.1, 101.1);
+    assert_eq!(amend_count(&mut h), 1);
+    h.quote("BTCUSDT", 105.0, 107.0);
+    assert_eq!(amend_count(&mut h), 1, "the market moved again, so we move again");
+}
+
+#[test]
+fn pacing_one_symbol_does_not_forget_another() {
+    // The map of who has been asked is keyed by order id across every symbol
+    // this plug quotes, and was pruned against one symbol's slice of the book.
+    // So a price in BTCUSDT evicted ETHUSDT's record and the next ETH price
+    // asked again -- the cancel loop, back, on a two-symbol config.
+    let mut h = quoter_over(&["BTCUSDT", "ETHUSDT"], 0.0);
+    seed_bid(&mut h, "eng-eth", "ETHUSDT", 199.0);
+    h.ctx.set_foreign_position("ETHUSDT", Side::Buy, 1.0, 200.0);
+
+    h.quote("ETHUSDT", 199.0, 201.0);
+    assert_eq!(cancel_count(&mut h), 1, "asked once");
+    // A price in the other symbol, interleaved as they are on a live feed.
+    h.quote("BTCUSDT", 99.0, 101.0);
+    let _ = h.drain_actions();
+    h.quote("ETHUSDT", 199.0, 201.0);
+    assert_eq!(cancel_count(&mut h), 0, "still inside the window, still asked");
+}

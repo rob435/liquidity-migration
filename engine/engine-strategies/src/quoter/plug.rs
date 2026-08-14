@@ -61,6 +61,26 @@ const QUOTE_TAG: &str = "quote";
 /// again would leave it there for good.
 const CANCEL_AGAIN_AFTER_NS: u64 = 1_000_000_000;
 
+/// What this strategy has asked the venue to do about one of its orders.
+///
+/// It has to remember, because the engine's order ledger does not. That ledger
+/// records the price an order was *sent* at and has no `AmendSent` arm at all
+/// (`engine-core/src/inflight.rs`), so `StrategyCtx::resting` reports the
+/// original price for the order's whole life however many times it has been
+/// moved since. A quoter measuring drift against that would find the same
+/// drift on every price and ask again for ever -- worse than asking twice to
+/// cancel, which at least ends when the venue confirms.
+///
+/// The engine's own working supervisor keeps exactly this, for exactly this
+/// reason (`working.rs`, `WorkState::px` updated in `amended`).
+#[derive(Copy, Clone, Debug)]
+struct Asked {
+    /// When we last asked for anything about this order.
+    at_ns: u64,
+    /// The price we last asked it to move to, when we have.
+    moved_to: Option<f64>,
+}
+
 pub struct Quoter {
     id: StrategyId,
     /// The venue's spellings, and the ids once the engine has interned them.
@@ -71,9 +91,9 @@ pub struct Quoter {
     /// Scratch, kept between wakes so reading our own book allocates nothing
     /// on the hot path.
     working: Vec<Resting>,
-    /// When each order was last asked to cancel. Pruned every pass to what is
-    /// still working, so it cannot outgrow the book.
-    asked_to_cancel: HashMap<String, u64>,
+    /// What we have already asked the venue about each order. Pruned every
+    /// pass to what is still working, so it cannot outgrow the book.
+    asked: HashMap<String, Asked>,
 }
 
 impl Quoter {
@@ -150,7 +170,7 @@ impl Quoter {
                 stop_loss_fraction,
             },
             working: Vec::new(),
-            asked_to_cancel: HashMap::new(),
+            asked: HashMap::new(),
         })
     }
 
@@ -171,13 +191,39 @@ impl Quoter {
 
     /// Ask the venue to pull an order, unless we have just asked.
     fn pull(&mut self, symbol: SymbolId, id: &str, now_ns: u64, ctx: &mut dyn StrategyCtx) {
-        if let Some(asked_ns) = self.asked_to_cancel.get(id) {
-            if now_ns.saturating_sub(*asked_ns) < CANCEL_AGAIN_AFTER_NS {
+        if let Some(asked) = self.asked.get(id) {
+            if now_ns.saturating_sub(asked.at_ns) < CANCEL_AGAIN_AFTER_NS {
                 return;
             }
         }
-        self.asked_to_cancel.insert(id.to_string(), now_ns);
+        self.asked.insert(id.to_string(), Asked { at_ns: now_ns, moved_to: None });
         ctx.cancel(symbol, id);
+    }
+
+    /// Ask the venue to move an order, unless we have already asked it to go
+    /// to this price.
+    ///
+    /// The test is against the price we asked for, not the one the ledger
+    /// reports, because the ledger's is the price the order was sent at and
+    /// never changes. Half a tick is the same threshold the engine's own
+    /// supervisor uses to decide a move is not worth the queue position it
+    /// gives up (`working/plan.rs`).
+    fn move_to(
+        &mut self,
+        symbol: SymbolId,
+        id: &str,
+        px: f64,
+        tick: f64,
+        now_ns: u64,
+        ctx: &mut dyn StrategyCtx,
+    ) {
+        if let Some(asked) = self.asked.get(id) {
+            if asked.moved_to.is_some_and(|at| (at - px).abs() < tick.max(0.0) * 0.5) {
+                return;
+            }
+        }
+        self.asked.insert(id.to_string(), Asked { at_ns: now_ns, moved_to: Some(px) });
+        ctx.amend(symbol, id, engine_types::AmendSpec { px: Some(px), qty: None });
     }
 
     fn requote(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
@@ -187,6 +233,16 @@ impl Quoter {
         self.working.clear();
         let mut out = Vec::new();
         ctx.resting(&mut out);
+        // Pruned against the WHOLE book, every symbol of it, before it is
+        // narrowed below. Pruning against one symbol's slice threw away every
+        // other symbol's record, so a price in one name un-paced the next
+        // price in another -- the loop this exists to stop, back again on any
+        // config with two symbols in it.
+        if !self.asked.is_empty() {
+            let book = &out;
+            self.asked
+                .retain(|id, _| book.iter().any(|o| o.client_order_id == id));
+        }
         for order in out.iter().filter(|o| o.symbol == symbol) {
             if let Some(px) = order.px() {
                 self.working.push(Resting {
@@ -197,16 +253,7 @@ impl Quoter {
             }
         }
         drop(out);
-
-        // An order the log has ended is gone from the book above, so its entry
-        // here is spent. Pruned every pass rather than on an event, because
-        // this is the one place that knows what is still working.
         let now_ns = ctx.now_ns();
-        if !self.asked_to_cancel.is_empty() {
-            let working = &self.working;
-            self.asked_to_cancel
-                .retain(|id, _| working.iter().any(|o| o.client_order_id == *id));
-        }
 
         // Somebody else's name. Pull anything of ours that is resting in it
         // and leave it: there is one venue stop per position, so two sleeves
@@ -232,11 +279,9 @@ impl Quoter {
                 QuoteStep::Place { side, px, qty, stop_px } => {
                     self.place(symbol, side, px, qty, stop_px, &rule, ctx)
                 }
-                QuoteStep::Move { client_order_id, px } => ctx.amend(
-                    symbol,
-                    &client_order_id,
-                    engine_types::AmendSpec { px: Some(px), qty: None },
-                ),
+                QuoteStep::Move { client_order_id, px } => {
+                    self.move_to(symbol, &client_order_id, px, rule.tick_size, now_ns, ctx)
+                }
                 QuoteStep::Pull { client_order_id } => {
                     self.pull(symbol, &client_order_id, now_ns, ctx)
                 }

@@ -139,6 +139,9 @@ fn footer(total: &Costs, fills: &Fills) -> String {
             total.marks_unmeasurable
         ));
     }
+    // Deliberately not reported off a log: a replay owes nothing a future
+    // mark and drops nothing, so both counters are always zero there. They
+    // belong to a running engine, and this footer is written for both.
     if fills.dropped > 0 {
         out.push_str(&format!(
             "  {} fill(s) were dropped from the markout queue: too many were waiting at\n  \
@@ -151,6 +154,17 @@ fn footer(total: &Costs, fills: &Fills) -> String {
             "  {} fill(s) are still waiting for a horizon to come round.\n",
             fills.pending()
         ));
+    }
+    // A restart ends every horizon a fill was still owed, and nothing records
+    // that it did. So the long-horizon columns are measured over fewer fills
+    // than the short ones, and which fills is not random: restarts cluster on
+    // deploys, and deploys cluster on the days something changed.
+    if total.markout[0].weight > total.markout[HORIZONS_MS.len() - 1].weight {
+        out.push_str(
+            "  the later horizons cover less than the earlier ones. A restart ends every\n  \
+             horizon a fill was still owed, so a run with restarts in it measures the\n  \
+             five-minute column over fewer fills than the one-second column.\n",
+        );
     }
     out
 }

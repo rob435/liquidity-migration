@@ -229,7 +229,11 @@ async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
     // Priced against the book each order left at, which the log carries.
     let arrival = costs.arrival_shortfall.mean().expect("the arrival was priced");
     assert!(arrival.abs() < 5.0, "half a tick on a 30,000 book, got {arrival}");
-    assert_eq!(costs.all_in_arrival_bps(), Some(arrival + fee));
+    // Equal to the sum of the two means only because every fill here had both
+    // halves; it is accumulated per fill, so the float arithmetic is not the
+    // same order and the last bit differs.
+    let all_in = costs.all_in_arrival_bps().expect("both halves, every fill");
+    assert!((all_in - (arrival + fee)).abs() < 1e-9, "{all_in} vs {}", arrival + fee);
 
     // And the part nothing else exercises: a horizon came round, the tick read
     // the book, and the mark went into the log.
