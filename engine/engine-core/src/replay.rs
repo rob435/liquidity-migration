@@ -99,6 +99,33 @@ pub fn one_line(record: &WalRecord) -> String {
             pretty(*wire_ns)
         ),
         WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update)),
+        WalRecord::CancelSent {
+            symbol,
+            client_order_id,
+            wire_ns,
+        } => format!(
+            "pulled     {client_order_id} on symbol {} (at +{} from start)",
+            symbol.0,
+            pretty(*wire_ns)
+        ),
+        WalRecord::AmendSent {
+            symbol,
+            client_order_id,
+            spec,
+            wire_ns,
+        } => format!(
+            "moved      {client_order_id} on symbol {} to{}{} (at +{} from start)",
+            symbol.0,
+            match spec.px {
+                Some(px) => format!(" price {px}"),
+                None => String::new(),
+            },
+            match spec.qty {
+                Some(qty) => format!(" size {qty}"),
+                None => String::new(),
+            },
+            pretty(*wire_ns)
+        ),
         WalRecord::LatencyLedger {
             window_s,
             events,

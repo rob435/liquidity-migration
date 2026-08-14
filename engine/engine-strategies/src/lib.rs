@@ -8,6 +8,7 @@
 //! the events it is handed and the context it is given.
 
 mod params;
+pub mod target_book;
 mod touch_sniper;
 
 #[cfg(test)]

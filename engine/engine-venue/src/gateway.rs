@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce};
+use engine_types::orders::{
+    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
+};
 use engine_types::risk::AccountView;
-use engine_types::{VenueError, VenueGateway};
+use engine_types::{VenueCaps, VenueError, VenueGateway};
 use serde_json::{Map, Value};
 
 use crate::clock::mono_ns;
@@ -18,6 +20,7 @@ use crate::{CATEGORY, DEMO_REST_BASE};
 const PATH_TIME: &str = "/v5/market/time";
 const PATH_ORDER_CREATE: &str = "/v5/order/create";
 const PATH_ORDER_CANCEL: &str = "/v5/order/cancel";
+const PATH_ORDER_AMEND: &str = "/v5/order/amend";
 const PATH_TRADING_STOP: &str = "/v5/position/trading-stop";
 const PATH_WALLET: &str = "/v5/account/wallet-balance";
 const PATH_POSITIONS: &str = "/v5/position/list";
@@ -96,6 +99,23 @@ impl BybitGateway {
 }
 
 impl VenueGateway for BybitGateway {
+    fn caps(&self) -> VenueCaps {
+        VenueCaps {
+            // Bybit v5 linear perps: the position carries its own stop-loss
+            // (POST /v5/position/trading-stop, and stopLoss on the entry).
+            native_position_stop: true,
+            // POST /v5/order/amend, by orderLinkId — see amend_order below.
+            amend_in_place: true,
+            // timeInForce "PostOnly" on a limit order; see tif_str below.
+            post_only: true,
+            // Bybit does have a batch endpoint, but this crate has no path to
+            // it: every order goes out one request at a time. Declared false
+            // because a caller that batched on this word would find nothing
+            // to call.
+            batch_orders: false,
+        }
+    }
+
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         let mut body = Map::new();
         body.insert("category".into(), CATEGORY.into());
@@ -143,6 +163,36 @@ impl VenueGateway for BybitGateway {
         body.insert("orderLinkId".into(), client_order_id.into());
 
         let envelope = self.rest.post_signed(PATH_ORDER_CANCEL, &Value::Object(body)).await?;
+        venue_result(envelope)?;
+        Ok(())
+    }
+
+    async fn amend_order(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        spec: AmendSpec,
+    ) -> Result<(), VenueError> {
+        if spec.px.is_none() && spec.qty.is_none() {
+            return Err(VenueError::BadRequest(
+                "an amend that changes neither price nor size".to_string(),
+            ));
+        }
+        let mut body = Map::new();
+        body.insert("category".into(), CATEGORY.into());
+        body.insert("symbol".into(), self.name_of(symbol)?.into());
+        body.insert("orderLinkId".into(), client_order_id.into());
+        // Only what is changing. Bybit reads an absent field as "leave it",
+        // and a price echoed back unchanged still costs the order its place
+        // in the queue.
+        if let Some(px) = spec.px {
+            body.insert("price".into(), venue_num(px)?.into());
+        }
+        if let Some(qty) = spec.qty {
+            body.insert("qty".into(), venue_num(qty)?.into());
+        }
+
+        let envelope = self.rest.post_signed(PATH_ORDER_AMEND, &Value::Object(body)).await?;
         venue_result(envelope)?;
         Ok(())
     }

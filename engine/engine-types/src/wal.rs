@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::orders::{Intent, OrderRequest, OrderUpdate};
+use crate::ids::SymbolId;
+use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate};
 use crate::risk::RiskVerdict;
 
 /// One record in the append-only log. Serialized as tagged JSON inside a
@@ -32,6 +33,21 @@ pub enum WalRecord {
     },
     OrderUpdate {
         update: OrderUpdate,
+    },
+    /// A cancel on its way out. Not barriered before the wire: a cancel adds
+    /// no exposure, and an order the log still shows working is recovered at
+    /// boot whether or not the cancel survived the crash.
+    CancelSent {
+        symbol: SymbolId,
+        client_order_id: String,
+        wire_ns: u64,
+    },
+    /// An in-place reprice or resize on its way out.
+    AmendSent {
+        symbol: SymbolId,
+        client_order_id: String,
+        spec: AmendSpec,
+        wire_ns: u64,
     },
     /// Periodic latency ledger line: histogram quantiles in nanoseconds.
     LatencyLedger {

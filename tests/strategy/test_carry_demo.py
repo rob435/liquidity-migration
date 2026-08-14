@@ -12,6 +12,7 @@ settlement, so v4's crowding-persistence multiplier stays at full size.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2140,3 +2141,76 @@ class TestBoundaryOnlyStoredHealth:
 
         assert live_reads  # the journal wake paid its own live read
         assert wake["equity_usdt"] == pytest.approx(EQUITY)
+
+
+# ---------------------------------------------------------------------------
+# The engine target book: what research decided, written where the Rust engine
+# can follow it. Off unless the path is set; never able to stop the sleeve.
+# ---------------------------------------------------------------------------
+
+
+def _write_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Path:
+    path = tmp_path / "carry_targets.json"
+    monkeypatch.setenv(module.ENGINE_TARGET_BOOK_PATH_ENV, str(path))
+    kwargs: dict[str, Any] = {
+        "desired": {"KAITOUSDT": 0.10, "COTIUSDT": 0.05},
+        "decision_ts_ms": 1786665600000,
+        "sizing_equity_usdt": 1000.0,
+        "notional_multiplier": 1.0,
+        "stop_loss_fraction": 0.35,
+        "entry_leverage": 2.0,
+        "strategy_profile": "carry_hold_v4_live_v1",
+    }
+    kwargs.update(overrides)
+    module._write_engine_target_book(**kwargs)
+    return path
+
+
+def test_target_book_records_the_decided_notionals(tmp_path, monkeypatch) -> None:
+    book = json.loads(_write_book(tmp_path, monkeypatch).read_text(encoding="utf-8"))
+    assert book["source"] == "carry_hold_v4_live_v1"
+    assert book["decision_ts_ms"] == 1786665600000
+    assert book["valid_until_ms"] == 1786665600000 + module.SIGNAL_VALIDITY_MS
+    by_symbol = {row["symbol"]: row for row in book["targets"]}
+    # weight * sizing equity * multiplier, which is what the sleeve sizes with.
+    assert by_symbol["KAITOUSDT"]["notional_usdt"] == pytest.approx(100.0)
+    assert by_symbol["COTIUSDT"]["notional_usdt"] == pytest.approx(50.0)
+    assert by_symbol["KAITOUSDT"]["stop_loss_fraction"] == 0.35
+
+
+def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv(module.ENGINE_TARGET_BOOK_PATH_ENV, raising=False)
+    module._write_engine_target_book(
+        desired={"KAITOUSDT": 0.1},
+        decision_ts_ms=1786665600000,
+        sizing_equity_usdt=1000.0,
+        notional_multiplier=1.0,
+        stop_loss_fraction=0.35,
+        entry_leverage=2.0,
+        strategy_profile="carry_hold_v4_live_v1",
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_empty_decision_writes_an_empty_book(tmp_path, monkeypatch) -> None:
+    # Deciding cash is a decision and the engine must be able to act on it.
+    book = json.loads(_write_book(tmp_path, monkeypatch, desired={}).read_text(encoding="utf-8"))
+    assert book["targets"] == []
+
+
+def test_a_book_that_cannot_be_written_never_stops_the_sleeve(tmp_path, monkeypatch) -> None:
+    # The sleeve is trading; bookkeeping for a component that trades nothing
+    # yet must not be able to raise into it.
+    monkeypatch.setenv(module.ENGINE_TARGET_BOOK_PATH_ENV, str(tmp_path / "x.json"))
+    monkeypatch.setattr(
+        module, "write_target_book", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    module._write_engine_target_book(
+        desired={"KAITOUSDT": 0.1},
+        decision_ts_ms=1786665600000,
+        sizing_equity_usdt=1000.0,
+        notional_multiplier=1.0,
+        stop_loss_fraction=0.35,
+        entry_leverage=2.0,
+        strategy_profile="carry_hold_v4_live_v1",
+    )

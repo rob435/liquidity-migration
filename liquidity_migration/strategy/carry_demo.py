@@ -33,7 +33,9 @@ import dataclasses
 import json
 import logging
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,11 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import coerce_int
+from liquidity_migration.research.engine_targets import (
+    EngineTarget,
+    render_target_book,
+    write_target_book,
+)
 from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
 from liquidity_migration.account.account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
@@ -313,6 +320,12 @@ SIGNAL_VALIDITY_MS = 6 * HOUR_MS
 #: attempts suppress that symbol's entries permanently, so never hand the
 #: service an entry it can only expire.
 ENTRY_PUBLISH_GUARD_MS = 15 * 60 * 1000
+#: Where to write the decided book for the Rust execution engine to follow.
+#: Unset means do not write one, which is the default and what the fleet runs
+#: with today: the engine trades nothing yet. Writing it changes no decision
+#: and places no order — it only records what was decided, so the engine can
+#: be run against the same book and compared.
+ENGINE_TARGET_BOOK_PATH_ENV = "CARRY_ENGINE_TARGET_BOOK_PATH"
 #: A sleeve whose newest successful decision is older than this is loudly
 #: stale: today's decision still failing past 06:00 the next day.
 DECISION_STALE_MS = 30 * HOUR_MS
@@ -1013,6 +1026,49 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
     )
 
 
+def _write_engine_target_book(
+    *,
+    desired: Mapping[str, float],
+    decision_ts_ms: int,
+    sizing_equity_usdt: float,
+    notional_multiplier: float,
+    stop_loss_fraction: float,
+    entry_leverage: float,
+    strategy_profile: str,
+) -> None:
+    """Record the decided book where the Rust engine can follow it.
+
+    Off unless ``CARRY_ENGINE_TARGET_BOOK_PATH`` names a file. It writes what
+    was decided and nothing else: no order, no change to any decision, and no
+    exception out of here — a book that cannot be written must never stop the
+    sleeve that is trading.
+    """
+    path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
+    if not path_text:
+        return
+    try:
+        targets = [
+            EngineTarget(
+                symbol=symbol,
+                notional_usdt=float(weight) * sizing_equity_usdt * notional_multiplier,
+                stop_loss_fraction=stop_loss_fraction,
+                leverage=entry_leverage,
+            )
+            for symbol, weight in sorted(desired.items())
+        ]
+        write_target_book(
+            Path(path_text),
+            render_target_book(
+                source=strategy_profile,
+                decision_ts_ms=decision_ts_ms,
+                valid_until_ms=decision_ts_ms + SIGNAL_VALIDITY_MS,
+                targets=targets,
+            ),
+        )
+    except Exception:  # noqa: BLE001 - never let bookkeeping stop the sleeve
+        _logger.exception("could not write the engine target book at %s", path_text)
+
+
 def _carry_target_plan(
     *,
     decision: CarryDecision | None,
@@ -1054,6 +1110,16 @@ def _carry_target_plan(
     # account still sizes off its own equity.
     if demo.capital_reference_usdt > 0.0:
         sizing_equity_usdt = min(sizing_equity_usdt, float(demo.capital_reference_usdt))
+
+    _write_engine_target_book(
+        desired=desired,
+        decision_ts_ms=decision_ts_ms,
+        sizing_equity_usdt=sizing_equity_usdt,
+        notional_multiplier=float(demo.notional_multiplier),
+        stop_loss_fraction=float(demo.declared_stop_loss_fraction),
+        entry_leverage=float(demo.entry_leverage),
+        strategy_profile=str(demo.strategy_profile),
+    )
 
     # A reservation whose accepted quantity is already ZERO is a completed exit
     # desire, not exposure: re-publishing a zero target converges nothing and

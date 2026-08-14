@@ -35,10 +35,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use engine_types::{
-    quantize, AccountView, EngineEvent, InstrumentRule, Intent, MarketEvent, MarketFeed,
-    MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate, RiskKernel, RiskVerdict,
-    StopSpec, Strategy, StrategyId, Subscription, SymbolId, VenueError, VenueGateway, Wal,
-    WalError, WalRecord,
+    quantize, AccountView, Action, AmendSpec, EngineEvent, InstrumentRule, Intent, MarketEvent,
+    MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate, RiskKernel,
+    RiskVerdict, StopSpec, Strategy, StrategyId, Subscription, SymbolId, VenueError, VenueGateway,
+    Wal, WalError, WalRecord,
 };
 
 use crate::clock;
@@ -49,8 +49,9 @@ use crate::ledger::{LatencyLedger, Segment};
 use crate::routing::Routing;
 
 /// A strategy that emits from every order update it hears could keep the loop
-/// busy forever. One wake handles this many intents; the rest are dropped
-/// with a note, and the loop goes back to reading the market.
+/// busy forever. One wake handles this many actions; past that only the ones
+/// that reduce risk keep flowing, and the loop goes back to reading the
+/// market.
 pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
@@ -109,7 +110,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     routing: Routing,
     rules: Vec<Option<InstrumentRule>>,
     timers: Timers,
-    pending: VecDeque<Intent>,
+    pending: VecDeque<Action>,
     account: AccountView,
     registry: OrderRegistry,
     orders: LedgerOfOrders,
@@ -393,23 +394,38 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 timers,
                 pending,
                 routing,
+                orders,
+                registry,
                 ..
             } = self;
+            let count = strategies.len();
+            let mut feed = |sid| {
+                feed_strategy(
+                    strategies,
+                    market,
+                    timers,
+                    pending,
+                    orders,
+                    registry,
+                    sid,
+                    &engine_event,
+                    now,
+                )
+            };
             match event {
                 MarketEvent::Quote { symbol, .. } => {
                     for sid in routing.quote_listeners(symbol) {
-                        feed_strategy(strategies, market, timers, pending, *sid, &engine_event, now);
+                        feed(*sid);
                     }
                 }
                 MarketEvent::Ticker { symbol, .. } => {
                     for sid in routing.ticker_listeners(symbol) {
-                        feed_strategy(strategies, market, timers, pending, *sid, &engine_event, now);
+                        feed(*sid);
                     }
                 }
                 MarketEvent::FeedReset { .. } => {
-                    for index in 0..strategies.len() {
-                        let sid = StrategyId(index as u16);
-                        feed_strategy(strategies, market, timers, pending, sid, &engine_event, now);
+                    for index in 0..count {
+                        feed(StrategyId(index as u16));
                     }
                 }
             }
@@ -426,9 +442,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 market,
                 timers,
                 pending,
+                orders,
+                registry,
                 ..
             } = self;
-            feed_strategy(strategies, market, timers, pending, sid, &event, now);
+            feed_strategy(
+                strategies, market, timers, pending, orders, registry, sid, &event, now,
+            );
         }
         self.drain(now).await
     }
@@ -461,35 +481,51 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
         let mut handled = 0usize;
-        let mut entries_dropped = 0usize;
-        while let Some(intent) = self.pending.pop_front() {
+        let mut adding_dropped = 0usize;
+        while let Some(action) = self.pending.pop_front() {
             handled += 1;
-            // Past the cap, entries are dropped but exits still flow: a
-            // de-risking order queued behind a flood must get out, or its
-            // strategy is stranded holding a position it believes it left.
-            // The hard cap bounds even the exits against a runaway loop.
-            if handled > MAX_INTENTS_PER_WAKE && !intent.reduce_only {
-                entries_dropped += 1;
+            // Past the cap, whatever adds risk is dropped but whatever sheds
+            // it still flows: an exit or a cancel queued behind a flood must
+            // get out, or its strategy is stranded holding a position — or an
+            // order — it believes it is rid of. An amend counts as adding: it
+            // can raise the size of a resting order. The hard cap bounds even
+            // the de-risking ones against a runaway loop.
+            if handled > MAX_INTENTS_PER_WAKE && !action.is_risk_reducing() {
+                adding_dropped += 1;
                 continue;
             }
             if handled > MAX_INTENTS_PER_WAKE * 4 {
                 let dropped = self.pending.len() + 1;
                 self.pending.clear();
-                tracing::error!(dropped, "far too many intents in one wake; the rest were dropped");
+                tracing::error!(dropped, "far too many actions in one wake; the rest were dropped");
                 self.wal.append(&WalRecord::Note {
                     source: "engine".into(),
-                    text: format!("dropped {dropped} intents, exits included: more than {} in one wake", MAX_INTENTS_PER_WAKE * 4),
+                    text: format!("dropped {dropped} actions, exits included: more than {} in one wake", MAX_INTENTS_PER_WAKE * 4),
                 })?;
                 break;
             }
-            self.process_intent(intent, origin_ns).await?;
+            match action {
+                Action::Place(intent) => self.process_intent(intent, origin_ns).await?,
+                Action::Cancel {
+                    symbol,
+                    client_order_id,
+                } => self.process_cancel(symbol, &client_order_id, origin_ns).await?,
+                Action::Amend {
+                    symbol,
+                    client_order_id,
+                    spec,
+                } => {
+                    self.process_amend(symbol, &client_order_id, spec, origin_ns)
+                        .await?
+                }
+            }
         }
-        if entries_dropped > 0 {
-            tracing::error!(entries_dropped, "too many intents in one wake; entries were dropped");
+        if adding_dropped > 0 {
+            tracing::error!(adding_dropped, "too many actions in one wake; entries and amends were dropped");
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
                 text: format!(
-                    "dropped {entries_dropped} entries: more than {MAX_INTENTS_PER_WAKE} intents in one wake (exits still flowed)"
+                    "dropped {adding_dropped} entries and amends: more than {MAX_INTENTS_PER_WAKE} actions in one wake (exits and cancels still flowed)"
                 ),
             })?;
         }
@@ -559,6 +595,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             client_order_id: Some(client_order_id.clone()),
             verdict,
         })?;
+
+        // The risk kernel requires a position-opening intent to carry a stop.
+        // A venue that keeps no stop of its own would leave that rule
+        // unenforced without ever saying so: the order goes out, the log
+        // records a stop, and nothing at the venue is watching the position.
+        // An exit sheds its stop below in any case, so it is not held back.
+        if intent.stop.is_some() && !intent.reduce_only && !self.venue.caps().native_position_stop {
+            return self.refuse(
+                &client_order_id,
+                &intent,
+                "the intent carries a stop and this venue keeps none",
+            );
+        }
 
         let Some(rule) = self.rules.get(intent.symbol.0 as usize).copied().flatten() else {
             return self.refuse(
@@ -711,6 +760,164 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
+    /// Pull a resting order.
+    ///
+    /// Not the order path in miniature: there is no barrier before the wire.
+    /// A cancel adds no exposure, and an order the log still shows working is
+    /// recovered at the next boot whether or not the cancel survived a crash
+    /// — so the fsync would buy nothing. `origin_ns` is taken but not
+    /// recorded: the latency ledger measures the order path, and mixing a
+    /// barrier-free cancel into "out the door" would flatter that number.
+    async fn process_cancel(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        _origin_ns: u64,
+    ) -> Result<(), EngineError> {
+        self.wal.append(&WalRecord::CancelSent {
+            symbol,
+            client_order_id: client_order_id.to_string(),
+            wire_ns: clock::now_ns(),
+        })?;
+
+        if self.shadow {
+            // The never-sent marker is read back as an ending for the order
+            // id that follows it, so these words name the cancel and not the
+            // order it would have pulled: that order's fate is whatever the
+            // log already says it is.
+            self.wal.append(&WalRecord::Note {
+                source: "shadow".into(),
+                text: format!(
+                    "{}cancel of {client_order_id} on {}",
+                    inflight::NEVER_SENT_PREFIX,
+                    self.market.table.name(symbol)
+                ),
+            })?;
+            return Ok(());
+        }
+
+        match self.venue.cancel_order(symbol, client_order_id).await {
+            Ok(()) => Ok(()),
+            // A request that could not be built never left the box: the
+            // resting order is untouched, which is certainty rather than
+            // doubt. No synthetic reject — that would end an order at the
+            // venue's expense in our own book only.
+            Err(VenueError::BadRequest(detail)) => {
+                tracing::error!(id = client_order_id, detail, "cancel never sent");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!("cancel of {client_order_id} never sent: {detail}"),
+                })?;
+                Ok(())
+            }
+            Err(other) => {
+                // We do not know whether the venue got it. The order stays in
+                // flight either way, and the private stream will say if it
+                // went; a retry from here is how one gets cancelled twice.
+                tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
+                    ),
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Reprice or resize a resting order in place. See [`process_cancel`] for
+    /// why neither of these two paths barriers before the wire.
+    ///
+    /// [`process_cancel`]: Engine::process_cancel
+    /// Whether an amend would leave more size working than the log currently
+    /// says. An order the log does not know is treated as growing: not
+    /// knowing is not the same as knowing it is smaller.
+    fn grows_the_order(&self, client_order_id: &str, spec: &AmendSpec) -> bool {
+        let Some(new_qty) = spec.qty else {
+            return false;
+        };
+        match self.orders.orders.get(client_order_id) {
+            Some(order) => new_qty > order.request.qty,
+            None => true,
+        }
+    }
+
+    async fn process_amend(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        spec: AmendSpec,
+        _origin_ns: u64,
+    ) -> Result<(), EngineError> {
+        if !self.venue.caps().amend_in_place {
+            // No quiet fallback to cancel-and-replace. A replaced order is a
+            // new order at the back of the queue at a fresh price — a
+            // different trade from the one asked for, and the strategy would
+            // never learn it had been substituted.
+            tracing::warn!(id = client_order_id, "this venue cannot amend; the order is left alone");
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "{client_order_id} not amended: this venue cannot change a resting order in place, and cancel-and-replace is a different trade"
+                ),
+            })?;
+            return Ok(());
+        }
+
+        // An amend that raises the size adds exposure, so it is durable
+        // before the wire for the same reason a send is: a crash in between
+        // must never leave the log describing a smaller order than the one
+        // the venue is now working. Repricing, or shrinking, cannot create
+        // exposure and rides the ordinary group flush.
+        let grows = self.grows_the_order(client_order_id, &spec);
+        self.wal.append(&WalRecord::AmendSent {
+            symbol,
+            client_order_id: client_order_id.to_string(),
+            spec,
+            wire_ns: clock::now_ns(),
+        })?;
+        if grows && !self.shadow {
+            self.wal.barrier()?;
+        }
+
+        if self.shadow {
+            self.wal.append(&WalRecord::Note {
+                source: "shadow".into(),
+                text: format!(
+                    "{}amend of {client_order_id} on {}",
+                    inflight::NEVER_SENT_PREFIX,
+                    self.market.table.name(symbol)
+                ),
+            })?;
+            return Ok(());
+        }
+
+        match self.venue.amend_order(symbol, client_order_id, spec).await {
+            Ok(()) => Ok(()),
+            Err(VenueError::BadRequest(detail)) => {
+                tracing::error!(id = client_order_id, detail, "amend never sent");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!("amend of {client_order_id} never sent: {detail}"),
+                })?;
+                Ok(())
+            }
+            Err(other) => {
+                // The order is still working; we just do not know at which
+                // price or size. The next account or order update settles it.
+                tracing::error!(id = client_order_id, error = %other, "amend failed with no answer");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "amend of {client_order_id} sent with no answer ({other}); its price and size are unconfirmed"
+                    ),
+                })?;
+                Ok(())
+            }
+        }
+    }
+
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
         self.wal.append(&WalRecord::OrderUpdate {
@@ -744,9 +951,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         market,
                         timers,
                         pending,
+                        orders,
+                        registry,
                         ..
                     } = self;
-                    feed_strategy(strategies, market, timers, pending, sid, &event, now);
+                    feed_strategy(
+                        strategies, market, timers, pending, orders, registry, sid, &event, now,
+                    );
                 }
                 None => {
                     let ours = self.registry.is_ours(id);
@@ -763,10 +974,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         timers,
                         pending,
                         routing,
+                        orders,
+                        registry,
                         ..
                     } = self;
                     for sid in routing.all_listeners(symbol) {
-                        feed_strategy(strategies, market, timers, pending, sid, &event, now);
+                        feed_strategy(
+                            strategies, market, timers, pending, orders, registry, sid, &event, now,
+                        );
                     }
                 }
             }
@@ -814,11 +1029,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn feed_strategy(
     strategies: &mut [Box<dyn Strategy>],
     market: &MarketState,
     timers: &mut Timers,
-    pending: &mut VecDeque<Intent>,
+    pending: &mut VecDeque<Action>,
+    orders: &LedgerOfOrders,
+    registry: &OrderRegistry,
     sid: StrategyId,
     event: &EngineEvent,
     now_ns: u64,
@@ -832,6 +1050,8 @@ fn feed_strategy(
         strategy: sid,
         out: pending,
         timers,
+        orders,
+        registry,
     };
     strategy.on_event(event, &mut ctx);
 }

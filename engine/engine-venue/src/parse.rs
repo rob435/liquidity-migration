@@ -109,10 +109,13 @@ pub(crate) fn parse_wallet(result: &Value) -> Result<(f64, f64), VenueError> {
 
 /// Open positions, with the cursor for the next page.
 ///
-/// A position in a symbol the engine has not interned cannot be given a
-/// `SymbolId`, and dropping it would hide live exposure from the risk kernel.
-/// So it fails, naming the symbol: the operator either subscribes it or
-/// flattens it.
+/// A position in a symbol no strategy subscribed to belongs to somebody else
+/// — the owner's own hand-trading, or another process on the same venue
+/// account. It is named in the log and skipped: the engine can only place an
+/// order on a symbol a strategy subscribed to, so a position it cannot even
+/// address is not exposure it can create, hide, or reduce. Refusing to read
+/// the account over one would mean an account holding anything unfamiliar
+/// stops the engine dead.
 pub(crate) fn parse_positions(
     result: &Value,
     resolve: &dyn Fn(&str) -> Option<SymbolId>,
@@ -136,12 +139,10 @@ pub(crate) fn parse_positions(
                 )))
             }
         };
-        let id = resolve(&symbol).ok_or_else(|| {
-            VenueError::BadReply(format!(
-                "open position in {symbol}, which the engine does not know; \
-                 register the symbol or flatten it"
-            ))
-        })?;
+        let Some(id) = resolve(&symbol) else {
+            report_foreign_once(&symbol, qty);
+            continue;
+        };
         // Bybit writes "" or "0" when no stop is set on the position.
         let stop_attached = opt_num_field(row, "stopLoss")?.is_some_and(|v| v > 0.0);
         out.push(PositionView {
@@ -153,6 +154,24 @@ pub(crate) fn parse_positions(
         });
     }
     Ok((out, next_cursor(result)))
+}
+
+/// Say once that somebody else's position is there, not on every account
+/// refresh. The account is read every couple of seconds, so a line per read
+/// is tens of thousands of lines a day that bury everything worth seeing.
+fn report_foreign_once(symbol: &str, qty: f64) {
+    thread_local! {
+        static SAID: std::cell::RefCell<std::collections::BTreeSet<String>> =
+            const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    }
+    let first = SAID.with(|said| said.borrow_mut().insert(symbol.to_string()));
+    if first {
+        tracing::warn!(
+            symbol,
+            qty,
+            "position in a symbol no strategy trades; left alone as somebody else's"
+        );
+    }
 }
 
 fn next_cursor(result: &Value) -> String {
@@ -387,16 +406,20 @@ mod tests {
     }
 
     #[test]
-    fn a_position_the_engine_cannot_name_fails_closed() {
+    fn somebody_elses_position_is_skipped_and_does_not_stop_the_read() {
+        // The owner hand-trades the same venue account, so a position in a
+        // symbol no strategy subscribed to is the normal case, not a fault.
+        // The engine cannot place an order on an unsubscribed symbol, so it
+        // reads past it and keeps the positions that are its own.
         let result = json!({"list": [
             {"symbol": "VANRYUSDT", "side": "Buy", "size": "100", "avgPrice": "0.1",
-             "stopLoss": ""}
+             "stopLoss": ""},
+            {"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "avgPrice": "95000.5",
+             "stopLoss": "90000"}
         ]});
-        let err = parse_positions(&result, &resolver()).unwrap_err();
-        match err {
-            VenueError::BadReply(msg) => assert!(msg.contains("VANRYUSDT"), "{msg}"),
-            other => panic!("expected BadReply, got {other:?}"),
-        }
+        let (positions, _) = parse_positions(&result, &resolver()).unwrap();
+        assert_eq!(positions.len(), 1, "only the engine's own symbol survives");
+        assert_eq!(positions[0].qty, 0.5);
     }
 
     #[test]

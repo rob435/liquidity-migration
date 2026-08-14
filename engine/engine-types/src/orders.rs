@@ -55,6 +55,87 @@ pub struct Intent {
     pub decided_ns: u64,
 }
 
+/// A new price and/or size for an order already resting at the venue.
+/// `None` leaves that field as it is.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AmendSpec {
+    pub px: Option<f64>,
+    pub qty: Option<f64>,
+}
+
+/// What a strategy asks the engine to do. Placing is one of three verbs: a
+/// market maker that can only place is a maker that cannot leave.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Action {
+    Place(Intent),
+    /// Pull a resting order by the id the engine minted for it.
+    Cancel {
+        symbol: SymbolId,
+        client_order_id: String,
+    },
+    /// Reprice or resize in place, keeping the order's venue identity and,
+    /// where the venue allows it, its queue position. Refused on a venue
+    /// whose [`crate::VenueCaps`] say it cannot amend — the engine will not
+    /// quietly substitute cancel-and-replace, which is a different trade.
+    Amend {
+        symbol: SymbolId,
+        client_order_id: String,
+        spec: AmendSpec,
+    },
+}
+
+impl Action {
+    /// Whether this action can only reduce the engine's exposure. Under a
+    /// flood the engine drops what adds risk and lets the rest through, so
+    /// cancels and exits keep flowing when entries stop.
+    pub fn is_risk_reducing(&self) -> bool {
+        match self {
+            Action::Place(intent) => intent.reduce_only,
+            Action::Cancel { .. } => true,
+            Action::Amend { .. } => false,
+        }
+    }
+
+    pub fn symbol(&self) -> SymbolId {
+        match self {
+            Action::Place(intent) => intent.symbol,
+            Action::Cancel { symbol, .. } | Action::Amend { symbol, .. } => *symbol,
+        }
+    }
+}
+
+/// One of a strategy's own orders that the log says is still working. Handed
+/// out by [`crate::strategy::StrategyCtx::resting`] so a quoting strategy can
+/// find the order it wants to pull or move. Borrowed, not owned: reading your
+/// own book allocates nothing.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct RestingOrder<'a> {
+    pub client_order_id: &'a str,
+    pub symbol: SymbolId,
+    pub side: Side,
+    pub kind: OrderKind,
+    pub qty: f64,
+    pub filled_qty: f64,
+    pub reduce_only: bool,
+    /// The venue has acknowledged it. An unacked order is still out there —
+    /// it may rest, or the reply may simply not have arrived yet.
+    pub acked: bool,
+}
+
+impl RestingOrder<'_> {
+    /// Resting limit price, or `None` for a market order in flight.
+    pub fn px(&self) -> Option<f64> {
+        match self.kind {
+            OrderKind::Limit { px, .. } => Some(px),
+            OrderKind::Market => None,
+        }
+    }
+
+    pub fn remaining_qty(&self) -> f64 {
+        (self.qty - self.filled_qty).max(0.0)
+    }
+}
+
 /// A risk-approved order on its way to the venue. Quantities and prices are
 /// already quantized to the instrument's step and tick.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

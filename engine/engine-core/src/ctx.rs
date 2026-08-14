@@ -1,17 +1,19 @@
 //! The window a strategy sees, and the timers it can set.
 //!
-//! A strategy gets read-only market state, the clock, a way to hand back an
-//! intent, and one-shot timers. Nothing else: no venue, no log, no other
-//! strategy's state. Timers are scoped per strategy, so two strategies may
-//! both use timer 1 without colliding, and re-arming the same number before
-//! it fires replaces the old one.
+//! A strategy gets read-only market state, the clock, its own resting orders,
+//! a way to hand back an action, and one-shot timers. Nothing else: no venue,
+//! no log, no other strategy's state. Timers are scoped per strategy, so two
+//! strategies may both use timer 1 without colliding, and re-arming the same
+//! number before it fires replaces the old one.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use engine_types::{
-    Intent, MarketState, Quote, StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
+    Action, MarketState, Quote, RestingOrder, StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
 };
+
+use crate::inflight::{LedgerOfOrders, OrderRegistry};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Pending {
@@ -73,8 +75,14 @@ pub struct Ctx<'a> {
     pub market: &'a MarketState,
     pub now_ns: u64,
     pub strategy: StrategyId,
-    pub out: &'a mut VecDeque<Intent>,
+    pub out: &'a mut VecDeque<Action>,
     pub timers: &'a mut Timers,
+    /// What the log says is still out there. Read-only, and filtered by the
+    /// registry below before a strategy is shown any of it.
+    pub orders: &'a LedgerOfOrders,
+    /// Who placed each order. Without it one strategy could read — and then
+    /// cancel — another's working orders.
+    pub registry: &'a OrderRegistry,
 }
 
 impl StrategyCtx for Ctx<'_> {
@@ -94,26 +102,94 @@ impl StrategyCtx for Ctx<'_> {
         self.now_ns
     }
 
-    fn emit(&mut self, mut intent: Intent) {
+    fn emit(&mut self, action: Action) {
         // The context knows whose callback this is, so the intent is filed
-        // under that strategy whatever it claims.
-        intent.strategy = self.strategy;
-        if intent.decided_ns == 0 {
-            intent.decided_ns = self.now_ns;
-        }
-        self.out.push_back(intent);
+        // under that strategy whatever it claims. A cancel or an amend names
+        // an order id instead, and the id already carries its owner.
+        let action = match action {
+            Action::Place(mut intent) => {
+                intent.strategy = self.strategy;
+                if intent.decided_ns == 0 {
+                    intent.decided_ns = self.now_ns;
+                }
+                Action::Place(intent)
+            }
+            other => other,
+        };
+        self.out.push_back(action);
     }
 
     fn arm_timer(&mut self, id: TimerId, after_ns: u64) {
         self.timers
             .arm(self.strategy, id, self.now_ns.saturating_add(after_ns));
     }
+
+    fn resting<'a>(&'a self, out: &mut Vec<RestingOrder<'a>>) {
+        for (id, order) in &self.orders.orders {
+            // Someone else's order is none of this strategy's business, and
+            // an order the log has already ended cannot be pulled or moved.
+            if !order.in_flight() || self.registry.owner_of(id) != Some(self.strategy) {
+                continue;
+            }
+            let request = &order.request;
+            out.push(RestingOrder {
+                client_order_id: id.as_str(),
+                symbol: request.symbol,
+                side: request.side,
+                kind: request.kind,
+                qty: request.qty,
+                filled_qty: order.filled_qty,
+                reduce_only: request.reduce_only,
+                acked: order.acked,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_types::{OrderKind, Side};
+    use engine_types::{Intent, OrderKind, OrderRequest, OrderUpdate, Side, WalRecord};
+
+    fn sent(id: &str, strategy: StrategyId) -> WalRecord {
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: id.into(),
+                strategy,
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                kind: OrderKind::Limit {
+                    px: 100.0,
+                    tif: engine_types::TimeInForce::Gtc,
+                },
+                stop: None,
+                reduce_only: false,
+            },
+            wire_ns: 1,
+        }
+    }
+
+    /// One context over a hand-built book, so the filters can be read off
+    /// directly instead of through a whole engine run.
+    fn ctx_over<'a>(
+        market: &'a MarketState,
+        out: &'a mut VecDeque<Action>,
+        timers: &'a mut Timers,
+        orders: &'a LedgerOfOrders,
+        registry: &'a OrderRegistry,
+        strategy: StrategyId,
+    ) -> Ctx<'a> {
+        Ctx {
+            market,
+            now_ns: 42,
+            strategy,
+            out,
+            timers,
+            orders,
+            registry,
+        }
+    }
 
     #[test]
     fn timers_fire_in_time_order_and_are_scoped_per_strategy() {
@@ -144,14 +220,17 @@ mod tests {
         let market = MarketState::default();
         let mut out = VecDeque::new();
         let mut timers = Timers::default();
-        let mut ctx = Ctx {
-            market: &market,
-            now_ns: 42,
-            strategy: StrategyId(3),
-            out: &mut out,
-            timers: &mut timers,
-        };
-        ctx.emit(Intent {
+        let orders = LedgerOfOrders::default();
+        let registry = OrderRegistry::default();
+        let mut ctx = ctx_over(
+            &market,
+            &mut out,
+            &mut timers,
+            &orders,
+            &registry,
+            StrategyId(3),
+        );
+        ctx.place(Intent {
             strategy: StrategyId(9),
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -162,8 +241,123 @@ mod tests {
             tag: "t".into(),
             decided_ns: 0,
         });
-        let got = out.pop_front().unwrap();
+        let Some(Action::Place(got)) = out.pop_front() else {
+            panic!("expected a placement");
+        };
         assert_eq!(got.strategy, StrategyId(3));
         assert_eq!(got.decided_ns, 42);
+    }
+
+    #[test]
+    fn a_cancel_reaches_the_engine_naming_the_order_it_pulls() {
+        let market = MarketState::default();
+        let mut out = VecDeque::new();
+        let mut timers = Timers::default();
+        let orders = LedgerOfOrders::default();
+        let registry = OrderRegistry::default();
+        let mut ctx = ctx_over(
+            &market,
+            &mut out,
+            &mut timers,
+            &orders,
+            &registry,
+            StrategyId(3),
+        );
+        ctx.cancel(SymbolId(1), "eng-7");
+        assert_eq!(
+            out.pop_front(),
+            Some(Action::Cancel {
+                symbol: SymbolId(1),
+                client_order_id: "eng-7".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn resting_shows_a_strategy_its_own_working_orders_and_nobody_elses() {
+        // A strategy that could read another's book could cancel it too.
+        let market = MarketState::default();
+        let mut timers = Timers::default();
+        let orders = LedgerOfOrders::from_records(&[
+            sent("mine-open", StrategyId(1)),
+            sent("theirs", StrategyId(2)),
+            sent("mine-filled", StrategyId(1)),
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill {
+                    client_order_id: "mine-filled".into(),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: 0.0,
+                    venue_ts_ms: 0,
+                    recv_ns: 0,
+                },
+            },
+        ]);
+        // The filled one stays owned: ownership outlives the order, so this
+        // is the in-flight filter being tested and not a missing owner.
+        let mut registry = OrderRegistry::new("eng-1-".into());
+        registry.own("mine-open", StrategyId(1));
+        registry.own("mine-filled", StrategyId(1));
+        registry.own("theirs", StrategyId(2));
+
+        let mut out = VecDeque::new();
+        let ctx = ctx_over(
+            &market,
+            &mut out,
+            &mut timers,
+            &orders,
+            &registry,
+            StrategyId(1),
+        );
+        let mut seen = Vec::new();
+        ctx.resting(&mut seen);
+        let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
+        assert_eq!(ids, vec!["mine-open"], "own and still working, nothing else");
+        assert_eq!(seen[0].px(), Some(100.0));
+        assert_eq!(seen[0].remaining_qty(), 1.0);
+        assert!(!seen[0].acked, "no ack has arrived for it");
+
+        let mut out = VecDeque::new();
+        let ctx = ctx_over(
+            &market,
+            &mut out,
+            &mut timers,
+            &orders,
+            &registry,
+            StrategyId(2),
+        );
+        let mut seen = Vec::new();
+        ctx.resting(&mut seen);
+        let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
+        assert_eq!(ids, vec!["theirs"]);
+    }
+
+    #[test]
+    fn resting_appends_and_leaves_the_buffer_reusable() {
+        // The contract is "appended to out", so a strategy can keep one
+        // buffer between wakes and pay nothing for the read.
+        let market = MarketState::default();
+        let mut timers = Timers::default();
+        let orders = LedgerOfOrders::from_records(&[sent("a", StrategyId(0))]);
+        let mut registry = OrderRegistry::default();
+        registry.own("a", StrategyId(0));
+        let mut out = VecDeque::new();
+        let ctx = ctx_over(
+            &market,
+            &mut out,
+            &mut timers,
+            &orders,
+            &registry,
+            StrategyId(0),
+        );
+        let mut seen = Vec::with_capacity(8);
+        ctx.resting(&mut seen);
+        ctx.resting(&mut seen);
+        assert_eq!(seen.len(), 2, "the second read appended, it did not clear");
+        seen.clear();
+        ctx.resting(&mut seen);
+        assert_eq!(seen.len(), 1);
     }
 }

@@ -2,10 +2,11 @@
 //! it, so it is worth reading before writing the next one.
 //!
 //! [`MockCtx`] is a stand-in for the engine's side of the strategy contract:
-//! it holds the market picture, the clock, and it records what the strategy
-//! did — the intents it emitted and the timers it armed. [`Harness`] pairs one
-//! context with one strategy and gives each thing that can happen to a plug a
-//! one-line name, so a test reads like the story it is testing:
+//! it holds the market picture, the clock, the strategy's own resting orders,
+//! and it records what the strategy did — the actions it emitted and the
+//! timers it armed. [`Harness`] pairs one context with one strategy and gives
+//! each thing that can happen to a plug a one-line name, so a test reads like
+//! the story it is testing:
 //!
 //! ```ignore
 //! let mut h = Harness::new(strategy);
@@ -21,8 +22,8 @@
 use std::collections::HashMap;
 
 use engine_types::{
-    EngineEvent, Intent, MarketEvent, OrderAck, OrderUpdate, Quote, Side, Strategy, StrategyCtx,
-    SymbolId, Ticker, TimerId,
+    Action, EngineEvent, Intent, MarketEvent, OrderAck, OrderKind, OrderUpdate, Quote,
+    RestingOrder, Side, Strategy, StrategyCtx, SymbolId, Ticker, TimerId,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -33,17 +34,34 @@ pub struct ArmedTimer {
     pub due_ns: u64,
 }
 
+/// A working order for the strategy under test to find. Owned here because
+/// the real contract hands out borrows of the engine's own book.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestingSeed {
+    pub client_order_id: String,
+    pub symbol: SymbolId,
+    pub side: Side,
+    pub kind: OrderKind,
+    pub qty: f64,
+    pub filled_qty: f64,
+    pub reduce_only: bool,
+    pub acked: bool,
+}
+
 pub struct MockCtx {
     symbols: HashMap<String, SymbolId>,
     quotes: Vec<Quote>,
     tickers: Vec<Ticker>,
     now_ns: u64,
     /// Everything the strategy emitted, oldest first.
-    pub emitted: Vec<Intent>,
+    pub emitted: Vec<Action>,
     /// Timers still waiting to fire.
     pub timers: Vec<ArmedTimer>,
     /// Every arm_timer call ever made, including replacements.
     pub arm_calls: Vec<ArmedTimer>,
+    /// What the engine would say is still working for this strategy. Empty
+    /// unless a test seeds it.
+    pub resting: Vec<RestingSeed>,
 }
 
 impl MockCtx {
@@ -56,6 +74,7 @@ impl MockCtx {
             emitted: Vec::new(),
             timers: Vec::new(),
             arm_calls: Vec::new(),
+            resting: Vec::new(),
         }
     }
 
@@ -98,8 +117,8 @@ impl StrategyCtx for MockCtx {
         self.now_ns
     }
 
-    fn emit(&mut self, intent: Intent) {
-        self.emitted.push(intent);
+    fn emit(&mut self, action: Action) {
+        self.emitted.push(action);
     }
 
     fn arm_timer(&mut self, id: TimerId, after_ns: u64) {
@@ -108,6 +127,21 @@ impl StrategyCtx for MockCtx {
         // One shot per id: arming again replaces the pending one.
         self.timers.retain(|t| t.id != id);
         self.timers.push(armed);
+    }
+
+    fn resting<'a>(&'a self, out: &mut Vec<RestingOrder<'a>>) {
+        for seed in &self.resting {
+            out.push(RestingOrder {
+                client_order_id: seed.client_order_id.as_str(),
+                symbol: seed.symbol,
+                side: seed.side,
+                kind: seed.kind,
+                qty: seed.qty,
+                filled_qty: seed.filled_qty,
+                reduce_only: seed.reduce_only,
+                acked: seed.acked,
+            });
+        }
     }
 }
 
@@ -204,9 +238,27 @@ impl Harness {
         self.deliver(EngineEvent::Timer { id, now_ns });
     }
 
-    /// Take everything emitted since the last call.
-    pub fn drain(&mut self) -> Vec<Intent> {
+    /// Give the strategy a working order to find through `ctx.resting`.
+    pub fn rest(&mut self, seed: RestingSeed) {
+        self.ctx.resting.push(seed);
+    }
+
+    /// Take every action emitted since the last call.
+    pub fn drain_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.ctx.emitted)
+    }
+
+    /// Take the orders placed since the last call. A plug that only places is
+    /// read through this one; a plug that also pulls or moves orders is read
+    /// through [`Harness::drain_actions`].
+    pub fn drain(&mut self) -> Vec<Intent> {
+        self.drain_actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::Place(intent) => Some(intent),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The single intent emitted since the last call. Panics on none or many,
@@ -215,5 +267,101 @@ impl Harness {
         let mut drained = self.drain();
         assert_eq!(drained.len(), 1, "expected exactly one intent, got {drained:?}");
         drained.remove(0)
+    }
+
+    /// The single action emitted since the last call, whatever kind it is.
+    pub fn one_action(&mut self) -> Action {
+        let mut drained = self.drain_actions();
+        assert_eq!(drained.len(), 1, "expected exactly one action, got {drained:?}");
+        drained.remove(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_types::{StrategyId, Subscription};
+
+    /// Pulls whatever the engine says it has working, on the first quote.
+    struct Puller;
+
+    impl Strategy for Puller {
+        fn name(&self) -> &str {
+            "puller"
+        }
+
+        fn subscriptions(&self) -> Vec<Subscription> {
+            vec![Subscription {
+                symbol: "BTCUSDT".to_string(),
+                feed: engine_types::Feed::Quote,
+            }]
+        }
+
+        fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+            if !matches!(event, EngineEvent::Market(MarketEvent::Quote { .. })) {
+                return;
+            }
+            let mut mine = Vec::new();
+            ctx.resting(&mut mine);
+            let pulls: Vec<(SymbolId, String)> = mine
+                .iter()
+                .map(|o| (o.symbol, o.client_order_id.to_string()))
+                .collect();
+            for (symbol, id) in pulls {
+                ctx.cancel(symbol, &id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_plug_reads_its_resting_orders_and_can_pull_one() {
+        let mut h = Harness::new(Box::new(Puller));
+        let symbol = h.ctx.id_of("BTCUSDT");
+        h.rest(RestingSeed {
+            client_order_id: "eng-4".to_string(),
+            symbol,
+            side: Side::Buy,
+            kind: OrderKind::Limit { px: 60_000.0, tif: engine_types::TimeInForce::Gtc },
+            qty: 0.01,
+            filled_qty: 0.0,
+            reduce_only: false,
+            acked: true,
+        });
+        h.quote("BTCUSDT", 60_999.0, 61_000.0);
+        assert_eq!(
+            h.one_action(),
+            Action::Cancel { symbol, client_order_id: "eng-4".to_string() }
+        );
+        assert!(h.drain().is_empty(), "a cancel is not a placement");
+    }
+
+    #[test]
+    fn an_empty_book_is_the_default() {
+        let mut h = Harness::new(Box::new(Puller));
+        h.quote("BTCUSDT", 60_999.0, 61_000.0);
+        assert!(h.drain_actions().is_empty());
+    }
+
+    #[test]
+    fn a_strategy_id_on_an_emitted_intent_is_left_alone_here() {
+        // The engine's own context rewrites it; the mock deliberately does
+        // not, so a test can see exactly what the plug asked for.
+        let mut ctx = MockCtx::new();
+        ctx.add_symbol("BTCUSDT");
+        ctx.place(Intent {
+            strategy: StrategyId(9),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+            tag: "t".into(),
+            decided_ns: 7,
+        });
+        let Action::Place(intent) = ctx.emitted.remove(0) else {
+            panic!("expected a placement");
+        };
+        assert_eq!(intent.strategy, StrategyId(9));
     }
 }

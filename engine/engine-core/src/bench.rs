@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use engine_types::{
-    AccountView, EngineEvent, Feed, FeedError, InstrumentRule, Intent, MarketEvent, MarketFeed,
-    OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote, RiskKernel, RiskVerdict,
-    Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, Symbol, SymbolId, VenueError,
-    VenueGateway, Wal, WalRecord,
+    AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent, MarketEvent,
+    MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote, RiskKernel,
+    RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, Symbol, SymbolId,
+    VenueCaps, VenueError, VenueGateway, Wal, WalRecord,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -290,7 +290,7 @@ impl Strategy for BenchStrategy {
         if !self.seen.is_multiple_of(self.every_nth) {
             return;
         }
-        ctx.emit(Intent {
+        ctx.place(Intent {
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Buy,
@@ -384,6 +384,17 @@ impl HttpVenue {
 }
 
 impl VenueGateway for HttpVenue {
+    /// The same answers Bybit gives, so the bench walks the same paths the
+    /// shipping gateway walks.
+    fn caps(&self) -> VenueCaps {
+        VenueCaps {
+            native_position_stop: true,
+            amend_in_place: true,
+            post_only: true,
+            batch_orders: false,
+        }
+    }
+
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         let px = match req.kind {
             OrderKind::Limit { px, .. } => px,
@@ -423,6 +434,22 @@ impl VenueGateway for HttpVenue {
         self.call("/v5/order/cancel", &format!("{{\"orderLinkId\":\"{id}\"}}"))
             .await
             .map(|_| ())
+    }
+
+    async fn amend_order(
+        &mut self,
+        _symbol: SymbolId,
+        id: &str,
+        spec: AmendSpec,
+    ) -> Result<(), VenueError> {
+        let px = spec.px.map(|px| format!(",\"price\":\"{px}\"")).unwrap_or_default();
+        let qty = spec.qty.map(|qty| format!(",\"qty\":\"{qty}\"")).unwrap_or_default();
+        self.call(
+            "/v5/order/amend",
+            &format!("{{\"orderLinkId\":\"{id}\"{px}{qty}}}"),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {

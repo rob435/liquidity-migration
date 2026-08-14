@@ -25,18 +25,46 @@ pub use market::{
     Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote, Subscription, Ticker,
 };
 pub use orders::{
-    Intent, InstrumentRule, OrderAck, OrderKind, OrderRequest, OrderUpdate, Side, StopSpec,
-    TimeInForce, VenueError,
+    Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderKind, OrderRequest, OrderUpdate,
+    RestingOrder, Side, StopSpec, TimeInForce, VenueError,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
 pub use wal::{Wal, WalError, WalRecord};
 
+/// What a venue can actually do. Venues differ in kind, not just in address:
+/// one holds a position-level stop for you, the next expects you to work the
+/// exit yourself. The engine reads these and refuses an action the venue
+/// cannot honour, rather than quietly substituting a different trade.
+///
+/// Every field is stated by the adapter. There is no default: a wrong guess
+/// here is a strategy believing it has a stop it does not have.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct VenueCaps {
+    /// The venue keeps a position-level stop the engine can set and move
+    /// (Bybit's full-position trading stop). False means a stop has to be
+    /// worked as an ordinary reduce-only order by whoever wants one.
+    pub native_position_stop: bool,
+    /// A resting order can be repriced or resized in place, keeping its
+    /// venue identity.
+    pub amend_in_place: bool,
+    /// Post-only (maker-or-cancel) is honoured on limit orders.
+    pub post_only: bool,
+    /// Orders may be sent in batches within one request.
+    pub batch_orders: bool,
+}
+
 /// A venue gateway: signs and sends orders, attaches stops, reads account
-/// state. Implementations talk to the demo venue only; there is deliberately
-/// no way to express a mainnet endpoint through this trait.
+/// state. One implementation per venue; the engine picks one by name at
+/// assembly and never learns which it got.
+///
+/// Implementations reach practice venues only. Whether a given adapter is
+/// allowed to touch real money is that adapter's own decision, made in its
+/// own crate — this trait deliberately cannot express an endpoint.
 #[allow(async_fn_in_trait)]
 pub trait VenueGateway {
+    /// What this venue can do. Read before asking it for anything exotic.
+    fn caps(&self) -> VenueCaps;
     /// Place an order. The caller has already made the intent durable.
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError>;
     /// Cancel by the engine's own client order id.
@@ -45,7 +73,16 @@ pub trait VenueGateway {
         symbol: SymbolId,
         client_order_id: &str,
     ) -> Result<(), VenueError>;
-    /// Attach or move a position stop (stop-loss trigger price).
+    /// Reprice or resize a resting order in place. Only called when
+    /// [`VenueCaps::amend_in_place`] is true.
+    async fn amend_order(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        spec: AmendSpec,
+    ) -> Result<(), VenueError>;
+    /// Attach or move a position stop (stop-loss trigger price). Only called
+    /// when [`VenueCaps::native_position_stop`] is true.
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
     /// Current positions and equity. On Bybit this is two venue reads
     /// (wallet and positions), issued together.

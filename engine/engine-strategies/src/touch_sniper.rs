@@ -131,7 +131,7 @@ impl TouchSniper {
 
     fn send_entry(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
         let decided_ns = ctx.now_ns();
-        ctx.emit(Intent {
+        ctx.place(Intent {
             strategy: self.id,
             symbol,
             side: self.side,
@@ -150,7 +150,7 @@ impl TouchSniper {
         // Leave what we actually got filled. The configured size is only a
         // fallback for the case where the fill news has not reached us.
         let qty = if self.entry_filled_qty > 0.0 { self.entry_filled_qty } else { self.qty };
-        ctx.emit(Intent {
+        ctx.place(Intent {
             strategy: self.id,
             symbol,
             side: self.side.flipped(),

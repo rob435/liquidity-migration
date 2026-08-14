@@ -4,8 +4,8 @@
 mod support;
 
 use engine_types::{
-    OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce, VenueError,
-    VenueGateway,
+    AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
+    VenueError, VenueGateway,
 };
 use engine_venue::{BybitGateway, Credentials};
 use hmac::{Hmac, KeyInit, Mac};
@@ -213,6 +213,89 @@ async fn cancel_goes_by_our_own_order_id() {
     assert_eq!(body["category"], "linear");
     assert_eq!(body["symbol"], "BTCUSDT");
     assert_eq!(body["orderLinkId"], "eng-1");
+}
+
+#[tokio::test]
+async fn an_amend_carries_only_the_field_it_changes() {
+    // An echoed-back price is not a no-op at the venue: it costs the order
+    // its place in the queue, which is the one thing amending is for.
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1","orderLinkId":"eng-1"}"#)).await;
+    let mut gw = gateway(&server);
+    assert!(gw.caps().amend_in_place, "and the engine is told it can");
+
+    gw.amend_order(
+        SymbolId(0),
+        "eng-1",
+        AmendSpec {
+            px: Some(94_000.5),
+            qty: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let request = server.only("/v5/order/amend");
+    assert_eq!(request.method, "POST");
+    assert_signed(&request, &request.body);
+    let body = request.json();
+    assert_eq!(body["category"], "linear");
+    assert_eq!(body["symbol"], "BTCUSDT");
+    assert_eq!(body["orderLinkId"], "eng-1");
+    assert_eq!(body["price"], "94000.5");
+    assert!(body.get("qty").is_none(), "the size was not being changed");
+}
+
+#[tokio::test]
+async fn an_amend_renders_a_new_size_as_a_venue_string() {
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
+    let mut gw = gateway(&server);
+
+    gw.amend_order(
+        SymbolId(1),
+        "eng-2",
+        AmendSpec {
+            px: None,
+            qty: Some(1.5),
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = server.only("/v5/order/amend").json();
+    assert_eq!(body["symbol"], "ETHUSDT");
+    assert_eq!(body["qty"], "1.5");
+    assert!(body.get("price").is_none());
+}
+
+#[tokio::test]
+async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
+    let mut gw = gateway(&server);
+
+    assert!(matches!(
+        gw.amend_order(SymbolId(0), "eng-1", AmendSpec { px: None, qty: None }).await,
+        Err(VenueError::BadRequest(_))
+    ));
+    let mut bad_size = AmendSpec { px: None, qty: Some(f64::NAN) };
+    assert!(gw.amend_order(SymbolId(0), "eng-1", bad_size).await.is_err());
+    bad_size.qty = Some(0.0);
+    assert!(gw.amend_order(SymbolId(0), "eng-1", bad_size).await.is_err());
+    assert!(server.requests().is_empty(), "nothing should have been sent");
+}
+
+#[tokio::test]
+async fn the_gateway_says_what_bybit_can_actually_do() {
+    // The engine refuses actions on this word, so a wrong one here is a
+    // strategy believing it has something it does not.
+    let server = TestServer::start(|_, _| ok("{}")).await;
+    let caps = gateway(&server).caps();
+    assert!(caps.native_position_stop, "trading-stop holds the position stop");
+    assert!(caps.amend_in_place, "/v5/order/amend");
+    assert!(caps.post_only, "timeInForce PostOnly");
+    assert!(
+        !caps.batch_orders,
+        "Bybit has a batch endpoint but this crate has no path to it"
+    );
 }
 
 #[tokio::test]
