@@ -16,6 +16,88 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — The engine stops being looser than the fleet, becomes visible
+  from outside, and gets a unit to run under.** Four commits, `f2317a14`,
+  `344e9914`, `465e333d`, `e47c917a`. Nothing is deployed and nothing is
+  installed; the host still runs `2bd3a009`.
+
+  *Not looser any more.* `engine-risk/PORT_NOTES.md` had carried this sentence
+  since the port: "The engine is looser than the Python fleet by exactly these
+  four caps." That was the last measurable reason the Rust kernel was not a
+  replacement for the Python one, and it had nothing to do with which host it
+  talks to. Ported: the per-symbol gross ceiling (across the whole projected
+  book, stricter than Python, which nets producers' rows per symbol first), the
+  second gross ceiling, account-level initial margin, and the available-margin
+  test. One of the four was deliberately **not** written and the notes now say
+  why instead of leaving a hole: a separate account-gross gate is unreachable,
+  because the loader proves component ≤ account and the envelope refuses any
+  book over the allowance first, so a test for it could only pass vacuously.
+
+  That work turned up a real fault. The partition's load-time proof compared
+  its margin shares against gross ÷ leverage — a stand-in for a cap that did
+  not exist. The funded account's shares sum to exactly the declared 100.0 and
+  the old bound was 87.5, so **the engine could not have accepted the shipped
+  mainnet partition at all.**
+
+  *Visible from outside.* The last row the engine's capability table marked
+  Absent was "nothing outside the process can tell whether the engine is
+  healthy", and it is the row that gates anything standing down. The engine
+  now writes a heartbeat file — atomically, from the group-flush tick, never on
+  the order path, and a failure to write it can never stop the loop. The field
+  that matters is `may_open`: an engine that is alive, writing healthy
+  heartbeats, and quietly refusing to open anything looks perfectly well from
+  outside. The judging stays in the fleet's existing watchdog rather than a
+  second notification stack; `check_fleet_liveness.py` pages on stale,
+  unreadable, or latched, and is off unless a path is configured.
+
+  The two halves were built separately and **did not meet** — only three of
+  eight field names agreed. The reader caught it and refused to bend to what it
+  found, which is the right instinct: a reader that silently adapts to whatever
+  the writer emits is not a contract. Settled deliberately (`wall_ts_ms`
+  because the log already spells a wall stamp that way; `mode` as a word rather
+  than a boolean because a boolean cannot grow a third state; account and lease
+  optional because a shadow run legitimately has neither), then checked end to
+  end against a document the engine actually wrote.
+
+  *A unit to run under.* The engine had none and had only ever been started by
+  hand. It now has one, running its **own** demo account (579580669), shadow
+  unless the host's environment file says otherwise, with `REAL_MONEY` unset in
+  the unit whatever the environment holds. Everything about it in the deploy is
+  conditional on the unit fragment, the binary, and an operator-placed
+  environment file all being present, because `verify_topology` runs on every
+  mainnet deploy and a unit demanded unconditionally would fail every deploy
+  and every status read on the funded fleet.
+
+  The build cannot break a deploy: every path returns 0 and prints why, it runs
+  last in both staged and rollout, and in rollout deliberately after the two
+  lines that disarm the rollback trap. Test-enforced — making it a strict phase
+  turns the rollout flatness test red.
+
+  Two hazards found and closed on the way. A relative log path resolved inside
+  the deployed checkout would write an untracked file into the tree the deploy
+  proves clean at every exact-commit step, so the unit gets its own state
+  directory. And a *running* engine left out of the rollout stop list would
+  deadlock every deploy, funded fleet included, because `require_quiescent`
+  refuses to install while any `liquidity-migration-*` unit runs while
+  stop-first only stops what those lists name.
+
+  A third was found by reading the result back: as first built, an installed
+  engine that would not start was a verification mismatch, and a mismatch
+  inside a rollout reaches the cleanup that stops the fleet — so a bad
+  `engine.toml` or an expired demo credential could have taken the funded
+  account down. Its row is now **reported, never fatal**. Every other unit in
+  that table carries orders; the engine carries none.
+
+  *And the question that keeps being asked.* Whether the Python order path can
+  be deleted was measured rather than argued: walking the import graph from all
+  nine units, **93 of 135 modules are reachable from a live unit and not one is
+  demo-only** — demo and mainnet run byte-identical command lines, the realm is
+  a parameter branched inside shared modules. A symbol-level scan across the 45
+  order-path modules found zero unreferenced functions or classes. The host's
+  installed units already match `deploy/systemd/` exactly. There is nothing in
+  it to delete. `docs/engine.md` now carries the order in which it could
+  actually happen, and names the one step that is the owner's.
+
 - **2026-08-14 — The engine holds an account, works an entry, and checks
   itself against the venue; and a dead sleeve stops deciding what the live
   ones may trade.** Two commits, `4a8f8301` and `a8388b27`.
