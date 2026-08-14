@@ -312,7 +312,8 @@ impl Strategy for BenchStrategy {
             // a resting entry would put a reprice in the middle of the
             // numbers the latency table is read off.
             work: None,
-        });
+                    leverage: None,
+});
     }
 }
 
@@ -402,6 +403,7 @@ impl VenueGateway for HttpVenue {
             amend_in_place: true,
             post_only: true,
             batch_orders: false,
+            set_leverage: false,
         }
     }
 

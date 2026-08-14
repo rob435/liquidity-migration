@@ -118,6 +118,19 @@ pub struct Intent {
     /// still replays.
     #[serde(default)]
     pub work: Option<WorkPolicy>,
+    /// The venue margin leverage this size was worked out at.
+    ///
+    /// `None` means the strategy has no opinion and the symbol keeps whatever
+    /// leverage it carries. `Some` means the engine sets it at the venue
+    /// before the order goes, because the margin a position posts is notional
+    /// divided by this, and a position that posts different margin from the
+    /// one the risk kernel priced is not the position anybody agreed to.
+    ///
+    /// Only honoured on orders that increase exposure: an exit at the wrong
+    /// leverage is still an exit, and making it wait on a round trip would be
+    /// the wrong trade-off.
+    #[serde(default)]
+    pub leverage: Option<f64>,
 }
 
 /// A new price and/or size for an order already resting at the venue.

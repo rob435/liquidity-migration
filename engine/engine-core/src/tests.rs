@@ -194,6 +194,7 @@ fn bybit_like_caps() -> VenueCaps {
         amend_in_place: true,
         post_only: true,
         batch_orders: false,
+        set_leverage: true,
     }
 }
 
@@ -208,6 +209,10 @@ struct MockVenue {
     /// What the venue would say it is working. Seeded by a test that wants
     /// boot to find an order the log does not know about.
     working: Vec<VenueOrder>,
+    /// Every leverage the engine actually told the venue about, in order.
+    leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+    /// Make set_leverage refuse, so a test can watch the order not go.
+    leverage_refuses: bool,
 }
 
 impl MockVenue {
@@ -237,6 +242,8 @@ impl MockVenue {
                 caps: bybit_like_caps(),
                 reply: None,
                 working: Vec::new(),
+                leverages: Rc::new(RefCell::new(Vec::new())),
+                leverage_refuses: false,
             },
             sends,
         )
@@ -294,6 +301,17 @@ impl VenueGateway for MockVenue {
     }
 
     async fn set_stop(&mut self, _symbol: SymbolId, _trigger_px: f64) -> Result<(), VenueError> {
+        Ok(())
+    }
+
+    async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
+        self.leverages.borrow_mut().push((symbol, leverage));
+        if self.leverage_refuses {
+            return Err(VenueError::Rejected {
+                code: 110044,
+                message: "leverage limit exceeded".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -466,6 +484,10 @@ struct Buyer {
     heard: Rc<RefCell<Vec<String>>>,
     /// Asks the engine to rest and work the entry instead of crossing.
     work: Option<WorkPolicy>,
+    /// What leverage its entries were sized at. None means no opinion.
+    leverage: Option<f64>,
+    /// Send exits instead of entries.
+    reduce_only: bool,
 }
 
 impl Buyer {
@@ -479,6 +501,8 @@ impl Buyer {
                 seen: 0,
                 heard: heard.clone(),
                 work: None,
+                leverage: None,
+                reduce_only: false,
             },
             heard,
         )
@@ -525,10 +549,11 @@ impl Strategy for Buyer {
                     stop: Some(StopSpec {
                         trigger_px: quote.bid_px * 0.99,
                     }),
-                    reduce_only: false,
+                    reduce_only: self.reduce_only,
                     tag: "buy".into(),
                     decided_ns: ctx.now_ns(),
                     work: self.work,
+                    leverage: self.leverage,
                 });
             }
             EngineEvent::Order(update) => {
@@ -613,6 +638,17 @@ struct Harness {
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
+    leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+}
+
+/// The same as `build_with`, with a venue that refuses every set_leverage.
+async fn build_with_refusing_leverage(
+    settings: &EngineSection,
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_inner(settings, verdict, strategies, symbols, &[], Vec::new(), true).await
 }
 
 async fn build(
@@ -647,12 +683,26 @@ async fn build_with(
     replayed: &[WalRecord],
     working: Vec<VenueOrder>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_inner(settings, verdict, strategies, symbols, replayed, working, false).await
+}
+
+async fn build_inner(
+    settings: &EngineSection,
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+    leverage_refuses: bool,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
+    venue.leverage_refuses = leverage_refuses;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
+    let leverages = venue.leverages.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let engine = Engine::boot(
         settings,
@@ -674,6 +724,7 @@ async fn build_with(
             cancels,
             amends,
             risk_saw,
+            leverages,
         },
     )
 }
@@ -1048,6 +1099,7 @@ impl Strategy for BurstEmitter {
                     tag: if exit { "burst-exit".into() } else { "burst-entry".into() },
                     decided_ns: ctx.now_ns(),
                     work: None,
+                    leverage: None,
                 });
             }
         }
@@ -1115,6 +1167,7 @@ impl Strategy for SloppyExiter {
                     tag: "sloppy-exit".into(),
                     decided_ns: ctx.now_ns(),
                     work: None,
+                    leverage: None,
                 });
             }
         }
@@ -1765,6 +1818,7 @@ impl Strategy for MixedBurst {
                     tag: "flood-entry".into(),
                     decided_ns: ctx.now_ns(),
                     work: None,
+                    leverage: None,
                 });
             }
             for i in 0..self.cancels {
@@ -2083,6 +2137,7 @@ impl Strategy for Watcher {
                 tag: "watch".into(),
                 decided_ns: ctx.now_ns(),
                 work: None,
+                leverage: None,
             });
         }
     }
@@ -2300,6 +2355,146 @@ async fn until_heard(heard: Rc<RefCell<Vec<String>>>) {
     while heard.borrow().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
+}
+
+/// A buyer whose entries were sized at a leverage, so the engine has to make
+/// the venue agree before the order goes.
+fn levered_buyer(symbol: &str, leverage: f64) -> (Buyer, Rc<RefCell<Vec<String>>>) {
+    let (mut buyer, heard) = Buyer::new(symbol, 1, 0.01);
+    buyer.leverage = Some(leverage);
+    (buyer, heard)
+}
+
+#[tokio::test]
+async fn an_entry_states_its_leverage_before_the_order_goes() {
+    // Margin posted is notional divided by leverage. An order sized at one
+    // and filled at another does not commit the capital the kernel priced.
+    let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
+    let (mut engine, h) =
+        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.leverages.borrow().as_slice(), [(SymbolId(0), 2.0)]);
+    assert_eq!(h.sends.borrow().len(), 1, "the order still went");
+    // Order matters: the venue heard about leverage before it heard the order.
+    let tape = h.tape.borrow();
+    assert!(
+        tape.iter().any(|step| matches!(step, Step::Send(_))),
+        "no send on the tape: {tape:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_entry_on_the_same_symbol_does_not_pay_for_leverage_twice() {
+    // A symbol keeps its leverage at the venue. Re-stating it before every
+    // order would buy a round trip per order, measured at ~190 ms on the
+    // Python fleet, for no change at all.
+    let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
+    let (mut engine, h) =
+        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 3, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.sends.borrow().len(), 3, "three entries went");
+    assert_eq!(
+        h.leverages.borrow().len(),
+        1,
+        "leverage was stated more than once for one symbol: {:?}",
+        h.leverages.borrow()
+    );
+}
+
+#[tokio::test]
+async fn an_exit_does_not_wait_on_leverage() {
+    // An exit at the wrong leverage is still an exit. Making it wait on a
+    // venue round trip would be the wrong trade to make.
+    let (mut seller, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    seller.leverage = Some(2.0);
+    seller.reduce_only = true;
+    let (mut engine, h) =
+        build(false, allow_all(), vec![Box::new(seller)], &["BTCUSDT"], &[]).await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        h.leverages.borrow().is_empty(),
+        "an exit stopped to set leverage: {:?}",
+        h.leverages.borrow()
+    );
+}
+
+#[tokio::test]
+async fn an_order_whose_leverage_will_not_set_is_not_sent() {
+    // Fails closed. Sending anyway would post margin nobody priced, and the
+    // whole reason for stating leverage is that we do not know what the
+    // symbol currently carries.
+    let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
+    let mut settings = settings(false);
+    settings.shadow = false;
+    let (mut engine, h) = build_with_refusing_leverage(
+        &settings,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+    )
+    .await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.leverages.borrow().len(), 1, "it tried");
+    assert!(
+        h.sends.borrow().is_empty(),
+        "an order went at a leverage the venue would not accept"
+    );
+}
+
+#[test]
+fn a_symbol_that_goes_flat_forgets_its_leverage() {
+    // The cache is only safe because of this. The owner trades the funded
+    // account by hand, so a symbol that has been closed and reopened may have
+    // been set to anything in between -- and a remembered value would make
+    // the next entry skip the call that would have corrected it.
+    use engine_types::risk::PositionView;
+    let mut at = std::collections::HashMap::new();
+    at.insert(SymbolId(0), 2.0);
+    at.insert(SymbolId(1), 3.0);
+
+    let still_open = vec![PositionView {
+        symbol: SymbolId(1),
+        side: Side::Buy,
+        qty: 1.0,
+        entry_px: 100.0,
+        stop_attached: true,
+    }];
+    crate::engine::forget_leverage_where_flat(&mut at, &still_open);
+
+    assert_eq!(at.get(&SymbolId(1)), Some(&3.0), "an open symbol keeps it");
+    assert!(at.get(&SymbolId(0)).is_none(), "a flat symbol forgets it");
 }
 
 #[tokio::test]
@@ -2541,6 +2736,7 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
                 tag: "exit".into(),
                 decided_ns: ctx.now_ns(),
                 work: Some(WorkPolicy::default()),
+                leverage: None,
             });
         }
     }

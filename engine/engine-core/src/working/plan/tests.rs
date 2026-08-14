@@ -49,6 +49,7 @@ fn intent(kind: OrderKind, reduce_only: bool, work: Option<WorkPolicy>) -> Inten
         tag: "t".into(),
         decided_ns: 1,
         work,
+        leverage: None,
     }
 }
 

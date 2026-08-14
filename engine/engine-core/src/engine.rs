@@ -122,6 +122,16 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// The resting entries this engine is advancing. Empty unless a strategy
     /// asked for one to be worked.
     working: WorkingOrders,
+    /// What leverage each symbol was last set to by this engine.
+    ///
+    /// A symbol keeps its leverage at the venue until somebody changes it, so
+    /// re-sending the same number before every entry would buy a round trip
+    /// per order for nothing. What makes the cache safe is forgetting a symbol
+    /// the moment the account reading shows it flat: the owner trades this
+    /// account by hand, and a symbol that has been closed and reopened may
+    /// have been set to anything in between. The same rule the Python fleet
+    /// runs under `--shared-leverage-authority`.
+    leverage_at: std::collections::HashMap<SymbolId, f64>,
     ledger: LatencyLedger,
     /// The target book watcher, when one was configured. Parked here between
     /// boot and run; `run` takes it out for the length of the run, because
@@ -263,8 +273,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tag: "recovered".to_string(),
                     decided_ns: 0,
                     // The order is already at the venue; there is nothing
-                    // left to decide about how it was placed.
+                    // left to decide about how it was placed, and its
+                    // leverage was set before it went.
                     work: None,
+                    leverage: None,
                 },
                 request.qty,
             );
@@ -298,6 +310,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // for — so a recovered order is left alone rather than worked
             // from a made-up deadline.
             working: WorkingOrders::default(),
+            leverage_at: std::collections::HashMap::new(),
             may_open,
             ledger: LatencyLedger::new(now),
             targets: TargetBooks::new(Vec::new()),
@@ -654,6 +667,49 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// the venue holds one position per symbol — so a book delivered to the
     /// wrong follower is that follower trying to hold another sleeve's
     /// positions.
+    /// Take a fresh account reading.
+    ///
+    /// The one place a reading is adopted, so what has to happen with it
+    /// cannot be done in one path and forgotten in the other.
+    fn adopt_view(&mut self, view: AccountView) {
+        forget_leverage_where_flat(&mut self.leverage_at, &view.positions);
+        self.account = view;
+        // The loss guard's daily anchor rolls on the READING's UTC day, so
+        // hand it the reading's wall time.
+        self.risk
+            .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
+    }
+
+    /// Make the venue agree that this symbol sits at this leverage, before an
+    /// order that would post margin against it.
+    ///
+    /// Margin is notional divided by leverage, so an order sized at one
+    /// leverage and filled at another does not commit the capital the risk
+    /// kernel priced. Unknown is not "probably fine": every failure here
+    /// refuses the order rather than sending it and hoping.
+    async fn ensure_leverage(&mut self, symbol: SymbolId, want: f64) -> Result<(), String> {
+        if !want.is_finite() || want <= 0.0 {
+            return Err(format!(
+                "the decision asks for leverage {want}, which is not a leverage"
+            ));
+        }
+        if !self.venue.caps().set_leverage {
+            return Err(format!(
+                "this decision was sized at leverage {want}, and this venue cannot be told                  what leverage to use — the margin it would post is not the margin it was                  sized at"
+            ));
+        }
+        if self.leverage_at.get(&symbol).is_some_and(|at| *at == want) {
+            return Ok(());
+        }
+        match self.venue.set_leverage(symbol, want).await {
+            Ok(()) => {
+                self.leverage_at.insert(symbol, want);
+                Ok(())
+            }
+            Err(e) => Err(format!("could not set leverage to {want}: {e}")),
+        }
+    }
+
     async fn on_targets(
         &mut self,
         strategy: StrategyId,
@@ -713,11 +769,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if now.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns {
             match self.venue.account_view().await {
                 Ok(view) => {
-                    self.account = view;
-                    // The loss guard's daily anchor rolls on the READING's
-                    // UTC day, so hand it the reading's wall time.
-                    self.risk
-                        .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
+                    self.adopt_view(view);
                 }
                 // Keeping the old reading is not the same as trusting it: it
                 // ages, and the risk kernel refuses on an old reading.
@@ -1013,6 +1065,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             reduce_only: intent.reduce_only,
         };
 
+        // Before the durable record, because a leverage that could not be set
+        // means this order must not go at all — and an OrderSent record is
+        // the engine saying it is about to put one on the wire.
+        //
+        // Entries only. An exit at the wrong leverage is still an exit, and
+        // making it wait on a round trip would be the wrong trade. Shadow runs
+        // send nothing, so there is nothing to set.
+        if !self.shadow && !intent.reduce_only {
+            if let Some(want) = intent.leverage {
+                if let Err(reason) = self.ensure_leverage(request.symbol, want).await {
+                    return self.refuse(&client_order_id, &intent, &reason);
+                }
+            }
+        }
+
         // Durable before the wire. Everything above this line can be lost by
         // a crash without consequence; everything below it cannot. In shadow
         // nothing reaches the wire, so no fsync — and no barrier BETWEEN the
@@ -1292,11 +1359,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // reading now rather than trusting exposure across the gap.
         if let OrderUpdate::StreamReset { .. } = update {
             match self.venue.account_view().await {
-                Ok(view) => {
-                    self.account = view;
-                    self.risk
-                        .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
-                }
+                Ok(view) => self.adopt_view(view),
                 Err(e) => {
                     tracing::warn!(error = %e, "no fresh account reading after a stream gap");
                 }
@@ -1468,6 +1531,22 @@ fn feed_strategy(
         registry,
     };
     strategy.on_event(event, &mut ctx);
+}
+
+/// Drop the remembered leverage of every symbol the reading shows flat.
+///
+/// A symbol with no position may be reopened at any leverage by anyone holding
+/// a key, and the owner trades the funded account by hand. Remembering what we
+/// last set it to would then be remembering something that is no longer true,
+/// and the next entry would skip the call that would have corrected it.
+///
+/// A symbol still open keeps its entry: its leverage cannot be changed at the
+/// venue while a position is on it.
+pub(crate) fn forget_leverage_where_flat(
+    leverage_at: &mut std::collections::HashMap<SymbolId, f64>,
+    positions: &[engine_types::risk::PositionView],
+) {
+    leverage_at.retain(|symbol, _| positions.iter().any(|p| p.symbol == *symbol));
 }
 
 /// When this message reached us. The whole chain is measured from here.

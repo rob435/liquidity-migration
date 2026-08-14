@@ -286,6 +286,7 @@ mod tests {
             tag: "t".into(),
             decided_ns: 0,
             work: None,
+            leverage: None,
         });
         let Some(Action::Place(got)) = out.pop_front() else {
             panic!("expected a placement");

@@ -165,6 +165,7 @@ pub fn entry(
         tag: "test".to_string(),
         decided_ns,
         work: None,
+        leverage: None,
     }
 }
 

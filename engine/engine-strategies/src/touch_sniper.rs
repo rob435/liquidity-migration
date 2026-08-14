@@ -142,6 +142,9 @@ impl TouchSniper {
             tag: ENTRY_TAG.to_string(),
             decided_ns,
             work: None,
+            // This plug sizes in quantity, not margin, so it leaves the
+            // symbol's leverage alone.
+            leverage: None,
         });
         self.state = State::EntrySent;
     }
@@ -162,6 +165,9 @@ impl TouchSniper {
             tag: EXIT_TAG.to_string(),
             decided_ns,
             work: None,
+            // This plug sizes in quantity, not margin, so it leaves the
+            // symbol's leverage alone.
+            leverage: None,
         });
         self.exit_order = None;
         self.resend_exit_on_next_quote = false;

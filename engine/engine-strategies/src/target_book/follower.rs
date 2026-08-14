@@ -199,6 +199,15 @@ impl TargetBookFollower {
                 );
                 continue;
             }
+            // What the book asked this name to be held at. The planner is
+            // about sizing and deliberately does not carry it, so it is read
+            // back from the book here.
+            let want_leverage = self.book.as_ref().and_then(|book| {
+                book.targets
+                    .iter()
+                    .find(|t| t.symbol == step.symbol())
+                    .map(|t| t.leverage)
+            });
             let intent = match step {
                 Step::Enter {
                     side,
@@ -218,6 +227,7 @@ impl TargetBookFollower {
                     tag: ENTER_TAG.to_string(),
                     decided_ns,
                     work: self.entry_work,
+                    leverage: want_leverage,
                 },
                 Step::Exit { side, qty, .. } => Intent {
                     strategy: self.id,
@@ -230,6 +240,9 @@ impl TargetBookFollower {
                     tag: EXIT_TAG.to_string(),
                     decided_ns,
                     work: None,
+                    // An exit at the wrong leverage is still an exit. Making
+                    // it wait on a round trip would be the wrong trade.
+                    leverage: None,
                 },
                 // A resize that adds is an opening order, and the risk kernel
                 // refuses one with no stop. The planner says whether this is
@@ -255,6 +268,9 @@ impl TargetBookFollower {
                     // A shrink is an exit in all but name, and an exit never
                     // rests. Only the half that adds exposure is worked.
                     work: if reduce_only { None } else { self.entry_work },
+                    // Same split: the half that adds margin is the half whose
+                    // leverage matters.
+                    leverage: if reduce_only { None } else { want_leverage },
                 },
             };
             // Remember it against the reading it was decided from, so the

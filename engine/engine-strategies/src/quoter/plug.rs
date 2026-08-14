@@ -173,6 +173,9 @@ impl Quoter {
             // quotes; handing them to the engine's supervisor as well would
             // give one order two minds.
             work: None,
+            // This plug sizes in quantity, not margin, so it leaves the
+            // symbol's leverage alone.
+            leverage: None,
         });
     }
 }

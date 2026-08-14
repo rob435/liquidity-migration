@@ -32,6 +32,7 @@ const PATH_ORDER_CREATE: &str = "/v5/order/create";
 const PATH_ORDER_CANCEL: &str = "/v5/order/cancel";
 const PATH_ORDER_AMEND: &str = "/v5/order/amend";
 const PATH_TRADING_STOP: &str = "/v5/position/trading-stop";
+const PATH_SET_LEVERAGE: &str = "/v5/position/set-leverage";
 const PATH_WALLET: &str = "/v5/account/wallet-balance";
 const PATH_POSITIONS: &str = "/v5/position/list";
 const PATH_INSTRUMENTS: &str = "/v5/market/instruments-info";
@@ -160,6 +161,8 @@ impl VenueGateway for BybitGateway {
             // because a caller that batched on this word would find nothing
             // to call.
             batch_orders: false,
+            // POST /v5/position/set-leverage; see set_leverage below.
+            set_leverage: true,
         }
     }
 
@@ -257,6 +260,30 @@ impl VenueGateway for BybitGateway {
         let envelope = self.rest.post_signed(PATH_TRADING_STOP, &Value::Object(body)).await?;
         venue_result(envelope)?;
         Ok(())
+    }
+
+    async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
+        let text = venue_num(leverage)?;
+        let mut body = Map::new();
+        body.insert("category".into(), CATEGORY.into());
+        body.insert("symbol".into(), self.name_of(symbol)?.into());
+        // Both sides, always the same number. One-way position mode still
+        // carries two, and a venue that has them different would post
+        // different margin depending on which way a position went.
+        body.insert("buyLeverage".into(), text.clone().into());
+        body.insert("sellLeverage".into(), text.into());
+
+        let envelope = self.rest.post_signed(PATH_SET_LEVERAGE, &Value::Object(body)).await?;
+        match venue_result(envelope) {
+            Ok(_) => Ok(()),
+            // 110043 is "leverage not modified": the symbol already sits at
+            // this number. Bybit reports it as an error and it is not one —
+            // the request asked for a state, and the state is what was asked
+            // for. Treating it as a failure would block every repeat entry on
+            // a symbol whose leverage is already right, which is most of them.
+            Err(VenueError::Rejected { code: 110043, .. }) => Ok(()),
+            Err(other) => Err(other),
+        }
     }
 
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {

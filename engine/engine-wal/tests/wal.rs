@@ -35,6 +35,7 @@ fn every_variant() -> Vec<WalRecord> {
                 tag: "entry".to_string(),
                 decided_ns: 99_000_111_222,
                 work: Some(engine_types::WorkPolicy::default()),
+                leverage: None,
             },
         },
         WalRecord::Verdict {

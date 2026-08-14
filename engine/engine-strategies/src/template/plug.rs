@@ -154,6 +154,9 @@ impl Template {
             tag: TAG.to_string(),
             decided_ns: ctx.now_ns(),
             work: None,
+            // This plug sizes in quantity, not margin, so it leaves the
+            // symbol's leverage alone.
+            leverage: None,
         });
     }
 }

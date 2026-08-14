@@ -516,3 +516,78 @@ async fn an_identity_with_no_usable_account_number_is_refused() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Leverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_leverage_states_both_sides_and_the_symbol() {
+    let server = TestServer::start(|_, _| ok("{}")).await;
+    let mut gw = gateway(&server);
+
+    gw.set_leverage(SymbolId(1), 2.0).await.unwrap();
+
+    let request = server.only("/v5/position/set-leverage");
+    let body = request.json();
+    assert_eq!(body["category"], "linear");
+    assert_eq!(body["symbol"], "ETHUSDT");
+    // Both sides, the same number. One-way position mode still carries two,
+    // and a venue holding them apart would post different margin depending on
+    // which way a position went.
+    assert_eq!(body["buyLeverage"], "2");
+    assert_eq!(body["sellLeverage"], "2");
+    assert_signed(&request, &request.body);
+}
+
+#[tokio::test]
+async fn leverage_not_modified_is_success_not_a_failure() {
+    // Bybit answers 110043 when the symbol already sits at the number asked
+    // for. The request asked for a state and the state is what was asked for,
+    // so this is the request succeeding. Read as an error it would block
+    // every repeat entry on a symbol whose leverage is already right -- which
+    // is most entries, most of the time.
+    let server = TestServer::start(|_, _| {
+        (
+            200,
+            r#"{"retCode":110043,"retMsg":"leverage not modified","result":{},"time":1700000000000}"#
+                .to_string(),
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    gw.set_leverage(SymbolId(0), 2.0)
+        .await
+        .expect("\"already at this leverage\" is not a failure");
+}
+
+#[tokio::test]
+async fn a_real_leverage_refusal_is_still_a_refusal() {
+    // The other half of the pair: only 110043 is forgiven, and the proof that
+    // the arm above is not swallowing everything.
+    let server = TestServer::start(|_, _| {
+        (
+            200,
+            r#"{"retCode":110044,"retMsg":"leverage limit exceeded","result":{},"time":1700000000000}"#
+                .to_string(),
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    let err = gw.set_leverage(SymbolId(0), 500.0).await.unwrap_err();
+    match err {
+        VenueError::Rejected { code, .. } => assert_eq!(code, 110044),
+        other => panic!("expected a venue refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_gateway_says_it_can_set_leverage() {
+    // The engine only calls set_leverage when this is true, and refuses an
+    // order sized at a leverage it cannot state. A gateway that could set it
+    // but said otherwise would block every levered entry.
+    let server = TestServer::start(|_, _| ok("{}")).await;
+    assert!(gateway(&server).caps().set_leverage);
+}

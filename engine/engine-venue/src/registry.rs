@@ -137,6 +137,12 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.set_leverage(symbol, leverage).await,
+        }
+    }
+
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.account_identity().await,

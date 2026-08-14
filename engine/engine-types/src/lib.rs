@@ -70,6 +70,10 @@ pub struct VenueCaps {
     pub post_only: bool,
     /// Orders may be sent in batches within one request.
     pub batch_orders: bool,
+    /// The venue's margin leverage for a symbol can be set by the engine.
+    /// False means whatever leverage the symbol already carries is what an
+    /// order will post margin at, and the engine has no say in it.
+    pub set_leverage: bool,
 }
 
 /// A venue gateway: signs and sends orders, attaches stops, reads account
@@ -107,6 +111,23 @@ pub trait VenueGateway {
     /// Attach or move a position stop (stop-loss trigger price). Only called
     /// when [`VenueCaps::native_position_stop`] is true.
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
+    /// Set the venue's margin leverage for a symbol, both sides. Only called
+    /// when [`VenueCaps::set_leverage`] is true, and only before an order that
+    /// would increase exposure.
+    ///
+    /// Leverage decides how much margin a position posts, so an engine that
+    /// cannot set it is trading at whatever the last person to touch the
+    /// symbol chose. Setting it to the value it already holds must succeed:
+    /// venues tend to report that as an error, and it is not one.
+    ///
+    /// The default refuses, so a venue that has not implemented it cannot
+    /// quietly claim the leverage was applied.
+    async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
+        let _ = (symbol, leverage);
+        Err(VenueError::BadRequest(
+            "this venue cannot set leverage, and said so in its caps".to_string(),
+        ))
+    }
     /// Current positions and equity. On Bybit this is two venue reads
     /// (wallet and positions), issued together.
     async fn account_view(&mut self) -> Result<AccountView, VenueError>;
