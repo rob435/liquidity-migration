@@ -19,9 +19,12 @@ match; never append history to this file.
   `verify-ok … mainnet=armed`). All nine units active and enabled, zero
   error-level lines after. This put the wave-3 order path live for the first
   time — one durable write per queued request, the price-touch wake, the GC
-  discipline — so the **2026-08-14 00:20 UTC carry boundary is the first
-  measured on it**. The one-line rollback floor `31ee68d` remains: rolling back
-  past it requires archiving each producer's event tape.
+  discipline. The first carry boundary on it (2026-08-14 00:20 UTC) worked as
+  designed: freeze ahead at 00:18:45, deadline wake at 00:20:00.000 exactly,
+  frozen book published in that pass (`build_skipped=True`, 2 exits + 1 entry
+  grouped, `err=none`) — receipts in CHANGELOG 2026-08-14. The one-line
+  rollback floor `31ee68d` remains: rolling back past it requires archiving
+  each producer's event tape.
 - **The Rust execution engine is merged and does nothing yet.** `engine/`
   ([docs/engine.md](docs/engine.md)) ships in the checkout but is **not built,
   not running, and trades nothing**; the Python fleet owns everything live. The

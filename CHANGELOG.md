@@ -16,6 +16,18 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 00:20 UTC — First carry boundary on the wave-3 order path, and
+  it worked as designed.** Receipts from the demo carry producer's journal:
+  `froze_ahead=True` at 00:18:45 (the pre-boundary freeze), then the deadline
+  wake at **00:20:00.000 exactly** (cycle id `…1786666800000`, epoch
+  milliseconds on the boundary) with `build_skipped=True` — the boundary pass
+  published the frozen book instead of rebuilding it — and the day's
+  publications grouped in that same pass: 2 exits + 1 entry, book 2→1, gross
+  0.200→0.100, `err=none`. Follow-up cycles at 00:20:04 and 00:20:07 clean.
+  Zero fleet error-level journal lines since the 23:46 deploy (one unrelated
+  sshd scanner line). The freeze-ahead → deadline-wake → publish-frozen chain
+  built in wave 3 is now measured live, not just designed.
+
 - **2026-08-14 ~00:40 UTC — Repo cleanup: the engine promoted to first class,
   dead files deleted, docs cut to essential facts (owner directive).** Not
   deployed; the host still runs `2bd3a00` and nothing here changes what the
