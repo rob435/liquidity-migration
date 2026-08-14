@@ -154,14 +154,38 @@ quietly substituting a different one. Cancel-and-replace is not an amend: it
 is a new order at the back of the queue at a fresh price, and a strategy that
 asked to move a quote would never learn it had been given something else.
 
-To add one (Hyperliquid, MEXC): implement `VenueGateway` in a crate of its
-own — `caps`, `send_order`, `cancel_order`, `amend_order`, `set_stop`,
-`account_view`, `instrument_rules` — and state the capabilities honestly. A
-venue with no native position stop is not a broken venue; it is a venue where
-an entry carrying a stop is refused, because the risk kernel's
-every-entry-carries-a-stop rule would otherwise be silently unenforced.
-Whether an adapter may touch real money is that adapter's own decision, made
-in its own crate: the trait cannot express an endpoint.
+The engine picks its venue by name: `[engine] venue = "bybit_demo"` in
+`engine.toml`, resolved once in `engine-venue/src/registry.rs`. Leaving the
+key out means the Bybit demo account, so every config written before the key
+existed still says what it said. An unknown name is refused at boot, by name,
+listing what the binary knows — never defaulted to a venue nobody chose.
+
+To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
+
+1. Write the adapter as a module in the crate and implement `VenueGateway` —
+   `caps`, `send_order`, `cancel_order`, `amend_order`, `set_stop`,
+   `account_view`, `instrument_rules` — stating the capabilities honestly. A
+   venue with no native position stop is not a broken venue; it is a venue
+   where an entry carrying a stop is refused, because the risk kernel's
+   every-entry-carries-a-stop rule would otherwise be silently unenforced.
+2. Add a variant to the `Venue` enum in `registry.rs` and delegate all seven
+   methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
+   uses `async fn`, which cannot be a trait object at all, and a closed enum
+   keeps the whole set of venues visible in one place — which is what the
+   fence below depends on.
+3. Add the name to `KNOWN_VENUES` and to the `by_name` match. Nothing in
+   `engine-core` changes: the loop is generic over the gateway type, and
+   `assembly.rs` already asks for a venue by name.
+4. Nothing for the fence. `tests/demo_fence.rs` walks the whole crate, so a
+   new module is scanned the moment it exists, and a host that is not a demo
+   host turns the suite red wherever it is written. A companion test refuses
+   a venue *name* that reads like real money; the scan is the real fence and
+   that one is the cheap second check.
+
+A name selects a compiled-in adapter and cannot introduce an endpoint, which
+is why config may choose the venue at all. Whether an adapter may touch real
+money is that adapter's own decision, made in its own crate: the trait cannot
+express an endpoint.
 
 ## What the engine cannot do yet
 

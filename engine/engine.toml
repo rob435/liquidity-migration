@@ -1,9 +1,15 @@
-# The engine's config. There is no venue address in here on purpose: where
-# the engine trades is fixed in the venue crate (demo only), so no edit to
-# this file can point it somewhere else.
+# The engine's config. There is still no venue address in here on purpose:
+# `venue` below is a name, not an address. It picks one of the adapters
+# compiled into the venue crate, and every host that crate knows is a demo
+# host — its own test reads the crate source back and fails the build if
+# another appears. So no edit to this file can point the engine somewhere
+# else; the most a wrong name can do is refuse to start.
 
 [engine]
 wal_path = "engine.wal"
+# Which venue adapter to run. Leave the line out and it means this same one,
+# so a config written before the key existed still says what it said.
+venue = "bybit_demo"
 # How often buffered log bytes are pushed to the OS. Order records do not
 # wait for this — they are forced to disk before the order goes out.
 group_flush_ms = 250
